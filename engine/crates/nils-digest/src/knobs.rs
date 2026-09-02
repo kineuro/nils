@@ -11,6 +11,7 @@ use nils_dicom::extract::{MODALITIES, SOP_CLASSES};
 use nils_registry::time::today;
 use serde_json::json;
 
+use crate::rule::Rule;
 use crate::walk::Filter;
 
 /// The default of `batch_rows` (§9.1).
@@ -18,10 +19,6 @@ pub const DEFAULT_BATCH_ROWS: usize = 2_000;
 
 /// The default of `walk_threads` (§5.1).
 pub const DEFAULT_WALK_THREADS: usize = 8;
-
-/// The identity rule of slice 3, in words: v0's two lines (§7.3). The rule as
-/// data arrives with slice 4.
-pub const IDENTITY_RULE: &str = "PatientID, then StudyInstanceUID";
 
 /// One knob as the spec lists it.
 #[derive(Debug, Clone, Copy)]
@@ -110,7 +107,7 @@ pub static KNOBS: &[Knob] = &[
 
 /// The slice this build implements; knobs with a later `settable_since` hold
 /// their default.
-pub const SLICE: u8 = 3;
+pub const SLICE: u8 = 4;
 
 /// The settings of one run.
 #[derive(Debug, Clone)]
@@ -118,6 +115,8 @@ pub struct Settings {
     pub root: PathBuf,
     pub name: String,
     pub filter: Filter,
+    /// The identity rule (§7.3): the default, or the file of `--identity-rule`.
+    pub identity: Rule,
     pub workers: usize,
     pub walk_threads: usize,
     /// Instances per write (§9.1).
@@ -140,6 +139,7 @@ impl Settings {
             name: default_name(&root),
             root,
             filter: Filter::All,
+            identity: Rule::default(),
             workers: default_workers(),
             walk_threads: DEFAULT_WALK_THREADS,
             batch_rows: DEFAULT_BATCH_ROWS,
@@ -156,7 +156,7 @@ impl Settings {
             "files" => self.filter.to_string(),
             "sop_classes" => format!("{} (v0's nine)", SOP_CLASSES.len()),
             "modalities" => MODALITIES.join(", "),
-            "identity" => IDENTITY_RULE.into(),
+            "identity" => self.identity.describe(),
             "workers" => self.workers.to_string(),
             "walk_threads" => self.walk_threads.to_string(),
             "batch_rows" => self.batch_rows.to_string(),
@@ -175,7 +175,7 @@ impl Settings {
             "files": self.filter.to_string(),
             "sop_classes": SOP_CLASSES,
             "modalities": MODALITIES,
-            "identity": { "rule": IDENTITY_RULE, "id_type": "patient-id", "fallback": "study-instance-uid" },
+            "identity": self.identity.to_json(),
             "workers": self.workers,
             "walk_threads": self.walk_threads,
             "batch_rows": self.batch_rows,
@@ -259,15 +259,17 @@ mod tests {
             assert!(page.contains(k.name), "{} missing", k.name);
         }
         assert!(page.contains("nils digest (dry run)"));
-        assert!(page.contains("(settable from slice 4)"));
-        assert!(!page.contains("(settable from slice 3)"));
+        assert!(page.contains("PatientID, then StudyInstanceUID"));
+        assert!(!page.contains("(settable from slice"));
         assert_eq!(s.value_of("workers"), "3");
         assert_eq!(s.value_of("batch_rows"), "2000");
         let config = s.config();
         assert_eq!(config["workers"], 3);
         assert_eq!(config["files"], "all");
         assert_eq!(config["restart"], false);
-        assert_eq!(config["identity"]["fallback"], "study-instance-uid");
+        assert_eq!(config["identity"]["id_type"], "patient-id");
+        assert_eq!(config["identity"]["from"][0]["field"], "PatientID");
+        assert_eq!(config["identity"]["fallback"], "StudyInstanceUID");
         assert_eq!(config["sop_classes"].as_array().unwrap().len(), 9);
         assert_eq!(s.value_of("sop_classes"), "9 (v0's nine)");
         assert_eq!(s.value_of("modalities"), "MR, CT, PT");

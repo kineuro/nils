@@ -207,6 +207,13 @@ impl Row {
             ))),
         }
     }
+
+    pub fn opt_bytes(&self, i: usize) -> Result<Option<&[u8]>, Error> {
+        match &self.0[i] {
+            Cell::Null => Ok(None),
+            _ => self.bytes(i).map(Some),
+        }
+    }
 }
 
 /// What a store can fail with.
@@ -590,6 +597,57 @@ impl Store {
                 );
                 let stmt = prepared(client, statements, &sql)?;
                 let rows = client.query(&stmt, &[&ids])?;
+                for row in &rows {
+                    out.push(pg_row(row)?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Rows of `table` whose bytes `key` column is one of `keys`, read back
+    /// like [`Store::select_by_keys`]. The linkage store's `identity.lookup`
+    /// is the one such key.
+    pub fn select_by_bytes(
+        &mut self,
+        table: &Table,
+        columns: &[&Column],
+        key: &str,
+        keys: &[Vec<u8>],
+    ) -> Result<Vec<Row>, Error> {
+        let mut out = Vec::new();
+        match self {
+            Store::Sqlite(_) => {
+                for chunk in keys.chunks(SQLITE_KEY_CHUNK) {
+                    let sql = self.dialect().select_by_keys(
+                        None,
+                        table,
+                        columns,
+                        key,
+                        Type::Bytes,
+                        chunk.len(),
+                    );
+                    let params: Vec<Param> =
+                        chunk.iter().map(|k| Param::Bytes(k.clone())).collect();
+                    out.extend(self.query(&sql, &params)?);
+                }
+            }
+            Store::Postgres {
+                client,
+                statements,
+                schema,
+                ..
+            } => {
+                let sql = Dialect::Postgres.select_by_keys(
+                    Some(schema),
+                    table,
+                    columns,
+                    key,
+                    Type::Bytes,
+                    1,
+                );
+                let stmt = prepared(client, statements, &sql)?;
+                let rows = client.query(&stmt, &[&keys])?;
                 for row in &rows {
                     out.push(pg_row(row)?);
                 }

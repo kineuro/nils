@@ -264,7 +264,7 @@ impl Dialect {
 
     /// `SELECT <columns as text> FROM t WHERE key IN (...)`: the placeholders
     /// are one per key on SQLite and one array on Postgres, of `bigint` for
-    /// an integer key and of `text` otherwise.
+    /// an integer key, `bytea` for a bytes key and `text` otherwise.
     pub fn select_by_keys(
         self,
         schema: Option<&str>,
@@ -282,6 +282,7 @@ impl Dialect {
             }
             Dialect::Postgres => match key_ty {
                 Type::Int | Type::Id => format!("{key} = ANY($1::bigint[])"),
+                Type::Bytes => format!("{key} = ANY($1::bytea[])"),
                 _ => format!("{key} = ANY($1::text[])"),
             },
         };
@@ -365,8 +366,10 @@ mod tests {
         assert!(pg.starts_with(
             "CREATE TABLE nils.subject (\n  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n"
         ));
-        assert!(sqlite.contains("  code_digest BLOB NOT NULL,\n  birth_date TEXT,\n"));
-        assert!(pg.contains("  code_digest BYTEA NOT NULL,\n  birth_date DATE,\n"));
+        assert!(
+            sqlite.contains("  code TEXT NOT NULL,\n  code_digest BLOB,\n  birth_date TEXT,\n")
+        );
+        assert!(pg.contains("  code TEXT NOT NULL,\n  code_digest BYTEA,\n  birth_date DATE,\n"));
         assert!(sqlite.ends_with("CONSTRAINT uq_subject_code UNIQUE (code)\n)"));
         let detail = Dialect::Postgres.create_table(Some("nils"), table("series_mr"));
         assert!(detail.contains("  series_id BIGINT NOT NULL,\n"));
@@ -444,6 +447,22 @@ mod tests {
                 3
             ),
             "SELECT study_date FROM study WHERE study_instance_uid IN (?, ?, ?)"
+        );
+        let identity = table("identity");
+        let cols: Vec<&Column> = ["id", "subject_id"]
+            .iter()
+            .map(|c| identity.column(c).unwrap())
+            .collect();
+        assert_eq!(
+            Dialect::Postgres.select_by_keys(
+                Some("nils_linkage"),
+                identity,
+                &cols,
+                "lookup",
+                Type::Bytes,
+                2
+            ),
+            "SELECT id, subject_id FROM nils_linkage.identity WHERE lookup = ANY($1::bytea[])"
         );
     }
 

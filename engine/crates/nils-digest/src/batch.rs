@@ -18,6 +18,7 @@ use nils_dicom::catalogue::{VARIES_PER_INSTANCE, fields_of};
 use nils_dicom::{Converter, Extracted, Level, Refusal, Value};
 use nils_registry::store::Cell;
 
+use crate::rule::Ident;
 use crate::walk::SkipReason;
 
 /// What an earlier run recorded for a path that is read again (§5.2).
@@ -32,6 +33,8 @@ pub struct Prior {
 /// A file the reader accepted, with what the writer needs beside it.
 pub struct ParsedFile {
     pub extracted: Extracted,
+    /// The identifier the rule resolved (§7.3); the values it read are gone.
+    pub ident: Ident,
     /// Relative to the root, forward slashes.
     pub path: String,
     /// The directory part of `path`, empty at the root.
@@ -153,15 +156,6 @@ impl Batcher {
             items: std::mem::take(&mut self.items),
             parsed: std::mem::take(&mut self.parsed),
         })
-    }
-}
-
-/// The identity a file is filed under (§7.3): PatientID trimmed, else the
-/// StudyInstanceUID; the flag says the fallback was taken.
-pub fn identity_of(x: &Extracted) -> (&str, bool) {
-    match x.identity.patient_id.as_deref().map(str::trim) {
-        Some(id) if !id.is_empty() => (id, false),
-        _ => (x.study_uid.as_str(), true),
     }
 }
 
@@ -524,9 +518,9 @@ mod tests {
     }
 
     #[test]
-    fn the_identity_rule_is_patient_id_then_study_uid() {
+    fn the_hashes_cover_the_study_and_series_rows() {
         use nils_dicom::synth::{MetaFields, TempDir, minimal_mr, part10};
-        let dir = TempDir::new("identity");
+        let dir = TempDir::new("hashes");
         let path = dir.file(
             "a.dcm",
             &part10(
@@ -535,12 +529,7 @@ mod tests {
                 true,
             ),
         );
-        let mut x = nils_dicom::extract(&path).unwrap();
-        assert_eq!(identity_of(&x), ("1.2.3", true));
-        x.identity.patient_id = Some("   ".into());
-        assert_eq!(identity_of(&x), ("1.2.3", true));
-        x.identity.patient_id = Some(" P1 ".into());
-        assert_eq!(identity_of(&x), ("P1", false));
+        let x = nils_dicom::extract(&path).unwrap();
         let h = RowHashes::of(&x);
         assert_eq!(h.study.len(), fields_of(Level::Study).count());
         assert_eq!(h.series.len(), Fields::series("MR").len());

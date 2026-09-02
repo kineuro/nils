@@ -14,7 +14,6 @@ use nils_dicom::extract::sop_class_name;
 use nils_dicom::{Diagnostic, DiagnosticKind, Extracted, QuarantineClass, Refusal};
 use serde::{Deserialize, Serialize};
 
-use crate::batch::identity_of;
 use crate::walk::SkipReason;
 
 /// How many distinct samples a diagnostic kind keeps.
@@ -73,14 +72,15 @@ fn hash_of(text: &str) -> u64 {
 }
 
 impl Counts {
-    /// A file the reader accepted.
-    pub fn accepted(&mut self, x: &Extracted, bytes: u64) {
+    /// A file the reader accepted, filed under `value` of `id_type` (§7.3).
+    pub fn accepted(&mut self, x: &Extracted, id_type: &str, value: &str, bytes: u64) {
         self.seen += 1;
         self.parsed += 1;
         self.bytes += bytes;
         self.studies.insert(hash_of(&x.study_uid));
         self.series.insert(hash_of(&x.series_uid));
-        self.subjects.insert(hash_of(identity_of(x).0));
+        self.subjects
+            .insert(hash_of(&format!("{id_type}\0{value}")));
         *self.modalities.entry(x.modality.clone()).or_default() += 1;
         *self.sop_classes.entry(x.sop_class.clone()).or_default() += 1;
         *self
@@ -308,6 +308,12 @@ pub struct Written {
     /// Records marked gone at the end of the walk.
     pub gone: u64,
     pub subjects_created: u64,
+    /// Identifiers the linkage store had met (§7.4 step 3).
+    #[serde(default)]
+    pub subjects_matched: u64,
+    /// Identifiers attached to a subject found by its code (§7.4 step 5).
+    #[serde(default)]
+    pub identities_attached: u64,
     pub studies_created: u64,
     pub series_created: u64,
     pub stacks_created: u64,
@@ -547,6 +553,12 @@ impl fmt::Display for Report {
                 thousands(w.studies_created),
                 thousands(w.series_created),
                 thousands(w.stacks_created),
+            )?;
+            writeln!(
+                f,
+                "  identity         known {}   attached {}",
+                thousands(w.subjects_matched),
+                thousands(w.identities_attached),
             )?;
         }
 
