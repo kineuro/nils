@@ -99,6 +99,12 @@ throughput within 20 percent, fails no more vendor files, and clears the
 cross-compile test, in which case the group's Go prior art (Bifrost) tips it. The
 spike lives in the public repo under `spikes/` and its report closes D2 either
 way. **Accepted 2026-09-02, with maintainability as the second criterion (section 7).**
+**Closed 2026-09-02: Rust**, on the first corpus and the CI matrix alone, because
+the gap (2.8× the throughput at a third of the CPU, 1,771 vendor files the Go library
+fails and Rust reads, six of six static targets against five) left nothing for the
+baseline host, the one-million-instance run or the mix corpus to reverse; those runs
+join the report as evidence when they exist. The decision and its numbers are in
+[02](02-engine.md), the report in `spikes/lang/README.md` of the public repository.
 
 ### C11, the pack format
 
