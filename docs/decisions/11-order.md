@@ -33,7 +33,18 @@ record: where the gate's corpus and the two development corpora live, the baseli
 host as built, and where the v0 key comes from. Order of work in the spec's §14: eight
 slices, skeleton to budget, C11 beside slices 6 to 8. Slice 1, the skeleton, merged
 2026-09-02 (`kineuro/nils` pull request 3; Rust 1.98.0 pinned, 02); main now
-requires the engine checks and the six builds.
+requires the engine checks and the six builds. Slice 2, the reader and the walker,
+merged 2026-09-02 (pull request 4): `nils digest --dry-run` over nmosd on a development container on Asgard
+sees 508,045 files, parses 504,247 and quarantines 3,798, of which 3,664 are SOP
+classes outside v0's nine (secondary capture above all) and the reader's own
+classes refuse exactly the spike's 134 (124 `not_dicom`, 10 `missing_uid`), with
+no diagnostics; 62,300 files/s at eight workers from cache, peak RSS 851 MB. What
+building the table settled is amended into the spec (§5.3, §6.1 to §6.3): six v0
+keywords that never existed in the dictionary and were therefore always null (two
+accepted changes come from it: `phase_encoding_direction` from its standard tag,
+the PET radiopharmaceutical fields from their sequence), the creator-aware private
+blocks, the fallback chain's stop rule and the empty element as null. The mix
+corpus run is the slice's open item until the corpus has arrived.
 
 **Wave 2 — fingerprint and classify.** The columnar fingerprint pass, the pack
 loader, the MRI pack carried over, evidence storage, `nils classify`. *Gate:*

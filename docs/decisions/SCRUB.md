@@ -38,6 +38,11 @@ and the "private by design" paragraph became the pointer to this file.
 - Hardware the group has published elsewhere (Asgard), the group's partners (Vienna,
   Amsterdam), the names of the private repositories, and the v0 commit that code
   references point to.
+- The names of the two development corpora (nmosd, mix) with their file, series
+  and subject counts and the results of running the engine over them (11, Wave 1,
+  from slice 2 on). A corpus name labels a diagnosis group or a sampling scheme,
+  never a person, and the spike's own README in this repository uses the same
+  names with the same counts. Where the corpora live is still removed.
 - Facts about v0's code: its schema, its stages, where it mounts the Docker socket,
   what its agent's connection string looks like. v0's code is public in
   `kineuro/nils-legacy`; describing it discloses nothing new.
