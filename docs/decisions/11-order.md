@@ -64,7 +64,29 @@ amendments are the blocks headed "Settled while building the writer (slice 3)"
 and known: `linkage_meta` does not yet hold the registry id (slice 4 adds it with
 the store's first rows), the identity rule is fixed to PatientID with the
 StudyInstanceUID fallback until slice 4, SIGINT is slice 6's, and the second-pass
-cost on SQLite is slice 6's number to bring down.
+cost on SQLite is slice 6's number to bring down. Slice 4, identity, merged
+2026-09-02 (pull request 6): the two schemes, the subkeys derived from the
+registry's one key, the linkage store with its id types, identities, audit rows,
+linkages and the validate-then-apply import, the rule as a YAML file
+(`--identity-rule`), and the writer's per-batch resolution through the store.
+What building it settled is amended into the spec as the blocks "Settled while
+building identity (slice 4)" (§4.2, §7, §11, §13, with §3, §9.2 and §15): one
+fallback and it is StudyInstanceUID; a pattern read for its `id` group alone; one
+identity per type per subject, with `linkage link` as the only merge; imported
+subjects without a digest; `registry_id` in `linkage_meta` and the refusal of a
+store that belongs to another registry; three collision reasons (`identity`,
+`display-code`, `batch`), each rolling the batch back, opening
+`identity.collision` and failing the job with the code and the item and never an
+identifier; the operating-system user as the actor until Wave 4's doors; the
+schema version held at 1 through the alpha; `serde-saphyr` in place of the
+archived `serde_yaml`. On the same development container: nmosd under `blake2b-8` with a throwaway key
+gives 44 subjects and 82 studies in 32 s, and the same tree again with
+`--restart` matches all 44 and creates none in 26 s; the million on SQLite takes
+35 s against 32 s with identical counts and 212 KB of linkage store. Not in slice
+4 and known: `linkage purge` comes with `custody` (slice 6), the
+`ingest.quarantine` items are slice 6's, `review apply` is Wave 4's, and the
+gate's check that every v0 code comes out of a v1 digest under the v0 key with
+the maps imported (§12.4) is slice 7's, with the compare tool.
 
 **Wave 2 — fingerprint and classify.** The columnar fingerprint pass, the pack
 loader, the MRI pack carried over, evidence storage, `nils classify`. *Gate:*
