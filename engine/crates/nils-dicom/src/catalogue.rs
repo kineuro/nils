@@ -250,6 +250,14 @@ const ORIENTATION_CHAIN: &[Step] = &[
     ),
 ];
 
+/// Series-level columns that carry the first instance's value by design and
+/// differ between the instances of a series (v0 kept them on the series row):
+/// the file meta's SOP instance and the slice position. The writer leaves them
+/// out of the `field_disagreement` check (§9.1), which would otherwise count
+/// every slice of every series.
+pub const VARIES_PER_INSTANCE: [&str; 2] =
+    ["media_storage_sop_instance_uid", "image_position_patient"];
+
 const NOTE_FG: &str = "Enhanced MR fallback: the functional groups, shared then per-frame (v0)";
 const NOTE_PRIVATE: &str = "the private per-frame sequences are the Philips (2005,140F) and the Siemens (0021,1201) one, read without a creator check (v0)";
 const NOTE_META: &str = "the file meta when the element is absent (v0)";
@@ -1652,6 +1660,13 @@ pub fn render_markdown() -> String {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn the_per_instance_columns_are_series_columns() {
+        for column in VARIES_PER_INSTANCE {
+            assert!(index_of(Series, column).is_some(), "{column}");
+        }
+    }
 
     #[test]
     fn counts_per_level_are_the_spec_s() {

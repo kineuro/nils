@@ -12,8 +12,9 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use nils_dicom::extract::sop_class_name;
 use nils_dicom::{Diagnostic, DiagnosticKind, Extracted, QuarantineClass, Refusal};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::batch::identity_of;
 use crate::walk::SkipReason;
 
 /// How many distinct samples a diagnostic kind keeps.
@@ -27,6 +28,9 @@ pub struct Counts {
     pub seen: u64,
     pub parsed: u64,
     pub quarantined: u64,
+    /// Candidate files an earlier run recorded and this one found unchanged
+    /// (§5.2): seen, not read.
+    pub unchanged: u64,
     /// Regular files the `files` knob did not select.
     pub filtered: u64,
     pub symlinks: u64,
@@ -76,9 +80,7 @@ impl Counts {
         self.bytes += bytes;
         self.studies.insert(hash_of(&x.study_uid));
         self.series.insert(hash_of(&x.series_uid));
-        if let Some(id) = &x.identity.patient_id {
-            self.subjects.insert(hash_of(id));
-        }
+        self.subjects.insert(hash_of(identity_of(x).0));
         *self.modalities.entry(x.modality.clone()).or_default() += 1;
         *self.sop_classes.entry(x.sop_class.clone()).or_default() += 1;
         *self
@@ -113,6 +115,12 @@ impl Counts {
         }
     }
 
+    /// A file found as an earlier run recorded it.
+    pub fn unchanged(&mut self) {
+        self.seen += 1;
+        self.unchanged += 1;
+    }
+
     /// An entry the walker did not hand on.
     pub fn skipped(&mut self, reason: SkipReason) {
         match reason {
@@ -136,11 +144,22 @@ impl Counts {
         self.diagnostics.entry(d.kind).or_default().add(d.sample());
     }
 
+    /// Every diagnostic kind counted, with its samples: what the writer
+    /// records per batch.
+    pub fn diagnostic_rows(
+        &self,
+    ) -> impl Iterator<Item = (DiagnosticKind, u64, &BTreeSet<String>)> {
+        self.diagnostics
+            .iter()
+            .map(|(kind, t)| (*kind, t.count, &t.samples))
+    }
+
     /// Fold another thread's counts into these.
     pub fn merge(&mut self, other: Counts) {
         self.seen += other.seen;
         self.parsed += other.parsed;
         self.quarantined += other.quarantined;
+        self.unchanged += other.unchanged;
         self.filtered += other.filtered;
         self.symlinks += other.symlinks;
         self.special += other.special;
@@ -211,7 +230,7 @@ fn breakdown_key(r: &Refusal) -> Option<String> {
 }
 
 /// A count keyed by a text.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Keyed {
     pub key: String,
     pub count: u64,
@@ -230,37 +249,37 @@ fn keyed<K: ToString>(map: &BTreeMap<K, u64>) -> Vec<Keyed> {
 }
 
 /// One quarantine class in the report.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassCount {
-    pub class: &'static str,
+    pub class: String,
     pub count: u64,
     pub breakdown: Vec<Keyed>,
 }
 
 /// One SOP class in the report.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SopClassCount {
     pub uid: String,
-    pub name: Option<&'static str>,
+    pub name: Option<String>,
     pub count: u64,
 }
 
 /// One diagnostic kind in the report.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticCount {
-    pub kind: &'static str,
+    pub kind: String,
     pub count: u64,
     pub samples: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skipped {
     pub symlink: u64,
     pub special: u64,
 }
 
 /// The settings the report repeats.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Setup {
     pub name: String,
     pub root: String,
@@ -270,8 +289,32 @@ pub struct Setup {
     pub walk_threads: usize,
 }
 
+/// What the writer did (§9.1): the rows of a run that was not a dry run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Written {
+    pub batch_id: i64,
+    /// The epoch after the last write.
+    pub epoch: i64,
+    /// Transactions committed.
+    pub writes: u64,
+    /// Files filed as their instance's own (§5.3).
+    pub ingested: u64,
+    /// Files whose instance another file holds.
+    pub duplicate: u64,
+    /// Files read again because their size or time differed from their record.
+    pub changed: u64,
+    /// Files an earlier run quarantined, left as they were.
+    pub quarantine_kept: u64,
+    /// Records marked gone at the end of the walk.
+    pub gone: u64,
+    pub subjects_created: u64,
+    pub studies_created: u64,
+    pub series_created: u64,
+    pub stacks_created: u64,
+}
+
 /// The report: the JSON of `--json`, the text otherwise.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
     #[serde(flatten)]
     pub setup: Setup,
@@ -282,6 +325,8 @@ pub struct Report {
     pub seen: u64,
     pub parsed: u64,
     pub quarantined: u64,
+    #[serde(default)]
+    pub unchanged: u64,
     pub filtered: u64,
     pub skipped: Skipped,
     pub walk_errors: u64,
@@ -296,6 +341,8 @@ pub struct Report {
     pub charsets: Vec<Keyed>,
     pub forms: Vec<Keyed>,
     pub diagnostics: Vec<DiagnosticCount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written: Option<Written>,
 }
 
 impl Report {
@@ -311,7 +358,7 @@ impl Report {
             .iter()
             .map(|(uid, c)| SopClassCount {
                 uid: uid.clone(),
-                name: sop_class_name(uid),
+                name: sop_class_name(uid).map(str::to_string),
                 count: *c,
             })
             .collect();
@@ -325,6 +372,7 @@ impl Report {
             seen: counts.seen,
             parsed: counts.parsed,
             quarantined: counts.quarantined,
+            unchanged: counts.unchanged,
             filtered: counts.filtered,
             skipped: Skipped {
                 symlink: counts.symlinks,
@@ -335,7 +383,7 @@ impl Report {
             quarantine: QuarantineClass::ALL
                 .iter()
                 .map(|&class| ClassCount {
-                    class: class.name(),
+                    class: class.name().to_string(),
                     count: counts.class(class),
                     breakdown: counts.breakdown.get(&class).map(keyed).unwrap_or_default(),
                 })
@@ -352,12 +400,13 @@ impl Report {
                 .iter()
                 .filter_map(|&kind| {
                     counts.diagnostics.get(&kind).map(|t| DiagnosticCount {
-                        kind: kind.name(),
+                        kind: kind.name().to_string(),
                         count: t.count,
                         samples: t.samples.iter().cloned().collect(),
                     })
                 })
                 .collect(),
+            written: None,
         }
     }
 
@@ -450,10 +499,11 @@ impl fmt::Display for Report {
         )?;
         writeln!(
             f,
-            "  files            {} seen   {} parsed   {} quarantined   {} filtered   {} skipped ({} symlink, {} special)   {} walk errors",
+            "  files            {} seen   {} parsed   {} quarantined   {} unchanged   {} filtered   {} skipped ({} symlink, {} special)   {} walk errors",
             thousands(self.seen),
             thousands(self.parsed),
             thousands(self.quarantined),
+            thousands(self.unchanged),
             thousands(self.filtered),
             thousands(self.skipped.symlink + self.skipped.special),
             thousands(self.skipped.symlink),
@@ -474,6 +524,30 @@ impl fmt::Display for Report {
         match self.peak_rss_bytes {
             Some(b) => writeln!(f, "   peak RSS {}", human_bytes(b))?,
             None => writeln!(f)?,
+        }
+
+        if let Some(w) = &self.written {
+            writeln!(f, "written")?;
+            writeln!(
+                f,
+                "  batch {}   epoch {}   {} writes   {} ingested   {} duplicate   {} changed   {} quarantine kept   {} gone",
+                w.batch_id,
+                w.epoch,
+                thousands(w.writes),
+                thousands(w.ingested),
+                thousands(w.duplicate),
+                thousands(w.changed),
+                thousands(w.quarantine_kept),
+                thousands(w.gone),
+            )?;
+            writeln!(
+                f,
+                "  created          subjects {}   studies {}   series {}   stacks {}",
+                thousands(w.subjects_created),
+                thousands(w.studies_created),
+                thousands(w.series_created),
+                thousands(w.stacks_created),
+            )?;
         }
 
         writeln!(f, "quarantine")?;
@@ -506,7 +580,7 @@ impl fmt::Display for Report {
                 if i > 0 {
                     f.write_str("   ")?;
                 }
-                match c.name {
+                match &c.name {
                     Some(name) => write!(f, "{name} {}", thousands(c.count))?,
                     None => write!(f, "{} {}", c.uid, thousands(c.count))?,
                 }
@@ -620,6 +694,26 @@ mod tests {
         assert_eq!(json["seen"], 4);
         assert_eq!(json["name"], "t");
         assert_eq!(json["quarantine"][0]["class"], "not_dicom");
+        assert!(json.get("written").is_none());
+
+        // what `nils status --batch` prints comes back from the stored JSON
+        let mut report = report;
+        report.written = Some(Written {
+            batch_id: 7,
+            epoch: 3,
+            writes: 2,
+            ingested: 1,
+            ..Written::default()
+        });
+        let text = serde_json::to_string(&report).unwrap();
+        let back: Report = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.seen, 4);
+        assert_eq!(back.class("parse_error"), 2);
+        assert_eq!(back.written, report.written);
+        assert!(
+            back.to_string()
+                .contains("  batch 7   epoch 3   2 writes   1 ingested")
+        );
     }
 
     #[test]

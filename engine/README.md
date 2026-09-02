@@ -21,16 +21,28 @@ cargo build --release
 
 ## Running
 
-What the binary does so far (the writer lands with slice 3):
+What the binary does so far (identity rules, stacks, `custody`, `quarantine`, `review` and `linkage` land with slices 4 to 6):
 
 ```sh
-nils digest <root> --dry-run              # walk, read every header, print the report
+nils digest <root> --dry-run              # walk, read every header, print the report; no registry needed
 nils digest <root> --dry-run --json       # the report as one JSON document, progress as JSON lines
-nils digest <root> --dry-run --workers 8 --files dcm --name my-batch
 nils digest <root> --describe             # the effective knobs
+
+mkdir myreg && cd myreg
+nils key add k < key.txt                  # the pseudonym key, kept in keys/ and named, never printed
+nils init --key k                         # a SQLite registry in the working directory
+nils init --key k --backend postgres --dsn postgres://nils:secret@db/nils --schema nils
+nils digest <root>                        # digest; the same command again resumes
+nils digest <root> --workers 8 --walk-threads 8 --batch-rows 2000 --files dcm --name my-batch
+nils status                               # the registry, the running jobs, the last batches
+nils status --batch 3 --json              # one batch's counts
 ```
 
+A registry is a home directory: `nils.toml`, the key store and, on SQLite, `registry.db` and `linkage.db`. `--registry <dir>` names it for any command, else `NILS_REGISTRY`, else the working directory. On Postgres the two stores are the schemas `<schema>` and `<schema>_linkage`; `NILS_DSN` overrides the DSN in `nils.toml`, and `NILS_PG_BULK=insert` swaps the `COPY` bulk path for multi-row inserts. Exit codes: 0 done, 1 the command failed, 2 the arguments or the configuration are wrong, 3 another job holds the registry.
+
 The report names nothing from inside a file but SOP class and transfer syntax UIDs, modality and character set codes, tag keywords and the reader's error texts; diagnostic samples are shapes (`series_mr.echo_time=9a`), never values. Progress goes to stderr every ten seconds. The field catalogue is [`docs/reference/catalogue.md`](../docs/reference/catalogue.md), rendered from `nils-dicom` by `cargo run -p nils-dicom --example catalogue -- --write` and checked by a test.
+
+A synthetic corpus for trying it: `cargo run --release -p nils-dicom --example corpus -- --out /tmp/synth --instances 20000 --seed 1 > manifest.json`, described in [`tools/synth/README.md`](../tools/synth/README.md); the manifest's counts are what a digest of the tree must report.
 
 ## Checks
 

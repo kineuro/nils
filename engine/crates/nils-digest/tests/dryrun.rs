@@ -184,7 +184,9 @@ fn the_dry_run_counts_every_class() {
 
     assert_eq!(report.studies, 2);
     assert_eq!(report.series, 4);
-    assert_eq!(report.subjects, 2);
+    // P1, P2, and the two files without a PatientID, each under its study
+    // UID (§7.3)
+    assert_eq!(report.subjects, 4);
     let keyed = |items: &[nils_digest::report::Keyed]| -> Vec<(String, u64)> {
         items.iter().map(|k| (k.key.clone(), k.count)).collect()
     };
@@ -197,7 +199,10 @@ fn the_dry_run_counts_every_class() {
         ]
     );
     assert_eq!(report.sop_classes[0].uid, MR);
-    assert_eq!(report.sop_classes[0].name, Some("MR Image Storage"));
+    assert_eq!(
+        report.sop_classes[0].name.as_deref(),
+        Some("MR Image Storage")
+    );
     assert_eq!(report.sop_classes[0].count, 3);
     assert!(
         report
@@ -229,6 +234,7 @@ fn the_dry_run_counts_every_class() {
     assert_eq!(report.kind("value_invalid"), 2);
     assert_eq!(report.kind("charset_unknown"), 1);
     assert_eq!(report.kind("walk_error"), 0);
+    assert_eq!(report.kind("identity_fallback"), 2);
     let samples = |kind: &str| -> Vec<String> {
         report
             .diagnostics

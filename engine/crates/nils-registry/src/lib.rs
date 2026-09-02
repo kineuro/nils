@@ -4,20 +4,37 @@
 //!
 //! What lives here, from the Wave 1 specification
 //! (`docs/specs/wave1-parse-and-digest.md`): the schema declared once and rendered
-//! for each backend (§4), the dialect layer and the connection types for SQLite
-//! and Postgres, migrations, the linkage store and the key store (§7).
+//! for each backend (§4, [`schema`] and [`dialect`]), the connection and bulk
+//! paths of both backends ([`store`], §9.2), the migrations ([`migrate`]), the
+//! registry home with its `nils.toml` ([`home`]), the pseudonym schemes and the
+//! key store ([`pseudonym`], [`keys`], §7), and the clock ([`time`]).
 //!
-//! Slice 1 of the build is the skeleton: the two backends are named, and the test
-//! suite proves that both answer (`tests/backends.rs`). The schema lands with
-//! slice 3 (§14).
+//! Slice 1 named the two backends and proved both answer (`tests/backends.rs`);
+//! slice 3 landed the rest (§14).
 
 use std::fmt;
 use std::str::FromStr;
 
+pub mod dialect;
+pub mod home;
+pub mod keys;
+pub mod migrate;
+pub mod pseudonym;
+pub mod schema;
+pub mod store;
+pub mod time;
+
+pub use home::{Home, HomeError, InitOptions, Meta, Registry};
+pub use keys::{KeyError, KeyStore};
+pub use migrate::SCHEMA_VERSION;
+pub use pseudonym::Scheme;
+pub use store::{BulkPath, Error, Insert, Param, Row, Store};
+
 /// The two database backends a registry can live in (§4.1): SQLite for a laptop
 /// or a single host, Postgres for a shared server. `nils init --backend` takes
 /// one of these by name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Backend {
     /// The bundled SQLite, one file on disk.
     Sqlite,
