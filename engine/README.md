@@ -52,7 +52,7 @@ nils custody                              # every store: where, what it holds, h
 nils custody --markdown > custody.md      # the same as the deployment's record (docs/reference/custody.md is one)
 ```
 
-A digest stops on one signal (Ctrl-C or SIGTERM): what is already parsed is written and committed, the batch is marked `cancelled`, the exit code is 130, and the same command resumes. A second signal abandons the batch in flight. A run killed outright (a power cut, `kill -9`) resumes the same way, to the same rows; the tests prove it at every point.
+A digest stops on one signal (Ctrl-C or SIGTERM): what is already parsed is written and committed, the batch is marked `cancelled`, the exit code is 130, and the same command resumes. A second signal abandons the batch in flight. A run killed outright (a power cut, `kill -9`) resumes the same way, to the same rows; the tests prove it at every point. A pass over a tree that has not changed reads no file: it walks, asks the registry once per directory, and touches the rows it found (half a million files in under five seconds on the development container).
 
 Every instance is filed under a stack of its series: v0's signature (spec §8), computed from the file alone, keyed, indexed in order of first appearance, with the orientation class and its confidence on the `stack` row. The report counts `stacks` beside `studies`, `series` and `subjects`, and a stack whose orientation is known but oblique (confidence under 0.9) counts `orientation_oblique` once.
 

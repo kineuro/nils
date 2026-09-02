@@ -357,6 +357,11 @@ Settled while building the writer (slice 3):
   the report) and its row is touched (`batch_id`, `seen_at`), because
   `batch_id` is what says a path was examined by this batch, and that is what
   gone-marking reads. A quarantined file left alone is `quarantine_kept`.
+  Settled in slice 6: an unchanged file has nothing to parse, so it never
+  enters the parsers' queue; the resume stage collects the unchanged files
+  into batches of its own (closing at eight times `batch_rows`, as a parser's
+  would) and hands them to the writer directly. §9.2 has the measurement that
+  decided it.
 - Only an instance's own file carries its instance forward (the file
   `instance.source_file_id` points back to). A duplicate is filed afresh against
   whatever it holds now; a changed duplicate is not the instance changing.
@@ -978,6 +983,23 @@ them did; the resume slice (§14, 6) owns that number. What the table does not
 say: a real digest walks NFS from a cold cache, and there the reader, not the
 writer, is expected to be the wall, which is the budget's measurement (§12.5).
 
+Measured while building jobs and custody (slice 6), same host and knobs: the
+touch was never the wall. The second pass over nmosd took 25 s with 32 workers
+and 5 s with one, and on a copy of the registry the pieces of the SQLite side
+add up to four seconds (the lookup of 508,045 records in 3,178 directory
+queries 2.2 s, the touch of every row 2.0 s, a bare `find` with a stat of
+every file 1.7 s). The rest was the parsers' queue: half a million unchanged
+files sent through it one by one, each waking a worker with nothing to do,
+and the workers' contention for the next slowing the stage that fed them. With
+the unchanged files batched by the resume stage (§5.2) the second pass over
+nmosd takes 4.7 s (108,000 files/s) on 32 workers and the same on one, against
+25.8 s before; the million's second pass takes 5.4 s on SQLite and 18.2 s on
+Postgres, against 66 s and 37 s, with identical counts on both (862 subjects,
+1,711 studies, 7,622 series and stacks, 1,000,000 instances). The first pass
+is what it was: 33.1 s on nmosd, 35.5 s for the million on SQLite and 75.5 s
+on Postgres `COPY`, whose second pass is now the round trips of the lookup
+and the touch, a number for the baseline host (§14, 8).
+
 ### 9.3 Two stores, one order
 
 The registry commits first, then the linkage store. A crash between the two leaves
@@ -1036,6 +1058,18 @@ Settled while building jobs and custody (slice 6):
   interrupted by a real SIGINT resumes to the same subjects, studies, series,
   stacks, instances, source-file statuses and identity rows as an uninterrupted
   run, on SQLite and on Postgres.
+- On CT 110 the same holds over nmosd (508,045 files, 32 workers, SQLite):
+  a run killed after 40 commits (5 s in), one killed inside the 61st
+  transaction (8 s), one stopped by SIGINT after 80 commits (18 s, exit 130)
+  and one aborted after 20 (3 s) each resume to the uninterrupted run's 44
+  subjects, 82 studies, 2,165 series, 2,534 stacks, 493,708 instances,
+  493,708 ingested, 10,539 duplicate and 3,798 quarantined files and 44
+  identities; the resumes take 29 s, 25 s, 18 s and 30 s, the killed runs'
+  batches end `failed` with `reparse_from` set and the signalled ones
+  `cancelled`, and a third pass over any of them takes 5 s. What differs is
+  the review items: a run files one `ingest.quarantine` item per class it
+  quarantined itself, so a resumed tree has between one and six, never one
+  per file and never twice for a file.
 
 ## 11. Knobs, diagnostics and the report (C37, D7)
 
@@ -1319,8 +1353,9 @@ they share the schema.
 6. **Jobs, resume, status, custody.** *Done when:* a digest killed at any point
    resumes to the same counts as an uninterrupted one, and `nils custody` lists
    every file the tests created. Landed: the kill-and-resume tests of §10 hold
-   on SQLite and Postgres, and the CLI test finds every file under the home in
-   `custody --json`.
+   on SQLite and Postgres and over nmosd on CT 110, the CLI test finds every
+   file under the home in `custody --json`, and the second pass over an
+   unchanged tree went from 25.8 s to 4.7 s on nmosd (§9.2).
 7. **The compare tool and the gate runs** on the baseline host: the spike's
    corpora first, then the live corpus study by study, each run's report in the
    record; the session check of §12.4 is part of the tool. *Done when:* §12.2 to
