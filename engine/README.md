@@ -19,6 +19,19 @@ cargo build --release
 ./target/release/nils --version
 ```
 
+## Running
+
+What the binary does so far (the writer lands with slice 3):
+
+```sh
+nils digest <root> --dry-run              # walk, read every header, print the report
+nils digest <root> --dry-run --json       # the report as one JSON document, progress as JSON lines
+nils digest <root> --dry-run --workers 8 --files dcm --name my-batch
+nils digest <root> --describe             # the effective knobs
+```
+
+The report names nothing from inside a file but SOP class and transfer syntax UIDs, modality and character set codes, tag keywords and the reader's error texts; diagnostic samples are shapes (`series_mr.echo_time=9a`), never values. Progress goes to stderr every ten seconds. The field catalogue is [`docs/reference/catalogue.md`](../docs/reference/catalogue.md), rendered from `nils-dicom` by `cargo run -p nils-dicom --example catalogue -- --write` and checked by a test.
+
 ## Checks
 
 CI runs these on every pull request, in this order, and main requires them (`.github/workflows/ci.yml`). Run them before pushing:
