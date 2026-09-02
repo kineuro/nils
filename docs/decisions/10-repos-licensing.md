@@ -14,7 +14,8 @@ a standard needs.
 | `nils-segment` | public when ported | the annotation app |
 | `nils-query` | public when built | the notebook |
 | `nils-agent` | private until stable, then public | the Flue app |
-| `nils-design` | private, permanent | this record: decisions, reviews, ratification, the page builder; the public engine repo carries a scrubbed copy as `docs/decisions/` |
+| `nils-design` | private, permanent | this record: decisions, reviews, ratification, the page builder, `scripts/scrub.py`; the public engine repo carries the scrubbed copy it produces as `docs/decisions/`, with the removals listed in the copy's `SCRUB.md` |
+| `nils-legacy` | public, archived 2026-09-02 | the v0 mirror, formerly `kineuro/nils`: 14 commits and 2 forks, read-only (15 R3) |
 | deployment glue | private (ours) | our compose files, Authentik/Traefik config, site specifics |
 
 Development happens on the public repos directly — branches and tags are the
@@ -135,8 +136,8 @@ because it holds the rights to all of the code. Hence:
   stays NILS** (D31, [15](15-ratification.md) §10). The checks behind it: no
   neuroimaging, DICOM or BIDS tool of that name exists; `nils` is free on crates.io
   and on PyPI (the npm name is taken, so a JavaScript client would be
-  `@kineuro/nils`); the GitHub name is ours (the old mirror moves to `nils-legacy`,
-  15 R3); the plain `nils.*` domains are all registered, and the product lives at
+  `@kineuro/nils`); the GitHub name is ours (the old mirror became `nils-legacy` on
+  2026-09-02, 15 R3); the plain `nils.*` domains are all registered, and the product lives at
   `nils.kineuro.se` regardless. NILS is a common given name and a common acronym,
   which was the strike against it; a common word is still registrable as a word
   mark for software (class 9) and software services (class 42) when nobody holds
@@ -147,9 +148,10 @@ because it holds the rights to all of the code. Hence:
   allowed; no product or service names derived from the mark) is in the repository
   from commit one (15 R6).
   Logo, Nima's direction of the same day, not yet a decision: a mark in the
-  family of the Bifrost mark with an N inside it, or the n-rune of the futharks,
-  ᚾ (Naudiz in the Elder, nauðr in the Younger; the sound is /n/, the name means
-  "need"). The mark is drawn when the website page for NILS is.
+  family of the Bifrost mark with an N inside it, or an old Nordic character for
+  the sound; he named the rune himself, ᚾ, Naudiz in the Elder Futhark (nauðr in
+  the Younger; the name means "need"). The mark is drawn when the website page
+  for NILS is.
 - **Where the edge lives.** Sell operation, not science. The classifier, the query
   language, the packs and the federation primitives are the open edition, always;
   the hosted multi-tenant service, the managed relay and federation operations,

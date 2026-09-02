@@ -47,7 +47,7 @@ listed in [SCRUB.md](SCRUB.md). Nothing that was left out changes a decision.
 | [12-review-devils-advocate.md](12-review-devils-advocate.md) | The 2026-09-01 verification against the live system: corrections applied, challenges C1-C15, missing decisions D13-D19 |
 | [13-query-and-agent-study.md](13-query-and-agent-study.md) | The 2026-09-02 study of nils-query and nils-agent against Metabase's and Flue's source and the live agent traffic: ten use-case families, amendments C16-C25, decisions D20-D24 |
 | [14-federation.md](14-federation.md) | The 2026-09-02 federation design: engines as nodes, optional and node-addable, disclosure levels at the door, compute travels and data stays, the cluster question; amendments C26-C34, decisions D25-D29 |
-| [15-ratification.md](15-ratification.md) | The 2026-09-02 ratification sheet: every open item of 12, 13 and 14, the license and the repository restart, each with a recommended verdict; every verdict recorded the same day (sections 7 to 10), the four items Nima raised in section 8 |
+| [15-ratification.md](15-ratification.md) | The 2026-09-02 ratification sheet: every open item of 12, 13 and 14, the license and the repository restart, each with a recommended verdict; every verdict recorded the same day (sections 7 to 10), the four items Nima raised in section 8, the repository as built (section 11) |
 
 ## Decision register
 

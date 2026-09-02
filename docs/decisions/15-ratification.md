@@ -250,9 +250,9 @@ the details, all accepted 2026-09-02 (section 9); v0 is frozen from that day (F1
 
 1. Done 2026-09-02: the register statuses flipped and the texts amended, one
    commit per batch of verdicts in `nils-design`.
-2. The name, decided 2026-09-02: NILS (section 10). Then I create the repo per
-   R1 to R8, including the scrub pass (R7) and the corpus review (C10), and
-   archive the mirror (R3).
+2. Done 2026-09-02: the name, NILS (section 10); the mirror archived as
+   `nils-legacy` (R3); `kineuro/nils` created per R1 to R8, with the scrub pass
+   (R7) and the corpus review (C10) as its second commit (section 11).
 3. The spike (C1) and the baseline VM (C6) start the same day; ten working days
    later D2 closes and the CI skeleton follows.
 4. Wave 1 opens by writing its spec: registry schema on both backends, ingest
@@ -448,3 +448,21 @@ recorded in 10, is not a decision yet.
 "First step" is item 2 of section 6: the repository, per R1 to R8, with the
 mirror archived (R3). What was done is recorded in section 11. Next ids: C39
 and D32.
+
+## 11. The repository, 2026-09-02
+
+Done the same day, every commit authored by nima-ch without trailers (R2).
+
+| Step | What was done |
+|---|---|
+| R3 | The v0 mirror `kineuro/nils` got an archival notice at the top of its README (commit `2bac175`), was renamed `kineuro/nils-legacy` and archived. Its 2 forks and its GitHub Pages branch stay with it; the Pages URL moved with the name and is not redirected |
+| R1, R2 | `kineuro/nils` created public with fresh history. Commit one `2e227eb`, "chore: commit one, per the design record (R1 to R8)". Local clone at `~/Projects/nils-v1`; `~/Projects/nils` holds Nima's old clone of the v0 upstream (uncommitted changes in it) and was left untouched |
+| R6 | `LICENSE` (AGPL-3.0-only), `contracts/LICENSE` (Apache-2.0), `docs/LICENSE` (CC BY 4.0), `README.md`, `CONTRIBUTING.md`, `CLA.md` (an adaptation of the Apache ICLA 2.2, to be read by a lawyer before the first external pull request), `TRADEMARKS.md`, `SECURITY.md` (admin@kineuro.se; private vulnerability reporting on), `CHANGELOG.md`, `.github/CODEOWNERS`, `.editorconfig`, issue and pull request templates |
+| R5 | `contracts/`, `packs/mri/`, `spikes/lang/` (the C1 question and its four criteria, written before the work), `evals/`, `docs/decisions/`, `.github/workflows/` |
+| R8 | `ci.yml` (text hygiene, SPDX headers, DCO on commits that touch `contracts/` or `sdk/`; the job `ci` is the required check), `release.yml` (a `v*` tag publishes the matching changelog section as the release), `cla.yml` (CLA Assistant Lite; signatures on the orphan branch `cla-signatures`; skipped for pull requests that touch only `contracts/` and `sdk/`). First run on main: green |
+| R4 | Ruleset "main": pull request required, linear history, no deletion, no force push, status check `ci`. Repository admins bypass it, which is how `docs/` gets its direct commits (CONTRIBUTING says so). Squash and rebase merges only, head branches deleted on merge, wiki and projects off |
+| R7, C10 | `docs/decisions/` is the scrubbed copy of this record, commit `bb98a0b`, produced by `scripts/scrub.py` in this repository (every substitution asserts its count; the pass fails if a removed term survives). Its `SCRUB.md` lists the removals and records the corpus review: no corpus and no fixture at commit one, and the transformation behind the first one is written down before it lands |
+| org profile | The NILS row of `kineuro/.github` points at v1 and its design record, and at `nils-legacy` for the version in production |
+
+The `TRADEMARKS.md` claim ("registration is in progress") waits on Nima's search
+(section 10). Item 3 of section 6, the spike and the baseline VM, starts next.

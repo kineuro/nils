@@ -13,7 +13,7 @@
 ## Waves
 
 **Wave 0 — ground.** v0 feature work frozen (F1, since 2026-09-02). The public repo
-restarted under the decided name (15, R1 to R8; AGPL-3.0-only, 10). CI skeleton:
+restarted as `kineuro/nils` on 2026-09-02 (15 §11; R1 to R8; AGPL-3.0-only, 10). CI skeleton:
 multi-platform binary builds, the two-backend test matrix, the scaled performance benchmark harness (D6). Accepted 2026-09-02 from
 [12](12-review-devils-advocate.md): the language spike (C1, judged on speed and
 maintainability together), the baseline host with v0 measured on it (C6), and the
