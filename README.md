@@ -9,12 +9,13 @@
 | | |
 |---|---|
 | [`docs/decisions/`](docs/) | The design record: what NILS v1 is, and why, decision by decision. Start there. |
+| [`docs/specs/`](docs/specs/) | One specification per wave of the build, written before the wave's code. Wave 1, parse and digest, is the first. |
 | [`contracts/`](contracts/) | The interfaces others build against: the query AST schema, the pack specification and vocabulary, the OpenAPI description, the MCP schemas, the federation protocol, `nils.job.yml`. Apache-2.0. |
 | [`packs/mri/`](packs/mri/) | The first-party MRI modality pack. |
-| [`spikes/`](spikes/) | Throwaway code behind decisions. The language spike opens here. |
+| [`spikes/`](spikes/) | Throwaway code behind decisions. The language spike, which chose Rust, reports in [`spikes/lang/`](spikes/lang/). |
 | [`evals/`](evals/) | The gold tasks and the scoring for the query language and the agent. |
 
-The engine's source directory appears when the language spike has reported, ten working days from commit one.
+The engine's source directory, `engine/`, appears with the first slice of Wave 1 ([`docs/specs/wave1-parse-and-digest.md`](docs/specs/wave1-parse-and-digest.md), §14).
 
 ## License
 
