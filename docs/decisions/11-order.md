@@ -44,7 +44,27 @@ keywords that never existed in the dictionary and were therefore always null (tw
 accepted changes come from it: `phase_encoding_direction` from its standard tag,
 the PET radiopharmaceutical fields from their sequence), the creator-aware private
 blocks, the fallback chain's stop rule and the empty element as null. The mix
-corpus run is the slice's open item until the corpus has arrived.
+corpus run is the slice's open item until the corpus has arrived. Slice 3, the
+schema and the writer, merged 2026-09-02 (pull request 5): the schema declared
+once and rendered for both dialects, the registry home (`nils.toml`, the key
+store, `NILS_REGISTRY`, `NILS_DSN`), the writer with its three caches and
+per-field hashes, resume, jobs and `nils status`, and the corpus generator as an
+example of `nils-dicom`. The synthetic million (1,011,783 files, 2,000 refused by
+design) on the same development container with 64 workers from cache: identical counts on SQLite, Postgres
+`COPY` and Postgres `INSERT` and equal to the manifest; 32 s, 65 s and 70 s
+(31,300, 15,500 and 14,500 files/s), 2 GB peak RSS once the batch queue was
+capped at sixteen (4.1 GB before), 538 MB of SQLite and 1,015 MB of Postgres for
+the million; the second pass over the unchanged tree 66 s on SQLite and 37 s on
+Postgres, bound by touching a million `source_file` rows. The Postgres server's
+merge on one core is the wall, so `COPY` stays the default and the spec's §15
+question is closed; whether the Postgres registry wants more than one writer
+connection is slice 8's, if the baseline host shows the same wall. The spec's
+amendments are the blocks headed "Settled while building the writer (slice 3)"
+(§4.2, §5.2, §9.1, §10, §11, §12.6, §13) and the numbers in §9.2. Not in slice 3
+and known: `linkage_meta` does not yet hold the registry id (slice 4 adds it with
+the store's first rows), the identity rule is fixed to PatientID with the
+StudyInstanceUID fallback until slice 4, SIGINT is slice 6's, and the second-pass
+cost on SQLite is slice 6's number to bring down.
 
 **Wave 2 — fingerprint and classify.** The columnar fingerprint pass, the pack
 loader, the MRI pack carried over, evidence storage, `nils classify`. *Gate:*
