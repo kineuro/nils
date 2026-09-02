@@ -313,7 +313,7 @@ batch's report counts each:
 | `not_dicom` | no `DICM` marker and no readable bare dataset that yields a SOPInstanceUID |
 | `unreadable` | an I/O error opening or reading (permission, a vanished file, a stale NFS handle) |
 | `parse_error` | the reader failed inside the header; the error text is in `detail`, classified by the reader's error chain |
-| `missing_uid` | no StudyInstanceUID, SeriesInstanceUID or SOPInstanceUID |
+| `missing_uid` | no StudyInstanceUID, SeriesInstanceUID, SOPInstanceUID or SOPClassUID, checked in that order; `detail` names the first one missing (the SOP class may come from the file meta, §6.1) |
 | `unsupported_sop_class` | a SOP class outside the batch's `sop_classes` knob (default: v0's nine image storage classes for MR, CT and PT, §6.1) |
 | `missing_modality` | no Modality and no ModalitiesInStudy to fall back on |
 | `unsupported_modality` | a modality outside the batch's `modalities` knob (default `MR`, `CT`, `PT`; `PET` is normalized to `PT`) |
@@ -321,6 +321,11 @@ batch's report counts each:
 `duplicate` is not a refusal: the file parsed and its SOP instance already exists
 in the registry (another path, another batch). The row keeps `instance_id` so the
 second path is provenance too. `skipped` (symlink) is neither.
+
+The first four classes are the reader's, decided before any policy applies; the
+spike's harness counted exactly these, and the dry run of slice 2 over the nmosd
+corpus refused the same 134 files (124 `not_dicom`, 10 `missing_uid`). The other
+three are the batch's knobs at work.
 
 Each class is a listed output: `nils quarantine list [--batch <id>] [--class <c>]`
 prints paths, and the batch's report carries the counts. One review item of kind
@@ -353,13 +358,22 @@ Legacy Converted Enhanced MR, PET Image Storage, Legacy Converted Enhanced PET.
 The SOP class is read from the dataset and, when absent there, from the file meta
 (MediaStorageSOPClassUID), as v0 did.
 
+A bare dataset's transfer syntax is the one it was read with (implicit or
+explicit VR little endian) and `instance.transfer_syntax_uid` records it. When
+the file meta lacks (0002,0012), `dicom-rs` substitutes its own implementation
+class UID and version name; the reader treats that substitute as absent, so
+`implementation_class_uid` and `implementation_version_name` stay null rather
+than naming the reader.
+
 ### 6.2 The catalogue
 
 The catalogue is a table in `nils-dicom`, one row per column the digest writes:
 the column name, the level (subject, study, series, series_mr, series_ct,
 series_pet, stack, instance), the source (a keyword, or a fallback chain), the
 converter, the sensitivity class, and a note. It is generated into the
-documentation and it is the seed of Wave 4's catalog endpoint. Wave 1's rule is
+documentation (`docs/reference/catalogue.md`, rendered from the code by
+`cargo run -p nils-dicom --example catalogue -- --write` and checked against it
+by a test) and it is the seed of Wave 4's catalog endpoint. Wave 1's rule is
 **v0's field set, v0's fallbacks, v0's converters, then additions**: the gate
 compares field by field (§12), and a field that v0 wrote and v1 dropped would
 have to be argued as an accepted change, in writing.
@@ -424,6 +438,26 @@ the 0.5.3 source):
   diagnostic. This is an addition: v0 left both empty at ingest and filled them
   through its importer (C35 puts them in the registry as quasi-identifying fields).
 
+Settled while building the table (slice 2):
+
+- Six keywords v0 mapped do not exist in the standard dictionary (SeriesComments,
+  PhaseEncodingDirection, SUVbw, SUVlbm, SUVbsa, ActivityConcentrationScale);
+  v0's `getattr` found nothing for them, so those columns were always null. They
+  stay as columns and stay null, except `phase_encoding_direction`, which v1 reads
+  from InPlanePhaseEncodingDirection (0018,1312): an addition for the gate's
+  list of accepted changes.
+- The eight radiopharmaceutical and radionuclide fields sit inside
+  RadiopharmaceuticalInformationSequence in every real PET file; v0 read the top
+  level only and wrote null. v1 reads the top level, then the first item of the
+  sequence: an addition, listed the same way.
+- The six DWI private values are read by creator block: the creator element is
+  checked and the block is shifted to where the creator sits, with v0's fixed
+  block (`0x10`) only when the group declares no creator at all. The two private
+  per-frame sequences are read at their fixed tags without a creator check, as
+  v0 read them.
+- A fallback chain moves on when the element is absent or empty and stops at the
+  first present value, even one the converter refuses (null, `value_invalid`).
+
 Additions in Wave 1 beyond that list: `instance.charset`, `source_file.size` and
 `mtime_ns`, `stack.stack_key`, the counts on series and stacks. Nothing removed.
 PatientName and PatientID are read for identity (§7) and stored nowhere in the
@@ -461,6 +495,8 @@ gate compares against it:
 - **json**: the DICOM JSON model of the element (`dicom-json`), which is the shape
   pydicom's `to_json_dict` produced for v0.
 - **PN** is never converted: no person-name element is stored.
+- An **empty** element (zero length, or a sequence with no item) is null for every
+  converter, with no diagnostic, and does not stop a fallback chain (§6.2).
 
 ## 7. Identity (C36, C37, D13, C3)
 

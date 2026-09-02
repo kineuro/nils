@@ -9,5 +9,18 @@
 //! (§10). A stage's input is always a predicate over columns, never a list
 //! carried in memory.
 //!
-//! Slice 1 of the build is the skeleton; the walker lands with slice 2 and the
-//! writer with slice 3 (§14).
+//! Slice 2 of the build (§14) is the walker, the parser pool and the dry run:
+//! [`dry_run`] walks a root, reads every candidate file through
+//! `nils_dicom::extract` and returns the [`Report`]; the writer lands with
+//! slice 3.
+
+pub mod dryrun;
+pub mod knobs;
+pub mod report;
+mod rss;
+pub mod walk;
+
+pub use dryrun::{DigestError, dry_run};
+pub use knobs::{KNOBS, Knob, Settings};
+pub use report::Report;
+pub use walk::{Filter, SkipReason, WalkEvent, walk};
