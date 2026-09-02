@@ -44,6 +44,7 @@ pub mod status {
 /// One `source_file` row, as the resume check reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recorded {
+    pub id: i64,
     pub size: i64,
     pub mtime_ns: i64,
     pub status: &'static str,
@@ -57,8 +58,9 @@ pub struct Recorded {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Parse(Option<Prior>),
+    /// The row to touch, and whether it is a quarantined file kept as it is.
     Unchanged {
-        status: &'static str,
+        id: i64,
         quarantined: bool,
     },
 }
@@ -89,11 +91,11 @@ pub fn decide(
     }
     match r.status {
         status::INGESTED | status::DUPLICATE if same => Decision::Unchanged {
-            status: r.status,
+            id: r.id,
             quarantined: false,
         },
         status::QUARANTINED if same && !retry_quarantine => Decision::Unchanged {
-            status: r.status,
+            id: r.id,
             quarantined: true,
         },
         status::QUARANTINED if same => Decision::Parse(None),
@@ -132,7 +134,7 @@ impl Records {
         let empty = store.query_opt(&probe, &[Param::Int(source_id)])?.is_none();
         let instance = store.qualified("instance");
         let sql = format!(
-            "SELECT f.path, f.size, f.mtime_ns, f.status, f.instance_id, i.source_file_id = f.id \
+            "SELECT f.path, f.size, f.mtime_ns, f.status, f.instance_id, i.source_file_id = f.id, f.id \
              FROM {table} AS f LEFT JOIN {instance} AS i ON i.id = f.instance_id \
              WHERE f.source_id = {} AND f.dir = {}",
             d.param(1, Type::Int),
@@ -169,6 +171,7 @@ impl Records {
                 map.insert(
                     r.text(0)?.to_string(),
                     Recorded {
+                        id: r.int(6)?,
                         size: r.int(1)?,
                         mtime_ns: r.int(2)?,
                         status,
@@ -228,17 +231,7 @@ pub fn run(
                         mtime_ns,
                         prior,
                     },
-                    Decision::Unchanged {
-                        status,
-                        quarantined,
-                    } => Task::Unchanged {
-                        rel,
-                        dir,
-                        size,
-                        mtime_ns,
-                        status,
-                        quarantined,
-                    },
+                    Decision::Unchanged { id, quarantined } => Task::Unchanged { id, quarantined },
                 }
             }
             WalkEvent::Skipped {
@@ -278,6 +271,7 @@ mod tests {
 
     fn rec(status: &'static str, instance: Option<i64>) -> Recorded {
         Recorded {
+            id: 1,
             size: 10,
             mtime_ns: 5,
             status,
@@ -293,7 +287,7 @@ mod tests {
         assert_eq!(
             decide(Some(&ingested), 10, 5, false, false),
             Decision::Unchanged {
-                status: "ingested",
+                id: 1,
                 quarantined: false
             }
         );
@@ -308,7 +302,7 @@ mod tests {
         assert_eq!(
             decide(Some(&quarantined), 10, 5, false, false),
             Decision::Unchanged {
-                status: "quarantined",
+                id: 1,
                 quarantined: true
             }
         );
@@ -420,6 +414,7 @@ mod tests {
         assert_eq!(
             records.get("a", "a/x").unwrap(),
             Some(Recorded {
+                id: 1,
                 size: 10,
                 mtime_ns: 5,
                 status: "ingested",
@@ -432,8 +427,11 @@ mod tests {
             Some("quarantined")
         );
         assert_eq!(
-            records.get("a", "a/w").unwrap().map(|r| (r.status, r.own)),
-            Some(("duplicate", false))
+            records
+                .get("a", "a/w")
+                .unwrap()
+                .map(|r| (r.id, r.status, r.own)),
+            Some((4, "duplicate", false))
         );
         assert_eq!(records.get("a", "a/z").unwrap(), None);
         assert_eq!(records.get("b", "b/q").unwrap(), None);

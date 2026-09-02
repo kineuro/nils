@@ -1087,9 +1087,10 @@ impl<'a> Writer<'a> {
         Ok(filed)
     }
 
-    /// Source files: every item's row, upserted on `(source_id, path)`; then
-    /// the new instances' `source_file_id`, and the instance an earlier run
-    /// filed a changed path under let go of it.
+    /// Source files: every read item's row, upserted on `(source_id, path)`,
+    /// and the unchanged files' rows touched by id; then the new instances'
+    /// `source_file_id`, and the instance an earlier run filed a changed path
+    /// under let go of it.
     fn source_files(
         &mut self,
         batch: &Batch,
@@ -1128,23 +1129,6 @@ impl<'a> Writer<'a> {
             ],
         })
         .returning(&["id", "path"]);
-        let light = Insert::new(
-            t,
-            &[
-                "source_id",
-                "batch_id",
-                "dir",
-                "path",
-                "size",
-                "mtime_ns",
-                "status",
-                "seen_at",
-            ],
-        )
-        .on_conflict(Conflict::Update {
-            target: &["source_id", "path"],
-            set: &["batch_id", "seen_at"],
-        });
         let row = |path: &str,
                    dir: &str,
                    size: u64,
@@ -1168,7 +1152,7 @@ impl<'a> Writer<'a> {
             ]
         };
         let mut rows = Vec::with_capacity(batch.items.len());
-        let mut light_rows = Vec::new();
+        let mut unchanged = Vec::new();
         // path → (instance id, the file is its own, the instance it left)
         let mut wanted: HashMap<&str, (i64, bool, Option<i64>)> = HashMap::new();
         let mut ingested = 0;
@@ -1231,24 +1215,8 @@ impl<'a> Writer<'a> {
                     None,
                     None,
                 )),
-                Item::Unchanged {
-                    path,
-                    dir,
-                    size,
-                    mtime_ns,
-                    status,
-                    quarantined,
-                } => {
-                    light_rows.push(vec![
-                        Param::Int(self.source_id),
-                        Param::Int(self.batch_id),
-                        Param::from(dir.as_str()),
-                        Param::from(path.as_str()),
-                        Param::Int(*size as i64),
-                        Param::Int(*mtime_ns),
-                        Param::from(*status),
-                        Param::from(now),
-                    ]);
+                Item::Unchanged { id, quarantined } => {
+                    unchanged.push(*id);
                     if *quarantined {
                         self.written.quarantine_kept += 1;
                     }
@@ -1272,7 +1240,15 @@ impl<'a> Writer<'a> {
                 }
             }
         }
-        store.insert(&light, &light_rows)?;
+        store.update_by_ids(
+            t,
+            &[
+                ("batch_id", Param::Int(self.batch_id)),
+                ("seen_at", Param::from(now)),
+            ],
+            "id",
+            &unchanged,
+        )?;
         if !pairs.is_empty() {
             store.update_from_values(table("instance"), "source_file_id = v.val", "id", &pairs)?;
         }

@@ -615,24 +615,10 @@ fn parse_all(
                     }
                 }
             },
-            Task::Unchanged {
-                rel,
-                dir,
-                size,
-                mtime_ns,
-                status,
-                quarantined,
-            } => {
+            Task::Unchanged { id, quarantined } => {
                 counts.unchanged();
                 progress.unchanged();
-                Item::Unchanged {
-                    path: rel,
-                    dir,
-                    size,
-                    mtime_ns,
-                    status,
-                    quarantined,
-                }
+                Item::Unchanged { id, quarantined }
             }
             Task::Skipped {
                 rel,

@@ -59,13 +59,9 @@ pub enum Item {
         refusal: Refusal,
     },
     /// A file an earlier run recorded and this one found unchanged: only its
-    /// batch and its seen time move.
+    /// row's batch and seen time move.
     Unchanged {
-        path: String,
-        dir: String,
-        size: u64,
-        mtime_ns: i64,
-        status: &'static str,
+        id: i64,
         quarantined: bool,
     },
     /// A symbolic link or a special file: a row, no read.
@@ -93,11 +89,7 @@ pub enum Task {
         prior: Option<Prior>,
     },
     Unchanged {
-        rel: String,
-        dir: String,
-        size: u64,
-        mtime_ns: i64,
-        status: &'static str,
+        id: i64,
         quarantined: bool,
     },
     Skipped {
