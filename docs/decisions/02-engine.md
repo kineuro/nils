@@ -14,6 +14,26 @@ managing the symptom.
   [12](12-review-devils-advocate.md), accepted 2026-09-02: a Wave 0 parsing spike
   settles it on speed and maintainability together, not this sentence. Distribution mirrors Bifrost either way: six static binaries +
   checksums per release, an install script, `nils update`.
+- **Decided 2026-09-02: Rust.** The spike (`spikes/lang/` in `kineuro/nils`, pull
+  request 1) closed C1 on the evidence in hand rather than on the full programme,
+  because the gap left nothing for the remaining runs to reverse. On one study's raw
+  DICOM tree (508,045 files, 64.1 GB, warm cache, 8 workers) the Rust harness on
+  `dicom-object` 0.10 parsed at 63,900 files/s in 69 s of CPU against 22,600 files/s
+  in 218 s for the Go harness on `suyashkumar/dicom` 1.1; both reject the same 134
+  non-DICOM or UID-less files, and Go alone fails 1,771 more on a character set
+  written without its underscore, which pydicom and `dicom-object` both read. The Go
+  library also cannot stop in front of Pixel Data (it reads every file to the end) and
+  misreads a Part 10 file without a preamble. In CI, one binary with SQLite and DuckDB
+  inside built, ran and linked no database library on six of six targets for Rust and
+  five of six for Go (Windows on arm64 fails in Go's cgo runtime; Rust pays instead
+  with 8 to 15 minutes of DuckDB compilation per target, once per cache). The two
+  harnesses are the same size. What the spike did not measure yet, and adds to the
+  report as evidence when it exists: the 8-core baseline host, the NFS case, the
+  one-million-instance run, and the deliberately diverse "mix" corpus (2,568 series
+  from 16 manufacturer labels and 26 study years, chosen by stratified read-only SQL on
+  the live registry and moved over Bifrost). The mix corpus is kept regardless: it is
+  the parser's development corpus for Wave 1, where the open question is no longer the
+  language but how much of the reader we own on top of `dicom-rs`.
 - **Risk, honestly**: `dicom-rs` has met fewer cursed vendor files than pydicom. The
   mitigation is our own corpus — 37.5M live instances become the parser regression
   suite (parse-and-compare against v0's extracted values before anything else is

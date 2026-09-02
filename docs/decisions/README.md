@@ -8,10 +8,10 @@ commit that made the change cites the decision. The record is the truth, not a
 snapshot.
 
 Status: **ratified 2026-09-02**, every decision and every amendment
-([15](15-ratification.md) §7 to §9). Open on evidence only: the language
-spike, the baseline measurement and the pack-format prototype (approved work), and
-on other people: Amsterdam's cluster and Vienna's answers. The name is NILS (D31,
-2026-09-02).
+([15](15-ratification.md) §7 to §9). The language spike closed the same
+day (D2: Rust, [02](02-engine.md)). Open on evidence only: the baseline
+measurement and the pack-format prototype (approved work), and on other people:
+Amsterdam's cluster and Vienna's answers. The name is NILS (D31, 2026-09-02).
 
 This directory is the public copy of the record, which is kept in the private
 repository `kineuro/nils-design` and copied here after a scrub pass
@@ -63,7 +63,7 @@ docs carry it in place.
 | Id | Decision | Doc | Amendments (12, 13, 14, 15) |
 |---|---|---|---|
 | D1 | The engine is complete alone; every other app is optional, and absence degrades features silently, never errors | 00, 01 | holds; C13 (`off` binds loopback); C37 (every knob is a contract, 15 §8); D25 (the node daemon is one more optional app, in the same binary) |
-| D2 | The engine's volume path is a compiled Rust core shipped as a single static binary; ML stays in optional Python sidecars | 02 | holds as direction; C1 accepted 2026-09-02 (Rust vs Go spike, judged on speed and maintainability); prior-art premise corrected |
+| D2 | The engine's volume path is a compiled Rust core shipped as a single static binary; ML stays in optional Python sidecars | 02 | decided 2026-09-02: Rust, on the C1 spike's evidence (02, 15 §7); prior-art premise corrected |
 | D3 | One schema, two storage backends: embedded (SQLite + DuckDB) for standalone, Postgres for the multi-user server | 02 | holds |
 | D4 | The registry is subject-centric and global; "cohort" splits into ingest batch (provenance) and saved selection (membership) | 03 | holds, strengthened; C2, C3, C32 (identity node-local; registry epoch); C36 (the KI registry keeps v0's subject-code scheme and key), D30 (the clinical timeline is core) |
 | D5 | The query AST executes in the engine — one governed query door for UI, agent, and CLI alike | 05, 06 | holds; C4, C16, C17, C18, C20, C22, C27, C28; D20, D27 (a peer's request is the same door, answered as a projection) |

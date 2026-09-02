@@ -1,0 +1,21 @@
+[package]
+name = "nils-spike-parse"
+version = "0.0.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+
+[[bin]]
+name = "parse"
+path = "src/main.rs"
+
+[dependencies]
+dicom-object = "0.10"
+dicom-core = "0.10"
+dicom-dictionary-std = "0.10"
+walkdir = "2.5"
+crossbeam-channel = "0.5"
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"

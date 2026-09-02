@@ -339,7 +339,7 @@ C16 onward, from the query and agent study, continue in
 
 | Id | Affects | Proposal | Status |
 |---|---|---|---|
-| C1 | D2 | Wave 0 language spike: parse 1M production instances with `dicom-rs` and a Go DICOM library; decide by files/s, RSS and vendor-file failures. Classifier port is interpreter-first either way | accepted 2026-09-02; judged on speed and maintainability together (15 §7) |
+| C1 | D2 | Wave 0 language spike: parse 1M production instances with `dicom-rs` and a Go DICOM library; decide by files/s, RSS and vendor-file failures. Classifier port is interpreter-first either way | accepted 2026-09-02; judged on speed and maintainability together (15 §7); closed 2026-09-02: Rust (02) |
 | C2 | D4, D12 | Overrides are provenance-scoped pack overlays, never per selection | accepted 2026-09-02 (15 §9) |
 | C3 | D4, D13 | Registry-wide pseudonym key held outside the DB; existing subject codes and CSV linkage maps imported as linkage records in Wave 1 | accepted 2026-09-02 (15 §9) |
 | C4 | D5 | The ten `nils-data` query patterns become AST fixtures in the Wave 4 gate | accepted 2026-09-02 (15 §9) |

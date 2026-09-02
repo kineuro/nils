@@ -1,0 +1,14 @@
+[package]
+name = "nils-spike-dbcheck"
+version = "0.0.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+
+[[bin]]
+name = "dbcheck"
+path = "src/main.rs"
+
+[dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
+duckdb = { version = "1.10505", features = ["bundled"] }

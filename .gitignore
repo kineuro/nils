@@ -16,3 +16,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# The language spike builds its Go binaries in place
+spikes/lang/go/parse
+spikes/lang/go/dbcheck
