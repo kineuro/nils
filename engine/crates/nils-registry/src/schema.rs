@@ -308,6 +308,7 @@ fn build_registry() -> Vec<Table> {
                     req("stack_index", Type::Int),
                     req("stack_key", Type::Text),
                     req("modality", Type::Text),
+                    req("orientation", Type::Text),
                 ],
                 Level::Stack,
                 vec![

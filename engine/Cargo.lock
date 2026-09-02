@@ -920,10 +920,12 @@ dependencies = [
 name = "nils-digest"
 version = "1.0.0-alpha.0"
 dependencies = [
+ "blake2",
  "crossbeam-channel",
  "dicom-core",
  "dicom-dictionary-std",
  "glob",
+ "hex",
  "libc",
  "lru",
  "nils-dicom",

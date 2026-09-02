@@ -183,6 +183,16 @@ impl Row {
         }
     }
 
+    pub fn double(&self, i: usize) -> Result<f64, Error> {
+        match &self.0[i] {
+            Cell::Double(v) => Ok(*v),
+            Cell::Int(v) => Ok(*v as f64),
+            other => Err(Error::Message(format!(
+                "column {i}: expected a double, read {other:?}"
+            ))),
+        }
+    }
+
     pub fn text(&self, i: usize) -> Result<&str, Error> {
         match &self.0[i] {
             Cell::Text(s) => Ok(s),

@@ -144,6 +144,7 @@ pub fn rows(reg: &mut Registry, sql: &str) -> Vec<Row> {
         "series_ct",
         "series_pet",
         "series",
+        "stack",
         "study",
         "subject",
         "diagnostic",

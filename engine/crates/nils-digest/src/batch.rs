@@ -14,11 +14,12 @@ use std::collections::BTreeMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 
-use nils_dicom::catalogue::{VARIES_PER_INSTANCE, fields_of};
+use nils_dicom::catalogue::{VARIES_PER_INSTANCE, fields_of, stack_defining};
 use nils_dicom::{Converter, Extracted, Level, Refusal, Value};
 use nils_registry::store::Cell;
 
 use crate::rule::Ident;
+use crate::stack::Signature;
 use crate::walk::SkipReason;
 
 /// What an earlier run recorded for a path that is read again (§5.2).
@@ -35,6 +36,8 @@ pub struct ParsedFile {
     pub extracted: Extracted,
     /// The identifier the rule resolved (§7.3); the values it read are gone.
     pub ident: Ident,
+    /// The stack the instance belongs to (§8), computed from the file alone.
+    pub signature: Signature,
     /// Relative to the root, forward slashes.
     pub path: String,
     /// The directory part of `path`, empty at the root.
@@ -191,7 +194,7 @@ impl RowHashes {
 
 /// The catalogue columns of a row the writer compares: names, converters, and
 /// whether each takes part (the per-instance columns of the series row do
-/// not, §9.1).
+/// not, §9.1, nor the series columns a stack signature is made of, §8).
 #[derive(Debug, Clone)]
 pub struct Fields {
     pub names: Vec<&'static str>,
@@ -213,8 +216,8 @@ impl Fields {
                 f.names.push(field.column);
                 f.levels.push(level);
                 f.converters.push(field.converter);
-                f.compared
-                    .push(!(level == Level::Series && VARIES_PER_INSTANCE.contains(&field.column)));
+                let varies = level == Level::Series && VARIES_PER_INSTANCE.contains(&field.column);
+                f.compared.push(!(varies || stack_defining(field)));
             }
         }
         f
@@ -456,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn fields_follow_the_catalogue_and_skip_the_per_instance_columns() {
+    fn fields_follow_the_catalogue_and_skip_the_per_instance_and_stack_columns() {
         let study = Fields::study();
         assert_eq!(study.len(), fields_of(Level::Study).count());
         assert!(study.compared.iter().all(|&c| c));
@@ -472,7 +475,28 @@ mod tests {
             .filter(|(_, c)| !**c)
             .map(|(n, _)| *n)
             .collect();
-        assert_eq!(skipped, VARIES_PER_INSTANCE);
+        assert_eq!(
+            skipped,
+            [
+                "media_storage_sop_instance_uid",
+                "image_type",
+                "image_orientation_patient",
+                "image_position_patient",
+                "repetition_time",
+                "echo_time",
+                "inversion_time",
+                "flip_angle",
+                "echo_numbers",
+                "echo_train_length",
+                "receive_coil_name",
+            ]
+        );
+        assert!(skipped.iter().all(|n| {
+            VARIES_PER_INSTANCE.contains(n)
+                || fields_of(Level::Series)
+                    .chain(fields_of(Level::SeriesMr))
+                    .any(|(_, f)| f.column == *n && stack_defining(f))
+        }));
         assert_eq!(Fields::series("XX").len(), fields_of(Level::Series).count());
         assert_eq!(detail_level("PT"), Some(Level::SeriesPet));
         assert_eq!(detail_level("US"), None);

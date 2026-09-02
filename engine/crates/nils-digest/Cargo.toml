@@ -14,8 +14,10 @@ publish.workspace = true
 nils-dicom.workspace = true
 nils-registry.workspace = true
 
+blake2.workspace = true
 crossbeam-channel.workspace = true
 glob.workspace = true
+hex.workspace = true
 lru.workspace = true
 regex.workspace = true
 serde.workspace = true

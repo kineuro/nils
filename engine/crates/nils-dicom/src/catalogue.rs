@@ -1580,6 +1580,17 @@ pub fn index_of(level: Level, column: &str) -> Option<usize> {
         .position(|f| f.level == level && f.column == column)
 }
 
+/// Whether a series-level column reads what a stack column reads (§8): the
+/// series row and its detail row carry the first instance's value of it, as
+/// in v0, and the stacks carry every value the series has, so instances that
+/// differ on it are the series' stacks, not a `field_disagreement`.
+pub fn stack_defining(field: &Field) -> bool {
+    matches!(
+        field.level,
+        Level::Series | Level::SeriesMr | Level::SeriesCt | Level::SeriesPet
+    ) && fields_of(Level::Stack).any(|(_, s)| s.source == field.source)
+}
+
 fn tag_text(tag: Tag) -> String {
     format!("({:04X},{:04X})", tag.group(), tag.element())
 }
@@ -1666,6 +1677,36 @@ mod tests {
         for column in VARIES_PER_INSTANCE {
             assert!(index_of(Series, column).is_some(), "{column}");
         }
+    }
+
+    #[test]
+    fn the_stack_defining_series_columns_are_the_thirteen() {
+        let defining: Vec<String> = CATALOGUE
+            .iter()
+            .filter(|f| stack_defining(f))
+            .map(|f| format!("{}.{}", f.level, f.column))
+            .collect();
+        assert_eq!(
+            defining,
+            [
+                "series.image_type",
+                "series.image_orientation_patient",
+                "series_mr.repetition_time",
+                "series_mr.echo_time",
+                "series_mr.inversion_time",
+                "series_mr.flip_angle",
+                "series_mr.echo_numbers",
+                "series_mr.echo_train_length",
+                "series_mr.receive_coil_name",
+                "series_ct.kvp",
+                "series_ct.x_ray_tube_current",
+                "series_ct.exposure",
+                "series_pet.series_type",
+            ]
+        );
+        // a stack column is never its own reason, nor is an instance column
+        assert!(fields_of(Stack).all(|(_, f)| !stack_defining(f)));
+        assert!(fields_of(Instance).all(|(_, f)| !stack_defining(f)));
     }
 
     #[test]
