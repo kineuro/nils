@@ -34,6 +34,13 @@ pub const WALK_BOUND: usize = 16_384;
 /// How many tasks may wait before the parsers.
 pub const TASK_BOUND: usize = 1_024;
 
+/// How many closed batches may wait for the writer: two per worker, but no
+/// more than this. Beyond a handful the queue only holds memory (a batch of
+/// 2,000 parsed rows is tens of megabytes), and the parsers block on a full
+/// queue at no cost to throughput, since a full queue means the writer is
+/// the wall either way.
+pub const BATCH_BOUND: usize = 16;
+
 /// A running job whose heartbeat is younger than this holds the registry;
 /// an older one is taken over as failed (§10).
 pub const FRESH_SECS: u64 = 60;
@@ -349,7 +356,7 @@ fn execute(
 
     let (walk_tx, walk_rx) = crossbeam_channel::bounded::<WalkEvent>(WALK_BOUND);
     let (task_tx, task_rx) = crossbeam_channel::bounded::<Task>(TASK_BOUND);
-    let (batch_tx, batch_rx) = crossbeam_channel::bounded::<Batch>(2 * workers);
+    let (batch_tx, batch_rx) = crossbeam_channel::bounded::<Batch>((2 * workers).min(BATCH_BOUND));
     let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(0);
 
     let (walked, resumed, mut counts, wrote) = std::thread::scope(|s| {
