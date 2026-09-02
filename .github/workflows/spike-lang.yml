@@ -1,0 +1,99 @@
+name: spike-lang
+# The language spike, criterion 3 (docs/decisions/15, C1): does one binary that embeds
+# SQLite and DuckDB build on each of the six release targets, and does it run? Every
+# target builds natively on its own runner, the way a release would. A failing target
+# is a finding, not a broken build, so the matrix never stops early.
+on:
+  pull_request:
+    paths: ["spikes/lang/**", ".github/workflows/spike-lang.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dbcheck:
+    name: dbcheck ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x86_64, runner: ubuntu-latest }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm }
+          - { target: macos-x86_64, runner: macos-15-intel }
+          - { target: macos-arm64, runner: macos-latest }
+          - { target: windows-x86_64, runner: windows-latest }
+          - { target: windows-arm64, runner: windows-11-arm }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: spikes/lang/go/go.mod
+          cache-dependency-path: spikes/lang/go/go.sum
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spikes/lang/rust
+      - name: rust dbcheck (bundled SQLite and DuckDB)
+        id: rust
+        working-directory: spikes/lang/rust
+        run: |
+          cargo build --release -p nils-spike-dbcheck
+          ls -la target/release/dbcheck* || true
+      - name: rust dbcheck runs
+        working-directory: spikes/lang/rust
+        run: ./target/release/dbcheck
+      - name: rust dbcheck links no database library
+        working-directory: spikes/lang/rust
+        run: |
+          case "$RUNNER_OS" in
+            Linux) ldd target/release/dbcheck ;;
+            macOS) otool -L target/release/dbcheck ;;
+            Windows) echo "no ldd on windows; the run above is the proof" ;;
+          esac | tee deps.txt
+          ! grep -i -E "duckdb|sqlite" deps.txt
+      - name: go dbcheck (modernc sqlite and duckdb-go)
+        id: go
+        working-directory: spikes/lang/go
+        env:
+          CGO_ENABLED: "1"
+        run: go build -o dbcheck ./cmd/dbcheck
+      - name: go dbcheck runs
+        working-directory: spikes/lang/go
+        run: ./dbcheck
+      - name: go dbcheck links no database library
+        working-directory: spikes/lang/go
+        run: |
+          case "$RUNNER_OS" in
+            Linux) ldd dbcheck ;;
+            macOS) otool -L dbcheck ;;
+            Windows) echo "no ldd on windows; the run above is the proof" ;;
+          esac | tee deps.txt
+          ! grep -i -E "duckdb|sqlite" deps.txt
+
+  smoke:
+    name: parse harnesses agree on the synthetic corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: spikes/lang/go/go.mod
+          cache-dependency-path: spikes/lang/go/go.sum
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spikes/lang/rust
+      - name: build both parsers
+        run: |
+          (cd spikes/lang/rust && cargo build --release -p nils-spike-parse)
+          (cd spikes/lang/go && go build -o parse ./cmd/parse)
+      - name: synthetic corpus, both sides
+        run: spikes/lang/smoke.sh

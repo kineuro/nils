@@ -1,0 +1,16 @@
+# The language spike, Rust side (docs/decisions/15, C1). Throwaway code: two binaries,
+# `parse` (walk a corpus, read every header, write counts) and `dbcheck` (one static
+# binary embedding SQLite and DuckDB, built on six targets by CI).
+[workspace]
+resolver = "2"
+members = ["parse", "dbcheck"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+# The DuckDB amalgamation is compiled by its build script; without this override every
+# translation unit carries debug info and the compile needs far more memory than it should.
+[profile.release.package.libduckdb-sys]
+debug = false
