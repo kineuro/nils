@@ -21,7 +21,7 @@ cargo build --release
 
 ## Running
 
-What the binary does so far (stacks, `custody`, `quarantine`, `review` and `linkage purge` land with slices 5 and 6):
+What the binary does so far (`custody`, `quarantine`, `review` and `linkage purge` land with slice 6):
 
 ```sh
 nils digest <root> --dry-run              # walk, read every header, print the report; no registry needed
@@ -45,6 +45,8 @@ nils linkage show <code> --why "the audit reason"   # decrypts the subject's ide
 nils linkage link <code-a> <code-b> --evidence "the same person, renamed"
 nils linkage unlink <id>
 ```
+
+Every instance is filed under a stack of its series: v0's signature (spec §8), computed from the file alone, keyed, indexed in order of first appearance, with the orientation class and its confidence on the `stack` row. The report counts `stacks` beside `studies`, `series` and `subjects`, and a stack whose orientation is known but oblique (confidence under 0.9) counts `orientation_oblique` once.
 
 A registry names one pseudonym key and one scheme at `init`: `blake2b-32` by default, or `--scheme blake2b-8` to continue a v0 registry with its key, so that every known person lands on the known code. The identifiers themselves live only in the linkage store, encrypted under a subkey of the registry's key; a subject holds one identifier per type, and two subjects that are one person are joined with `linkage link`. An identity collision (two identifiers on one code) rolls its batch back, opens a review item and fails the job with the code and the item, never an identifier.
 

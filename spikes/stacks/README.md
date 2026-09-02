@@ -22,4 +22,20 @@ prints counts. The two v0 modules the first script imports (`stack_utils.py`,
 `dicom_mappings.py` of v0 0.5.0, MIT) are placed beside it as `v0/` and are not
 part of this repository.
 
-**Verdict.** Pending.
+**Verdict, nmosd (2026-09-02).** Equal. The two hold 2,165 series in common
+and v1's partition equals v0's on every one of them, over the 493,708 instances
+both hold: 2,534 v0 groups, 2,534 v1 stacks, 212 series with more than one
+stack (at most five), no label. v1 holds no instance v0 does not. v0's reader
+(pydicom, `force=True`) opened all 508,045 files; 134 had no series or SOP
+instance UID (the 124 that are not DICOM and the 10 without UIDs, the same 134
+v1 refuses) and the other 507,911 files are 497,017 distinct instances. v0's
+`kept` flag (the four UIDs, modality MR, CT, PT or PET) marks 496,888 of them:
+the 493,708 both hold, plus 3,180 only v0 holds, which are the non-image SOP
+classes §5.3 refuses that carry an MR modality (Secondary Capture, nearly all).
+The 129 instances v0 would not keep (modality SR, DOC and PR) are the Enhanced
+SR, Encapsulated PDF and presentation state files §5.3 refuses too. Of v1's
+2,534 stacks 34 are oblique (confidence 0.81 to 0.89) and none has an unknown
+orientation.
+
+**Mix.** Pending the copy of the corpus; the same two scripts run on it as they
+ran here, and the numbers go below this line.

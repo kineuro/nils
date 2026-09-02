@@ -5,3 +5,4 @@ Throwaway code that answers a question in the design record. Each spike is a dir
 | Spike | Question | Criteria | Opened |
 |---|---|---|---|
 | [`lang/`](lang/) | Which language does the engine use: Rust, the prior, or Go (C1, D2)? | Throughput and memory on one million instances, vendor-file failures, static cross-compiled binaries, and maintainability. Ten working days. | 2026-09-02 |
+| [`stacks/`](stacks/) | Does v1 partition a series into stacks the way v0 did (Wave 1, §14 item 5)? | Over the series both registries hold, the share whose partitions are equal, and for the rest, the signature field that caused the difference. | 2026-09-02 |
