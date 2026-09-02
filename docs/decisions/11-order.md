@@ -31,7 +31,9 @@ rule land here (C3, C36, C37, D13). *Opened 2026-09-02* with the language decisi
 documentation and cites this record by id; what it cannot say stays in the private
 record: where the gate's corpus and the two development corpora live, the baseline
 host as built, and where the v0 key comes from. Order of work in the spec's §14: eight
-slices, skeleton to budget, C11 beside slices 6 to 8.
+slices, skeleton to budget, C11 beside slices 6 to 8. Slice 1, the skeleton, merged
+2026-09-02 (`kineuro/nils` pull request 3; Rust 1.98.0 pinned, 02); main now
+requires the engine checks and the six builds.
 
 **Wave 2 — fingerprint and classify.** The columnar fingerprint pass, the pack
 loader, the MRI pack carried over, evidence storage, `nils classify`. *Gate:*

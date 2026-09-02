@@ -34,6 +34,14 @@ managing the symptom.
   the live registry and moved over Bifrost). The mix corpus is kept regardless: it is
   the parser's development corpus for Wave 1, where the open question is no longer the
   language but how much of the reader we own on top of `dicom-rs`.
+- **Toolchain (Nima, 2026-09-02):** the newest stable Rust at the opening of the
+  wave, 1.98.0, pinned in `engine/rust-toolchain.toml` with `rust-version` to
+  match, read by CI from the same file, and raised to each new release deliberately
+  in a pull request of its own. Rust's compatibility guarantee means the newest
+  compiler costs nothing, and the pin means every machine builds the same thing.
+  Landed with the engine skeleton, slice 1 of the Wave 1 spec (`kineuro/nils` pull
+  request 3, merged the same day): the four crates, CI on both registry backends
+  and the six targets, releases in Bifrost's form.
 - **Risk, honestly**: `dicom-rs` has met fewer cursed vendor files than pydicom. The
   mitigation is our own corpus — 37.5M live instances become the parser regression
   suite (parse-and-compare against v0's extracted values before anything else is
