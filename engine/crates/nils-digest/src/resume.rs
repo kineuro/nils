@@ -8,6 +8,13 @@
 //! that differs is read again with its record's instance beside it; a file
 //! with no record is new. With `--restart` every file is read again, its
 //! record's instance still beside it, so a file keeps its status.
+//!
+//! An unchanged file has nothing to parse, so it never enters the parsers'
+//! queue: this stage collects the unchanged files into batches of its own and
+//! hands them to the writer directly. (Sent one by one through the queue,
+//! half a million of them cost the run twenty seconds on thirty-two workers,
+//! the parsers waking for each and contending for the next; five seconds
+//! on one worker, which was the measure of the loss.)
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -18,7 +25,9 @@ use lru::LruCache;
 use nils_registry::schema::Type;
 use nils_registry::store::{Cell, Error, Param, Store};
 
-use crate::batch::{Prior, Task};
+use crate::batch::{Batch, Batcher, Item, Prior, Task};
+use crate::cancel::Cancel;
+use crate::progress::Progress;
 use crate::report::Counts;
 use crate::walk::{SkipReason, WalkEvent};
 
@@ -44,6 +53,7 @@ pub mod status {
 /// One `source_file` row, as the resume check reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recorded {
+    pub id: i64,
     pub size: i64,
     pub mtime_ns: i64,
     pub status: &'static str,
@@ -51,14 +61,18 @@ pub struct Recorded {
     /// The instance's `source_file_id` points back at this row: the file is
     /// the instance's own, not a duplicate of it.
     pub own: bool,
+    /// The row was recorded in the last second of a batch that failed: its
+    /// identity rows may be missing (§9.3), so the file is read again.
+    pub reparse: bool,
 }
 
 /// What to do with a file, given its record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Parse(Option<Prior>),
+    /// The row to touch, and whether it is a quarantined file kept as it is.
     Unchanged {
-        status: &'static str,
+        id: i64,
         quarantined: bool,
     },
 }
@@ -88,12 +102,18 @@ pub fn decide(
         });
     }
     match r.status {
+        // the batch that recorded the file failed right after: read again,
+        // under the same instance, so that a lost identity row is attached
+        _ if r.reparse && same => Decision::Parse(own.map(|id| Prior {
+            instance_id: Some(id),
+            changed: false,
+        })),
         status::INGESTED | status::DUPLICATE if same => Decision::Unchanged {
-            status: r.status,
+            id: r.id,
             quarantined: false,
         },
         status::QUARANTINED if same && !retry_quarantine => Decision::Unchanged {
-            status: r.status,
+            id: r.id,
             quarantined: true,
         },
         status::QUARANTINED if same => Decision::Parse(None),
@@ -131,9 +151,12 @@ impl Records {
         );
         let empty = store.query_opt(&probe, &[Param::Int(source_id)])?.is_none();
         let instance = store.qualified("instance");
+        let batch = store.qualified("ingest_batch");
         let sql = format!(
-            "SELECT f.path, f.size, f.mtime_ns, f.status, f.instance_id, i.source_file_id = f.id \
+            "SELECT f.path, f.size, f.mtime_ns, f.status, f.instance_id, i.source_file_id = f.id, f.id, \
+             b.reparse_from IS NOT NULL AND f.seen_at >= b.reparse_from \
              FROM {table} AS f LEFT JOIN {instance} AS i ON i.id = f.instance_id \
+             LEFT JOIN {batch} AS b ON b.id = f.batch_id \
              WHERE f.source_id = {} AND f.dir = {}",
             d.param(1, Type::Int),
             d.param(2, Type::Text)
@@ -161,19 +184,21 @@ impl Records {
                 let Some(status) = status::of(r.text(3)?) else {
                     continue;
                 };
-                let own = match r.get(5) {
+                let flag = |i: usize| match r.get(i) {
                     Cell::Bool(b) => *b,
-                    Cell::Int(i) => *i != 0,
+                    Cell::Int(n) => *n != 0,
                     _ => false,
                 };
                 map.insert(
                     r.text(0)?.to_string(),
                     Recorded {
+                        id: r.int(6)?,
                         size: r.int(1)?,
                         mtime_ns: r.int(2)?,
                         status,
                         instance_id: r.opt_int(4)?,
-                        own,
+                        own: flag(5),
+                        reparse: flag(7),
                     },
                 );
             }
@@ -195,19 +220,43 @@ pub fn relative(root: &Path, path: &Path) -> (String, String) {
     (parts.join("/"), dir)
 }
 
-/// Run the stage: every walk event in, a task out, until the walker is done.
-/// With no records (a dry run) every file is parsed. Returns what the stage
-/// counted itself: the filtered files.
+/// What the stage runs with.
+pub struct Stage<'a> {
+    pub root: &'a Path,
+    /// The source's records; none in a dry run, where every file is parsed.
+    pub records: Option<Records>,
+    pub retry_quarantine: bool,
+    pub restart: bool,
+    /// The parsed rows a batch holds (§9.1); the unchanged batches this stage
+    /// makes close at eight times that, as a parser's would.
+    pub rows: usize,
+}
+
+/// Run the stage: every walk event in, a task out to the parsers or an
+/// unchanged file into a batch for the writer, until the walker is done or a
+/// stop is asked. Returns what the stage counted itself: the filtered and
+/// the unchanged files.
 pub fn run(
-    root: &Path,
+    stage: Stage<'_>,
     rx: &Receiver<WalkEvent>,
     tx: &Sender<Task>,
-    mut records: Option<Records>,
-    retry_quarantine: bool,
-    restart: bool,
+    batches: &Sender<Batch>,
+    progress: &Progress,
+    cancel: &Cancel,
 ) -> Result<Counts, Error> {
+    let Stage {
+        root,
+        mut records,
+        retry_quarantine,
+        restart,
+        rows,
+    } = stage;
     let mut counts = Counts::default();
+    let mut unchanged = Batcher::new(rows);
     for event in rx {
+        if cancel.stop() {
+            break;
+        }
         let task = match event {
             WalkEvent::File {
                 path,
@@ -228,17 +277,16 @@ pub fn run(
                         mtime_ns,
                         prior,
                     },
-                    Decision::Unchanged {
-                        status,
-                        quarantined,
-                    } => Task::Unchanged {
-                        rel,
-                        dir,
-                        size,
-                        mtime_ns,
-                        status,
-                        quarantined,
-                    },
+                    Decision::Unchanged { id, quarantined } => {
+                        counts.unchanged();
+                        progress.unchanged();
+                        if let Some(batch) = unchanged.push(Item::Unchanged { id, quarantined })
+                            && batches.send(batch).is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
                 }
             }
             WalkEvent::Skipped {
@@ -269,6 +317,9 @@ pub fn run(
             break;
         }
     }
+    if let Some(batch) = unchanged.take() {
+        let _ = batches.send(batch);
+    }
     Ok(counts)
 }
 
@@ -278,11 +329,13 @@ mod tests {
 
     fn rec(status: &'static str, instance: Option<i64>) -> Recorded {
         Recorded {
+            id: 1,
             size: 10,
             mtime_ns: 5,
             status,
             instance_id: instance,
             own: instance.is_some(),
+            reparse: false,
         }
     }
 
@@ -293,7 +346,7 @@ mod tests {
         assert_eq!(
             decide(Some(&ingested), 10, 5, false, false),
             Decision::Unchanged {
-                status: "ingested",
+                id: 1,
                 quarantined: false
             }
         );
@@ -308,7 +361,7 @@ mod tests {
         assert_eq!(
             decide(Some(&quarantined), 10, 5, false, false),
             Decision::Unchanged {
-                status: "quarantined",
+                id: 1,
                 quarantined: true
             }
         );
@@ -354,6 +407,53 @@ mod tests {
         };
         assert_eq!(
             decide(Some(&gone_duplicate), 10, 5, false, false),
+            Decision::Parse(None)
+        );
+
+        // a file of a failed batch's last second is read again as it is,
+        // its instance beside it; a duplicate or a quarantined one afresh
+        let again = Recorded {
+            reparse: true,
+            ..ingested.clone()
+        };
+        assert_eq!(
+            decide(Some(&again), 10, 5, false, false),
+            Decision::Parse(Some(Prior {
+                instance_id: Some(7),
+                changed: false
+            }))
+        );
+        assert_eq!(
+            decide(Some(&again), 11, 5, false, false),
+            Decision::Parse(Some(Prior {
+                instance_id: Some(7),
+                changed: true
+            }))
+        );
+        assert_eq!(
+            decide(
+                Some(&Recorded {
+                    reparse: true,
+                    ..duplicate.clone()
+                }),
+                10,
+                5,
+                false,
+                false
+            ),
+            Decision::Parse(None)
+        );
+        assert_eq!(
+            decide(
+                Some(&Recorded {
+                    reparse: true,
+                    ..quarantined.clone()
+                }),
+                10,
+                5,
+                false,
+                false
+            ),
             Decision::Parse(None)
         );
 
@@ -405,7 +505,13 @@ mod tests {
             .unwrap();
         store
             .execute(
-                "INSERT INTO source_file (id, source_id, batch_id, dir, path, size, mtime_ns, status, instance_id, seen_at) VALUES (1, 1, 1, 'a', 'a/x', 10, 5, 'ingested', 42, 't'), (2, 1, 1, 'a', 'a/y', 1, 1, 'quarantined', NULL, 't'), (3, 2, 1, 'a', 'a/z', 1, 1, 'ingested', 9, 't'), (4, 1, 1, 'a', 'a/w', 10, 5, 'duplicate', 42, 't')",
+                "INSERT INTO source_file (id, source_id, batch_id, dir, path, size, mtime_ns, status, instance_id, seen_at) VALUES (1, 1, 1, 'a', 'a/x', 10, 5, 'ingested', 42, 't'), (2, 1, 1, 'a', 'a/y', 1, 1, 'quarantined', NULL, 't'), (3, 2, 1, 'a', 'a/z', 1, 1, 'ingested', 9, 't'), (4, 1, 1, 'a', 'a/w', 10, 5, 'duplicate', 42, 't'), (5, 1, 2, 'a', 'a/v', 10, 5, 'ingested', 43, '2026-09-02T10:00:00Z'), (6, 1, 2, 'a', 'a/u', 10, 5, 'ingested', 44, '2026-09-02T09:59:59Z')",
+                &[],
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO ingest_batch (id, source_id, job_id, name, config, started_at, state, reparse_from) VALUES (1, 1, 1, 'n', '{}', 't', 'done', NULL), (2, 1, 2, 'n', '{}', 't', 'failed', '2026-09-02T10:00:00Z')",
                 &[],
             )
             .unwrap();
@@ -420,20 +526,37 @@ mod tests {
         assert_eq!(
             records.get("a", "a/x").unwrap(),
             Some(Recorded {
+                id: 1,
                 size: 10,
                 mtime_ns: 5,
                 status: "ingested",
                 instance_id: Some(42),
                 own: true,
+                reparse: false,
             })
+        );
+        // the failed batch's last second is read again, the one before not
+        assert_eq!(
+            records
+                .get("a", "a/v")
+                .unwrap()
+                .map(|r| (r.id, r.own, r.reparse)),
+            Some((5, false, true))
+        );
+        assert_eq!(
+            records.get("a", "a/u").unwrap().map(|r| (r.id, r.reparse)),
+            Some((6, false))
         );
         assert_eq!(
             records.get("a", "a/y").unwrap().map(|r| r.status),
             Some("quarantined")
         );
         assert_eq!(
-            records.get("a", "a/w").unwrap().map(|r| (r.status, r.own)),
-            Some(("duplicate", false))
+            records
+                .get("a", "a/w")
+                .unwrap()
+                .map(|r| (r.id, r.status, r.own)),
+            Some((4, "duplicate", false))
         );
         assert_eq!(records.get("a", "a/z").unwrap(), None);
         assert_eq!(records.get("b", "b/q").unwrap(), None);

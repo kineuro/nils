@@ -696,6 +696,63 @@ impl Store {
         self.execute(&sql, &params)
     }
 
+    /// `UPDATE table SET a = ?, b = ? WHERE key IN (...)` for the listed ids:
+    /// the same values for every row, in chunks on SQLite and with one array
+    /// on Postgres. Returns the rows updated.
+    pub fn update_by_ids(
+        &mut self,
+        table: &Table,
+        sets: &[(&str, Param)],
+        key: &str,
+        ids: &[i64],
+    ) -> Result<u64, Error> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let d = self.dialect();
+        let mut assign = String::new();
+        let mut params = Vec::with_capacity(sets.len() + SQLITE_KEY_CHUNK);
+        for (i, (name, value)) in sets.iter().enumerate() {
+            let column = table
+                .column(name)
+                .unwrap_or_else(|| panic!("{}.{name} is not a column", table.name));
+            if i > 0 {
+                assign.push_str(", ");
+            }
+            assign.push_str(&format!("{name} = {}", d.param(i + 1, column.ty)));
+            params.push(value.clone());
+        }
+        let name = self.qualified(table.name);
+        match self {
+            Store::Sqlite(_) => {
+                let mut updated = 0;
+                for chunk in ids.chunks(SQLITE_KEY_CHUNK) {
+                    let marks = vec!["?"; chunk.len()];
+                    let sql = format!(
+                        "UPDATE {name} SET {assign} WHERE {key} IN ({})",
+                        marks.join(", ")
+                    );
+                    params.truncate(sets.len());
+                    params.extend(chunk.iter().map(|&id| Param::Int(id)));
+                    updated += self.execute(&sql, &params)?;
+                }
+                Ok(updated)
+            }
+            Store::Postgres {
+                client, statements, ..
+            } => {
+                let sql = format!(
+                    "UPDATE {name} SET {assign} WHERE {key} = ANY(${}::bigint[])",
+                    sets.len() + 1
+                );
+                let stmt = prepared(client, statements, &sql)?;
+                let mut args: Vec<&(dyn ToSql + Sync)> = params.iter().map(Param::pg).collect();
+                args.push(&ids);
+                Ok(client.execute(&stmt, &args)?)
+            }
+        }
+    }
+
     /// `UPDATE table SET <set> ... WHERE <key> = v.key` for integer pairs
     /// `(key, val)`, in chunks; `set` names the new value as `v.val`. Returns
     /// the rows updated.

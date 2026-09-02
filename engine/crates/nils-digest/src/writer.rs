@@ -31,6 +31,7 @@ use nils_registry::time::now_iso;
 use nils_registry::{HomeError, Registry, Scheme, pseudonym};
 
 use crate::batch::{Batch, Fields, Item, ParsedFile, detail_level, hash_value, hash32};
+use crate::cancel::{Cancel, Scripted};
 use crate::progress::{PROGRESS_EVERY, Progress};
 use crate::report::{Counts, Written};
 use crate::resume::status;
@@ -41,6 +42,13 @@ pub const CACHE_ROWS: usize = 200_000;
 
 /// The kind of the review item a collision opens (§7.1).
 pub const COLLISION_KIND: &str = "identity.collision";
+/// The review item that groups the files a batch quarantined into one class
+/// (§5.3): one per batch and class, the count as evidence, no path in it.
+pub const QUARANTINE_KIND: &str = "ingest.quarantine";
+
+/// The error a batch ends with when an abort is asked while it is in flight
+/// (§10): its transaction rolls back, and the run ends as aborted.
+pub const ABORTED: &str = "aborted: the batch in flight rolled back";
 
 struct SubjectEntry {
     hashes: Box<[u32]>,
@@ -126,6 +134,10 @@ pub struct Writer<'a> {
     /// The identity rows of the batch in flight, filed once it commits.
     pending: Vec<NewIdentity>,
     collision: Option<Collision>,
+    /// The run's stop token (§10), checked between the tables of a batch.
+    cancel: Cancel,
+    /// The stop the tests script, acting on the count of commits.
+    script: Option<Scripted>,
 }
 
 impl Drop for Writer<'_> {
@@ -180,19 +192,36 @@ impl<'a> Writer<'a> {
             last_heartbeat: Instant::now(),
             pending: Vec::new(),
             collision: None,
+            cancel: Cancel::new(),
+            script: None,
         })
+    }
+
+    /// The run's stop token, and the scripted stop of a test if there is one.
+    pub fn cancelled_by(mut self, cancel: Cancel, script: Option<Scripted>) -> Writer<'a> {
+        self.cancel = cancel;
+        self.script = script;
+        self
     }
 
     /// Write one batch in one transaction; nothing of it lands on an error.
     /// The identity rows follow in the linkage store once the registry has
     /// committed (§9.3); a collision opens its review item after the
-    /// rollback, in a transaction of its own, and the error stands.
+    /// rollback, in a transaction of its own, and the error stands. An abort
+    /// asked while the batch is in flight ends it with [`ABORTED`] at the
+    /// next table.
     pub fn write(&mut self, batch: &Batch, progress: &Progress) -> Result<(), HomeError> {
         self.registry.store().begin()?;
         match self.write_rows(batch, progress) {
             Ok(()) => {
+                if let Some(s) = self.script {
+                    s.inside_transaction(self.written.writes);
+                }
                 self.registry.store().commit()?;
                 self.written.writes += 1;
+                if let Some(s) = self.script {
+                    s.after_commit(self.written.writes, &self.cancel);
+                }
                 self.file_identities()
             }
             Err(e) => {
@@ -298,15 +327,31 @@ impl<'a> Writer<'a> {
                 tally.walk_error(error);
             }
         }
+        self.checkpoint()?;
         let subject_ids = self.subjects(&parsed, &now, &mut tally)?;
+        self.checkpoint()?;
         let study_ids = self.studies(&parsed, &subject_ids, &mut tally)?;
+        self.checkpoint()?;
         let series_ids = self.series(&parsed, &study_ids, &subject_ids, &mut tally)?;
+        self.checkpoint()?;
         let stack_ids = self.stacks(&parsed, &series_ids, &mut tally)?;
+        self.checkpoint()?;
         let filed = self.instances(&parsed, &series_ids, &stack_ids, &mut tally)?;
+        self.checkpoint()?;
         self.source_files(batch, &filed, &now, progress)?;
+        self.checkpoint()?;
         self.diagnostics(&tally, &now)?;
         self.written.epoch = self.registry.next_epoch()?;
         Ok(())
+    }
+
+    /// Between two tables of a batch: the place an abort takes effect.
+    fn checkpoint(&self) -> Result<(), HomeError> {
+        if self.cancel.abort() {
+            Err(HomeError::Message(ABORTED.into()))
+        } else {
+            Ok(())
+        }
     }
 
     /// Subjects (§7.4): every file's identifier resolved through the linkage
@@ -1087,9 +1132,10 @@ impl<'a> Writer<'a> {
         Ok(filed)
     }
 
-    /// Source files: every item's row, upserted on `(source_id, path)`; then
-    /// the new instances' `source_file_id`, and the instance an earlier run
-    /// filed a changed path under let go of it.
+    /// Source files: every read item's row, upserted on `(source_id, path)`,
+    /// and the unchanged files' rows touched by id; then the new instances'
+    /// `source_file_id`, and the instance an earlier run filed a changed path
+    /// under let go of it.
     fn source_files(
         &mut self,
         batch: &Batch,
@@ -1128,23 +1174,6 @@ impl<'a> Writer<'a> {
             ],
         })
         .returning(&["id", "path"]);
-        let light = Insert::new(
-            t,
-            &[
-                "source_id",
-                "batch_id",
-                "dir",
-                "path",
-                "size",
-                "mtime_ns",
-                "status",
-                "seen_at",
-            ],
-        )
-        .on_conflict(Conflict::Update {
-            target: &["source_id", "path"],
-            set: &["batch_id", "seen_at"],
-        });
         let row = |path: &str,
                    dir: &str,
                    size: u64,
@@ -1168,7 +1197,7 @@ impl<'a> Writer<'a> {
             ]
         };
         let mut rows = Vec::with_capacity(batch.items.len());
-        let mut light_rows = Vec::new();
+        let mut unchanged = Vec::new();
         // path → (instance id, the file is its own, the instance it left)
         let mut wanted: HashMap<&str, (i64, bool, Option<i64>)> = HashMap::new();
         let mut ingested = 0;
@@ -1231,24 +1260,8 @@ impl<'a> Writer<'a> {
                     None,
                     None,
                 )),
-                Item::Unchanged {
-                    path,
-                    dir,
-                    size,
-                    mtime_ns,
-                    status,
-                    quarantined,
-                } => {
-                    light_rows.push(vec![
-                        Param::Int(self.source_id),
-                        Param::Int(self.batch_id),
-                        Param::from(dir.as_str()),
-                        Param::from(path.as_str()),
-                        Param::Int(*size as i64),
-                        Param::Int(*mtime_ns),
-                        Param::from(*status),
-                        Param::from(now),
-                    ]);
+                Item::Unchanged { id, quarantined } => {
+                    unchanged.push(*id);
                     if *quarantined {
                         self.written.quarantine_kept += 1;
                     }
@@ -1272,7 +1285,15 @@ impl<'a> Writer<'a> {
                 }
             }
         }
-        store.insert(&light, &light_rows)?;
+        store.update_by_ids(
+            t,
+            &[
+                ("batch_id", Param::Int(self.batch_id)),
+                ("seen_at", Param::from(now)),
+            ],
+            "id",
+            &unchanged,
+        )?;
         if !pairs.is_empty() {
             store.update_from_values(table("instance"), "source_file_id = v.val", "id", &pairs)?;
         }
@@ -1353,7 +1374,9 @@ impl<'a> Writer<'a> {
 }
 
 /// The writer's loop: every batch the parsers send, a heartbeat between them
-/// while they are quiet, until the last parser is done.
+/// while they are quiet, until the last parser is done. A stop changes
+/// nothing here: the parsers send what they have read, and it is written.
+/// An abort lets every batch from then on go, the one in flight included.
 pub fn run(
     writer: &mut Writer<'_>,
     rx: &Receiver<Batch>,
@@ -1362,7 +1385,14 @@ pub fn run(
     loop {
         match rx.recv_timeout(PROGRESS_EVERY) {
             Ok(batch) => {
-                writer.write(&batch, progress)?;
+                if writer.cancel.abort() {
+                    continue;
+                }
+                match writer.write(&batch, progress) {
+                    Ok(()) => {}
+                    Err(HomeError::Message(m)) if m == ABORTED => continue,
+                    Err(e) => return Err(e),
+                }
                 writer.heartbeat(progress, false)?;
             }
             Err(RecvTimeoutError::Timeout) => writer.heartbeat(progress, false)?,

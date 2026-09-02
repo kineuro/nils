@@ -134,8 +134,8 @@ pub fn labs_keyed(scheme: Scheme, display_length: usize, key: &[u8]) -> Vec<Lab>
     out
 }
 
-/// A query with `{table}` placeholders for the qualified table names.
-pub fn rows(reg: &mut Registry, sql: &str) -> Vec<Row> {
+/// `sql` with its `{table}` placeholders replaced by the qualified names.
+pub fn rows_sql(reg: &mut Registry, sql: &str) -> String {
     let mut text = sql.to_string();
     for t in [
         "source_file",
@@ -155,6 +155,12 @@ pub fn rows(reg: &mut Registry, sql: &str) -> Vec<Row> {
     ] {
         text = text.replace(&format!("{{{t}}}"), &reg.store().qualified(t));
     }
+    text
+}
+
+/// A query with `{table}` placeholders for the qualified table names.
+pub fn rows(reg: &mut Registry, sql: &str) -> Vec<Row> {
+    let text = rows_sql(reg, sql);
     reg.store().query(&text, &[]).unwrap()
 }
 

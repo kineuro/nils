@@ -357,6 +357,11 @@ Settled while building the writer (slice 3):
   the report) and its row is touched (`batch_id`, `seen_at`), because
   `batch_id` is what says a path was examined by this batch, and that is what
   gone-marking reads. A quarantined file left alone is `quarantine_kept`.
+  Settled in slice 6: an unchanged file has nothing to parse, so it never
+  enters the parsers' queue; the resume stage collects the unchanged files
+  into batches of its own (closing at eight times `batch_rows`, as a parser's
+  would) and hands them to the writer directly. §9.2 has the measurement that
+  decided it.
 - Only an instance's own file carries its instance forward (the file
   `instance.source_file_id` points back to). A duplicate is filed afresh against
   whatever it holds now; a changed duplicate is not the instance changing.
@@ -405,6 +410,16 @@ prints paths, and the batch's report carries the counts. One review item of kind
 members), with the count as evidence and no path in the item body; a human or an
 agent decides "accepted" (these are sidecars, this is not our data) or "retry" and
 the decision is a row, not a deletion.
+
+Settled while building custody (slice 6): `nils quarantine list` prints each
+refused path joined to its root, with the batch, the class and the detail,
+oldest batch first; `--json` is the same as one document. The review item per
+batch and class is filed in the run's finish transaction, with `ref`
+`{"batch_id", "class"}` and evidence `{"count"}`, by a cancelled run too; a
+quarantine that a later run keeps (the file unchanged and not retried) files
+nothing, because it belongs to the item of the batch that refused it. `nils
+review list [--kind <k>] [--status <s>]` and `review show <id>` read the items;
+the decision, `review apply`, is Wave 4's.
 
 ## 6. The reader and the field catalogue
 
@@ -739,6 +754,16 @@ Settled while building identity (slice 4):
 - `linkage purge` arrives with `custody` in slice 6, so that what it deletes
   is listed before it can be deleted.
 
+Settled while building custody (slice 6): `nils linkage purge --subject <code>
+| --all` says what it would delete, asks at a terminal, and refuses without
+`--yes` anywhere else. It deletes the subject's (or every subject's) `identity`
+and `linkage` rows in one transaction and keeps the id types, the read audit
+(the record that a read happened, not what was read) and the registry's
+subjects; the purge is recorded as a `linkage-purge` job row that `status` lists.
+A purged identifier is filed again only when its file is parsed again (changed,
+or new): a run that finds the file unchanged does not read it (§5.2), so the
+next digest does not undo a purge.
+
 ## 8. Stacks
 
 Stack membership is decided per instance, without seeing the rest of the series,
@@ -958,6 +983,23 @@ them did; the resume slice (§14, 6) owns that number. What the table does not
 say: a real digest walks NFS from a cold cache, and there the reader, not the
 writer, is expected to be the wall, which is the budget's measurement (§12.5).
 
+Measured while building jobs and custody (slice 6), same host and knobs: the
+touch was never the wall. The second pass over nmosd took 25 s with 32 workers
+and 5 s with one, and on a copy of the registry the pieces of the SQLite side
+add up to four seconds (the lookup of 508,045 records in 3,178 directory
+queries 2.2 s, the touch of every row 2.0 s, a bare `find` with a stat of
+every file 1.7 s). The rest was the parsers' queue: half a million unchanged
+files sent through it one by one, each waking a worker with nothing to do,
+and the workers' contention for the next slowing the stage that fed them. With
+the unchanged files batched by the resume stage (§5.2) the second pass over
+nmosd takes 4.7 s (108,000 files/s) on 32 workers and the same on one, against
+25.8 s before; the million's second pass takes 5.4 s on SQLite and 18.2 s on
+Postgres, against 66 s and 37 s, with identical counts on both (862 subjects,
+1,711 studies, 7,622 series and stacks, 1,000,000 instances). The first pass
+is what it was: 33.1 s on nmosd, 35.5 s for the million on SQLite and 75.5 s
+on Postgres `COPY`, whose second pass is now the round trips of the lookup
+and the touch, a number for the baseline host (§14, 8).
+
 ### 9.3 Two stores, one order
 
 The registry commits first, then the linkage store. A crash between the two leaves
@@ -990,6 +1032,44 @@ resumes, §5.2), the batch row with its resolved config and its counts, and
 `--batch`, one batch's counts). The heartbeat carries the same JSON the
 progress line prints, so a `status` from another shell sees where a digest is.
 SIGINT handling is slice 6's, with the kill-and-resume test that proves it.
+
+Settled while building jobs and custody (slice 6):
+
+- One SIGINT (or SIGTERM) asks the run to stop: nothing new is read, everything
+  already parsed is written and committed, the batch and the job are marked
+  `cancelled`, the report says `stopped`, and the exit code is 130. A second
+  signal asks for an abort: the transaction in flight rolls back, the batch is
+  marked `cancelled` with what was committed before it, the report says
+  `aborted`, exit code 130 again. Either way the next `digest` resumes (§5.2)
+  and a cancelled run marks nothing `gone`.
+- A job whose process is gone (this host, no such pid) is taken over at once,
+  without the 60 s heartbeat window; a stale heartbeat of a process that may
+  still be alive waits the window as before.
+- A batch marked `failed` records `reparse_from`, the last `seen_at` of its
+  files; the run that resumes it parses the files of that last second again,
+  which repairs the §9.3 window (a registry commit without its linkage commit):
+  their subjects are matched or created and their identities attached (§7.4,
+  step 5).
+- The kill-and-resume tests script the moment with
+  `NILS_DEBUG_STOP=<stop|abort|interrupt|terminate|kill|kill-inside>:<n>`, a
+  test hook and not a knob: act once `n` batches have committed, `kill-inside`
+  ending the process inside the next transaction with its rows written. A run
+  killed after a commit, killed inside a transaction, stopped, aborted or
+  interrupted by a real SIGINT resumes to the same subjects, studies, series,
+  stacks, instances, source-file statuses and identity rows as an uninterrupted
+  run, on SQLite and on Postgres.
+- On CT 110 the same holds over nmosd (508,045 files, 32 workers, SQLite):
+  a run killed after 40 commits (5 s in), one killed inside the 61st
+  transaction (8 s), one stopped by SIGINT after 80 commits (18 s, exit 130)
+  and one aborted after 20 (3 s) each resume to the uninterrupted run's 44
+  subjects, 82 studies, 2,165 series, 2,534 stacks, 493,708 instances,
+  493,708 ingested, 10,539 duplicate and 3,798 quarantined files and 44
+  identities; the resumes take 29 s, 25 s, 18 s and 30 s, the killed runs'
+  batches end `failed` with `reparse_from` set and the signalled ones
+  `cancelled`, and a third pass over any of them takes 5 s. What differs is
+  the review items: a run files one `ingest.quarantine` item per class it
+  quarantined itself, so a resumed tree has between one and six, never one
+  per file and never twice for a file.
 
 ## 11. Knobs, diagnostics and the report (C37, D7)
 
@@ -1179,13 +1259,14 @@ nils digest <root> [--name <label>] [--workers N] [--walk-threads N] [--batch-ro
             [--retry-quarantine] [--restart] [--dry-run] [--describe] [--json]
 nils status [--batch <id>] [--json]
 nils quarantine list [--batch <id>] [--class <c>] [--json]
-nils review list [--kind <k>] [--status open] | show <id> | apply <id> --decision <d>
+nils review list [--kind <k>] [--status <s>] [--json] | show <id> [--json]
+nils review apply <id> --decision <d>          # Wave 4
 nils linkage import <csv> --id-type <t> --id-column <c> --code-column <c>
 nils linkage id-type add <name> [--description ...] | list
 nils linkage link <code-a> <code-b> --evidence <text> | unlink <id>
 nils linkage show <code>                       # decrypts; writes a read_audit row
-nils linkage purge --subject <code> | --all    # confirm; listed in custody
-nils custody [--json]
+nils linkage purge --subject <code> | --all [--yes]   # says what it deletes; listed in custody
+nils custody [--json | --markdown]
 nils doctor
 ```
 
@@ -1222,6 +1303,25 @@ column flags default to `identifier` and `code` (§7.4). `linkage purge` comes
 with `custody` (slice 6); `quarantine`, `review` and `doctor` still wait for
 their slices.
 
+Settled while building jobs and custody (slice 6):
+
+- Exit code 130: the run was stopped or aborted by a signal; what was read is
+  written, and the report says which (§10).
+- `nils custody` lists the configuration file beside the six stores named
+  above: for each, where it lives (on SQLite the files with their mode and
+  size, on Postgres the schema and the DSN with its password replaced), the
+  classes it holds (§4.3), the counts of the moment, how long it is kept, and
+  the commands that read, change, export and delete it. The CLI test walks the
+  home and checks that every file under it is listed and that every command
+  the table names exists. `--markdown` renders the deployment's record without
+  the live counts; [`docs/reference/custody.md`](../reference/custody.md) is
+  that page for a SQLite home, and a test keeps it current.
+- `quarantine list`, `review list | show` and `linkage purge` exist as listed
+  (§5.3, §7.4); `review apply` is Wave 4's and `doctor` still waits.
+- `status` lists the purges under "other jobs" (`other_jobs` in `--json`)
+  beside the running jobs and the last batches; the job kinds so far are
+  `digest` and `linkage-purge`.
+
 ## 14. Order of work
 
 Each slice is done when its "done when" holds; the slices are sequential where
@@ -1252,7 +1352,10 @@ they share the schema.
    prototype (C11) may start.
 6. **Jobs, resume, status, custody.** *Done when:* a digest killed at any point
    resumes to the same counts as an uninterrupted one, and `nils custody` lists
-   every file the tests created.
+   every file the tests created. Landed: the kill-and-resume tests of §10 hold
+   on SQLite and Postgres and over nmosd on CT 110, the CLI test finds every
+   file under the home in `custody --json`, and the second pass over an
+   unchanged tree went from 25.8 s to 4.7 s on nmosd (§9.2).
 7. **The compare tool and the gate runs** on the baseline host: the spike's
    corpora first, then the live corpus study by study, each run's report in the
    record; the session check of §12.4 is part of the tool. *Done when:* §12.2 to

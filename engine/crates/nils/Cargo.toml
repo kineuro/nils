@@ -22,6 +22,7 @@ nils-registry.workspace = true
 clap.workspace = true
 csv.workspace = true
 serde_json.workspace = true
+ctrlc.workspace = true
 
 [dev-dependencies]
 dicom-core.workspace = true

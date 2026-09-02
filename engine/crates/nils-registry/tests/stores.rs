@@ -176,6 +176,35 @@ fn exercise(name: &str, store: &mut Store) {
             "{name}"
         );
     }
+    // the same values on a list of ids, more than one SQLite chunk of them
+    let touched = store
+        .update_by_ids(
+            instance,
+            &[
+                ("source_file_id", Param::from(Some(5i64))),
+                ("instance_number", Param::from(9i64)),
+            ],
+            "id",
+            &ids[..1_100],
+        )
+        .unwrap();
+    assert_eq!(touched, 1_100, "{name}");
+    let back = store
+        .select_by_ids(instance, &cols, "id", &ids[1_099..1_101])
+        .unwrap();
+    let number_of = |id: i64| {
+        back.iter()
+            .find(|r| r.int(0).unwrap() == id)
+            .map(|r| r.opt_int(2).unwrap())
+            .unwrap()
+    };
+    assert_eq!(number_of(ids[1_099]), Some(9), "{name}: the last id listed");
+    assert_ne!(
+        number_of(ids[1_100]),
+        Some(9),
+        "{name}: the first id not listed"
+    );
+    assert_eq!(store.update_by_ids(instance, &[], "id", &[]).unwrap(), 0);
 
     // an upsert on source_file: the second batch overwrites status and batch
     let sf = table("source_file");

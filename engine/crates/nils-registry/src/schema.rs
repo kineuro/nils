@@ -206,6 +206,10 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .unique(&["root_canonical"]),
+        // `reparse_from` is set on a batch that ends `failed`: the `seen_at`
+        // of the files its last transaction recorded, which the runs after it
+        // read again, since a crash between the registry's commit and the
+        // linkage store's loses the identity rows of that transaction (§9.3).
         Table::new(
             "ingest_batch",
             vec![
@@ -219,6 +223,7 @@ fn build_registry() -> Vec<Table> {
                 req("state", Type::Text),
                 col("counts", Type::Json),
                 col("epoch_after", Type::Int),
+                col("reparse_from", Type::Timestamp),
             ],
         )
         .index(&["source_id"]),

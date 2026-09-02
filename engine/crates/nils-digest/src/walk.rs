@@ -16,6 +16,8 @@ use std::sync::{Condvar, Mutex};
 
 use crossbeam_channel::Sender;
 
+use crate::cancel::Cancel;
+
 /// The `files` knob: which names are candidates.
 #[derive(Debug, Clone)]
 pub enum Filter {
@@ -157,12 +159,14 @@ impl Queue {
 }
 
 /// Walk `root` with `threads` listing threads, sending events to `tx`, and
-/// return when the tree is done. The root must be listable.
+/// return when the tree is done, or once a stop is asked: the directories
+/// still queued are then let go unlisted. The root must be listable.
 pub fn walk(
     root: &Path,
     threads: usize,
     filter: &Filter,
     tx: &Sender<WalkEvent>,
+    cancel: &Cancel,
 ) -> io::Result<()> {
     // The root's failure is the job's, so it is tried here, before the pool.
     std::fs::read_dir(root)?;
@@ -175,7 +179,9 @@ pub fn walk(
         for _ in 0..threads.max(1) {
             s.spawn(|| {
                 while let Some(dir) = queue.pop() {
-                    list(&dir, filter, &queue, tx);
+                    if !cancel.stop() {
+                        list(&dir, filter, &queue, tx);
+                    }
                     queue.done();
                 }
             });
@@ -272,7 +278,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(64);
         let root = root.to_path_buf();
         let filter = filter.clone();
-        let walker = std::thread::spawn(move || walk(&root, 3, &filter, &tx));
+        let walker = std::thread::spawn(move || walk(&root, 3, &filter, &tx, &Cancel::new()));
         let events: Vec<WalkEvent> = rx.iter().collect();
         walker.join().unwrap().unwrap();
         events
@@ -366,7 +372,37 @@ mod tests {
     fn an_unlistable_root_is_an_error() {
         let dir = TempDir::new("walk-missing");
         let (tx, _rx) = crossbeam_channel::bounded(1);
-        assert!(walk(&dir.path().join("nope"), 2, &Filter::All, &tx).is_err());
+        assert!(
+            walk(
+                &dir.path().join("nope"),
+                2,
+                &Filter::All,
+                &tx,
+                &Cancel::new()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_stop_lets_the_queued_directories_go() {
+        let dir = TempDir::new("walk-stop");
+        for d in 0..20 {
+            for f in 0..5 {
+                dir.file(&format!("d{d:02}/f{f}"), b"x");
+            }
+        }
+        let cancel = Cancel::new();
+        cancel.request();
+        let (tx, rx) = crossbeam_channel::bounded(1_000);
+        walk(dir.path(), 2, &Filter::All, &tx, &cancel).unwrap();
+        drop(tx);
+        // the threads check before every listing, the root's included
+        assert_eq!(rx.iter().count(), 0);
+        let (tx, rx) = crossbeam_channel::bounded(1_000);
+        walk(dir.path(), 2, &Filter::All, &tx, &Cancel::new()).unwrap();
+        drop(tx);
+        assert_eq!(rx.iter().count(), 100);
     }
 
     #[cfg(unix)]

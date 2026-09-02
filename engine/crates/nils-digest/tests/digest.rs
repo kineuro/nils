@@ -759,3 +759,202 @@ fn a_fresh_job_holds_the_registry_and_a_stale_one_is_taken_over() {
         assert!(matches!(states[1].get(1), Cell::Null), "{name}");
     }
 }
+
+#[test]
+fn a_job_of_this_host_whose_process_is_gone_is_taken_over_at_once() {
+    if !cfg!(unix) {
+        return;
+    }
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let s = settings(&dir);
+        let mut reg = lab.open();
+        digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let host = texts(&mut reg, "SELECT host FROM {job} WHERE id = 1")[0].clone();
+
+        // a process that has ended: its pid is free
+        let child = std::process::Command::new("true")
+            .spawn()
+            .and_then(|mut c| c.wait().map(|_| c.id()))
+            .expect("a child that ends");
+        let running = |reg: &mut nils_registry::Registry, pid: u32| -> i64 {
+            let now = now_iso();
+            let inserted = reg
+                .store()
+                .insert(
+                    &Insert::new(
+                        table("job"),
+                        &[
+                            "kind",
+                            "name",
+                            "args",
+                            "state",
+                            "pid",
+                            "host",
+                            "started_at",
+                            "heartbeat_at",
+                        ],
+                    )
+                    .returning(&["id"]),
+                    &[vec![
+                        Param::from("digest"),
+                        Param::from("other"),
+                        Param::from("{}"),
+                        Param::from("running"),
+                        Param::from(i64::from(pid)),
+                        Param::from(host.as_str()),
+                        Param::from(now.as_str()),
+                        Param::from(now.as_str()),
+                    ]],
+                )
+                .unwrap();
+            inserted[0].int(0).unwrap()
+        };
+        let dead = running(&mut reg, child);
+        let r = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(r.unchanged, 6, "{name}");
+        let error = texts(
+            &mut reg,
+            &format!("SELECT error FROM {{job}} WHERE id = {dead}"),
+        );
+        let expected = format!("process {child} is gone; no heartbeat since ");
+        assert!(error[0].starts_with(&expected), "{name}: {}", error[0]);
+        assert!(error[0].ends_with('Z'), "{name}: {}", error[0]);
+
+        // this process is alive: its fresh job holds the registry
+        let alive = running(&mut reg, std::process::id());
+        let err = digest(&s, &mut reg).unwrap_err();
+        assert!(
+            matches!(err, DigestError::Busy { job_id, .. } if job_id == alive),
+            "{name}: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_failed_batch_has_its_last_second_read_again_and_its_identities_repaired() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let s = settings(&dir);
+        let mut reg = lab.open();
+        let first = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            first.written.as_ref().unwrap().subjects_created,
+            2,
+            "{name}"
+        );
+
+        // As if the run had ended between the registry's commit and the
+        // linkage store's (§9.3): the subjects stand, their identity rows
+        // do not, and the batch ends failed with its last second marked.
+        let mut linkage = reg.open_linkage().unwrap();
+        let identity = linkage.qualified("identity");
+        assert_eq!(
+            linkage
+                .query(&format!("SELECT COUNT(*) FROM {identity}"), &[])
+                .unwrap()[0]
+                .int(0)
+                .unwrap(),
+            2,
+            "{name}"
+        );
+        linkage
+            .execute(&format!("DELETE FROM {identity}"), &[])
+            .unwrap();
+        drop(linkage);
+        let mark = rows_sql(
+            &mut reg,
+            "UPDATE {ingest_batch} SET state = 'failed', reparse_from = (SELECT MAX(f.seen_at) FROM {source_file} AS f WHERE f.batch_id = ingest_batch.id) WHERE id = 1",
+        );
+        let marked = reg.store().execute(&mark, &[]).unwrap();
+        assert_eq!(marked, 1, "{name}");
+
+        let again = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // every file of the batch was recorded in its last second
+        assert_eq!(again.unchanged, 0, "{name}");
+        assert_eq!(again.parsed, 5, "{name}");
+        let w = again.written.as_ref().unwrap();
+        assert_eq!(w.subjects_created, 0, "{name}");
+        // the linkage store has not met the identifiers; the subjects are
+        // found by their codes and the identities attached (§7.4 step 5)
+        assert_eq!(w.subjects_matched, 0, "{name}");
+        assert_eq!(w.identities_attached, 2, "{name}");
+        assert_eq!(w.ingested, 5, "{name}");
+        assert_eq!(w.changed, 0, "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {subject}"), 2, "{name}");
+        assert_eq!(
+            one(&mut reg, "SELECT COUNT(*) FROM {instance}"),
+            5,
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {source_file} WHERE batch_id = 2 AND status = 'ingested'"
+            ),
+            5,
+            "{name}"
+        );
+        let mut linkage = reg.open_linkage().unwrap();
+        assert_eq!(
+            linkage
+                .query(&format!("SELECT COUNT(*) FROM {identity}"), &[])
+                .unwrap()[0]
+                .int(0)
+                .unwrap(),
+            2,
+            "{name}"
+        );
+
+        // a third run leaves everything alone: the rows moved to batch 2
+        let third = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(third.unchanged, 6, "{name}");
+        assert_eq!(third.parsed, 0, "{name}");
+    }
+}
+
+#[test]
+fn a_batch_files_one_review_item_per_quarantine_class() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let s = settings(&dir);
+        let mut reg = lab.open();
+        digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let items = rows(
+            &mut reg,
+            "SELECT kind, scope, status, CAST(ref AS TEXT), CAST(evidence AS TEXT) FROM {review_item} ORDER BY id",
+        );
+        assert_eq!(items.len(), 1, "{name}");
+        assert_eq!(items[0].text(0).unwrap(), "ingest.quarantine", "{name}");
+        assert_eq!(items[0].text(1).unwrap(), "batch", "{name}");
+        assert_eq!(items[0].text(2).unwrap(), "open", "{name}");
+        let reference: serde_json::Value = serde_json::from_str(items[0].text(3).unwrap()).unwrap();
+        assert_eq!(reference["batch_id"], 1, "{name}");
+        assert_eq!(reference["class"], "not_dicom", "{name}");
+        let evidence: serde_json::Value = serde_json::from_str(items[0].text(4).unwrap()).unwrap();
+        assert_eq!(evidence, serde_json::json!({ "count": 1 }), "{name}");
+
+        // a run that keeps the quarantine files nothing new
+        digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            one(&mut reg, "SELECT COUNT(*) FROM {review_item}"),
+            1,
+            "{name}"
+        );
+
+        // a retry that quarantines again files a new item for its batch
+        let mut retry = settings(&dir);
+        retry.retry_quarantine = true;
+        digest(&retry, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let refs = texts(
+            &mut reg,
+            "SELECT CAST(ref AS TEXT) FROM {review_item} ORDER BY id",
+        );
+        assert_eq!(refs.len(), 2, "{name}");
+        let reference: serde_json::Value = serde_json::from_str(&refs[1]).unwrap();
+        assert_eq!(reference["batch_id"], 3, "{name}");
+    }
+}

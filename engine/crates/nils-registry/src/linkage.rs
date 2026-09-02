@@ -376,6 +376,95 @@ pub fn unlink(store: &mut Store, id: i64, actor: &str) -> Result<bool, Error> {
     Ok(n > 0)
 }
 
+/// What `purge` removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Purged {
+    pub identities: u64,
+    pub linkages: u64,
+}
+
+/// What the linkage store holds, for the custody table: identity rows, the
+/// subjects they belong to, open linkages, audited reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Holdings {
+    pub identities: u64,
+    pub subjects: u64,
+    pub linkages: u64,
+    pub reads: u64,
+}
+
+pub fn holdings(store: &mut Store) -> Result<Holdings, Error> {
+    let count = |store: &mut Store, sql: String| -> Result<u64, Error> {
+        Ok(u64::try_from(store.query(&sql, &[])?[0].int(0)?).unwrap_or(0))
+    };
+    let identity = store.qualified("identity");
+    let linkage = store.qualified("linkage");
+    let audit = store.qualified("read_audit");
+    Ok(Holdings {
+        identities: count(store, format!("SELECT COUNT(*) FROM {identity}"))?,
+        subjects: count(
+            store,
+            format!("SELECT COUNT(DISTINCT subject_id) FROM {identity}"),
+        )?,
+        linkages: count(
+            store,
+            format!("SELECT COUNT(*) FROM {linkage} WHERE reversed_at IS NULL"),
+        )?,
+        reads: count(store, format!("SELECT COUNT(*) FROM {audit}"))?,
+    })
+}
+
+/// Delete the identity rows and the linkages of one subject, or of every
+/// subject when `subject` is none (§13 `linkage purge`). The id types and
+/// the read audit stay: the audit is the record that a read happened, not
+/// what was read. The registry's subjects are untouched, so a digest of the
+/// same sources files the identities again.
+pub fn purge(store: &mut Store, subject: Option<i64>) -> Result<Purged, Error> {
+    let identity = store.qualified("identity");
+    let linkage = store.qualified("linkage");
+    let d = store.dialect();
+    store.begin()?;
+    let result = (|| -> Result<Purged, Error> {
+        let (linkages, identities) = match subject {
+            Some(id) => (
+                store.execute(
+                    &format!(
+                        "DELETE FROM {linkage} WHERE subject_a = {} OR subject_b = {}",
+                        d.param(1, crate::schema::Type::Int),
+                        d.param(2, crate::schema::Type::Int)
+                    ),
+                    &[Param::from(id), Param::from(id)],
+                )?,
+                store.execute(
+                    &format!(
+                        "DELETE FROM {identity} WHERE subject_id = {}",
+                        d.param(1, crate::schema::Type::Int)
+                    ),
+                    &[Param::from(id)],
+                )?,
+            ),
+            None => (
+                store.execute(&format!("DELETE FROM {linkage}"), &[])?,
+                store.execute(&format!("DELETE FROM {identity}"), &[])?,
+            ),
+        };
+        Ok(Purged {
+            identities,
+            linkages,
+        })
+    })();
+    match result {
+        Ok(p) => {
+            store.commit()?;
+            Ok(p)
+        }
+        Err(e) => {
+            let _ = store.rollback();
+            Err(e)
+        }
+    }
+}
+
 /// One row of `linkage`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Linkage {
