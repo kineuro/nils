@@ -9,9 +9,11 @@ snapshot.
 
 Status: **ratified 2026-09-02**, every decision and every amendment
 ([15](15-ratification.md) §7 to §9). The language spike closed the same
-day (D2: Rust, [02](02-engine.md)). Open on evidence only: the baseline
-measurement and the pack-format prototype (approved work), and on other people:
-Amsterdam's cluster and Vienna's answers. The name is NILS (D31, 2026-09-02).
+day (D2: Rust, [02](02-engine.md)), and Wave 1 opened with its spec in
+the public repository ([11](11-order.md), `docs/specs/wave1-parse-and-digest.md`
+in `kineuro/nils`). Open on evidence only: the baseline measurement and the
+pack-format prototype (approved work), and on other people: Amsterdam's cluster and
+Vienna's answers. The name is NILS (D31, 2026-09-02).
 
 This directory is the public copy of the record, which is kept in the private
 repository `kineuro/nils-design` and copied here after a scrub pass

@@ -25,7 +25,13 @@ resume. *Gate:* parse-and-compare on the production corpus — field-level agree
 v0's extraction on 37.5M instances, with every divergence classified (v0 bug, v1
 bug, or accepted change); the performance budget met on the 8-core/64 GB baseline
 host (C6). Identity linkage, the pseudonym scheme with the v0 key, and the identity
-rule land here (C3, C36, C37, D13).
+rule land here (C3, C36, C37, D13). *Opened 2026-09-02* with the language decision
+(D2: Rust). The spec is `docs/specs/wave1-parse-and-digest.md` in `kineuro/nils`
+(pull request 2), public from its first draft because it is the engine's own
+documentation and cites this record by id; what it cannot say stays in the private
+record: where the gate's corpus and the two development corpora live, the baseline
+host as built, and where the v0 key comes from. Order of work in the spec's §14: eight
+slices, skeleton to budget, C11 beside slices 6 to 8.
 
 **Wave 2 — fingerprint and classify.** The columnar fingerprint pass, the pack
 loader, the MRI pack carried over, evidence storage, `nils classify`. *Gate:*
