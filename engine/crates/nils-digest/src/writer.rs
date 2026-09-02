@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The writer (§9.1): one thread, one transaction per batch, rows in the
-//! order subjects, studies, series with their detail rows, instances, source
-//! files, diagnostics, then the epoch. Three caches keep the rows a batch is
-//! likely to meet again; a miss costs one keyed select for the whole batch,
+//! order subjects, studies, series with their detail rows, stacks, instances,
+//! source files, diagnostics, then the epoch. The caches keep the rows a batch
+//! is likely to meet again; a miss costs one keyed select for the whole batch,
 //! never a query per file.
 //!
 //! A row that exists is never rewritten: the first record of a subject, a
@@ -111,6 +111,8 @@ pub struct Writer<'a> {
     subjects: LruCache<i64, SubjectEntry>,
     studies: LruCache<String, StudyEntry>,
     series: LruCache<String, SeriesEntry>,
+    /// `(series id, stack key)` → stack id (§8).
+    stacks: LruCache<(i64, String), i64>,
     subject_fields: Fields,
     study_fields: Fields,
     /// The series row alone, as the `series` table holds it.
@@ -165,6 +167,7 @@ impl<'a> Writer<'a> {
             subjects: LruCache::new(cap),
             studies: LruCache::new(cap),
             series: LruCache::new(cap),
+            stacks: LruCache::new(cap),
             subject_fields: Fields::subject(),
             study_fields: Fields::study(),
             series_fields: Fields::of(&[Level::Series]),
@@ -298,7 +301,8 @@ impl<'a> Writer<'a> {
         let subject_ids = self.subjects(&parsed, &now, &mut tally)?;
         let study_ids = self.studies(&parsed, &subject_ids, &mut tally)?;
         let series_ids = self.series(&parsed, &study_ids, &subject_ids, &mut tally)?;
-        let filed = self.instances(&parsed, &series_ids, &mut tally)?;
+        let stack_ids = self.stacks(&parsed, &series_ids, &mut tally)?;
+        let filed = self.instances(&parsed, &series_ids, &stack_ids, &mut tally)?;
         self.source_files(batch, &filed, &now, progress)?;
         self.diagnostics(&tally, &now)?;
         self.written.epoch = self.registry.next_epoch()?;
@@ -832,13 +836,150 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
-    /// Instances: a row per SOP instance UID the registry does not hold; the
-    /// status of every file follows from whether its instance is new, its
-    /// own from an earlier run, or another file's (§5.3).
+    /// Stacks (§8): a row per `(series, stack key)` the registry does not
+    /// hold, its index the next of its series; every file's stack id comes
+    /// back, for its instance. The stacks of a series the cache misses are
+    /// read in one select, so the next index is the registry's, not the
+    /// cache's.
+    fn stacks(
+        &mut self,
+        parsed: &[&ParsedFile],
+        series_ids: &[i64],
+        tally: &mut Counts,
+    ) -> Result<Vec<i64>, HomeError> {
+        let t = table("stack");
+        let missed: Vec<i64> = {
+            let mut ids: Vec<i64> = parsed
+                .iter()
+                .zip(series_ids)
+                .filter(|(p, sid)| !self.stacks.contains(&(**sid, p.signature.key.clone())))
+                .map(|(_, sid)| *sid)
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        // series id → the index the next stack of the series takes
+        let mut next: HashMap<i64, i64> = HashMap::new();
+        if !missed.is_empty() {
+            let cols = columns(
+                t,
+                &["id", "series_id", "stack_key", "stack_index"],
+                &Fields::of(&[]),
+            );
+            let found = self
+                .registry
+                .store()
+                .select_by_ids(t, &cols, "series_id", &missed)?;
+            for r in &found {
+                let sid = r.int(1)?;
+                self.stacks.put((sid, r.text(2)?.to_string()), r.int(0)?);
+                let n = next.entry(sid).or_default();
+                *n = (*n).max(r.int(3)? + 1);
+            }
+        }
+        // (series id, key) → the first file of the batch in the stack
+        let mut pending: HashMap<(i64, String), usize> = HashMap::new();
+        let mut rows = Vec::new();
+        let mut per_series: BTreeMap<i64, i64> = BTreeMap::new();
+        for (i, p) in parsed.iter().enumerate() {
+            let sid = series_ids[i];
+            let key = (sid, p.signature.key.clone());
+            if self.stacks.contains(&key) || pending.contains_key(&key) {
+                continue;
+            }
+            let x = &p.extracted;
+            let index = next.entry(sid).or_default();
+            let mut row = vec![
+                Param::Int(sid),
+                Param::Int(*index),
+                Param::from(p.signature.key.as_str()),
+                Param::from(x.modality.as_str()),
+                Param::from(p.signature.orientation.class.name()),
+            ];
+            row.extend(x.row(Level::Stack).map(|(_, v)| Param::from(v)));
+            row.extend([
+                Param::Double(p.signature.orientation.confidence),
+                Param::Int(0),
+                Param::Int(self.batch_id),
+            ]);
+            rows.push(row);
+            *index += 1;
+            *per_series.entry(sid).or_default() += 1;
+            pending.insert(key, i);
+        }
+        let mut diags = Vec::new();
+        if !rows.is_empty() {
+            let spec = Insert::all(t)
+                .on_conflict(Conflict::Nothing(&["series_id", "stack_key"]))
+                .returning(&["id", "series_id", "stack_key"]);
+            let returned = self.registry.store().insert(&spec, &rows)?;
+            for r in &returned {
+                let key = (r.int(1)?, r.text(2)?.to_string());
+                let Some(i) = pending.remove(&key) else {
+                    continue;
+                };
+                self.stacks.put(key, r.int(0)?);
+                let o = &parsed[i].signature.orientation;
+                if o.oblique() {
+                    diags.push(Diagnostic::new(
+                        DiagnosticKind::OrientationOblique,
+                        format!("{} {:.2}", o.class.name(), o.confidence),
+                    ));
+                }
+            }
+            self.written.stacks_created += returned.len() as u64;
+            // a row the insert did not return exists: another batch's
+            for (sid, _) in pending.keys() {
+                if let Some(n) = per_series.get_mut(sid) {
+                    *n -= 1;
+                }
+            }
+            if !pending.is_empty() {
+                let mut again: Vec<i64> = pending.keys().map(|(sid, _)| *sid).collect();
+                again.sort_unstable();
+                again.dedup();
+                let cols = columns(t, &["id", "series_id", "stack_key"], &Fields::of(&[]));
+                let found = self
+                    .registry
+                    .store()
+                    .select_by_ids(t, &cols, "series_id", &again)?;
+                for r in &found {
+                    self.stacks
+                        .put((r.int(1)?, r.text(2)?.to_string()), r.int(0)?);
+                }
+            }
+            let pairs: Vec<(i64, i64)> = per_series.into_iter().filter(|(_, n)| *n > 0).collect();
+            if !pairs.is_empty() {
+                self.registry.store().update_from_values(
+                    table("series"),
+                    "n_stacks = n_stacks + v.val",
+                    "id",
+                    &pairs,
+                )?;
+            }
+        }
+        let mut ids = Vec::with_capacity(parsed.len());
+        for (i, p) in parsed.iter().enumerate() {
+            let id = self
+                .stacks
+                .get(&(series_ids[i], p.signature.key.clone()))
+                .copied()
+                .ok_or_else(|| missing_row("stack"))?;
+            ids.push(id);
+        }
+        self.note(tally, diags);
+        Ok(ids)
+    }
+
+    /// Instances: a row per SOP instance UID the registry does not hold, in
+    /// its file's stack; the status of every file follows from whether its
+    /// instance is new, its own from an earlier run, or another file's (§5.3).
     fn instances(
         &mut self,
         parsed: &[&ParsedFile],
         series_ids: &[i64],
+        stack_ids: &[i64],
         tally: &mut Counts,
     ) -> Result<Vec<Filed>, HomeError> {
         let t = table("instance");
@@ -854,7 +995,7 @@ impl<'a> Writer<'a> {
             let mut row = vec![
                 Param::from(x.sop_uid.as_str()),
                 Param::Int(series_ids[i]),
-                Param::Null,
+                Param::Int(stack_ids[i]),
             ];
             row.extend(x.row(Level::Instance).map(|(_, v)| Param::from(v)));
             row.extend([Param::Null, Param::Int(self.batch_id)]);
@@ -886,6 +1027,7 @@ impl<'a> Writer<'a> {
         }
         let mut filed = Vec::with_capacity(parsed.len());
         let mut per_series: BTreeMap<i64, i64> = BTreeMap::new();
+        let mut per_stack: BTreeMap<i64, i64> = BTreeMap::new();
         let mut diags = Vec::new();
         for (i, p) in parsed.iter().enumerate() {
             let x = &p.extracted;
@@ -896,6 +1038,7 @@ impl<'a> Writer<'a> {
             let same = p.prior.is_some_and(|prior| prior.instance_id == Some(id));
             let (st, own) = if creator {
                 *per_series.entry(series_ids[i]).or_default() += 1;
+                *per_stack.entry(stack_ids[i]).or_default() += 1;
                 (status::INGESTED, true)
             } else if same {
                 (status::INGESTED, false)
@@ -926,6 +1069,15 @@ impl<'a> Writer<'a> {
         if !pairs.is_empty() {
             self.registry.store().update_from_values(
                 table("series"),
+                "n_instances = n_instances + v.val",
+                "id",
+                &pairs,
+            )?;
+        }
+        let pairs: Vec<(i64, i64)> = per_stack.into_iter().collect();
+        if !pairs.is_empty() {
+            self.registry.store().update_from_values(
+                table("stack"),
                 "n_instances = n_instances + v.val",
                 "id",
                 &pairs,

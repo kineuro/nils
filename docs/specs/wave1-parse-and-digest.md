@@ -2,8 +2,8 @@
 
 *Specification, first draft 2026-09-02; amended the same day after review (studies
 and sessions, §4.4; one key, §7.2; the toolchain, §3) and as the slices of §14 were
-built (the blocks headed "Settled while building", in §4.2, §5.2, §6.2, §7, §9,
-§10, §11 and §13; the measurements in §9.2 and §15). This is the spec the engine code
+built (the blocks headed "Settled while building", in §4.2, §5.2, §6.2, §7, §8, §9,
+§10, §11 and §13; the measurements in §8, §9.2 and §15). This is the spec the engine code
 follows; the design record ([`docs/decisions/`](../decisions/)) says why each
 choice was made, and this document cites it by id. It implements D2, D3, D4, D6,
 D7, D13, D17, C3, C6, C36, C37 and C38 and closes at the gate in §12.*
@@ -168,9 +168,10 @@ that has a value, §9.1, which is not a rewrite).
 - `series_mr`, `series_ct`, `series_pet`: `series_id` (primary key) and the
   modality columns of the catalogue. Present from Wave 1 for all three (11,
   "nothing may assume MRI").
-- `stack`: `id`, `series_id`, `stack_index`, `stack_key`, `modality`, the fourteen
-  signature columns of §8, `orientation_confidence`, `n_instances`,
-  `first_batch_id`. Unique `(series_id, stack_index)` and `(series_id, stack_key)`.
+- `stack`: `id`, `series_id`, `stack_index`, `stack_key`, `modality`,
+  `orientation` (the class of §8), the fourteen signature columns of §8 as read,
+  `orientation_confidence`, `n_instances`, `first_batch_id`. Unique
+  `(series_id, stack_index)` and `(series_id, stack_key)`.
   The progress columns of later passes (`fingerprinted_at`, `classified_at`, pack
   version, evidence ref) are added by the migrations of the waves that fill them;
   the pattern is fixed now: a pass is a nullable timestamp and a version on its
@@ -237,6 +238,14 @@ Settled while building identity (slice 4):
 - The schema version of both stores stays 1 through the alpha: a registry made
   by an earlier alpha is re-created from its sources, not migrated. Migrations
   begin at 1.0.0, and the version column is there so that they can.
+
+Settled while building stacks (slice 5): the `stack` row holds `orientation`
+(the class) beside `orientation_confidence`, and its fourteen signature columns
+hold the values as the first instance of the stack read them, not rounded: the
+rounding is the key's business (§8), the columns are the catalogue's. The
+`stack_id` of an instance is set by the same transaction that files it; there
+is no instance without a stack, and `series.n_stacks` and `stack.n_instances`
+are incremented per batch beside `series.n_instances`.
 
 ### 4.3 Sensitivity classes
 
@@ -775,6 +784,50 @@ within the series, continuing across batches, as in v0. The gate compares
 partitions (which instances share a stack), not indexes (§12.3), and later waves
 refer to a stack by id and key.
 
+Settled while building stacks (slice 5):
+
+- The canonical string is the fourteen values in v0's tuple order (EchoTime,
+  InversionTime, EchoNumbers, EchoTrainLength, RepetitionTime, FlipAngle,
+  ReceiveCoilName, Exposure, KVP, XRayTubeCurrent, NumberOfSlices, SeriesType,
+  the orientation class, ImageType), joined by `|`, with `|` and `\` inside a
+  value escaped by `\`; a rounded value that comes out as negative zero is
+  written without its sign, as Python prints it. A text value is the
+  catalogue's normal form (§6.3: trimmed, multi-valued joined by `\`), so a
+  trailing space that v0 kept and an empty string that v0 kept as `''` are the
+  only ways a key can differ from v0's tuple, and neither occurred on the
+  spike's corpus. The key of the empty signature is `e4a6a0577479b2b4`, pinned
+  in the tests beside a full MR signature.
+- The series row and its detail row carry the first instance's values of the
+  thirteen series-level columns a stack signature is also made of (`image_type`
+  and `image_orientation_patient` on `series`; the seven MR timing, echo and
+  coil columns on `series_mr`; `kvp`, `x_ray_tube_current` and `exposure` on
+  `series_ct`; `series_type` on `series_pet`), as in v0, and those columns are
+  left out of the `field_disagreement` check (§9.1): instances that differ on
+  them are the series' stacks, which the `stack` table records, not a
+  disagreement. The list is derived from the catalogue (a series-level column
+  whose source a stack column reads too), and a test pins the thirteen.
+- `orientation_oblique` is counted once per stack created, not per instance,
+  when the class is known and the confidence is under 0.9; the unknown
+  orientation (`Axial`, 0.5, from a missing or degenerate ImageOrientationPatient)
+  is not oblique, or every non-image series would be. The sample is the class
+  and the confidence to two decimals.
+- The dry run counts `stacks` (distinct series and key pairs) beside `series`
+  and `subjects`, and the report's `written` block counts `stacks_created`.
+- On the nmosd corpus (508,045 files; 493,708 instances ingested, 10,539
+  duplicate SOP instances, 3,798 quarantined: 124 not DICOM, 10 without a
+  StudyInstanceUID, 3,664 of the non-image SOP classes §5.3 refuses, of which
+  3,530 Secondary Capture, 102 Enhanced SR, 17 Encapsulated PDF, 13 Grayscale
+  Softcopy Presentation State and two others) v1 makes 2,534 stacks over 2,165
+  series (212 series with more than one stack, at most five), and the partition
+  equals v0's on every one of the 2,165 series both hold, over every one of the
+  493,708 instances both hold: v0's signature computed with its own code and
+  pydicom 3.0.2 gives 2,534 groups, one per v1 stack. The 3,180 instances only
+  v0 holds are the non-image SOP classes. 34 stacks are oblique (confidence
+  0.81 to 0.89); none has an unknown orientation. The digest takes 32.5 s
+  (15,600 files/s, 32 workers, 1.7 GB peak) and the same tree again 25.8 s,
+  creating nothing. The mix corpus is compared the same way when it lands
+  (`spikes/stacks/`).
+
 ## 9. The pipeline
 
 ### 9.1 Stages and bounds
@@ -839,6 +892,15 @@ Settled while building the writer (slice 3):
 - The epoch advances once per committed batch, including a batch that held only
   unchanged files: the counter says "the registry was examined", not "the
   registry grew", and a consumer that polls it sees every run.
+
+Settled while building stacks (slice 5): the stack step sits between the
+series and the instances. Its cache is keyed by series id and stack key, holds
+200,000 entries like the other three, and a miss loads every stack of the
+series in one keyed select per batch (`WHERE series_id IN (...)`), which also
+yields the next `stack_index`; the batch's new stacks are then inserted with
+`ON CONFLICT DO NOTHING` on `(series_id, stack_key)` in the order their first
+instances came, and the rows the insert returned are the ones this batch
+created, which is where `stacks_created` and `orientation_oblique` are counted.
 
 ### 9.2 Backends
 
@@ -968,6 +1030,11 @@ it resolved to, with the file's path; the `written` block gained
 `subjects_matched` and `identities_attached` (§7.4). The `identity.collision`
 review item exists from this slice; the `ingest.quarantine` items are slice
 6's, with the quarantine list they summarize.
+
+Settled while building stacks (slice 5): the report counts `stacks` beside
+`studies`, `series` and `subjects`, in the dry run too, and the `written` block's
+`stacks_created` is filled; `orientation_oblique` is counted per stack created
+(§8) and its samples are the class and the confidence (`Coronal 0.71`).
 
 The diagnostics are counted per batch and kind, with `scope` and `ref_id` where
 one row is the subject and a `sample` of at most ten shapes:
@@ -1179,7 +1246,10 @@ they share the schema.
    trip reproduces its codes, and a digest of one study's tree under `blake2b-8`
    with a test key lands every returning identifier on one subject.
 5. **Stacks.** The signature, the key, the index, the orientation. *Done when:*
-   the partitions on the spike's corpora equal v0's for those series.
+   the partitions on the spike's corpora equal v0's for those series. Landed
+   with the nmosd half of the check equal on every series (§8); the mix corpus
+   is checked the same way when its copy completes, and the pack-format
+   prototype (C11) may start.
 6. **Jobs, resume, status, custody.** *Done when:* a digest killed at any point
    resumes to the same counts as an uninterrupted one, and `nils custody` lists
    every file the tests created.

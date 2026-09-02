@@ -42,6 +42,8 @@ pub struct Counts {
     studies: HashSet<u64>,
     series: HashSet<u64>,
     subjects: HashSet<u64>,
+    /// Stacks as `(series, key)` pairs (§8).
+    stacks: HashSet<u64>,
     modalities: BTreeMap<String, u64>,
     sop_classes: BTreeMap<String, u64>,
     transfer_syntaxes: BTreeMap<String, u64>,
@@ -72,8 +74,16 @@ fn hash_of(text: &str) -> u64 {
 }
 
 impl Counts {
-    /// A file the reader accepted, filed under `value` of `id_type` (§7.3).
-    pub fn accepted(&mut self, x: &Extracted, id_type: &str, value: &str, bytes: u64) {
+    /// A file the reader accepted, filed under `value` of `id_type` (§7.3)
+    /// and in the stack of `stack_key` within its series (§8).
+    pub fn accepted(
+        &mut self,
+        x: &Extracted,
+        id_type: &str,
+        value: &str,
+        stack_key: &str,
+        bytes: u64,
+    ) {
         self.seen += 1;
         self.parsed += 1;
         self.bytes += bytes;
@@ -81,6 +91,8 @@ impl Counts {
         self.series.insert(hash_of(&x.series_uid));
         self.subjects
             .insert(hash_of(&format!("{id_type}\0{value}")));
+        self.stacks
+            .insert(hash_of(&format!("{}\0{stack_key}", x.series_uid)));
         *self.modalities.entry(x.modality.clone()).or_default() += 1;
         *self.sop_classes.entry(x.sop_class.clone()).or_default() += 1;
         *self
@@ -177,6 +189,7 @@ impl Counts {
         self.studies.extend(other.studies);
         self.series.extend(other.series);
         self.subjects.extend(other.subjects);
+        self.stacks.extend(other.stacks);
         merge_map(&mut self.modalities, other.modalities);
         merge_map(&mut self.sop_classes, other.sop_classes);
         merge_map(&mut self.transfer_syntaxes, other.transfer_syntaxes);
@@ -341,6 +354,9 @@ pub struct Report {
     pub studies: u64,
     pub series: u64,
     pub subjects: u64,
+    /// Distinct `(series, stack key)` pairs among the parsed files (§8).
+    #[serde(default)]
+    pub stacks: u64,
     pub modalities: Vec<Keyed>,
     pub sop_classes: Vec<SopClassCount>,
     pub transfer_syntaxes: Vec<Keyed>,
@@ -397,6 +413,7 @@ impl Report {
             studies: counts.studies.len() as u64,
             series: counts.series.len() as u64,
             subjects: counts.subjects.len() as u64,
+            stacks: counts.stacks.len() as u64,
             modalities: keyed(&counts.modalities),
             sop_classes,
             transfer_syntaxes: keyed(&counts.transfer_syntaxes),
@@ -580,9 +597,10 @@ impl fmt::Display for Report {
         writeln!(f, "content")?;
         writeln!(
             f,
-            "  studies {}   series {}   subjects {}",
+            "  studies {}   series {}   stacks {}   subjects {}",
             thousands(self.studies),
             thousands(self.series),
+            thousands(self.stacks),
             thousands(self.subjects)
         )?;
         keyed_line(f, "modality", &self.modalities)?;

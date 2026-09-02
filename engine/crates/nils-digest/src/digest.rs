@@ -25,6 +25,7 @@ use crate::report::{Counts, Report, Setup, Written};
 use crate::resume::{self, Records};
 use crate::rss::peak_rss;
 use crate::rule::Rule;
+use crate::stack::Signature;
 use crate::walk::{Filter, WalkEvent, walk};
 use crate::writer::{self, Writer};
 
@@ -580,12 +581,20 @@ fn parse_all(
             } => match nils_dicom::extract_with(&path, rule.fields()) {
                 Ok(mut x) => {
                     let ident = rule.apply(&mut x);
-                    counts.accepted(&x, rule.id_type_of(&ident), &ident.value, size);
+                    let signature = Signature::of(&x);
+                    counts.accepted(
+                        &x,
+                        rule.id_type_of(&ident),
+                        &ident.value,
+                        &signature.key,
+                        size,
+                    );
                     progress.file(true);
                     let hashes = RowHashes::of(&x);
                     Item::Parsed(Box::new(ParsedFile {
                         extracted: x,
                         ident,
+                        signature,
                         path: rel,
                         dir,
                         size,
