@@ -756,3 +756,279 @@ fn a_blake2b_8_registry_gives_the_v0_code() {
         "{text}"
     );
 }
+
+/// Twelve subjects, two studies each, two series a study, six instances a
+/// series: 288 DICOM files, one file that is not DICOM, one duplicate.
+fn corpus() -> TempDir {
+    let dir = TempDir::new("cli-corpus");
+    for s in 1..=12 {
+        for st in 1..=2 {
+            let study = format!("1.2.826.0.1.3680043.8.498.{s}.{st}");
+            for se in 1..=2 {
+                let series = format!("{study}.{se}");
+                for i in 1..=6 {
+                    let sop = format!("{series}.{i}");
+                    let mut e = synth::minimal_mr(&study, &series, &sop);
+                    e.extend(patient(&format!("S{s:02}"), None));
+                    dir.file(
+                        &format!("s{s:02}/st{st}/se{se}/IM_{i:04}"),
+                        &synth::part10(&MetaFields::mr(&sop), &e, true),
+                    );
+                }
+            }
+        }
+    }
+    dir.file("s01/notes.txt", b"not a dicom file\n");
+    let first = std::fs::read(dir.path().join("s01/st1/se1/IM_0001")).unwrap();
+    dir.file("s01/st1/se1/IM_0001_copy", &first);
+    dir
+}
+
+/// What a registry holds, as far as two runs over the same tree must agree.
+#[derive(Debug, PartialEq)]
+struct Snapshot {
+    counts: Vec<(String, i64)>,
+    statuses: Vec<(String, i64)>,
+    uids: Vec<String>,
+    identities: i64,
+}
+
+fn snapshot(home: &TempDir) -> Snapshot {
+    use nils_registry::Store;
+    let mut reg = Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let mut counts = Vec::new();
+    for t in ["subject", "study", "series", "stack", "instance"] {
+        let n = reg
+            .query(&format!("SELECT COUNT(*) FROM {t}"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        counts.push((t.to_string(), n));
+    }
+    for (t, what) in [
+        ("series", "n_instances"),
+        ("series", "n_stacks"),
+        ("stack", "n_instances"),
+    ] {
+        let n = reg
+            .query(&format!("SELECT COALESCE(SUM({what}), 0) FROM {t}"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        counts.push((format!("{t}.{what}"), n));
+    }
+    let statuses = reg
+        .query(
+            "SELECT status, COUNT(*) FROM source_file GROUP BY status ORDER BY status",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| (r.text(0).unwrap().to_string(), r.int(1).unwrap()))
+        .collect();
+    let mut uids = Vec::new();
+    for (t, c) in [
+        ("subject", "code"),
+        ("study", "study_instance_uid"),
+        ("series", "series_instance_uid"),
+        ("instance", "sop_instance_uid"),
+    ] {
+        uids.extend(
+            reg.query(&format!("SELECT {c} FROM {t} ORDER BY {c}"), &[])
+                .unwrap()
+                .iter()
+                .map(|r| format!("{t}:{}", r.text(0).unwrap())),
+        );
+    }
+    let mut linkage = Store::open_sqlite(&home.path().join("linkage.db")).unwrap();
+    let identities = linkage.query("SELECT COUNT(*) FROM identity", &[]).unwrap()[0]
+        .int(0)
+        .unwrap();
+    Snapshot {
+        counts,
+        statuses,
+        uids,
+        identities,
+    }
+}
+
+/// `nils digest` of `dir` into `home`, small batches so that a run has many
+/// transactions, with a scripted stop when `stop` says so.
+fn run(home: &TempDir, dir: &TempDir, stop: Option<&str>) -> std::process::Output {
+    let mut cmd = nils();
+    cmd.args(["--registry"])
+        .arg(home.path())
+        .args(["digest", "--workers", "2", "--batch-rows", "20", "--json"])
+        .arg(dir.path());
+    match stop {
+        Some(s) => cmd.env("NILS_DEBUG_STOP", s),
+        None => cmd.env_remove("NILS_DEBUG_STOP"),
+    };
+    cmd.output().unwrap()
+}
+
+fn status_json(home: &TempDir) -> serde_json::Value {
+    let out = nils()
+        .args(["--registry"])
+        .arg(home.path())
+        .args(["status", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// The reference: one run to the end over the corpus.
+fn reference(dir: &TempDir) -> (Snapshot, serde_json::Value) {
+    let home = home();
+    let out = run(&home, dir, None);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["seen"], 290);
+    assert_eq!(report["parsed"], 289);
+    assert_eq!(report["quarantined"], 1);
+    assert_eq!(report["written"]["ingested"], 288);
+    assert_eq!(report["written"]["duplicate"], 1);
+    assert_eq!(report["written"]["subjects_created"], 12);
+    assert!(
+        report["written"]["writes"].as_u64().unwrap() >= 8,
+        "{report}"
+    );
+    let snap = snapshot(&home);
+    assert_eq!(snap.counts[0], ("subject".to_string(), 12));
+    assert_eq!(snap.counts[4], ("instance".to_string(), 288));
+    assert_eq!(snap.identities, 12);
+    (snap, report)
+}
+
+#[test]
+fn a_digest_killed_after_a_commit_resumes_to_the_same_rows() {
+    let dir = corpus();
+    let (reference, _) = reference(&dir);
+    for script in ["kill:1", "kill:3"] {
+        let home = home();
+
+        // the process ends right after a commit, before the identities of
+        // that transaction reach the linkage store (§9.3)
+        let out = run(&home, &dir, Some(script));
+        assert!(!out.status.success(), "{script}: {}", stdout(&out));
+        let doc = status_json(&home);
+        assert_eq!(doc["jobs"].as_array().unwrap().len(), 1, "{script}: {doc}");
+        assert_eq!(doc["batches"][0]["state"], "running", "{script}: {doc}");
+        let before = snapshot(&home);
+        assert!(before.counts[4].1 >= 1, "{script}: {before:?}");
+        if script == "kill:1" {
+            // the first transaction created subjects; none of their
+            // identities made it
+            assert!(before.counts[0].1 >= 1, "{before:?}");
+            assert_eq!(before.identities, 0, "{before:?}");
+        }
+
+        // the next run takes the dead job over, reads the last second of its
+        // batch again and goes on to the end
+        let out = run(&home, &dir, None);
+        assert!(out.status.success(), "{script}: {}", stderr(&out));
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report["seen"], 290, "{script}");
+        if script == "kill:1" {
+            assert_eq!(
+                report["written"]["identities_attached"], before.counts[0].1,
+                "{script}: {report}"
+            );
+        }
+        assert_eq!(snapshot(&home), reference, "{script}");
+        let doc = status_json(&home);
+        assert_eq!(doc["jobs"].as_array().unwrap().len(), 0, "{script}: {doc}");
+        assert_eq!(doc["batches"][0]["state"], "done", "{script}: {doc}");
+        assert_eq!(doc["batches"][1]["state"], "failed", "{script}: {doc}");
+
+        // a third run finds everything in place
+        let out = run(&home, &dir, None);
+        assert!(out.status.success(), "{script}: {}", stderr(&out));
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report["unchanged"], 290, "{script}");
+        assert_eq!(snapshot(&home), reference, "{script}");
+    }
+}
+
+#[test]
+fn a_digest_killed_inside_a_transaction_resumes_to_the_same_rows() {
+    let dir = corpus();
+    let (reference, _) = reference(&dir);
+    let home = home();
+    let out = run(&home, &dir, Some("kill-inside:1"));
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let before = snapshot(&home);
+    assert!(before.counts[4].1 < 288, "{before:?}");
+
+    let out = run(&home, &dir, None);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(snapshot(&home), reference);
+    let doc = status_json(&home);
+    assert_eq!(doc["jobs"].as_array().unwrap().len(), 0, "{doc}");
+    assert_eq!(doc["batches"][0]["state"], "done", "{doc}");
+    assert_eq!(doc["batches"][1]["state"], "failed", "{doc}");
+}
+
+#[test]
+fn a_stopped_digest_writes_what_it_read_and_resumes_to_the_same_rows() {
+    let dir = corpus();
+    let (reference, _) = reference(&dir);
+    for (script, word) in [("stop:1", "stopped"), ("abort:1", "aborted")] {
+        let home = home();
+        let out = run(&home, &dir, Some(script));
+        assert_eq!(out.status.code(), Some(130), "{script}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains(&format!("nils: {word}:")),
+            "{script}: {}",
+            stderr(&out)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report["cancelled"], word, "{script}");
+        assert!(report["seen"].as_u64().unwrap() < 290, "{script}: {report}");
+        let doc = status_json(&home);
+        assert_eq!(doc["jobs"].as_array().unwrap().len(), 0, "{script}: {doc}");
+        assert_eq!(doc["batches"][0]["state"], "cancelled", "{script}: {doc}");
+        let partial = snapshot(&home);
+        assert!(partial.counts[4].1 >= 1, "{script}: {partial:?}");
+        assert!(partial.counts[4].1 < 288, "{script}: {partial:?}");
+
+        let out = run(&home, &dir, None);
+        assert!(out.status.success(), "{script}: {}", stderr(&out));
+        assert_eq!(snapshot(&home), reference, "{script}");
+        let doc = status_json(&home);
+        assert_eq!(doc["batches"][0]["state"], "done", "{script}: {doc}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_interrupted_digest_stops_and_resumes_to_the_same_rows() {
+    let dir = corpus();
+    let (reference, _) = reference(&dir);
+    let home = home();
+    let out = run(&home, &dir, Some("interrupt:1"));
+    assert_eq!(out.status.code(), Some(130), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("nils: stopping: what is read is written"),
+        "{}",
+        stderr(&out)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["cancelled"], "stopped");
+    let text_run = nils()
+        .args(["--registry"])
+        .arg(home.path())
+        .args(["status"])
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&text_run).contains(" cancelled "),
+        "{}",
+        stdout(&text_run)
+    );
+
+    let out = run(&home, &dir, None);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(snapshot(&home), reference);
+}

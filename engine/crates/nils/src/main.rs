@@ -10,7 +10,9 @@
 //! something to do (§14).
 //!
 //! Exit codes: 0 done; 1 the command failed; 2 the arguments or the
-//! configuration are wrong; 3 another job holds the registry.
+//! configuration are wrong; 3 another job holds the registry; 130 the run
+//! was stopped by a signal (§10: what was read is written, and the report
+//! says so).
 
 use std::fs;
 use std::io::{self, Read as _};
@@ -18,7 +20,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use nils_digest::{DigestError, Filter, Report, Rule, Settings};
+use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::home::{Config, Home, InitOptions, REGISTRY_ENV};
 use nils_registry::keys::strip_newline;
 use nils_registry::linkage::{self, ImportError, ImportRow, Subkeys};
@@ -28,6 +30,7 @@ use nils_registry::{Backend, Param, Registry, Scheme, Store};
 const FAILED: u8 = 1;
 const USAGE: u8 = 2;
 const BUSY: u8 = 3;
+const STOPPED: u8 = 130;
 
 /// NILS digests DICOM into a registry: one binary, on a laptop or a server.
 #[derive(Debug, Parser)]
@@ -420,20 +423,57 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
         print!("{}", settings.describe());
         return Ok(());
     }
+    let cancel = stop_on_signal()?;
     let result = if settings.dry_run {
-        nils_digest::dry_run(&settings)
+        nils_digest::digest_with(&settings, None, &cancel)
     } else {
         let mut registry = open(home)?;
-        nils_digest::digest(&settings, &mut registry)
+        nils_digest::digest_with(&settings, Some(&mut registry), &cancel)
     };
     match result {
-        Ok(report) => print_report(&report, settings.json),
+        Ok(report) => {
+            print_report(&report, settings.json)?;
+            match report.cancelled {
+                None => Ok(()),
+                Some(Cancelled::Stopped) => Err(Exit {
+                    code: STOPPED,
+                    message: "stopped: what was read is written; run again to go on".into(),
+                }),
+                Some(Cancelled::Aborted) => Err(Exit {
+                    code: STOPPED,
+                    message: "aborted: the batch in flight was abandoned; run again to go on"
+                        .into(),
+                }),
+            }
+        }
         Err(e @ DigestError::Busy { .. }) => Err(Exit {
             code: BUSY,
             message: e.to_string(),
         }),
         Err(e) => Err(fail(e.to_string())),
     }
+}
+
+/// The token a run is asked to stop through (§10): one signal asks for a
+/// stop, a second for an abort. SIGINT and SIGTERM both count.
+fn stop_on_signal() -> Result<Cancel, Exit> {
+    let cancel = Cancel::new();
+    let token = cancel.clone();
+    let mut asked = 0u8;
+    ctrlc::set_handler(move || {
+        token.request();
+        asked = asked.saturating_add(1);
+        match asked {
+            1 => eprintln!(
+                "nils: stopping: what is read is written, then the job ends \
+                 (a second signal abandons the batch in flight)"
+            ),
+            2 => eprintln!("nils: aborting: the batch in flight is abandoned"),
+            _ => {}
+        }
+    })
+    .map_err(|e| fail(format!("cannot handle signals: {e}")))?;
+    Ok(cancel)
 }
 
 fn print_report(report: &Report, json: bool) -> Result<(), Exit> {

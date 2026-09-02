@@ -14,6 +14,7 @@ use nils_dicom::extract::sop_class_name;
 use nils_dicom::{Diagnostic, DiagnosticKind, Extracted, QuarantineClass, Refusal};
 use serde::{Deserialize, Serialize};
 
+use crate::cancel::Cancelled;
 use crate::walk::SkipReason;
 
 /// How many distinct samples a diagnostic kind keeps.
@@ -365,6 +366,10 @@ pub struct Report {
     pub diagnostics: Vec<DiagnosticCount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub written: Option<Written>,
+    /// How the run ended when it was asked to stop (§10): absent when it ran
+    /// to the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled: Option<Cancelled>,
 }
 
 impl Report {
@@ -430,6 +435,7 @@ impl Report {
                 })
                 .collect(),
             written: None,
+            cancelled: None,
         }
     }
 
@@ -513,13 +519,15 @@ fn keyed_line(f: &mut fmt::Formatter<'_>, label: &str, items: &[Keyed]) -> fmt::
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = &self.setup;
-        writeln!(
-            f,
-            "nils digest{}   name {}   root {}",
-            if s.dry_run { " (dry run)" } else { "" },
-            s.name,
-            s.root
-        )?;
+        let ended = match (s.dry_run, self.cancelled) {
+            (true, None) => " (dry run)",
+            (true, Some(Cancelled::Stopped)) => " (dry run, stopped)",
+            (true, Some(Cancelled::Aborted)) => " (dry run, aborted)",
+            (false, Some(Cancelled::Stopped)) => " (stopped)",
+            (false, Some(Cancelled::Aborted)) => " (aborted)",
+            (false, None) => "",
+        };
+        writeln!(f, "nils digest{ended}   name {}   root {}", s.name, s.root)?;
         writeln!(
             f,
             "  files            {} seen   {} parsed   {} quarantined   {} unchanged   {} filtered   {} skipped ({} symlink, {} special)   {} walk errors",
@@ -713,6 +721,22 @@ mod tests {
         assert_eq!(report.files_per_s, 2.0);
         let text = report.to_string();
         assert!(text.contains("nils digest (dry run)   name t   root /r"));
+        let mut stopped = report.clone();
+        stopped.setup.dry_run = false;
+        stopped.cancelled = Some(Cancelled::Stopped);
+        assert!(
+            stopped
+                .to_string()
+                .starts_with("nils digest (stopped)   name t")
+        );
+        stopped.cancelled = Some(Cancelled::Aborted);
+        assert!(
+            stopped
+                .to_string()
+                .starts_with("nils digest (aborted)   name t")
+        );
+        stopped.cancelled = None;
+        assert!(stopped.to_string().starts_with("nils digest   name t"));
         assert!(text.contains(&format!("  {:<24} {:>9}   truncated 2\n", "parse_error", 2)));
         assert!(text.contains(&format!(
             "  {:<24} {:>9}   Permission denied (os error 13)\n",
@@ -725,6 +749,7 @@ mod tests {
         assert_eq!(json["name"], "t");
         assert_eq!(json["quarantine"][0]["class"], "not_dicom");
         assert!(json.get("written").is_none());
+        assert!(json.get("cancelled").is_none());
 
         // what `nils status --batch` prints comes back from the stored JSON
         let mut report = report;

@@ -19,6 +19,7 @@ use nils_registry::schema::Type;
 use nils_registry::store::{Cell, Error, Param, Store};
 
 use crate::batch::{Prior, Task};
+use crate::cancel::Cancel;
 use crate::report::Counts;
 use crate::walk::{SkipReason, WalkEvent};
 
@@ -52,6 +53,9 @@ pub struct Recorded {
     /// The instance's `source_file_id` points back at this row: the file is
     /// the instance's own, not a duplicate of it.
     pub own: bool,
+    /// The row was recorded in the last second of a batch that failed: its
+    /// identity rows may be missing (§9.3), so the file is read again.
+    pub reparse: bool,
 }
 
 /// What to do with a file, given its record.
@@ -90,6 +94,12 @@ pub fn decide(
         });
     }
     match r.status {
+        // the batch that recorded the file failed right after: read again,
+        // under the same instance, so that a lost identity row is attached
+        _ if r.reparse && same => Decision::Parse(own.map(|id| Prior {
+            instance_id: Some(id),
+            changed: false,
+        })),
         status::INGESTED | status::DUPLICATE if same => Decision::Unchanged {
             id: r.id,
             quarantined: false,
@@ -133,9 +143,12 @@ impl Records {
         );
         let empty = store.query_opt(&probe, &[Param::Int(source_id)])?.is_none();
         let instance = store.qualified("instance");
+        let batch = store.qualified("ingest_batch");
         let sql = format!(
-            "SELECT f.path, f.size, f.mtime_ns, f.status, f.instance_id, i.source_file_id = f.id, f.id \
+            "SELECT f.path, f.size, f.mtime_ns, f.status, f.instance_id, i.source_file_id = f.id, f.id, \
+             b.reparse_from IS NOT NULL AND f.seen_at >= b.reparse_from \
              FROM {table} AS f LEFT JOIN {instance} AS i ON i.id = f.instance_id \
+             LEFT JOIN {batch} AS b ON b.id = f.batch_id \
              WHERE f.source_id = {} AND f.dir = {}",
             d.param(1, Type::Int),
             d.param(2, Type::Text)
@@ -163,9 +176,9 @@ impl Records {
                 let Some(status) = status::of(r.text(3)?) else {
                     continue;
                 };
-                let own = match r.get(5) {
+                let flag = |i: usize| match r.get(i) {
                     Cell::Bool(b) => *b,
-                    Cell::Int(i) => *i != 0,
+                    Cell::Int(n) => *n != 0,
                     _ => false,
                 };
                 map.insert(
@@ -176,7 +189,8 @@ impl Records {
                         mtime_ns: r.int(2)?,
                         status,
                         instance_id: r.opt_int(4)?,
-                        own,
+                        own: flag(5),
+                        reparse: flag(7),
                     },
                 );
             }
@@ -198,9 +212,9 @@ pub fn relative(root: &Path, path: &Path) -> (String, String) {
     (parts.join("/"), dir)
 }
 
-/// Run the stage: every walk event in, a task out, until the walker is done.
-/// With no records (a dry run) every file is parsed. Returns what the stage
-/// counted itself: the filtered files.
+/// Run the stage: every walk event in, a task out, until the walker is done
+/// or a stop is asked. With no records (a dry run) every file is parsed.
+/// Returns what the stage counted itself: the filtered files.
 pub fn run(
     root: &Path,
     rx: &Receiver<WalkEvent>,
@@ -208,9 +222,13 @@ pub fn run(
     mut records: Option<Records>,
     retry_quarantine: bool,
     restart: bool,
+    cancel: &Cancel,
 ) -> Result<Counts, Error> {
     let mut counts = Counts::default();
     for event in rx {
+        if cancel.stop() {
+            break;
+        }
         let task = match event {
             WalkEvent::File {
                 path,
@@ -277,6 +295,7 @@ mod tests {
             status,
             instance_id: instance,
             own: instance.is_some(),
+            reparse: false,
         }
     }
 
@@ -351,6 +370,53 @@ mod tests {
             Decision::Parse(None)
         );
 
+        // a file of a failed batch's last second is read again as it is,
+        // its instance beside it; a duplicate or a quarantined one afresh
+        let again = Recorded {
+            reparse: true,
+            ..ingested.clone()
+        };
+        assert_eq!(
+            decide(Some(&again), 10, 5, false, false),
+            Decision::Parse(Some(Prior {
+                instance_id: Some(7),
+                changed: false
+            }))
+        );
+        assert_eq!(
+            decide(Some(&again), 11, 5, false, false),
+            Decision::Parse(Some(Prior {
+                instance_id: Some(7),
+                changed: true
+            }))
+        );
+        assert_eq!(
+            decide(
+                Some(&Recorded {
+                    reparse: true,
+                    ..duplicate.clone()
+                }),
+                10,
+                5,
+                false,
+                false
+            ),
+            Decision::Parse(None)
+        );
+        assert_eq!(
+            decide(
+                Some(&Recorded {
+                    reparse: true,
+                    ..quarantined.clone()
+                }),
+                10,
+                5,
+                false,
+                false
+            ),
+            Decision::Parse(None)
+        );
+
         // a restart reads everything again, the record's instance beside it
         assert_eq!(
             decide(Some(&ingested), 10, 5, false, true),
@@ -399,7 +465,13 @@ mod tests {
             .unwrap();
         store
             .execute(
-                "INSERT INTO source_file (id, source_id, batch_id, dir, path, size, mtime_ns, status, instance_id, seen_at) VALUES (1, 1, 1, 'a', 'a/x', 10, 5, 'ingested', 42, 't'), (2, 1, 1, 'a', 'a/y', 1, 1, 'quarantined', NULL, 't'), (3, 2, 1, 'a', 'a/z', 1, 1, 'ingested', 9, 't'), (4, 1, 1, 'a', 'a/w', 10, 5, 'duplicate', 42, 't')",
+                "INSERT INTO source_file (id, source_id, batch_id, dir, path, size, mtime_ns, status, instance_id, seen_at) VALUES (1, 1, 1, 'a', 'a/x', 10, 5, 'ingested', 42, 't'), (2, 1, 1, 'a', 'a/y', 1, 1, 'quarantined', NULL, 't'), (3, 2, 1, 'a', 'a/z', 1, 1, 'ingested', 9, 't'), (4, 1, 1, 'a', 'a/w', 10, 5, 'duplicate', 42, 't'), (5, 1, 2, 'a', 'a/v', 10, 5, 'ingested', 43, '2026-09-02T10:00:00Z'), (6, 1, 2, 'a', 'a/u', 10, 5, 'ingested', 44, '2026-09-02T09:59:59Z')",
+                &[],
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO ingest_batch (id, source_id, job_id, name, config, started_at, state, reparse_from) VALUES (1, 1, 1, 'n', '{}', 't', 'done', NULL), (2, 1, 2, 'n', '{}', 't', 'failed', '2026-09-02T10:00:00Z')",
                 &[],
             )
             .unwrap();
@@ -420,7 +492,20 @@ mod tests {
                 status: "ingested",
                 instance_id: Some(42),
                 own: true,
+                reparse: false,
             })
+        );
+        // the failed batch's last second is read again, the one before not
+        assert_eq!(
+            records
+                .get("a", "a/v")
+                .unwrap()
+                .map(|r| (r.id, r.own, r.reparse)),
+            Some((5, false, true))
+        );
+        assert_eq!(
+            records.get("a", "a/u").unwrap().map(|r| (r.id, r.reparse)),
+            Some((6, false))
         );
         assert_eq!(
             records.get("a", "a/y").unwrap().map(|r| r.status),
