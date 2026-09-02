@@ -143,6 +143,40 @@ fn exercise(name: &str, store: &mut Store) {
         .unwrap();
     assert!(none.is_empty(), "{name}");
 
+    // the same by integer key, and an update from a list of pairs
+    let by_id = store
+        .select_by_ids(instance, &cols, "id", &ids[..600])
+        .unwrap();
+    assert_eq!(by_id.len(), 600, "{name}");
+    let pairs: Vec<(i64, i64)> = ids[..700].iter().map(|&id| (id, 1_000 + id)).collect();
+    let updated = store
+        .update_from_values(instance, "source_file_id = v.val", "id", &pairs)
+        .unwrap();
+    assert_eq!(updated, 700, "{name}");
+    let bumped = store
+        .update_from_values(
+            instance,
+            "instance_number = instance_number + v.val",
+            "id",
+            &pairs[..3],
+        )
+        .unwrap();
+    assert_eq!(bumped, 3, "{name}");
+    let sf_col = [
+        instance.column("id").unwrap(),
+        instance.column("source_file_id").unwrap(),
+    ];
+    let back = store
+        .select_by_ids(instance, &sf_col, "id", &ids[..2])
+        .unwrap();
+    for r in &back {
+        assert_eq!(
+            r.opt_int(1).unwrap(),
+            Some(1_000 + r.int(0).unwrap()),
+            "{name}"
+        );
+    }
+
     // an upsert on source_file: the second batch overwrites status and batch
     let sf = table("source_file");
     let columns = [
@@ -207,6 +241,44 @@ fn exercise(name: &str, store: &mut Store) {
     assert_eq!(r.int(0).unwrap(), 2, "{name}");
     assert_eq!(r.text(1).unwrap(), "unchanged", "{name}");
     assert_eq!(r.int(2).unwrap(), 1, "{name}");
+
+    // an update by id casts by the columns' types: a JSON value and a stamp
+    let sf_id = first[0].int(0).unwrap();
+    let job = table("job");
+    let job_rows = store
+        .insert(
+            &Insert::new(job, &["kind", "state", "started_at"]).returning(&["id"]),
+            &[vec![
+                Param::from("digest"),
+                Param::from("running"),
+                Param::from("2026-09-02T00:00:00Z"),
+            ]],
+        )
+        .unwrap();
+    let job_id = job_rows[0].int(0).unwrap();
+    let n = store
+        .update_by_id(
+            job,
+            &[
+                ("state", Param::from("done")),
+                ("progress", Param::from("{\"seen\": 3}")),
+                ("finished_at", Param::from("2026-09-02T00:01:00Z")),
+                ("pid", Param::from(Some(sf_id))),
+            ],
+            "id",
+            job_id,
+        )
+        .unwrap();
+    assert_eq!(n, 1, "{name}");
+    let cols = [
+        job.column("state").unwrap(),
+        job.column("progress").unwrap(),
+        job.column("finished_at").unwrap(),
+    ];
+    let back = store.select_by_ids(job, &cols, "id", &[job_id]).unwrap();
+    assert_eq!(back[0].text(0).unwrap(), "done", "{name}");
+    assert!(back[0].text(1).unwrap().contains("\"seen\""), "{name}");
+    assert_eq!(back[0].text(2).unwrap(), "2026-09-02T00:01:00Z", "{name}");
 
     // typed columns round-trip as text: a study with a date, a JSON value, a
     // double and a null

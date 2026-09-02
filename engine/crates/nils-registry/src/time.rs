@@ -17,6 +17,47 @@ pub fn now_iso() -> String {
     iso_of(unix_secs())
 }
 
+/// Now, as seconds since the Unix epoch.
+pub fn now_secs() -> u64 {
+    unix_secs()
+}
+
+/// A `YYYY-MM-DDTHH:MM:SSZ` stamp back to seconds since the Unix epoch; none
+/// for anything else.
+pub fn secs_of(iso: &str) -> Option<u64> {
+    let b = iso.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |from: usize, to: usize| iso[from..to].parse::<i64>().ok();
+    let (y, m, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (hh, mm, ss) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    let days = days_from_civil(y, m as u32, d as u32);
+    u64::try_from(days * 86_400 + hh * 3600 + mm * 60 + ss).ok()
+}
+
+/// A proleptic Gregorian date to days since 1970-01-01 (the inverse of
+/// [`civil_from_days`]).
+pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let mp = if m > 2 { m - 3 } else { m + 9 } as u64;
+    let doy = (153 * mp + 2) / 5 + d as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i64 - 719_468
+}
+
 /// Today, as `YYYY-MM-DD`.
 pub fn today() -> String {
     let (y, m, d) = civil_from_days((unix_secs() / 86_400) as i64);
@@ -64,5 +105,29 @@ mod tests {
         assert_eq!(iso_of(20_698 * 86_400 + 50_587), "2026-09-02T14:03:07Z");
         assert_eq!(today().len(), 10);
         assert_eq!(now_iso().len(), 20);
+    }
+
+    #[test]
+    fn stamps_parse_back() {
+        for secs in [
+            0u64,
+            86_399,
+            951_782_400,
+            20_698 * 86_400 + 50_587,
+            4_102_444_800,
+        ] {
+            assert_eq!(secs_of(&iso_of(secs)), Some(secs), "{secs}");
+        }
+        assert_eq!(
+            secs_of("2026-09-02T14:03:07Z"),
+            Some(20_698 * 86_400 + 50_587)
+        );
+        assert_eq!(secs_of("2026-09-02 14:03:07"), None);
+        assert_eq!(secs_of("2026-13-02T14:03:07Z"), None);
+        assert_eq!(secs_of(""), None);
+        for days in [-1_000_000, -1, 0, 1, 19_782, 20_698, 3_000_000] {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(days_from_civil(y, m, d), days, "{days}");
+        }
     }
 }

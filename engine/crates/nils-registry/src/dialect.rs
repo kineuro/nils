@@ -263,13 +263,15 @@ impl Dialect {
     }
 
     /// `SELECT <columns as text> FROM t WHERE key IN (...)`: the placeholders
-    /// are one per key on SQLite and one text array on Postgres.
+    /// are one per key on SQLite and one array on Postgres, of `bigint` for
+    /// an integer key and of `text` otherwise.
     pub fn select_by_keys(
         self,
         schema: Option<&str>,
         t: &Table,
         columns: &[&Column],
         key: &str,
+        key_ty: Type,
         keys: usize,
     ) -> String {
         let exprs: Vec<String> = columns.iter().map(|c| self.text_of(c)).collect();
@@ -278,7 +280,10 @@ impl Dialect {
                 let marks = vec!["?"; keys];
                 format!("{key} IN ({})", marks.join(", "))
             }
-            Dialect::Postgres => format!("{key} = ANY($1::text[])"),
+            Dialect::Postgres => match key_ty {
+                Type::Int | Type::Id => format!("{key} = ANY($1::bigint[])"),
+                _ => format!("{key} = ANY($1::text[])"),
+            },
         };
         format!(
             "SELECT {} FROM {} WHERE {}",
@@ -286,6 +291,43 @@ impl Dialect {
             qualified(schema, t.name),
             filter
         )
+    }
+
+    /// `UPDATE t SET <set> FROM (VALUES ...) AS v(key, val) WHERE t.<key> =
+    /// v.key`, for `rows` integer pairs. `set` names the new value as `v.val`
+    /// (`n_instances = n_instances + v.val`, `source_file_id = v.val`).
+    pub fn update_from_values(
+        self,
+        schema: Option<&str>,
+        t: &Table,
+        set: &str,
+        key: &str,
+        rows: usize,
+    ) -> String {
+        let mut values = String::new();
+        let mut n = 0;
+        for r in 0..rows {
+            if r > 0 {
+                values.push_str(", ");
+            }
+            n += 1;
+            let a = self.param(n, Type::Int);
+            n += 1;
+            let b = self.param(n, Type::Int);
+            match self {
+                Dialect::Sqlite => values.push_str(&format!("({a}, {b})")),
+                Dialect::Postgres => values.push_str(&format!("({a}::bigint, {b}::bigint)")),
+            }
+        }
+        let table = qualified(schema, t.name);
+        match self {
+            Dialect::Sqlite => format!(
+                "UPDATE {table} SET {set} FROM (SELECT column1 AS key, column2 AS val FROM (VALUES {values})) AS v WHERE {table}.{key} = v.key"
+            ),
+            Dialect::Postgres => format!(
+                "UPDATE {table} AS t SET {set} FROM (VALUES {values}) AS v(key, val) WHERE t.{key} = v.key"
+            ),
+        }
     }
 }
 
@@ -382,11 +424,25 @@ mod tests {
             "INSERT INTO nils.study (study_instance_uid, subject_id, study_date) SELECT study_instance_uid, subject_id, study_date FROM bulk_study RETURNING id"
         );
         assert_eq!(
-            Dialect::Postgres.select_by_keys(Some("nils"), t, &cols[2..], "study_instance_uid", 3),
+            Dialect::Postgres.select_by_keys(
+                Some("nils"),
+                t,
+                &cols[2..],
+                "study_instance_uid",
+                Type::Text,
+                3
+            ),
             "SELECT study_date::text FROM nils.study WHERE study_instance_uid = ANY($1::text[])"
         );
         assert_eq!(
-            Dialect::Sqlite.select_by_keys(None, t, &cols[2..], "study_instance_uid", 3),
+            Dialect::Sqlite.select_by_keys(
+                None,
+                t,
+                &cols[2..],
+                "study_instance_uid",
+                Type::Text,
+                3
+            ),
             "SELECT study_date FROM study WHERE study_instance_uid IN (?, ?, ?)"
         );
     }

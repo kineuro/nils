@@ -16,6 +16,7 @@ nils-registry.workspace = true
 
 crossbeam-channel.workspace = true
 glob.workspace = true
+lru.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

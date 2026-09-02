@@ -85,15 +85,39 @@ impl SkipReason {
     }
 }
 
-/// What the walker sends.
+/// What the walker sends. The size and the modification time come from the
+/// walker's own `stat` (never following a link), so the resume check (§5.2)
+/// and the `source_file` row cost no second call.
 #[derive(Debug)]
 pub enum WalkEvent {
     /// A candidate file.
-    File(PathBuf),
+    File {
+        path: PathBuf,
+        size: u64,
+        mtime_ns: i64,
+    },
     /// An entry not handed on.
-    Skipped { path: PathBuf, reason: SkipReason },
+    Skipped {
+        path: PathBuf,
+        reason: SkipReason,
+        size: u64,
+        mtime_ns: i64,
+    },
     /// A directory that could not be listed, or an entry that could not be read.
     WalkError { path: PathBuf, error: String },
+}
+
+/// A modification time as nanoseconds since the Unix epoch, negative before
+/// it.
+pub fn mtime_ns_of(metadata: &std::fs::Metadata) -> i64 {
+    use std::time::UNIX_EPOCH;
+    let Ok(modified) = metadata.modified() else {
+        return 0;
+    };
+    match modified.duration_since(UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
+        Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap_or(i64::MAX),
+    }
 }
 
 struct Queue {
@@ -193,29 +217,44 @@ fn list(dir: &Path, filter: &Filter, queue: &Queue, tx: &Sender<WalkEvent>) {
                 continue;
             }
         };
-        let event = if kind.is_symlink() {
-            WalkEvent::Skipped {
-                path,
-                reason: SkipReason::Symlink,
-            }
-        } else if kind.is_dir() {
+        if kind.is_dir() {
             queue.push(path);
             continue;
-        } else if kind.is_file() {
-            let name = entry.file_name();
-            if filter.matches(&name.to_string_lossy()) {
-                WalkEvent::File(path)
-            } else {
-                WalkEvent::Skipped {
-                    path,
-                    reason: SkipReason::Filtered,
-                }
-            }
+        }
+        let reason = if kind.is_symlink() {
+            Some(SkipReason::Symlink)
+        } else if !kind.is_file() {
+            Some(SkipReason::Special)
+        } else if filter.matches(&entry.file_name().to_string_lossy()) {
+            None
         } else {
-            WalkEvent::Skipped {
-                path,
-                reason: SkipReason::Special,
+            Some(SkipReason::Filtered)
+        };
+        // the size and the mtime of the entry itself: a link's own, not its
+        // target's
+        let (size, mtime_ns) = match entry.metadata() {
+            Ok(m) => (m.len(), mtime_ns_of(&m)),
+            Err(e) if reason.is_none() => {
+                let _ = tx.send(WalkEvent::WalkError {
+                    path,
+                    error: e.to_string(),
+                });
+                continue;
             }
+            Err(_) => (0, 0),
+        };
+        let event = match reason {
+            None => WalkEvent::File {
+                path,
+                size,
+                mtime_ns,
+            },
+            Some(reason) => WalkEvent::Skipped {
+                path,
+                reason,
+                size,
+                mtime_ns,
+            },
         };
         if tx.send(event).is_err() {
             return;
@@ -243,7 +282,9 @@ mod tests {
         events
             .iter()
             .filter_map(|e| match e {
-                WalkEvent::File(p) => Some(p.file_name().unwrap().to_string_lossy().into_owned()),
+                WalkEvent::File { path, .. } => {
+                    Some(path.file_name().unwrap().to_string_lossy().into_owned())
+                }
                 _ => None,
             })
             .collect()
@@ -285,6 +326,10 @@ mod tests {
                 .map(String::from)
                 .collect()
         );
+        assert!(events.iter().all(|e| match e {
+            WalkEvent::File { size, mtime_ns, .. } => *size == 1 && *mtime_ns > 0,
+            _ => true,
+        }));
         #[cfg(unix)]
         assert!(events.iter().any(|e| matches!(
             e,

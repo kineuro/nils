@@ -14,7 +14,7 @@ use rusqlite::types::{ToSqlOutput, ValueRef};
 
 use crate::Backend;
 use crate::dialect::{Conflict, Dialect, copy_text};
-use crate::schema::{Column, Table};
+use crate::schema::{Column, Table, Type};
 
 /// A value bound to a placeholder.
 #[derive(Debug, Clone, PartialEq)]
@@ -498,8 +498,9 @@ impl Store {
         Ok(self.query(sql, params)?.into_iter().next())
     }
 
-    /// Rows of `table` whose `key` column is one of `keys`, the listed columns
-    /// read back as text where the backend would otherwise reformat them.
+    /// Rows of `table` whose text `key` column is one of `keys`, the listed
+    /// columns read back as text where the backend would otherwise reformat
+    /// them.
     pub fn select_by_keys(
         &mut self,
         table: &Table,
@@ -511,9 +512,14 @@ impl Store {
         match self {
             Store::Sqlite(_) => {
                 for chunk in keys.chunks(SQLITE_KEY_CHUNK) {
-                    let sql = self
-                        .dialect()
-                        .select_by_keys(None, table, columns, key, chunk.len());
+                    let sql = self.dialect().select_by_keys(
+                        None,
+                        table,
+                        columns,
+                        key,
+                        Type::Text,
+                        chunk.len(),
+                    );
                     let params: Vec<Param> =
                         chunk.iter().map(|k| Param::from(k.as_str())).collect();
                     out.extend(self.query(&sql, &params)?);
@@ -525,7 +531,14 @@ impl Store {
                 schema,
                 ..
             } => {
-                let sql = Dialect::Postgres.select_by_keys(Some(schema), table, columns, key, 1);
+                let sql = Dialect::Postgres.select_by_keys(
+                    Some(schema),
+                    table,
+                    columns,
+                    key,
+                    Type::Text,
+                    1,
+                );
                 let stmt = prepared(client, statements, &sql)?;
                 let rows = client.query(&stmt, &[&keys])?;
                 for row in &rows {
@@ -534,6 +547,113 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// Rows of `table` whose integer `key` column is one of `ids`, read back
+    /// like [`Store::select_by_keys`].
+    pub fn select_by_ids(
+        &mut self,
+        table: &Table,
+        columns: &[&Column],
+        key: &str,
+        ids: &[i64],
+    ) -> Result<Vec<Row>, Error> {
+        let mut out = Vec::new();
+        match self {
+            Store::Sqlite(_) => {
+                for chunk in ids.chunks(SQLITE_KEY_CHUNK) {
+                    let sql = self.dialect().select_by_keys(
+                        None,
+                        table,
+                        columns,
+                        key,
+                        Type::Int,
+                        chunk.len(),
+                    );
+                    let params: Vec<Param> = chunk.iter().map(|&k| Param::Int(k)).collect();
+                    out.extend(self.query(&sql, &params)?);
+                }
+            }
+            Store::Postgres {
+                client,
+                statements,
+                schema,
+                ..
+            } => {
+                let sql = Dialect::Postgres.select_by_keys(
+                    Some(schema),
+                    table,
+                    columns,
+                    key,
+                    Type::Int,
+                    1,
+                );
+                let stmt = prepared(client, statements, &sql)?;
+                let rows = client.query(&stmt, &[&ids])?;
+                for row in &rows {
+                    out.push(pg_row(row)?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// `UPDATE table SET a = ?, b = ? WHERE key = id`, the placeholders cast
+    /// by the columns' declared types. Returns the rows updated.
+    pub fn update_by_id(
+        &mut self,
+        table: &Table,
+        sets: &[(&str, Param)],
+        key: &str,
+        id: i64,
+    ) -> Result<u64, Error> {
+        let d = self.dialect();
+        let mut sql = format!("UPDATE {} SET ", self.qualified(table.name));
+        let mut params = Vec::with_capacity(sets.len() + 1);
+        for (i, (name, value)) in sets.iter().enumerate() {
+            let column = table
+                .column(name)
+                .unwrap_or_else(|| panic!("{}.{name} is not a column", table.name));
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str(&format!("{name} = {}", d.param(i + 1, column.ty)));
+            params.push(value.clone());
+        }
+        sql.push_str(&format!(
+            " WHERE {key} = {}",
+            d.param(sets.len() + 1, Type::Int)
+        ));
+        params.push(Param::Int(id));
+        self.execute(&sql, &params)
+    }
+
+    /// `UPDATE table SET <set> ... WHERE <key> = v.key` for integer pairs
+    /// `(key, val)`, in chunks; `set` names the new value as `v.val`. Returns
+    /// the rows updated.
+    pub fn update_from_values(
+        &mut self,
+        table: &Table,
+        set: &str,
+        key: &str,
+        pairs: &[(i64, i64)],
+    ) -> Result<u64, Error> {
+        let mut updated = 0;
+        for chunk in pairs.chunks(SQLITE_KEY_CHUNK) {
+            let sql = self.dialect().update_from_values(
+                self.schema().map(str::to_string).as_deref(),
+                table,
+                set,
+                key,
+                chunk.len(),
+            );
+            let params: Vec<Param> = chunk
+                .iter()
+                .flat_map(|&(k, v)| [Param::Int(k), Param::Int(v)])
+                .collect();
+            updated += self.execute(&sql, &params)?;
+        }
+        Ok(updated)
     }
 
     /// Insert `rows` (one `Vec<Param>` per row, aligned with the insert's

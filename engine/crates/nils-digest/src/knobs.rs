@@ -6,11 +6,22 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use nils_dicom::extract::{MODALITIES, SOP_CLASSES};
+use nils_registry::time::today;
+use serde_json::json;
 
 use crate::walk::Filter;
+
+/// The default of `batch_rows` (§9.1).
+pub const DEFAULT_BATCH_ROWS: usize = 2_000;
+
+/// The default of `walk_threads` (§5.1).
+pub const DEFAULT_WALK_THREADS: usize = 8;
+
+/// The identity rule of slice 3, in words: v0's two lines (§7.3). The rule as
+/// data arrives with slice 4.
+pub const IDENTITY_RULE: &str = "PatientID, then StudyInstanceUID";
 
 /// One knob as the spec lists it.
 #[derive(Debug, Clone, Copy)]
@@ -99,7 +110,7 @@ pub static KNOBS: &[Knob] = &[
 
 /// The slice this build implements; knobs with a later `settable_since` hold
 /// their default.
-pub const SLICE: u8 = 2;
+pub const SLICE: u8 = 3;
 
 /// The settings of one run.
 #[derive(Debug, Clone)]
@@ -109,13 +120,20 @@ pub struct Settings {
     pub filter: Filter,
     pub workers: usize,
     pub walk_threads: usize,
+    /// Instances per write (§9.1).
+    pub batch_rows: usize,
+    /// Read again what an earlier run quarantined (§5.2).
+    pub retry_quarantine: bool,
+    /// Ignore `source_file` for this run and parse everything (§5.2).
+    pub restart: bool,
     pub dry_run: bool,
     pub json: bool,
 }
 
 impl Settings {
     /// The defaults for a root: the name from the basename and today's date,
-    /// every file a candidate, one worker per core, eight walker threads.
+    /// every file a candidate, one worker per core, eight walker threads,
+    /// 2,000 instances per batch.
     pub fn new(root: impl Into<PathBuf>) -> Settings {
         let root = root.into();
         Settings {
@@ -123,7 +141,10 @@ impl Settings {
             root,
             filter: Filter::All,
             workers: default_workers(),
-            walk_threads: 8,
+            walk_threads: DEFAULT_WALK_THREADS,
+            batch_rows: DEFAULT_BATCH_ROWS,
+            retry_quarantine: false,
+            restart: false,
             dry_run: false,
             json: false,
         }
@@ -135,15 +156,35 @@ impl Settings {
             "files" => self.filter.to_string(),
             "sop_classes" => format!("{} (v0's nine)", SOP_CLASSES.len()),
             "modalities" => MODALITIES.join(", "),
-            "identity" => "PatientID, then StudyInstanceUID".into(),
+            "identity" => IDENTITY_RULE.into(),
             "workers" => self.workers.to_string(),
             "walk_threads" => self.walk_threads.to_string(),
-            "batch_rows" => "2000".into(),
+            "batch_rows" => self.batch_rows.to_string(),
             "charset_fallback" => "iso-8859-1".into(),
-            "retry_quarantine" => "false".into(),
+            "retry_quarantine" => self.retry_quarantine.to_string(),
             "name" => self.name.clone(),
             _ => String::new(),
         }
+    }
+
+    /// `ingest_batch.config` (§4.2): every knob as resolved, the identity
+    /// rule, the filter, the workers, the binary's version, and what the run
+    /// was asked to do.
+    pub fn config(&self) -> serde_json::Value {
+        json!({
+            "files": self.filter.to_string(),
+            "sop_classes": SOP_CLASSES,
+            "modalities": MODALITIES,
+            "identity": { "rule": IDENTITY_RULE, "id_type": "patient-id", "fallback": "study-instance-uid" },
+            "workers": self.workers,
+            "walk_threads": self.walk_threads,
+            "batch_rows": self.batch_rows,
+            "charset_fallback": "iso-8859-1",
+            "retry_quarantine": self.retry_quarantine,
+            "name": self.name,
+            "restart": self.restart,
+            "version": env!("CARGO_PKG_VERSION"),
+        })
     }
 
     /// The `--describe` page.
@@ -196,43 +237,9 @@ pub fn default_name(root: &Path) -> String {
     format!("{base}-{}", today())
 }
 
-/// Today's date in UTC as `YYYY-MM-DD`.
-pub fn today() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (y, m, d) = civil_from_days((secs / 86_400) as i64);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-/// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's
-/// algorithm).
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dates_come_out_right() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(19_723), (2024, 1, 1));
-        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
-        assert_eq!(civil_from_days(20_698), (2026, 9, 2));
-        assert_eq!(today().len(), 10);
-    }
 
     #[test]
     fn the_default_name_is_basename_and_date() {
@@ -252,8 +259,16 @@ mod tests {
             assert!(page.contains(k.name), "{} missing", k.name);
         }
         assert!(page.contains("nils digest (dry run)"));
-        assert!(page.contains("(settable from slice 3)"));
+        assert!(page.contains("(settable from slice 4)"));
+        assert!(!page.contains("(settable from slice 3)"));
         assert_eq!(s.value_of("workers"), "3");
+        assert_eq!(s.value_of("batch_rows"), "2000");
+        let config = s.config();
+        assert_eq!(config["workers"], 3);
+        assert_eq!(config["files"], "all");
+        assert_eq!(config["restart"], false);
+        assert_eq!(config["identity"]["fallback"], "study-instance-uid");
+        assert_eq!(config["sop_classes"].as_array().unwrap().len(), 9);
         assert_eq!(s.value_of("sop_classes"), "9 (v0's nine)");
         assert_eq!(s.value_of("modalities"), "MR, CT, PT");
     }
