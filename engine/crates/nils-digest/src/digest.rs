@@ -436,13 +436,19 @@ fn execute(
             })
         };
         let resumer = {
-            let root = root.clone();
-            let retry = settings.retry_quarantine;
-            let restart = settings.restart;
+            let stage = resume::Stage {
+                root: &root,
+                records,
+                retry_quarantine: settings.retry_quarantine,
+                restart: settings.restart,
+                rows: settings.batch_rows,
+            };
+            let tx = batch_tx.clone();
+            let progress = &progress;
             s.spawn(move || {
-                let result =
-                    resume::run(&root, &walk_rx, &task_tx, records, retry, restart, cancel);
+                let result = resume::run(stage, &walk_rx, &task_tx, &tx, progress, cancel);
                 drop(task_tx);
+                drop(tx);
                 result
             })
         };
@@ -737,11 +743,6 @@ fn parse_all(
                     }
                 }
             },
-            Task::Unchanged { id, quarantined } => {
-                counts.unchanged();
-                progress.unchanged();
-                Item::Unchanged { id, quarantined }
-            }
             Task::Skipped {
                 rel,
                 dir,

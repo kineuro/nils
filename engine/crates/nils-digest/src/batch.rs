@@ -59,7 +59,8 @@ pub enum Item {
         refusal: Refusal,
     },
     /// A file an earlier run recorded and this one found unchanged: only its
-    /// row's batch and seen time move.
+    /// row's batch and seen time move. The resume stage batches these itself;
+    /// a parser never sees one.
     Unchanged {
         id: i64,
         quarantined: bool,
@@ -88,10 +89,6 @@ pub enum Task {
         mtime_ns: i64,
         prior: Option<Prior>,
     },
-    Unchanged {
-        id: i64,
-        quarantined: bool,
-    },
     Skipped {
         rel: String,
         dir: String,
@@ -104,7 +101,8 @@ pub enum Task {
     },
 }
 
-/// A batch: what one parser collected until the batch was full.
+/// A batch: what one parser (or, for unchanged files, the resume stage)
+/// collected until the batch was full.
 pub struct Batch {
     pub items: Vec<Item>,
     /// How many of the items are parsed files.

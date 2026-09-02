@@ -8,6 +8,13 @@
 //! that differs is read again with its record's instance beside it; a file
 //! with no record is new. With `--restart` every file is read again, its
 //! record's instance still beside it, so a file keeps its status.
+//!
+//! An unchanged file has nothing to parse, so it never enters the parsers'
+//! queue: this stage collects the unchanged files into batches of its own and
+//! hands them to the writer directly. (Sent one by one through the queue,
+//! half a million of them cost the run twenty seconds on thirty-two workers,
+//! the parsers waking for each and contending for the next; five seconds
+//! on one worker, which was the measure of the loss.)
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -18,8 +25,9 @@ use lru::LruCache;
 use nils_registry::schema::Type;
 use nils_registry::store::{Cell, Error, Param, Store};
 
-use crate::batch::{Prior, Task};
+use crate::batch::{Batch, Batcher, Item, Prior, Task};
 use crate::cancel::Cancel;
+use crate::progress::Progress;
 use crate::report::Counts;
 use crate::walk::{SkipReason, WalkEvent};
 
@@ -212,19 +220,39 @@ pub fn relative(root: &Path, path: &Path) -> (String, String) {
     (parts.join("/"), dir)
 }
 
-/// Run the stage: every walk event in, a task out, until the walker is done
-/// or a stop is asked. With no records (a dry run) every file is parsed.
-/// Returns what the stage counted itself: the filtered files.
+/// What the stage runs with.
+pub struct Stage<'a> {
+    pub root: &'a Path,
+    /// The source's records; none in a dry run, where every file is parsed.
+    pub records: Option<Records>,
+    pub retry_quarantine: bool,
+    pub restart: bool,
+    /// The parsed rows a batch holds (§9.1); the unchanged batches this stage
+    /// makes close at eight times that, as a parser's would.
+    pub rows: usize,
+}
+
+/// Run the stage: every walk event in, a task out to the parsers or an
+/// unchanged file into a batch for the writer, until the walker is done or a
+/// stop is asked. Returns what the stage counted itself: the filtered and
+/// the unchanged files.
 pub fn run(
-    root: &Path,
+    stage: Stage<'_>,
     rx: &Receiver<WalkEvent>,
     tx: &Sender<Task>,
-    mut records: Option<Records>,
-    retry_quarantine: bool,
-    restart: bool,
+    batches: &Sender<Batch>,
+    progress: &Progress,
     cancel: &Cancel,
 ) -> Result<Counts, Error> {
+    let Stage {
+        root,
+        mut records,
+        retry_quarantine,
+        restart,
+        rows,
+    } = stage;
     let mut counts = Counts::default();
+    let mut unchanged = Batcher::new(rows);
     for event in rx {
         if cancel.stop() {
             break;
@@ -249,7 +277,16 @@ pub fn run(
                         mtime_ns,
                         prior,
                     },
-                    Decision::Unchanged { id, quarantined } => Task::Unchanged { id, quarantined },
+                    Decision::Unchanged { id, quarantined } => {
+                        counts.unchanged();
+                        progress.unchanged();
+                        if let Some(batch) = unchanged.push(Item::Unchanged { id, quarantined })
+                            && batches.send(batch).is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
                 }
             }
             WalkEvent::Skipped {
@@ -279,6 +316,9 @@ pub fn run(
         if tx.send(task).is_err() {
             break;
         }
+    }
+    if let Some(batch) = unchanged.take() {
+        let _ = batches.send(batch);
     }
     Ok(counts)
 }
