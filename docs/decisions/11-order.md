@@ -86,7 +86,30 @@ gives 44 subjects and 82 studies in 32 s, and the same tree again with
 4 and known: `linkage purge` comes with `custody` (slice 6), the
 `ingest.quarantine` items are slice 6's, `review apply` is Wave 4's, and the
 gate's check that every v0 code comes out of a v1 digest under the v0 key with
-the maps imported (§12.4) is slice 7's, with the compare tool.
+the maps imported (§12.4) is slice 7's, with the compare tool. Slice 5, stacks,
+merged 2026-09-02 (pull request 7): the signature, the key, the index and the
+orientation as v0 computed them, the `stack` row with the class, the confidence
+and the fourteen values as read, the instance's `stack_id` set by the transaction
+that files it, `stacks` in the report and the dry run, `stacks_created` in
+`written`. What building it settled is amended into the spec as the blocks
+"Settled while building stacks (slice 5)" (§4.2, §8, §9.1, §11, §14): the
+canonical string behind the key and the pinned key of the empty signature; the
+thirteen series-level columns a signature is also made of (`image_type`,
+`image_orientation_patient`, the seven MR fields, the three CT fields,
+`series_type` on PET) left out of `field_disagreement`, derived from the
+catalogue rather than listed, because the series row holds the first instance's
+value as in v0 and the stacks hold every value the series has; `orientation_oblique`
+once per stack created, for a known class under 0.9, never for the unknown one;
+the stack cache keyed by series id and stack key, with one keyed select per batch
+on a miss. On the same development container: v0's partition of nmosd, recomputed with v0's own two
+modules (`spikes/stacks/`; the modules sit beside the script and are not
+committed), equals v1's on every one of the 2,165 series both hold, 2,534 stacks
+against 2,534 v0 groups over 493,708 instances, and the 3,180 instances only v0
+holds are the non-image SOP classes §5.3 refuses; the digest with stacks takes
+32.5 s (15,600 files/s, 32 workers, 1.7 GB peak) and the same tree again 25.8 s,
+creating nothing; 34 stacks are oblique and none has an unknown orientation. Not
+in slice 5 and known: the mix half of the check waits for the corpus's copy to
+complete, and the pack-format prototype (C11) may start.
 
 **Wave 2 — fingerprint and classify.** The columnar fingerprint pass, the pack
 loader, the MRI pack carried over, evidence storage, `nils classify`. *Gate:*
