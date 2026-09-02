@@ -42,6 +42,9 @@ pub const CACHE_ROWS: usize = 200_000;
 
 /// The kind of the review item a collision opens (§7.1).
 pub const COLLISION_KIND: &str = "identity.collision";
+/// The review item that groups the files a batch quarantined into one class
+/// (§5.3): one per batch and class, the count as evidence, no path in it.
+pub const QUARANTINE_KIND: &str = "ingest.quarantine";
 
 /// The error a batch ends with when an abort is asked while it is in flight
 /// (§10): its transaction rolls back, and the run ends as aborted.

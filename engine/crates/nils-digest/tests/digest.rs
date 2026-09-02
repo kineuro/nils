@@ -914,3 +914,47 @@ fn a_failed_batch_has_its_last_second_read_again_and_its_identities_repaired() {
         assert_eq!(third.parsed, 0, "{name}");
     }
 }
+
+#[test]
+fn a_batch_files_one_review_item_per_quarantine_class() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let s = settings(&dir);
+        let mut reg = lab.open();
+        digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let items = rows(
+            &mut reg,
+            "SELECT kind, scope, status, CAST(ref AS TEXT), CAST(evidence AS TEXT) FROM {review_item} ORDER BY id",
+        );
+        assert_eq!(items.len(), 1, "{name}");
+        assert_eq!(items[0].text(0).unwrap(), "ingest.quarantine", "{name}");
+        assert_eq!(items[0].text(1).unwrap(), "batch", "{name}");
+        assert_eq!(items[0].text(2).unwrap(), "open", "{name}");
+        let reference: serde_json::Value = serde_json::from_str(items[0].text(3).unwrap()).unwrap();
+        assert_eq!(reference["batch_id"], 1, "{name}");
+        assert_eq!(reference["class"], "not_dicom", "{name}");
+        let evidence: serde_json::Value = serde_json::from_str(items[0].text(4).unwrap()).unwrap();
+        assert_eq!(evidence, serde_json::json!({ "count": 1 }), "{name}");
+
+        // a run that keeps the quarantine files nothing new
+        digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            one(&mut reg, "SELECT COUNT(*) FROM {review_item}"),
+            1,
+            "{name}"
+        );
+
+        // a retry that quarantines again files a new item for its batch
+        let mut retry = settings(&dir);
+        retry.retry_quarantine = true;
+        digest(&retry, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let refs = texts(
+            &mut reg,
+            "SELECT CAST(ref AS TEXT) FROM {review_item} ORDER BY id",
+        );
+        assert_eq!(refs.len(), 2, "{name}");
+        let reference: serde_json::Value = serde_json::from_str(&refs[1]).unwrap();
+        assert_eq!(reference["batch_id"], 3, "{name}");
+    }
+}

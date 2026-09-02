@@ -209,8 +209,8 @@ fn init_key_digest_and_status_go_round() {
     );
     assert!(text.contains("running jobs\n  none"), "{text}");
     assert!(text.contains("batches (last 2)"), "{text}");
-    assert!(text.contains(" done     first "), "{text}");
-    assert!(text.contains(" done     second "), "{text}");
+    assert!(text.contains(" done      first "), "{text}");
+    assert!(text.contains(" done      second "), "{text}");
 
     let out = nils()
         .args(registry)
@@ -1031,4 +1031,441 @@ fn an_interrupted_digest_stops_and_resumes_to_the_same_rows() {
     let out = run(&home, &dir, None);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(snapshot(&home), reference);
+}
+
+/// A file's path, relative to `home`, for every file under it.
+fn files_under(home: &TempDir) -> Vec<String> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path.display().to_string());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(home.path(), &mut out);
+    out.sort();
+    out
+}
+
+#[test]
+fn custody_quarantine_review_and_purge_go_round() {
+    let home = home();
+    let dir = patients();
+    dir.file("p1/notes.txt", b"nothing\n");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let run = |args: &[&str]| {
+        nils()
+            .args(registry)
+            .args(args)
+            .env("USER", "tester")
+            .env_remove("NILS_DSN")
+            .output()
+            .unwrap()
+    };
+    let json = |out: &std::process::Output| -> serde_json::Value {
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", stdout(out)))
+    };
+
+    let out = nils()
+        .args(registry)
+        .args(["digest", "--workers", "1", "--json"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report = json(&out);
+    assert_eq!(report["quarantined"], 1);
+    assert_eq!(report["written"]["subjects_created"], 3);
+
+    // the quarantine list names the file, its class and its batch
+    let notes = dir.path().join("p1").join("notes.txt");
+    let notes = notes.to_str().unwrap();
+    let out = run(&["quarantine", "list"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("   1 file(s)"), "{text}");
+    assert!(
+        text.contains(&format!("      1  not_dicom      {notes}")),
+        "{text}"
+    );
+    let out = run(&["quarantine", "list", "--batch", "1", "--class", "not_dicom"]);
+    assert!(stdout(&out).contains(notes), "{}", stdout(&out));
+    let out = run(&["quarantine", "list", "--batch", "2"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("   0 file(s)   batch 2"),
+        "{}",
+        stdout(&out)
+    );
+    let out = run(&["quarantine", "list", "--class", "missing_uid", "--json"]);
+    assert_eq!(json(&out)["count"], 0);
+    let out = run(&["quarantine", "list", "--json"]);
+    let doc = json(&out);
+    assert_eq!(doc["count"], 1);
+    assert_eq!(doc["files"][0]["batch_id"], 1);
+    assert_eq!(doc["files"][0]["class"], "not_dicom");
+    assert_eq!(doc["files"][0]["path"], notes);
+    assert!(doc["files"][0]["seen_at"].as_str().unwrap().ends_with('Z'));
+
+    // one review item groups the class, with the count and no path
+    let out = run(&["review", "list"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("   1 item(s)"), "{text}");
+    assert!(
+        text.contains("     1  ingest.quarantine    open       batch    "),
+        "{text}"
+    );
+    assert!(
+        text.contains("batch 1, class not_dicom, 1 file(s)"),
+        "{text}"
+    );
+    assert!(!text.contains("notes.txt"), "{text}");
+    let out = run(&["review", "list", "--kind", "identity.collision"]);
+    assert!(stdout(&out).contains("   0 item(s)"), "{}", stdout(&out));
+    let out = run(&[
+        "review",
+        "list",
+        "--status",
+        "open",
+        "--kind",
+        "ingest.quarantine",
+        "--json",
+    ]);
+    let doc = json(&out);
+    assert_eq!(doc["count"], 1);
+    assert_eq!(doc["items"][0]["ref"]["batch_id"], 1);
+    assert_eq!(doc["items"][0]["ref"]["class"], "not_dicom");
+    assert_eq!(doc["items"][0]["evidence"]["count"], 1);
+    assert!(doc["items"][0]["decided_at"].is_null());
+    let out = run(&["review", "show", "1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.starts_with("review item 1   ingest.quarantine   open\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  about      batch 1, class not_dicom, 1 file(s)\n"),
+        "{text}"
+    );
+    assert!(text.contains("  evidence   {\"count\":1}\n"), "{text}");
+    assert!(!text.contains("decided"), "{text}");
+    let out = run(&["review", "show", "1", "--json"]);
+    assert_eq!(json(&out)["id"], 1);
+    let out = run(&["review", "show", "9"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("no review item 9"),
+        "{}",
+        stderr(&out)
+    );
+
+    // custody lists every file under the home and every command it names exists
+    let out = run(&["custody", "--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let doc = json(&out);
+    assert_eq!(doc["home"], home.path().to_str().unwrap());
+    assert_eq!(doc["backend"], "sqlite");
+    let stores = doc["stores"].as_array().unwrap();
+    let names: Vec<&str> = stores
+        .iter()
+        .map(|s| s["store"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "configuration",
+            "registry",
+            "linkage store",
+            "key store",
+            "quarantine list",
+            "job records",
+            "logs"
+        ]
+    );
+    let listed: Vec<String> = stores
+        .iter()
+        .flat_map(|s| s["files"].as_array().unwrap())
+        .map(|f| f["path"].as_str().unwrap().to_string())
+        .collect();
+    for file in files_under(&home) {
+        assert!(
+            listed.contains(&file),
+            "{file} is not in custody: {listed:?}"
+        );
+    }
+    let by_name = |name: &str| stores.iter().find(|s| s["store"] == name).unwrap();
+    assert_eq!(by_name("registry")["counts"]["subjects"], 3);
+    assert_eq!(by_name("registry")["counts"]["instances"], 4);
+    assert_eq!(by_name("registry")["counts"]["source_files"], 5);
+    assert_eq!(by_name("linkage store")["counts"]["identities"], 3);
+    assert_eq!(by_name("linkage store")["counts"]["audited_reads"], 0);
+    assert_eq!(by_name("key store")["counts"]["keys"], 1);
+    assert_eq!(by_name("key store")["counts"]["in_use"], "k");
+    assert_eq!(by_name("quarantine list")["counts"]["files"], 1);
+    assert_eq!(by_name("quarantine list")["counts"]["open_review_items"], 1);
+    assert_eq!(by_name("job records")["counts"]["jobs"], 1);
+    assert_eq!(by_name("logs")["where"], "nowhere");
+    let mut commands = Vec::new();
+    for st in stores {
+        let c = &st["commands"];
+        for key in ["read", "change", "export"] {
+            commands.extend(
+                c[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string()),
+            );
+        }
+        commands.push(c["delete"].as_str().unwrap().to_string());
+    }
+    let mut checked = 0;
+    for command in &commands {
+        let Some(rest) = command.strip_prefix("nils ") else {
+            continue;
+        };
+        let words: Vec<&str> = rest
+            .split_whitespace()
+            .take_while(|w| w.chars().next().unwrap().is_ascii_lowercase())
+            .collect();
+        let out = run(&[words.as_slice(), &["--help"]].concat());
+        assert!(
+            out.status.success(),
+            "custody names {command:?} but nils {words:?} --help fails: {}",
+            stderr(&out)
+        );
+        checked += 1;
+    }
+    assert!(checked >= 12, "{checked} commands checked: {commands:?}");
+    let out = run(&["custody"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.starts_with("nils custody   registry "), "{text}");
+    assert!(
+        text.contains("nothing is retained that is not listed here"),
+        "{text}"
+    );
+    for name in names {
+        assert!(text.contains(&format!("\n{name}\n")), "{name}: {text}");
+    }
+    assert!(
+        text.contains("  delete    nils linkage purge --subject <code> | --all"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "  where     {}   ",
+            home.path().join("registry.db").display()
+        )),
+        "{text}"
+    );
+    assert!(
+        !text.contains("SQLite keeps"),
+        "the live view lists the files instead: {text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "  where     {}   directory, mode 700\n",
+            home.path().join("keys").display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "            {}   20 bytes, mode 600\n",
+            home.path().join("keys").join("k").display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains("  now       3 subjects, 3 studies, 3 series, 4 instances, 5 source files"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  now       1 file, 1 class, 1 open review item\n"),
+        "{text}"
+    );
+    assert!(text.contains("  now       1 key, in use k\n"), "{text}");
+    assert!(text.contains("  now       1 job, 1 batch\n"), "{text}");
+
+    // purge says what it would delete and refuses without a yes
+    let p2 = code_of("P2");
+    let p3 = code_of("P3");
+    let out = run(&["linkage", "link", &p2, &p3, "--evidence", "same person"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = run(&["linkage", "purge"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--subject <code> or --all"),
+        "{}",
+        stderr(&out)
+    );
+    let out = run(&["linkage", "purge", "--subject", &p2, "--all"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let out = run(&["linkage", "purge", "--subject", &p2]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("add --yes to confirm"),
+        "{}",
+        stderr(&out)
+    );
+    let out = run(&["linkage", "purge", "--subject", "nope", "--yes"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let out = run(&["linkage", "show", &p2]);
+    assert!(stdout(&out).contains("P2   (identity "), "{}", stdout(&out));
+
+    // with a yes the subject's identifiers and linkages go; the audit and the subject stay
+    let out = run(&["linkage", "purge", "--subject", &p2, "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        format!(
+            "purged 1 identifier(s) and 1 linkage(s) of subject {p2}; the read audit and the registry's subjects stay, and a file parsed again files its identifier again (an unchanged file does not)\n"
+        )
+    );
+    let out = run(&["linkage", "show", &p2]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("  no identifiers\n"), "{text}");
+    assert!(!text.contains("linkages"), "{text}");
+    let out = run(&["linkage", "show", &p3]);
+    assert!(stdout(&out).contains("P3   (identity "), "{}", stdout(&out));
+    let out = run(&["custody", "--json"]);
+    let doc = json(&out);
+    let by_name = |name: &str| {
+        doc["stores"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["store"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_name("linkage store")["counts"]["identities"], 2);
+    assert_eq!(by_name("linkage store")["counts"]["open_linkages"], 0);
+    assert_eq!(
+        by_name("linkage store")["counts"]["audited_reads"],
+        2,
+        "one row per identifier revealed; a show of a subject without identifiers reads nothing"
+    );
+    assert_eq!(by_name("registry")["counts"]["subjects"], 3);
+    assert_eq!(by_name("job records")["counts"]["jobs"], 2);
+
+    // an unchanged digest does not file the identifier again; a parsed file does
+    let out = nils()
+        .args(registry)
+        .args(["digest", "--workers", "1", "--json"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report = json(&out);
+    assert_eq!(report["unchanged"], 5);
+    assert_eq!(report["written"]["subjects_created"], 0);
+    assert_eq!(report["written"]["identities_attached"], 0);
+    let out = run(&["linkage", "show", &p2]);
+    assert!(
+        stdout(&out).contains("  no identifiers\n"),
+        "{}",
+        stdout(&out)
+    );
+    dir.file(
+        "p2/IM_0001",
+        &mr_of("1.2.3.B", "1.2.3.B.1.1", patient("P2", Some("revisited"))),
+    );
+    let out = nils()
+        .args(registry)
+        .args(["digest", "--workers", "1", "--json"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report = json(&out);
+    assert_eq!(report["unchanged"], 4);
+    assert_eq!(report["written"]["changed"], 1);
+    assert_eq!(report["written"]["subjects_created"], 0);
+    assert_eq!(report["written"]["identities_attached"], 1);
+    let out = run(&["linkage", "show", &p2]);
+    assert!(stdout(&out).contains("P2   (identity "), "{}", stdout(&out));
+
+    // --all empties the store
+    let out = run(&["linkage", "purge", "--all", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).starts_with("purged 3 identifier(s) and 0 linkage(s) of every subject;"),
+        "{}",
+        stdout(&out)
+    );
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("linkage.db")).unwrap();
+    let rows = store.query("SELECT COUNT(*) FROM identity", &[]).unwrap();
+    assert_eq!(rows[0].int(0).unwrap(), 0);
+    let rows = store.query("SELECT COUNT(*) FROM read_audit", &[]).unwrap();
+    assert_eq!(rows[0].int(0).unwrap(), 3, "the audit survives the purge");
+    let out = run(&["linkage", "show", &p2]);
+    assert!(
+        stdout(&out).contains("  no identifiers\n"),
+        "{}",
+        stdout(&out)
+    );
+    let rows = store.query("SELECT COUNT(*) FROM id_type", &[]).unwrap();
+    assert_eq!(rows[0].int(0).unwrap(), 2);
+    // status lists the purges as the jobs they were
+    let out = run(&["status", "--json"]);
+    let doc = json(&out);
+    assert_eq!(doc["jobs"].as_array().unwrap().len(), 0, "{doc}");
+    let purges = doc["other_jobs"].as_array().unwrap();
+    assert_eq!(purges.len(), 2, "{doc}");
+    assert_eq!(purges[0]["kind"], "linkage-purge");
+    assert_eq!(purges[0]["name"], "every subject");
+    assert_eq!(purges[0]["state"], "done");
+    assert_eq!(purges[0]["args"]["identities"], 3);
+    assert_eq!(purges[0]["args"]["actor"], "tester");
+    assert_eq!(purges[1]["name"], format!("subject {p2}"));
+    assert_eq!(purges[1]["args"]["linkages"], 1);
+    let out = run(&["status"]);
+    let text = stdout(&out);
+    assert!(text.contains("other jobs (last 2)\n"), "{text}");
+    assert!(
+        text.contains("   linkage-purge every subject   done on "),
+        "{text}"
+    );
+}
+
+/// The custody page under `docs/reference` is what `nils custody --markdown`
+/// prints for a SQLite registry, with the home shown as `<home>`; set
+/// `NILS_WRITE_REFERENCE=1` to rewrite it after a change.
+#[test]
+fn the_custody_page_is_current() {
+    let home = home();
+    let out = nils()
+        .args([
+            "--registry",
+            home.path().to_str().unwrap(),
+            "custody",
+            "--markdown",
+        ])
+        .env_remove("NILS_DSN")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let rendered = stdout(&out).replace(home.path().to_str().unwrap(), "<home>");
+    assert!(!rendered.contains("/tmp/"), "{rendered}");
+    let page = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../docs/reference/custody.md")
+        .canonicalize()
+        .unwrap();
+    if std::env::var_os("NILS_WRITE_REFERENCE").is_some() {
+        std::fs::write(&page, &rendered).unwrap();
+    }
+    let current = std::fs::read_to_string(&page).unwrap();
+    assert_eq!(
+        current, rendered,
+        "docs/reference/custody.md is stale; NILS_WRITE_REFERENCE=1 cargo test -p nils --test cli the_custody_page rewrites it"
+    );
 }

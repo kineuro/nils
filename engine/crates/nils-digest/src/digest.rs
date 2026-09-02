@@ -36,7 +36,7 @@ use crate::rss::peak_rss;
 use crate::rule::Rule;
 use crate::stack::Signature;
 use crate::walk::{Filter, WalkEvent, walk};
-use crate::writer::{self, Writer};
+use crate::writer::{self, QUARANTINE_KIND, Writer};
 
 /// How many paths may wait between the walker and the resume check.
 pub const WALK_BOUND: usize = 16_384;
@@ -161,7 +161,7 @@ fn run(
 }
 
 /// The host as the job records it.
-fn hostname() -> String {
+pub fn hostname() -> String {
     std::env::var("HOSTNAME")
         .ok()
         .filter(|h| !h.trim().is_empty())
@@ -606,6 +606,34 @@ fn finish(
         let mut report = Report::new(setup, counts, elapsed, peak_rss());
         report.written = Some(written.clone());
         report.cancelled = cancelled;
+        // one review item per class the run quarantined into (§5.3): the
+        // count is the evidence, the paths stay in the quarantine list
+        let items: Vec<Vec<Param>> = report
+            .quarantine
+            .iter()
+            .filter(|c| c.count > 0)
+            .map(|c| {
+                let reference = serde_json::json!({ "batch_id": run.batch_id, "class": c.class });
+                let evidence = serde_json::json!({ "count": c.count });
+                vec![
+                    Param::from(QUARANTINE_KIND),
+                    Param::from("batch"),
+                    Param::from(reference.to_string()),
+                    Param::from(evidence.to_string()),
+                    Param::from("open"),
+                    Param::from(now.as_str()),
+                ]
+            })
+            .collect();
+        if !items.is_empty() {
+            store.insert(
+                &Insert::new(
+                    table("review_item"),
+                    &["kind", "scope", "ref", "evidence", "status", "created_at"],
+                ),
+                &items,
+            )?;
+        }
         let report_json = serde_json::to_string(&report).unwrap_or_default();
         store.update_by_id(
             table("ingest_batch"),
