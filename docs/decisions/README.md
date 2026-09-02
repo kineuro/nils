@@ -8,10 +8,10 @@ commit that made the change cites the decision. The record is the truth, not a
 snapshot.
 
 Status: **ratified 2026-09-02**, every decision and every amendment
-([15](15-ratification.md) §7 to §9). Open on evidence only: the language
-spike, the baseline measurement and the pack-format prototype (approved work), and
-on other people: Amsterdam's cluster and Vienna's answers. The name is NILS (D31,
-2026-09-02).
+([15](15-ratification.md) §7 to §9). The language spike closed the same
+day (D2: Rust, [02](02-engine.md)). Open on evidence only: the baseline
+measurement and the pack-format prototype (approved work), and on other people:
+Amsterdam's cluster and Vienna's answers. The name is NILS (D31, 2026-09-02).
 
 This directory is the public copy of the record, which is kept in the private
 repository `kineuro/nils-design` and copied here after a scrub pass
