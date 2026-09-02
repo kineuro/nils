@@ -1,0 +1,18 @@
+[package]
+name = "nils-registry"
+description = "The registry of NILS: the schema declared once, the SQLite and Postgres dialects, migrations, the linkage store and the key store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+postgres.workspace = true
+rusqlite.workspace = true
+
+[lints]
+workspace = true

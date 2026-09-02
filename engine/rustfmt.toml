@@ -1,0 +1,3 @@
+# rustfmt with its defaults for the 2024 style edition; `cargo fmt --all --check` is
+# the CI step, so an editor running rustfmt directly gets the same answer.
+style_edition = "2024"

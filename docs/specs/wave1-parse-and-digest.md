@@ -1,8 +1,8 @@
 # Wave 1: parse and digest
 
 *Specification, first draft 2026-09-02; amended the same day after review (studies
-and sessions, §4.4; one key, §7.2). This is the spec the first slice of engine
-code follows; the design record ([`docs/decisions/`](../decisions/)) says why each
+and sessions, §4.4; one key, §7.2; the toolchain, §3). This is the spec the first
+slice of engine code follows; the design record ([`docs/decisions/`](../decisions/)) says why each
 choice was made, and this document cites it by id. It implements D2, D3, D4, D6,
 D7, D13, D17, C3, C6, C36, C37 and C38 and closes at the gate in §12.*
 
@@ -68,8 +68,12 @@ A Cargo workspace under `engine/`:
 | `nils-digest` | the walker, the pipeline, identity resolution, stack signatures, the writer, jobs, resume |
 | `nils` | the binary: the CLI, config, `custody`, output formatting |
 
-Rust stable, edition 2024, `rust-version` pinned in the workspace and raised
-deliberately. Every source file starts with `// SPDX-License-Identifier:
+Rust 1.98.0 (the current stable at the opening of the wave), edition 2024. The
+toolchain is pinned in `engine/rust-toolchain.toml`, the workspace's `rust-version`
+matches it, CI reads the same file, and a new Rust release is adopted by raising
+both in a pull request of its own: Rust's compatibility guarantee means the newest
+toolchain costs nothing and the pin means every machine builds the same thing. Every
+source file starts with `// SPDX-License-Identifier:
 AGPL-3.0-only` (10; 15, R6). Dependencies are chosen for Wave 1 only: `dicom-object`
 and `dicom-json` (the reader and the DICOM JSON model), `rusqlite` with the bundled
 SQLite, `postgres` (synchronous, with `COPY`), `blake2`, `chacha20poly1305`, `clap`,

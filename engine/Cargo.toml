@@ -1,0 +1,37 @@
+# The NILS engine: one workspace, four crates (docs/specs/wave1-parse-and-digest.md, §3).
+# The toolchain is pinned in rust-toolchain.toml and rust-version below says the same;
+# both move together, deliberately, in a pull request of their own.
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "1.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.98"
+license = "AGPL-3.0-only"
+repository = "https://github.com/kineuro/nils"
+homepage = "https://kineuro.se"
+authors = ["Karolinska Institutet Neuro Research Group"]
+publish = false
+
+# Every dependency of Wave 1 is declared here once, when the slice that uses it lands,
+# and the crates take it with `workspace = true`.
+[workspace.dependencies]
+nils-dicom = { path = "crates/nils-dicom" }
+nils-registry = { path = "crates/nils-registry" }
+nils-digest = { path = "crates/nils-digest" }
+
+clap = { version = "4.6", features = ["derive"] }
+postgres = "0.19"
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[workspace.lints.rust]
+# CI lints with -D warnings, so an unsafe block needs an explicit allow with its reason.
+unsafe_code = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1

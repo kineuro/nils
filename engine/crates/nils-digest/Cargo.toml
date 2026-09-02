@@ -1,0 +1,18 @@
+[package]
+name = "nils-digest"
+description = "The digest of NILS: the walker, the pipeline, identity resolution, stack signatures, the writer, jobs and resume"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+nils-dicom.workspace = true
+nils-registry.workspace = true
+
+[lints]
+workspace = true

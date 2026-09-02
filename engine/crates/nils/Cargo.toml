@@ -1,0 +1,25 @@
+[package]
+name = "nils"
+description = "NILS, the neuroimaging registry engine: one binary that digests DICOM into a registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nils"
+path = "src/main.rs"
+
+[dependencies]
+nils-dicom.workspace = true
+nils-digest.workspace = true
+nils-registry.workspace = true
+
+clap.workspace = true
+
+[lints]
+workspace = true

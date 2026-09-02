@@ -1,0 +1,56 @@
+name: engine-build
+# The six release targets of the language spike (docs/decisions/15, C1): `nils` is
+# built natively on each runner, the way a release is, `nils --version` proves it
+# runs, and the binary is kept as an artifact. ci.yml calls this on every pull
+# request and release.yml on every tag, so the two can never drift. A failing target
+# is a finding on its own; the matrix never stops early.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: nils ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x86_64, runner: ubuntu-latest, exe: "" }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm, exe: "" }
+          - { target: macos-x86_64, runner: macos-15-intel, exe: "" }
+          - { target: macos-arm64, runner: macos-latest, exe: "" }
+          - { target: windows-x86_64, runner: windows-latest, exe: ".exe" }
+          - { target: windows-arm64, runner: windows-11-arm, exe: ".exe" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: the pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' engine/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - name: build
+        working-directory: engine
+        run: cargo build --release --locked -p nils
+      - name: nils --version
+        working-directory: engine
+        run: |
+          ./target/release/nils${{ matrix.exe }} --version
+          mkdir -p ../bin
+          cp ./target/release/nils${{ matrix.exe }} ../bin/nils-${{ matrix.target }}${{ matrix.exe }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nils-${{ matrix.target }}
+          path: bin/nils-${{ matrix.target }}${{ matrix.exe }}
+          if-no-files-found: error
+          retention-days: 7

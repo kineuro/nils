@@ -4,7 +4,7 @@
 .idea/
 .vscode/
 
-# Build output and environments; extended when the engine's language is decided
+# Build output and environments (the engine builds into engine/target/)
 target/
 dist/
 node_modules/
