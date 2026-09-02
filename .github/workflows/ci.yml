@@ -1,0 +1,27 @@
+name: ci
+# Runs on every pull request and on main. The job named "ci" is the status check that
+# main requires. Format, lint and tests for the engine join it when the language spike
+# has reported (docs/decisions/15, R8).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: text hygiene
+        run: scripts/check-hygiene.sh
+      - name: SPDX headers
+        run: scripts/check-spdx.sh
+      - name: DCO on contracts/ and sdk/
+        if: github.event_name == 'pull_request'
+        run: scripts/check-dco.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"

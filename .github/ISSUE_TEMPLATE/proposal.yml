@@ -1,0 +1,21 @@
+name: Proposal
+description: A change to what NILS does or how it is built.
+labels: [proposal]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you propose
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why, and for whom
+    validations:
+      required: true
+  - type: input
+    id: decisions
+    attributes:
+      label: Decisions this touches
+      description: Ids from docs/decisions/ (D5, C18, ...), if any.
