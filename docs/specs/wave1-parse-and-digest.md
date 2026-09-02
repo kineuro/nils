@@ -1,8 +1,10 @@
 # Wave 1: parse and digest
 
 *Specification, first draft 2026-09-02; amended the same day after review (studies
-and sessions, §4.4; one key, §7.2; the toolchain, §3). This is the spec the first
-slice of engine code follows; the design record ([`docs/decisions/`](../decisions/)) says why each
+and sessions, §4.4; one key, §7.2; the toolchain, §3) and as the slices of §14 were
+built (the blocks headed "Settled while building", in §4.2, §5.2, §6.2, §9, §10,
+§11 and §13; the measurements in §9.2 and §15). This is the spec the engine code
+follows; the design record ([`docs/decisions/`](../decisions/)) says why each
 choice was made, and this document cites it by id. It implements D2, D3, D4, D6,
 D7, D13, D17, C3, C6, C36, C37 and C38 and closes at the gate in §12.*
 
@@ -123,14 +125,16 @@ Postgres 16 in a service container.
 
 ### 4.2 Tables
 
-Registry (`registry.db`, or the `nils` schema on Postgres). Every table that the
-digest writes carries `first_batch_id`, the batch that created the row; rows are
-never rewritten by a later batch in Wave 1 (a changed file is a diagnostic, §5.2).
+Registry (`registry.db`, or on Postgres the schema `nils.toml` names, `nils` by
+default). Every table that the digest writes carries `first_batch_id`, the batch
+that created the row; rows are never rewritten by a later batch in Wave 1 (a
+changed file is a diagnostic, §5.2; a stored null is filled by the first file
+that has a value, §9.1, which is not a rewrite).
 
 - `registry_meta`: `key`, `value`. Holds `registry_id` (a UUID), `schema_version`,
-  `epoch`, `created_at`, `pseudonym_scheme`, `key` (a key *name*, §7.2),
-  `display_length`, `session_scheme` (json, §4.4).
-- `job`: `id`, `kind`, `args` (json), `state` (`queued`, `running`, `done`,
+  `epoch`, `created_at`, `pseudonym_scheme`, `pseudonym_key` (a key *name*,
+  §7.2), `display_length`, `session_scheme` (json, §4.4).
+- `job`: `id`, `kind`, `name`, `args` (json), `state` (`queued`, `running`, `done`,
   `failed`, `cancelled`), `pid`, `host`, `started_at`, `heartbeat_at`,
   `finished_at`, `progress` (json), `error`.
 - `source`: `id`, `root` (as given), `root_canonical`, `first_seen_at`.
@@ -139,12 +143,14 @@ never rewritten by a later batch in Wave 1 (a changed file is a diagnostic, §5.
   binary's version), `started_at`, `finished_at`, `state`, `counts` (json: the
   diagnostics report of §11), `epoch_after`.
 - `source_file`: `id`, `source_id`, `batch_id` (the last batch that examined the
-  path), `path` (relative to the root, forward slashes), `size`, `mtime_ns`,
+  path), `dir` (the path's directory, what the resume check queries by, §5.2),
+  `path` (relative to the root, forward slashes), `size`, `mtime_ns`,
   `status` (`ingested`, `duplicate`, `quarantined`, `skipped`, `gone`), `reason`
-  (the quarantine class of §5.3, `symlink` for a skipped one, or null), `detail`
-  (text, or null), `instance_id` (null unless `ingested` or `duplicate`),
-  `seen_at`. Unique `(source_id, path)`. This is D17's "records the path of
-  every file".
+  (the quarantine class of §5.3, `symlink` or `special` for a skipped one, or
+  null), `detail` (text, or null), `instance_id` (null unless `ingested` or
+  `duplicate`), `seen_at`. Unique `(source_id, path)`; indexed on
+  `(source_id, dir)`, `(batch_id, status)` and `instance_id`. This is D17's
+  "records the path of every file".
 - `subject`: `id`, `code` (unique), `code_digest` (bytes, the full digest under the
   scheme), `birth_date`, `sex`, `first_batch_id`, `created_at`. Nothing else: names
   never enter (D13), and the demographics v0 collected through its importer arrive
@@ -178,11 +184,16 @@ never rewritten by a later batch in Wave 1 (a changed file is a diagnostic, §5.
   staged results, precedence) is Wave 4's; Wave 1 creates the table with these
   columns so that its items have a home and are not a log line.
 
-Linkage store (`linkage.db` beside the registry, mode 600; the `linkage` schema on
-Postgres). Separate on purpose: it is the only store with identifying data, its
-contents are unreadable without the registry's key (§7.2), and it can be backed
-up, exported and purged on its own (D13, C38).
+Linkage store (`linkage.db` beside the registry, mode 600; on Postgres the schema
+`<schema>_linkage`, `nils_linkage` by default). Separate on purpose: it is the
+only store with identifying data, its contents are unreadable without the
+registry's key (§7.2), and it can be backed up, exported and purged on its own
+(D13, C38).
 
+- `linkage_meta`: `key`, `value`. Holds the store's own `schema_version`, so the
+  two stores migrate separately; slice 4 adds the `registry_id` of the registry
+  it belongs to, so that a linkage store copied next to the wrong registry is
+  refused, not joined.
 - `id_type`: `id`, `name`, `description`. Seeded with `patient-id` (DICOM
   PatientID) and `study-instance-uid` (the fallback of §7.3); sites add their own
   (`personal-number`, a study's own scheme) with `nils linkage id-type add`.
@@ -302,6 +313,32 @@ This is what "resume by default" means: the second `nils digest <root>` after an
 interrupted first one does the remaining work, and a `nils digest` over a tree that
 grew since last month ingests only what is new. `--restart` ignores `source_file`
 for the run and re-parses everything; it does not delete rows.
+
+Settled while building the writer (slice 3):
+
+- The check is one query per directory on `(source_id, dir)`, with the paths of
+  that directory held in a small LRU while its files are in flight; a source
+  with no rows at all is not asked. An unchanged file is counted (`unchanged` in
+  the report) and its row is touched (`batch_id`, `seen_at`), because
+  `batch_id` is what says a path was examined by this batch, and that is what
+  gone-marking reads. A quarantined file left alone is `quarantine_kept`.
+- Only an instance's own file carries its instance forward (the file
+  `instance.source_file_id` points back to). A duplicate is filed afresh against
+  whatever it holds now; a changed duplicate is not the instance changing.
+- A changed file is parsed again and, when its SOP instance is known, filed
+  under it: `ingested` when the instance is its own, `duplicate` otherwise, and
+  in both cases a `file_changed` diagnostic whose subject says what the new
+  content was (`new_sop`, an instance nobody had; `same_sop`, its own instance
+  as before; `other_sop`, another instance's). A file that was `gone` and is
+  back unchanged is its instance's own file again, not a duplicate of it.
+- Paths are marked `gone` only by a run that could have seen everything: the
+  `files` knob at `all` and no `walk_error`. A filtered run or one with an
+  unlistable directory leaves the absent paths as they were.
+- `--restart` reads every file again; a file whose instance is its own is
+  refiled as that instance (`same_sop` when the file changed), and nothing is
+  deleted.
+- Special files (sockets, devices, pipes) are recorded as `skipped` with reason
+  `special`, beside `symlink`.
 
 ### 5.3 Quarantine classes
 
@@ -665,15 +702,18 @@ refer to a stack by id and key.
 
 ```
 walker pool (8) ──files──▶ parsers (workers) ──batches──▶ writer (1) ──▶ registry
-                  cap 16k            cap 2 × workers                     linkage store
+                  cap 16k          cap 2 × workers, at most 16           linkage store
 ```
 
 - **Parsers**: `--workers` threads, default the number of cores. Each reads a
   file (§6.1), extracts the catalogue, computes the stack signature, applies the
   identity rule (the value only; resolution is the writer's), and appends one
-  row set to its current batch. A batch closes at 2,000 instances or 64 MB, whichever
-  first, and goes to the writer. Refusals are rows too (`source_file` with a
-  reason), so quarantine is written in the same transactions as the data.
+  row set to its current batch. A batch closes at `batch_rows` parsed files
+  (2,000) or at eight times that many items of any kind, whichever first, and
+  goes to the writer; the second bound is what keeps a tree of unchanged files
+  moving through the writer in transactions of a size it can commit quickly.
+  Refusals are rows too (`source_file` with a reason), so quarantine is written
+  in the same transactions as the data.
 - **Writer**: one thread, one transaction per batch, in this order: subjects
   (resolution, §7.4, with an in-memory map of identifier lookup to subject id),
   studies, series and their detail tables (`ON CONFLICT DO NOTHING`; the
@@ -687,11 +727,39 @@ walker pool (8) ──files──▶ parsers (workers) ──batches──▶ wr
   file), `source_file` rows, diagnostic increments, batch counts. Then commit, then
   the linkage store's rows for the subjects created (§9.3).
 - **Bounds**: every channel is bounded (16,384 paths between the walker and the
-  parsers, two batches per worker between the parsers and the writer), so a slow
-  writer stops the parsers and a slow disk stops the walker. The only structures that grow with the corpus are
-  the subject map (a few hundred bytes per subject) and the LRU caches; per-subject
+  parsers, two batches per worker between the parsers and the writer, and never
+  more than sixteen), so a slow writer stops the parsers and a slow disk stops
+  the walker. The only structures that grow with the corpus are the subject map
+  (a few hundred bytes per subject) and the LRU caches; per-subject
   materialization, id lists and pickled batches do not exist (02). The Wave 1
   target for peak RSS is 4 GB at any corpus size, against D6's ceiling of 16.
+
+Settled while building the writer (slice 3):
+
+- The writer keeps, beside each cached subject, study and series id, one 32-bit
+  hash per catalogue column of that row. A later file of a known row is
+  compared hash by hash: a stored null against a value is a fill (the null was
+  no value, and the first file that has one supplies it, as an `UPDATE` of that
+  column alone); two values that differ are a `field_disagreement` counted per
+  batch and kind, whose sample is `<table>.<field>=<shape>`. The columns that
+  vary per instance by nature (`VARIES_PER_INSTANCE` in the catalogue) are left
+  out of the series comparison, and a file of another modality than the series
+  row is compared on the series columns only, never on the other modality's
+  detail table.
+- Cache misses are one keyed select per batch and table (`WHERE uid IN (...)`),
+  never a query per file; each of the three caches holds 200,000 rows.
+- The batch queue was two batches per worker with no ceiling. On a 64-core host
+  that is 128 closed batches and, with the open batch each parser holds, a
+  quarter of a million parsed rows in flight: the million digested at 4.1 GB
+  peak RSS on SQLite and Postgres alike, and the dry run alone at 2.9 GB. Capped
+  at sixteen, the same runs peak at 2.0 to 2.1 GB and the SQLite digest is a
+  third faster (§9.2), since a full queue means the writer is the wall either
+  way. On eight workers the dry run peaks at 0.4 GB. What remains is the open
+  batches, one per parser; the budget slice (§14, 8) decides whether
+  `batch_rows` should shrink with the worker count.
+- The epoch advances once per committed batch, including a batch that held only
+  unchanged files: the counter says "the registry was examined", not "the
+  registry grew", and a consumer that polls it sees every run.
 
 ### 9.2 Backends
 
@@ -705,6 +773,41 @@ v0's writer committed every hundred rows through one connection with the
 database's parallelism turned off; the budget (§12.5) is what shows whether the
 writer is the wall, and slice 3 of §14 measures both paths before the parser is
 tuned.
+
+Measured while building the writer (slice 3), on the synthetic million of §12.6
+(1,011,783 files: 1,000,000 instances, 9,783 duplicate paths, 2,000 refused; 862
+subjects, 1,711 studies, 7,622 series; 5.7 GB at 4 KB of pixel data per file) on
+the development container (64 cores, 256 GB, the corpus on local NVMe and warm in
+the ZFS cache, PostgreSQL 17 on the same host with 8 GB of shared buffers), 64
+workers, `batch_rows` 2,000, the binary at the end of the slice:
+
+| run | elapsed | files/s | peak RSS | batches |
+|---|---|---|---|---|
+| dry run | 5.8 s | 175,000 | 2.0 GB | |
+| SQLite, first digest | 32.3 s | 31,300 | 2.1 GB | 506 |
+| Postgres, `COPY` and merge | 65.3 s | 15,500 | 2.0 GB | 505 |
+| Postgres, multi-row `INSERT` | 70.0 s | 14,500 | 2.0 GB | 505 |
+| SQLite, the same tree again | 65.9 s | 15,400 | 0.3 GB | 82 |
+| Postgres, the same tree again | 37.3 s | 27,100 | 0.2 GB | 82 |
+
+Every count is identical across the three backends and equal to the dry run's
+and the generator's manifest (§12.6). The registry is 538 MB on SQLite and
+1,015 MB on Postgres for the million. The Postgres wall is the server: during
+the digest one backend sits at ninety percent of a core merging the temporary
+tables into the indexed ones, while the parsers idle on the full queue, and the
+two bulk paths differ by seven percent because the transfer is not where the
+time goes. `COPY` stays the default; `NILS_PG_BULK=insert` selects the other
+path, kept so that the comparison can be repeated on the baseline host and over
+a real network, where the round trips the multi-row insert makes (a statement per 1,000 rows,
+or fewer when the row is wide, under the protocol's 65,535 parameters) may
+weigh more than they do on localhost.
+The temporary tables are created once per connection and truncated before each
+`COPY`. The second pass over an
+unchanged tree is bound by the writer touching a million `source_file` rows
+(`batch_id` and `seen_at`, §5.2), which on SQLite costs more than ingesting
+them did; the resume slice (§14, 6) owns that number. What the table does not
+say: a real digest walks NFS from a cold cache, and there the reader, not the
+writer, is expected to be the wall, which is the budget's measurement (§12.5).
 
 ### 9.3 Two stores, one order
 
@@ -730,6 +833,15 @@ seconds and printed to stderr on a TTY as one updating line, or as one JSON line
 per interval with `--json`. `nils status` reads the job rows and the batch counts,
 and `nils status --batch <id>` prints the full report of §11.
 
+Settled while building the writer (slice 3): the job row and its heartbeat, the
+refusal while another job's heartbeat is fresh (exit code 3), the takeover of a
+stale one (marked `failed` with the reason in `error`, then the new batch
+resumes, §5.2), the batch row with its resolved config and its counts, and
+`nils status` (the registry's metadata, the running jobs, the last batches; with
+`--batch`, one batch's counts). The heartbeat carries the same JSON the
+progress line prints, so a `status` from another shell sees where a digest is.
+SIGINT handling is slice 6's, with the kill-and-resume test that proves it.
+
 ## 11. Knobs, diagnostics and the report (C37, D7)
 
 The digest declares its knobs as data; `nils digest --describe` prints them with
@@ -751,6 +863,17 @@ their defaults and types, and they are recorded, resolved, in `ingest_batch.conf
 This is the seed of the affordance API (`describe` and `diagnose`, C20): in Wave
 4 the same declaration is served over HTTP and an agent proposes changes to it as
 review items; in Wave 1 a human edits a file and runs the digest again.
+
+Settled while building the writer (slice 3): `workers`, `walk_threads`,
+`batch_rows`, `files`, `retry_quarantine` and `name` are flags of `nils digest`
+and `restart` and the binary's version are recorded beside them in the batch's
+config (a dry run writes no batch row);
+`sop_classes`, `modalities` and `charset_fallback` are declared with their
+defaults and not yet settable from the command line, and `identity` is slice
+4's, with the rule file. The report gained `unchanged`, `skipped` by reason,
+`walk_errors` and, when writing, a `written` block (the batch id, the epoch
+after, batches committed, instances ingested and duplicate, files changed,
+quarantine kept, paths gone, subjects, studies, series and stacks created).
 
 The diagnostics are counted per batch and kind, with `scope` and `ref_id` where
 one row is the subject and a `sample` of at most ten shapes:
@@ -861,6 +984,19 @@ in the repository that a deliberate commit updates. The release workflow builds
 a small synthetic tree on each. The test suite is green on SQLite and on
 Postgres 16.
 
+Settled while building the writer (slice 3): the generator is the `corpus`
+example of `nils-dicom` (`cargo run --release -p nils-dicom --example corpus`),
+written on the crate's own Part 10 writer, so that what the reader reads is
+what the writer wrote and no second implementation of the file format exists.
+From a seed it writes subjects with one to three studies of one to eight series
+each, MR, Enhanced MR, CT and PT in v0's proportions, in the three file forms
+and both VR encodings, three character sets, a share of subjects without a
+PatientID, one duplicate path per hundred instances and one refused file per
+five hundred, cycling through the classes of §5.3; it prints a manifest with the
+counts a digest must reproduce. A million instances take 26 s to write and
+5.7 GB at 4 KB of pixel data per file (`tools/synth/README.md`). The CI-time
+generation and the regression gate are slice 8's, when the baseline is known.
+
 ### 12.7 Corpus hygiene
 
 Every adjudicated divergence becomes a fixture in `nils-dicom`'s tests: a
@@ -871,13 +1007,15 @@ start of the verified corpus (C12).
 ## 13. CLI reference for Wave 1
 
 ```
-nils init [--backend sqlite|postgres] [--dsn ...] [--scheme blake2b-32|blake2b-8]
-          --key <name> [--display-length 12] [--session-scheme <file>]
+nils [--registry <dir>] <command>              # else NILS_REGISTRY, else the working directory
+nils init [--backend sqlite|postgres] [--dsn ...] [--schema nils]
+          [--scheme blake2b-32|blake2b-8] --key <name> [--display-length 12]
+          [--session-scheme <file>]
 nils key add <name> [--from-file <path>]      # otherwise from stdin
 nils key list | remove <name>
-nils digest <root> [--name <label>] [--workers N] [--files all|dcm|no-ext|<glob>]
-            [--identity-rule <file>] [--retry-quarantine] [--restart] [--dry-run]
-            [--describe] [--json]
+nils digest <root> [--name <label>] [--workers N] [--walk-threads N] [--batch-rows N]
+            [--files all|dcm|no-ext|<glob>] [--identity-rule <file>]
+            [--retry-quarantine] [--restart] [--dry-run] [--describe] [--json]
 nils status [--batch <id>] [--json]
 nils quarantine list [--batch <id>] [--class <c>] [--json]
 nils review list [--kind <k>] [--status open] | show <id> | apply <id> --decision <d>
@@ -896,6 +1034,25 @@ registry, the linkage store, the key store, the quarantine list, the job records
 and the logs: where it lives, which classes it holds, how long it is kept, and
 the command that exports, changes or deletes it (C38); every command it names
 exists in this list, and nothing is retained that the table does not show.
+
+Settled while building the writer (slice 3):
+
+- A registry is a **home**: the directory `--registry` names (else
+  `NILS_REGISTRY`, else the working directory), holding `nils.toml` (backend,
+  DSN, Postgres schema, key store path), the key store `keys/` and, on SQLite,
+  `registry.db` and `linkage.db`. On Postgres the two stores are the schemas
+  `<schema>` and `<schema>_linkage` of the database the DSN names; `NILS_DSN`
+  in the environment overrides the DSN in `nils.toml`, so a file checked into a
+  project need not hold a password. `nils init` refuses a home that is already
+  one and a schema that already holds a registry.
+- The key is added before `init` (`nils key add`), `init` names it and reads it
+  once to prove it is there, and every later command reads it from the store by
+  that name; `key remove` refuses the key the registry uses.
+- Exit codes: 0 done; 1 the command failed; 2 the arguments or the
+  configuration are wrong; 3 another job holds the registry (§10).
+- `--identity-rule` is listed and not yet accepted (slice 4); `custody`,
+  `quarantine`, `review`, `linkage` and `doctor` arrive with the slices that
+  give them something to do.
 
 ## 14. Order of work
 
@@ -949,8 +1106,14 @@ record and does not gate Wave 1.
 - **Hashing.** No content hash in Wave 1. The anonymizer and the custody page
   may want one; if so it is a knob (`--hash`) that reads the whole file, and the
   cost is measured before it is on by default.
-- **The Postgres bulk path.** `COPY` plus merge is the plan; slice 3 measures it
-  against multi-row inserts and the spec is amended with the numbers.
+- **The Postgres bulk path.** Answered by slice 3 (§9.2): `COPY` plus merge
+  digests the million in 65 s against 70 s for multi-row inserts on the same
+  host, both bound by the server's merge on one core, so `COPY` stays the
+  default and the insert path stays selectable for the measurement over a real
+  network. What the wave still has to learn is whether the Postgres registry
+  should be digested with more than one writer connection, which is the
+  budget's question (§14, 8) if the gate's runs show the server as the wall
+  on the baseline host too.
 - **Identity rule grammar.** Named groups over one field cover the two cases C37
   named; a rule that combines fields, or normalizes case and separators before
   hashing, waits for a source that needs it, and is then a knob, not code.
