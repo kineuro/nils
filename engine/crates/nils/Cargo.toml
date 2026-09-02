@@ -20,7 +20,12 @@ nils-digest.workspace = true
 nils-registry.workspace = true
 
 clap.workspace = true
+csv.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+dicom-core.workspace = true
+dicom-dictionary-std.workspace = true
 
 [lints]
 workspace = true

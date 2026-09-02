@@ -333,6 +333,14 @@ impl Home {
 
         let mut linkage = self.open_store(&config, Kind::Linkage)?;
         migrate::migrate(&mut linkage, Kind::Linkage)?;
+        // the linkage store carries the id of the registry it belongs to, so
+        // that one copied next to another registry is refused (§4.2)
+        set_meta_in(
+            &mut linkage,
+            "linkage_meta",
+            "registry_id",
+            &meta.registry_id,
+        )?;
         drop(linkage);
 
         self.write_config(&config)?;
@@ -393,7 +401,11 @@ impl Meta {
 }
 
 fn set_meta(store: &mut Store, key: &str, value: &str) -> Result<(), store::Error> {
-    let table = store.qualified("registry_meta");
+    set_meta_in(store, "registry_meta", key, value)
+}
+
+fn set_meta_in(store: &mut Store, table: &str, key: &str, value: &str) -> Result<(), store::Error> {
+    let table = store.qualified(table);
     let d = store.dialect();
     let sql = format!(
         "INSERT INTO {table} (key, value) VALUES ({}, {}) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -402,6 +414,18 @@ fn set_meta(store: &mut Store, key: &str, value: &str) -> Result<(), store::Erro
     );
     store.execute(&sql, &[Param::from(key), Param::from(value)])?;
     Ok(())
+}
+
+fn get_meta_in(store: &mut Store, table: &str, key: &str) -> Result<Option<String>, store::Error> {
+    let table = store.qualified(table);
+    let sql = format!(
+        "SELECT value FROM {table} WHERE key = {}",
+        store.dialect().param(1, crate::schema::Type::Text)
+    );
+    match store.query_opt(&sql, &[Param::from(key)])? {
+        Some(row) => Ok(Some(row.text(0)?.to_string())),
+        None => Ok(None),
+    }
 }
 
 fn read_meta(store: &mut Store) -> Result<Meta, HomeError> {
@@ -503,10 +527,27 @@ impl Registry {
         self.home.open_store(&self.config, Kind::Registry)
     }
 
-    /// The linkage store, migrated if behind and refused if ahead.
+    /// The linkage store, migrated if behind and refused if ahead, and
+    /// refused when it belongs to another registry (§4.2). A store from
+    /// before slice 4 carries no registry id yet and is claimed on first open.
     pub fn open_linkage(&self) -> Result<Store, HomeError> {
         let mut store = self.home.open_store(&self.config, Kind::Linkage)?;
         migrate::migrate(&mut store, Kind::Linkage)?;
+        match get_meta_in(&mut store, "linkage_meta", "registry_id")? {
+            Some(id) if id == self.meta.registry_id => {}
+            Some(id) => {
+                return Err(HomeError::Message(format!(
+                    "the linkage store belongs to registry {id}, not to this one ({}); it was copied from another registry",
+                    self.meta.registry_id
+                )));
+            }
+            None => set_meta_in(
+                &mut store,
+                "linkage_meta",
+                "registry_id",
+                &self.meta.registry_id,
+            )?,
+        }
         Ok(store)
     }
 
@@ -581,6 +622,16 @@ mod tests {
             .int(0)
             .unwrap();
         assert_eq!(n, 2);
+        let owner = linkage
+            .query(
+                "SELECT value FROM linkage_meta WHERE key = 'registry_id'",
+                &[],
+            )
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string();
+        assert_eq!(owner, again.meta().registry_id);
         assert_eq!(
             migrate::standing(again.store(), Kind::Registry).unwrap(),
             Standing::Current
@@ -609,6 +660,43 @@ mod tests {
         drop(reg);
         let err = home.open().unwrap_err().to_string();
         assert!(err.contains("ahead of this binary"), "{err}");
+    }
+
+    #[test]
+    fn a_linkage_store_of_another_registry_is_refused_and_an_unclaimed_one_is_claimed() {
+        let dir = TempDir::new("home-linkage");
+        let a = Home::new(dir.path().join("a"));
+        a.keys(None).add("k", b"x").unwrap();
+        let reg_a = a.init(&opts("k")).unwrap();
+        let b = Home::new(dir.path().join("b"));
+        b.keys(None).add("k", b"x").unwrap();
+        let reg_b = b.init(&opts("k")).unwrap();
+        // b's linkage store copied next to a
+        fs::copy(
+            dir.path().join("b").join(LINKAGE_DB),
+            dir.path().join("a").join(LINKAGE_DB),
+        )
+        .unwrap();
+        let err = reg_a.open_linkage().unwrap_err().to_string();
+        assert!(err.contains("belongs to registry"), "{err}");
+        assert!(err.contains(&reg_b.meta().registry_id), "{err}");
+        // a store from before slice 4 has no owner and is claimed
+        let mut store = reg_b.open_linkage().unwrap();
+        store
+            .execute("DELETE FROM linkage_meta WHERE key = 'registry_id'", &[])
+            .unwrap();
+        drop(store);
+        let mut store = reg_b.open_linkage().unwrap();
+        let owner = store
+            .query(
+                "SELECT value FROM linkage_meta WHERE key = 'registry_id'",
+                &[],
+            )
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string();
+        assert_eq!(owner, reg_b.meta().registry_id);
     }
 
     #[test]

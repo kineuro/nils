@@ -61,11 +61,69 @@ pub fn sop_class_name(uid: &str) -> Option<&'static str> {
     })
 }
 
-/// The two identifying elements, read for the subject key and never stored.
+/// The fields the identity rule reads (§7.3), each a DICOM keyword resolved
+/// to its tag once. The default is the default rule's one field, PatientID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityFields {
+    fields: Vec<(String, Tag)>,
+}
+
+/// A keyword the dictionary does not know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownKeyword(pub String);
+
+impl std::fmt::Display for UnknownKeyword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is not a DICOM keyword", self.0)
+    }
+}
+
+impl std::error::Error for UnknownKeyword {}
+
+impl Default for IdentityFields {
+    fn default() -> IdentityFields {
+        IdentityFields::new(&["PatientID"]).expect("PatientID is a keyword")
+    }
+}
+
+impl IdentityFields {
+    /// Resolve keywords in the order the rule tries them.
+    pub fn new(keywords: &[&str]) -> Result<IdentityFields, UnknownKeyword> {
+        let mut fields = Vec::with_capacity(keywords.len());
+        for k in keywords {
+            let tag = tag_of(k).ok_or_else(|| UnknownKeyword(k.to_string()))?;
+            fields.push((k.to_string(), tag));
+        }
+        Ok(IdentityFields { fields })
+    }
+
+    pub fn keywords(&self) -> impl Iterator<Item = &str> {
+        self.fields.iter().map(|(k, _)| k.as_str())
+    }
+
+    pub fn len(&self) -> usize {
+        self.fields.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+}
+
+/// The tag of a keyword, when the dictionary has it as one tag.
+pub fn tag_of(keyword: &str) -> Option<Tag> {
+    match StandardDataDictionary.by_name(keyword)?.tag {
+        dicom_core::dictionary::TagRange::Single(tag) => Some(tag),
+        _ => None,
+    }
+}
+
+/// The identifying values, read for the subject key and never stored: one
+/// slot per field of the [`IdentityFields`] the file was extracted with, in
+/// that order, none when the element is absent, empty or not text.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Identity {
-    pub patient_id: Option<String>,
-    pub patient_name: Option<String>,
+    pub values: Vec<Option<String>>,
 }
 
 /// One accepted file: its keys, its catalogue values and its diagnostics.
@@ -99,10 +157,16 @@ impl Extracted {
     }
 }
 
-/// Read and extract the file at `path`.
+/// Read and extract the file at `path`, with the default identity fields.
 pub fn extract(path: &Path) -> Result<Extracted, Refusal> {
+    extract_with(path, &IdentityFields::default())
+}
+
+/// Read and extract the file at `path`, reading the identity fields of a
+/// rule.
+pub fn extract_with(path: &Path, fields: &IdentityFields) -> Result<Extracted, Refusal> {
     let header = read(path).map_err(refusal_of)?;
-    extract_header(header)
+    extract_header(header, fields)
 }
 
 /// The quarantine class of a read failure.
@@ -115,7 +179,7 @@ pub fn refusal_of(failure: ReadFailure) -> Refusal {
 }
 
 /// Extract from a header already read.
-pub fn extract_header(header: Header) -> Result<Extracted, Refusal> {
+pub fn extract_header(header: Header, fields: &IdentityFields) -> Result<Extracted, Refusal> {
     let Header {
         form,
         meta,
@@ -161,8 +225,11 @@ pub fn extract_header(header: Header) -> Result<Extracted, Refusal> {
     let modality = modality_of(&dataset, &charset)?;
 
     let identity = Identity {
-        patient_id: text_of(&dataset, tags::PATIENT_ID, &charset),
-        patient_name: text_of(&dataset, tags::PATIENT_NAME, &charset),
+        values: fields
+            .fields
+            .iter()
+            .map(|(_, tag)| text_of(&dataset, *tag, &charset))
+            .collect(),
     };
 
     let mut values = Vec::with_capacity(CATALOGUE.len());
@@ -433,6 +500,11 @@ mod tests {
         let path = dir.path().join("a.dcm");
         std::fs::write(&path, bytes).unwrap();
         read(&path).unwrap()
+    }
+
+    /// Extract with the default identity fields.
+    fn extract_header(header: Header) -> Result<Extracted, Refusal> {
+        super::extract_header(header, &IdentityFields::default())
     }
 
     fn mr(elems: Vec<Elem>) -> Vec<Elem> {
@@ -736,14 +808,53 @@ mod tests {
             synth::text(tags::PATIENT_NAME, VR::PN, "Doe^Jane"),
         ])))
         .unwrap();
-        assert_eq!(x.identity.patient_id.as_deref(), Some("P001"));
-        assert_eq!(x.identity.patient_name.as_deref(), Some("Doe^Jane"));
+        assert_eq!(x.identity.values, vec![Some("P001".to_string())]);
         assert!(
             x.values
                 .iter()
                 .flatten()
                 .all(|v| !v.to_string().contains("Doe"))
         );
+
+        let fields = IdentityFields::new(&["PatientName", "OtherPatientIDs", "PatientID"]).unwrap();
+        let x = super::extract_header(
+            header(mr(vec![
+                synth::text(tags::PATIENT_ID, VR::LO, "P001 "),
+                synth::text(tags::PATIENT_NAME, VR::PN, "Doe^Jane"),
+            ])),
+            &fields,
+        )
+        .unwrap();
+        assert_eq!(
+            x.identity.values,
+            vec![Some("Doe^Jane".to_string()), None, Some("P001".to_string())]
+        );
+        assert!(
+            x.values
+                .iter()
+                .flatten()
+                .all(|v| !v.to_string().contains("Doe"))
+        );
+    }
+
+    #[test]
+    fn identity_fields_are_keywords() {
+        let f = IdentityFields::new(&["PatientID", "AccessionNumber"]).unwrap();
+        assert_eq!(
+            f.keywords().collect::<Vec<_>>(),
+            ["PatientID", "AccessionNumber"]
+        );
+        assert_eq!(f.len(), 2);
+        assert_eq!(
+            IdentityFields::new(&["PatientId"]).unwrap_err(),
+            UnknownKeyword("PatientId".into())
+        );
+        assert_eq!(
+            IdentityFields::new(&["PatientId"]).unwrap_err().to_string(),
+            "PatientId is not a DICOM keyword"
+        );
+        assert_eq!(tag_of("StudyInstanceUID"), Some(tags::STUDY_INSTANCE_UID));
+        assert_eq!(tag_of("nope"), None);
     }
 
     #[test]

@@ -405,3 +405,176 @@ fn a_home_on_postgres_initialises_and_reopens() {
         .batch("DROP SCHEMA nils_home_test CASCADE; DROP SCHEMA nils_home_test_linkage CASCADE")
         .unwrap();
 }
+
+/// The linkage store beside a registry store: on SQLite two in-memory
+/// stores, on Postgres the test schema and its `_linkage` sibling.
+fn store_pairs() -> Vec<(String, Option<MutexGuard<'static, ()>>, Store, Store)> {
+    let mut out = vec![(
+        "sqlite".to_string(),
+        None,
+        Store::sqlite_in_memory().expect("sqlite"),
+        Store::sqlite_in_memory().expect("sqlite"),
+    )];
+    if let Some((guard, registry)) = postgres_store(SCHEMA) {
+        let dsn = postgres_dsn().unwrap();
+        let mut linkage =
+            Store::connect_postgres(&dsn, &format!("{SCHEMA}_linkage")).expect("connect");
+        linkage
+            .batch(&format!("CREATE SCHEMA {SCHEMA}_linkage"))
+            .expect("linkage schema");
+        out.push(("postgres".to_string(), Some(guard), registry, linkage));
+    }
+    out
+}
+
+#[test]
+fn the_linkage_store_files_looks_up_and_imports_on_both_backends() {
+    use nils_registry::linkage::{self, ImportError, ImportFault, ImportRow, NewIdentity, Subkeys};
+    for (name, _guard, mut registry, mut linkage) in store_pairs() {
+        migrate::migrate(&mut registry, Kind::Registry).unwrap();
+        migrate::migrate(&mut linkage, Kind::Linkage).unwrap();
+        let keys = Subkeys::derive(b"nils-fixture-key");
+        // a subject the digest made, with its identity row
+        let created = registry
+            .insert(
+                &Insert::new(
+                    table("subject"),
+                    &["code", "code_digest", "first_batch_id", "created_at"],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from("771c4326c89c082c"),
+                    Param::from(vec![0x77u8, 0x1c]),
+                    Param::from(1i64),
+                    Param::from("2026-09-02T00:00:00Z"),
+                ]],
+            )
+            .unwrap();
+        let subject_id = created[0].int(0).unwrap();
+        let lookup = keys.lookup("patient-id", "PID-0001");
+        linkage::insert_identities(
+            &mut linkage,
+            &[NewIdentity {
+                subject_id,
+                id_type_id: 1,
+                lookup: lookup.clone(),
+                ciphertext: keys.seal("PID-0001"),
+                source: "dicom",
+                first_batch_id: Some(1),
+            }],
+        )
+        .unwrap();
+        let found =
+            linkage::identities_by_lookup(&mut linkage, &[lookup.clone(), vec![1; 32]]).unwrap();
+        assert_eq!(found.len(), 1, "{name}");
+        assert_eq!(found[0].subject_id, subject_id, "{name}");
+        assert_eq!(found[0].lookup, lookup, "{name}");
+        let shown = linkage::reveal(&mut linkage, &keys, subject_id, "tester", None).unwrap();
+        assert_eq!(shown[0].value, "PID-0001", "{name}");
+
+        // an import that maps the known identifier elsewhere is refused whole
+        let rows = |pairs: &[(&str, &str)]| -> Vec<ImportRow> {
+            pairs
+                .iter()
+                .enumerate()
+                .map(|(i, (identifier, code))| ImportRow {
+                    line: i + 2,
+                    identifier: identifier.to_string(),
+                    code: code.to_string(),
+                })
+                .collect()
+        };
+        let err = linkage::import(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            "patient-id",
+            &rows(&[("PID-0001", "sub-x"), ("PID-0002", "sub-y")]),
+        )
+        .unwrap_err();
+        match err {
+            ImportError::Faults(faults) => assert_eq!(
+                faults,
+                vec![ImportFault::IdentifierMapped {
+                    line: 2,
+                    code: "771c4326c89c082c".to_string()
+                }],
+                "{name}"
+            ),
+            ImportError::Store(e) => panic!("{name}: {e}"),
+        }
+        let n = registry.query("SELECT COUNT(*) FROM subject", &[]).unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(n, 1, "{name}: nothing written");
+
+        // the good rows land, and land once
+        let report = linkage::import(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            "patient-id",
+            &rows(&[("PID-0001", "771c4326c89c082c"), ("PID-0002", "sub-y")]),
+        )
+        .unwrap();
+        assert_eq!(report.subjects_created, 1, "{name}");
+        assert_eq!(report.identities_added, 1, "{name}");
+        assert_eq!(report.unchanged, 1, "{name}");
+        let again = linkage::import(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            "patient-id",
+            &rows(&[("PID-0002", "sub-y")]),
+        )
+        .unwrap();
+        assert_eq!(again.unchanged, 1, "{name}");
+        let imported = linkage::subjects_by_code(&mut registry, &["sub-y".to_string()]).unwrap();
+        assert_eq!(imported.len(), 1, "{name}");
+        let shown =
+            linkage::reveal(&mut linkage, &keys, imported[0].id, "tester", Some("why")).unwrap();
+        assert_eq!(shown[0].value, "PID-0002", "{name}");
+        assert_eq!(shown[0].source, "csv", "{name}");
+        let audits = linkage
+            .query("SELECT COUNT(*) FROM read_audit", &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(audits, 2, "{name}");
+        let digest = registry
+            .query("SELECT code_digest FROM subject WHERE code = 'sub-y'", &[])
+            .unwrap();
+        assert!(
+            matches!(digest[0].get(0), nils_registry::store::Cell::Null),
+            "{name}: an imported code has no digest"
+        );
+        // linkages
+        let id = linkage::link(
+            &mut linkage,
+            subject_id,
+            imported[0].id,
+            "same person",
+            "tester",
+        )
+        .unwrap();
+        assert!(
+            linkage::unlink(&mut linkage, id, "tester").unwrap(),
+            "{name}"
+        );
+        let of = linkage::linkages_of(&mut linkage, imported[0].id).unwrap();
+        assert_eq!(of.len(), 1, "{name}");
+        assert!(of[0].reversed_at.is_some(), "{name}");
+        assert!(
+            of[0].created_at.ends_with('Z'),
+            "{name}: {}",
+            of[0].created_at
+        );
+        if let Some(schema) = registry.schema().map(str::to_string) {
+            registry
+                .batch(&format!(
+                    "DROP SCHEMA {schema} CASCADE; DROP SCHEMA {schema}_linkage CASCADE"
+                ))
+                .unwrap();
+        }
+    }
+}

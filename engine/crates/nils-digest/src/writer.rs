@@ -9,6 +9,12 @@
 //! A row that exists is never rewritten: the first record of a subject, a
 //! study or a series stands, and a file that disagrees with it raises a
 //! `field_disagreement` naming the field.
+//!
+//! Subjects are resolved through the linkage store (§7.4): the lookup of a
+//! file's identifier names its subject when the store has met it; otherwise
+//! the code is derived and the subject created, or found by its code and the
+//! identity attached, or refused as a collision. The identity rows are filed
+//! after the registry's transaction commits (§9.3).
 
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
@@ -18,24 +24,44 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use lru::LruCache;
 use nils_dicom::{Diagnostic, DiagnosticKind, Level, Value};
 use nils_registry::dialect::Conflict;
+use nils_registry::linkage::{self, NewIdentity, Subkeys};
 use nils_registry::schema::{Column, Table, Type, table};
 use nils_registry::store::{Insert, Param, Store};
 use nils_registry::time::now_iso;
 use nils_registry::{HomeError, Registry, Scheme, pseudonym};
 
-use crate::batch::{
-    Batch, Fields, Item, ParsedFile, detail_level, hash_value, hash32, identity_of,
-};
+use crate::batch::{Batch, Fields, Item, ParsedFile, detail_level, hash_value, hash32};
 use crate::progress::{PROGRESS_EVERY, Progress};
 use crate::report::{Counts, Written};
 use crate::resume::status;
+use crate::rule::{FALLBACK_ID_TYPE, Rule};
 
 /// Rows each of the writer's caches holds (§9.1).
 pub const CACHE_ROWS: usize = 200_000;
 
+/// The kind of the review item a collision opens (§7.1).
+pub const COLLISION_KIND: &str = "identity.collision";
+
 struct SubjectEntry {
-    id: i64,
     hashes: Box<[u32]>,
+}
+
+/// An id type the rule files under, with its row in the linkage store.
+struct IdType {
+    name: String,
+    id: i64,
+}
+
+/// A collision met in a batch (§7.4 step 5): the review item to open once
+/// the batch is rolled back.
+struct Collision {
+    code: String,
+    subject_id: Option<i64>,
+    id_type: String,
+    /// `identity`: the subject holds another identifier of the type;
+    /// `display-code`: its digest is another one's (blake2b-32, §7.1);
+    /// `batch`: two identifiers of this batch derive the one code.
+    reason: &'static str,
 }
 
 struct StudyEntry {
@@ -65,14 +91,24 @@ struct Filed {
 
 pub struct Writer<'a> {
     registry: &'a mut Registry,
+    /// The linkage store, on its own connection (§9.3).
+    linkage: Store,
     /// The pseudonym key: read from the key store, written nowhere (§7.2).
     key: Vec<u8>,
+    /// The subkeys of the linkage store, derived once (§7.2).
+    keys: Subkeys,
     scheme: Scheme,
     display_length: usize,
+    /// The rule's id type and the fallback's.
+    id_type: IdType,
+    fallback: IdType,
     source_id: i64,
     batch_id: i64,
     job_id: Option<i64>,
-    subjects: LruCache<String, SubjectEntry>,
+    /// Lookup → subject, for the identities met (§7.4 step 3).
+    identities: LruCache<Vec<u8>, i64>,
+    /// Subject id → the row's field hashes.
+    subjects: LruCache<i64, SubjectEntry>,
     studies: LruCache<String, StudyEntry>,
     series: LruCache<String, SeriesEntry>,
     subject_fields: Fields,
@@ -85,6 +121,9 @@ pub struct Writer<'a> {
     pub counts: Counts,
     pub written: Written,
     last_heartbeat: Instant,
+    /// The identity rows of the batch in flight, filed once it commits.
+    pending: Vec<NewIdentity>,
+    collision: Option<Collision>,
 }
 
 impl Drop for Writer<'_> {
@@ -96,23 +135,33 @@ impl Drop for Writer<'_> {
 impl<'a> Writer<'a> {
     pub fn new(
         registry: &'a mut Registry,
+        rule: &Rule,
         source_id: i64,
         batch_id: i64,
         job_id: Option<i64>,
     ) -> Result<Writer<'a>, HomeError> {
         let key = registry.pseudonym_key()?;
+        let keys = Subkeys::derive(&key);
+        let mut linkage = registry.open_linkage()?;
+        let id_type = id_type_of(&mut linkage, &rule.id_type)?;
+        let fallback = id_type_of(&mut linkage, FALLBACK_ID_TYPE)?;
         let meta = registry.meta();
         let scheme = meta.pseudonym_scheme;
         let display_length = meta.display_length;
         let cap = NonZeroUsize::new(CACHE_ROWS).unwrap_or(NonZeroUsize::MIN);
         Ok(Writer {
             registry,
+            linkage,
             key,
+            keys,
             scheme,
             display_length,
+            id_type,
+            fallback,
             source_id,
             batch_id,
             job_id,
+            identities: LruCache::new(cap),
             subjects: LruCache::new(cap),
             studies: LruCache::new(cap),
             series: LruCache::new(cap),
@@ -126,22 +175,101 @@ impl<'a> Writer<'a> {
                 ..Written::default()
             },
             last_heartbeat: Instant::now(),
+            pending: Vec::new(),
+            collision: None,
         })
     }
 
     /// Write one batch in one transaction; nothing of it lands on an error.
+    /// The identity rows follow in the linkage store once the registry has
+    /// committed (§9.3); a collision opens its review item after the
+    /// rollback, in a transaction of its own, and the error stands.
     pub fn write(&mut self, batch: &Batch, progress: &Progress) -> Result<(), HomeError> {
         self.registry.store().begin()?;
         match self.write_rows(batch, progress) {
             Ok(()) => {
                 self.registry.store().commit()?;
                 self.written.writes += 1;
-                Ok(())
+                self.file_identities()
             }
             Err(e) => {
                 let _ = self.registry.store().rollback();
+                self.pending.clear();
+                if let Some(c) = self.collision.take() {
+                    let id = self.open_review(&c)?;
+                    return Err(HomeError::Message(collision_message(&c, id)));
+                }
                 Err(e)
             }
+        }
+    }
+
+    /// The identity rows of the batch just committed (§9.3).
+    fn file_identities(&mut self) -> Result<(), HomeError> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let rows = std::mem::take(&mut self.pending);
+        self.linkage.begin()?;
+        match linkage::insert_identities(&mut self.linkage, &rows) {
+            Ok(_) => {
+                self.linkage.commit()?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.linkage.rollback();
+                Err(e.into())
+            }
+        }
+    }
+
+    /// The review item of a collision (§7.1): the subject and the type, never
+    /// an identifier.
+    fn open_review(&mut self, c: &Collision) -> Result<i64, HomeError> {
+        let now = now_iso();
+        let reference = serde_json::json!({ "subject_id": c.subject_id, "code": c.code });
+        let evidence = serde_json::json!({
+            "id_type": c.id_type,
+            "reason": c.reason,
+            "scheme": self.scheme.to_string(),
+            "display_length": self.display_length,
+            "batch_id": self.batch_id,
+        });
+        let store = self.registry.store();
+        store.begin()?;
+        let result = store.insert(
+            &Insert::new(
+                table("review_item"),
+                &["kind", "scope", "ref", "evidence", "status", "created_at"],
+            )
+            .returning(&["id"]),
+            &[vec![
+                Param::from(COLLISION_KIND),
+                Param::from("subject"),
+                Param::from(reference.to_string()),
+                Param::from(evidence.to_string()),
+                Param::from("open"),
+                Param::from(now.as_str()),
+            ]],
+        );
+        match result {
+            Ok(rows) => {
+                store.commit()?;
+                Ok(rows.first().map(|r| r.int(0)).transpose()?.unwrap_or(0))
+            }
+            Err(e) => {
+                let _ = store.rollback();
+                Err(e.into())
+            }
+        }
+    }
+
+    /// The id type a file's identifier is filed under.
+    fn type_of(&self, p: &ParsedFile) -> &IdType {
+        if p.ident.fell_back {
+            &self.fallback
+        } else {
+            &self.id_type
         }
     }
 
@@ -177,83 +305,48 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
-    /// Subjects: the code of every file's identity, a row for each code the
-    /// registry does not hold, the fields of a known row compared.
+    /// Subjects (§7.4): every file's identifier resolved through the linkage
+    /// store, a row for each identifier no subject holds, the fields of a
+    /// known row compared.
     fn subjects(
         &mut self,
         parsed: &[&ParsedFile],
         now: &str,
         tally: &mut Counts,
     ) -> Result<Vec<i64>, HomeError> {
-        let t = table("subject");
-        let mut codes: Vec<pseudonym::Code> = Vec::with_capacity(parsed.len());
-        let mut hashes: Vec<Box<[u32]>> = Vec::with_capacity(parsed.len());
-        let mut rows = Vec::new();
-        // the codes asked of the store this batch, with the first file's hashes
-        let mut pending: HashMap<String, Box<[u32]>> = HashMap::new();
-        for p in parsed {
-            let x = &p.extracted;
-            let (ident, _) = identity_of(x);
-            let code = pseudonym::code(self.scheme, &self.key, ident, self.display_length);
-            let h: Box<[u32]> = x.row(Level::Subject).map(|(_, v)| hash_value(v)).collect();
-            if !self.subjects.contains(&code.code) && !pending.contains_key(&code.code) {
-                let mut row = vec![
-                    Param::from(code.code.as_str()),
-                    Param::Bytes(code.digest.clone()),
-                ];
-                row.extend(x.row(Level::Subject).map(|(_, v)| Param::from(v)));
-                row.push(Param::Int(self.batch_id));
-                row.push(Param::from(now));
-                rows.push(row);
-                pending.insert(code.code.clone(), h.clone());
+        let ids = self.resolve(parsed, now)?;
+        // the field hashes of every subject met, read for those not cached
+        let mut fetch: Vec<i64> = Vec::new();
+        for &id in &ids {
+            if !self.subjects.contains(&id) && !fetch.contains(&id) {
+                fetch.push(id);
             }
-            codes.push(code);
-            hashes.push(h);
         }
-        if !rows.is_empty() {
-            let spec = Insert::all(t)
-                .on_conflict(Conflict::Nothing(&["code"]))
-                .returning(&["id", "code"]);
-            let returned = self.registry.store().insert(&spec, &rows)?;
-            for r in &returned {
-                let code = r.text(1)?;
-                let hashes = pending.remove(code).unwrap_or_default();
+        if !fetch.is_empty() {
+            let t = table("subject");
+            let cols = columns(t, &["id"], &self.subject_fields);
+            let found = self
+                .registry
+                .store()
+                .select_by_ids(t, &cols, "id", &fetch)?;
+            for r in &found {
                 self.subjects.put(
-                    code.to_string(),
+                    r.int(0)?,
                     SubjectEntry {
-                        id: r.int(0)?,
-                        hashes,
+                        hashes: self.subject_fields.hash_cells(&r.0[1..]),
                     },
                 );
             }
-            self.written.subjects_created += returned.len() as u64;
-            let missing: Vec<String> = pending.keys().cloned().collect();
-            if !missing.is_empty() {
-                let cols = columns(t, &["id", "code"], &self.subject_fields);
-                let found = self
-                    .registry
-                    .store()
-                    .select_by_keys(t, &cols, "code", &missing)?;
-                for r in &found {
-                    self.subjects.put(
-                        r.text(1)?.to_string(),
-                        SubjectEntry {
-                            id: r.int(0)?,
-                            hashes: self.subject_fields.hash_cells(&r.0[2..]),
-                        },
-                    );
-                }
-            }
         }
-        let mut ids = Vec::with_capacity(parsed.len());
         let mut diags = Vec::new();
-        for ((p, code), h) in parsed.iter().zip(&codes).zip(&hashes) {
+        for (p, &id) in parsed.iter().zip(&ids) {
+            let x = &p.extracted;
+            let h: Box<[u32]> = x.row(Level::Subject).map(|(_, v)| hash_value(v)).collect();
             let entry = self
                 .subjects
-                .get_mut(&code.code)
+                .get_mut(&id)
                 .ok_or_else(|| missing_row("subject"))?;
-            ids.push(entry.id);
-            for (i, _) in self.subject_fields.differing(h, &entry.hashes) {
+            for (i, _) in self.subject_fields.differing(&h, &entry.hashes) {
                 diags.push(disagreement(
                     DiagnosticKind::SubjectFieldDisagreement,
                     &self.subject_fields,
@@ -264,14 +357,188 @@ impl<'a> Writer<'a> {
             fill(
                 self.registry.store(),
                 &self.subject_fields,
-                h,
+                &h,
                 &mut entry.hashes,
-                entry.id,
+                id,
                 &p.extracted,
             )?;
         }
         self.note(tally, diags);
         Ok(ids)
+    }
+
+    /// The subject of every file (§7.4): by the lookup of its identifier
+    /// when the linkage store has met it (step 3); else by the code, created
+    /// (step 4), or found and the identity attached, or a collision (step 5).
+    fn resolve(&mut self, parsed: &[&ParsedFile], now: &str) -> Result<Vec<i64>, HomeError> {
+        let t = table("subject");
+        let n = parsed.len();
+        let mut ids: Vec<Option<i64>> = vec![None; n];
+        // the lookups the cache does not hold, with the first file of each
+        let mut misses: HashMap<Vec<u8>, usize> = HashMap::new();
+        let mut lookups: Vec<Vec<u8>> = Vec::with_capacity(n);
+        for (i, p) in parsed.iter().enumerate() {
+            let lookup = self.keys.lookup(&self.type_of(p).name, &p.ident.value);
+            match self.identities.get(&lookup) {
+                Some(&id) => ids[i] = Some(id),
+                None => {
+                    misses.entry(lookup.clone()).or_insert(i);
+                }
+            }
+            lookups.push(lookup);
+        }
+        if !misses.is_empty() {
+            let keys: Vec<Vec<u8>> = misses.keys().cloned().collect();
+            for row in linkage::identities_by_lookup(&mut self.linkage, &keys)? {
+                self.identities.put(row.lookup.clone(), row.subject_id);
+                self.written.subjects_matched += 1;
+                misses.remove(&row.lookup);
+            }
+        }
+        // the rest are identifiers no subject holds: by code, deduplicated
+        // in the batch; two identifiers of one type on one code collide
+        struct Group {
+            digest: Vec<u8>,
+            /// The misses on the code: (lookup, first file).
+            members: Vec<(Vec<u8>, usize)>,
+        }
+        let mut groups: BTreeMap<String, Group> = BTreeMap::new();
+        for (lookup, &i) in &misses {
+            let p = parsed[i];
+            let code = pseudonym::code(self.scheme, &self.key, &p.ident.value, self.display_length);
+            let g = groups.entry(code.code).or_insert_with(|| Group {
+                digest: code.digest,
+                members: Vec::new(),
+            });
+            g.members.push((lookup.clone(), i));
+        }
+        for (code, g) in &mut groups {
+            g.members.sort_by_key(|(_, i)| *i);
+            for (k, (_, i)) in g.members.iter().enumerate() {
+                let ty = &self.type_of(parsed[*i]).name;
+                if g.members[..k]
+                    .iter()
+                    .any(|(_, j)| &self.type_of(parsed[*j]).name == ty)
+                {
+                    self.collision = Some(Collision {
+                        code: code.clone(),
+                        subject_id: None,
+                        id_type: ty.clone(),
+                        reason: "batch",
+                    });
+                    return Err(HomeError::Message("identity collision".into()));
+                }
+            }
+        }
+        if !groups.is_empty() {
+            let mut rows = Vec::with_capacity(groups.len());
+            for (code, g) in &groups {
+                let x = &parsed[g.members[0].1].extracted;
+                let mut row = vec![Param::from(code.as_str()), Param::Bytes(g.digest.clone())];
+                row.extend(x.row(Level::Subject).map(|(_, v)| Param::from(v)));
+                row.push(Param::Int(self.batch_id));
+                row.push(Param::from(now));
+                rows.push(row);
+            }
+            let spec = Insert::all(t)
+                .on_conflict(Conflict::Nothing(&["code"]))
+                .returning(&["id", "code"]);
+            let returned = self.registry.store().insert(&spec, &rows)?;
+            // code → subject id, for the created and then the found
+            let mut by_code: HashMap<String, i64> = HashMap::with_capacity(groups.len());
+            for r in &returned {
+                let id = r.int(0)?;
+                let code = r.text(1)?;
+                by_code.insert(code.to_string(), id);
+                if let Some(g) = groups.get(code) {
+                    let x = &parsed[g.members[0].1].extracted;
+                    self.subjects.put(
+                        id,
+                        SubjectEntry {
+                            hashes: x.row(Level::Subject).map(|(_, v)| hash_value(v)).collect(),
+                        },
+                    );
+                    for (lookup, i) in &g.members {
+                        self.attach(id, parsed[*i], lookup.clone());
+                    }
+                }
+            }
+            self.written.subjects_created += returned.len() as u64;
+            let existing: Vec<String> = groups
+                .keys()
+                .filter(|c| !by_code.contains_key(*c))
+                .cloned()
+                .collect();
+            if !existing.is_empty() {
+                let cols = columns(t, &["id", "code", "code_digest"], &Fields::of(&[]));
+                let found = self
+                    .registry
+                    .store()
+                    .select_by_keys(t, &cols, "code", &existing)?;
+                let mut subject_ids = Vec::with_capacity(found.len());
+                let mut digests: HashMap<i64, Option<Vec<u8>>> = HashMap::new();
+                for r in &found {
+                    let id = r.int(0)?;
+                    by_code.insert(r.text(1)?.to_string(), id);
+                    digests.insert(id, r.opt_bytes(2)?.map(<[u8]>::to_vec));
+                    subject_ids.push(id);
+                }
+                let held = linkage::identities_of_subjects(&mut self.linkage, &subject_ids)?;
+                for code in &existing {
+                    let g = &groups[code];
+                    let id = *by_code.get(code).ok_or_else(|| missing_row("subject"))?;
+                    for (lookup, i) in &g.members {
+                        let p = parsed[*i];
+                        let ty = self.type_of(p);
+                        let other_digest = digests
+                            .get(&id)
+                            .and_then(|d| d.as_ref())
+                            .is_some_and(|d| *d != g.digest);
+                        let other_identity = held
+                            .iter()
+                            .any(|h| h.subject_id == id && h.id_type_id == ty.id);
+                        if other_digest || other_identity {
+                            self.collision = Some(Collision {
+                                code: code.clone(),
+                                subject_id: Some(id),
+                                id_type: ty.name.clone(),
+                                reason: if other_digest {
+                                    "display-code"
+                                } else {
+                                    "identity"
+                                },
+                            });
+                            return Err(HomeError::Message("identity collision".into()));
+                        }
+                        self.attach(id, p, lookup.clone());
+                        self.written.identities_attached += 1;
+                    }
+                }
+            }
+        }
+        for (i, lookup) in lookups.iter().enumerate() {
+            if ids[i].is_none() {
+                ids[i] = self.identities.get(lookup).copied();
+            }
+        }
+        ids.into_iter()
+            .map(|id| id.ok_or_else(|| missing_row("subject")))
+            .collect()
+    }
+
+    /// An identity row for the subject, filed after the commit (§9.3), and
+    /// the lookup cached.
+    fn attach(&mut self, subject_id: i64, p: &ParsedFile, lookup: Vec<u8>) {
+        let ty = self.type_of(p);
+        self.pending.push(NewIdentity {
+            subject_id,
+            id_type_id: ty.id,
+            lookup: lookup.clone(),
+            ciphertext: self.keys.seal(&p.ident.value),
+            source: "dicom",
+            first_batch_id: Some(self.batch_id),
+        });
+        self.identities.put(lookup, subject_id);
     }
 
     /// Studies: a row per study UID the registry does not hold, filed under
@@ -1007,6 +1274,42 @@ fn fill(
         theirs[i] = mine[i];
     }
     Ok(())
+}
+
+/// The id type of a name, which the linkage store must hold.
+fn id_type_of(linkage: &mut Store, name: &str) -> Result<IdType, HomeError> {
+    match linkage::id_type_id(linkage, name)? {
+        Some(id) => Ok(IdType {
+            name: name.to_string(),
+            id,
+        }),
+        None => Err(HomeError::Message(format!(
+            "no id type named {name}; nils linkage id-type list shows them, id-type add creates one"
+        ))),
+    }
+}
+
+/// The error a collision ends the job with: the code, the type and the item,
+/// never an identifier.
+fn collision_message(c: &Collision, item: i64) -> String {
+    let what = match c.reason {
+        "batch" => format!(
+            "two identifiers of this batch derive the one code {}",
+            c.code
+        ),
+        "display-code" => format!(
+            "code {} is another identifier's (its subject holds a different digest)",
+            c.code
+        ),
+        _ => format!(
+            "the subject with code {} already holds another identifier of type {}",
+            c.code, c.id_type
+        ),
+    };
+    format!(
+        "identity collision under {}: {what}; review item {item} is open. A blake2b-32 registry takes a longer display length (re-create it with --display-length); a blake2b-8 one has two identifiers on one code, which the review decides",
+        c.id_type
+    )
 }
 
 fn missing_row(what: &str) -> HomeError {

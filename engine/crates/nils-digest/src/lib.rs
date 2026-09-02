@@ -22,10 +22,12 @@ pub mod progress;
 pub mod report;
 pub mod resume;
 mod rss;
+pub mod rule;
 pub mod walk;
 pub mod writer;
 
 pub use digest::{DigestError, digest, dry_run};
 pub use knobs::{KNOBS, Knob, Settings};
 pub use report::{Report, Written};
+pub use rule::{Ident, Rule, RuleError};
 pub use walk::{Filter, SkipReason, WalkEvent, walk};

@@ -12,19 +12,19 @@ use std::io;
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender, select};
-use nils_dicom::{Diagnostic, DiagnosticKind};
 use nils_registry::dialect::Conflict;
 use nils_registry::schema::{Type, table};
 use nils_registry::store::{Insert, Param, Store};
 use nils_registry::time::{now_iso, now_secs, secs_of};
 use nils_registry::{HomeError, Registry};
 
-use crate::batch::{Batch, Batcher, Item, ParsedFile, RowHashes, Task, identity_of};
+use crate::batch::{Batch, Batcher, Item, ParsedFile, RowHashes, Task};
 use crate::knobs::Settings;
 use crate::progress::{PROGRESS_EVERY, Progress};
 use crate::report::{Counts, Report, Setup, Written};
 use crate::resume::{self, Records};
 use crate::rss::peak_rss;
+use crate::rule::Rule;
 use crate::walk::{Filter, WalkEvent, walk};
 use crate::writer::{self, Writer};
 
@@ -350,7 +350,13 @@ fn execute(
         _ => None,
     };
     let mut writer = match (registry.as_deref_mut(), run) {
-        (Some(reg), Some(r)) => Some(Writer::new(reg, r.source_id, r.batch_id, Some(r.job_id))?),
+        (Some(reg), Some(r)) => Some(Writer::new(
+            reg,
+            &settings.identity,
+            r.source_id,
+            r.batch_id,
+            Some(r.job_id),
+        )?),
         _ => None,
     };
 
@@ -385,9 +391,10 @@ fn execute(
                 let rx = task_rx.clone();
                 let tx = batch_tx.clone();
                 let rows = settings.batch_rows;
+                let rule = &settings.identity;
                 let progress = &progress;
                 s.spawn(move || {
-                    let counts = parse_all(&rx, &tx, rows, progress);
+                    let counts = parse_all(&rx, &tx, rows, rule, progress);
                     drop(tx);
                     counts
                 })
@@ -550,9 +557,15 @@ fn finish(
     }
 }
 
-/// One parser thread: every task until the resume check is done, the items
-/// batched for the writer.
-fn parse_all(rx: &Receiver<Task>, tx: &Sender<Batch>, rows: usize, progress: &Progress) -> Counts {
+/// One parser thread: every task until the resume check is done, the identity
+/// rule applied to every file read, the items batched for the writer.
+fn parse_all(
+    rx: &Receiver<Task>,
+    tx: &Sender<Batch>,
+    rows: usize,
+    rule: &Rule,
+    progress: &Progress,
+) -> Counts {
     let mut counts = Counts::default();
     let mut batcher = Batcher::new(rows);
     for task in rx {
@@ -564,19 +577,15 @@ fn parse_all(rx: &Receiver<Task>, tx: &Sender<Batch>, rows: usize, progress: &Pr
                 size,
                 mtime_ns,
                 prior,
-            } => match nils_dicom::extract(&path) {
+            } => match nils_dicom::extract_with(&path, rule.fields()) {
                 Ok(mut x) => {
-                    if identity_of(&x).1 {
-                        x.diagnostics.push(Diagnostic::new(
-                            DiagnosticKind::IdentityFallback,
-                            "PatientID",
-                        ));
-                    }
-                    counts.accepted(&x, size);
+                    let ident = rule.apply(&mut x);
+                    counts.accepted(&x, rule.id_type_of(&ident), &ident.value, size);
                     progress.file(true);
                     let hashes = RowHashes::of(&x);
                     Item::Parsed(Box::new(ParsedFile {
                         extracted: x,
+                        ident,
                         path: rel,
                         dir,
                         size,

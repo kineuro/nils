@@ -18,6 +18,7 @@ use std::str::FromStr;
 pub mod dialect;
 pub mod home;
 pub mod keys;
+pub mod linkage;
 pub mod migrate;
 pub mod pseudonym;
 pub mod schema;
@@ -26,6 +27,7 @@ pub mod time;
 
 pub use home::{Home, HomeError, InitOptions, Meta, Registry};
 pub use keys::{KeyError, KeyStore};
+pub use linkage::Subkeys;
 pub use migrate::SCHEMA_VERSION;
 pub use pseudonym::Scheme;
 pub use store::{BulkPath, Error, Insert, Param, Row, Store};

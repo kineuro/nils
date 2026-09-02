@@ -29,7 +29,10 @@ pub mod value;
 
 pub use catalogue::{CATALOGUE, Field, Level, Sensitivity, Source};
 pub use diagnostic::{Diagnostic, DiagnosticKind};
-pub use extract::{Extracted, Identity, extract, extract_header};
+pub use extract::{
+    Extracted, Identity, IdentityFields, UnknownKeyword, extract, extract_header, extract_with,
+    tag_of,
+};
 pub use read::{Form, Header, ParseKind, ReadFailure, read};
 pub use refusal::{QuarantineClass, Refusal};
 pub use value::{Converter, Value};

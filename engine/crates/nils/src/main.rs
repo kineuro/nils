@@ -3,9 +3,11 @@
 //! `nils`, the binary: the command line, configuration, `custody` and the output
 //! formatting (`docs/specs/wave1-parse-and-digest.md`, §3 and §13).
 //!
-//! Slice 3 of the build has `init`, `key`, `digest` (writing, `--dry-run` or
-//! `--describe`) and `status`; `custody`, `quarantine`, `review`, `linkage` and
-//! `doctor` arrive with the slices that give them something to do (§14).
+//! Slice 4 of the build has `init`, `key`, `digest` (writing, `--dry-run` or
+//! `--describe`, with `--identity-rule`), `status` and `linkage` (`import`,
+//! `id-type`, `show`, `link`, `unlink`); `custody`, `quarantine`, `review`,
+//! `linkage purge` and `doctor` arrive with the slices that give them
+//! something to do (§14).
 //!
 //! Exit codes: 0 done; 1 the command failed; 2 the arguments or the
 //! configuration are wrong; 3 another job holds the registry.
@@ -16,9 +18,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use nils_digest::{DigestError, Filter, Report, Settings};
+use nils_digest::{DigestError, Filter, Report, Rule, Settings};
 use nils_registry::home::{Config, Home, InitOptions, REGISTRY_ENV};
 use nils_registry::keys::strip_newline;
+use nils_registry::linkage::{self, ImportError, ImportRow, Subkeys};
 use nils_registry::schema::{Type, table};
 use nils_registry::{Backend, Param, Registry, Scheme, Store};
 
@@ -51,6 +54,11 @@ enum Command {
     Digest(DigestArgs),
     /// The registry: its metadata, the running jobs, the last batches
     Status(StatusArgs),
+    /// The linkage store: the identifiers behind the codes (§7)
+    Linkage {
+        #[command(subcommand)]
+        command: LinkageCommand,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -116,6 +124,9 @@ struct DigestArgs {
     /// Which file names are candidates: all, dcm, no-ext, or a glob
     #[arg(long, default_value = "all", value_name = "all|dcm|no-ext|<glob>")]
     files: String,
+    /// A YAML file with the identity rule (§7.3); PatientID, then StudyInstanceUID, by default
+    #[arg(long, value_name = "FILE")]
+    identity_rule: Option<PathBuf>,
     /// Read the quarantined files again
     #[arg(long)]
     retry_quarantine: bool,
@@ -131,6 +142,67 @@ struct DigestArgs {
     /// Machine-readable output: the report as one JSON document, progress as JSON lines
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum LinkageCommand {
+    /// File the identifier → code pairs of a CSV, creating the subjects the codes name
+    Import(ImportArgs),
+    /// The identifier types
+    IdType {
+        #[command(subcommand)]
+        command: IdTypeCommand,
+    },
+    /// Decrypt the identifiers of a subject; every read is audited
+    Show {
+        /// The subject's code
+        code: String,
+        /// Why the identifiers are read; written to the audit
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
+    },
+    /// Record that two subjects are one person: A is canonical, B the alias
+    Link {
+        /// The canonical subject's code
+        a: String,
+        /// The alias subject's code
+        b: String,
+        /// What shows they are one person
+        #[arg(long, value_name = "TEXT")]
+        evidence: String,
+    },
+    /// Reverse a linkage by its id
+    Unlink {
+        /// The linkage's id, as link printed and show lists it
+        id: i64,
+    },
+}
+
+#[derive(Debug, Args)]
+struct ImportArgs {
+    /// The CSV: a header row, then one identifier and its code per row
+    csv: PathBuf,
+    /// The type the identifiers are filed under
+    #[arg(long, default_value = "patient-id", value_name = "NAME")]
+    id_type: String,
+    /// The header of the identifier column
+    #[arg(long, default_value = "identifier", value_name = "HEADER")]
+    id_column: String,
+    /// The header of the code column
+    #[arg(long, default_value = "code", value_name = "HEADER")]
+    code_column: String,
+}
+
+#[derive(Debug, Subcommand)]
+enum IdTypeCommand {
+    /// Add an identifier type: lower case letters, digits and hyphens
+    Add {
+        name: String,
+        #[arg(long, value_name = "TEXT")]
+        description: Option<String>,
+    },
+    /// The identifier types, by id
+    List,
 }
 
 #[derive(Debug, Args)]
@@ -151,6 +223,7 @@ fn main() -> ExitCode {
         Command::Key { command } => key(&home, command),
         Command::Digest(args) => digest(&home, args),
         Command::Status(args) => status(&home, args),
+        Command::Linkage { command } => linkage_command(&home, command),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -334,6 +407,14 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
     }
     settings.filter =
         Filter::parse(&args.files).map_err(|e| usage(format!("--files {}: {e}", args.files)))?;
+    if let Some(path) = &args.identity_rule {
+        let text = fs::read_to_string(path)
+            .map_err(|e| usage(format!("--identity-rule {}: {e}", path.display())))?;
+        let mut rule = Rule::parse(&text)
+            .map_err(|e| usage(format!("--identity-rule {}: {e}", path.display())))?;
+        rule.source = Some(path.display().to_string());
+        settings.identity = rule;
+    }
 
     if args.describe {
         print!("{}", settings.describe());
@@ -490,10 +571,17 @@ fn status(home: &Home, args: StatusArgs) -> Result<(), Exit> {
     println!("  schema version   {}", meta.schema_version);
     println!("  epoch            {}", meta.epoch);
     println!("  created          {}", meta.created_at);
-    println!(
-        "  pseudonyms       {} from key {}, {} characters shown",
-        meta.pseudonym_scheme, meta.pseudonym_key, meta.display_length
-    );
+    match meta.pseudonym_scheme {
+        // v0's code is the whole digest in hex; no display length applies
+        Scheme::Blake2b8 => println!(
+            "  pseudonyms       {} from key {}, 16 hex characters",
+            meta.pseudonym_scheme, meta.pseudonym_key
+        ),
+        Scheme::Blake2b32 => println!(
+            "  pseudonyms       {} from key {}, {} characters shown",
+            meta.pseudonym_scheme, meta.pseudonym_key, meta.display_length
+        ),
+    }
     println!("running jobs");
     if jobs.is_empty() {
         println!("  none");
@@ -560,6 +648,169 @@ fn batch_report(registry: &mut Registry, id: i64, json: bool) -> Result<(), Exit
         .map_err(|e| fail(format!("batch {id}: the report does not parse: {e}")))?;
     print!("{report}");
     Ok(())
+}
+
+/// Who runs the command, for the audit and the linkage rows: the OS user.
+fn actor() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let mut store = registry.open_linkage()?;
+    match command {
+        LinkageCommand::Import(args) => import(&mut registry, &mut store, args),
+        LinkageCommand::IdType { command } => match command {
+            IdTypeCommand::Add { name, description } => {
+                let t = linkage::add_id_type(&mut store, &name, description.as_deref())?;
+                println!("added id type {} (id {})", t.name, t.id);
+                Ok(())
+            }
+            IdTypeCommand::List => {
+                for t in linkage::id_types(&mut store)? {
+                    println!(
+                        "{:>3}  {:<24} {}",
+                        t.id,
+                        t.name,
+                        t.description.as_deref().unwrap_or("")
+                    );
+                }
+                Ok(())
+            }
+        },
+        LinkageCommand::Show { code, why } => {
+            let subject = subject_of(&mut registry, &code)?;
+            let keys = Subkeys::derive(&registry.pseudonym_key()?);
+            let shown = linkage::reveal(&mut store, &keys, subject, &actor(), why.as_deref())?;
+            println!("subject {code} (id {subject})");
+            if shown.is_empty() {
+                println!("  no identifiers");
+            }
+            for r in &shown {
+                println!(
+                    "  {:<24} {}   (identity {}, from {})",
+                    r.id_type, r.value, r.identity_id, r.source
+                );
+            }
+            let links = linkage::linkages_of(&mut store, subject)?;
+            if !links.is_empty() {
+                let ids: Vec<i64> = links
+                    .iter()
+                    .flat_map(|l| [l.subject_a, l.subject_b])
+                    .filter(|&id| id != subject)
+                    .collect();
+                let codes: std::collections::HashMap<i64, String> =
+                    linkage::subjects_by_id(registry.store(), &ids)?
+                        .into_iter()
+                        .map(|s| (s.id, s.code))
+                        .collect();
+                let name = |id: i64| codes.get(&id).cloned().unwrap_or_else(|| format!("#{id}"));
+                println!("linkages");
+                for l in &links {
+                    let (role, other) = if l.subject_a == subject {
+                        ("canonical of", l.subject_b)
+                    } else {
+                        ("alias of", l.subject_a)
+                    };
+                    let state = match &l.reversed_at {
+                        Some(at) => format!(
+                            "reversed {at} by {}",
+                            l.reversed_by.as_deref().unwrap_or("-")
+                        ),
+                        None => "open".to_string(),
+                    };
+                    println!(
+                        "  {:>4}  {role} {}   {}   by {} at {}   {state}",
+                        l.id,
+                        name(other),
+                        l.evidence,
+                        l.actor.as_deref().unwrap_or("-"),
+                        l.created_at
+                    );
+                }
+            }
+            Ok(())
+        }
+        LinkageCommand::Link { a, b, evidence } => {
+            let subject_a = subject_of(&mut registry, &a)?;
+            let subject_b = subject_of(&mut registry, &b)?;
+            let id = linkage::link(&mut store, subject_a, subject_b, &evidence, &actor())?;
+            println!("linked {b} to {a} (linkage {id})");
+            Ok(())
+        }
+        LinkageCommand::Unlink { id } => {
+            if linkage::unlink(&mut store, id, &actor())? {
+                println!("reversed linkage {id}");
+                Ok(())
+            } else {
+                Err(fail(format!("no open linkage {id}")))
+            }
+        }
+    }
+}
+
+/// The subject a code names.
+fn subject_of(registry: &mut Registry, code: &str) -> Result<i64, Exit> {
+    linkage::subjects_by_code(registry.store(), &[code.to_string()])?
+        .into_iter()
+        .next()
+        .map(|s| s.id)
+        .ok_or_else(|| fail(format!("no subject with code {code}")))
+}
+
+/// `nils linkage import`: the CSV read whole, checked whole, then filed.
+fn import(registry: &mut Registry, store: &mut Store, args: ImportArgs) -> Result<(), Exit> {
+    let mut reader = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .flexible(true)
+        .from_path(&args.csv)
+        .map_err(|e| usage(format!("{}: {e}", args.csv.display())))?;
+    let headers = reader
+        .headers()
+        .map_err(|e| usage(format!("{}: {e}", args.csv.display())))?
+        .clone();
+    let column = |name: &str, flag: &str| -> Result<usize, Exit> {
+        headers.iter().position(|h| h == name).ok_or_else(|| {
+            usage(format!(
+                "{}: no column {name:?} in the header ({}); {flag} names it",
+                args.csv.display(),
+                headers.iter().collect::<Vec<_>>().join(", ")
+            ))
+        })
+    };
+    let id_col = column(&args.id_column, "--id-column")?;
+    let code_col = column(&args.code_column, "--code-column")?;
+    let mut rows = Vec::new();
+    for (i, record) in reader.records().enumerate() {
+        let line = i + 2;
+        let record =
+            record.map_err(|e| usage(format!("{} line {line}: {e}", args.csv.display())))?;
+        rows.push(ImportRow {
+            line,
+            identifier: record.get(id_col).unwrap_or("").to_string(),
+            code: record.get(code_col).unwrap_or("").to_string(),
+        });
+    }
+    let keys = Subkeys::derive(&registry.pseudonym_key()?);
+    match linkage::import(registry.store(), store, &keys, &args.id_type, &rows) {
+        Ok(report) => {
+            println!(
+                "imported {} row(s) as {}: {} subject(s) created, {} identifier(s) filed, {} already filed",
+                report.rows,
+                args.id_type,
+                report.subjects_created,
+                report.identities_added,
+                report.unchanged
+            );
+            Ok(())
+        }
+        Err(e @ ImportError::Faults(_)) => Err(fail(e.to_string().trim_end().to_string())),
+        Err(ImportError::Store(e)) => Err(fail(e.to_string())),
+    }
 }
 
 fn s(v: &serde_json::Value) -> &str {

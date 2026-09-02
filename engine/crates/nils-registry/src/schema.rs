@@ -243,17 +243,20 @@ fn build_registry() -> Vec<Table> {
         .index(&["source_id", "dir"])
         .index(&["batch_id", "status"])
         .index(&["instance_id"]),
+        // `code_digest` and `first_batch_id` are null for a subject that
+        // `nils linkage import` created: its code came from outside, not from
+        // the scheme, and no batch made it (§7.4).
         Table::new(
             "subject",
             with_catalogue(
                 vec![
                     col("id", Type::Id),
                     req("code", Type::Text),
-                    req("code_digest", Type::Bytes),
+                    col("code_digest", Type::Bytes),
                 ],
                 Level::Subject,
                 vec![
-                    req("first_batch_id", Type::Int),
+                    col("first_batch_id", Type::Int),
                     req("created_at", Type::Timestamp),
                 ],
             ),

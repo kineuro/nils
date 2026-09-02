@@ -21,7 +21,7 @@ cargo build --release
 
 ## Running
 
-What the binary does so far (identity rules, stacks, `custody`, `quarantine`, `review` and `linkage` land with slices 4 to 6):
+What the binary does so far (stacks, `custody`, `quarantine`, `review` and `linkage purge` land with slices 5 and 6):
 
 ```sh
 nils digest <root> --dry-run              # walk, read every header, print the report; no registry needed
@@ -36,7 +36,17 @@ nils digest <root>                        # digest; the same command again resum
 nils digest <root> --workers 8 --walk-threads 8 --batch-rows 2000 --files dcm --name my-batch
 nils status                               # the registry, the running jobs, the last batches
 nils status --batch 3 --json              # one batch's counts
+
+nils digest <root> --identity-rule rule.yaml   # which field names the person (spec §7.3); PatientID by default
+nils linkage import codes.csv             # legacy codes: a header row, columns identifier and code (--id-column, --code-column)
+nils linkage id-type add personal-number --description "the national number"
+nils linkage id-type list
+nils linkage show <code> --why "the audit reason"   # decrypts the subject's identifiers; writes read_audit
+nils linkage link <code-a> <code-b> --evidence "the same person, renamed"
+nils linkage unlink <id>
 ```
+
+A registry names one pseudonym key and one scheme at `init`: `blake2b-32` by default, or `--scheme blake2b-8` to continue a v0 registry with its key, so that every known person lands on the known code. The identifiers themselves live only in the linkage store, encrypted under a subkey of the registry's key; a subject holds one identifier per type, and two subjects that are one person are joined with `linkage link`. An identity collision (two identifiers on one code) rolls its batch back, opens a review item and fails the job with the code and the item, never an identifier.
 
 A registry is a home directory: `nils.toml`, the key store and, on SQLite, `registry.db` and `linkage.db`. `--registry <dir>` names it for any command, else `NILS_REGISTRY`, else the working directory. On Postgres the two stores are the schemas `<schema>` and `<schema>_linkage`; `NILS_DSN` overrides the DSN in `nils.toml`, and `NILS_PG_BULK=insert` swaps the `COPY` bulk path for multi-row inserts. Exit codes: 0 done, 1 the command failed, 2 the arguments or the configuration are wrong, 3 another job holds the registry.
 

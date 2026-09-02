@@ -2,8 +2,8 @@
 
 *Specification, first draft 2026-09-02; amended the same day after review (studies
 and sessions, §4.4; one key, §7.2; the toolchain, §3) and as the slices of §14 were
-built (the blocks headed "Settled while building", in §4.2, §5.2, §6.2, §9, §10,
-§11 and §13; the measurements in §9.2 and §15). This is the spec the engine code
+built (the blocks headed "Settled while building", in §4.2, §5.2, §6.2, §7, §9,
+§10, §11 and §13; the measurements in §9.2 and §15). This is the spec the engine code
 follows; the design record ([`docs/decisions/`](../decisions/)) says why each
 choice was made, and this document cites it by id. It implements D2, D3, D4, D6,
 D7, D13, D17, C3, C6, C36, C37 and C38 and closes at the gate in §12.*
@@ -79,7 +79,9 @@ source file starts with `// SPDX-License-Identifier:
 AGPL-3.0-only` (10; 15, R6). Dependencies are chosen for Wave 1 only: `dicom-object`
 and `dicom-json` (the reader and the DICOM JSON model), `rusqlite` with the bundled
 SQLite, `postgres` (synchronous, with `COPY`), `blake2`, `chacha20poly1305`, `clap`,
-`serde`/`serde_json`/`serde_yaml`, `regex`, `crossbeam-channel`, `tracing`. DuckDB
+`serde`/`serde_json`/`serde-saphyr` (the maintained serde binding to YAML;
+`serde_yaml` was archived by its author and takes no fixes), `regex`,
+`crossbeam-channel`, `tracing`. DuckDB
 is not linked in Wave 1: the columnar passes that need it are Wave 2's, and the
 spike showed what it costs each target in build time; it enters with the
 fingerprint pass. The six-target release workflow, the two-backend test matrix and
@@ -211,6 +213,30 @@ registry's key (§7.2), and it can be backed up, exported and purged on its own
   anonymizer (D13).
 - `read_audit`: `id`, `at`, `actor`, `identity_id`, `why`. Every command that
   decrypts an identifier writes a row.
+
+Settled while building identity (slice 4):
+
+- `subject.code_digest` and `subject.first_batch_id` are nullable: a subject an
+  import created has its code as given and no digest, and no batch created it
+  (§7.4). `identity.first_batch_id` is null for the same rows.
+- `linkage_meta` holds `registry_id` from this slice on: a registry refuses a
+  linkage store whose `registry_id` is another's, with the two ids in the error,
+  and stamps its own into a store that has none (one made before this slice).
+- A subject holds **one identity per type**: the unique `(id_type_id, lookup)`
+  stands, and neither the writer nor the import files a second identifier of
+  one type on a subject; that is a collision (§7.4) or a refused import row.
+  Two subjects that are one person are joined by `linkage link`, never by a
+  second row.
+- The first `review_item` rows are `identity.collision`: `scope` `subject`,
+  `ref` `{subject_id, code}` (the subject that holds the code, or none when the
+  collision is inside one batch), `evidence` `{id_type, reason, scheme,
+  display_length, batch_id}` with `reason` one of `identity`, `display-code`,
+  `batch` (§7.4). No identifier and no lookup is in the item.
+- `identity.source` is `dicom` or `csv` in Wave 1; `manual` waits for the door
+  that would write it.
+- The schema version of both stores stays 1 through the alpha: a registry made
+  by an earlier alpha is re-created from its sources, not migrated. Migrations
+  begin at 1.0.0, and the version column is there so that they can.
 
 ### 4.3 Sensitivity classes
 
@@ -651,6 +677,59 @@ unlink`) exist from Wave 1 with the CLI as their only door; the UI and the agent
 door are Wave 4's. Nothing in Wave 1 reads a linkage when it queries; the columns
 exist so that Wave 4 does not retrofit them (11).
 
+Settled while building identity (slice 4):
+
+- The rule file (§7.3) is `identity: {id_type, from: [{field, pattern?}, ...],
+  fallback?}`. `fallback` may be left out and, when written, can only be
+  `StudyInstanceUID`: there is one fallback and it is v0's. A pattern is read
+  for its `id` group alone; other named groups are not recorded (the
+  "diagnostics" of §7.3 wait for a rule that needs them). A value that is
+  empty or whitespace is no value. The file is parsed before anything runs and
+  a fault is a usage error (exit 2); the rule is recorded in the batch's config
+  with the path it came from. The `identity_fallback` diagnostic names the
+  rule's fields as its subject and carries no sample.
+- Resolution runs per batch, not per instance: the lookups of a batch are
+  matched against the writer's cache, the misses against the `identity` table
+  in one keyed select (step 3), and the rest are grouped by their code. A group
+  whose code no subject holds becomes a subject in the batch's insert; a group
+  whose code exists is attached to the subject (step 5) unless the subject's
+  stored digest is another (reason `display-code`, `blake2b-32` only) or the
+  subject already holds an identifier of that type (reason `identity`); two
+  identifiers of one type in one batch that derive one code are a collision
+  before any row is written (reason `batch`). The same value under two id
+  types derives the one code, as in v0, and attaches: it is not a collision.
+- A collision rolls the batch back, opens the `identity.collision` item in a
+  transaction of its own, marks the job and the batch `failed`, and exits 1 with
+  a message that names the type, the code and the item, never an identifier. A
+  `blake2b-32` registry is re-created with a longer `--display-length`; under
+  `blake2b-8` two identifiers on one code are a fact of v0's function, and the
+  review decides them (`review apply` is Wave 4's; in Wave 1 the item is a row
+  and the batch is digested again once the operator has acted).
+- The identity rows of a batch are filed in the linkage store after the
+  registry's transaction commits (§9.3); a subject whose identity row that
+  order lost is repaired on the next run by step 5.
+- `linkage import` reads a CSV with a header row; `--id-column` and
+  `--code-column` name the columns (`identifier` and `code` by default), values
+  are trimmed, and the whole file is checked before a row is written: an empty
+  identifier or code, an identifier that appears twice with two codes, a code
+  that appears twice with two identifiers, an identifier the store already maps
+  to another code, and a code that exists under another identifier of the type
+  are each listed by line, and nothing is written. The registry's subjects come
+  first, then the identity rows (§9.3). The subject's birth date and sex are
+  filled by the first file that carries them (§9.1).
+- `linkage show <code> [--why <text>]` decrypts every identifier of the subject
+  and prints each with its type, its identity id and its source, then the
+  subject's linkages, open and reversed; it writes one `read_audit` row per
+  identifier with `why` as given. The actor of the audit and of `link` and
+  `unlink` is the operating-system user (`USER`, else `USERNAME`, else
+  `unknown`) until the doors of Wave 4 bring their own. A linkage's evidence is
+  stored as `{"text": ...}`; `unlink` reverses an open linkage and refuses one
+  already reversed.
+- The report's `written` block gained `subjects_matched` (identifiers the
+  store had met, step 3) and `identities_attached` (step 5).
+- `linkage purge` arrives with `custody` in slice 6, so that what it deletes
+  is listed before it can be deleted.
+
 ## 8. Stacks
 
 Stack membership is decided per instance, without seeing the rest of the series,
@@ -801,6 +880,14 @@ path, kept so that the comparison can be repeated on the baseline host and over
 a real network, where the round trips the multi-row insert makes (a statement per 1,000 rows,
 or fewer when the row is wide, under the protocol's 65,535 parameters) may
 weigh more than they do on localhost.
+
+Measured while building identity (slice 4), same host and knobs: the million on
+SQLite takes 35.3 s (28,600 files/s) against 32.3 s before, the resolution
+through the linkage store costing a tenth, with identical counts and a linkage
+store of 212 KB for 862 identities. The nmosd corpus (508,045 files, 44
+subjects, 82 studies) under `blake2b-8` with a throwaway key digests in 32 s and
+again with `--restart` in 26 s, with 44 identifiers matched, none created and
+none attached: every returning identifier lands on its subject.
 The temporary tables are created once per connection and truncated before each
 `COPY`. The second pass over an
 unchanged tree is bound by the writer touching a million `source_file` rows
@@ -874,6 +961,13 @@ defaults and not yet settable from the command line, and `identity` is slice
 `walk_errors` and, when writing, a `written` block (the batch id, the epoch
 after, batches committed, instances ingested and duplicate, files changed,
 quarantine kept, paths gone, subjects, studies, series and stacks created).
+
+Settled while building identity (slice 4): `identity` is set with
+`--identity-rule <file>` (§7.3) and recorded in the batch's config as the rule
+it resolved to, with the file's path; the `written` block gained
+`subjects_matched` and `identities_attached` (§7.4). The `identity.collision`
+review item exists from this slice; the `ingest.quarantine` items are slice
+6's, with the quarantine list they summarize.
 
 The diagnostics are counted per batch and kind, with `scope` and `ref_id` where
 one row is the subject and a `sample` of at most ten shapes:
@@ -1054,6 +1148,13 @@ Settled while building the writer (slice 3):
   `quarantine`, `review`, `linkage` and `doctor` arrive with the slices that
   give them something to do.
 
+Settled while building identity (slice 4): `--identity-rule <file>` is accepted
+(§7.3); `nils linkage import`, `id-type add | list`, `show`, `link` and `unlink`
+exist as listed, `show` takes `--why <text>` for the audit row, and `import`'s
+column flags default to `identifier` and `code` (§7.4). `linkage purge` comes
+with `custody` (slice 6); `quarantine`, `review` and `doctor` still wait for
+their slices.
+
 ## 14. Order of work
 
 Each slice is done when its "done when" holds; the slices are sequential where
@@ -1117,6 +1218,9 @@ record and does not gate Wave 1.
 - **Identity rule grammar.** Named groups over one field cover the two cases C37
   named; a rule that combines fields, or normalizes case and separators before
   hashing, waits for a source that needs it, and is then a knob, not code.
+  Slice 4 built the grammar of §7.3 with one group read (`id`), one fallback
+  and no normalization beyond trimming; the mix corpus and the gate's runs say
+  which source asks for more.
 - **Session schemes** are fixed in their shape here (§4.4) and first applied in
   Wave 3. What Wave 3 decides with the exporter in hand: the window the group
   wants as its registry default (zero reproduces v0; the live registry's
