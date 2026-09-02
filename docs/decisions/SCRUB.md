@@ -23,6 +23,7 @@ pretending the fact was never there.
 | What v0's token verifier accepts | 12 §4 D1 | "more lenient than a verifier should be" |
 | D13's premise: the live registry's identifying fields with their shares, where the anonymization workbook is written and how it is protected (with file and line references), the digest truncation, the UID default, the transformations v0 lacks, the auth default | 12 §5 D13 | one paragraph that says v0 was built for one trusted host; the requirement list that follows is unchanged |
 | The share of subjects with a birth date | 15 §8 C35 | "nearly every subject" |
+| Where the Wave 1 gate's corpus and the two development corpora live, the baseline host as built, and where the v0 pseudonym key is kept | 11 (Wave 1, opened 2026-09-02) | one sentence that says these stay in the private record |
 | The reason the record is private, stated as what it exposes | 10 (repositories), 15 §5 R7 | restated as the operators' detail |
 | Links to rendered pages in a private workspace, and the tooling note | README | removed |
 
