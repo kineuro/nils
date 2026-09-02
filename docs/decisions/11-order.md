@@ -109,7 +109,39 @@ holds are the non-image SOP classes §5.3 refuses; the digest with stacks takes
 32.5 s (15,600 files/s, 32 workers, 1.7 GB peak) and the same tree again 25.8 s,
 creating nothing; 34 stacks are oblique and none has an unknown orientation. Not
 in slice 5 and known: the mix half of the check waits for the corpus's copy to
-complete, and the pack-format prototype (C11) may start.
+complete, and the pack-format prototype (C11) may start. Slice 6, jobs and
+custody, merged 2026-09-03 (pull request 8): the cancel token every stage
+holds (one signal stops, two abort), SIGINT and SIGTERM in the binary with exit
+code 130, the takeover of a job whose process is gone, `reparse_from` on a
+failed batch (its last second read again, which repairs a registry commit that
+lost its linkage commit), the `NILS_DEBUG_STOP` test hook, `nils custody`
+with its reference page, `nils quarantine list`, the `ingest.quarantine`
+review items with `nils review list | show`, and `nils linkage purge`. What
+building it settled is amended into the spec as the blocks "Settled while
+building jobs and custody (slice 6)" (§5.3, §7.4, §10, §13, §14, with §5.2 and
+§9.2): a cancelled run marks nothing gone; one review item per batch and class
+with the count as evidence and never a path, filed by a cancelled run too and
+never by a kept quarantine; a purge asks at a terminal, refuses without
+`--yes` elsewhere, keeps the id types, the read audit and the subjects, records
+itself as a `linkage-purge` job that `status` lists, and is not undone by a
+digest that finds the file unchanged; custody omits nothing (C38) and redacts
+a DSN password everywhere; `review apply` is Wave 4's and `doctor` waits.
+The number slice 3 left it: the second pass over an unchanged tree was never
+the writer's touch (two seconds of twenty-five on nmosd) but the parsers'
+queue, half a million unchanged files sent through it one at a time (25 s on
+32 workers, 5 s on one); the resume stage now batches them for the writer
+itself, and the second pass takes 4.7 s on nmosd against 25.8 s and, for the
+million, 5.4 s on SQLite and 18.2 s on Postgres against 66 s and 37 s. On CT
+110 over nmosd: a run killed after 40 commits, one killed inside a
+transaction, one stopped by SIGINT and one aborted each resume to the
+uninterrupted run's 44 subjects, 82 studies, 2,165 series, 2,534 stacks,
+493,708 instances, 508,045 file rows in the same statuses and 44 identities,
+and `custody --json` reads the same counts from every home; what differs is
+how many `ingest.quarantine` items a resumed tree holds (one to six), since a
+run files one per class it quarantined itself. Not in slice 6 and known:
+`review apply` (Wave 4), `doctor`, the mix checks (the copy), and the
+Postgres second pass (18 s of round trips for a million lookups and touches)
+is slice 8's on the baseline host.
 
 **Wave 2 — fingerprint and classify.** The columnar fingerprint pass, the pack
 loader, the MRI pack carried over, evidence storage, `nils classify`. *Gate:*
