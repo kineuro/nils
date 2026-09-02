@@ -880,6 +880,14 @@ path, kept so that the comparison can be repeated on the baseline host and over
 a real network, where the round trips the multi-row insert makes (a statement per 1,000 rows,
 or fewer when the row is wide, under the protocol's 65,535 parameters) may
 weigh more than they do on localhost.
+
+Measured while building identity (slice 4), same host and knobs: the million on
+SQLite takes 35.3 s (28,600 files/s) against 32.3 s before, the resolution
+through the linkage store costing a tenth, with identical counts and a linkage
+store of 212 KB for 862 identities. The nmosd corpus (508,045 files, 44
+subjects, 82 studies) under `blake2b-8` with a throwaway key digests in 32 s and
+again with `--restart` in 26 s, with 44 identifiers matched, none created and
+none attached: every returning identifier lands on its subject.
 The temporary tables are created once per connection and truncated before each
 `COPY`. The second pass over an
 unchanged tree is bound by the writer touching a million `source_file` rows

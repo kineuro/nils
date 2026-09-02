@@ -571,10 +571,17 @@ fn status(home: &Home, args: StatusArgs) -> Result<(), Exit> {
     println!("  schema version   {}", meta.schema_version);
     println!("  epoch            {}", meta.epoch);
     println!("  created          {}", meta.created_at);
-    println!(
-        "  pseudonyms       {} from key {}, {} characters shown",
-        meta.pseudonym_scheme, meta.pseudonym_key, meta.display_length
-    );
+    match meta.pseudonym_scheme {
+        // v0's code is the whole digest in hex; no display length applies
+        Scheme::Blake2b8 => println!(
+            "  pseudonyms       {} from key {}, 16 hex characters",
+            meta.pseudonym_scheme, meta.pseudonym_key
+        ),
+        Scheme::Blake2b32 => println!(
+            "  pseudonyms       {} from key {}, {} characters shown",
+            meta.pseudonym_scheme, meta.pseudonym_key, meta.display_length
+        ),
+    }
     println!("running jobs");
     if jobs.is_empty() {
         println!("  none");
