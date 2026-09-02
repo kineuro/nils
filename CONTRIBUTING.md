@@ -26,7 +26,7 @@ NILS v1 is pre-alpha and developed in the open. Issues, questions and pull reque
 
   CI checks both (`scripts/check-spdx.sh`).
 - Releases are tags: `v1.0.0-alpha.N` until the first release, `v1.0.0` after. A tag builds the binaries and publishes the matching section of [`CHANGELOG.md`](CHANGELOG.md) as the release notes, so every pull request that a user would notice adds a line under `Unreleased`.
-- Formatting, linting and test rules for the engine are added with the engine, once the language spike has reported (`spikes/`). Until then CI checks text hygiene, SPDX headers and sign-offs.
+- The engine is Rust, on the toolchain pinned in `engine/rust-toolchain.toml`. CI formats (`cargo fmt --all --check`), lints (`cargo clippy --workspace --all-targets -- -D warnings`), tests on SQLite and Postgres 16, and builds `nils` on the six release targets; `engine/README.md` says how to run the same checks before pushing. Text hygiene, SPDX headers and sign-offs are checked on every file.
 
 ## Licensing your contribution
 

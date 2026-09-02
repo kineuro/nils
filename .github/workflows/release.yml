@@ -1,7 +1,8 @@
 name: release
-# On a version tag: publish a GitHub release whose notes are the matching section of
-# CHANGELOG.md. The binaries and their checksums join this job when the engine exists,
-# in the form Bifrost uses (docs/decisions/15, R4).
+# On a version tag: build `nils` for the six targets (engine-build.yml, the same
+# build as ci.yml), check that the binary carries the tag's version, and publish a
+# GitHub release with the binaries, their checksums, and the matching section of
+# CHANGELOG.md as the notes, in the form Bifrost uses (docs/decisions/15, R4).
 on:
   push:
     tags: ['v*']
@@ -10,10 +11,26 @@ permissions:
   contents: write
 
 jobs:
+  build:
+    uses: ./.github/workflows/engine-build.yml
+
   release:
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: nils-*
+          path: bin
+          merge-multiple: true
+      - name: the binaries carry the tag's version
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          chmod +x bin/nils-*
+          got=$(bin/nils-linux-x86_64 --version)
+          [ "$got" = "nils $v" ] || { echo "tag says $v, the binary says '$got': raise version in engine/Cargo.toml first"; exit 1; }
+          (cd bin && sha256sum nils-* > SHA256SUMS && echo "$v" > VERSION && ls -la)
       - name: release notes from the changelog
         run: |
           v=${GITHUB_REF_NAME#v}
@@ -24,3 +41,7 @@ jobs:
           name: NILS ${{ github.ref_name }}
           body_path: notes.md
           prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            bin/nils-*
+            bin/SHA256SUMS
+            bin/VERSION

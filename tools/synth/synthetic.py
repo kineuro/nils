@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""A synthetic corpus for the spike's smoke test: no library, no real data.
+"""A synthetic DICOM corpus: no library, no real data.
 
-Writes a handful of files into a directory so that both harnesses can be checked
-for the same answer before they meet the private corpus:
+Written for the language spike's smoke test (spikes/lang/smoke.sh) and kept as the
+seed of the engine's synthetic generator, which grows to a one-million-instance
+corpus generated at CI time from a fixed seed (docs/specs/wave1-parse-and-digest.md,
+§12.6; C10: nothing real goes public). Writes a handful of files into a directory:
 
   part10.dcm        Part 10 file, preamble + meta group, explicit VR little endian
   nopreamble.dcm    the same, without the 128-byte preamble

@@ -1,0 +1,16 @@
+[package]
+name = "nils-dicom"
+description = "The DICOM reader of NILS: open, stop before Pixel Data, the field catalogue, the refusal classes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

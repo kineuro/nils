@@ -1,0 +1,8 @@
+# The toolchain the engine builds with, everywhere: rustup reads this file, CI reads
+# it too (.github/workflows/ci.yml and engine-build.yml), and Cargo.toml's
+# rust-version matches it. A new Rust release is adopted by raising all three in a
+# pull request of its own (docs/specs/wave1-parse-and-digest.md, §3).
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

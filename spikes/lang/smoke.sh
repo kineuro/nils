@@ -6,7 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 work=$(mktemp -d)
-python3 synthetic.py "$work/corpus" >/dev/null
+python3 ../../tools/synth/synthetic.py "$work/corpus" >/dev/null
 rust/target/release/parse --root "$work/corpus" --out "$work/rust" --workers 2 --label smoke >/dev/null
 go/parse --root "$work/corpus" --out "$work/go" --workers 2 --label smoke >/dev/null
 

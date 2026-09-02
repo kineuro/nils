@@ -1,7 +1,9 @@
 name: ci
-# Runs on every pull request and on main. The job named "ci" is the status check that
-# main requires. Format, lint and tests for the engine join it when the language spike
-# has reported (docs/decisions/15, R8).
+# Runs on every pull request and on main. "ci" checks the text, the SPDX headers and
+# the sign-offs; "engine" formats, lints and tests the engine on both registry
+# backends; "build" is the six-target build of engine-build.yml, the way a release
+# is made. Main requires all of them (docs/decisions/15, R8;
+# docs/specs/wave1-parse-and-digest.md, §12.6).
 on:
   pull_request:
   push:
@@ -25,3 +27,57 @@ jobs:
       - name: DCO on contracts/ and sdk/
         if: github.event_name == 'pull_request'
         run: scripts/check-dco.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+
+  engine:
+    name: engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nils
+          POSTGRES_PASSWORD: nils
+          POSTGRES_DB: nils_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nils"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # The tests that need Postgres read this; without it they say so and pass.
+      NILS_TEST_POSTGRES_DSN: postgres://nils:nils@localhost:5432/nils_test
+    steps:
+      - uses: actions/checkout@v7
+      - name: the pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' engine/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - name: rust-version matches the toolchain
+        run: |
+          channel="${{ steps.toolchain.outputs.channel }}"
+          want=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' engine/Cargo.toml)
+          case "$channel" in
+            "$want" | "$want".*) echo "toolchain $channel, rust-version $want" ;;
+            *) echo "engine/rust-toolchain.toml says $channel but engine/Cargo.toml says rust-version $want"; exit 1 ;;
+          esac
+      - name: format
+        working-directory: engine
+        run: cargo fmt --all --check
+      - name: lint
+        working-directory: engine
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: test on SQLite and Postgres 16
+        working-directory: engine
+        run: cargo test --workspace --locked
+
+  build:
+    uses: ./.github/workflows/engine-build.yml
