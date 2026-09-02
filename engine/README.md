@@ -21,7 +21,7 @@ cargo build --release
 
 ## Running
 
-What the binary does so far (`custody`, `quarantine`, `review` and `linkage purge` land with slice 6):
+What the binary does so far (`review apply` is Wave 4's; `doctor` waits for its slice):
 
 ```sh
 nils digest <root> --dry-run              # walk, read every header, print the report; no registry needed
@@ -44,13 +44,21 @@ nils linkage id-type list
 nils linkage show <code> --why "the audit reason"   # decrypts the subject's identifiers; writes read_audit
 nils linkage link <code-a> <code-b> --evidence "the same person, renamed"
 nils linkage unlink <id>
+nils linkage purge --subject <code> --yes   # or --all; says what it deletes first, keeps the read audit
+
+nils quarantine list --batch 3 --class not_dicom   # the refused files with class and detail; --json
+nils review list --kind ingest.quarantine          # one item per batch and class; review show <id>
+nils custody                              # every store: where, what it holds, how long, which command changes it
+nils custody --markdown > custody.md      # the same as the deployment's record (docs/reference/custody.md is one)
 ```
+
+A digest stops on one signal (Ctrl-C or SIGTERM): what is already parsed is written and committed, the batch is marked `cancelled`, the exit code is 130, and the same command resumes. A second signal abandons the batch in flight. A run killed outright (a power cut, `kill -9`) resumes the same way, to the same rows; the tests prove it at every point.
 
 Every instance is filed under a stack of its series: v0's signature (spec §8), computed from the file alone, keyed, indexed in order of first appearance, with the orientation class and its confidence on the `stack` row. The report counts `stacks` beside `studies`, `series` and `subjects`, and a stack whose orientation is known but oblique (confidence under 0.9) counts `orientation_oblique` once.
 
 A registry names one pseudonym key and one scheme at `init`: `blake2b-32` by default, or `--scheme blake2b-8` to continue a v0 registry with its key, so that every known person lands on the known code. The identifiers themselves live only in the linkage store, encrypted under a subkey of the registry's key; a subject holds one identifier per type, and two subjects that are one person are joined with `linkage link`. An identity collision (two identifiers on one code) rolls its batch back, opens a review item and fails the job with the code and the item, never an identifier.
 
-A registry is a home directory: `nils.toml`, the key store and, on SQLite, `registry.db` and `linkage.db`. `--registry <dir>` names it for any command, else `NILS_REGISTRY`, else the working directory. On Postgres the two stores are the schemas `<schema>` and `<schema>_linkage`; `NILS_DSN` overrides the DSN in `nils.toml`, and `NILS_PG_BULK=insert` swaps the `COPY` bulk path for multi-row inserts. Exit codes: 0 done, 1 the command failed, 2 the arguments or the configuration are wrong, 3 another job holds the registry.
+A registry is a home directory: `nils.toml`, the key store and, on SQLite, `registry.db` and `linkage.db`. `--registry <dir>` names it for any command, else `NILS_REGISTRY`, else the working directory. On Postgres the two stores are the schemas `<schema>` and `<schema>_linkage`; `NILS_DSN` overrides the DSN in `nils.toml`, and `NILS_PG_BULK=insert` swaps the `COPY` bulk path for multi-row inserts. Exit codes: 0 done, 1 the command failed, 2 the arguments or the configuration are wrong, 3 another job holds the registry, 130 the run was stopped by a signal.
 
 The report names nothing from inside a file but SOP class and transfer syntax UIDs, modality and character set codes, tag keywords and the reader's error texts; diagnostic samples are shapes (`series_mr.echo_time=9a`), never values. Progress goes to stderr every ten seconds. The field catalogue is [`docs/reference/catalogue.md`](../docs/reference/catalogue.md), rendered from `nils-dicom` by `cargo run -p nils-dicom --example catalogue -- --write` and checked by a test.
 
