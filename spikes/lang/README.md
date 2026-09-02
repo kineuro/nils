@@ -67,6 +67,21 @@ Failures: both sides reject the same 134 files (124 `not_dicom` Finder files, 10
 
 So on this corpus Go runs at 36 percent of Rust's throughput, uses three times the CPU, a quarter of the memory, and misses 1,771 files Rust reads. Criterion 1 and criterion 2 both point to Rust; the numbers on the 8-core baseline host and on the mix corpus follow.
 
+### Static binaries, the CI matrix, 2026-09-02
+
+Workflow run 33623854968 on the pull request, GitHub's hosted runners, one job per target, both sides built and run natively (no cross-compilation), `ldd` or `otool -L` on the result:
+
+| target (runner) | Rust: build, binary, runs | Go: build, runs |
+|---|---|---|
+| linux-x86_64 (ubuntu-latest) | 12m23s, 67.1 MB, yes | 0m28s, yes |
+| linux-arm64 (ubuntu-24.04-arm) | 8m39s, 63.2 MB, yes | 0m21s, yes |
+| macos-x86_64 (macos-15-intel) | 14m51s, 44.9 MB, yes | 0m45s, yes |
+| macos-arm64 (macos-latest) | 10m34s, 44.0 MB, yes | 0m36s, yes |
+| windows-x86_64 (windows-latest) | 15m16s, 29.1 MB, yes | 1m11s, yes |
+| windows-arm64 (windows-11-arm) | 12m24s, 34.3 MB, yes | build fails | 
+
+Every binary that built ran its query on SQLite 3.53 and DuckDB 1.5.5 from inside itself, and none links a database library (Linux: libstdc++, libgcc_s, libm, libc only; macOS: the system libraries only). The Rust side compiles the DuckDB amalgamation on every target, which is the 8 to 15 minutes; the Go side links the static libraries that `duckdb-go` ships, hence the seconds, and has none for Windows on arm64: the build stops in `runtime/cgo` itself (`gcc_arm64.S: no such instruction: stp x29,x30`), because the C toolchain on that runner cannot assemble arm64, so no cgo program builds there without a toolchain of our own. Criterion 3 holds for Rust on six of six targets and for Go on five, at a cost of build time on the Rust side that a cache pays once.
+
 ## Findings about the libraries
 
 - `suyashkumar/dicom` cannot stop in front of Pixel Data: `SkipPixelData()` skips the element by reading and discarding its bytes, so every file is read to the end. On nmosd that is 64 GB of reads for headers that add up to a few hundred megabytes. There is no public API to end the parse at a tag.
@@ -74,12 +89,11 @@ So on this corpus Go runs at 36 percent of Rust's throughput, uses three times t
 - `suyashkumar/dicom` returns an error for the character set `ISO IR 100` (1,771 files in nmosd); pydicom and dicom-object accept it.
 - `dicom-object` reads raw data sets without a meta group through `DicomCollectorOptions` with an expected transfer syntax; the Go side needs `SkipMetadataReadOnNewParserInit()` and infers the syntax.
 - `dicom-object`'s errors are `snafu` enums that capture a backtrace on every failure; on a corpus with many bad files that is a per-file cost worth measuring (it did not show on nmosd, where 134 files fail).
-- The DuckDB amalgamation compiled by `libduckdb-sys` needs the per-package profile override in `rust/Cargo.toml` (`debug = false`), otherwise every translation unit carries debug info and a 16 GB machine runs out of memory during the build. `duckdb-go` ships prebuilt static libraries and needs cgo; a Windows arm64 library is not among them, which the CI matrix will show.
+- The DuckDB amalgamation compiled by `libduckdb-sys` needs the per-package profile override in `rust/Cargo.toml` (`debug = false`), otherwise every translation unit carries debug info and a 16 GB machine runs out of memory during the build. `duckdb-go` ships prebuilt static libraries and needs cgo; a Windows arm64 library is not among them, and the CI matrix showed the build failing there before it got that far, in Go's own cgo runtime.
 - Both `dbcheck` binaries link only the C and C++ runtimes on Linux (`ldd`: libstdc++, libgcc_s, libm, libc); Rust's is 68 MB, Go's about the same order.
 
 ## Open
 
 - The 8-core baseline host (CT 111) and the NFS case.
 - The mix corpus (transfer pending), then the one-million-instance run.
-- The CI matrix on the pull request that carries this directory.
 - Criterion 4: the two harnesses are the same size (449 lines of Rust, 433 of Go for `parse`; 36 and 50 for `dbcheck`); the judgment is written in the report.
