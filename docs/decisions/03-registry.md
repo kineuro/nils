@@ -14,8 +14,8 @@ should never need.
 
 One **registry** is the system of record. Inside it:
 
-- **Subjects** are global. Sessions (studies), series, instances, stacks hang off
-  subjects, full stop. Arrival path is metadata, not structure.
+- **Subjects** are global. Studies, series, instances, stacks hang off subjects,
+  full stop. Arrival path is metadata, not structure.
 - **Ingest batches** replace cohort-as-container: every digest run is a recorded
   batch (source path, config, pack versions, who, when), and every row it touched
   carries the batch id. Provenance becomes queryable data on the data.
@@ -94,6 +94,35 @@ through the MRI table. Nothing in the core schema or the passes may assume MRI.
 ## Sessions and timepoints
 
 v0's session-timepoint schemes (labeling sessions for BIDS) carry over as selection-
-scoped configuration: a scheme belongs to a selection (a study's view of the data),
-not to the registry — two studies can label the same subject's sessions differently
+scoped configuration: a scheme belongs to a selection (a project's view of the data),
+not to the registry — two projects can label the same subject's sessions differently
 without conflict, which is exactly the multi-cohort reality that motivated this doc.
+
+*Sharpened 2026-09-02, from Nima's review of the Wave 1 spec.* The words: a
+**study** is DICOM's unit, one StudyInstanceUID, one continuous run on one scanner,
+a fact in the file and therefore a row (v0's table name stays). A **session** is the
+occasion the subject came in for, and nothing in a file says which studies share
+one: the PACS splits a visit into a brain study and a spine study, a scan that
+stopped and started again is a second UID, and a visit that was too much for one
+day continues days later. The live registry says how common this is: 4,443 of
+30,665 occasions (14.5 %) hold more than one study on the same day, 4,280 of them
+different exams and 4,323 starting within an hour of each other; 331 pairs of
+consecutive visits (about 1 %) fall within fourteen days, half of them the same exam
+again; the rest of the gaps are the six-monthly and yearly follow-ups. v0 kept
+`study` and derived the occasion three times in three places (an `event` per
+subject, modality and date; the QC services' grouping by subject and date; the
+anonymizer's M00/M06/M12 labels from the first study date in the export), none
+stored, none reviewable, none able to join two days.
+
+The v1 rule, which is this section applied all the way down: the registry stores
+studies and never a session; a session is the output of a **session scheme**
+(grouping window in days, a labelling rule, an anchor for month labels, and explicit
+overrides by study UID that win over the rule), declared once as the registry's
+default and overridable per selection, and applied by whatever needs sessions (the
+BIDS exporter and the anonymizer in Wave 3, the `session` grain in Wave 4). A
+changed scheme never rewrites the registry. The default reproduces v0 (same
+calendar day, date labels) so that the Wave 1 gate can check v1's grouping against
+v0's `event` rows; the one declared difference is that v1 groups across modalities
+(one occasion is one session whatever the scanners; one such day exists). The
+shape is in the Wave 1 spec §4.4; Wave 3 decides the group's own default window
+and where overrides are written and reviewed.

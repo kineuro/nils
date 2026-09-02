@@ -355,7 +355,12 @@ never in a digest's configuration, in the database, in a document or in a chat.
 The per-digest seed field goes away. Re-keying means re-deriving from the sources
 and is written down as exactly that expensive, which is why the key is also backed
 up under the same custody. **Recommendation: accept.** Accepted 2026-09-02. The
-key itself appears nowhere in this record.
+key itself appears nowhere in this record. *Spec review, 2026-09-02:* the Wave 1
+spec's first draft named two keys, the pseudonym key and a separate linkage-store
+key; Nima closed it to one. A registry has one key, set by the user, and for the
+KI registry it is the v0 key; the linkage store's lookup and encryption subkeys
+are derived from it (Wave 1 spec §7.2), so there is one secret to set, back up
+and guard.
 
 ### C37, every knob is a contract, and the agent sits beside each step (amends D1, D7, D12, C2; 00, 01, 04, 03)
 

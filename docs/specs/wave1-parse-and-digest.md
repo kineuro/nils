@@ -1,6 +1,7 @@
 # Wave 1: parse and digest
 
-*Specification, first draft 2026-09-02. This is the spec the first slice of engine
+*Specification, first draft 2026-09-02; amended the same day after review (studies
+and sessions, §4.4; one key, §7.2). This is the spec the first slice of engine
 code follows; the design record ([`docs/decisions/`](../decisions/)) says why each
 choice was made, and this document cites it by id. It implements D2, D3, D4, D6,
 D7, D13, D17, C3, C6, C36, C37 and C38 and closes at the gate in §12.*
@@ -10,7 +11,7 @@ D7, D13, D17, C3, C6, C36, C37 and C38 and closes at the gate in §12.*
 One binary, `nils`, that
 
 1. creates a registry on SQLite or Postgres from one declared schema (`nils init`);
-2. keeps a pseudonym key and a linkage key outside the database (`nils key`);
+2. keeps the registry's key outside the database (`nils key`);
 3. walks a source tree, parses the header of every file, records every path,
    quarantines what it refuses, resolves every instance to a subject under the
    registry's pseudonym scheme and the batch's identity rule, groups instances into
@@ -38,9 +39,12 @@ has to exist before the performance bar in §12 means anything.
   creates carries its id.
 - **File**: a path under a source root, recorded whatever happens to it.
   **Instance**: one DICOM SOP instance; a file that parsed and was accepted.
-  **Series**, **session** (a DICOM study, one visit), **subject**: the chain every
-  instance hangs off. **Stack**: a homogeneous group of instances inside a series,
-  defined by the signature in §8.
+  **Series**, **study** (one StudyInstanceUID: one continuous run on one scanner,
+  DICOM's word and v0's table), **subject**: the chain every instance hangs off.
+  **Stack**: a homogeneous group of instances inside a series, defined by the
+  signature in §8. **Session**: the occasion a subject came in for, which is one
+  study most of the time and several when the PACS split the visit or the visit
+  spanned days; not a table but the output of a session scheme (§4.4).
 - **Pseudonym scheme**: the function that turns a source identifier into a subject
   code (C36). **Identity rule**: which fields carry the identifier and how they are
   parsed (C37). **Linkage store**: the separate store that maps identifiers to
@@ -120,8 +124,8 @@ digest writes carries `first_batch_id`, the batch that created the row; rows are
 never rewritten by a later batch in Wave 1 (a changed file is a diagnostic, §5.2).
 
 - `registry_meta`: `key`, `value`. Holds `registry_id` (a UUID), `schema_version`,
-  `epoch`, `created_at`, `pseudonym_scheme`, `pseudonym_key` (a key *name*),
-  `linkage_key` (a key name), `display_length`.
+  `epoch`, `created_at`, `pseudonym_scheme`, `key` (a key *name*, §7.2),
+  `display_length`, `session_scheme` (json, §4.4).
 - `job`: `id`, `kind`, `args` (json), `state` (`queued`, `running`, `done`,
   `failed`, `cancelled`), `pid`, `host`, `started_at`, `heartbeat_at`,
   `finished_at`, `progress` (json), `error`.
@@ -141,12 +145,12 @@ never rewritten by a later batch in Wave 1 (a changed file is a diagnostic, §5.
   scheme), `birth_date`, `sex`, `first_batch_id`, `created_at`. Nothing else: names
   never enter (D13), and the demographics v0 collected through its importer arrive
   with the clinical layer in Wave 4 (D30).
-- `session`: `id`, `study_instance_uid` (unique), `subject_id`, `study_date`,
+- `study`: `id`, `study_instance_uid` (unique), `subject_id`, `study_date`,
   `study_time`, `study_description`, `study_comments`, `modalities_in_study`,
   `manufacturer`, `manufacturer_model_name`, `station_name`, `institution_name`,
-  `first_batch_id`. v0 called this table `study`; the DICOM word stays in the
-  column names.
-- `series`: `id`, `series_instance_uid` (unique), `session_id`, `subject_id`,
+  `first_batch_id`. v0's table and DICOM's word; there is no `session` table
+  (§4.4).
+- `series`: `id`, `series_instance_uid` (unique), `study_id`, `subject_id`,
   `modality`, the series columns of the catalogue (§6.2), `n_instances`,
   `n_stacks`, `first_batch_id`.
 - `series_mr`, `series_ct`, `series_pet`: `series_id` (primary key) and the
@@ -163,7 +167,7 @@ never rewritten by a later batch in Wave 1 (a changed file is a diagnostic, §5.
   instance columns of the catalogue, `charset` (the SpecificCharacterSet as
   written), `source_file_id` (the first path), `first_batch_id`.
 - `diagnostic`: `id`, `batch_id`, `kind`, `scope` (`file`, `instance`, `series`,
-  `session`, `subject`, `batch`), `ref_id`, `count`, `sample` (json), `created_at`.
+  `study`, `subject`, `batch`), `ref_id`, `count`, `sample` (json), `created_at`.
 - `review_item`: `id`, `kind`, `scope`, `ref` (json), `evidence` (json), `status`
   (`open`, `accepted`, `rejected`, `superseded`), `actor`, `created_at`,
   `decided_at`, `decision` (json). The full shape (grouping by evidence signature,
@@ -171,16 +175,17 @@ never rewritten by a later batch in Wave 1 (a changed file is a diagnostic, §5.
   columns so that its items have a home and are not a log line.
 
 Linkage store (`linkage.db` beside the registry, mode 600; the `linkage` schema on
-Postgres). Separate on purpose: it is the only store with identifying data, it has
-its own key, and it can be backed up, exported and purged on its own (D13, C38).
+Postgres). Separate on purpose: it is the only store with identifying data, its
+contents are unreadable without the registry's key (§7.2), and it can be backed
+up, exported and purged on its own (D13, C38).
 
 - `id_type`: `id`, `name`, `description`. Seeded with `patient-id` (DICOM
   PatientID) and `study-instance-uid` (the fallback of §7.3); sites add their own
   (`personal-number`, a study's own scheme) with `nils linkage id-type add`.
 - `identity`: `id`, `subject_id`, `id_type_id`, `lookup` (bytes: the keyed
-  BLAKE2b-256 of `id_type || 0x00 || value` under the linkage key), `ciphertext`
-  (bytes: the value under XChaCha20-Poly1305 with the linkage key, a fresh 24-byte
-  nonce prefixed), `source` (`dicom`, `csv`, `manual`), `first_batch_id`,
+  BLAKE2b-256 of `id_type || 0x00 || value` under the lookup subkey of §7.2),
+  `ciphertext` (bytes: the value under XChaCha20-Poly1305 with the encryption
+  subkey, a fresh 24-byte nonce prefixed), `source` (`dicom`, `csv`, `manual`), `first_batch_id`,
   `created_at`. Unique `(id_type_id, lookup)`. The identifier itself is in no
   column in clear: a copied file needs the key.
 - `linkage`: `id`, `subject_a`, `subject_b`, `kind` (`same-person`), `evidence`
@@ -204,6 +209,52 @@ a name), `clinical` (nothing the digest writes; the clinical layer arrives in Wa
 and enforces them in results, evidence and MCP responses (D13, C27); Wave 1 uses
 them in one place already: a diagnostic sample of a classed value is a *shape*,
 never the value (§11).
+
+### 4.4 Studies and sessions
+
+A study is DICOM's unit, one StudyInstanceUID for one continuous run on one
+scanner, and it is a row because it is a fact in the file. A session is the
+occasion the subject came in for, and no file records it: the PACS splits one
+visit into a brain study and a spine study, a scan that stopped and started again
+is a new study, and a visit that was too much for one day continues a few days
+later. In the live registry, 4,443 of 30,665 occasions (14.5 percent) hold more
+than one study on the same day; 4,280 of those are different exams and 4,323 begin
+within an hour of each other; a further 331 pairs of consecutive visits, about one
+percent, fall within fourteen days, half of them the same exam again. v0 keeps
+`study` and derives the occasion three times in three places (an `event` per
+subject, modality and date; the QC services' grouping by subject and date; the
+anonymizer's M00, M06, M12 labels from the first study date), none of them stored,
+reviewable or able to join two days.
+
+v1 keeps the table `study` and makes the session the output of a **session
+scheme**, applied by whatever needs sessions (the BIDS exporter and the anonymizer
+in Wave 3, the `session` grain of the query language in Wave 4) and never stored
+as a fact, so a changed scheme never rewrites the registry. The registry declares a
+default scheme at `nils init` (`registry_meta.session_scheme`) and a selection
+carries its own (03, "Sessions and timepoints"), so two projects can cut the same
+subject's studies differently without a conflict. A scheme has four parts:
+
+- `window_days` (default 0). A subject's studies are taken in date and time order,
+  whatever their modality; a study joins the open session when its date is within
+  `window_days` of that session's first study, otherwise it opens a new one. Zero
+  is the same calendar day, which is v0's `event` and its QC grouping; fourteen
+  joins the brain-on-Monday, spine-on-Wednesday visit.
+- `label` (default `date`). `date`: the first study's date as `YYYYMMDD`, v0's
+  `ses-` label. `months`: v0's anonymizer function, calendar months from the
+  anchor plus the remaining days over 30.44, rounded; zero is `M00`; a value within
+  one month of a multiple of six snaps to it, so M05, M07, M11 and M13 become M06
+  and M12 while M03 stays M03; `M` and two digits. `ordinal`: `01`, `02`, in order.
+- `anchor`, for `months`: the subject's first session in scope, which is what v0
+  did (its anchor was the first study in the export, and the export is the
+  selection's scope). A clinical event as the anchor (months since treatment start)
+  is Wave 4's, when the timeline exists (D30).
+- `overrides`: explicit assignments by study UID, this study belongs to that
+  session and this session is labelled so; they win over the rule, and they are the
+  door for the case the rule cannot know.
+
+Wave 1 stores what every scheme reads (`study_date`, `study_time`, `subject_id`,
+`modality`) and applies the default scheme in one place: the compare tool groups
+v1's studies under it and checks the groups against v0's `event` rows (§12.4).
 
 ## 5. The walker (D17)
 
@@ -301,7 +352,7 @@ The SOP class is read from the dataset and, when absent there, from the file met
 ### 6.2 The catalogue
 
 The catalogue is a table in `nils-dicom`, one row per column the digest writes:
-the column name, the level (subject, session, series, series_mr, series_ct,
+the column name, the level (subject, study, series, series_mr, series_ct,
 series_pet, stack, instance), the source (a keyword, or a fallback chain), the
 converter, the sensitivity class, and a note. It is generated into the
 documentation and it is the seed of Wave 4's catalog endpoint. Wave 1's rule is
@@ -312,7 +363,7 @@ have to be argued as an accepted change, in writing.
 The levels and their fields, as v0 extracts them (`extract/dicom_mappings.py` in
 the 0.5.3 source):
 
-- **session** (9): StudyDate, StudyTime, StudyDescription, StudyComments,
+- **study** (9): StudyDate, StudyTime, StudyDescription, StudyComments,
   ModalitiesInStudy, Manufacturer, ManufacturerModelName, StationName,
   InstitutionName.
 - **series** (29): FrameOfReferenceUID; ImplementationClassUID,
@@ -418,7 +469,7 @@ re-deriving every subject from the sources, which `nils` refuses to do implicitl
   bytes, data = UTF-8 of the identifier, digest 8 bytes))`, sixteen lowercase hex
   characters. The key bytes are the UTF-8 of the string v0 used, without a
   trailing newline. The registry that continues v0 is created with `--scheme
-  blake2b-8 --pseudonym-key <name>` where the named key holds that string, so that every
+  blake2b-8 --key <name>` where the named key holds that string, so that every
   known person lands on the known subject and every existing BIDS tree, export and
   collaboration keeps its codes (C36).
 - `blake2b-32`: the default for new registries (D13). The full 32-byte keyed
@@ -441,15 +492,30 @@ reproduces them.
 Keys live outside the database: by default in `keys/` beside the registry
 (directory mode 700, files mode 600), or at the path `keys.dir` in the config, or
 later in a KMS behind the same interface. `nils key add <name>` reads the key from
-standard input or `--from-file`, strips one trailing newline and says so, and
-writes the file; `nils key list` shows names, lengths and fingerprints (the first
-eight hex characters of an unkeyed BLAKE2b of the key), never bytes; `nils key
-remove` refuses while `registry_meta` names the key. A key is referred to by name
-in `registry_meta` and in a batch's config, and appears nowhere else: not in a
-log line, not in an error, not in a diagnostic, not in a document. Two keys are
-named at `init`: the pseudonym key and the linkage key, and they are different
-keys. Re-keying is written down as what it is: a re-derivation from the sources,
-and the reason the keys are backed up under the custody of §13.
+standard input or `--from-file`, strips one trailing newline and says so, refuses
+a key longer than 64 bytes (BLAKE2b's limit, and so v0's), and writes the file;
+`nils key list` shows names, lengths and fingerprints (the first eight hex
+characters of an unkeyed BLAKE2b of the key), never bytes; `nils key remove`
+refuses while `registry_meta` names the key.
+
+A registry names **one key** at `init` (`--key <name>`). It is the pseudonym key
+of §7.1, used as it is, so that the registry that continues v0 is created with the
+v0 key and nothing else; and it is the root of the linkage store's two subkeys,
+derived once per process and never stored: `k_lookup = BLAKE2b-256(key = the key,
+data = "nils/linkage/lookup")` and `k_encrypt = BLAKE2b-256(key = the key, data =
+"nils/linkage/encrypt")`. One secret to set, back up and guard. Whoever holds it
+can derive codes and read the linkage store, which is the same power stated twice;
+the store's file mode and its `read_audit` table are the controls on it. The key
+is referred to by name in `registry_meta` and in a batch's config, and appears
+nowhere else: not in a log line, not in an error, not in a diagnostic, not in a
+document. Re-keying is written down as what it is: a re-derivation from the
+sources, and the reason the key is backed up under the custody of §13.
+
+Fixture, under the throwaway key of §7.1: `k_lookup` is
+`d7d3eeb7a8fb4fc9c1cdd83c215c93fabef487366ee678717f8edd0935336fa0`, `k_encrypt` is
+`1313a85029438352d9ebb2b8f4b03f32390dfd160355b1ace070bb40f87aabc2`, and the lookup
+of `PID-0001` under `patient-id` is
+`a548a6fa8cf22772d1de1ee342ff8bd7460c15b1c01e0e189f297cf8a168bd0c`.
 
 ### 7.3 The identity rule
 
@@ -473,7 +539,7 @@ an `identity_unparsed` diagnostic whose sample is the value's *shape* (its lengt
 and character classes, `dddddddddddd-dddddddd`), so the report can say "a
 thousand names carry an identifier and a date" without carrying either. The
 fallback files the study UID under `study-instance-uid`, so a PatientID-less
-session that returns lands on the same subject; it counts `identity_fallback`.
+study digested again lands on the same subject; it counts `identity_fallback`.
 The default rule is the two-line one (PatientID, then the fallback), which is v0.
 
 ### 7.4 Resolution
@@ -481,12 +547,12 @@ The default rule is the two-line one (PatientID, then the fallback), which is v0
 For each instance, in the writer, cached by identifier:
 
 1. Apply the rule to get `(id_type, value)`.
-2. `lookup = BLAKE2b-256(key = linkage key, data = id_type || 0x00 || value)`.
+2. `lookup = BLAKE2b-256(key = k_lookup, data = id_type || 0x00 || value)` (§7.2).
 3. An `identity` row with that lookup gives the subject. Done; this is the common
    case, and the reason a returning person is one subject.
 4. Otherwise derive the code under the scheme. If no subject has it, create the
    subject (birth date and sex from this instance), the `identity` row
-   (ciphertext under the linkage key) and continue.
+   (ciphertext under `k_encrypt`) and continue.
 5. If a subject already has that code: when it has no `identity` row of this type,
    it came from an import without an identifier or from a run that stopped between
    the two stores (§9.3), and the identity is attached; when it has one with a
@@ -570,9 +636,9 @@ walker pool (8) ──files──▶ parsers (workers) ──batches──▶ wr
   reason), so quarantine is written in the same transactions as the data.
 - **Writer**: one thread, one transaction per batch, in this order: subjects
   (resolution, §7.4, with an in-memory map of identifier lookup to subject id),
-  sessions, series and their detail tables (`ON CONFLICT DO NOTHING`; the
+  studies, series and their detail tables (`ON CONFLICT DO NOTHING`; the
   conflicting rows' ids fetched after; first instance wins, and a later
-  instance's disagreement on a series or session field counts a
+  instance's disagreement on a series or study field counts a
   `field_disagreement` diagnostic per field with the two shapes as its sample;
   the cache keeps an 8-byte hash of each row's values beside its id, so the check
   costs one hash per instance and no values in memory), stacks (a per-series map
@@ -650,17 +716,17 @@ The diagnostics are counted per batch and kind, with `scope` and `ref_id` where
 one row is the subject and a `sample` of at most ten shapes:
 
 `walk_error`, `charset_unknown`, `charset_lossy`, `value_invalid`,
-`field_disagreement` (per series or session, per field), `identity_unparsed`,
+`field_disagreement` (per series or study, per field), `identity_unparsed`,
 `identity_fallback`, `subject_field_disagreement` (birth date or sex),
-`file_changed`, `orientation_oblique`, `series_multi_session` (a
+`file_changed`, `orientation_oblique`, `series_multi_study` (a
 SeriesInstanceUID seen under two StudyInstanceUIDs: the instances are ingested
-under the first session and the disagreement is counted, because a series
-belongs to one session by the standard, and the file disagrees with the
+under the first study and the disagreement is counted, because a series
+belongs to one study by the standard, and the file disagrees with the
 standard, not with the digest).
 
 The report (`ingest_batch.counts`, printed at the end and by `nils status --batch`)
 is what C37 calls "the diagnostics report": counts per quarantine class, per
-diagnostic kind, subjects created and matched, sessions, series and stacks
+diagnostic kind, subjects created and matched, studies, series and stacks
 created, instances ingested and duplicate, the rate, the elapsed time and the
 peak RSS. Without an agent, that is where the digest stops, which is v0 today made
 legible; with one, in Wave 4, the report is what the agent reads.
@@ -684,7 +750,7 @@ scanner (read-only role, the live database untouched, F1) and v1's through the
 SQLite or Postgres scanner, joins on the UIDs at each level and on the subject
 code, and emits per field: rows compared, agreeing, both null, one null, both
 present and different; per series: whether the stack partition is identical;
-per subject: whether the code and its sessions match. Values are normalized to
+per subject: whether the code and its studies match. Values are normalized to
 §6.3's forms on both sides before comparing. Divergences are grouped by field and
 pattern and written as a report with counts and shapes only; the classed fields
 show no value. The tool is public (nothing in it is about our data); the runs are
@@ -720,10 +786,17 @@ complete.
 
 With the registry created under `blake2b-8` and the v0 key, and v0's CSV maps
 imported through `nils linkage import`, every subject code in v0 is a subject code
-in v1 and every v0 session hangs off the same code. This is C36's promise and it
+in v1 and every v0 study hangs off the same code. This is C36's promise and it
 is measured, not assumed. The two places v0 could not keep a person whole (a
 digest with an empty key; a study re-linked under a second cohort) are expected to
 show up as v0 bugs here, and the report says how many people they touched.
+
+Sessions, the same way: the compare tool groups v1's studies under the default
+scheme of §4.4 and checks the groups against v0's `event` rows, one for one. The
+one known divergence is declared now as an accepted change: v0 opens an event per
+modality, so a subject scanned on MR and CT the same day has two, and v1's default
+scheme has one, since one occasion is one session whatever the scanners; the live
+registry holds exactly one such day.
 
 ### 12.5 Performance (D6, C6)
 
@@ -759,7 +832,7 @@ start of the verified corpus (C12).
 
 ```
 nils init [--backend sqlite|postgres] [--dsn ...] [--scheme blake2b-32|blake2b-8]
-          --pseudonym-key <name> --linkage-key <name> [--display-length 12]
+          --key <name> [--display-length 12] [--session-scheme <file>]
 nils key add <name> [--from-file <path>]      # otherwise from stdin
 nils key list | remove <name>
 nils digest <root> [--name <label>] [--workers N] [--files all|dcm|no-ext|<glob>]
@@ -802,8 +875,9 @@ they share the schema.
    paths, the writer with its caches. *Done when:* the synthetic million digests
    on SQLite and Postgres with the same counts, and the bulk path on each is
    measured and recorded.
-4. **Identity.** The two schemes, the key store, the linkage store, the identity
-   rule, `linkage import`. *Done when:* the fixtures of §7.1 pass, a CSV round
+4. **Identity.** The two schemes, the key store and the derived subkeys, the
+   linkage store, the identity rule, `linkage import`. *Done when:* the fixtures
+   of §7.1 and §7.2 pass, a CSV round
    trip reproduces its codes, and a digest of one study's tree under `blake2b-8`
    with a test key lands every returning identifier on one subject.
 5. **Stacks.** The signature, the key, the index, the orientation. *Done when:*
@@ -813,7 +887,8 @@ they share the schema.
    every file the tests created.
 7. **The compare tool and the gate runs** on the baseline host: the spike's
    corpora first, then the live corpus study by study, each run's report in the
-   record. *Done when:* §12.2 to §12.4 hold and every divergence is classified.
+   record; the session check of §12.4 is part of the tool. *Done when:* §12.2 to
+   §12.4 hold and every divergence is classified.
 8. **The budget.** v0 measured on the baseline host (C6); v1 tuned against it;
    the CI benchmark's baseline recorded. *Done when:* §12.5 and §12.6 hold and
    the record's D6 numbers are restated.
@@ -839,5 +914,11 @@ record and does not gate Wave 1.
 - **Identity rule grammar.** Named groups over one field cover the two cases C37
   named; a rule that combines fields, or normalizes case and separators before
   hashing, waits for a source that needs it, and is then a knob, not code.
+- **Session schemes** are fixed in their shape here (§4.4) and first applied in
+  Wave 3. What Wave 3 decides with the exporter in hand: the window the group
+  wants as its registry default (zero reproduces v0; the live registry's
+  fourteen-day pairs are the argument for more), where overrides are written and
+  how they are reviewed, and whether `months` under a clinical anchor waits for
+  Wave 4 or comes earlier.
 - **The baseline host** is described in the record with its deviations from the
   VM that C6 asked for.
