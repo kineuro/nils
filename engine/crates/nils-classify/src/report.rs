@@ -87,6 +87,8 @@ pub struct Classified {
     pub decided: i64,
     /// Stacks the pack says nobody is to be asked about.
     pub silent: i64,
+    /// What each pass did (§7): its reference, its scale and its methods.
+    pub passes: Vec<crate::passes::Ran>,
     /// How many axis verdicts each tier decided, as `axis:tier`. A rule's
     /// reach is a number here rather than a review item per stack.
     pub by_tier: std::collections::BTreeMap<String, i64>,
@@ -110,6 +112,7 @@ impl Classified {
             evidence: 0,
             decided: 0,
             silent: 0,
+            passes: Vec::new(),
             by_tier: std::collections::BTreeMap::new(),
             review_items: 0,
             seconds: 0.0,
@@ -165,6 +168,23 @@ impl fmt::Display for Classified {
         weakest.sort_by_key(|(_, n)| -**n);
         for (what, n) in weakest.iter().take(3) {
             writeln!(f, "  {what:<28} {n:>8}   decided with no keyword")?;
+        }
+        for p in &self.passes {
+            writeln!(
+                f,
+                "  {} ({}) against {} of {} stack(s)",
+                p.pass, p.kind, p.reference, p.pool
+            )?;
+            writeln!(
+                f,
+                "    {} of {} target(s) answered, {} review item(s)",
+                p.decided, p.targets, p.review_items
+            )?;
+            let mut how: Vec<(&String, &i64)> = p.by_method.iter().collect();
+            how.sort_by_key(|(_, n)| -**n);
+            for (method, n) in how.iter().take(5) {
+                writeln!(f, "    {method:<24} {n:>8}")?;
+            }
         }
         writeln!(f, "  {:.1} s, {:.0} stacks/s", self.seconds, self.rate())?;
         if let Some(rss) = self.peak_rss {

@@ -29,7 +29,7 @@ pub const WINDOW: usize = 4_096;
 
 /// The fingerprint columns a pack is fed, in the order the select reads them.
 /// The pack names a field; this is where a name becomes a column.
-const FIELDS: &[(&str, &str)] = &[
+pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("echo_time", "echo_time"),
     ("repetition_time", "repetition_time"),
     ("inversion_time", "inversion_time"),
@@ -124,7 +124,7 @@ fn select(store: &Store, modality: Option<&str>, ids: bool) -> String {
 /// A cell as the text a pack reads. The fingerprint's columns are typed and a
 /// pack's fields are named, so this is where a double becomes the string a
 /// substring test can look at and a number can still be parsed back.
-fn cell_text(c: &nils_registry::store::Cell) -> Option<String> {
+pub(crate) fn cell_text(c: &nils_registry::store::Cell) -> Option<String> {
     use nils_registry::store::Cell;
     match c {
         Cell::Null => None,
@@ -618,6 +618,22 @@ fn run(
         after = last;
         if rows.len() < window {
             break;
+        }
+    }
+
+    // The passes: the phases that read more than one stack. They run once,
+    // after every stack has a verdict, against the reference the pack named.
+    if !report.cancelled {
+        report.passes = crate::passes::run(
+            store,
+            pack,
+            settings,
+            cancel,
+            nils_pack::pass::Phase::After,
+            job_id,
+        )?;
+        for p in &report.passes {
+            report.review_items += p.review_items;
         }
     }
 

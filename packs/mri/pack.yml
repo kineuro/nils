@@ -51,6 +51,11 @@ rules:
 # The order the rule sets run in.
 order: [excluded, provenance, swi, symri, epimix, stage, technique, base, modifier, construct, body_part, post_contrast, intent]
 
+# The phases that read more than one stack (spec section 7). A pack that
+# declares none gets none.
+passes:
+  - passes/physics_vote.yml
+
 # When a person is asked about an axis (spec section 8.2). v0 asks about 84
 # percent of its stacks, mostly because no keyword matched rather than because
 # anything was in doubt, and a queue that long is read by nobody. These are the

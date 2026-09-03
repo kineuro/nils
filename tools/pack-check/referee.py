@@ -45,9 +45,17 @@ def main() -> int:
     ap.add_argument("--v0", required=True)
     ap.add_argument("--csv", required=True)
     ap.add_argument("--axis", required=True)
+    ap.add_argument(
+        "--verdicts",
+        help="for --axis vote: v0's series_classification_cache, which is the reference it votes against",
+    )
     a = ap.parse_args()
 
     sys.path.insert(0, a.v0)
+    # Not a detector but the phase that runs after all of them, against a
+    # reference built from v0's own verdicts.
+    if a.axis == "vote":
+        return vote(a, src=a.v0)
     from classification.core.context import ClassificationContext  # noqa: E402
 
     if a.axis == "technique":
@@ -183,6 +191,91 @@ def main() -> int:
         ctx = ClassificationContext.from_fingerprint(fp)
         value, tier, matched = decide(ctx)
         out.write(f"{fp['series_stack_id']}\t{name}\t{value}\t{tier}\t{matched}\n")
+    return 0
+
+
+def vote(a, src: str) -> int:
+    """v0's `sort/gap_filling.py`, over a reference built from its own
+    verdicts, writing one row per MR stack in the shape `classify_csv` writes
+    a pass in: the answer, the method that found it, and how many neighbours
+    agreed."""
+    import importlib.util
+    from pathlib import Path
+
+    if not a.verdicts:
+        raise SystemExit("--axis vote needs --verdicts")
+    path = Path(src) / "sort" / "gap_filling.py"
+    spec = importlib.util.spec_from_file_location("v0_gap_filling", path)
+    mod = importlib.util.module_from_spec(spec)
+    # `dataclasses` resolves a field's type through sys.modules, so the module
+    # has to be registered before it is executed.
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    verdicts = {}
+    with open(a.verdicts, newline="", encoding="utf-8") as fh:
+        for r in csv.DictReader(fh):
+            verdicts[r["series_stack_id"]] = r
+
+    stacks = list(rows(a.csv))
+    reference = []
+    for fp in stacks:
+        v = verdicts.get(str(fp["series_stack_id"]))
+        if not v or fp.get("modality") != "MR":
+            continue
+        base, tech, dt = v.get("base"), v.get("technique"), v.get("directory_type")
+        if not base or base == "Unknown" or not tech or tech == "Unknown":
+            continue
+        if not dt or dt == "excluded":
+            continue
+        reference.append(
+            {
+                "series_stack_id": fp["series_stack_id"],
+                "base": base,
+                "technique": tech,
+                "directory_type": dt,
+                "mr_tr": fp.get("mr_tr"),
+                "mr_te": fp.get("mr_te"),
+                "mr_ti": fp.get("mr_ti"),
+                "mr_flip_angle": fp.get("mr_flip_angle"),
+                "stack_n_instances": fp.get("stack_n_instances"),
+            }
+        )
+    by_intent, global_db = mod.build_intent_scoped_databases(reference)
+    print(
+        f"reference: {len(reference)} stacks, {len(by_intent)} pools",
+        file=sys.stderr,
+    )
+
+    out = sys.stdout
+    for fp in stacks:
+        if fp.get("modality") != "MR":
+            continue
+        v = verdicts.get(str(fp["series_stack_id"]))
+        dt = (v or {}).get("directory_type") or None
+        db = by_intent.get(dt, global_db)
+        which = "scoped" if dt in by_intent else "global"
+        ask = lambda db: mod.find_best_match(  # noqa: E731
+            ref_db=db,
+            tr=fp.get("mr_tr"),
+            te=fp.get("mr_te"),
+            ti=fp.get("mr_ti"),
+            fa=fp.get("mr_flip_angle"),
+            n_instances=fp.get("stack_n_instances"),
+            scanning_sequence=fp.get("scanning_sequence"),
+        )
+        r = ask(db)
+        if (
+            r.method in ("no_match", "insufficient_matches", "no_compatible_match")
+            and dt != "misc"
+        ):
+            r = ask(global_db)
+            which = "global"
+        answer = f"{r.base or ''}|{r.technique or ''}"
+        out.write(
+            f"{fp['series_stack_id']}\tvote\t{answer}\t{r.method}"
+            f"\t{r.match_count} of {r.total_in_bin} in {which}\n"
+        )
     return 0
 
 

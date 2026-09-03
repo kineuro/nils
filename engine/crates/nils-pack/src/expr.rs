@@ -8,7 +8,7 @@
 //! pass (`spikes/pack/README.md`, finding 8), so it is written down closed:
 //! anything a pack needs that is not here is a finding, not a patch.
 
-use regex::Regex;
+pub use regex::Regex;
 use std::collections::HashSet;
 
 /// A parser's view of one field: the case-folded value and, unless the parser
@@ -149,6 +149,18 @@ pub enum Expr {
         axis: usize,
         value: String,
     },
+    /// An axis nothing has decided, or one that resolved to this value. What
+    /// a pass names when it says which stacks it is for: `Unknown` and
+    /// nothing at all are the same gap to a vote that would fill it.
+    AxisMissingOr {
+        axis: usize,
+        value: String,
+    },
+    /// The family of the candidate a pass is judging (§7.2). Only a pass kind
+    /// that offers a second subject can make this true.
+    Family(String),
+    /// And whether there is a candidate at all.
+    CandidateEmpty,
 
     Any(Vec<Expr>),
     All(Vec<Expr>),
@@ -169,6 +181,19 @@ pub trait Ctx {
     /// declared before it.
     fn axis_is(&self, _axis: usize, _value: &str) -> bool {
         false
+    }
+    /// Whether an axis decided so far carries no value at all.
+    fn axis_empty(&self, _axis: usize) -> bool {
+        false
+    }
+    /// The candidate answer a pass kind is judging, when the kind offers one.
+    /// Every other atom reads the stack; these two read the candidate, and
+    /// that seam is part of the kind's contract (§7.2).
+    fn candidate(&self) -> &str {
+        ""
+    }
+    fn candidate_family(&self) -> &str {
+        ""
     }
 }
 
@@ -237,6 +262,9 @@ impl Expr {
             }
 
             Expr::Axis { axis, value } => c.axis_is(*axis, value),
+            Expr::AxisMissingOr { axis, value } => c.axis_empty(*axis) || c.axis_is(*axis, value),
+            Expr::Family(f) => c.candidate_family() == f,
+            Expr::CandidateEmpty => c.candidate().is_empty(),
 
             Expr::Any(xs) => xs.iter().any(|x| x.eval(subj, c)),
             Expr::All(xs) => xs.iter().all(|x| x.eval(subj, c)),

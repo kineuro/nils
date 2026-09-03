@@ -18,6 +18,10 @@ use crate::error::{Error, R};
 use crate::expr::{Case, Cmp, Expr, NumOp};
 use crate::normalize::{Conditional, Normalizer};
 use crate::overlay::Overlay;
+use crate::pass::{
+    Compat, CompatRule, Cond, Emit, KeyDim, Kind, OnTie, Pass, Phase, Reference, Relaxed, Vote,
+    What,
+};
 use crate::rules::{
     Axis, AxisValue, Clause, Derive, DeriveCase, Rule, RuleSet, SetValue, Sets, Tier, Which,
 };
@@ -61,6 +65,9 @@ pub struct Pack {
     pub axes: Vec<Axis>,
     /// The rule sets, in the order they run.
     pub rule_sets: Vec<RuleSet>,
+    /// The passes: the phases that read more than one stack (§7). A pack that
+    /// declares none gets none.
+    pub passes: Vec<Pass>,
     /// The overlay applied, when one was, for the classified row to record.
     pub overlay: Option<String>,
     /// How many cases its own corpus holds, all of which passed.
@@ -458,10 +465,24 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         }
     }
 
+    // --- passes, last: a pass may name an axis and a flag, and both exist now
+    let mut passes: Vec<Pass> = Vec::new();
+    for pf in files_of(m, &manifest, dir, "passes")? {
+        let pass = load_pass(&pf, &axes, &derived, &buckets, &mut regexes)?;
+        if passes.iter().any(|p: &Pass| p.name == pass.name) {
+            return Err(
+                Error::at(format!("pass {}", pass.name), "is declared twice")
+                    .in_file(&pf.path, Some(&pf.source)),
+            );
+        }
+        passes.push(pass);
+    }
+
     let mut pack = Pack {
         derived,
         axes,
         rule_sets,
+        passes,
         name,
         version,
         contract,
@@ -828,9 +849,11 @@ fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<
                 ),
             )
         })?;
+        let missing_or = m.get("missing_or").is_some();
         let want = yaml::text(
-            m.get("is")
-                .ok_or_else(|| Error::at(at, "an axis atom needs `is`"))?,
+            m.get("is").or_else(|| m.get("missing_or")).ok_or_else(|| {
+                Error::at(at, "an axis atom needs `is`, or `missing_or` for a gap")
+            })?,
             at,
         )?;
         // An axis atom may name a value by its identity or by what a row
@@ -848,7 +871,26 @@ fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<
                 ));
             }
         };
-        return Ok(Expr::Axis { axis: ix, value });
+        return Ok(if missing_or {
+            Expr::AxisMissingOr { axis: ix, value }
+        } else {
+            Expr::Axis { axis: ix, value }
+        });
+    }
+
+    // The two atoms that read the candidate a pass is judging rather than the
+    // stack. A pack may write them anywhere; they are simply false wherever
+    // there is no candidate, which is everywhere but a pass (§7.2).
+    if let Some(f) = m.get("family") {
+        return Ok(Expr::Family(yaml::text(f, at)?));
+    }
+    if let Some(c) = m.get("candidate_empty") {
+        let want = c.as_bool().unwrap_or(true);
+        return Ok(if want {
+            Expr::CandidateEmpty
+        } else {
+            Expr::Not(Box::new(Expr::CandidateEmpty))
+        });
     }
 
     if let Some(p) = m.get("parser") {
@@ -1707,5 +1749,453 @@ fn load_rule_set(
         decides,
         enter_when,
         rules,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Passes (§7). A pass file declares a configured instance of a kind the engine
+// provides. Nothing here is an algorithm; everything here is the numbers one
+// runs on.
+
+fn load_pass(
+    f: &File,
+    axes: &[Axis],
+    derived: &[Normalizer],
+    buckets: &BTreeMap<String, Vec<String>>,
+    regexes: &mut Vec<Regex>,
+) -> R<Pass> {
+    let m = f.blame(yaml::obj(&f.value, "pass"))?;
+    let name = f.blame(yaml::text(yaml::get(m, "pass", "pass")?, "pass"))?;
+    let at = format!("pass {name}");
+    let kind_name = f.blame(yaml::text(yaml::get(m, "kind", &at)?, "kind"))?;
+    let phase = match m.get("phase") {
+        None => Phase::After,
+        Some(p) => match f.blame(yaml::text(p, "phase"))?.as_str() {
+            "before" => Phase::Before,
+            "after" => Phase::After,
+            other => {
+                return Err(Error::at("phase", format!("before or after, not {other}"))
+                    .in_file(&f.path, Some(&f.source)));
+            }
+        },
+    };
+
+    let axis_ix = |n: &str, at: &str| -> R<usize> {
+        axes.iter()
+            .position(|a| a.name == n)
+            .ok_or_else(|| Error::at(at, format!("no axis named {n}")))
+    };
+    // A pass runs where the rules have already run and only the fingerprint
+    // and the decided axes are at hand, so its expressions may read those and
+    // nothing else. A pack that names a flag here is refused with the line
+    // rather than quietly reading false.
+    let no_parsers: Vec<ParserDef> = Vec::new();
+    let no_parser_ix: HashMap<String, usize> = HashMap::new();
+    let mut compile_here = |body: &Value, at: &str, regexes: &mut Vec<Regex>| -> R<Expr> {
+        let mut sc = Scope {
+            derived,
+            axes,
+            parsers: &no_parsers,
+            parser_ix: &no_parser_ix,
+            buckets,
+            within: None,
+            flags: None,
+            regexes,
+            deps: HashSet::new(),
+        };
+        compile(body, at, &mut sc)
+    };
+
+    let target = match m.get("target") {
+        None => None,
+        Some(t) => {
+            let tm = f.blame(yaml::obj(t, &format!("{at}.target")))?;
+            let w = yaml::get(tm, "when", &format!("{at}.target"))?;
+            Some(f.blame(compile_here(w, &format!("{at}.target.when"), regexes))?)
+        }
+    };
+
+    // --- the reference
+    let r = f.blame(yaml::obj(yaml::get(m, "reference", &at)?, "reference"))?;
+    let scope = f.blame(yaml::text(
+        yaml::get(r, "scope", &format!("{at}.reference"))?,
+        "reference.scope",
+    ))?;
+    let mut filter = Vec::new();
+    if let Some(fl) = r.get("filter") {
+        for (k, v) in f.blame(yaml::obj(fl, &format!("{at}.reference.filter")))? {
+            let path = format!("{at}.reference.filter.{k}");
+            let what = match axes.iter().position(|a| a.name == *k) {
+                Some(i) => What::Axis(i),
+                None => match resolve_field(derived, k) {
+                    Some(i) => What::Field(i),
+                    None => {
+                        return Err(Error::at(
+                            path,
+                            format!("{k} is neither an axis of this pack nor a field"),
+                        )
+                        .in_file(&f.path, Some(&f.source)));
+                    }
+                },
+            };
+            let mut cond = Cond {
+                what,
+                is: Vec::new(),
+                not: Vec::new(),
+                present: None,
+            };
+            match v {
+                Value::Object(o) => {
+                    if let Some(x) = o.get("is") {
+                        cond.is = f.blame(yaml::texts(x, &path))?;
+                    }
+                    if let Some(x) = o.get("not") {
+                        cond.not = f.blame(yaml::texts(x, &path))?;
+                    }
+                    if let Some(x) = o.get("present") {
+                        cond.present = x.as_bool();
+                    }
+                }
+                other => cond.is = f.blame(yaml::texts(other, &path))?,
+            }
+            filter.push(cond);
+        }
+    }
+    let partition_by = match r.get("partition_by") {
+        None => None,
+        Some(v) => {
+            let n = f.blame(yaml::text(v, &format!("{at}.reference.partition_by")))?;
+            Some(f.blame(axis_ix(&n, &format!("{at}.reference.partition_by")))?)
+        }
+    };
+    let reference = Reference {
+        scope,
+        filter,
+        partition_by,
+        fallback: matches!(r.get("fallback").and_then(|v| v.as_str()), Some("global")),
+        fallback_when: match r.get("fallback_when") {
+            Some(v) => f.blame(yaml::texts(v, &format!("{at}.reference.fallback_when")))?,
+            None => Vec::new(),
+        },
+        fallback_except: match r.get("fallback_except") {
+            Some(v) => f.blame(yaml::texts(v, &format!("{at}.reference.fallback_except")))?,
+            None => Vec::new(),
+        },
+    };
+
+    // --- what it writes down about itself
+    let emit = match m.get("emit") {
+        None => Emit {
+            evidence: true,
+            review_below: 0.0,
+            review_all_touched: false,
+        },
+        Some(e) => {
+            let em = f.blame(yaml::obj(e, &format!("{at}.emit")))?;
+            Emit {
+                evidence: !matches!(em.get("evidence").and_then(|v| v.as_str()), Some("never")),
+                review_below: match em.get("review_item_below") {
+                    Some(v) => f.blame(yaml::number(v, &format!("{at}.emit.review_item_below")))?,
+                    None => 0.0,
+                },
+                review_all_touched: em
+                    .get("review_all_touched")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            }
+        }
+    };
+
+    let kind = match kind_name.as_str() {
+        "nearest_neighbour_vote" => Kind::Vote(load_vote(
+            f,
+            m,
+            &at,
+            axes,
+            derived,
+            &mut compile_here,
+            regexes,
+        )?),
+        other => {
+            return Err(Error::at(
+                "kind",
+                format!(
+                    "{other} is not a pass kind this engine provides; it has nearest_neighbour_vote"
+                ),
+            )
+            .in_file(&f.path, Some(&f.source)));
+        }
+    };
+
+    Ok(Pass {
+        name,
+        phase,
+        kind,
+        target,
+        reference,
+        emit,
+    })
+}
+
+fn load_vote(
+    f: &File,
+    m: &serde_json::Map<String, Value>,
+    at: &str,
+    axes: &[Axis],
+    derived: &[Normalizer],
+    compile_here: &mut impl FnMut(&Value, &str, &mut Vec<Regex>) -> R<Expr>,
+    regexes: &mut Vec<Regex>,
+) -> R<Vote> {
+    // --- the key: which fields, and how a value is binned
+    let mut dims: Vec<KeyDim> = Vec::new();
+    for (n, spec) in f.blame(yaml::obj(yaml::get(m, "key", at)?, "key"))? {
+        let path = format!("{at}.key.{n}");
+        let s = f.blame(yaml::obj(spec, &path))?;
+        let field = resolve_field(derived, n)
+            .ok_or_else(|| Error::at(&path, format!("no field named {n}")))
+            .map_err(|e| e.in_file(&f.path, Some(&f.source)))?;
+        let half_even = match s.get("rounding") {
+            None => false,
+            Some(r) => match f.blame(yaml::text(r, &path))?.as_str() {
+                "half_even" => true,
+                "half_away" => false,
+                other => {
+                    return Err(Error::at(
+                        format!("{path}.rounding"),
+                        format!("half_even or half_away, not {other}"),
+                    )
+                    .in_file(&f.path, Some(&f.source)));
+                }
+            },
+        };
+        dims.push(KeyDim {
+            name: n.clone(),
+            field,
+            round: s
+                .get("round")
+                .map(|x| f.blame(yaml::number(x, &path)))
+                .transpose()?,
+            ceil: s
+                .get("ceil")
+                .map(|x| f.blame(yaml::number(x, &path)))
+                .transpose()?,
+            half_even,
+        });
+    }
+    if dims.is_empty() || dims.len() > 5 {
+        return Err(Error::at(
+            format!("{at}.key"),
+            format!(
+                "a vote is binned on one to five dimensions, not {}",
+                dims.len()
+            ),
+        )
+        .in_file(&f.path, Some(&f.source)));
+    }
+    let dim_ix = |n: &str, at: &str| -> R<usize> {
+        dims.iter()
+            .position(|d| d.name == n)
+            .ok_or_else(|| Error::at(at, format!("no key dimension named {n}")))
+    };
+
+    // --- how far the search goes when the bin is empty
+    let w = f.blame(yaml::obj(yaml::get(m, "widen", at)?, "widen"))?;
+    let max_distance = f.blame(yaml::number(
+        yaml::get(w, "max_distance", &format!("{at}.widen"))?,
+        "widen.max_distance",
+    ))? as i64;
+    let mut pairs = Vec::new();
+    if let Some(ps) = w.get("pairs") {
+        for (i, pair) in f
+            .blame(yaml::arr(ps, &format!("{at}.widen.pairs")))?
+            .iter()
+            .enumerate()
+        {
+            let path = format!("{at}.widen.pairs[{i}]");
+            let two = f.blame(yaml::texts(pair, &path))?;
+            if two.len() != 2 {
+                return Err(
+                    Error::at(&path, "a pair is two dimensions").in_file(&f.path, Some(&f.source))
+                );
+            }
+            pairs.push((
+                f.blame(dim_ix(&two[0], &path))?,
+                f.blame(dim_ix(&two[1], &path))?,
+            ));
+        }
+    }
+    let mut relaxed = None;
+    if let Some(rs) = w.get("relaxed")
+        && let Some(first) = f
+            .blame(yaml::arr(rs, &format!("{at}.widen.relaxed")))?
+            .first()
+    {
+        let path = format!("{at}.widen.relaxed[0]");
+        let rm = f.blame(yaml::obj(first, &path))?;
+        let anchor = f.blame(yaml::text(yaml::get(rm, "requires", &path)?, &path))?;
+        let vary = f.blame(yaml::obj(yaml::get(rm, "vary", &path)?, &path))?;
+        let spans: Vec<(&String, f64)> = vary
+            .iter()
+            .map(|(k, v)| f.blame(yaml::number(v, &path)).map(|n| (k, n)))
+            .collect::<R<_>>()?;
+        if spans.len() != 2 || *spans[0].0 != anchor {
+            return Err(
+                Error::at(&path, format!("vary names two dimensions, {anchor} first"))
+                    .in_file(&f.path, Some(&f.source)),
+            );
+        }
+        relaxed = Some(Relaxed {
+            requires: f.blame(dim_ix(spans[0].0, &path))?,
+            requires_span: spans[0].1 as i64,
+            other: f.blame(dim_ix(spans[1].0, &path))?,
+            other_span: spans[1].1 as i64,
+            method: match rm.get("method") {
+                Some(v) => f.blame(yaml::text(v, &path))?,
+                None => "expanded_relaxed".to_string(),
+            },
+        });
+    }
+
+    // --- what the vote is about, and when the winner is written
+    let d = f.blame(yaml::obj(yaml::get(m, "decide", at)?, "decide"))?;
+    let axis_ix = |n: &str, at: &str| -> R<usize> {
+        axes.iter()
+            .position(|a| a.name == n)
+            .ok_or_else(|| Error::at(at, format!("no axis named {n}")))
+    };
+    let named = |key: &str| -> R<Vec<usize>> {
+        let path = format!("{at}.decide.{key}");
+        f.blame(yaml::texts(yaml::get(d, key, &path)?, &path))?
+            .iter()
+            .map(|n| f.blame(axis_ix(n, &path)))
+            .collect()
+    };
+    let vote_on = named("vote_on")?;
+    let writes = named("writes")?;
+    for a in &writes {
+        if !vote_on.contains(a) {
+            return Err(Error::at(
+                format!("{at}.decide.writes"),
+                format!(
+                    "{} is written but not voted on; a pass writes what it decided",
+                    axes[*a].name
+                ),
+            )
+            .in_file(&f.path, Some(&f.source)));
+        }
+    }
+    let on_tie = match d.get("on_tie") {
+        None => OnTie::Nothing,
+        Some(v) => match f
+            .blame(yaml::text(v, &format!("{at}.decide.on_tie")))?
+            .as_str()
+        {
+            "none" => OnTie::Nothing,
+            "first_seen" => OnTie::FirstSeen,
+            other => {
+                return Err(Error::at(
+                    format!("{at}.decide.on_tie"),
+                    format!("none or first_seen, not {other}"),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+        },
+    };
+    let write_when = match d.get("write_when") {
+        None => Vec::new(),
+        Some(v) => {
+            let wm = f.blame(yaml::obj(v, &format!("{at}.decide.write_when")))?;
+            match wm.get("missing_or") {
+                Some(x) => f.blame(yaml::texts(x, &format!("{at}.decide.write_when")))?,
+                None => Vec::new(),
+            }
+        }
+    };
+
+    // --- the compatibility filter, which is what makes this kind offer a
+    // second subject: its rules judge the candidate, not the stack.
+    let c = f.blame(yaml::obj(
+        yaml::get(m, "compatibility", at)?,
+        "compatibility",
+    ))?;
+    let path = format!("{at}.compatibility");
+    let subject = f.blame(yaml::obj(yaml::get(c, "subject", &path)?, &path))?;
+    let sf = f.blame(yaml::text(
+        yaml::get(subject, "text", &path)?,
+        &format!("{path}.subject.text"),
+    ))?;
+    let subject_field = resolve_field(derived, &sf)
+        .ok_or_else(|| Error::at(&path, format!("no field named {sf}")))
+        .map_err(|e| e.in_file(&f.path, Some(&f.source)))?;
+    let subject_case = match subject.get("case") {
+        None => Case::Raw,
+        Some(v) => Case::parse(&f.blame(yaml::text(v, &path))?).ok_or_else(|| {
+            Error::at(&path, "case is raw, lower or upper").in_file(&f.path, Some(&f.source))
+        })?,
+    };
+    let default_family = match c.get("default_family") {
+        Some(v) => f.blame(yaml::text(v, &path))?,
+        None => "OTHER".to_string(),
+    };
+    let mut family_of = HashMap::new();
+    if let Some(fo) = c.get("family_of") {
+        for (k, v) in f.blame(yaml::obj(fo, &format!("{path}.family_of")))? {
+            family_of.insert(k.clone(), f.blame(yaml::text(v, &path))?);
+        }
+    }
+    let mut rules = Vec::new();
+    for (i, rv) in f
+        .blame(yaml::arr(
+            yaml::get(c, "rules", &path)?,
+            &format!("{path}.rules"),
+        ))?
+        .iter()
+        .enumerate()
+    {
+        let rp = format!("{path}.rules[{i}]");
+        let rm = f.blame(yaml::obj(rv, &rp))?;
+        rules.push(CompatRule {
+            when: compile_here(yaml::get(rm, "when", &rp)?, &format!("{rp}.when"), regexes)?,
+            allow: compile_here(
+                yaml::get(rm, "allow", &rp)?,
+                &format!("{rp}.allow"),
+                regexes,
+            )?,
+        });
+    }
+
+    // Which of the voted axes the filter judges: the one whose vocabulary the
+    // family table names.
+    let compat_axis = vote_on
+        .iter()
+        .position(|a| {
+            axes[*a]
+                .values
+                .iter()
+                .any(|v| family_of.contains_key(&v.id))
+        })
+        .unwrap_or(0);
+
+    Ok(Vote {
+        dims,
+        max_distance,
+        pairs,
+        relaxed,
+        min_matches: f.blame(yaml::number(
+            yaml::get(d, "min_matches", &format!("{at}.decide"))?,
+            "decide.min_matches",
+        ))? as usize,
+        on_tie,
+        vote_on,
+        writes,
+        write_when,
+        compat: Compat {
+            subject_field,
+            subject_case,
+            default_family,
+            family_of,
+            rules,
+        },
+        compat_axis,
     })
 }

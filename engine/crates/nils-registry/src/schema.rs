@@ -475,6 +475,10 @@ fn build_registry() -> Vec<Table> {
                 req("rule", Type::Text),
                 req("source", Type::Text),
                 col("matched", Type::Text),
+                // A pass wrote this, and against which named reference. Null
+                // when a rule did, which is most of the time.
+                col("pass", Type::Text),
+                col("reference", Type::Text),
             ],
         )
         .index(&["stack_id"]),

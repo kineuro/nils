@@ -161,6 +161,13 @@ impl Ctx for Evaluated<'_> {
             .get(axis)
             .is_some_and(|vs| vs.iter().any(|v| v == value))
     }
+
+    fn axis_empty(&self, axis: usize) -> bool {
+        self.decided
+            .borrow()
+            .get(axis)
+            .is_none_or(|vs| vs.is_empty())
+    }
 }
 
 // ---------------------------------------------------------------------------
