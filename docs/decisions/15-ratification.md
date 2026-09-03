@@ -120,6 +120,25 @@ small sandboxed expression language (predicates over fingerprint fields, no I/O,
 no loops), not a plugin API. This keeps principle 6 true and keeps packs
 contributable by people who do not write Rust. **Accepted 2026-09-02, with the
 modality-extension criterion (section 7).**
+**Closed 2026-09-03: the grammar is 100 percent declarative and the pack ships
+with no code hatch.** The prototype (`spikes/pack/` in the public repository)
+expresses the five parsers with their 220 predicates, all 138 unified flags and
+the seven helpers v0 keeps as context methods, the SWI branch with its own
+taxonomy, and the physics-vote pass, and is checked against v0's own code over
+the live corpus: 518,365 stacks × 138 flags, 17,054 branch verdicts and 518,353
+votes, **no disagreement in any field**. It reads the pack in 5.5 s where v0's
+hand-written Python takes 30.0 s, so the format costs nothing to run. The
+prototype swapped the SyMRI and EPIMix branches for the physics vote, which
+makes the test stricter: those two are structurally the same as SWI, and the
+vote is the one piece that is not an expression at all. The language is ten
+atoms and three combinators over a stack, plus two atoms that read a pass's
+**candidate**; a pass remains a configured instance of an engine-provided kind,
+which is the boundary written into the Wave 2 spec (§5.1, §6, §7.2). Eight
+findings about v0 came with it, four of them bugs (three flags that can never be
+true and cover 11 percent of the corpus, a dead `or` in the synthetic test, two
+functions that decide an SWI output by different rules, a vote whose tie is
+broken by the database's row order); they are declared differences in the wave's
+gate rather than behaviour to reproduce.
 
 ### C6, the baseline host
 
@@ -234,7 +253,7 @@ evidence lands, and the report says what it found.
 |---|---|---|---|
 | C1 | the language spike report | me | Wave 0, ten working days from the repo restart |
 | C6 | the baseline measurement on the Asgard VM | me | Wave 0, after a sample corpus is on the storage server |
-| C11 | the pack-format prototype on the three hardest v0 pieces | me | second half of Wave 1 |
+| C11 | ~~the pack-format prototype on the three hardest v0 pieces~~ **done 2026-09-03; the format is data, no code hatch (section 3, C11)** | me | second half of Wave 1 |
 | C31 | Amsterdam's answer on what their cluster is | you | an email, any time before Wave 7 |
 | Federation pilot | Vienna's answers of 14 §7 | you | before Wave 8 |
 | Names | decided 2026-09-02: the name stays NILS, the federation is unnamed (D31, section 10); the trademark search (TMview, PRV, classes 9 and 42) is yours, in a browser, and gates the word-mark filing, not the repository | you | the search: before the filing |
