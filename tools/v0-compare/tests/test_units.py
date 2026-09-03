@@ -413,7 +413,7 @@ def test_axes_group_their_differences_and_name_the_two_that_are_never_allowed() 
     assert rep.stacks == 6
     base = next(a for a in rep.axes if a.axis == "base")
     assert base.compared == 6
-    assert base.agreed == 3
+    assert base.agreed == 2
     assert base.v1_silent == 1
     assert base.v0_silent == 1
     assert [(g.pattern, g.count) for g in base.groups][0] == ("v0=T2w v1=PDw", 2)
