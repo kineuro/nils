@@ -215,10 +215,38 @@ hang off another code (two under a v1 code v0 never had, two under a code that
 is another v0 subject's; one v0 subject split over two v1 subjects, one v1
 subject holding two v0 subjects), which also costs the session bar its two
 sessions, since a study under another code lands in another (subject, date)
-group. The run used a throwaway key, so `code_classes` says `other` for all 43;
-with Nima's own key in a file on the host it will say which of v0's codes the
-key and the identifier reproduce, and that is what tells a re-linked study from
-a digest v0 ran with an empty key.
+group. Both were run down on 2026-09-03 and neither is the engine's.
+
+Two of the four were the import's: the linkage CSV had been built from v0's
+identifier table, which holds 43 rows where the project's own map holds 44, so
+two studies carried an identifier v1 had never been told about and it minted a
+code for them. Imported from the project's map instead, the studies on the same
+code go from 78 to 80 of 82 and the sessions from 42 to 43 of 44. The map needed
+the many-to-one import of §7.4 to load at all: it gives one person two project
+identifiers, from the era before the identifiers were renamed.
+
+The other two are the files. One session of one subject was written into two
+subject directories by the export that pseudonymized it: one series of it has
+24 instances under the right subject's directory with the right identifier and
+the rest under another subject's, with that subject's identifier, and the
+second study of the session went there whole. The export changed identity in
+the middle of a series. Two signs say it was two runs: the misfiled sessions
+are named after their date where that subject's own sessions are named after
+the exam, and v0 has the session right because it ingested it before the
+relabelling and its resume never re-read it. It is not an identity collision:
+the two subjects have different personnummer in the project's own list, where
+exactly one pair of identifiers shares one. Nima settled it by reading the
+scans, and the anatomy is the first subject's. So v0 is right, the files are
+wrong, and v1 reports what the files say, which is what it is for. The gate's
+last two bars close when those 10,515 instances carry the right identifier
+again; the finding is written up on the host beside the run.
+
+The run used a throwaway key, so `code_classes` says `other` for all 43;
+with Nima's own key it stays `other`, and that is a fact about this cohort
+rather than a fault: it arrives pseudonymized, the personnummer the key was
+applied to is nowhere in the data, and the codes come from the project's map.
+The key still classifies the cohorts that arrive with the personnummer in
+`PatientID`.
 
 What the run turned up, and what it did not, is worth keeping. The 128,880 v0
 instances v1 has no row for are the whole of the difference at the instance
