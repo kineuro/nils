@@ -19,7 +19,7 @@ pub const FIELDS: &[&str] = &[
     "manufacturer",
     "model",
     "orientation",
-    "stack_key",
+    "split_reason",
     "echo_number",
     "sequence_name",
     "image_type",
@@ -128,7 +128,7 @@ pub fn read_fingerprints(path: &str) -> Result<Vec<Fingerprint>, String> {
             g(2).to_string(),  // manufacturer
             g(3).to_string(),  // model
             g(7).to_string(),  // orientation
-            String::new(),     // stack_key: v0's fingerprint has none
+            String::new(),     // split_reason: v0's fingerprint has none
             g(20).to_string(), // echo_number
             g(4).to_string(),  // sequence_name
             g(11).to_string(), // image_type

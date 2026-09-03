@@ -151,8 +151,12 @@ otherwise do per stack, materialized and typed once**. Per stack, in
   slice thickness, spacing, matrix, number of averages, pixel bandwidth), typed,
   in the units the DICOM carries, with nulls kept as nulls.
 - **Shape**: the geometry facts (2D or 3D acquisition, the orientation class,
-  the number of instances, frames and echoes in the stack, the stack key when
-  the series has more than one stack, and whether it has).
+  the number of instances in the stack, the stack's signature and index, how
+  many stacks its series has, and, when that is more than one, **why the series
+  split**: the first signature column its stacks disagree on, in v0's order.
+  v0 computes that reason, stores it on the stack, and then never selects it
+  into the fingerprint its own classifier reads, which is why three of its
+  flags have never fired.
 - **Provenance**: manufacturer, model, station and the implementation writer
   (its class UID and version name), folded the same way as the text. Not
   SoftwareVersions: the registry does not carry it, and adding a column to the
@@ -178,6 +182,22 @@ Deliberately **not** in it, and this settles the open question §14 carried:
 The fingerprint is derived data. It is never the truth about a file: the
 registry's columns are, and the fingerprint carries the batch and the epoch that
 produced it, so a change in derivation is visible and re-runnable.
+
+**Settled while building (slice 1).** Two names had to be kept apart. v0's
+`stack_key` is the reason a series split; v1's `stack.stack_key` is the
+signature hash and means something else entirely, so the fingerprint calls the
+hash `signature` and the reason `split_reason`, and a pack author cannot
+confuse them.
+
+The reason itself is derived from the stacks rather than copied from v0, and
+the two agree on all 2,165 series of the nmosd corpus. On the mix corpus they
+agree on 2,559 of 2,567, and the eight are v0's, with a named cause: v0 writes
+the key in its **sort** step and not in extraction, so a series that was
+extracted and never sorted has none. Across the whole live corpus that is 19
+multi-stack series (8 of the 9 CT ones, 11 of 87,973 MR ones), and every one of
+them is a series with no classification row, while every keyed series has one.
+The correlation is exact, both ways. v1 derives the reason wherever the stacks
+are, so the gap closes.
 
 ### 4.3 When it runs
 
