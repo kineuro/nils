@@ -136,7 +136,7 @@ fn main() {
         if with_passes {
             corpus.push(
                 id.parse().unwrap_or(0),
-                |f| stack.text(f).to_string(),
+                |f| stack.as_text(f).into_owned(),
                 |a| {
                     verdict
                         .axis(&pack.axes[a].name)

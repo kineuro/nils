@@ -115,6 +115,21 @@ impl Stack {
         }
     }
 
+    /// The field as the text something else stores, numbers included. A
+    /// corpus keeps what a pass reads as text and parses it back, so this is
+    /// the one accessor that does not care which half of the stack a field
+    /// lives in.
+    pub fn as_text(&self, i: usize) -> std::borrow::Cow<'_, str> {
+        if i < FIRST_TEXT {
+            match self.num[i] {
+                None => std::borrow::Cow::Borrowed(""),
+                Some(v) => std::borrow::Cow::Owned(format!("{v}")),
+            }
+        } else {
+            std::borrow::Cow::Borrowed(&self.text[i - FIRST_TEXT])
+        }
+    }
+
     /// Whether the field carries anything at all.
     pub fn present(&self, i: usize) -> bool {
         if i < FIRST_TEXT {
