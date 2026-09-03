@@ -824,7 +824,7 @@ Settled while building stacks (slice 5):
   only ways a key can differ from v0's tuple, and neither occurred on the
   spike's corpus. The key of the empty signature is `e4a6a0577479b2b4`, pinned
   in the tests beside a full MR signature.
-- The series row and its detail row carry the first instance's values of the
+- The series row and its detail row carry one instance's values of the
   thirteen series-level columns a stack signature is also made of (`image_type`
   and `image_orientation_patient` on `series`; the seven MR timing, echo and
   coil columns on `series_mr`; `kvp`, `x_ray_tube_current` and `exposure` on
@@ -832,7 +832,19 @@ Settled while building stacks (slice 5):
   left out of the `field_disagreement` check (§9.1): instances that differ on
   them are the series' stacks, which the `stack` table records, not a
   disagreement. The list is derived from the catalogue (a series-level column
-  whose source a stack column reads too), and a test pins the thirteen.
+  whose source a stack column reads too), and a test pins the thirteen. Which
+  instance's values those are was v0's answer, the first one walked, until
+  slice 7: the row now keeps the smallest value of each column (§9.1), so a
+  multi-stack series says the same thing whatever the walk order. The raw
+  `image_orientation_patient` is in the thirteen but not in the signature
+  itself, which carries the derived orientation class, so instances of one
+  stack may still spell it differently; the same rule decides it.
+- The stack row is written once, from the instance that created the stack, and
+  is not decided the way the rows above are: its fourteen signature values are
+  what defines the stack, so they agree by construction, except in the last
+  decimals of the six the signature rounds and in the raw orientation. A hash
+  per stack row, to decide those too, is Wave 2's if the fingerprint reads
+  them.
 - `orientation_oblique` is counted once per stack created, not per instance,
   when the class is known and the confidence is under 0.9; the unknown
   orientation (`Axial`, 0.5, from a missing or degenerate ImageOrientationPatient)
@@ -905,6 +917,26 @@ Settled while building the writer (slice 3):
   out of the series comparison, and a file of another modality than the series
   row is compared on the series columns only, never on the other modality's
   detail table.
+- Settled while reading the first gate run (slice 7): a field two files
+  disagree on is **decided by value**, not by which file arrived first. The row
+  keeps the smaller of the two in the catalogue's canonical text order, on
+  every column of the subject, study and series rows, whether the column is one
+  the comparison above counts or one it leaves out. A row is therefore the same
+  whatever order the walk and the workers gave the files, which "the first
+  record stands" was not: the first gate run found the instances of single
+  series carrying up to twenty-six spellings of `sequence_name`, two
+  acquisition matrices, two slice spacings and two orientations, and each of
+  them made the registry depend on a race. The rule needs nothing stored, since
+  `min` does not care in what order it is applied: a run that resumes, a batch
+  that arrives late and a second digest of the same tree reach the same row.
+  The cost is one read of the stored value the first time a field of a row is
+  decided (kept with the cached row afterwards) and an `UPDATE` of that column
+  when the smaller value is the new one; both are rare, because almost no field
+  of almost any row is ever disagreed about. A file that carries a null decides
+  nothing: a null is no value. The fill rule covers every column the same way
+  now, the per-instance and stack-signature ones included; only the
+  disagreement *diagnostic* still leaves them out, since an instance that
+  differs there is the series' stacks, not a disagreement (§8).
 - Cache misses are one keyed select per batch and table (`WHERE uid IN (...)`),
   never a query per file; each of the three caches holds 200,000 rows.
 - The batch queue was two batches per worker with no ceiling. On a 64-core host

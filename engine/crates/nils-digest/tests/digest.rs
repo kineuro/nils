@@ -12,12 +12,14 @@ mod common;
 use std::fs;
 use std::time::Duration;
 
-use nils_dicom::synth::TempDir;
+use dicom_core::VR;
+use dicom_dictionary_std::tags;
+use nils_dicom::synth::{self, TempDir};
 use nils_digest::{DigestError, Report, digest};
 use nils_registry::schema::table;
 use nils_registry::store::Cell;
 use nils_registry::time::{iso_of, now_iso, now_secs};
-use nils_registry::{Insert, Param};
+use nils_registry::{Insert, Param, Registry};
 
 use common::*;
 
@@ -630,8 +632,8 @@ fn disagreements_are_diagnostics_not_errors() {
             "{name}"
         );
         assert_eq!(samples("series_multi_study"), ["series.study_id"], "{name}");
-        // the first values stand: the study has one description, the subject
-        // one birth date, the series one study
+        // one row each: the study has one description, the subject one birth
+        // date, the series one study
         assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {subject}"), 1, "{name}");
         assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {study}"), 2, "{name}");
         assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {series}"), 3, "{name}");
@@ -648,19 +650,15 @@ fn disagreements_are_diagnostics_not_errors() {
             2,
             "{name}"
         );
+        // the row is decided, not raced: the smaller value in the canonical
+        // text order stands, whichever file the walk brought first (§9.1)
         let described = texts(
             &mut reg,
             "SELECT study_description FROM {study} WHERE study_instance_uid = 'A'",
         );
-        assert!(
-            described == ["Brain"] || described == ["Head"],
-            "{name}: {described:?}"
-        );
+        assert_eq!(described, ["Brain"], "{name}");
         let born = texts(&mut reg, "SELECT CAST(birth_date AS TEXT) FROM {subject}");
-        assert!(
-            born == ["1980-01-01"] || born == ["1980-01-02"],
-            "{name}: {born:?}"
-        );
+        assert_eq!(born, ["1980-01-01"], "{name}");
         // the diagnostics are rows of the batch
         assert_eq!(
             texts(
@@ -956,5 +954,80 @@ fn a_batch_files_one_review_item_per_quarantine_class() {
         assert_eq!(refs.len(), 2, "{name}");
         let reference: serde_json::Value = serde_json::from_str(&refs[1]).unwrap();
         assert_eq!(reference["batch_id"], 3, "{name}");
+    }
+}
+
+#[test]
+fn a_disagreed_field_is_decided_by_value_not_by_order() {
+    // Two series that carry the same three sequence names and body parts in
+    // opposite file order, so the writer meets them in opposite orders, and a
+    // third series that a later run adds a file to, when the row is no longer
+    // in the writer's cache and is read back. Every one of them ends with the
+    // smaller value in the canonical text order (§9.1).
+    let variants = [("ep_b1000", "HEAD"), ("tse2d1_9", "NECK"), ("*fl3d1", "BRAIN")];
+    let file = |series: &str, i: usize, sop: &str, (sequence, part): (&str, &str)| {
+        (
+            format!("{series}/IM_{i:04}"),
+            mr(
+                "A",
+                series,
+                sop,
+                "P1",
+                &[
+                    synth::text(tags::BODY_PART_EXAMINED, VR::CS, part),
+                    synth::text(tags::SEQUENCE_NAME, VR::SH, sequence),
+                ],
+            ),
+        )
+    };
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("digest-decided");
+        for (i, v) in variants.iter().enumerate() {
+            let (path, bytes) = file("A.1", i, &format!("A.1.{i}"), *v);
+            dir.file(&path, &bytes);
+            let (path, bytes) = file("A.2", i, &format!("A.2.{i}"), variants[2 - i]);
+            dir.file(&path, &bytes);
+        }
+        // the third series starts with the middle value alone
+        let (path, bytes) = file("A.3", 0, "A.3.0", variants[1]);
+        dir.file(&path, &bytes);
+        let mut s = settings(&dir);
+        // one file per batch, so the walk order is the writer's order
+        s.workers = 1;
+        s.walk_threads = 1;
+        s.batch_rows = 1;
+        let mut reg = lab.open();
+        let r = digest(&s, &mut reg).unwrap();
+        assert_eq!(r.written.as_ref().unwrap().ingested, 7, "{name}");
+        let decided = |reg: &mut Registry, uid: &str| {
+            texts(
+                reg,
+                &format!(
+                    "SELECT sequence_name || ' ' || body_part_examined FROM {{series}} \
+                     WHERE series_instance_uid = '{uid}'"
+                ),
+            )
+        };
+        // the two orders decide the same row
+        assert_eq!(decided(&mut reg, "A.1"), ["*fl3d1 BRAIN"], "{name}");
+        assert_eq!(decided(&mut reg, "A.2"), ["*fl3d1 BRAIN"], "{name}");
+        // a later run, with nothing of the row in its cache, still decides it:
+        // the smaller value replaces the stored one, a larger one does not
+        let (path, bytes) = file("A.3", 1, "A.3.1", variants[2]);
+        dir.file(&path, &bytes);
+        let r = digest(&s, &mut reg).unwrap();
+        assert_eq!(r.written.as_ref().unwrap().ingested, 1, "{name}");
+        assert_eq!(decided(&mut reg, "A.3"), ["*fl3d1 BRAIN"], "{name}");
+        let (path, bytes) = file("A.3", 2, "A.3.2", variants[0]);
+        dir.file(&path, &bytes);
+        digest(&s, &mut reg).unwrap();
+        assert_eq!(
+            decided(&mut reg, "A.3"),
+            ["*fl3d1 BRAIN"],
+            "{name}: a larger value replaced the row"
+        );
+        // every file after the first of a series disagrees on both fields
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {series}"), 3, "{name}");
     }
 }

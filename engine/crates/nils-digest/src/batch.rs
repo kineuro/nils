@@ -269,14 +269,29 @@ impl Fields {
             .map(move |(i, _)| (i, self.names[i]))
     }
 
-    /// The compared fields the stored row holds no value for and the file
-    /// does: the writer fills them.
+    /// The fields the stored row holds no value for and the file does: the
+    /// writer fills them. Every field, whether it is compared or not: a null
+    /// is no value on any of them (§9.1).
     pub fn fillable(&self, mine: &[u32], theirs: &[u32]) -> Vec<usize> {
         let none = hash32(None);
         mine.iter()
             .zip(theirs)
             .enumerate()
-            .filter(|(i, (a, b))| self.compared[*i] && **b == none && **a != none)
+            .filter(|(_, (a, b))| **b == none && **a != none)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The fields both sides hold a value for and disagree on, compared or
+    /// not: the writer decides them by value (§9.1), so that a row does not
+    /// depend on which instance reached the writer first. `differing` is the
+    /// same set restricted to the fields a disagreement is a diagnostic for.
+    pub fn resolvable(&self, mine: &[u32], theirs: &[u32]) -> Vec<usize> {
+        let none = hash32(None);
+        mine.iter()
+            .zip(theirs)
+            .enumerate()
+            .filter(|(_, (a, b))| **a != **b && **a != none && **b != none)
             .map(|(i, _)| i)
             .collect()
     }
