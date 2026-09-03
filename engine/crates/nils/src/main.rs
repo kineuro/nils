@@ -865,6 +865,11 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                         "review_below": pack.review.below(&a.name),
                         "asks_when_missing": pack.review.asks_when_missing(&a.name),
                     })).collect::<Vec<_>>(),
+                    "passes": pack.passes.iter().map(|p| serde_json::json!({
+                        "pass": p.name, "kind": p.kind_name(),
+                        "phase": format!("{:?}", p.phase).to_lowercase(),
+                        "reference": p.reference.scope,
+                    })).collect::<Vec<_>>(),
                     "rule_sets": pack.rule_sets.iter().map(|r| serde_json::json!({
                         "rule_set": r.name, "rules": r.rules.len(),
                         "decides": r.decides, "entered": r.enter_when.is_some(),
@@ -901,6 +906,14 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                         a.name,
                         a.values.len(),
                         pack.review.below(&a.name)
+                    );
+                }
+                for p in &pack.passes {
+                    println!(
+                        "  pass    {:20} {} against {}",
+                        p.name,
+                        p.kind_name(),
+                        p.reference.scope
                     );
                 }
                 for r in &pack.rule_sets {
