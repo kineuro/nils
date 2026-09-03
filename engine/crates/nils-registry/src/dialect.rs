@@ -91,16 +91,26 @@ impl Dialect {
     /// the column itself on SQLite; on Postgres, dates and JSON cast to text,
     /// times with their six fraction digits, timestamps in UTC.
     pub fn text_of(self, column: &Column) -> String {
+        self.text_of_qualified(None, column)
+    }
+
+    /// [`Dialect::text_of`] for a column of an aliased table in a join, so
+    /// that a select across several tables reads a date, a time, a timestamp
+    /// or a JSON column as text on either backend. Postgres hands those back
+    /// in types the store does not read, and a select that forgets the cast
+    /// fails only once a row of that shape exists, which is the worst time.
+    pub fn text_of_qualified(self, alias: Option<&str>, column: &Column) -> String {
+        let name = match alias {
+            Some(a) => format!("{a}.{}", column.name),
+            None => column.name.to_string(),
+        };
         match (self, column.ty) {
-            (Dialect::Postgres, Type::Date | Type::Json) => format!("{}::text", column.name),
-            (Dialect::Postgres, Type::Time) => {
-                format!("to_char({}, 'HH24:MI:SS.US')", column.name)
+            (Dialect::Postgres, Type::Date | Type::Json) => format!("{name}::text"),
+            (Dialect::Postgres, Type::Time) => format!("to_char({name}, 'HH24:MI:SS.US')"),
+            (Dialect::Postgres, Type::Timestamp) => {
+                format!("to_char({name} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
             }
-            (Dialect::Postgres, Type::Timestamp) => format!(
-                "to_char({} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
-                column.name
-            ),
-            _ => column.name.to_string(),
+            _ => name,
         }
     }
 

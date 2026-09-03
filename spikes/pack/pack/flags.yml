@@ -196,12 +196,13 @@ flags:
 
   is_3d: {any: [{field: acquisition_type, eq: '3D'}, image_type.is_3d_view]}
   is_2d: {any: [{field: acquisition_type, eq: '2D'}, image_type.is_2d_view]}
-  # v0 reads these three off a `stack_key` its fingerprint query never selects,
+  # v0 reads these three off a stack key its fingerprint query never selects,
   # so all three are permanently false there. The rule below is the one v0
-  # meant; the difference is declared (spikes/pack/README.md, finding 1).
-  is_multi_echo: {field: stack_key, eq: multi_echo}
-  is_multi_ti:   {field: stack_key, eq: multi_ti}
-  is_multi_fa:   {field: stack_key, eq: multi_flip_angle}
+  # meant, against the fingerprint column Wave 2 slice 1 added; the difference
+  # is declared (spikes/pack/README.md, finding 1).
+  is_multi_echo: {field: split_reason, eq: multi_echo}
+  is_multi_ti:   {field: split_reason, eq: multi_ti}
+  is_multi_fa:   {field: split_reason, eq: multi_flip_angle}
 
   # === 5. derived / synthetic / quantitative ================================
 

@@ -11,7 +11,7 @@ use crate::schema::{ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,11 +50,65 @@ pub struct Migration {
     pub apply: fn(&mut Store, Kind) -> Result<(), Error>,
 }
 
-/// Every migration, in order. The first creates the schema as declared.
-pub static MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    apply: create_declared_tables,
-}];
+/// Every migration, in order. The first creates the schema as declared; the
+/// rest add what a later wave declared, so that a registry written by an older
+/// binary opens under a newer one without being rebuilt.
+pub static MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        apply: create_declared_tables,
+    },
+    Migration {
+        version: 2,
+        apply: create_stack_fingerprint,
+    },
+];
+
+/// Wave 2 §4.2. A registry created at version 1 gains the table; one created
+/// now already has it from [`create_declared_tables`], so this is a no-op
+/// there and the two paths reach the same schema.
+fn create_stack_fingerprint(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["stack_fingerprint"])
+}
+
+/// Create the named declared tables if they are not there yet.
+fn add_tables(store: &mut Store, kind: Kind, names: &[&str]) -> Result<(), Error> {
+    let dialect = store.dialect();
+    let schema = store.schema().map(str::to_string);
+    for t in kind.tables().iter().filter(|t| names.contains(&t.name)) {
+        if table_exists(store, t.name)? {
+            continue;
+        }
+        store.batch(&dialect.create_table(schema.as_deref(), t))?;
+        for ix in dialect.create_indexes(schema.as_deref(), t) {
+            store.batch(&ix)?;
+        }
+    }
+    Ok(())
+}
+
+fn table_exists(store: &mut Store, name: &str) -> Result<bool, Error> {
+    Ok(match store {
+        Store::Sqlite(_) => store
+            .query_opt(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                &[Param::from(name)],
+            )?
+            .is_some(),
+        Store::Postgres { .. } => {
+            let schema = store.schema().unwrap_or("public").to_string();
+            store
+                .query_opt(
+                    "SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
+                    &[Param::from(schema), Param::from(name)],
+                )?
+                .is_some()
+        }
+    })
+}
 
 fn create_declared_tables(store: &mut Store, kind: Kind) -> Result<(), Error> {
     let dialect = store.dialect();
@@ -223,7 +277,10 @@ mod tests {
             standing(&mut store, Kind::Registry).unwrap(),
             Standing::Empty
         );
-        assert_eq!(migrate(&mut store, Kind::Registry).unwrap(), vec![1]);
+        // Every migration runs on a new store; the later ones are no-ops
+        // there, since migration 1 creates every declared table.
+        let applied: Vec<i64> = MIGRATIONS.iter().map(|m| m.version).collect();
+        assert_eq!(migrate(&mut store, Kind::Registry).unwrap(), applied);
         assert_eq!(
             standing(&mut store, Kind::Registry).unwrap(),
             Standing::Current

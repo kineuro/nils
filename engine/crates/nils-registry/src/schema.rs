@@ -344,6 +344,82 @@ fn build_registry() -> Vec<Table> {
         .unique(&["sop_instance_uid"])
         .index(&["series_id"])
         .index(&["stack_id"]),
+        // The fingerprint of Wave 2 (`docs/specs/wave2-fingerprint-and-classify.md`,
+        // §4.2): the join a classifier would otherwise do per stack, materialized
+        // and typed. It holds what is true of the file; what is true of MRI is in
+        // a pack, so there are no flags here and the text is folded but not
+        // rewritten.
+        Table::new(
+            "stack_fingerprint",
+            vec![
+                col("id", Type::Id),
+                req("stack_id", Type::Int),
+                req("series_id", Type::Int),
+                req("study_id", Type::Int),
+                req("subject_id", Type::Int),
+                req("modality", Type::Text),
+                // folded text: NFKC, whitespace collapsed, case kept, because a
+                // pack's first normalizer step is a case-sensitive removal
+                col("text_series_description", Type::Text),
+                col("text_protocol_name", Type::Text),
+                col("text_sequence_name", Type::Text),
+                col("text_body_part", Type::Text),
+                col("text_series_comments", Type::Text),
+                col("text_image_comments", Type::Text),
+                col("text_all", Type::Text),
+                col("text_contrast", Type::Text),
+                // the multi-valued fields as read; a parser tokenizes them
+                col("image_type", Type::Text),
+                col("scanning_sequence", Type::Text),
+                col("sequence_variant", Type::Text),
+                col("scan_options", Type::Text),
+                col("image_orientation_patient", Type::Text),
+                // physics
+                col("echo_time", Type::Double),
+                col("repetition_time", Type::Double),
+                col("inversion_time", Type::Double),
+                col("flip_angle", Type::Double),
+                col("echo_train_length", Type::Int),
+                col("echo_numbers", Type::Text),
+                col("diffusion_b_value", Type::Text),
+                col("magnetic_field_strength", Type::Double),
+                col("slice_thickness", Type::Double),
+                col("spacing_between_slices", Type::Double),
+                col("number_of_averages", Type::Double),
+                col("pixel_bandwidth", Type::Text),
+                // shape
+                col("mr_acquisition_type", Type::Text),
+                req("orientation", Type::Text),
+                col("orientation_confidence", Type::Double),
+                req("n_instances", Type::Int),
+                req("stack_index", Type::Int),
+                col("signature", Type::Text),
+                req("stacks_in_series", Type::Int),
+                // Why this stack's series split, when it did: v0's stack key
+                // (`sort/stack_key.py`), which its own classifier reads for
+                // three flags and never receives. Null for a single-stack
+                // series.
+                col("split_reason", Type::Text),
+                col("rows", Type::Int),
+                col("columns", Type::Int),
+                col("pixel_spacing", Type::Text),
+                col("fov_x", Type::Double),
+                col("fov_y", Type::Double),
+                col("aspect_ratio", Type::Double),
+                // provenance
+                col("manufacturer", Type::Text),
+                col("manufacturer_model_name", Type::Text),
+                col("station_name", Type::Text),
+                col("implementation_class_uid", Type::Text),
+                col("implementation_version_name", Type::Text),
+                // what made it
+                req("job_id", Type::Int),
+                req("epoch", Type::Int),
+            ],
+        )
+        .unique(&["stack_id"])
+        .index(&["series_id"])
+        .index(&["modality"]),
         Table::new(
             "diagnostic",
             vec![

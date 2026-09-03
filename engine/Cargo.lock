@@ -936,10 +936,25 @@ dependencies = [
  "ctrlc",
  "dicom-core",
  "dicom-dictionary-std",
+ "nils-classify",
  "nils-dicom",
  "nils-digest",
  "nils-registry",
  "serde_json",
+]
+
+[[package]]
+name = "nils-classify"
+version = "1.0.0-alpha.0"
+dependencies = [
+ "dicom-core",
+ "dicom-dictionary-std",
+ "nils-dicom",
+ "nils-digest",
+ "nils-registry",
+ "serde",
+ "serde_json",
+ "unicode-normalization",
 ]
 
 [[package]]

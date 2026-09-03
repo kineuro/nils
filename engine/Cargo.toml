@@ -22,6 +22,7 @@ publish = false
 nils-dicom = { path = "crates/nils-dicom" }
 nils-registry = { path = "crates/nils-registry" }
 nils-digest = { path = "crates/nils-digest" }
+nils-classify = { path = "crates/nils-classify" }
 
 blake2 = "0.11"
 bytes = "1"
@@ -47,6 +48,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde-saphyr = "1.2"
 serde_json = { version = "1.0", features = ["preserve_order"] }
 toml = "1.1"
+unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [workspace.lints.rust]

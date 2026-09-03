@@ -62,9 +62,10 @@ fn n(i: i64) -> String {
 }
 
 fn exercise(name: &str, store: &mut Store) {
+    let every: Vec<i64> = migrate::MIGRATIONS.iter().map(|m| m.version).collect();
     assert_eq!(
         migrate::migrate(store, Kind::Registry).unwrap(),
-        vec![1],
+        every,
         "{name}"
     );
     assert_eq!(

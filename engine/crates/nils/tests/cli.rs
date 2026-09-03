@@ -1469,3 +1469,62 @@ fn the_custody_page_is_current() {
         "docs/reference/custody.md is stale; NILS_WRITE_REFERENCE=1 cargo test -p nils --test cli the_custody_page rewrites it"
     );
 }
+
+#[test]
+fn fingerprint_derives_once_and_then_skips() {
+    let dir = tree();
+    let home = home();
+    let registry: [&std::ffi::OsStr; 2] =
+        [std::ffi::OsStr::new("--registry"), home.path().as_os_str()];
+    let out = nils()
+        .args(registry)
+        .args(["digest", "--workers", "2", "--name", "t", "--json"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let out = nils()
+        .args(registry)
+        .args(["fingerprint", "--name", "f", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let first: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let stacks = first["read"].as_i64().unwrap();
+    assert!(stacks > 0, "{first}");
+    assert_eq!(first["written"], stacks);
+    assert_eq!(first["skipped"], 0);
+    assert_eq!(first["cancelled"], false);
+
+    // a second run derives nothing
+    let out = nils()
+        .args(registry)
+        .args(["fingerprint", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let again: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(again["written"], 0);
+    assert_eq!(again["skipped"], stacks);
+
+    // and one modality is a subset of all of them
+    let out = nils()
+        .args(registry)
+        .args(["fingerprint", "--modality", "CT", "--force", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let ct: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(ct["read"].as_i64().unwrap() < stacks, "{ct}");
+    assert!(ct["read"].as_i64().unwrap() > 0, "{ct}");
+
+    // the page says the same as the JSON
+    let out = nils()
+        .args(registry)
+        .args(["fingerprint"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("stacks read"), "{}", stdout(&out));
+}

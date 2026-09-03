@@ -126,37 +126,78 @@ host, later); and the columnar shape is what makes the evaluation of most rules
 a vector operation rather than a Python loop (D12's "compile where the structure
 allows").
 
-The fingerprint is derived data. It is never the truth about a file: the
-registry's columns are, and the fingerprint carries the batch and the pack
-contract version that produced it, so a change in derivation is visible and
-re-runnable.
+### 4.2 What it holds, and the line that decides it
 
-### 4.2 What it holds
+**The fingerprint holds what is true of the file. The pack holds what is true
+of the knowledge.** Everything below follows from that one line, and so does
+what is deliberately absent.
 
-Per stack, in `stack_fingerprint`:
+What it is, in one sentence: **the five-table join a classifier would
+otherwise do per stack, materialized and typed once**. Per stack, in
+`stack_fingerprint`:
 
-- **Normalized text**: the series description, protocol name, sequence name and
-  the requested procedure text, each folded to one form (case, whitespace,
-  Unicode NFKC, the accents and the Nordic letters kept, punctuation reduced to
-  single spaces). One column per source field, plus one `text_all` that joins
-  them, because most keyword rules search across all of them and joining once is
-  cheaper than joining per rule.
-- **Parsed tokens**: the token sets of the multi-valued fields (`ImageType`,
-  `ScanningSequence`, `SequenceVariant`, `ScanOptions`, `ImageOrientation`),
-  stored as sorted arrays of tokens, so a predicate is a membership test.
+- **Folded text**: the six fields v0 joins (series description, protocol name,
+  sequence name, body part examined, series comments, image comments), each
+  kept as its own column and once more as the join, folded to one form: Unicode
+  NFKC, case, whitespace collapsed, the accents and the Nordic letters kept.
+  Folding is a fact about text.
+- **The multi-valued fields as read**: `ImageType`, `ScanningSequence`,
+  `SequenceVariant`, `ScanOptions` and `ImageOrientationPatient`, the stack's
+  own value where it has one and the series' otherwise. They are not tokenized
+  here: a parser declares its own `strip` and `split` (§6.1), and two packs may
+  disagree about where a token ends, so tokenizing is knowledge too.
 - **Physics**: the numbers a rule compares (echo time, repetition time,
   inversion time, flip angle, echo train length, b-values, field strength,
   slice thickness, spacing, matrix, number of averages, pixel bandwidth), typed,
   in the units the DICOM carries, with nulls kept as nulls.
 - **Shape**: the geometry facts (2D or 3D acquisition, the orientation class,
-  the number of instances, frames and echoes in the stack, whether the stack is
-  one of several in its series).
-- **Provenance**: manufacturer, model, station, software version and the
-  implementation writer, normalized the same way as the text.
-- **Flags**: the pack-independent booleans that the parsers of §6.1 produce.
-  These are *derived by the pack's grammar*, not by the engine, and they are
-  stored beside the fingerprint with the pack contract version that made them,
-  since a pack may add a flag.
+  the number of instances in the stack, the stack's signature and index, how
+  many stacks its series has, and, when that is more than one, **why the series
+  split**: the first signature column its stacks disagree on, in v0's order.
+  v0 computes that reason, stores it on the stack, and then never selects it
+  into the fingerprint its own classifier reads, which is why three of its
+  flags have never fired.
+- **Provenance**: manufacturer, model, station and the implementation writer
+  (its class UID and version name), folded the same way as the text. Not
+  SoftwareVersions: the registry does not carry it, and adding a column to the
+  catalogue is a Wave 1 change, not a fingerprint's to make.
+- **Contrast**: the administration fields v0 joins into its contrast blob,
+  folded, since a contrast agent's name is a fact about the study.
+
+Deliberately **not** in it, and this settles the open question §14 carried:
+
+- **Flags** are not stored. They are derived by the pack's grammar, so storing
+  them in an engine table would need a namespace per pack and a rewrite on
+  every pack version. The prototype settles the cost objection: 518,365 stacks,
+  220 predicates and 145 flags each, in 5.5 seconds on one core. Deriving them
+  when a pack is loaded is cheaper than keeping them true.
+- **The semantic normalization is not applied here.** v0 folds *and* rewrites
+  in one pass at extract time: `ir` becomes `inversion-recovery`, `mpr` beside
+  `3d` becomes `mprage`, seventeen boilerplate tokens are dropped. Those are
+  claims about MRI, not about text, so they belong to the pack (§6.4) and run
+  when a pack does. The practical difference is large: in v0, correcting the
+  token map means re-extracting the archive, because the rewritten text is what
+  was stored. In v1 it is a pack version, a diff and a re-classification.
+
+The fingerprint is derived data. It is never the truth about a file: the
+registry's columns are, and the fingerprint carries the batch and the epoch that
+produced it, so a change in derivation is visible and re-runnable.
+
+**Settled while building (slice 1).** Two names had to be kept apart. v0's
+`stack_key` is the reason a series split; v1's `stack.stack_key` is the
+signature hash and means something else entirely, so the fingerprint calls the
+hash `signature` and the reason `split_reason`, and a pack author cannot
+confuse them.
+
+The reason itself is derived from the stacks rather than copied from v0, and
+the two agree on all 2,165 series of the nmosd corpus. On the mix corpus they
+agree on 2,559 of 2,567, and the eight are v0's, with a named cause: v0 writes
+the key in its **sort** step and not in extraction, so a series that was
+extracted and never sorted has none. Across the whole live corpus that is 19
+multi-stack series (8 of the 9 CT ones, 11 of 87,973 MR ones), and every one of
+them is a series with no classification row, while every keyed series has one.
+The correlation is exact, both ways. v1 derives the reason wherever the stacks
+are, so the gap closes.
 
 ### 4.3 When it runs
 
@@ -413,14 +454,31 @@ de-duplicated before it is stored, as v0 does.
 
 ### 6.4 Text and its normalization
 
-Keywords are matched against a normalized blob built from the description,
-protocol, sequence name, body part, series comments and image comments. v0's
-normalizer is twelve ordered steps and one of them is surprising: after
-tokenizing it **de-duplicates tokens, keeping the first occurrence**, so a
-description that repeats a word loses the repeat and a two-word keyword only
-matches if the surviving tokens are adjacent. The order is load-bearing and the
-pack carries it as data (the token map, the replacements, the conditional
-replacements), because the gate compares against v0 and a different order gives
+Keywords are matched against a blob the **pack** builds from the folded text of
+§4.2, in twelve ordered steps that are all data: literal removals, three
+classes of character replacement (meaningful to a word, separator to a space,
+noise to nothing), lower-casing, spacing around `+` and `-` so that a trailing
+plus survives as a token, a final character filter, tokenizing on space and
+underscore, de-duplication, boilerplate removal, unconditional token
+replacement, conditional token replacement, and a join.
+
+Three of them are load-bearing in ways that are easy to get wrong, so they are
+called out rather than left to a reader of the config:
+
+- **De-duplication keeps the first occurrence and preserves order.** A
+  description that repeats a word loses the repeat, and a two-word keyword only
+  matches if the surviving tokens end up adjacent.
+- **`+` and `-` are tokens.** They carry contrast meaning, which is why v0's
+  contrast vocabulary contains `" -k"` and `" -gd"` whose leading space is
+  load-bearing, and why step 4.5 exists at all.
+- **The conditional replacements read the whole token set**, so `mpr` becomes
+  `mprage` only when `3d` is also present. That makes the pass order-sensitive
+  in one direction only: unconditional replacements run first, and their output
+  is what the conditions see.
+
+v0 runs this at extract time and stores the result; v1 runs it when a pack is
+loaded, for the reason §4.2 gives. The steps and their order are transcribed
+exactly, because the gate compares against v0 and a different order gives
 different answers on real text.
 
 ### 6.5 A different route of logic is a file
@@ -807,9 +865,6 @@ wanted, this slice is the reason they will be vocabulary and not code.
   registry snapshot" is the shape; whether the snapshot is a materialized table,
   a filtered view pinned by epoch, or a file shipped with the pack is slice 6's
   to decide and to record.
-- **Whether the fingerprint's flags belong to the pack or the engine.** They are
-  derived by pack grammar but stored in an engine table; if two packs disagree
-  about a flag's name, the storage needs a namespace. Slice 1 decides.
 - **The sidecar seam.** A pack may declare that an axis prefers a model when one
   is present (body part today). Wave 2 declares the seam and does not implement
   a sidecar; the question is whether the declaration belongs in the axis or in a

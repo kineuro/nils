@@ -25,7 +25,7 @@ pub mod knobs;
 pub mod progress;
 pub mod report;
 pub mod resume;
-mod rss;
+pub mod rss;
 pub mod rule;
 pub mod stack;
 pub mod walk;

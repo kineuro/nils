@@ -1,6 +1,6 @@
 [package]
-name = "nils"
-description = "NILS, the neuroimaging registry engine: one binary that digests DICOM into a registry"
+name = "nils-classify"
+description = "The pass over a registry: the fingerprint, the modality router, evidence and decisions"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,24 +10,17 @@ homepage.workspace = true
 authors.workspace = true
 publish.workspace = true
 
-[[bin]]
-name = "nils"
-path = "src/main.rs"
-
 [dependencies]
-nils-dicom.workspace = true
-nils-classify.workspace = true
 nils-digest.workspace = true
 nils-registry.workspace = true
-
-clap.workspace = true
-csv.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-ctrlc.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
+nils-dicom.workspace = true
 
 [lints]
 workspace = true
