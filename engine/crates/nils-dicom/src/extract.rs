@@ -184,6 +184,7 @@ pub fn extract_header(header: Header, fields: &IdentityFields) -> Result<Extract
         form,
         meta,
         dataset,
+        repaired,
     } = header;
     let transfer_syntax = match (&meta, form) {
         (Some(m), _) => m.transfer_syntax().to_string(),
@@ -192,6 +193,14 @@ pub fn extract_header(header: Header, fields: &IdentityFields) -> Result<Extract
     };
 
     let mut diagnostics = Vec::new();
+    if repaired > 0 {
+        // the header could only be read once the elements whose length their
+        // VR cannot hold were repaired in memory (§6.1)
+        diagnostics.push(Diagnostic::new(
+            DiagnosticKind::RaggedLength,
+            "read.value_length",
+        ));
+    }
     let declared = declared_charset(&dataset);
     let charset = Charset::resolve(declared.as_deref());
     if charset.is_unknown()

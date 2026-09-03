@@ -1035,3 +1035,49 @@ fn a_disagreed_field_is_decided_by_value_not_by_order() {
         assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {series}"), 3, "{name}");
     }
 }
+
+#[test]
+fn a_file_with_an_impossible_length_is_read_and_counted() {
+    // A private UL of six bytes, which a UL cannot hold: the file reads once
+    // the reader repairs it, the instance is ingested like any other, and the
+    // report says how many files needed it (§6.1).
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("digest-ragged");
+        dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", "P1", &[]));
+        let mut ragged = vec![
+            synth::text(dicom_core::Tag(0x0009, 0x0010), VR::LO, "A VENDOR"),
+            synth::bytes(
+                dicom_core::Tag(0x0009, 0x1213),
+                VR::UL,
+                vec![1, 0, 0, 0, 2, 0],
+            ),
+            synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1_mprage"),
+        ];
+        ragged.extend(synth::minimal_mr("A", "A.2", "A.2.1"));
+        ragged.push(synth::text(tags::PATIENT_ID, VR::LO, "P1"));
+        dir.file(
+            "a/IM_0002",
+            &synth::part10(&synth::MetaFields::mr("A.2.1"), &ragged, true),
+        );
+        let s = settings(&dir);
+        let mut reg = lab.open();
+        let r = digest(&s, &mut reg).unwrap();
+        assert_eq!((r.seen, r.parsed, r.quarantined), (2, 2, 0), "{name}");
+        assert_eq!(r.kind("ragged_length"), 1, "{name}: {:?}", r.diagnostics);
+        assert_eq!(
+            one(&mut reg, "SELECT COUNT(*) FROM {instance}"),
+            2,
+            "{name}"
+        );
+        // the elements after the impossible one are read, not lost
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT series_description FROM {series} WHERE series_instance_uid = 'A.2'"
+            ),
+            ["t1_mprage"],
+            "{name}"
+        );
+    }
+}

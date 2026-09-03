@@ -23,11 +23,12 @@ pub enum DiagnosticKind {
     FileChanged,
     OrientationOblique,
     SeriesMultiStudy,
+    RaggedLength,
 }
 
 impl DiagnosticKind {
     /// Every kind, in the order the report prints them.
-    pub const ALL: [DiagnosticKind; 11] = [
+    pub const ALL: [DiagnosticKind; 12] = [
         DiagnosticKind::WalkError,
         DiagnosticKind::CharsetUnknown,
         DiagnosticKind::CharsetLossy,
@@ -39,6 +40,7 @@ impl DiagnosticKind {
         DiagnosticKind::FileChanged,
         DiagnosticKind::OrientationOblique,
         DiagnosticKind::SeriesMultiStudy,
+        DiagnosticKind::RaggedLength,
     ];
 
     /// The name as written in `diagnostic.kind` and the report.
@@ -55,6 +57,7 @@ impl DiagnosticKind {
             DiagnosticKind::FileChanged => "file_changed",
             DiagnosticKind::OrientationOblique => "orientation_oblique",
             DiagnosticKind::SeriesMultiStudy => "series_multi_study",
+            DiagnosticKind::RaggedLength => "ragged_length",
         }
     }
 }

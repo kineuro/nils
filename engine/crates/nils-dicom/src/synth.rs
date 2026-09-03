@@ -28,8 +28,11 @@ pub enum Body {
     Text(String),
     /// Raw bytes, padded with NUL to even length.
     Bytes(Vec<u8>),
-    /// The items of a sequence.
+    /// The items of a sequence, the sequence and its items with a length.
     Items(Vec<Vec<Elem>>),
+    /// The items of a sequence of undefined length, each item of undefined
+    /// length too, closed by delimiters.
+    UndefinedItems(Vec<Vec<Elem>>),
 }
 
 /// A string element. Not for binary VRs; see [`num`].
@@ -76,6 +79,18 @@ pub fn seq(tag: Tag, items: Vec<Vec<Elem>>) -> Elem {
         tag,
         vr: VR::SQ,
         body: Body::Items(items),
+    }
+}
+
+/// A sequence written the way a scanner may write it and the way the
+/// standard allows: the sequence and every item of undefined length, closed
+/// by an item delimiter and a sequence delimiter (PS3.5 §7.5). Files in the
+/// archive carry `ProcedureCodeSequence` in exactly this form.
+pub fn seq_undefined(tag: Tag, items: Vec<Vec<Elem>>) -> Elem {
+    Elem {
+        tag,
+        vr: VR::SQ,
+        body: Body::UndefinedItems(items),
     }
 }
 
@@ -144,7 +159,7 @@ fn padded(body: &Body, vr: VR) -> Vec<u8> {
             }
             v
         }
-        Body::Items(_) => unreachable!(),
+        Body::Items(_) | Body::UndefinedItems(_) => unreachable!(),
     }
 }
 
@@ -161,7 +176,31 @@ fn encode_elem(out: &mut Vec<u8>, e: &Elem, explicit: bool) {
             }
             v
         }
+        Body::UndefinedItems(items) => {
+            // the item of undefined length ends at its delimiter, and the
+            // sequence at its own; the header below writes 0xFFFFFFFF
+            let mut v = Vec::new();
+            for item in items {
+                v.extend_from_slice(&0xFFFEu16.to_le_bytes());
+                v.extend_from_slice(&0xE000u16.to_le_bytes());
+                v.extend_from_slice(&u32::MAX.to_le_bytes());
+                v.extend_from_slice(&encode_dataset(item, explicit));
+                v.extend_from_slice(&0xFFFEu16.to_le_bytes());
+                v.extend_from_slice(&0xE00Du16.to_le_bytes());
+                v.extend_from_slice(&0u32.to_le_bytes());
+            }
+            v.extend_from_slice(&0xFFFEu16.to_le_bytes());
+            v.extend_from_slice(&0xE0DDu16.to_le_bytes());
+            v.extend_from_slice(&0u32.to_le_bytes());
+            v
+        }
         other => padded(other, e.vr),
+    };
+    let undefined = matches!(e.body, Body::UndefinedItems(_));
+    let declared = if undefined {
+        u32::MAX
+    } else {
+        value.len() as u32
     };
     out.extend_from_slice(&e.tag.group().to_le_bytes());
     out.extend_from_slice(&e.tag.element().to_le_bytes());
@@ -169,12 +208,12 @@ fn encode_elem(out: &mut Vec<u8>, e: &Elem, explicit: bool) {
         out.extend_from_slice(e.vr.to_string().as_bytes());
         if long_header(e.vr) {
             out.extend_from_slice(&[0, 0]);
-            out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            out.extend_from_slice(&declared.to_le_bytes());
         } else {
             out.extend_from_slice(&(value.len() as u16).to_le_bytes());
         }
     } else {
-        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        out.extend_from_slice(&declared.to_le_bytes());
     }
     out.extend_from_slice(&value);
 }

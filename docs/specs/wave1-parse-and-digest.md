@@ -447,6 +447,23 @@ Legacy Converted Enhanced MR, PET Image Storage, Legacy Converted Enhanced PET.
 The SOP class is read from the dataset and, when absent there, from the file meta
 (MediaStorageSOPClassUID), as v0 did.
 
+Settled while reading the mix corpus (slice 7): an element may declare a length
+its own VR cannot hold, and one vendor's private block does it in every file it
+writes (a `UL` of six bytes, where a `UL` takes four). `dicom-rs` reads the
+values that fit and counts the whole declared length as consumed, so the stream
+is two bytes behind from there on: the next tag it reads is the middle of a
+text value, its length is nonsense, and the file is reported truncated when
+nothing is truncated at all. It cost 1,996 of the mix corpus's 196,086 files,
+one percent, and with them 69 series, 47 studies and 32 subjects. The reader
+therefore repairs such a file in memory when, and only when, the first read
+failed as truncated: it walks the header itself, finds every element whose
+length its VR cannot hold, rounds the length down to the values that fit and
+drops the surplus bytes (which any reader ignores anyway), and reads the
+repaired copy. The file on disk is never touched, the repair is bounded to the
+first 8 MB of the header, a file it cannot follow keeps the first verdict, and
+every repaired file counts a `ragged_length` diagnostic, so the archive's
+malformed corner stays visible in the report rather than becoming silent.
+
 A bare dataset's transfer syntax is the one it was read with (implicit or
 explicit VR little endian) and `instance.transfer_syntax_uid` records it. When
 the file meta lacks (0002,0012), `dicom-rs` substitutes its own implementation
@@ -1199,7 +1216,8 @@ one row is the subject and a `sample` of at most ten shapes:
 SeriesInstanceUID seen under two StudyInstanceUIDs: the instances are ingested
 under the first study and the disagreement is counted, because a series
 belongs to one study by the standard, and the file disagrees with the
-standard, not with the digest).
+standard, not with the digest), `ragged_length` (§6.1: a length a fixed-size
+VR cannot hold, repaired in memory so the header could be read).
 
 The report (`ingest_batch.counts`, printed at the end and by `nils status --batch`)
 is what C37 calls "the diagnostics report": counts per quarantine class, per
