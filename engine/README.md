@@ -34,6 +34,7 @@ nils init --key k                         # a SQLite registry in the working dir
 nils init --key k --backend postgres --dsn postgres://nils:secret@db/nils --schema nils
 nils digest <root>                        # digest; the same command again resumes
 nils digest <root> --workers 8 --walk-threads 8 --batch-rows 2000 --files dcm --name my-batch
+nils digest <root> --files dcm,no-ext     # a union of name filters: .dcm in any case or no suffix (v0's "all")
 nils status                               # the registry, the running jobs, the last batches
 nils status --batch 3 --json              # one batch's counts
 
@@ -62,7 +63,7 @@ A registry is a home directory: `nils.toml`, the key store and, on SQLite, `regi
 
 The report names nothing from inside a file but SOP class and transfer syntax UIDs, modality and character set codes, tag keywords and the reader's error texts; diagnostic samples are shapes (`series_mr.echo_time=9a`), never values. Progress goes to stderr every ten seconds. The field catalogue is [`docs/reference/catalogue.md`](../docs/reference/catalogue.md), rendered from `nils-dicom` by `cargo run -p nils-dicom --example catalogue -- --write` and checked by a test.
 
-A synthetic corpus for trying it: `cargo run --release -p nils-dicom --example corpus -- --out /tmp/synth --instances 20000 --seed 1 > manifest.json`, described in [`tools/synth/README.md`](../tools/synth/README.md); the manifest's counts are what a digest of the tree must report.
+A synthetic corpus for trying it: `cargo run --release -p nils-dicom --example corpus -- --out /tmp/synth --instances 20000 --seed 1 > manifest.json`, described in [`tools/synth/README.md`](../tools/synth/README.md); the manifest's counts are what a digest of the tree must report. The registry a digest of it writes is what [`tools/v0-compare`](../tools/v0-compare/README.md) is tested against: the tool that measures a v1 registry against the v0 one it replaces (spec §12).
 
 ## Checks
 
