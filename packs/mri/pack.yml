@@ -17,6 +17,39 @@ parsers:
   - parsers.yml
 flags:
   - flags.yml
+# The pack's own text: the twelve steps that turn the fingerprint's folded
+# fields into what a keyword is matched against (spec section 6.4).
+normalize:
+  - normalize.yml
+
+axes:
+  # The order is the order the axes are decided in, and an axis may read one
+  # declared before it: construct's synthetic values require a provenance.
+  - axes/provenance.yml
+  - axes/technique.yml
+  - axes/modifier.yml
+  - axes/construct.yml
+  - axes/base.yml
+  - axes/body_part.yml
+  - axes/post_contrast.yml
+  - axes/directory_type.yml
+
+# Rule sets written longhand: the tiers that are not value-major.
+rules:
+  # The routes run before the axes they override: a route decides for the
+  # stacks it claims, and an axis leaves alone what is already decided.
+  - rules/excluded.yml
+  - rules/swi.yml
+  - rules/symri.yml
+  - rules/epimix.yml
+  - rules/stage.yml
+  - rules/base.yml
+  - rules/post_contrast.yml
+  - rules/body_part.yml
+  - rules/intent.yml
+
+# The order the rule sets run in.
+order: [excluded, provenance, swi, symri, epimix, stage, technique, base, modifier, construct, body_part, post_contrast, intent]
 
 # The lists a site may amend through an overlay, and nothing else: a pack
 # decides what is editable, not the engine (§5.3). Physics, flags and the

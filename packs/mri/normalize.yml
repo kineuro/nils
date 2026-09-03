@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The semantic normalizer, transcribed from v0 0.5.3
+# `sort/semantic-token-map.yaml` and `sort/semantic_normalizer.py`.
+#
+# v0 runs this at extract time and stores the result, so correcting the map
+# means re-extracting the archive. Here it is the pack's, it runs when the
+# pack is loaded, and correcting it is a version bump (spec section 4.2).
+
+normalize: search_text
+from:
+  - text_series_description
+  - text_protocol_name
+  - text_sequence_name
+  - text_body_part
+  - text_series_comments
+  - text_image_comments
+
+# Removed literally, before anything is folded, and case-sensitively:
+# which is why the fingerprint keeps case (spec section 4.2).
+raw_removals:
+  - 'RÖR PÅ DXSIN SE PÄRM'
+
+characters:
+  meaningful:
+    '*': 'star'
+  to_space: ['/', '\', '(', ')', '[', ']', ',', ';', ':', '^', '=']
+  remove: ['''', '"']
+
+# Boilerplate that means nothing, dropped after de-duplication.
+token_removals: ['RÖR PÅ DXSIN SE PÄRM', 'EPILEPSI', 'eplipsi', 'hjärtsekvens', 'Startsekvens', 'ENCEPHALIT', 'swift', 'brain', 'BRAIN', 'HEAD', 'head', 'Direkt', 'direct', 'direkt', 'MESEMS', 'SistaTestet', 'faser']
+
+# Ambiguous short tokens expanded so a keyword can be matched as a plain
+# substring without hitting the inside of another word.
+token_replacements:
+  'ir': 'inversion-recovery'
+  'pd': 'proton-density'
+  'pdw': 'proton-density'
+  'se': 'spin-echo'
+  'gre': 'gradient-echo'
+  'fc': 'flow-compensation'
+  'mt': 'magnetization-transfer'
+  't1': 't1w'
+  't2': 't2w'
+  '+t2': 't2w'
+  '-t2': 't2w'
+  't2cube': 't2w-cube'
+  'pdt2': 'proton-density-t2w'
+  'pd-t2': 'proton-density-t2w'
+  'pd+t2': 'proton-density-t2w'
+  'pd +t2': 'proton-density-t2w'
+  'pd+ t2': 'proton-density-t2w'
+  'loc': 'localizer'
+  'surv': 'localizer'
+  'sur': 'localizer'
+  '3-pl': 'localizer'
+  '3pl': 'localizer'
+  '-sikt': 'localizer'
+  'scout': 'localizer'
+  'versikt': 'localizer'
+  'prop': 'propeller'
+  'pha': 'phase'
+  'phs': 'phase'
+  'mag': 'magnitude'
+  'sense': 'grappa'
+  'fase': 'resolve'
+
+# v0 has one conditional replacement and it can never fire: it waits for
+# `t1`, which the unconditional replacement above has already turned into
+# `t1w`. Writing it against what is actually there was tried and measured on
+# the whole corpus, and it loses more than it gains: it would turn `mpr` into
+# `mprage` on 15,858 series, and on this corpus `mprage` is usually already
+# present while the separate `mpr` means the reformat. The cost is 7,693
+# stacks losing the MPR construct and 7,725 losing the ProjectionDerived
+# provenance, against 1,207 gaining MPRAGE as their technique. Whether
+# `MPR 3D T1` with no `mprage` is an MPRAGE is a radiological question, not
+# a programming one, so it goes to the verified corpus and not into a pack
+# on my say-so. The mechanism is in the format and tested; the rule is out.
+conditional_replacements: []

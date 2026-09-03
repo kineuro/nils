@@ -996,6 +996,7 @@ dependencies = [
 name = "nils-pack"
 version = "1.0.0-alpha.0"
 dependencies = [
+ "csv",
  "regex",
  "serde",
  "serde-saphyr",

@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Whether contrast was given, transcribed from v0 0.5.3
+# `detectors/contrast.py` and `detection_yaml/contrast-detection.yaml`.
+#
+# Three states, and the third is not a value: a stack with nothing to say
+# either way is unknown, and v0 stores null rather than a guess.
+
+axis: post_contrast
+kind: single
+stores: label
+
+values:
+  given: {label: '1'}
+  not_given: {label: '0'}

@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The base contrast axis: the vocabulary only. Its rules are tier-major and
+# not value-major, so they are written longhand in rules/base.yml rather than
+# in the compact form the other axes use (spec section 6.3).
+
+axis: base
+kind: single
+# No default. v0's detector answers `Unknown` and its pipeline then stores
+# null, so `Unknown` is an internal marker and never a row's value; an axis
+# nobody could decide is left unsaid.
+# v0 stores the name and not the identity, which is how `T2starw` came to be
+# written `T2*w` in 7,358 rows. Here the identity is the identity and the
+# label is what a row stores.
+stores: label
+
+values:
+  'DWI': {}
+  'PWI': {}
+  'SWI': {}
+  'T1rho': {}
+  'T2rho': {}
+  'T2starw':
+    label: 'T2*w'
+  'T2w': {}
+  'PDw': {}
+  'T1w': {}
+  'MTw': {}
+  'Unknown': {}

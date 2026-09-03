@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# What the axes decide, and what the pack's own normalizer makes of the text
+# they search. Every stack here is invented; the values are the shapes the
+# rules turn on.
+
+cases:
+
+  - name: a Siemens MPRAGE is an MPRAGE by its sequence name
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP\MP'
+      text_sequence_name: '*tfl3d1_16'
+      text_series_description: 'sag T1 mprage'
+      mr_acquisition_type: 3D
+    axes:
+      technique: MPRAGE
+      provenance: RawRecon
+
+  - name: a diffusion EPI is DWI-EPI, and its b value is not a modifier
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\DIFFUSION\NONE'
+      scanning_sequence: EP
+      text_sequence_name: '*ep_b1000#1'
+      text_series_description: 'ax dwi b1000'
+      diffusion_b_value: '1000'
+    axes:
+      technique: DWI-EPI
+      # Not DTIRecon: that provenance needs a diffusion-derived output, and
+      # this is the acquisition itself.
+      provenance: RawRecon
+
+  - name: a FLAIR is a modifier of an inversion-recovery TSE, not a technique
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      text_sequence_name: '*tir2d1_15'
+      text_series_description: 'ax T2 FLAIR'
+      inversion_time: 2500
+    axes:
+      # The axis stores the display name: v0 calls IR-TSE a TIRM in a row.
+      technique: TIRM
+      modifier: FLAIR
+
+  - name: an ADC map is a construct, and the map is what it is of
+    stack:
+      image_type: 'DERIVED\PRIMARY\ADC\ADC'
+      text_series_description: 'ax dwi ADC'
+    axes:
+      construct: ADC
+
+  - name: a localizer says so in its provenance
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      text_sequence_name: '*fl2d1_scout'
+      text_series_description: 'localizer'
+    axes:
+      provenance: Localizer
+
+  - name: the pack normalizes its own text, so a star is a word
+    stack:
+      text_series_description: 'ax T2*  swi'
+      text_protocol_name: 'SWI_pha'
+    flags: {}
+    axes:
+      construct: Phase
+
+  - name: at most one member of an exclusion group survives
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      text_series_description: 'ax T2 flair stir'
+      inversion_time: 2500
+    axes:
+      # FLAIR and STIR are both in IR_CONTRAST; the lower priority wins.
+      modifier: FLAIR

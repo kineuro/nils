@@ -1,0 +1,355 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The base contrast, transcribed from v0 0.5.3 `detectors/base_contrast.py`
+# and `detection_yaml/base-detection.yaml`.
+#
+# This is the axis that needs the longhand form. v0's other detectors scan an
+# axis's values and try three tiers per value; this one scans six tiers and
+# tries every value inside each. A rule set is ordered rules, so the tiers are
+# the rules and their order is v0's.
+
+rule_set: base
+decides: [base]
+
+tiers: {exclusive: 0.9, keywords: 0.85, physics: 0.7}
+
+order:
+  - 'technique:MPRAGE'
+  - 'technique:MEMPRAGE'
+  - 'technique:MP2RAGE'
+  - 'technique:TOF-MRA'
+  - 'technique:ME-GRE'
+  - 'technique:comb-ME-GRE'
+  - 'technique:DWI-EPI'
+  - 'technique:ASL-EPI'
+  - 'flag:dwi'
+  - 'flag:pwi'
+  - 'flag:swi'
+  - 'flag:mtw'
+  - 'flag:synthetic_t1'
+  - 'flag:synthetic_t2'
+  - 'flag:synthetic_flair'
+  - 'flag:synthetic_pd'
+  - 'flag:synthetic_dir'
+  - 'flag:synthetic_psir'
+  - 'flag:t1_map'
+  - 'flag:t2_map'
+  - 'flag:mp2rage_inversion'
+  - 'flag:mp2rage_uniform'
+  - 'flair:t1_text'
+  - 'flair:t2_text'
+  - 'flair:short_te'
+  - 'flair:long_te'
+  - 'flair:default'
+  - 'dual_echo:pd'
+  - 'dual_echo:t2'
+  - 'keywords:DWI'
+  - 'keywords:PWI'
+  - 'keywords:SWI'
+  - 'keywords:T1rho'
+  - 'keywords:T2rho'
+  - 'keywords:T2starw'
+  - 'keywords:T2w'
+  - 'keywords:PDw'
+  - 'keywords:T1w'
+  - 'keywords:MTw'
+  - 'physics:ir_stir_like'
+  - 'physics:ir_standard'
+  - 'physics:se_t1w'
+  - 'physics:se_t2w'
+  - 'physics:se_pdw'
+  - 'physics:gre_t1w'
+  - 'physics:gre_t2starw'
+
+rules:
+
+  # Tier 1. Some techniques physics-lock to a base contrast, and v0 takes
+  # them as authoritative: no conflict check, no keyword may override.
+  #
+  # v0's map has ten entries and two of them name techniques its own technique
+  # axis does not have (SWI, DSC-EPI), so they can never fire. A rule
+  # that names a value outside an axis's vocabulary fails this pack at load,
+  # which is how they were found.
+  'technique:MPRAGE':
+    clauses:
+      - {when: {axis: technique, is: 'MPRAGE'}, cite: 'MPRAGE', source: technique}
+    set: {base: 'T1w'}
+    confidence: 0.95
+    why: 'the MPRAGE technique implies a T1w base contrast'
+
+  'technique:MEMPRAGE':
+    clauses:
+      - {when: {axis: technique, is: 'MEMPRAGE'}, cite: 'MEMPRAGE', source: technique}
+    set: {base: 'T1w'}
+    confidence: 0.95
+    why: 'the MEMPRAGE technique implies a T1w base contrast'
+
+  'technique:MP2RAGE':
+    clauses:
+      - {when: {axis: technique, is: 'MP2RAGE'}, cite: 'MP2RAGE', source: technique}
+    set: {base: 'T1w'}
+    confidence: 0.95
+    why: 'the MP2RAGE technique implies a T1w base contrast'
+
+  'technique:TOF-MRA':
+    clauses:
+      - {when: {axis: technique, is: 'TOF-MRA'}, cite: 'TOF-MRA', source: technique}
+    set: {base: 'T1w'}
+    confidence: 0.9
+    why: 'the TOF-MRA technique implies a T1w base contrast'
+
+  'technique:ME-GRE':
+    clauses:
+      - {when: {axis: technique, is: 'ME-GRE'}, cite: 'ME-GRE', source: technique}
+    set: {base: 'T2starw'}
+    confidence: 0.85
+    why: 'the ME-GRE technique implies a T2*w base contrast'
+
+  'technique:comb-ME-GRE':
+    clauses:
+      - {when: {axis: technique, is: 'comb-ME-GRE'}, cite: 'comb-ME-GRE', source: technique}
+    set: {base: 'T2starw'}
+    confidence: 0.9
+    why: 'the comb-ME-GRE technique implies a T2*w base contrast'
+
+  'technique:DWI-EPI':
+    clauses:
+      - {when: {axis: technique, is: 'DWI-EPI'}, cite: 'DWI-EPI', source: technique}
+    set: {base: 'DWI'}
+    confidence: 0.95
+    why: 'the DWI-EPI technique implies a DWI base contrast'
+
+  'technique:ASL-EPI':
+    clauses:
+      - {when: {axis: technique, is: 'ASL-EPI'}, cite: 'ASL-EPI', source: technique}
+    set: {base: 'PWI'}
+    confidence: 0.95
+    why: 'the ASL-EPI technique implies a PWI base contrast'
+
+  # Tier 2. Flags that settle the base on their own.
+  'flag:dwi':
+    clauses:
+      - {flag: 'is_dwi', tier: exclusive}
+      - {flag: 'has_adc', tier: exclusive}
+      - {flag: 'has_fa', tier: exclusive}
+      - {flag: 'has_trace', tier: exclusive}
+    set: {base: 'DWI'}
+
+  'flag:pwi':
+    clauses:
+      - {flag: 'is_perfusion', tier: exclusive}
+      - {flag: 'is_asl', tier: exclusive}
+      - {flag: 'has_cbf', tier: exclusive}
+      - {flag: 'has_cbv', tier: exclusive}
+      - {flag: 'has_mtt', tier: exclusive}
+      - {flag: 'has_tmax', tier: exclusive}
+      - {flag: 'has_ttp', tier: exclusive}
+    set: {base: 'PWI'}
+
+  'flag:swi':
+    clauses:
+      - {flag: 'is_swi', tier: exclusive}
+      - {flag: 'has_swi', tier: exclusive}
+    set: {base: 'SWI'}
+
+  'flag:mtw':
+    clauses:
+      - {flag: 'has_mtc', tier: exclusive}
+    set: {base: 'MTw'}
+
+  'flag:synthetic_t1':
+    clauses:
+      - {flag: 'has_t1_synthetic', tier: exclusive}
+    set: {base: 'T1w'}
+
+  'flag:synthetic_t2':
+    clauses:
+      - {flag: 'has_t2_synthetic', tier: exclusive}
+    set: {base: 'T2w'}
+
+  'flag:synthetic_flair':
+    clauses:
+      - {flag: 'has_flair_synthetic', tier: exclusive}
+    set: {base: 'T2w'}
+
+  'flag:synthetic_pd':
+    clauses:
+      - {flag: 'has_pd_synthetic', tier: exclusive}
+    set: {base: 'PDw'}
+
+  'flag:synthetic_dir':
+    clauses:
+      - {when: {all: [is_dir, is_synthetic]}, cite: 'is_dir and is_synthetic', source: flags, tier: exclusive}
+    set: {base: 'T2w'}
+
+  'flag:synthetic_psir':
+    clauses:
+      - {when: {all: [has_psir, is_synthetic]}, cite: 'has_psir and is_synthetic', source: flags, tier: exclusive}
+    set: {base: 'T1w'}
+
+  'flag:t1_map':
+    clauses:
+      - {flag: has_t1_map, tier: exclusive}
+      - {flag: has_r1, tier: exclusive}
+    set: {base: 'T1w'}
+
+  'flag:t2_map':
+    clauses:
+      - {flag: has_t2_map, tier: exclusive}
+      - {flag: has_r2, tier: exclusive}
+    set: {base: 'T2w'}
+
+  'flag:mp2rage_inversion':
+    clauses:
+      - {flag: is_mp2rage_inv1, tier: exclusive}
+      - {flag: is_mp2rage_inv2, tier: exclusive}
+    set: {base: 'T1w'}
+    why: 'every MP2RAGE output is T1-weighted; which output it is, is a construct'
+
+  'flag:mp2rage_uniform':
+    clauses:
+      - {flag: has_uniform, tier: exclusive}
+      - {flag: is_uniform_denoised, tier: exclusive}
+    set: {base: 'T1w'}
+
+  # Tier 3. FLAIR can be T1 or T2 weighted; the text decides, then the echo time.
+  'flair:t1_text':
+    clauses:
+      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {text: search_text, substring: t1}]}, cite: t1, source: text, tier: keywords}
+    set: {base: 'T1w'}
+
+  'flair:t2_text':
+    clauses:
+      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {text: search_text, substring: t2}]}, cite: t2, source: text, tier: keywords}
+    set: {base: 'T2w'}
+
+  'flair:short_te':
+    clauses:
+      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {field: echo_time, lt: 40}]}, cite: 'echo time under 40 ms', source: physics, tier: physics}
+    set: {base: 'T1w'}
+    confidence: 0.85
+
+  'flair:long_te':
+    clauses:
+      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {field: echo_time, ge: 40}]}, cite: 'echo time 40 ms or more', source: physics, tier: physics}
+    set: {base: 'T2w'}
+    confidence: 0.85
+
+  'flair:default':
+    clauses:
+      - {when: {any: [is_flair, {text: search_text, substring: flair}]}, cite: flair, source: text, tier: keywords}
+    set: {base: 'T2w'}
+    confidence: 0.7
+    why: 'a FLAIR with no echo time is taken as T2-weighted'
+
+  # Tier 4. A PD and T2 dual echo: the echo time says which echo this is.
+  'dual_echo:pd':
+    clauses:
+      - {when: {all: [{text: search_text, any_substring: ['pd', 'proton density', 'proton-density']}, {text: search_text, any_substring: ['t2']}, {field: echo_time, lt: 40}]}, cite: 'PD echo', source: physics, tier: physics}
+    set: {base: 'PDw'}
+    confidence: 0.85
+
+  'dual_echo:t2':
+    clauses:
+      - {when: {all: [{text: search_text, any_substring: ['pd', 'proton density', 'proton-density']}, {text: search_text, any_substring: ['t2']}, {field: echo_time, ge: 40}]}, cite: 'T2 echo', source: physics, tier: physics}
+    set: {base: 'T2w'}
+    confidence: 0.85
+
+  # Tier 5. Keywords, in the axis's own priority order.
+  'keywords:DWI':
+    clauses:
+      - {keywords: ['dwi', 'diffusion', 'dti', 'diff ', 'hardi'], tier: keywords}
+    set: {base: 'DWI'}
+
+  'keywords:PWI':
+    clauses:
+      - {keywords: ['pwi', 'perfusion', 'dsc', 'dce', 'perf '], tier: keywords}
+    set: {base: 'PWI'}
+
+  'keywords:SWI':
+    clauses:
+      - {keywords: ['swi', 'swan', 'susceptibility weighted', 'venobold'], tier: keywords}
+    set: {base: 'SWI'}
+
+  'keywords:T1rho':
+    clauses:
+      - {keywords: ['t1rho', 't1 rho', 't1ρ', 'spin lock', 'spinlock'], tier: keywords}
+    set: {base: 'T1rho'}
+
+  'keywords:T2rho':
+    clauses:
+      - {keywords: ['t2rho', 't2 rho', 't2ρ'], tier: keywords}
+    set: {base: 'T2rho'}
+
+  'keywords:T2starw':
+    clauses:
+      - {keywords: ['t2*', 't2star', 't2 star', 't2*w', 't2*-w'], tier: keywords}
+    set: {base: 'T2starw'}
+
+  'keywords:T2w':
+    clauses:
+      - {keywords: ['t2w', 't2 w', 't2-w', 't2 weighted', 't2-weighted', 't2'], tier: keywords}
+    set: {base: 'T2w'}
+
+  'keywords:PDw':
+    clauses:
+      - {keywords: ['pdw', 'pd w', 'pd-w', 'pd weighted', 'proton density', 'proton-density', 'qmap pd', 'pd map'], tier: keywords}
+    set: {base: 'PDw'}
+
+  'keywords:T1w':
+    clauses:
+      - {keywords: ['t1w', 't1 w', 't1-w', 't1 weighted', 't1-weighted', 't1'], tier: keywords}
+    set: {base: 'T1w'}
+
+  'keywords:MTw':
+    clauses:
+      - {keywords: ['mtw', 'mt w', 'magnetization transfer', 'magnetization-transfer', 'mt weighted'], tier: keywords}
+    set: {base: 'MTw'}
+
+  # Tier 6. The acquisition's own numbers. v0 tries inversion recovery first,
+  # and guards the spin-echo and gradient-echo windows with `not has_epi`: an
+  # echo-planar readout has its own timing and these windows do not describe
+  # it. The comparisons are v0's, strict at both ends.
+
+  'physics:ir_stir_like':
+    clauses:
+      - {when: {all: [has_ir, {field: inversion_time, lt: 300}]}, cite: 'inversion time under 300 ms', source: physics, tier: physics}
+    set: {base: 'T2w'}
+    confidence: 0.75
+    why: 'a short inversion time suppresses fat, which is a STIR and reads as T2-weighted'
+
+  'physics:ir_standard':
+    clauses:
+      - {when: {all: [has_ir, {field: inversion_time, ge: 300}, {field: inversion_time, le: 1500}]}, cite: 'inversion time between 300 and 1500 ms', source: physics, tier: physics}
+    set: {base: 'T1w'}
+    confidence: 0.7
+
+  'physics:se_t1w':
+    clauses:
+      - {when: {all: [has_se, {not: has_epi}, {field: repetition_time, lt: 1000}, {field: echo_time, lt: 30}]}, cite: 'a short repetition and echo time', source: physics, tier: physics}
+    set: {base: 'T1w'}
+    confidence: 0.7
+
+  'physics:se_t2w':
+    clauses:
+      - {when: {all: [has_se, {not: has_epi}, {field: repetition_time, gt: 2000}, {field: echo_time, gt: 50}]}, cite: 'a long repetition and echo time', source: physics, tier: physics}
+    set: {base: 'T2w'}
+    confidence: 0.7
+
+  'physics:se_pdw':
+    clauses:
+      - {when: {all: [has_se, {not: has_epi}, {field: repetition_time, gt: 2000}, {field: echo_time, lt: 30}]}, cite: 'a long repetition and a short echo time', source: physics, tier: physics}
+    set: {base: 'PDw'}
+    confidence: 0.65
+
+  'physics:gre_t1w':
+    clauses:
+      - {when: {all: [has_gre, {not: has_epi}, {field: echo_time, lt: 10}]}, cite: 'a very short echo time', source: physics, tier: physics}
+    set: {base: 'T1w'}
+    confidence: 0.7
+
+  'physics:gre_t2starw':
+    clauses:
+      - {when: {all: [has_gre, {not: has_epi}, {field: echo_time, gt: 15}]}, cite: 'a long echo time on a gradient echo', source: physics, tier: physics}
+    set: {base: 'T2starw'}
+    confidence: 0.7

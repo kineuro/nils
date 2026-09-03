@@ -16,5 +16,8 @@ serde.workspace = true
 serde-saphyr.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+csv.workspace = true
+
 [lints]
 workspace = true

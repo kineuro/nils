@@ -118,7 +118,7 @@ cases:
   - name: an MP2RAGE first inversion is told from the second by its inversion time
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
-      text_all: 'mp2rage inv1 sag p2 iso'
+      text_series_description: 'mp2rage inv1 sag p2 iso'
       inversion_time: 900
     flags:
       is_mp2rage_inv1: true
@@ -128,7 +128,7 @@ cases:
   - name: without the MP2RAGE context a short inversion time decides nothing
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
-      text_all: 'stir cor'
+      text_series_description: 'stir cor'
       inversion_time: 160
     flags:
       has_mp2rage_context: false
@@ -147,7 +147,7 @@ cases:
   - name: a GE recon prefix is read from the text as stored, not folded down
     stack:
       image_type: 'DERIVED\SECONDARY\M'
-      text_all: 'orig ax t2 flair'
+      text_series_description: 'orig ax t2 flair'
     flags:
       is_ge_orig: true
       is_ge_filtered: false

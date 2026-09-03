@@ -1,0 +1,356 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The construct axis, transcribed from v0 0.5.3
+# `classification/detection_yaml/construct-detection.yaml` and the detector that reads it.
+#
+# An axis file is a rule set written compactly: one rule per value, in the
+# order below, with up to three clauses in v0's order (an exclusive flag,
+# then a keyword, then a combination of flags). The first value whose first
+# clause holds decides, and which clause fired fixes the confidence.
+
+axis: construct
+kind: multi
+# The confidences v0 fixes per tier, from its own `confidence_thresholds`.
+tiers: {exclusive: 0.95, keywords: 0.85, combination: 0.75}
+stores: label
+# The text a keyword is matched against is the pack's own, normalized by
+# its twelve steps from the fingerprint's folded fields (spec section 6.4).
+search: search_text
+
+# Only these are tried by this axis's own rules; any other value
+# below is vocabulary a route sets (spec section 6.5).
+order:
+  - ADC
+  - eADC
+  - FA
+  - Trace
+  - MD
+  - CBF
+  - CBV
+  - MTT
+  - Tmax
+  - TTP
+  - Water
+  - Fat
+  - InPhase
+  - OutPhase
+  - T1map
+  - T2map
+  - R1map
+  - R2map
+  - PDmap
+  - SyntheticT1w
+  - SyntheticT2w
+  - SyntheticFLAIR
+  - SyntheticPDw
+  - MyelinMap
+  - QSM
+  - MIP
+  - MinIP
+  - MPR
+  - B0map
+  - B1map
+  - Magnitude
+  - Real
+  - Imaginary
+  - ORIG
+  - Filtered
+  - ND
+
+values:
+  ADC:
+    keywords:
+      - adc
+      - apparent diffusion coefficient
+      - adc map
+    detection:
+      exclusive: has_adc
+  eADC:
+    keywords:
+      - eadc
+      - exp adc
+      - exponential adc
+    detection:
+      exclusive: has_eadc
+  FA:
+    keywords:
+      - fractional anisotropy
+      - fa map
+    detection:
+      exclusive: has_fa
+  Trace:
+    keywords:
+      - trace
+      - tracew
+      - isodwi
+      - isotropic dwi
+    detection:
+      exclusive: has_trace
+  MD:
+    keywords:
+      - mean diffusivity
+      - md map
+      - mean diff
+  CBF:
+    keywords:
+      - cbf
+      - cerebral blood flow
+      - blood flow
+      - rcbf
+    detection:
+      exclusive: has_cbf
+  CBV:
+    keywords:
+      - cbv
+      - cerebral blood volume
+      - blood volume
+      - rcbv
+    detection:
+      exclusive: has_cbv
+  MTT:
+    keywords:
+      - mtt
+      - mean transit time
+      - transit time
+    detection:
+      exclusive: has_mtt
+  Tmax:
+    keywords:
+      - tmax
+      - t max
+      - time to max
+    detection:
+      exclusive: has_tmax
+  TTP:
+    keywords:
+      - ttp
+      - time to peak
+    detection:
+      exclusive: has_ttp
+  Water:
+    keywords:
+      - water only
+      - water image
+      - dixon water
+    detection:
+      exclusive: has_water
+  Fat:
+    keywords:
+      - fat only
+      - fat image
+      - dixon fat
+    detection:
+      exclusive: has_fat
+  InPhase:
+    keywords:
+      - in phase
+      - inphase
+    detection:
+      exclusive: has_in_phase
+  OutPhase:
+    keywords:
+      - opposed phase
+      - out of phase
+      - opp phase
+    detection:
+      exclusive: has_out_phase
+  T1map:
+    keywords:
+      - t1 map
+      - t1map
+      - t1 relaxation
+      - t1 mapping
+    detection:
+      exclusive: has_t1_map
+      combination: [is_qmap]
+  T2map:
+    keywords:
+      - t2 map
+      - t2map
+      - t2 relaxation
+      - t2 mapping
+    detection:
+      exclusive: has_t2_map
+      combination: [is_qmap]
+  R1map:
+    keywords:
+      - r1 map
+      - r1map
+    detection:
+      exclusive: has_r1
+  R2map:
+    keywords:
+      - r2 map
+      - r2map
+    detection:
+      exclusive: has_r2
+  PDmap:
+    keywords:
+      - pd map
+      - pdmap
+      - proton density map
+  SyntheticT1w:
+    keywords:
+      - synthetic t1
+      - synt t1
+      - t1w synthetic
+    detection:
+      exclusive: has_t1_synthetic
+  SyntheticT2w:
+    keywords:
+      - synthetic t2
+      - synt t2
+      - t2w synthetic
+    detection:
+      exclusive: has_t2_synthetic
+  SyntheticFLAIR:
+    keywords:
+      - synthetic flair
+      - synt flair
+    detection:
+      exclusive: has_flair_synthetic
+  SyntheticPDw:
+    keywords:
+      - synthetic pd
+      - synt pd
+    detection:
+      exclusive: has_pd_synthetic
+  MyelinMap:
+    keywords:
+      - myelin map
+      - myelin
+      - mwf
+      - myelin water fraction
+    detection:
+      exclusive: has_myelin
+  QSM:
+    keywords:
+      - qsm
+      - susceptibility map
+      - chi map
+  MIP:
+    keywords:
+      - mip
+      - maximum intensity projection
+      - max ip
+    detection:
+      exclusive: is_mip
+  MinIP:
+    keywords:
+      - minip
+      - minimum intensity projection
+      - min ip
+    detection:
+      exclusive: is_minip
+  MPR:
+    keywords:
+      - multiplanar reformat
+      - reformatted
+    detection:
+      exclusive: is_mpr
+  B0map:
+    keywords:
+      - b0 map
+      - b0map
+      - field map
+      - fieldmap
+  B1map:
+    keywords:
+      - b1 map
+      - b1map
+      - b1+
+      - b1-
+  Magnitude:
+    keywords:
+      - magnitude image
+      - magnitude only
+  Real:
+    keywords:
+      - real image
+      - real component
+    detection:
+      exclusive: has_real
+  Imaginary:
+    keywords:
+      - imaginary image
+      - imaginary component
+    detection:
+      exclusive: has_imaginary
+  ORIG:
+    detection:
+      exclusive: is_ge_orig
+  Filtered:
+    detection:
+      exclusive: is_ge_filtered
+  ND:
+    detection:
+      exclusive: has_nd
+  INV1:
+    keywords:
+      - inv1
+      - inv 1
+      - inversion 1
+    detection:
+      exclusive: is_mp2rage_inv1
+  INV2:
+    keywords:
+      - inv2
+      - inv 2
+      - inversion 2
+    detection:
+      exclusive: is_mp2rage_inv2
+  Uniform:
+    keywords:
+      - uni image
+      - uni images
+      - uniform image
+      - uniform images
+    detection:
+      exclusive: has_uniform
+  UniformDenoised:
+    label: Denoised
+    keywords:
+      - uni - den
+      - uni-den
+      - uniden
+      - uniform denoised
+      - denoised uniform
+      - uniform weighted
+    detection:
+      exclusive: is_uniform_denoised
+  SWI:
+    keywords:
+      - swi processed
+      - swi combined
+      - swi filtered
+    detection:
+      combination: [has_swi, is_derived]
+  Phase:
+    keywords:
+      - phase
+      - phase map
+      - phasemap
+      - phase image
+    detection:
+      exclusive: has_phase
+  R2starmap:
+    keywords:
+      - r2star
+      - r2star map
+      - r2starmap
+    detection:
+      exclusive: has_r2star
+
+  # Vocabulary the routes set and this axis's own rules never try. v0 has no
+  # declaration for these at all: its SyMRI route writes them and its intent
+  # cascade tests for them, with nothing tying the two together. Three of them
+  # are in the live corpus (SyntheticDIR 241, SyntheticPSIR 287,
+  # SyntheticSTIR 28); FatFraction is tested for and was never written.
+  'SyntheticSTIR': {}
+  'SyntheticDIR': {}
+  'SyntheticPSIR': {}
+  'FatFraction': {}
+  # The SyMRI route writes it; v0 declares it nowhere and wrote it 170 times.
+  'MultiQmap': {}
+  # The EPIMix route writes it; v0 declares it nowhere and wrote it 67 times.
+  'isoDWI': {}

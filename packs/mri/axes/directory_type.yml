@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# What a stack is for. Not read from the file: synthesized from the other
+# axes, which is why it is decided last and why its rules read axes rather
+# than flags (spec section 6.6).
+
+axis: directory_type
+kind: single
+default: misc
+
+values:
+  excluded: {}
+  localizer: {}
+  dwi: {}
+  perf: {}
+  func: {}
+  fmap: {}
+  anat: {}
+  misc: {}

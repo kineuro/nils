@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The STAGE route, transcribed from v0 0.5.3 `classification/branches/stage.py`.
+#
+# A multi-echo gradient echo whose outputs are a magnitude and a phase. It is
+# the one route that does not decide the base: the contrast is still whatever
+# the base rules make of it, and only the construct and the technique are the
+# route's to say.
+
+rule_set: stage
+enter_when: {axis: provenance, is: STAGE}
+decides: [construct, technique, directory_type]
+tiers: {exclusive: 0.9, stated: 0.85}
+
+order: [phase, magnitude]
+
+rules:
+
+  phase:
+    clauses:
+      - {when: {all: [has_phase, {not: has_magnitude}]}, cite: has_phase, source: flags, tier: exclusive}
+    set: {construct: [Phase], technique: 'ME-GRE', directory_type: anat}
+
+  magnitude:
+    clauses:
+      - {when: true, cite: STAGE, source: provenance}
+    set: {construct: [Magnitude], technique: 'ME-GRE', directory_type: anat}
+    why: 'anything that is not the phase is the magnitude'

@@ -1,0 +1,413 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The technique axis, transcribed from v0 0.5.3
+# `classification/detection_yaml/technique-detection.yaml` and the detector that reads it.
+#
+# An axis file is a rule set written compactly: one rule per value, in the
+# order below, with up to three clauses in v0's order (an exclusive flag,
+# then a keyword, then a combination of flags). The first value whose first
+# clause holds decides, and which clause fired fixes the confidence.
+
+axis: technique
+kind: single
+# v0's pipeline stores the display name and not the identity, which is how
+# `3D-TSE` came to be written `SPACE` and `SP-GRE` written `FLASH`.
+stores: label
+# The pipeline stores the display name, and v0 spells the fallback `Unknown`.
+default: Unknown
+# The text a keyword is matched against is the pack's own, normalized by
+# its twelve steps from the fingerprint's folded fields (spec section 6.4).
+search: search_text
+
+# Only these are tried by this axis's own rules; any other value
+# below is vocabulary a route sets (spec section 6.5).
+order:
+  - MS-EPI
+  - DWI-EPI
+  - DWI-STEAM
+  - BOLD-EPI
+  - ASL-EPI
+  - Perfusion-EPI
+  - GRASE
+  - SE-EPI
+  - GRE-EPI
+  - MRF
+  - MDME
+  - '3D-TSE'
+  - SS-TSE
+  - IR-TSE
+  - ME-SE
+  - VFA-TSE
+  - TSE
+  - SE
+  - QALAS
+  - MP2RAGE
+  - MEMPRAGE
+  - MPRAGE
+  - TOF-MRA
+  - PC-MRA
+  - comb-ME-GRE
+  - ME-GRE
+  - CISS
+  - bSSFP
+  - DESS
+  - SSFP
+  - VFA-GRE
+  - VI-GRE
+  - FSP-GRE
+  - SP-GRE
+  - SS-GRE
+  - GRE
+  - EPI
+
+values:
+  MS-EPI:
+    label: RESOLVE
+    family: EPI
+    keywords:
+      - resolve
+      - muse
+      - fase
+      - multishot epi
+      - multi-shot epi
+      - segmented epi
+    detection:
+      exclusive: is_epi_diff_resolve
+      combination: [has_segmented_kspace, has_epi]
+  DWI-EPI:
+    family: MIXED
+    keywords:
+      - dwi
+      - dti
+      - diffusion
+      - hardi
+      - dsi
+    detection:
+      exclusive: is_dwi
+  DWI-STEAM:
+    family: MIXED
+    keywords:
+      - steam
+      - dwi-steam
+      - diffusion steam
+  BOLD-EPI:
+    label: BOLD
+    family: MIXED
+    keywords:
+      - bold
+      - fmri
+      - functional
+      - resting state
+      - task
+    detection:
+      exclusive: is_bold
+  ASL-EPI:
+    label: ASL
+    family: MIXED
+    keywords:
+      - asl
+      - pcasl
+      - pasl
+      - casl
+      - arterial spin
+    detection:
+      exclusive: is_asl
+  Perfusion-EPI:
+    label: Perfusion
+    family: MIXED
+    keywords:
+      - perfusion
+      - dsc
+      - dce
+      - pwi
+    detection:
+      exclusive: is_perfusion
+  GRASE:
+    family: MIXED
+    keywords:
+      - grase
+      - turbogse
+      - tgse
+  SE-EPI:
+    family: MIXED
+    keywords:
+      - se-epi
+      - spin echo epi
+    detection:
+      combination: [has_se, has_epi]
+  GRE-EPI:
+    family: MIXED
+    keywords:
+      - gre-epi
+      - epi-gre
+    detection:
+      combination: [has_gre, has_epi]
+  MRF:
+    family: MIXED
+    keywords:
+      - mrf
+      - fingerprinting
+    detection:
+      exclusive: is_mrf
+  MDME:
+    family: SE
+    keywords:
+      - mdme
+      - multi dynamic multi echo
+      - multi-dynamic multi-echo
+      - symri
+      - magic
+    detection:
+      exclusive: is_mdme
+  '3D-TSE':
+    label: SPACE
+    family: SE
+    keywords:
+      - space
+      - cube
+      - vista
+      - '3d tse'
+      - '3d fse'
+      - fase3d
+      - mvox
+      - isofse
+    detection:
+      exclusive: is_space
+      combination: [is_tse, is_3d]
+  SS-TSE:
+    label: HASTE
+    family: SE
+    keywords:
+      - haste
+      - ssfse
+      - ss-tse
+      - sstse
+      - single shot tse
+      - single shot fse
+      - fase
+    detection:
+      exclusive: is_haste
+  IR-TSE:
+    label: TIRM
+    family: SE
+    keywords:
+      - tirm
+      - stir
+      - ir-tse
+      - ir tse
+      - ir-fse
+      - ir fse
+    detection:
+      combination: [has_ir, is_tse]
+  ME-SE:
+    label: MESE
+    family: SE
+    keywords:
+      - mese
+      - me-se
+      - multi echo se
+      - multi-echo se
+      - dual echo se
+      - memp
+    detection:
+      exclusive: is_me_se
+      combination: [is_multi_echo, has_se]
+  VFA-TSE:
+    label: RESTORE
+    family: SE
+    keywords:
+      - restore
+      - frfse
+      - drive
+      - de-fse
+      - de-fir
+      - t2 plus
+      - hyperecho
+  TSE:
+    family: SE
+    keywords:
+      - tse
+      - fse
+      - turbo spin echo
+      - fast spin echo
+      - turbo se
+      - fast se
+      - rare
+    detection:
+      exclusive: is_tse
+  SE:
+    family: SE
+    keywords:
+      - spin-echo
+    detection:
+      exclusive: has_se
+  QALAS:
+    family: GRE
+    keywords:
+      - qalas
+      - '3d qalas'
+    detection:
+      exclusive: is_qalas
+  MP2RAGE:
+    family: GRE
+    keywords:
+      - mp2rage
+    detection:
+      combination: [is_multi_ti, has_gre, has_ir, is_3d]
+  MEMPRAGE:
+    family: GRE
+    keywords:
+      - memprage
+      - me-mprage
+      - multi echo mprage
+      - multi-echo mprage
+    detection:
+      combination: [is_multi_echo, has_ir, has_gre, is_3d]
+  MPRAGE:
+    family: GRE
+    keywords:
+      - mprage
+      - bravo
+      - '3d tfe'
+      - ir-fspgr
+      - ir spgr
+    detection:
+      exclusive: is_mprage
+      combination: [has_ir, has_gre, is_3d]
+  TOF-MRA:
+    label: TOF
+    family: GRE
+    keywords:
+      - tof
+      - time of flight
+      - tof-mra
+      - inhance inflow
+    detection:
+      exclusive: is_tof
+  PC-MRA:
+    label: PC
+    family: GRE
+    keywords:
+      - pc-mra
+      - phase contrast
+      - pc flow
+      - velocity
+    detection:
+      exclusive: is_pc
+  comb-ME-GRE:
+    label: MEDIC
+    family: GRE
+    keywords:
+      - medic
+      - merge
+      - mffe
+      - me2d
+    detection:
+      exclusive: is_medic
+  ME-GRE:
+    label: MEGRE
+    family: GRE
+    keywords:
+      - megre
+      - me-gre
+      - multi echo gre
+      - multi-echo gre
+    detection:
+      combination: [is_multi_echo, has_gre]
+  CISS:
+    family: GRE
+    keywords:
+      - ciss
+      - fiesta-c
+      - fiesta c
+      - '3d drive'
+    detection:
+      exclusive: is_ciss
+  bSSFP:
+    label: FIESTA
+    family: GRE
+    keywords:
+      - bssfp
+      - truefisp
+      - true fisp
+      - fiesta
+      - balanced ffe
+      - b-ffe
+      - bffe
+      - trufi
+    detection:
+      exclusive: is_ssfp
+  DESS:
+    family: GRE
+    keywords:
+      - dess
+      - mensa
+  SSFP:
+    label: PSIF
+    family: GRE
+    keywords:
+      - ssfp
+      - psif
+      - t2-ffe
+      - ce-fast
+  VFA-GRE:
+    family: GRE
+    keywords:
+      - vfa
+      - despot
+      - variable flip angle
+    detection:
+      combination: [is_multi_fa, has_gre, is_3d]
+  VI-GRE:
+    label: VIBE
+    family: GRE
+    keywords:
+      - vibe
+      - lava
+      - thrive
+      - fame
+    detection:
+      combination: [has_spoiled, is_3d, has_gre]
+  FSP-GRE:
+    label: TurboFLASH
+    family: GRE
+    keywords:
+      - turboflash
+      - turbo flash
+      - tfe
+      - fspgr
+    detection:
+      exclusive: is_tfl
+  SP-GRE:
+    label: FLASH
+    family: GRE
+    keywords:
+      - flash
+      - spgr
+      - t1-ffe
+    detection:
+      exclusive: is_flash
+      combination: [has_spoiled, has_gre]
+  SS-GRE:
+    label: FISP
+    family: GRE
+    keywords:
+      - fisp
+      - grass
+      - ss-gre
+      - single shot gre
+  GRE:
+    family: GRE
+    keywords:
+      - gre
+      - gradient-echo
+      - ffe
+    detection:
+      exclusive: has_gre
+  EPI:
+    family: EPI
+    keywords:
+      - epi
+      - echo planar
+    detection:
+      exclusive: has_epi

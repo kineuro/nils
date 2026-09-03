@@ -1,0 +1,160 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The SWI route, transcribed from v0 0.5.3 `classification/branches/swi.py`.
+#
+# One acquisition, seven outputs, and none of them is answering "which
+# contrast weighting is this". A route is a rule set with an entry condition;
+# nothing else distinguishes it (spec section 6.5).
+#
+# The order is the knowledge, not the plumbing: QSM is tried LAST, because one
+# vendor stamps `psd/QSM/me` into the description of every output of the
+# acquisition, so `qsm` in the text says nothing until the specific output
+# labels have been ruled out.
+#
+# This route was the C11 prototype's second criterion, and it matched v0 on
+# all 17,054 stacks it routes (spikes/pack/README.md).
+
+rule_set: swi
+enter_when: {axis: provenance, is: SWIRecon}
+decides: [base, construct, technique, directory_type]
+tiers: {exclusive: 0.95, keywords: 0.9, stated: 0.9}
+
+# Every output of one acquisition shares its readout.
+derive:
+  swi_technique:
+    axis: technique
+    cases:
+      - {when: has_epi, value: EPI}
+      - {when: has_gre, value: GRE}
+      - {when: {text: search_text, any_substring: [epi, 3depi]}, value: EPI}
+      - {value: GRE}
+
+order: [minip, mip, phase, swi, projection, r2star, magnitude, qsm_source_echo, qsm, fallback]
+
+rules:
+
+  minip:
+    clauses:
+      - {flag: is_minip, tier: exclusive}
+      - {keywords: [minip, 'min ip'], tier: keywords}
+    set:
+      base: SWI
+      construct: [MinIP]
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.95
+    why: 'a minimum intensity projection: the venogram'
+
+  mip:
+    clauses:
+      - {flag: is_mip, tier: exclusive}
+      - {when: {all: [{text: search_text, substring: mip}, {not: {text: search_text, substring: minip}}]}, cite: mip, source: text, tier: keywords}
+    set:
+      base: SWI
+      construct: [MIP]
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.9
+
+  # The normalizer expands pha and phs to phase, so a GE PHS output lands
+  # here. A QSM token beats a bare P token: DERIVED\PRIMARY\QSM\P is a map.
+  phase:
+    clauses:
+      - {when: {all: [has_phase, {not: has_magnitude}, {not: has_qsm}]}, cite: has_phase, source: flags, tier: exclusive}
+      - {when: {all: [{text: search_text, substring: phase}, {not: {text: search_text, substring: magnitude}}, {not: has_qsm}]}, cite: phase, source: text, tier: keywords}
+    set:
+      base: SWI
+      construct:
+        - Phase
+        - {value: QSM, when: {text: search_text, substring: qsm}}
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.9
+
+  swi:
+    clauses:
+      - {flag: has_swi, tier: exclusive}
+    set:
+      base: SWI
+      construct: [SWI]
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.9
+
+  projection:
+    clauses:
+      - {flag: is_projection, tier: exclusive}
+    set:
+      base: SWI
+      construct: [SWI]
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.8
+
+  r2star:
+    clauses:
+      - {flag: has_r2star, tier: exclusive}
+      - {keywords: [r2star], tier: keywords}
+    set:
+      base: SWI
+      construct:
+        - {value: QSM, when: {any: [has_qsm, {text: search_text, substring: qsm}]}}
+        - R2starmap
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.9
+
+  magnitude:
+    clauses:
+      - {when: {all: [has_magnitude, {not: has_swi}]}, cite: 'has_magnitude without a SWI token', source: flags, tier: exclusive}
+      - {keywords: [magnitude], tier: keywords}
+    set:
+      base: SWI
+      construct:
+        - Magnitude
+        - {value: QSM, when: {text: search_text, substring: qsm}}
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.85
+
+  # Multi-echo source data from a QSM acquisition: an acquisition-style name
+  # rather than a short output label, and no QSM token.
+  qsm_source_echo:
+    clauses:
+      - when:
+          all:
+            - {not: has_qsm}
+            - {text: search_text, substring: qsm}
+            - {text: search_text, any_substring: ['10te', '8te', '6te', '5te', '4te', '3te']}
+            - {text: search_text, substring: psd}
+        cite: 'a multi-echo QSM source'
+        source: text
+        tier: keywords
+    set:
+      base: SWI
+      construct: [Magnitude, QSM]
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.8
+
+  qsm:
+    clauses:
+      - {flag: has_qsm, tier: exclusive}
+      - {keywords: [qsm], tier: keywords}
+    set:
+      base: SWI
+      construct: [QSM]
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.95
+
+  fallback:
+    clauses:
+      - {when: true, cite: SWIRecon, source: provenance}
+    set:
+      base: SWI
+      construct: [SWI]
+      technique: {from: swi_technique}
+      directory_type: anat
+    confidence: 0.7
+    why: 'an SWI acquisition whose output type is unclear is the processed image'

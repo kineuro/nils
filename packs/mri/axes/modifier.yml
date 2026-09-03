@@ -1,0 +1,169 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The modifier axis, transcribed from v0 0.5.3
+# `classification/detection_yaml/modifier-detection.yaml` and the detector that reads it.
+#
+# An axis file is a rule set written compactly: one rule per value, in the
+# order below, with up to three clauses in v0's order (an exclusive flag,
+# then a keyword, then a combination of flags). The first value whose first
+# clause holds decides, and which clause fired fixes the confidence.
+
+axis: modifier
+kind: multi
+# The confidences v0 fixes per tier, from its own `confidence_thresholds`.
+tiers: {exclusive: 0.95, keywords: 0.85, combination: 0.75}
+stores: label
+# The text a keyword is matched against is the pack's own, normalized by
+# its twelve steps from the fingerprint's folded fields (spec section 6.4).
+search: search_text
+
+# Only these are tried by this axis's own rules; any other value
+# below is vocabulary a route sets (spec section 6.5).
+order:
+  - FLAIR
+  - STIR
+  - DIR
+  - PSIR
+  - IR
+  - Radial
+  - Spiral
+  - FatSat
+  - WaterExcitation
+  - Dixon
+  - MT
+  - FlowComp
+  - BlackBlood
+  - BrightBlood
+  - MoCo
+
+values:
+  FLAIR:
+    group: IR_CONTRAST
+    priority: 1
+    keywords:
+      - flair
+      - t2 flair
+      - t1 flair
+      - dark fluid
+      - dark-fluid
+      - dark - fluid
+      - da fl
+      - da-fl
+      - da - fl
+    detection:
+      exclusive: is_flair
+  STIR:
+    group: IR_CONTRAST
+    priority: 2
+    keywords:
+      - stir
+      - short tau
+      - short ti
+      - tirm
+    detection:
+      exclusive: has_stir
+  DIR:
+    group: IR_CONTRAST
+    priority: 3
+    keywords:
+      - dir
+      - double ir
+      - dual ir
+      - double inversion
+    detection:
+      exclusive: is_dir
+  PSIR:
+    group: IR_CONTRAST
+    priority: 4
+    keywords:
+      - psir
+      - phase sensitive
+      - phase-sensitive ir
+    detection:
+      exclusive: has_psir
+  IR:
+    group: IR_CONTRAST
+    priority: 99
+    keywords:
+      - inversion recovery
+    detection:
+      exclusive: has_ir_se
+  Radial:
+    group: TRAJECTORY
+    priority: 1
+    keywords:
+      - propeller
+      - blade
+      - multivane
+      - radial
+      - periodically rotated
+    detection:
+      exclusive: is_radial
+  Spiral:
+    group: TRAJECTORY
+    priority: 2
+    keywords:
+      - spiral
+    detection:
+      exclusive: is_spiral
+  FatSat:
+    keywords:
+      - fatsat
+      - fat sat
+      - chemsat
+      - chem sat
+      - spair
+    detection:
+      exclusive: has_fat_sat
+  WaterExcitation:
+    label: WaterExc
+    keywords:
+      - water excitation
+      - water exc
+      - proset
+      - wex
+    detection:
+      exclusive: has_water_excitation
+  Dixon:
+    keywords:
+      - dixon
+      - ideal
+      - mdixon
+      - lava-flex
+      - vibe-dixon
+      - wfop
+    detection:
+      exclusive: has_dixon
+      combination: [has_in_phase, has_out_phase]
+  MT:
+    keywords:
+      - magnetization transfer
+      - mtc
+    detection:
+      exclusive: has_mtc
+  FlowComp:
+    keywords:
+      - flow comp
+      - flowcomp
+      - gmn
+      - fc
+    detection:
+      exclusive: has_flow_comp
+  BlackBlood:
+    keywords:
+      - black blood
+      - blackblood
+      - dark blood
+      - blood null
+  BrightBlood:
+    keywords:
+      - bright blood
+      - brightblood
+  MoCo:
+    keywords:
+      - moco
+      - mocoseries
+      - motion correct
+      - motioncorrect
+    detection:
+      exclusive: has_moco
