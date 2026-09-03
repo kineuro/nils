@@ -17,7 +17,8 @@ restarted as `kineuro/nils` on 2026-09-02 (15 §11; R1 to R8; AGPL-3.0-only, 10)
 multi-platform binary builds, the two-backend test matrix, the scaled performance benchmark harness (D6). Accepted 2026-09-02 from
 [12](12-review-devils-advocate.md): the language spike (C1, judged on speed and
 maintainability together), the baseline host with v0 measured on it (C6), and the
-pack-format prototype (C11) before Wave 2 opens.
+pack-format prototype (C11) before Wave 2 opens — done 2026-09-03, see Wave 2
+below and 15 §3.
 
 **Wave 1 — parse and digest.** The Rust core: walk, parse, extract, stack
 signatures, registry schema (both backends), ingest batches, `nils digest` with
@@ -388,6 +389,33 @@ output); disagreements individually adjudicated and either fixed or recorded as
 intentional pack corrections (each one becomes a case in the verified corpus, C12).
 Because v0 stores no pack version, the diff must separate rule changes from step-4
 gap-filling drift, which depends on ingestion order (C14).
+
+**Opened 2026-09-03.** C11 was closed first, as the ratification asks: the
+prototype is `spikes/pack/` and its verdict is in 15 §3. The specification is
+`docs/specs/wave2-fingerprint-and-classify.md`, fourteen sections, eight slices,
+written the way Wave 1's was and ratified before slice 1 begins. Two decisions
+of yours shape it beyond the Wave 1 pattern:
+
+* **The CT and PET packs are in the wave, not after it** (slice 8), each with
+  the axes its own modality needs rather than MRI's. v0 has neither — it pushes
+  every CT and PET stack through the MRI classifier — so they are the first work
+  in the rewrite with no v0 to reproduce, judged against the verified corpus
+  alone, and they carry a bar of their own: no line of engine code is written
+  for either. That is the honest test of the pack format, and it is last on
+  purpose, because it is cheap only if everything before it is right.
+* **v0's bugs are fixed and its structure is improved where we can see further**,
+  and every difference is then investigated to a **named cause** — a line of v0
+  or a line of v1 — before it is classified. A group whose cause is "walk order"
+  or "v0 bug" and nothing more is an open item, and the gate does not pass with
+  open items (spec §11.5). This is the bar the nmosd gate was actually held to,
+  written down: there, four studies that looked like one classification problem
+  were two unrelated causes upstream.
+
+The eight v0 findings the prototype turned up are the wave's first declared
+differences (spec §11.1). The corpus itself says how much is at stake: 120,653
+of 518,365 stacks (23.3 percent) carry a missing or `Unknown` base or technique
+in v0's own cache, which is what the physics vote is for and what the verified
+corpus has to judge.
 
 **Wave 3 — anonymize and BIDS.** Strategies, audit, `dcm2niix` orchestration,
 naming/collision rules, `nils anonymize` and `nils bids`. *Gate:* BIDS validator
