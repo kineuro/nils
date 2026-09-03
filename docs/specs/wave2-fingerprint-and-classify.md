@@ -31,11 +31,12 @@ The same binary, `nils`, gains
 6. **decisions that survive**: a human or agent verdict outranks a rule, is
    keyed at its scope, and a re-classification emits a new review item rather
    than overwriting it (C15, D7);
-7. the **CT and PET packs**, each with the axes its own modality needs rather
-   than MRI's. v0 has neither: it pushes every CT and PET stack through the MRI
-   classifier. These two are therefore the first work in the rewrite with no v0
-   to reproduce, judged against the verified corpus alone, and they are the
-   test of §5's promise that a modality costs vocabulary and no engine code.
+7. the **modality seam**: an axis belongs to a pack and not to the engine, a
+   stack whose modality has no pack is recorded `no_pack` rather than pushed
+   through the MRI classifier as v0 does, and a second modality is shown to
+   work end to end by a minimal pack in the test suite. The CT and PET packs
+   themselves are held; what this wave owes them is that the day they are
+   written, no Rust is.
 
 The gate is the same shape as Wave 1's: v1 against v0 on the live corpus, stack
 by stack and axis by axis, every disagreement classified, on the baseline host
@@ -53,8 +54,9 @@ named cause, and a cause is a line of v0 or a line of v1, never a class label
 (§11.5).
 
 Not in Wave 2: anonymization and BIDS (Wave 3), the server, the query AST and
-the MCP surface (Wave 4), and the model sidecars, whose seam this wave declares
-and does not fill.
+the MCP surface (Wave 4), the CT and PET packs, which are on hold and take the
+seam of item 7 when they are wanted, and the model sidecars, whose seam this
+wave declares and does not fill.
 
 ## 2. Words
 
@@ -71,8 +73,13 @@ and does not fill.
   fixes the confidence.
 - **Exclusion group**: a set of values of which at most one may hold, with the
   order that resolves a conflict.
-- **Branch**: a provenance-routed pipeline with its own taxonomy (v0 has SWI,
-  SyMRI, EPIMix/NeuroMix), entered when the acquisition's provenance says so.
+- **Clause**: one condition of a rule, with the tier that fixes its confidence.
+  The first clause that holds is what the evidence cites.
+- **Rule set**: an ordered list of rules, the axes they may decide, and an
+  optional condition for entering at all. An axis file is one written
+  compactly; a **branch** (v0's word for a route with its own taxonomy: SWI,
+  SyMRI, EPIMix/NeuroMix, STAGE) is one with an entry condition. There is no
+  third kind.
 - **Pass**: a step that looks beyond one stack (at the series, the study, the
   session or a reference pool) before or after per-stack classification.
 - **Pack**: the versioned bundle of vocabulary, grammar, branches, passes and
@@ -219,8 +226,9 @@ packs/mri/
   parsers/*.yml       # tokenizers and their named predicates (§6.1)
   flags/*.yml         # named booleans over parser predicates and fingerprint scalars (§6.2)
   axes/*.yml          # one file per axis: values, tiers, keywords, physics, exclusion groups
-  branches/*.yml      # provenance-routed pipelines and their output taxonomies (§6.5)
-  intent.yml          # the directory_type cascade (§6.6)
+  rules/*.yml         # rule sets written longhand: the routes with their own logic (§6.5)
+  intent.yml          # the directory_type rule set (§6.6)
+  order.yml           # the order the rule sets run in
   passes/*.yml        # configured instances of the engine's pass kinds (§7)
   corpus/*.yml        # expectation fixtures: a fingerprint in, the axes out
 ```
@@ -307,7 +315,10 @@ bare name), or `{any: [...]}`, `{all: [...]}`, `{not: ...}`, or a comparison on
 a fingerprint field (`eq, ne, lt, le, gt, ge, present`), or a match on a text
 field (`{text: f, case: raw|lower|upper, <atom>}`), or an inline parser atom
 (`{parser: image_type, token: SW_M_FFE}`), which is there because v0 twice
-reaches past its own named predicates into the token set. Nothing else.
+reaches past its own named predicates into the token set. A clause of a rule
+set may also read an axis an earlier rule set decided
+(`{axis: provenance, is: SWIRecon}`), which is how a route is entered and how
+the intent cascade is written. Nothing else.
 
 Flag-to-flag references are what removes v0's separate notion of a "helper":
 the seven booleans it keeps as methods on its classification context (the
@@ -320,40 +331,71 @@ A missing value makes a comparison false, never an error, which is v0's
 pack at load, naming the path that is wrong, not at run on the 400,000th
 stack.
 
-### 6.3 Axes
+### 6.3 The rule set, and why there is only one kind of them
 
-An axis declares its values, the order they are tried in, and per value the
-tiers that can match it. v0's tiers and their fixed confidences are the model:
-an exclusive flag (0.95), a keyword hit (0.85), a combination of flags (0.75),
-and per axis a default. Keywords are matched as case-insensitive substrings
-against the normalized text of §6.4: no word boundaries, no regex, because
-that is what v0 does and the gate is against v0.
+v0 has two machines for deciding an axis and they are the same machine.
+
+A **detector** scans an axis's values in priority order and, for each value,
+tries an exclusive flag, then a keyword hit, then a combination of flags; the
+first value that matches any of the three wins, and which of the three matched
+fixes the confidence (0.95, 0.85, 0.75). A **branch** scans its own rules in a
+deliberate order and, for each rule, tries a flag, then a text hit; the first
+rule that matches any of them wins, and which matched is the evidence. Value
+major, tier minor, in both. The prototype expressed the second as data and
+matched v0 on all 17,054 stacks it routes (`spikes/pack/`); the first is the
+same shape with a different file in front of it.
+
+So v1 has one concept.
+
+- A **rule** is an ordered list of **clauses**. The first clause that holds
+  fires the rule and is what the evidence cites; the clause's tier fixes the
+  confidence unless the rule states one.
+- A **rule set** declares the axes it `decides`, an optional `enter_when`, and
+  its rules in order. The first rule that fires decides.
+- A pack's rule sets run in declared order. An axis a rule set decided is not
+  decided again; a multi-valued axis collects and is resolved at the end.
+
+That is the whole evaluation model. v0's `skip_base_detection`,
+`skip_construct_detection` and `skip_technique_detection` booleans, threaded
+through the pipeline by hand, are gone: "already decided" is the mechanism, and
+no rule set has to know that another one exists.
+
+**An axis file is a rule set written compactly.** Writing four hundred keyword
+rules longhand would be worse than v0, so the axis keeps its dense form and the
+loader expands it: one rule per value, in `order`, with up to three clauses in
+v0's order.
 
 ```yaml
 axis: technique
-order: [MDME, 3D-TSE, HASTE, ...]        # first match wins
+order: [MDME, 3D-TSE, HASTE, ...]        # first value that fires wins
 values:
   3D-TSE:
     label: SPACE                          # what the row stores
     family: SE
     keywords: [space, cube, vista, "3d tse", "3d fse", fase3d, mvox, isofse]
     detection:
-      exclusive: is_space
-      combination: [is_tse, is_3d]
+      exclusive: is_space                 # clause 1, tier exclusive  (0.95)
+                                          # clause 2 is `keywords`    (0.85)
+      combination: [is_tse, is_3d]        # clause 3, tier combination (0.75)
 ```
 
-Two v0 problems are fixed here rather than carried. Its rule *key* and its
-stored *name* differ (`3D-TSE` vs `SPACE`) and its inference tables are keyed
-on a mixture of the two; in v1 the key is the identity, `label` is the display
-string, and every table is keyed on the identity. And its constructs drift
-between the branch tables and the intent cascade (`SWI` against `SWIProcessed`,
-`Phase` against `PhaseMap`), so that two parts of the same program disagree
-about the same value; in v1 an axis value that is not in the axis's declared
-vocabulary fails the pack at load.
+Keywords are matched as case-insensitive substrings against the normalized text
+of §6.4: no word boundaries, no regex, because that is what v0 does and the
+gate is against v0.
 
-Physics windows are typed comparisons declared per axis, kept apart from the
-per-value blocks so that the decorative copies v0 carries cannot drift from the
-ones that are read:
+Two v0 problems are fixed here rather than carried. Its rule *key* and its
+stored *name* differ (`3D-TSE` against `SPACE`) and its inference tables are
+keyed on a mixture of the two; in v1 the key is the identity, `label` is the
+display string, and every table is keyed on the identity. And its constructs
+drift between the branch tables and the intent cascade (`SWI` against
+`SWIProcessed`, `Phase` against `PhaseMap`), so that two parts of one program
+disagree about the same value; in v1 a rule that sets a value outside its
+axis's declared vocabulary, or an axis its rule set does not `decide`, fails
+the pack at load.
+
+Physics windows are rules like any other, with a numeric clause instead of a
+flag, kept in their own block so that the decorative copies v0 carries cannot
+drift from the ones that are read:
 
 ```yaml
 physics:
@@ -364,8 +406,10 @@ physics:
 
 Multi-valued axes (modifier, construct, acceleration) collect every match in
 order and then apply **exclusion groups**, which keep the highest-priority
-member of each group: `IR_CONTRAST: [FLAIR, STIR, DIR, PSIR, IR]`. The result
-is sorted and de-duplicated before it is stored, as v0 does.
+member of each group: `IR_CONTRAST: [FLAIR, STIR, DIR, PSIR, IR]`. Collection
+and exclusion belong to the axis, not to the rule set that produced a value,
+because they are facts about what the axis means. The result is sorted and
+de-duplicated before it is stored, as v0 does.
 
 ### 6.4 Text and its normalization
 
@@ -379,25 +423,51 @@ pack carries it as data (the token map, the replacements, the conditional
 replacements), because the gate compares against v0 and a different order gives
 different answers on real text.
 
-### 6.5 Branches
+### 6.5 A different route of logic is a file
 
-A branch is entered when the provenance axis says so and returns overrides for
-several axes at once, from its own taxonomy. v0 has four (SWI, SyMRI, EPIMix,
-STAGE) plus a Dixon table, each an ordered first-match dispatch whose order is
-deliberate: SWI tries MinIP, MIP, Phase, SWI, R2*, magnitude, and QSM **last**,
-because one vendor stamps `psd/QSM/me` into every output's description. As data:
+Some acquisitions are not variations on the normal questions; they need
+different questions entirely. One SWI acquisition yields seven outputs and
+none of them is asking "which contrast weighting is this". v0 calls this a
+**branch** and writes it in Python: five of them, `swi.py`, `symri.py`,
+`epimix.py`, `stage.py` and a Dixon table, about 1,865 lines, each returning a
+`BranchResult` of overrides plus three booleans telling the pipeline what to
+skip.
+
+In v1 a branch is a rule set with an `enter_when`. Nothing else distinguishes
+it.
 
 ```yaml
-branch: swi
-enter_when: {provenance: SWIRecon}
-order: [minip, mip, phase, swi, r2star, magnitude, qsm]
-rules:
-  minip: {when: {any: [text.minip, image_type.is_minip]},
-          set: {construct: [MinIP], directory_type: anat}}
+rules: swi
+enter_when: {axis: provenance, is: SWIRecon}
+decides: [base, construct, technique, directory_type]
+order: [minip, mip, phase, swi, projection, r2star, magnitude, qsm, fallback]
 ```
 
-A branch's outputs are values of the same axes, checked against the same
-vocabularies at load.
+The order is the knowledge, not the plumbing: SWI tries MinIP, MIP, Phase,
+SWI, R2*, magnitude, and QSM **last**, because one vendor stamps `psd/QSM/me`
+into every output's description, so `qsm` in the text says nothing until the
+specific output labels are ruled out. That reasoning survives as a comment
+beside the order it explains, instead of a docstring on a function.
+
+**This is the answer to "why bother having branches at all".** They earn their
+place only if adding a route is cheap, and the shape above is what makes it
+cheap. To classify an experimental sequence that needs its own logic:
+
+1. write `rules/<name>.yml` with an `enter_when`, the axes it `decides`, and
+   its rules in the order that matters;
+2. add whatever vocabulary it needs to the axis files, which is a major
+   version bump (§5.2) because a vocabulary is a contract;
+3. add its cases to the pack's corpus, which the engine checks at load.
+
+No Rust, no release of the engine, no pipeline stage to insert, no skip flag to
+thread. It ships as a pack version, it is diffable against the version before
+it, `nils pack diff` says which stacks it changes, and `nils explain` names it
+on every stack it touched. If it turns out to be wrong, the pack rolls back and
+the rows say which pack decided them.
+
+If a route ever needs something this cannot express, that is a finding of the
+same kind the prototype produced, and it is answered by widening the language
+or by adding a pass kind (§7.2), not by adding a Python file to the engine.
 
 ### 6.6 Intent
 
@@ -407,8 +477,13 @@ BOLD text gated on an EPI technique, then base and modifier, then the remaining
 constructs, then a provenance fallback, else `misc`. v0 has **two** copies of
 this cascade that disagree, the pipeline's and a simplified one inside gap
 filling, so a stack can be given one intent when classified and another when
-completed. In v1 there is one declaration, in `intent.yml`, and both the
-classifier and the passes evaluate it.
+completed.
+
+It is a rule set like any other: it `decides: [directory_type]`, it runs last
+because it reads what the others decided, and its clauses read axes
+(`{axis: base, is: T2w}`) rather than flags. There is one declaration, and both
+the classifier and the passes evaluate it, which is what makes the two copies
+impossible rather than merely discouraged.
 
 ## 7. The passes (C14)
 
@@ -557,7 +632,9 @@ end.
    explicit outcome, `no_pack`, recorded on the row; it is never a review item
    and never `misc`, which is what v0 does with every CT and PET stack it
    pushes through the MRI classifier.
-3. **Evaluate** per batch, in parallel, against the loaded pack and its overlay.
+3. **Evaluate** per batch, in parallel, against the loaded pack and its overlay:
+   the rule sets in the pack's declared order, each entered when its condition
+   holds, each leaving alone what an earlier one decided (§6.3).
 4. **Write** verdicts, evidence and review items in bulk, in one transaction per
    batch, in the order the registry's foreign keys require.
 5. **Pass** phases run after the per-stack phase, in declared order, each
@@ -686,11 +763,15 @@ The wave itself is eight slices.
 2. **The pack loader.** Manifest, validation, versioning, overlays, the corpus
    check at load. *Done when:* an invalid pack is refused with the line that is
    wrong, and a pack whose corpus fails will not load.
-3. **The axes.** Tiers, exclusion groups, physics windows, the seven persisted
-   axes plus intent. *Done when:* the per-stack verdict matches v0 on the
-   parity corpus for every stack that needs no pass.
-4. **The branches.** SWI, SyMRI, EPIMix, STAGE, Dixon, with their taxonomies.
-   *Done when:* the branch-routed stacks match v0's.
+3. **The rule set, and the axes as rule sets.** One evaluator, the compact axis
+   form expanded into it, tiers, exclusion groups, physics windows, the seven
+   persisted axes plus intent. *Done when:* the per-stack verdict matches v0 on
+   the parity corpus for every stack that needs neither a route nor a pass, and
+   the evaluator has one code path, not two.
+4. **The routes.** SWI, SyMRI, EPIMix, STAGE and Dixon as rule sets with entry
+   conditions, and nothing in the engine that names any of them. *Done when:*
+   the route-decided stacks match v0's, and a sixth route is added to the pack
+   by writing one file, with the diff of the engine empty.
 5. **Evidence, review and decisions.** The tables, the emission thresholds, the
    precedence of C15. *Done when:* a decision survives a re-classification and
    the queue's size is a number the report states.
@@ -700,26 +781,28 @@ The wave itself is eight slices.
 7. **The MRI gate.** The parity diff, the adjudication, the verified corpus, the
    performance run. *Done when:* §11's bars hold and every disagreement is
    either a fixed bug or a case in the verified corpus.
-8. **The CT and PET packs.** Their own axes, their own vocabularies, their own
-   corpora: for CT, what the reconstruction is (kernel, thickness, window) and
-   what it is of, rather than a pulse sequence it does not have; for PET, the
-   tracer, the reconstruction, the corrections and the units. Each is judged
-   against its own verified cases, since v0 has no verdict to reproduce, and
-   against one hard bar of its own: **no line of engine code is written for
-   either**. If one is, §5's promise is not kept, and what it cost is recorded
-   in the wave's record.
+8. **The modality seam.** Not a second clinical pack, but the foundation one
+   would stand on, tested rather than asserted. *Done when:* no axis name, no
+   flag name and no vocabulary value of MRI appears anywhere in the engine
+   crates; a stack whose modality has no pack is recorded `no_pack`, with no
+   review item and no `misc`; a pack declares its own axes and the registry
+   stores them without knowing what they mean; and a minimal two-axis pack for
+   a second modality, synthetic throughout and living in the test suite, loads,
+   routes and classifies with no change to any engine crate.
 
-The CT and PET slice is last on purpose. It is cheap only if everything before
-it is right, and it is the wave's honest test of the pack format: two modalities
-added by a person who writes vocabulary, not a person who writes Rust.
+The seam is last on purpose. It costs a day if everything before it is right
+and a rewrite if it is not, which is exactly what makes it worth measuring. The
+CT and PET packs are on hold and are not this wave's work; when they are
+wanted, this slice is the reason they will be vocabulary and not code.
 
 ## 14. Open questions carried into the wave
 
-- **Where a CT or PET axis stops being a modality's own and starts being a
-  second copy of MRI's.** Body part, provenance and intent are plainly shared;
-  base and technique plainly are not. Which of the seven are shared vocabulary
-  and which are per-pack is slice 8's to settle, and settling it wrongly is how
-  a pack format grows a modality-shaped hole.
+- **Which axes are shared and which belong to one modality.** Body part,
+  provenance and intent are plainly shared; base and technique plainly are not.
+  The CT and PET packs would settle it, and they are on hold, so slice 8 leaves
+  it open on purpose: the seam must not assume the answer, and the minimal test
+  pack must declare an axis of its own that no other pack has, to prove that it
+  can.
 - **What the pass reference is, exactly.** "The pack corpus plus a recorded
   registry snapshot" is the shape; whether the snapshot is a materialized table,
   a filtered view pinned by epoch, or a file shipped with the pack is slice 6's
