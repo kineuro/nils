@@ -1387,6 +1387,41 @@ spike's corpora (one study's raw tree of 508,045 files; the mix corpus of 2,568
 series) are the development runs on the way there, and every run's numbers are
 recorded with the binary's version.
 
+Settled in slice 8, on the baseline host built for it: an 8 vCPU / 64 GB VM on
+Asgard, Debian 13, reading the corpus from the storage server over NFS 4.2
+(`nconnect=16`, read-only) exactly as the hypervisor mounts it, and writing its
+registry to its own disk. A virtual machine and not a container, so that the
+page cache and the kernel are the guest's own and the numbers are the guest's
+own. The corpus is one study's raw tree: 497,150 files, 493,708 of them
+ingested, 44 subjects, 82 studies, 2,165 series and 2,534 stacks, and every
+figure below is from a cold cache (`drop_caches` before each run) on that host,
+with v0 and v1 producing the same counts.
+
+| | wall | files/s | peak resident |
+| --- | --- | --- | --- |
+| v0 (0.5.3), eight workers, two Postgres containers | 981 s | 507 | 5.78 GiB |
+| v1, eight workers, SQLite | 87 s | 5,713 | 0.83 GiB |
+| v1, eight workers, Postgres 16 | 93 s | 5,368 | 0.82 GiB |
+| v1, the same tree again, nothing changed | 4.2 s | 118,077 | 0.17 GiB |
+
+So the bar of this section is met with room: 5,713 files/s against 1,000, and
+0.83 GiB against the Wave 1 target of 4 GB and D6's ceiling of 16. v1 is
+eleven times v0's rate on the machine v0 was measured on, at a seventh of its
+memory, and the two agree on every count. What the record's "thirty million
+instances in a working day" means, measured rather than hoped: the live
+corpus's 37.5 million instances take 1.8 hours at this rate, where v0 would
+take 20.5. The second pass is the resume path of §9.2 doing its work: a tree
+whose files have not changed costs a walk and a `source_file` lookup, not a
+read.
+
+Two things the numbers are not. They are not v0 as it runs in production,
+which is a loaded host with a 24 GB database (there v0 sustains 150 to 460
+files/s); v0 on this quiet machine with an empty database is v0 at its best,
+which is the honest comparison to make. And they are not a promise about a
+corpus with a hundred times the instances: the caches of §9.1 hold 200,000
+rows each, and the run that will say what happens beyond them is the migration's
+own.
+
 ### 12.6 Small-machine CI and the six targets
 
 The synthetic generator of the spike moves to `tools/synth/` and grows to a
@@ -1398,6 +1433,19 @@ in the repository that a deliberate commit updates. The release workflow builds
 `nils` for the six targets of the spike and runs `nils init` and `nils digest` on
 a small synthetic tree on each. The test suite is green on SQLite and on
 Postgres 16.
+
+Settled in slice 8: the benchmark job (`bench` in CI) writes 200,000 instances
+from seed 1 with the generator, digests them on SQLite and holds the report
+against `engine/benches/baseline.json` through `engine/benches/gate.py`: below
+80 percent of the recorded rate for the runner class, or above the memory cap,
+and the job fails. The runner measured 16,846 files/s at 0.36 GiB; the recorded
+gate is 12,000, set below the measurement on purpose, because a shared runner
+varies by a quarter from run to run and the gate is there to catch a
+regression, not to measure the machine. The first run on a new runner class
+records its own entry; changing an entry afterwards is a commit that says why.
+The corpus is 200,000 instances rather than the million §12.6 asks for, so that
+the job costs three minutes on every pull request: the million-instance run
+belongs on the baseline host, where it is not paid for on every push.
 
 Settled while building the writer (slice 3): the generator is the `corpus`
 example of `nils-dicom` (`cargo run --release -p nils-dicom --example corpus`),

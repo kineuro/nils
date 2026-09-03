@@ -1,13 +1,13 @@
 {
   "$comment": [
-    "The regression gate of the small-machine budget (Wave 1 spec, §12.6). One entry",
+    "The regression gate of the small-machine budget (Wave 1 spec, \u00a712.6). One entry",
     "per runner class: the rate a digest of the synthetic corpus holds there and the",
     "resident memory it may take. A run below `files_per_s` times `floor` fails, and",
     "so does one above `rss_gib`.",
     "",
     "These are CI numbers on a shared runner, not the budget: the budget is measured",
     "on the baseline host of C6 and lives in the design record. What this file gates",
-    "is drift — a change that halves the rate must be a change someone meant to make,",
+    "is drift \u2014 a change that halves the rate must be a change someone meant to make,",
     "and updating these numbers is a commit of its own that says why."
   ],
   "floor": 0.8,
@@ -15,10 +15,15 @@
   "seed": 1,
   "runners": {
     "Linux-X64": {
-      "files_per_s": 0,
+      "files_per_s": 12000,
       "rss_gib": 4.0,
-      "measured": null,
-      "note": "filled by the first run of the benchmark job on this runner class"
+      "measured": {
+        "files_per_s": 16846,
+        "peak_rss_gib": 0.36,
+        "seen": 202287,
+        "when": "2026-09-03"
+      },
+      "note": "the gate number is set below what the runner measured on purpose: a shared runner varies by a quarter run to run, and this is here to catch a real regression, not to measure the machine"
     }
   }
 }
