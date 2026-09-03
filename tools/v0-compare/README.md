@@ -64,17 +64,22 @@ python -m pip install -e "tools/v0-compare[test]"
 `--v0-files` names v0's file-name mode (`all`: `.dcm` in any case or no
 suffix; `dcm`, `DCM`, `all_dcm`, `no_ext`), which selects the same names in
 v1 (the `--files` knob). `--root` scopes v1 to the source that holds the
-tree and lets me check on disk whether a v0 path v1 never saw exists.
-`--key-file` names the v0 subject-code key, one line, which classifies how
-v0 derived each code (`key-consistent`, `cohort-hashed`, `no identifier`,
-`other`); the key is read and dropped, never written.
+tree and lets me check on disk whether a v0 path v1 never saw exists;
+`--fs-cap` bounds that check (a million paths by default, `0` for all of
+them) and `--no-fs` skips it. `--key-file` names the v0 subject-code key,
+one line, which classifies how v0 derived each code (`key-consistent`,
+`cohort-hashed`, `no identifier`, `other`); the key is read and dropped,
+never written.
 
 ## What the report says
 
 Instances (§12.2) are paired on their SOP Instance UID. A v0 instance
 missing from v1 is classed by what v1 knows about its path: quarantined
 under a refusal class, ingested under another SOP, present on disk but
-never walked, or absent from disk. A v1 instance missing from v0 is `in v0
+never walked, or absent from disk. A v0 path is relative to its cohort's
+root, so a path absent from the compared root whose subject is listed under
+several cohorts is reported apart from one whose subject is in a single
+cohort: only the second is a file v0 holds and nobody has. A v1 instance missing from v0 is `in v0
 under another subject or cohort`, `name outside v0 mode`, `sop class not
 in v0's nine`, `modality not in v0's`, `resume skip` when v0's resume rule
 would have skipped it (its SOP sorts below the highest one v0 holds for the
@@ -86,7 +91,10 @@ accepted.
 Fields (§12.3) are compared per catalogue row after both sides are brought
 to one normal form: multi-valued strings and Python list literals to the
 backslash form, numbers to a canonical spelling, dates and times to ISO,
-JSON to presence. Rows that still differ are read back as shapes (`A` for
+JSON to presence. A SQLite registry is read by its declared types, not as
+text: SQLite writes a REAL out with 15 significant digits, and a float32
+widened to a double (B1rms) needs 17, so a text read would make the two
+sides differ on the spelling alone. Rows that still differ are read back as shapes (`A` for
 a letter, `9` for a digit) and grouped by pattern: `case`, `whitespace`,
 `number-format`, `rounded`, `scale`, `list-order`, `subset`, `prefix`,
 `null↔value`, or the shapes on both sides. A quasi-identifying or
@@ -131,7 +139,13 @@ fail; a `v1-bug` and an unclassified group count in full. Two series
 columns carry the first instance's value on both sides
 (`media_storage_sop_instance_uid`, `image_position_patient`), and which
 instance is first follows the walk order, so I class their divergences
-`accepted` myself unless the file says otherwise.
+`accepted` myself unless the file says otherwise. The thirteen
+stack-signature columns of the series tables (§8) carry the first
+instance's value the same way; there the instances differ only where the
+series has several stacks, so a divergence of one of them in a series with
+more than one stack on either side is grouped apart, under the pattern with
+` (multi-stack)` appended, and is `accepted` the same way. The same field
+in a single-stack series keeps its plain pattern and needs a rule.
 
 ## Tests
 

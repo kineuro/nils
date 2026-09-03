@@ -118,6 +118,20 @@ ORDER_DEPENDENT: dict[tuple[str, str], str] = {
     ("series", "image_position_patient"): "the first instance's position; which instance is first follows the walk order on both sides",
 }
 
+#: The suffix a divergence pattern carries when the series holds several
+#: stacks on either side and the field is one a stack signature is made of
+#: (`catalogue.stack_defining`): the series row carries the first instance's
+#: value on both sides (§8), the instances differ on it by definition of the
+#: stacks, and which one is first follows the walk order. The tool classes
+#: such a group `accepted` unless the adjudication file says otherwise; the
+#: same divergence in a single-stack series keeps its plain pattern and its
+#: standing.
+MULTI_STACK = " (multi-stack)"
+MULTI_STACK_NOTE = (
+    "a stack-signature column of a series with several stacks: the series row carries the first "
+    "instance's value on both sides, and which instance is first follows the walk order"
+)
+
 #: The v0 file-name modes (`extract/worker.py`, `_matches_extension`) and the
 #: v1 `files` knob that selects the same names.
 V0_FILE_MODES: dict[str, str] = {

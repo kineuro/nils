@@ -18,6 +18,10 @@ _HEADING = re.compile(r"^## (\w+) \((\d+)")
 _ROW = re.compile(r"^\| `(\w+)` \| (.*?) \| (\w+) \| ([\w-]+) \| (.*?) \|$")
 
 
+#: The series-level tables whose columns a stack signature may also read.
+SERIES_LEVELS = ("series", "series_mr", "series_ct", "series_pet")
+
+
 @dataclass(frozen=True)
 class Field:
     level: str
@@ -25,6 +29,8 @@ class Field:
     converter: str
     sensitivity: str
     note: str
+    #: the source as the catalogue prints it (the tags read, in order)
+    source: str = ""
 
     @property
     def classed(self) -> bool:
@@ -54,12 +60,12 @@ def load(path: Path | None = None) -> dict[str, list[Field]]:
             continue
         m = _ROW.match(line)
         if m and level:
-            column, _source, converter, sensitivity, note = m.groups()
+            column, source, converter, sensitivity, note = m.groups()
             if converter not in CONVERTERS:
                 raise ValueError(f"{path}: {level}.{column}: unknown converter {converter!r}")
             if sensitivity not in CLASSES:
                 raise ValueError(f"{path}: {level}.{column}: unknown class {sensitivity!r}")
-            levels[level].append(Field(level, column, converter, sensitivity, note))
+            levels[level].append(Field(level, column, converter, sensitivity, note, source.strip()))
     for name in LEVELS:
         if name not in levels:
             raise ValueError(f"{path}: no section for {name}")
@@ -68,3 +74,16 @@ def load(path: Path | None = None) -> dict[str, list[Field]]:
                 f"{path}: {name} declares {declared[name]} columns, {len(levels[name])} rows read"
             )
     return levels
+
+
+def stack_defining(levels: dict[str, list[Field]]) -> frozenset[tuple[str, str]]:
+    """The (level, column) of every series-level column a stack signature is
+    also made of: a column of the series tables whose source a stack column
+    reads too (the engine's `stack_defining`, the thirteen of spec §8). The
+    series row carries the first instance's value of each, so two digests
+    that walked a multi-stack series in different orders disagree on them by
+    construction."""
+    sources = {f.source for f in levels["stack"]}
+    return frozenset(
+        (f.level, f.column) for name in SERIES_LEVELS for f in levels[name] if f.source in sources
+    )

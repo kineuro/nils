@@ -15,7 +15,7 @@ from . import __version__
 from .classify import Adjudication
 from .fields import FieldStat, Group
 from .instances import InstanceReport
-from .mapping import EXACT_FIELDS, ORDER_DEPENDENT
+from .mapping import EXACT_FIELDS, MULTI_STACK, MULTI_STACK_NOTE, ORDER_DEPENDENT
 from .stacks import StackReport
 from .subjects import SubjectReport
 
@@ -64,16 +64,20 @@ class Report:
 
 def adjudicate(rep: Report, adj: Adjudication) -> None:
     """Assign classes to every group; count what stays unclassified; excuse
-    what the classes excuse."""
+    what the classes excuse. The file's rule wins; without one, a group of
+    an order-dependent column, or of a stack-signature column in
+    multi-stack series, is `accepted` with the built-in note."""
     rep.unclassified = 0
     for stat in rep.fields:
-        built_in = ORDER_DEPENDENT.get((stat.level, stat.field))
+        order_dependent = ORDER_DEPENDENT.get((stat.level, stat.field))
         for g in stat.groups:
             rule = adj.divergence(g.level, g.field, g.pattern)
             if rule is not None:
                 g.classification, g.note = rule.classification, rule.note
-            elif built_in is not None:
-                g.classification, g.note = "accepted", built_in
+            elif order_dependent is not None:
+                g.classification, g.note = "accepted", order_dependent
+            elif g.pattern.endswith(MULTI_STACK):
+                g.classification, g.note = "accepted", MULTI_STACK_NOTE
             else:
                 rep.unclassified += 1
         stat.excuse(EXCUSED)

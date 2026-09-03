@@ -137,10 +137,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
     rep.v0_files = args.v0_files
     rep.root_given = root is not None
     rep.v1_counts = v1.materialize(con, registry, cat, root)
-    rep.instances = instances.compare(con, args.cohort, args.v0_files, root, not args.no_fs)
+    rep.instances = instances.compare(con, args.cohort, args.v0_files, root, not args.no_fs, args.fs_cap)
     rep.stacks = stacks.compare(con)
     for level in catalogue.LEVELS:
-        n, stats = fields.compare_level(con, level, cat[level], args.sample_cap)
+        n, stats = fields.compare_level(con, level, cat, args.sample_cap)
         rep.pairs[level] = n
         rep.fields += stats
     rep.subjects = subjects.compare(con, args.cohort, key, classify=key is not None or args.cohort is not None)
@@ -194,6 +194,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--key-file", help="the v0 subject-code key, one line; classifies how v0 derived codes")
     p.add_argument("--adjudication", help="the TOML that classifies the divergences")
     p.add_argument("--no-fs", action="store_true", help="do not check paths on disk")
+    p.add_argument(
+        "--fs-cap",
+        type=int,
+        default=instances.FS_CAP,
+        help="v0 paths checked on disk at most (0: all of them)",
+    )
     p.add_argument("--catalogue", help="the catalogue.md to read (default: this checkout's)")
     p.add_argument("--sample-cap", type=int, default=fields.SAMPLE_CAP, help="residual rows classified per field")
     p.add_argument("--threads", type=int)

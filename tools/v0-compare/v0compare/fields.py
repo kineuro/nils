@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 import duckdb
 
 from . import normalize, v1
-from .catalogue import Field
-from .mapping import LEVELS, STACK_EXTRA, Level
+from .catalogue import SERIES_LEVELS, Field, stack_defining
+from .mapping import LEVELS, MULTI_STACK, STACK_EXTRA, Level
 from .shapes import pattern, shape
 from .v0 import TABLES
 
@@ -61,6 +61,18 @@ _KEYS: dict[str, str] = {
     "series_pet": "a0.series_instance_uid",
     "stack": "a.series_stack_id",
     "instance": "a.sop_instance_uid",
+}
+
+# Whether the series of a pair holds several stacks on either side: v0's
+# `series_stack` rows counted per series (`w.v0_series_stacks`), v1's
+# `n_stacks` on the series row (`b` at the series level, `b0` under a
+# detail table).
+_MULTI_JOIN = "LEFT JOIN w.v0_series_stacks k ON k.series_id = a.series_id"
+_MULTI: dict[str, str] = {
+    "series": "(coalesce(k.n, 0) > 1 OR coalesce(b.n_stacks, 0) > 1)",
+    "series_mr": "(coalesce(k.n, 0) > 1 OR coalesce(b0.n_stacks, 0) > 1)",
+    "series_ct": "(coalesce(k.n, 0) > 1 OR coalesce(b0.n_stacks, 0) > 1)",
+    "series_pet": "(coalesce(k.n, 0) > 1 OR coalesce(b0.n_stacks, 0) > 1)",
 }
 
 
@@ -189,13 +201,23 @@ def plans(level_name: str, fields: list[Field]) -> list[Plan]:
 
 
 def pair(con: duckdb.DuckDBPyConnection, level_name: str, fields: list[Field]) -> tuple[int, list[Plan]]:
-    """Build `w.pair_<level>`: one row per pair of rows, the key and every
-    field in normal form on both sides; the number of pairs."""
+    """Build `w.pair_<level>`: one row per pair of rows, the key, every
+    field in normal form on both sides and, at the series levels, whether
+    the series holds several stacks on either side; the number of pairs."""
     ps = plans(level_name, fields)
     columns = ", ".join(f"{p.a_expr} AS a_{p.fld.column}, {p.b_expr} AS b_{p.fld.column}" for p in ps)
+    joins = _JOINS[level_name]
+    multi = "FALSE"
+    if level_name in _MULTI:
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS w.v0_series_stacks AS "
+            "SELECT series_id, count(*) AS n FROM v0db.v0.series_stack GROUP BY 1"
+        )
+        joins += " " + _MULTI_JOIN
+        multi = _MULTI[level_name]
     con.execute(
         f"CREATE OR REPLACE TABLE w.pair_{level_name} AS "
-        f"SELECT {_KEYS[level_name]} AS key, {columns} {_JOINS[level_name]}"
+        f"SELECT {_KEYS[level_name]} AS key, {multi} AS multi, {columns} {joins}"
     )
     n = con.execute(f"SELECT count(*) FROM w.pair_{level_name}").fetchone()[0]
     _log(f"{level_name}: {n:,} pair(s)")
@@ -243,9 +265,19 @@ def stats(con: duckdb.DuckDBPyConnection, level_name: str, ps: list[Plan]) -> li
     return out
 
 
-def residual(con: duckdb.DuckDBPyConnection, level_name: str, p: Plan, stat: FieldStat, cap: int = SAMPLE_CAP) -> None:
+def residual(
+    con: duckdb.DuckDBPyConnection,
+    level_name: str,
+    p: Plan,
+    stat: FieldStat,
+    cap: int = SAMPLE_CAP,
+    stack_columns: frozenset[tuple[str, str]] = frozenset(),
+) -> None:
     """Read back the pairs of one field that do not agree and group them by
-    pattern; a residual beyond `cap` rows is sampled deterministically."""
+    pattern; a residual beyond `cap` rows is sampled deterministically. A
+    field in `stack_columns` (the stack-signature columns of the series
+    tables) groups the rows of multi-stack series apart, under the pattern
+    with `MULTI_STACK` appended."""
     total = stat.one_null + stat.differ
     if total == 0:
         return
@@ -255,15 +287,18 @@ def residual(con: duckdb.DuckDBPyConnection, level_name: str, p: Plan, stat: Fie
         every = -(-total // cap)
         where += f" AND hash(key) % {every} = 0"
         stat.sampled = cap
-    rows = con.execute(f"SELECT {a}, {b} FROM w.pair_{level_name} WHERE {where}").fetchall()
+    rows = con.execute(f"SELECT {a}, {b}, multi FROM w.pair_{level_name} WHERE {where}").fetchall()
     if stat.sampled:
         stat.sampled = len(rows)
     classed = p.fld.classed
+    split_multi = (level_name, p.fld.column) in stack_columns
     groups: dict[str, Group] = {}
-    for va, vb in rows:
+    for va, vb, multi in rows:
         name = pattern(va, vb, p.kind)
         if classed and "↔" in name and name not in ("null↔value", "value↔null"):
             name = "other"
+        if split_multi and multi:
+            name += MULTI_STACK
         g = groups.get(name)
         if g is None:
             g = groups[name] = Group(level_name, p.fld.column, name, 0)
@@ -276,11 +311,15 @@ def residual(con: duckdb.DuckDBPyConnection, level_name: str, p: Plan, stat: Fie
 
 
 def compare_level(
-    con: duckdb.DuckDBPyConnection, level_name: str, fields: list[Field], cap: int = SAMPLE_CAP
+    con: duckdb.DuckDBPyConnection,
+    level_name: str,
+    catalogue: dict[str, list[Field]],
+    cap: int = SAMPLE_CAP,
 ) -> tuple[int, list[FieldStat]]:
     """Pair, count and group one level; the pair count and the field stats."""
-    n, ps = pair(con, level_name, fields)
+    n, ps = pair(con, level_name, catalogue[level_name])
     out = stats(con, level_name, ps)
+    stack_columns = stack_defining(catalogue) if level_name in SERIES_LEVELS else frozenset()
     for p, stat in zip(ps, out):
-        residual(con, level_name, p, stat, cap)
+        residual(con, level_name, p, stat, cap, stack_columns)
     return n, out

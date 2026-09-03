@@ -285,3 +285,80 @@ def test_excused_rows_lift_the_agreement(tmp_path: Path) -> None:
     assert "3 excused" in bars["12.2 every v1 instance is in v0 or explained"].detail
     assert not bars["12.3 every divergence is classified"].passed
     assert '"passed": false' in report.to_json(rep)
+
+
+def test_stack_defining_pins_the_thirteen() -> None:
+    """The series-level columns a stack signature is also made of, derived
+    from the catalogue as the engine derives them (spec §8): thirteen."""
+    cols = catalogue.stack_defining(catalogue.load())
+    assert len(cols) == 13
+    assert {("series", "image_type"), ("series", "image_orientation_patient")} <= cols
+    assert sum(1 for level, _ in cols if level == "series_mr") == 7
+    assert {("series_ct", "kvp"), ("series_ct", "x_ray_tube_current"), ("series_ct", "exposure")} <= cols
+    assert ("series_pet", "series_type") in cols
+    assert not any(level in ("study", "subject", "instance", "stack") for level, _ in cols)
+
+
+def test_multi_stack_groups_are_the_tools_own(tmp_path: Path) -> None:
+    """A stack-signature column that differs in a multi-stack series is
+    `accepted` by the tool itself; the same pattern in a single-stack series
+    is not, and the file's rule wins over both."""
+    from v0compare import report
+    from v0compare.fields import FieldStat, Group
+    from v0compare.mapping import MULTI_STACK, MULTI_STACK_NOTE
+
+    def fresh() -> report.Report:
+        rep = report.Report()
+        rep.fields = [
+            FieldStat("series_mr", "echo_time", "double", "technical", "double", compared=10, equal=7, differ=3,
+                      groups=[Group("series_mr", "echo_time", "rounded" + MULTI_STACK, 2),
+                              Group("series_mr", "echo_time", "rounded", 1)]),
+        ]
+        return rep
+
+    rep = fresh()
+    report.adjudicate(rep, classify.load(None))
+    multi, single = rep.fields[0].groups
+    assert (multi.classification, multi.note) == ("accepted", MULTI_STACK_NOTE)
+    assert single.classification is None
+    assert rep.fields[0].excused == 2 and rep.unclassified == 1
+
+    toml = tmp_path / "adj.toml"
+    toml.write_text(
+        '[[divergence]]\nlevel = "series_mr"\nfield = "echo_time"\npattern = "rounded*"\nclass = "v1-bug"\n'
+        'note = "not this time"\n',
+        encoding="utf-8",
+    )
+    rep = fresh()
+    report.adjudicate(rep, classify.load(toml))
+    assert [g.classification for g in rep.fields[0].groups] == ["v1-bug", "v1-bug"]
+    assert rep.fields[0].excused == 0 and rep.unclassified == 0
+
+
+def test_sqlite_registry_is_read_typed(tmp_path: Path) -> None:
+    """A REAL column reaches DuckDB as the double SQLite holds, not through
+    its 15-digit text: a float32 widened to f64 (B1rms) keeps its 17
+    digits, and so meets v0's `str()` of the same value."""
+    import sqlite3
+
+    from v0compare import v1
+
+    path = tmp_path / "registry.db"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x REAL, n INTEGER, s TEXT)")
+    value = 0.30000001192092896  # float32 0.3, widened
+    db.execute("INSERT INTO t VALUES (1, ?, 7, 'a')", (value,))
+    db.commit()
+    db.close()
+    con = duckdb.connect()
+    v1.attach(con, v1.Registry("sqlite", path=path))
+    x, n, s = con.execute("SELECT x, n, s FROM v1.t").fetchone()
+    assert x == value and isinstance(n, int) and s == "a"
+    assert con.execute("SELECT CAST(x AS VARCHAR) FROM v1.t").fetchone()[0] == repr(value)
+    con.close()
+    # what the text read would have made of it
+    con = duckdb.connect()
+    con.execute("INSTALL sqlite; LOAD sqlite; SET sqlite_all_varchar = true")
+    con.execute(f"ATTACH '{path}' AS t2 (TYPE sqlite, READ_ONLY)")
+    assert con.execute("SELECT x FROM t2.t").fetchone()[0] == "0.300000011920929"
+    con.close()
