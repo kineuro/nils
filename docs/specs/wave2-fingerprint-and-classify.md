@@ -132,16 +132,20 @@ allows").
 of the knowledge.** Everything below follows from that one line, and so does
 what is deliberately absent.
 
-Per stack, in `stack_fingerprint`:
+What it is, in one sentence: **the five-table join a classifier would
+otherwise do per stack, materialized and typed once**. Per stack, in
+`stack_fingerprint`:
 
 - **Folded text**: the six fields v0 joins (series description, protocol name,
   sequence name, body part examined, series comments, image comments), each
   kept as its own column and once more as the join, folded to one form: Unicode
   NFKC, case, whitespace collapsed, the accents and the Nordic letters kept.
   Folding is a fact about text.
-- **Parsed tokens**: the token sets of the multi-valued fields (`ImageType`,
-  `ScanningSequence`, `SequenceVariant`, `ScanOptions`, `ImageOrientation`),
-  stored as sorted arrays of tokens, so a predicate is a membership test.
+- **The multi-valued fields as read**: `ImageType`, `ScanningSequence`,
+  `SequenceVariant`, `ScanOptions` and `ImageOrientationPatient`, the stack's
+  own value where it has one and the series' otherwise. They are not tokenized
+  here: a parser declares its own `strip` and `split` (§6.1), and two packs may
+  disagree about where a token ends, so tokenizing is knowledge too.
 - **Physics**: the numbers a rule compares (echo time, repetition time,
   inversion time, flip angle, echo train length, b-values, field strength,
   slice thickness, spacing, matrix, number of averages, pixel bandwidth), typed,
@@ -149,8 +153,10 @@ Per stack, in `stack_fingerprint`:
 - **Shape**: the geometry facts (2D or 3D acquisition, the orientation class,
   the number of instances, frames and echoes in the stack, the stack key when
   the series has more than one stack, and whether it has).
-- **Provenance**: manufacturer, model, station, software version and the
-  implementation writer, folded the same way as the text.
+- **Provenance**: manufacturer, model, station and the implementation writer
+  (its class UID and version name), folded the same way as the text. Not
+  SoftwareVersions: the registry does not carry it, and adding a column to the
+  catalogue is a Wave 1 change, not a fingerprint's to make.
 - **Contrast**: the administration fields v0 joins into its contrast blob,
   folded, since a contrast agent's name is a fact about the study.
 

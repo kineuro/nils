@@ -58,6 +58,8 @@ enum Command {
     },
     /// Walk a tree of DICOM files, read every header and digest it into the registry
     Digest(DigestArgs),
+    /// Derive the per-stack values a classifier reads, once, and store them
+    Fingerprint(FingerprintArgs),
     /// The registry: its metadata, the running jobs, the last batches
     Status(StatusArgs),
     /// The linkage store: the identifiers behind the codes (§7)
@@ -302,6 +304,7 @@ fn main() -> ExitCode {
         Command::Init(args) => init(&home, args),
         Command::Key { command } => key(&home, command),
         Command::Digest(args) => digest(&home, args),
+        Command::Fingerprint(args) => fingerprint(&home, args),
         Command::Status(args) => status(&home, args),
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
@@ -461,6 +464,66 @@ fn key(home: &Home, command: KeyCommand) -> Result<(), Exit> {
 fn key_in_use(home: &Home, config: Option<&Config>) -> Option<String> {
     config?;
     home.open().ok().map(|r| r.meta().pseudonym_key.clone())
+}
+
+/// `nils fingerprint` (Wave 2 §4.3).
+#[derive(Debug, Parser)]
+struct FingerprintArgs {
+    /// The run's label, recorded on the job
+    #[arg(long)]
+    name: Option<String>,
+    /// Derive again for stacks that already have a fingerprint
+    #[arg(long)]
+    force: bool,
+    /// Only stacks of this modality
+    #[arg(long, value_name = "MR|CT|PT|...")]
+    modality: Option<String>,
+    /// Stacks per window, one transaction each
+    #[arg(long, value_name = "N")]
+    window: Option<usize>,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
+}
+
+fn fingerprint(home: &Home, args: FingerprintArgs) -> Result<(), Exit> {
+    let mut settings = nils_classify::Settings {
+        force: args.force,
+        modality: args.modality,
+        ..nils_classify::Settings::default()
+    };
+    if let Some(name) = args.name {
+        settings.name = name;
+    }
+    if let Some(n) = args.window {
+        if n == 0 {
+            return Err(usage("--window must be at least 1"));
+        }
+        settings.window = n;
+    }
+    let cancel = stop_on_signal()?;
+    let mut registry = open(home)?;
+    let report = nils_classify::run(&mut registry, &settings, &cancel).map_err(|e| match e {
+        nils_classify::Error::Busy { .. } => Exit {
+            code: BUSY,
+            message: e.to_string(),
+        },
+        other => fail(other.to_string()),
+    })?;
+    if args.json {
+        let text = serde_json::to_string_pretty(&report)
+            .map_err(|e| fail(format!("the report will not serialize: {e}")))?;
+        println!("{text}");
+    } else {
+        print!("{report}");
+    }
+    if report.cancelled {
+        return Err(Exit {
+            code: STOPPED,
+            message: "stopped: what was derived is written; run again to go on".into(),
+        });
+    }
+    Ok(())
 }
 
 fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
