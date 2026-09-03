@@ -12,6 +12,7 @@
 //! Column names are the fingerprint's (`nils_pack::stack::FIELDS`). A v0
 //! export uses its own names for the same things, so those are accepted too.
 
+use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 
 /// v0's column name for the same field, where it differs.
@@ -100,6 +101,34 @@ fn main() {
     // comparison asks for every one of them.
     let vote_all = args.iter().any(|a| a == "--vote-all");
     let mut corpus = nils_pack::pass::Corpus::new(&pack);
+    // A pass reads what the rules decided. To compare the algorithm with v0's
+    // while holding the reference equal, the axes may instead be read from a
+    // CSV of v0's own verdicts: then the two votes see the same pool and any
+    // difference left is the algorithm and not the reference.
+    let axes_from: Option<HashMap<String, Vec<String>>> = arg(&args, "--axes-from").map(|path| {
+        let mut by_id = HashMap::new();
+        let mut rdr = csv::Reader::from_path(&path).unwrap_or_else(|e| {
+            eprintln!("{path}: {e}");
+            std::process::exit(2)
+        });
+        let head = rdr.headers().expect("a header row").clone();
+        let at = |name: &str| head.iter().position(|h| h == name);
+        let id_at = at("series_stack_id").unwrap_or(0);
+        let axis_at: Vec<Option<usize>> = pack.axes.iter().map(|a| at(&a.name)).collect();
+        for rec in rdr.records() {
+            let r = rec.expect("a row");
+            by_id.insert(
+                r.get(id_at).unwrap_or("").to_string(),
+                axis_at
+                    .iter()
+                    .map(|c| c.and_then(|i| r.get(i)).unwrap_or("").to_string())
+                    .collect(),
+            );
+        }
+        eprintln!("axes read from {path}: {} stacks", by_id.len());
+        by_id
+    });
+    let no_axes: Vec<String> = vec![String::new(); pack.axes.len()];
 
     let out = std::io::stdout();
     let mut w = BufWriter::with_capacity(1 << 20, out.lock());
@@ -134,14 +163,16 @@ fn main() {
         let verdict = ev.classify();
         stacks += 1;
         if with_passes {
+            let theirs = axes_from.as_ref().map(|m| m.get(id).unwrap_or(&no_axes));
             corpus.push(
                 id.parse().unwrap_or(0),
                 |f| stack.as_text(f).into_owned(),
-                |a| {
-                    verdict
+                |a| match theirs {
+                    Some(v) => v[a].clone(),
+                    None => verdict
                         .axis(&pack.axes[a].name)
                         .map(|v| v.stored())
-                        .unwrap_or_default()
+                        .unwrap_or_default(),
                 },
             );
         }
