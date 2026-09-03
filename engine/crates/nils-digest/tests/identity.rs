@@ -576,15 +576,31 @@ fn two_identifiers_on_one_code_stop_the_job_with_a_review_item() {
 
 #[test]
 fn a_person_may_hold_several_identifiers_of_one_type() {
-    // A personnummer that changed (a temporary number, then the permanent one
-    // residency brings) is one person under two identifiers of one type: the
-    // import files both on the one subject, and a digest of either lands
-    // there (§7.4).
+    // A personnummer is not for life: a temporary number becomes a permanent
+    // one when residency is granted, someone may carry several temporary ones
+    // before that, and the permanent one itself changes when a legal sex
+    // change does (the number says which). However many they are, they are one
+    // person: the import files them all on the one subject, in one file or in
+    // several, and a digest of any of them lands there (§7.4).
     for lab in labs() {
         let name = lab.name;
+        let numbers = ["spare-01", "spare-02", "main-01"];
         let dir = TempDir::new("identity-spare");
-        dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", "spare-01", &[]));
-        dir.file("b/IM_0001", &mr("B", "B.1", "B.1.1", "main-01", &[]));
+        for (i, number) in numbers.iter().enumerate() {
+            let study = format!("S{i}");
+            dir.file(
+                &format!("{study}/IM_0001"),
+                &mr(
+                    &study,
+                    &format!("{study}.1"),
+                    &format!("{study}.1.1"),
+                    number,
+                    &[],
+                ),
+            );
+        }
+        // the number the sex change brought, digested after the others
+        dir.file("S9/IM_0001", &mr("S9", "S9.1", "S9.1.1", "main-02", &[]));
         let s = settings(&dir);
         let mut reg = lab.open();
         let mut store = reg.open_linkage().unwrap();
@@ -594,35 +610,60 @@ fn a_person_may_hold_several_identifiers_of_one_type() {
             identifier: identifier.to_string(),
             code: "one-person".to_string(),
         };
-        let imported = linkage::import(
-            reg.store(),
-            &mut store,
-            &keys,
-            "patient-id",
-            &[row(2, "spare-01"), row(3, "main-01")],
-        )
-        .unwrap();
+        let rows: Vec<ImportRow> = numbers
+            .iter()
+            .enumerate()
+            .map(|(i, n)| row(i + 2, n))
+            .collect();
+        let imported =
+            linkage::import(reg.store(), &mut store, &keys, "patient-id", &rows).unwrap();
         assert_eq!(
             (
                 imported.subjects_created,
                 imported.identities_added,
                 imported.second_identifiers
             ),
-            (1, 2, 1),
+            (1, 3, 2),
+            "{name}"
+        );
+        // a later file adds a fourth to the subject the first import created
+        let again = linkage::import(
+            reg.store(),
+            &mut store,
+            &keys,
+            "patient-id",
+            &[row(2, "main-02")],
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                again.subjects_created,
+                again.identities_added,
+                again.second_identifiers
+            ),
+            (0, 1, 1),
             "{name}"
         );
         let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(report.written.unwrap().subjects_created, 0, "{name}");
         assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {subject}"), 1, "{name}");
-        let subject = subject_of_study(&mut reg, "A");
-        assert_eq!(subject_of_study(&mut reg, "B"), subject, "{name}");
+        let subject = subject_of_study(&mut reg, "S0");
+        for study in ["S1", "S2", "S9"] {
+            assert_eq!(
+                subject_of_study(&mut reg, study),
+                subject,
+                "{name}: {study}"
+            );
+        }
         let mut held = revealed(&mut reg, &mut store, subject);
         held.sort();
         assert_eq!(
             held,
             [
                 identity("patient-id", "main-01", "csv"),
-                identity("patient-id", "spare-01", "csv")
+                identity("patient-id", "main-02", "csv"),
+                identity("patient-id", "spare-01", "csv"),
+                identity("patient-id", "spare-02", "csv"),
             ],
             "{name}"
         );
