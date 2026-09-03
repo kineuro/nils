@@ -131,8 +131,8 @@ the writer's touch (two seconds of twenty-five on nmosd) but the parsers'
 queue, half a million unchanged files sent through it one at a time (25 s on
 32 workers, 5 s on one); the resume stage now batches them for the writer
 itself, and the second pass takes 4.7 s on nmosd against 25.8 s and, for the
-million, 5.4 s on SQLite and 18.2 s on Postgres against 66 s and 37 s. On CT
-110 over nmosd: a run killed after 40 commits, one killed inside a
+million, 5.4 s on SQLite and 18.2 s on Postgres against 66 s and 37 s. On the
+same development container over nmosd: a run killed after 40 commits, one killed inside a
 transaction, one stopped by SIGINT and one aborted each resume to the
 uninterrupted run's 44 subjects, 82 studies, 2,165 series, 2,534 stacks,
 493,708 instances, 508,045 file rows in the same statuses and 44 identities,
@@ -141,7 +141,44 @@ how many `ingest.quarantine` items a resumed tree holds (one to six), since a
 run files one per class it quarantined itself. Not in slice 6 and known:
 `review apply` (Wave 4), `doctor`, the mix checks (the copy), and the
 Postgres second pass (18 s of round trips for a million lookups and touches)
-is slice 8's on the baseline host.
+is slice 8's on the baseline host. Slice 7, the compare tool, merged
+2026-09-03 (pull request 9): `tools/v0-compare/`, Python over DuckDB, reads v0
+through `export.sh`'s read-only CSV export (the session forced read-only, F1)
+or a DSN and v1 through either scanner, and measures §12 the way the spec
+asks: instances paired on the SOP UID and every one missing on either side
+classed by what the other side knows of it, fields compared after a symmetric
+normalization with the residual read back as shapes and grouped by pattern,
+stack partitions matched by membership, codes and studies per code, and v1's
+sessions against v0's events. What building it settled is amended into the
+spec as the blocks "Settled while building the compare tool (slice 7)" and
+"Settled in slice 7" (§5.2, §12.1 to §12.4, §12.7, §14): the walker's `files`
+knob as a union (`dcm,no-ext` is v0's "all" mode, so both sides see the same
+candidates); the adjudication file (TOML; `divergence`, `partition` and
+`instance` rules with glob patterns) and the one rule the bars apply to its
+classes, that a group classed `accepted` or `v0-bug` is excused from the bar it
+would fail while a `v1-bug` and an unclassified group count in full, so the
+99.9 percent floor is measured net of what the record has explained and the
+classification bar is unchanged; the two series columns that carry the first
+instance's value and follow the walk order (`media_storage_sop_instance_uid`,
+`image_position_patient`) classed `accepted` by the tool itself, found when
+two digests of one synthetic corpus disagreed on seven of eight series; v0's
+`study.modality` against v1's `modalities_in_study` declared accepted per run;
+`linkage-csv` for the import with collisions counted, and `--key-file` classing
+each v0 code `key-consistent`, `cohort-hashed`, `no identifier` or `other`
+without an identifier or a key ever leaving the process. The tool has a gate of
+its own in CI (`v0-compare`, both backends): a v0-shaped export projected out
+of a synthetic registry with injected divergences in every class, a clean
+projection passing, the CSV round trip through `nils linkage import` filing
+every code as already known, and the key classes right with the right key and
+`other` with a wrong one; the corpus generator gained `--same-day-percent` for
+the session check. Not in slice 7 and known: the runs themselves. v0's export
+(fifteen zstd CSVs, 1.26 GB, no names: 5,322 subjects, 35,220 studies, 386,488
+series, 518,887 stacks, 37,535,095 instances, 142,033 events, 10,881 identifier
+rows) reached the private host that runs the gate on 2026-09-03, verified, and
+was deleted from the host it came from; the nmosd run on the development
+container and the cold-cache run on the baseline host follow, then the cohorts
+as the migration lands their raw trees, each report summarized here in counts
+and shapes; the slice closes with the last of them.
 
 **Wave 2 — fingerprint and classify.** The columnar fingerprint pass, the pack
 loader, the MRI pack carried over, evidence storage, `nils classify`. *Gate:*
