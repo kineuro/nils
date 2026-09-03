@@ -198,6 +198,28 @@ pub trait Ctx {
 }
 
 impl Expr {
+    /// Every field this expression reads, including the one a comparison
+    /// reads on its other side. What a pass needs in order to know which
+    /// columns to carry for half a million stacks.
+    pub fn fields(&self, out: &mut Vec<usize>) {
+        match self {
+            Expr::Field { field, cmp } => {
+                out.push(*field);
+                if let Cmp::Field(_, other) = cmp {
+                    out.push(*other);
+                }
+            }
+            Expr::Text { field, inner, .. } => {
+                out.push(*field);
+                inner.fields(out);
+            }
+            Expr::Any(es) | Expr::All(es) => es.iter().for_each(|e| e.fields(out)),
+            Expr::Not(e) => e.fields(out),
+            Expr::InParser { inner, .. } => inner.fields(out),
+            _ => {}
+        }
+    }
+
     /// Evaluate. `subj` is the subject in scope, if any. A subject atom with
     /// no subject is false, and the loader is what stops that from happening.
     pub fn eval<C: Ctx + ?Sized>(&self, subj: Option<&Subject<'_>>, c: &C) -> bool {

@@ -6,7 +6,9 @@
 //! The per-stack rules have run and every stack has a verdict. A pass is the
 //! part that reads more than one stack: it builds the **reference** the pack
 //! declared, asks its kind for an answer, and writes the answer down with the
-//! evidence that made it.
+//! evidence that made it. The algorithm and what it reads are `nils_pack`'s,
+//! so the checker that runs a pack over a CSV runs the same code; what is
+//! here is the registry: which columns to read, and what to write back.
 //!
 //! v0 does this against the live table, in whatever order the database
 //! returned it, and keeps nothing about the result. So the answer a stack got
@@ -17,92 +19,13 @@
 use std::collections::HashMap;
 
 use nils_pack::Pack;
-use nils_pack::expr::{Ctx, Subject};
-use nils_pack::pass::{Cond, Key, Pass, Phase, Pool, Vote, What, key_of, take};
-use nils_registry::schema::{Type, table};
+use nils_pack::pass::{Corpus, Pass, Phase, Vote, run_vote};
+use nils_registry::schema::table;
 use nils_registry::store::{Insert, Param, Store};
 use nils_registry::time::now_iso;
 
 use crate::classify::FIELDS;
 use crate::job::Error;
-
-/// One stack, as a pass sees it: what the fingerprint says and what the rules
-/// decided. A pass may read those two things and nothing else, which is what
-/// the loader enforces when it compiles a pass's expressions.
-struct Row<'a> {
-    fields: &'a [Option<String>],
-    /// Per axis of the pack, the value stored for this stack.
-    axes: &'a [Option<String>],
-}
-
-impl Ctx for Row<'_> {
-    fn pred(&self, _parser: usize, _pred: usize) -> bool {
-        unreachable!("a pass may not name a parser predicate")
-    }
-    fn subject(&self, _parser: usize) -> Subject<'_> {
-        unreachable!("a pass may not name a parser")
-    }
-    fn flag(&self, _flag: usize) -> bool {
-        unreachable!("a pass may not name a flag")
-    }
-    fn num(&self, field: usize) -> Option<f64> {
-        self.fields
-            .get(field)
-            .and_then(|v| v.as_deref())
-            .and_then(|s| s.parse().ok())
-    }
-    fn present(&self, field: usize) -> bool {
-        self.fields
-            .get(field)
-            .and_then(|v| v.as_deref())
-            .is_some_and(|s| !s.is_empty())
-    }
-    fn text(&self, field: usize) -> &str {
-        self.fields
-            .get(field)
-            .and_then(|v| v.as_deref())
-            .unwrap_or("")
-    }
-    fn re(&self, _idx: usize) -> &nils_pack::expr::Regex {
-        unreachable!("a pass's expressions carry no patterns of their own")
-    }
-    fn axis_is(&self, axis: usize, value: &str) -> bool {
-        self.axes
-            .get(axis)
-            .and_then(|v| v.as_deref())
-            .is_some_and(|v| v == value)
-    }
-    fn axis_empty(&self, axis: usize) -> bool {
-        self.axes
-            .get(axis)
-            .and_then(|v| v.as_deref())
-            .is_none_or(str::is_empty)
-    }
-}
-
-fn holds(c: &Cond, row: &Row<'_>) -> bool {
-    let value = match c.what {
-        What::Field(i) => row.fields.get(i).and_then(|v| v.as_deref()),
-        What::Axis(i) => row.axes.get(i).and_then(|v| v.as_deref()),
-    };
-    let value = value.filter(|v| !v.is_empty());
-    if let Some(want) = c.present
-        && value.is_some() != want
-    {
-        return false;
-    }
-    if let Some(v) = value {
-        if !c.is.is_empty() && !c.is.iter().any(|w| w == v) {
-            return false;
-        }
-        if c.not.iter().any(|w| w == v) {
-            return false;
-        }
-    } else if !c.is.is_empty() {
-        return false;
-    }
-    true
-}
 
 /// What one pass did, for the report and for the job record.
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -119,23 +42,23 @@ pub struct Ran {
     pub by_method: std::collections::BTreeMap<String, i64>,
 }
 
-/// Everything a pass phase needs from the registry, read once.
-struct Corpus {
-    /// Per stack, in stack order: the fingerprint's fields.
-    fields: Vec<Vec<Option<String>>>,
-    /// Per stack, per axis of the pack: what the rules decided.
-    axes: Vec<Vec<Option<String>>>,
-    ids: Vec<i64>,
-}
-
+/// The corpus, read once: only the fields the passes name, and the axes the
+/// rules decided. A pass that reads five columns does not pay for
+/// forty-three, which is the difference between tens of megabytes and
+/// gigabytes on half a million stacks.
 fn read_corpus(store: &mut Store, pack: &Pack, modality: Option<&str>) -> Result<Corpus, Error> {
+    let mut corpus = Corpus::new(pack);
+    let needed = corpus.needed();
+    if needed.is_empty() {
+        return Ok(corpus);
+    }
     let t = table("stack_fingerprint");
     let dialect = store.dialect();
     let columns: Vec<String> = std::iter::once("stack_id".to_string())
-        .chain(FIELDS.iter().map(|(_, c)| {
+        .chain(needed.iter().map(|f| {
             let column = t
-                .column(c)
-                .unwrap_or_else(|| panic!("stack_fingerprint.{c} is not a column"));
+                .column(FIELDS[*f].1)
+                .unwrap_or_else(|| panic!("stack_fingerprint.{} is not a column", FIELDS[*f].1));
             dialect.text_of_qualified(None, column)
         }))
         .collect();
@@ -148,37 +71,42 @@ fn read_corpus(store: &mut Store, pack: &Pack, modality: Option<&str>) -> Result
         columns.join(", "),
         store.qualified("stack_fingerprint"),
     );
-    let mut corpus = Corpus {
-        fields: Vec::new(),
-        axes: Vec::new(),
-        ids: Vec::new(),
-    };
-    let mut at: HashMap<i64, usize> = HashMap::new();
-    for r in store.query(&sql, &[])? {
-        let id = r.int(0)?;
-        at.insert(id, corpus.ids.len());
-        corpus.ids.push(id);
-        corpus.fields.push(
-            (0..FIELDS.len())
-                .map(|i| crate::classify::cell_text(r.get(i + 1)))
-                .collect(),
-        );
-        corpus.axes.push(vec![None; pack.axes.len()]);
-    }
 
-    let sql = format!(
+    // The axes first, so a stack arrives complete.
+    let mut decided: HashMap<i64, Vec<String>> = HashMap::new();
+    let sql_axes = format!(
         "SELECT stack_id, axis, value FROM {}",
         store.qualified("classification_axis")
     );
-    for r in store.query(&sql, &[])? {
+    for r in store.query(&sql_axes, &[])? {
         let name = r.text(1)?;
-        let (Some(&i), Some(a)) = (
-            at.get(&r.int(0)?),
-            pack.axes.iter().position(|x| x.name == name),
-        ) else {
+        let Some(a) = pack.axes.iter().position(|x| x.name == name) else {
             continue;
         };
-        corpus.axes[i][a] = r.opt_text(2)?.map(str::to_string);
+        let value = r.opt_text(2)?.unwrap_or("").to_string();
+        decided
+            .entry(r.int(0)?)
+            .or_insert_with(|| vec![String::new(); pack.axes.len()])[a] = value;
+    }
+
+    let empty: Vec<String> = vec![String::new(); pack.axes.len()];
+    for r in store.query(&sql, &[])? {
+        let id = r.int(0)?;
+        let cells: Vec<String> = (0..needed.len())
+            .map(|i| crate::classify::cell_text(r.get(i + 1)).unwrap_or_default())
+            .collect();
+        let axes = decided.get(&id).unwrap_or(&empty);
+        corpus.push(
+            id,
+            |f| {
+                needed
+                    .iter()
+                    .position(|n| *n == f)
+                    .map(|i| cells[i].clone())
+                    .unwrap_or_default()
+            },
+            |a| axes[a].clone(),
+        );
     }
     Ok(corpus)
 }
@@ -203,18 +131,12 @@ pub fn run(
             break;
         }
         let Some(vote) = pass.vote() else { continue };
-        out.push(run_vote(store, pack, pass, vote, &corpus, job_id)?);
+        out.push(run_one(store, pack, pass, vote, &corpus, job_id)?);
     }
     Ok(out)
 }
 
-/// The value's index in its axis's vocabulary, by what a row stores.
-fn value_index(pack: &Pack, axis: usize, stored: &str) -> Option<usize> {
-    let a = &pack.axes[axis];
-    (0..a.values.len()).find(|i| a.stored(*i) == stored)
-}
-
-fn run_vote(
+fn run_one(
     store: &mut Store,
     pack: &Pack,
     pass: &Pass,
@@ -228,135 +150,51 @@ fn run_vote(
         reference: pass.reference.scope.clone(),
         ..Ran::default()
     };
+    let (answers, pool, _pools) = run_vote(pack, pass, vote, corpus, false);
+    ran.pool = pool;
+    ran.targets = answers.len() as i64;
 
-    // --- the reference, as the pack declared it
-    let mut pools: HashMap<String, Pool> = HashMap::new();
-    let mut global = Pool::default();
-    for i in 0..corpus.ids.len() {
-        let row = Row {
-            fields: &corpus.fields[i],
-            axes: &corpus.axes[i],
-        };
-        if !pass.reference.filter.iter().all(|c| holds(c, &row)) {
-            continue;
-        }
-        let answer: Option<Vec<usize>> = vote
-            .vote_on
-            .iter()
-            .map(|a| {
-                corpus.axes[i][*a]
-                    .as_deref()
-                    .and_then(|v| value_index(pack, *a, v))
-            })
-            .collect();
-        let Some(answer) = answer else { continue };
-        let values: Vec<Option<f64>> = vote.dims.iter().map(|d| row.num(d.field)).collect();
-        let key = key_of(vote, &values);
-        if let Some(p) = pass.reference.partition_by {
-            let name = corpus.axes[i][p].clone().unwrap_or_default();
-            pools.entry(name).or_default().add(key, answer.clone());
-        }
-        global.add(key, answer);
-    }
-    ran.pool = global.len();
-
-    // --- and the stacks it is for
     let now = now_iso();
     let mut axis_rows: Vec<Vec<Param>> = Vec::new();
     let mut evidence: Vec<Vec<Param>> = Vec::new();
     let mut reviews: Vec<Vec<Param>> = Vec::new();
-    for i in 0..corpus.ids.len() {
-        let row = Row {
-            fields: &corpus.fields[i],
-            axes: &corpus.axes[i],
-        };
-        if let Some(t) = &pass.target
-            && !t.eval(None, &row)
-        {
+    for a in &answers {
+        *ran.by_method.entry(a.outcome.method.clone()).or_insert(0) += 1;
+        if a.writes.is_empty() {
             continue;
         }
-        ran.targets += 1;
-
-        let values: Vec<Option<f64>> = vote.dims.iter().map(|d| row.num(d.field)).collect();
-        let key: Key = key_of(vote, &values);
-        let sequence = row.text(vote.compat.subject_field).to_string();
-        let partition = pass
-            .reference
-            .partition_by
-            .map(|p| corpus.axes[i][p].clone().unwrap_or_default());
-
-        // Its own pool first, then the whole one, exactly as the pack says.
-        let mut outcome = match &partition {
-            Some(name) if !pass.reference.fallback_except.iter().any(|e| e == name) => {
-                let pool = pools.get(name).unwrap_or(&global);
-                take(vote, pool, &key, &sequence, &pack.axes, &pack.regexes, name)
-            }
-            _ => take(
-                vote,
-                &global,
-                &key,
-                &sequence,
-                &pack.axes,
-                &pack.regexes,
-                "global",
-            ),
-        };
-        if outcome.answer.is_none()
-            && pass.reference.fallback
-            && outcome.partition != "global"
-            && pass.reference.fallback_when.contains(&outcome.method)
-        {
-            outcome = take(
-                vote,
-                &global,
-                &key,
-                &sequence,
-                &pack.axes,
-                &pack.regexes,
-                "global",
-            );
-        }
-        *ran.by_method.entry(outcome.method.clone()).or_insert(0) += 1;
-
-        let Some(answer) = &outcome.answer else {
-            continue;
-        };
         ran.decided += 1;
-        let confidence = outcome.confidence();
+        let stack_id = corpus.ids[a.at];
+        let confidence = a.outcome.confidence();
         let cited = format!(
             "{} of {} neighbours in the {} pool of {}",
-            outcome.matches, outcome.neighbours, outcome.partition, outcome.pool
+            a.outcome.matches, a.outcome.neighbours, a.outcome.partition, a.outcome.pool
         );
-        for a in &vote.writes {
-            let at = vote
-                .vote_on
-                .iter()
-                .position(|x| x == a)
-                .expect("an axis written is an axis voted on");
-            let stored = pack.axes[*a].stored(answer[at]).to_string();
+        for (axis, stored) in &a.writes {
             // An axis that already says something keeps it: a pass fills a
             // gap, it does not overrule the rules.
-            let current = corpus.axes[i][*a].as_deref().unwrap_or("");
+            let current = corpus.axis_of(a.at, *axis);
             let fills = current.is_empty() || vote.write_when.iter().any(|w| w == current);
             if !fills {
                 continue;
             }
+            let name = pack.axes[*axis].name.as_str();
             axis_rows.push(vec![
-                Param::Int(corpus.ids[i]),
-                Param::from(pack.axes[*a].name.as_str()),
-                Param::from(stored.to_string()),
+                Param::Int(stack_id),
+                Param::from(name),
+                Param::from(stored.as_str()),
                 Param::Double(confidence),
                 Param::from("vote"),
             ]);
             if pass.emit.evidence {
                 evidence.push(vec![
-                    Param::Int(corpus.ids[i]),
-                    Param::from(pack.axes[*a].name.as_str()),
-                    Param::from(stored.to_string()),
+                    Param::Int(stack_id),
+                    Param::from(name),
+                    Param::from(stored.as_str()),
                     Param::from("vote"),
                     Param::Double(confidence),
                     Param::from(pass.name.as_str()),
-                    Param::from(outcome.method.as_str()),
+                    Param::from(a.outcome.method.as_str()),
                     Param::from("neighbours"),
                     Param::from(cited.as_str()),
                     Param::from(pass.name.as_str()),
@@ -365,18 +203,18 @@ fn run_vote(
             }
             if confidence < pass.emit.review_below || pass.emit.review_all_touched {
                 reviews.push(vec![
-                    Param::from(format!("{}:vote", pack.axes[*a].name)),
+                    Param::from(format!("{name}:vote")),
                     Param::from("stack"),
-                    Param::from(serde_json::json!({"stack_id": corpus.ids[i]}).to_string()),
+                    Param::from(serde_json::json!({"stack_id": stack_id}).to_string()),
                     Param::from(
                         serde_json::json!({
-                            "axis": pack.axes[*a].name,
+                            "axis": name,
                             "value": stored,
                             "confidence": confidence,
                             "pass": pass.name,
-                            "method": outcome.method,
-                            "matches": outcome.matches,
-                            "neighbours": outcome.neighbours,
+                            "method": a.outcome.method,
+                            "matches": a.outcome.matches,
+                            "neighbours": a.outcome.neighbours,
                             "reference": pass.reference.scope,
                             "job": job_id,
                         })
@@ -445,6 +283,5 @@ fn run_vote(
             }
         }
     }
-    let _ = Type::Int;
     Ok(ran)
 }

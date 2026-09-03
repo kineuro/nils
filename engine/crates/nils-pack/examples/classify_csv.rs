@@ -99,7 +99,7 @@ fn main() {
     // v0 votes for every MR stack whether or not the answer is written, so a
     // comparison asks for every one of them.
     let vote_all = args.iter().any(|a| a == "--vote-all");
-    let mut held: Vec<Held> = Vec::new();
+    let mut corpus = nils_pack::pass::Corpus::new(&pack);
 
     let out = std::io::stdout();
     let mut w = BufWriter::with_capacity(1 << 20, out.lock());
@@ -134,22 +134,16 @@ fn main() {
         let verdict = ev.classify();
         stacks += 1;
         if with_passes {
-            held.push(Held {
-                id: id.to_string(),
-                fields: (0..nils_pack::stack::FIELDS.len())
-                    .map(|i| stack.text(i).to_string())
-                    .collect(),
-                axes: pack
-                    .axes
-                    .iter()
-                    .map(|a| {
-                        verdict
-                            .axis(&a.name)
-                            .map(|v| v.stored())
-                            .unwrap_or_default()
-                    })
-                    .collect(),
-            });
+            corpus.push(
+                id.parse().unwrap_or(0),
+                |f| stack.text(f).to_string(),
+                |a| {
+                    verdict
+                        .axis(&pack.axes[a].name)
+                        .map(|v| v.stored())
+                        .unwrap_or_default()
+                },
+            );
         }
         silent += u64::from(verdict.silent);
         let mut any = false;
@@ -211,7 +205,7 @@ fn main() {
     }
     w.flush().ok();
     if with_passes {
-        run_passes(&pack, &held, vote_all, &mut w);
+        run_passes(&pack, &corpus, vote_all, &mut w);
     }
     eprintln!("{n} stacks");
     if stacks > 0 {
@@ -236,170 +230,44 @@ fn main() {
     }
 }
 
-/// One classified stack, kept for the passes: what the fingerprint said, and
-/// what the rules decided.
-struct Held {
-    id: String,
-    fields: Vec<String>,
-    axes: Vec<String>,
-}
-
-/// The subject a pass reads: fields and decided axes, and nothing else.
-struct Row<'a> {
-    fields: &'a [String],
-    axes: &'a [String],
-}
-
-impl nils_pack::expr::Ctx for Row<'_> {
-    fn pred(&self, _parser: usize, _pred: usize) -> bool {
-        unreachable!("a pass may not name a parser predicate")
-    }
-    fn subject(&self, _parser: usize) -> nils_pack::expr::Subject<'_> {
-        unreachable!("a pass may not name a parser")
-    }
-    fn flag(&self, _flag: usize) -> bool {
-        unreachable!("a pass may not name a flag")
-    }
-    fn num(&self, field: usize) -> Option<f64> {
-        self.fields.get(field).and_then(|s| s.parse().ok())
-    }
-    fn present(&self, field: usize) -> bool {
-        self.fields.get(field).is_some_and(|s| !s.is_empty())
-    }
-    fn text(&self, field: usize) -> &str {
-        self.fields.get(field).map(String::as_str).unwrap_or("")
-    }
-    fn re(&self, _idx: usize) -> &nils_pack::expr::Regex {
-        unreachable!("a pass carries no patterns of its own")
-    }
-    fn axis_is(&self, axis: usize, value: &str) -> bool {
-        self.axes.get(axis).is_some_and(|v| v == value)
-    }
-    fn axis_empty(&self, axis: usize) -> bool {
-        self.axes.get(axis).is_none_or(|v| v.is_empty())
-    }
-}
-
-fn cond_holds(c: &nils_pack::pass::Cond, row: &Row<'_>) -> bool {
-    use nils_pack::pass::What;
-    let value = match c.what {
-        What::Field(i) => row.fields.get(i).map(String::as_str),
-        What::Axis(i) => row.axes.get(i).map(String::as_str),
-    }
-    .filter(|v| !v.is_empty());
-    if let Some(want) = c.present
-        && value.is_some() != want
-    {
-        return false;
-    }
-    match value {
-        Some(v) => {
-            (c.is.is_empty() || c.is.iter().any(|w| w == v)) && !c.not.iter().any(|w| w == v)
-        }
-        None => c.is.is_empty(),
-    }
-}
-
 /// Every pass of the pack over the corpus in the file, written in the shape
 /// the referee writes v0's, so the two diff row by row.
-fn run_passes(pack: &nils_pack::Pack, held: &[Held], vote_all: bool, w: &mut impl Write) {
-    use nils_pack::pass::{Pool, key_of, take};
-    use std::collections::HashMap;
-
+fn run_passes(
+    pack: &nils_pack::Pack,
+    corpus: &nils_pack::pass::Corpus,
+    vote_all: bool,
+    w: &mut impl Write,
+) {
     for pass in &pack.passes {
         let Some(vote) = pass.vote() else { continue };
-        let mut pools: HashMap<String, Pool> = HashMap::new();
-        let mut global = Pool::default();
-        for h in held {
-            let row = Row {
-                fields: &h.fields,
-                axes: &h.axes,
-            };
-            if !pass.reference.filter.iter().all(|c| cond_holds(c, &row)) {
-                continue;
-            }
-            let answer: Option<Vec<usize>> = vote
+        let (answers, pool, pools) = nils_pack::pass::run_vote(pack, pass, vote, corpus, vote_all);
+        eprintln!(
+            "{}: reference {pool} stacks, {pools} pools, {} answered of {}",
+            pass.name,
+            answers.iter().filter(|a| !a.writes.is_empty()).count(),
+            answers.len()
+        );
+        for a in &answers {
+            let answer = vote
                 .vote_on
                 .iter()
-                .map(|a| {
-                    let axis = &pack.axes[*a];
-                    (0..axis.values.len()).find(|i| axis.stored(*i) == h.axes[*a])
+                .map(|axis| {
+                    a.writes
+                        .iter()
+                        .find(|(x, _)| x == axis)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default()
                 })
-                .collect();
-            let Some(answer) = answer else { continue };
-            let values: Vec<Option<f64>> = vote
-                .dims
-                .iter()
-                .map(|d| nils_pack::expr::Ctx::num(&row, d.field))
-                .collect();
-            let key = key_of(vote, &values);
-            if let Some(p) = pass.reference.partition_by {
-                pools
-                    .entry(h.axes[p].clone())
-                    .or_default()
-                    .add(key, answer.clone());
-            }
-            global.add(key, answer);
-        }
-        eprintln!(
-            "{}: reference {} stacks, {} pools",
-            pass.name,
-            global.len(),
-            pools.len()
-        );
-
-        for h in held {
-            let row = Row {
-                fields: &h.fields,
-                axes: &h.axes,
-            };
-            if !vote_all
-                && let Some(t) = &pass.target
-                && !t.eval(None, &row)
-            {
-                continue;
-            }
-            let values: Vec<Option<f64>> = vote
-                .dims
-                .iter()
-                .map(|d| nils_pack::expr::Ctx::num(&row, d.field))
-                .collect();
-            let key = key_of(vote, &values);
-            let sequence = nils_pack::expr::Ctx::text(&row, vote.compat.subject_field).to_string();
-            let partition = pass.reference.partition_by.map(|p| h.axes[p].clone());
-            let ask = |pool: &Pool, name: &str| {
-                take(vote, pool, &key, &sequence, &pack.axes, &pack.regexes, name)
-            };
-            let mut outcome = match &partition {
-                Some(name)
-                    if pools.contains_key(name)
-                        && !pass.reference.fallback_except.contains(name) =>
-                {
-                    ask(&pools[name], "scoped")
-                }
-                _ => ask(&global, "global"),
-            };
-            if outcome.answer.is_none()
-                && pass.reference.fallback
-                && outcome.partition != "global"
-                && pass.reference.fallback_when.contains(&outcome.method)
-            {
-                outcome = ask(&global, "global");
-            }
-            let answer = match &outcome.answer {
-                Some(a) => vote
-                    .vote_on
-                    .iter()
-                    .enumerate()
-                    .map(|(i, axis)| pack.axes[*axis].stored(a[i]).to_string())
-                    .collect::<Vec<_>>()
-                    .join("|"),
-                None => "|".to_string(),
-            };
+                .collect::<Vec<_>>()
+                .join("|");
             writeln!(
                 w,
                 "{}\tvote\t{answer}\t{}\t{} of {} in {}",
-                h.id, outcome.method, outcome.matches, outcome.neighbours, outcome.partition
+                corpus.ids[a.at],
+                a.outcome.method,
+                a.outcome.matches,
+                a.outcome.neighbours,
+                a.outcome.partition
             )
             .ok();
         }

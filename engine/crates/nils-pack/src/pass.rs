@@ -536,3 +536,332 @@ pub fn take(
     }
     silent("no_compatible_match", 0)
 }
+
+// ---------------------------------------------------------------------------
+// The corpus a pass runs over, and running one over it. Both callers use this:
+// the engine's job, which reads the registry, and the checker, which reads a
+// CSV. There is one implementation of the algorithm, and one of what it reads.
+
+/// Half a million stacks, holding only what the passes named.
+///
+/// A pass reads a handful of fields and the decided axes, so carrying every
+/// column of every stack costs gigabytes for nothing. What is here is the
+/// fields the passes actually name, interned, and the axes as small indices
+/// into their own vocabularies.
+pub struct Corpus {
+    /// Field index to slot, for the fields any pass reads.
+    slot: Vec<Option<u32>>,
+    slots: usize,
+    axes: usize,
+    /// Per slot, the distinct values seen; index 0 is always the empty one.
+    pool: Vec<Vec<Box<str>>>,
+    seen: Vec<HashMap<Box<str>, u32>>,
+    cells: Vec<u32>,
+    axis_pool: Vec<Vec<Box<str>>>,
+    axis_seen: Vec<HashMap<Box<str>, u16>>,
+    axis_cells: Vec<u16>,
+    pub ids: Vec<i64>,
+}
+
+impl Corpus {
+    /// Sized for what this pack's passes read, and nothing else.
+    pub fn new(pack: &crate::Pack) -> Corpus {
+        let mut needed: Vec<usize> = Vec::new();
+        for pass in &pack.passes {
+            if let Some(t) = &pass.target {
+                t.fields(&mut needed);
+            }
+            for c in &pass.reference.filter {
+                if let What::Field(i) = c.what {
+                    needed.push(i);
+                }
+            }
+            if let Some(v) = pass.vote() {
+                needed.extend(v.dims.iter().map(|d| d.field));
+                needed.push(v.compat.subject_field);
+                for r in &v.compat.rules {
+                    r.when.fields(&mut needed);
+                    r.allow.fields(&mut needed);
+                }
+            }
+        }
+        needed.sort_unstable();
+        needed.dedup();
+        let width = needed.iter().max().map(|m| m + 1).unwrap_or(0);
+        let mut slot = vec![None; width];
+        for (i, f) in needed.iter().enumerate() {
+            slot[*f] = Some(i as u32);
+        }
+        let slots = needed.len();
+        Corpus {
+            slot,
+            slots,
+            axes: pack.axes.len(),
+            pool: (0..slots).map(|_| vec![Box::from("")]).collect(),
+            seen: (0..slots).map(|_| HashMap::new()).collect(),
+            cells: Vec::new(),
+            axis_pool: (0..pack.axes.len()).map(|_| vec![Box::from("")]).collect(),
+            axis_seen: (0..pack.axes.len()).map(|_| HashMap::new()).collect(),
+            axis_cells: Vec::new(),
+            ids: Vec::new(),
+        }
+    }
+
+    /// Whether any pass reads this field, so a caller need not fetch it.
+    pub fn reads(&self, field: usize) -> bool {
+        self.slot.get(field).copied().flatten().is_some()
+    }
+
+    /// The fields any pass reads, in order.
+    pub fn needed(&self) -> Vec<usize> {
+        let mut out: Vec<usize> = (0..self.slot.len()).filter(|f| self.reads(*f)).collect();
+        out.sort_by_key(|f| self.slot[*f]);
+        out
+    }
+
+    fn intern(pool: &mut Vec<Box<str>>, seen: &mut HashMap<Box<str>, u32>, v: &str) -> u32 {
+        if v.is_empty() {
+            return 0;
+        }
+        if let Some(i) = seen.get(v) {
+            return *i;
+        }
+        let i = pool.len() as u32;
+        pool.push(Box::from(v));
+        seen.insert(Box::from(v), i);
+        i
+    }
+
+    /// Add one stack: what the fingerprint says, and what the rules decided.
+    pub fn push(
+        &mut self,
+        id: i64,
+        field: impl Fn(usize) -> String,
+        axis: impl Fn(usize) -> String,
+    ) {
+        self.ids.push(id);
+        for f in 0..self.slot.len() {
+            let Some(s) = self.slot[f] else { continue };
+            let v = field(f);
+            let at = self.cells.len() - (self.cells.len() % self.slots.max(1));
+            let _ = at;
+            let ix = Corpus::intern(&mut self.pool[s as usize], &mut self.seen[s as usize], &v);
+            // The slots of one stack are contiguous and in slot order, which
+            // the loop above guarantees.
+            self.cells.push(ix);
+        }
+        for a in 0..self.axes {
+            let v = axis(a);
+            let ix = if v.is_empty() {
+                0
+            } else if let Some(i) = self.axis_seen[a].get(v.as_str()) {
+                *i
+            } else {
+                let i = self.axis_pool[a].len() as u16;
+                self.axis_pool[a].push(Box::from(v.as_str()));
+                self.axis_seen[a].insert(Box::from(v.as_str()), i);
+                i
+            };
+            self.axis_cells.push(ix);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    /// One stack, as an expression sees it.
+    pub fn row(&self, i: usize) -> Row<'_> {
+        Row {
+            corpus: self,
+            at: i,
+        }
+    }
+
+    /// What the rules decided about this axis of this stack.
+    pub fn axis_of(&self, i: usize, axis: usize) -> &str {
+        &self.axis_pool[axis][self.axis_cells[i * self.axes + axis] as usize]
+    }
+}
+
+/// One stack of a [`Corpus`], and the only thing a pass's expressions may
+/// read: the fields the pack named, and the axes the rules decided.
+pub struct Row<'a> {
+    corpus: &'a Corpus,
+    at: usize,
+}
+
+impl Row<'_> {
+    fn cell(&self, field: usize) -> &str {
+        match self.corpus.slot.get(field).copied().flatten() {
+            None => "",
+            Some(s) => {
+                let ix = self.corpus.cells[self.at * self.corpus.slots + s as usize];
+                &self.corpus.pool[s as usize][ix as usize]
+            }
+        }
+    }
+}
+
+impl Ctx for Row<'_> {
+    fn pred(&self, _parser: usize, _pred: usize) -> bool {
+        unreachable!("a pass may not name a parser predicate")
+    }
+    fn subject(&self, _parser: usize) -> Subject<'_> {
+        unreachable!("a pass may not name a parser")
+    }
+    fn flag(&self, _flag: usize) -> bool {
+        unreachable!("a pass may not name a flag")
+    }
+    fn num(&self, field: usize) -> Option<f64> {
+        self.cell(field).parse().ok()
+    }
+    fn present(&self, field: usize) -> bool {
+        !self.cell(field).is_empty()
+    }
+    fn text(&self, field: usize) -> &str {
+        self.cell(field)
+    }
+    fn re(&self, _idx: usize) -> &regex::Regex {
+        unreachable!("a pass's expressions carry no patterns of their own")
+    }
+    fn axis_is(&self, axis: usize, value: &str) -> bool {
+        self.corpus.axis_of(self.at, axis) == value
+    }
+    fn axis_empty(&self, axis: usize) -> bool {
+        self.corpus.axis_of(self.at, axis).is_empty()
+    }
+}
+
+impl Cond {
+    /// Whether a row of the reference passes this condition.
+    pub fn holds(&self, corpus: &Corpus, at: usize) -> bool {
+        let row = corpus.row(at);
+        let value = match self.what {
+            What::Field(i) => row.cell(i),
+            What::Axis(i) => corpus.axis_of(at, i),
+        };
+        let present = !value.is_empty();
+        if let Some(want) = self.present
+            && present != want
+        {
+            return false;
+        }
+        if !present {
+            return self.is.is_empty();
+        }
+        (self.is.is_empty() || self.is.iter().any(|w| w == value))
+            && !self.not.iter().any(|w| w == value)
+    }
+}
+
+/// What a pass decided about one stack.
+pub struct Answered {
+    pub at: usize,
+    pub outcome: Outcome,
+    /// The axes it would write, and what it would write to them. Whether the
+    /// write happens is the caller's: an axis that already says something
+    /// keeps it unless the pack said otherwise.
+    pub writes: Vec<(usize, String)>,
+}
+
+/// Run one vote over a corpus: build the reference the pack declared, then
+/// answer for every stack the pass targets. `all` asks for every stack
+/// whether or not it is a target, which is how the result is compared with
+/// v0's, since v0 votes for everything and then decides what to keep.
+pub fn run_vote(
+    pack: &crate::Pack,
+    pass: &Pass,
+    vote: &Vote,
+    corpus: &Corpus,
+    all: bool,
+) -> (Vec<Answered>, usize, usize) {
+    let mut pools: HashMap<String, Pool> = HashMap::new();
+    let mut global = Pool::default();
+    for i in 0..corpus.len() {
+        if !pass.reference.filter.iter().all(|c| c.holds(corpus, i)) {
+            continue;
+        }
+        let answer: Option<Vec<usize>> = vote
+            .vote_on
+            .iter()
+            .map(|a| {
+                let axis = &pack.axes[*a];
+                let stored = corpus.axis_of(i, *a);
+                (0..axis.values.len()).find(|v| axis.stored(*v) == stored)
+            })
+            .collect();
+        let Some(answer) = answer else { continue };
+        let row = corpus.row(i);
+        let values: Vec<Option<f64>> = vote.dims.iter().map(|d| row.num(d.field)).collect();
+        let key = key_of(vote, &values);
+        if let Some(p) = pass.reference.partition_by {
+            let name = corpus.axis_of(i, p).to_string();
+            pools.entry(name).or_default().add(key, answer.clone());
+        }
+        global.add(key, answer);
+    }
+
+    let mut out = Vec::new();
+    for i in 0..corpus.len() {
+        let row = corpus.row(i);
+        if !all
+            && let Some(t) = &pass.target
+            && !t.eval(None, &row)
+        {
+            continue;
+        }
+        let values: Vec<Option<f64>> = vote.dims.iter().map(|d| row.num(d.field)).collect();
+        let key = key_of(vote, &values);
+        let sequence = row.text(vote.compat.subject_field).to_string();
+        let partition = pass
+            .reference
+            .partition_by
+            .map(|p| corpus.axis_of(i, p).to_string());
+        let ask = |pool: &Pool, name: &str| {
+            take(vote, pool, &key, &sequence, &pack.axes, &pack.regexes, name)
+        };
+        let mut outcome = match &partition {
+            Some(name)
+                if pools.contains_key(name) && !pass.reference.fallback_except.contains(name) =>
+            {
+                ask(&pools[name], "scoped")
+            }
+            _ => ask(&global, "global"),
+        };
+        // Its own pool said nothing, so the whole one is asked, which is what
+        // the pack means by a fallback.
+        if outcome.answer.is_none()
+            && pass.reference.fallback
+            && outcome.partition != "global"
+            && pass.reference.fallback_when.contains(&outcome.method)
+        {
+            outcome = ask(&global, "global");
+        }
+        let writes = match &outcome.answer {
+            None => Vec::new(),
+            Some(answer) => vote
+                .writes
+                .iter()
+                .map(|a| {
+                    let at = vote
+                        .vote_on
+                        .iter()
+                        .position(|x| x == a)
+                        .expect("an axis written is an axis voted on");
+                    (*a, pack.axes[*a].stored(answer[at]).to_string())
+                })
+                .collect(),
+        };
+        out.push(Answered {
+            at: i,
+            outcome,
+            writes,
+        });
+    }
+    (out, global.len(), pools.len())
+}
