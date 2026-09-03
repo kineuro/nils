@@ -85,6 +85,11 @@ pub struct Classified {
     pub evidence: i64,
     /// Axes a person's decision decided rather than a rule (§8.3).
     pub decided: i64,
+    /// Stacks the pack says nobody is to be asked about.
+    pub silent: i64,
+    /// How many axis verdicts each tier decided, as `axis:tier`. A rule's
+    /// reach is a number here rather than a review item per stack.
+    pub by_tier: std::collections::BTreeMap<String, i64>,
     /// The number that matters: a pack that flags everything has failed even
     /// if it agrees with v0 (§8.2).
     pub review_items: i64,
@@ -104,6 +109,8 @@ impl Classified {
             no_pack: 0,
             evidence: 0,
             decided: 0,
+            silent: 0,
+            by_tier: std::collections::BTreeMap::new(),
             review_items: 0,
             seconds: 0.0,
             peak_rss: None,
@@ -137,12 +144,37 @@ impl fmt::Display for Classified {
         if self.decided > 0 {
             writeln!(f, "  decided by hand  {:>12}", self.decided)?;
         }
+        if self.silent > 0 {
+            writeln!(
+                f,
+                "  asked nothing of {:>12}   stacks the pack rules out",
+                self.silent
+            )?;
+        }
+        let mut weakest: Vec<(&String, &i64)> = self
+            .by_tier
+            .iter()
+            .filter(|(k, _)| k.ends_with(":physics") || k.ends_with(":default"))
+            .collect();
+        weakest.sort_by_key(|(_, n)| -**n);
+        for (what, n) in weakest.iter().take(3) {
+            writeln!(f, "  {what:<28} {n:>8}   decided with no keyword")?;
+        }
         writeln!(
             f,
             "  review items     {:>12}   {:.1}% of the stacks",
             self.review_items,
             100.0 * self.review_share()
         )?;
+        let mut weakest: Vec<(&String, &i64)> = self
+            .by_tier
+            .iter()
+            .filter(|(k, _)| k.ends_with(":physics") || k.ends_with(":default"))
+            .collect();
+        weakest.sort_by_key(|(_, n)| -**n);
+        for (what, n) in weakest.iter().take(3) {
+            writeln!(f, "  {what:<28} {n:>8}   decided with no keyword")?;
+        }
         writeln!(f, "  {:.1} s, {:.0} stacks/s", self.seconds, self.rate())?;
         if let Some(rss) = self.peak_rss {
             writeln!(

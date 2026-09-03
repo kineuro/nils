@@ -139,7 +139,9 @@ fn main() {
                 found.map(|a| a.stored()).unwrap_or_default(),
                 cited.0,
                 cited.1,
-                found.map(|a| format!("{:.2}", a.confidence)).unwrap_or_default(),
+                found
+                    .map(|a| format!("{:.2}", a.confidence))
+                    .unwrap_or_default(),
             )
             .ok();
         }

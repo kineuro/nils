@@ -255,3 +255,34 @@ fn a_pack_that_declares_no_review_asks_about_nothing() {
     assert_eq!(pack.review.below("technique"), 0.0);
     assert!(!pack.review.asks_when_missing("technique"));
 }
+
+#[test]
+fn a_pack_may_say_that_a_stack_is_nobody_s_question() {
+    let d = good();
+    d.file(
+        "pack.yml",
+        &format!("{MANIFEST}review:\n  silent_when: is_original\n"),
+    );
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    let mut original = nils_pack::Stack::new();
+    original
+        .set(
+            "image_type",
+            nils_pack::stack::Value::Text(Some("ORIGINAL\\PRIMARY")),
+        )
+        .unwrap();
+    assert!(
+        nils_pack::Evaluated::new(&pack, &original)
+            .classify()
+            .silent,
+        "the pack rules this stack out of the queue"
+    );
+    let mut derived = nils_pack::Stack::new();
+    derived
+        .set(
+            "image_type",
+            nils_pack::stack::Value::Text(Some("DERIVED\\SECONDARY")),
+        )
+        .unwrap();
+    assert!(!nils_pack::Evaluated::new(&pack, &derived).classify().silent);
+}

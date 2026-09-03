@@ -404,6 +404,14 @@ fn run(
                     tier = "decision".to_string();
                     report.decided += 1;
                 }
+                // What decided each axis, counted: a rule that fires on a
+                // sixth of the archive is a question about the rule, and the
+                // count is how it is asked. Asking it once per stack is what
+                // makes v0's queue unreadable.
+                *report
+                    .by_tier
+                    .entry(format!("{}:{}", a.axis, tier))
+                    .or_insert(0) += 1;
                 axes.push(vec![
                     Param::Int(stack_id),
                     Param::from(a.axis.as_str()),
@@ -423,11 +431,12 @@ fn run(
                 // the report so that a pack cannot quietly do the same.
                 let below = settings.review_below.unwrap_or(pack.review.below(&a.axis));
                 let missing = value.is_empty();
-                let ask = if missing {
-                    pack.review.asks_when_missing(&a.axis)
-                } else {
-                    a.confidence > 0.0 && a.confidence < below
-                };
+                let ask = !verdict.silent
+                    && if missing {
+                        pack.review.asks_when_missing(&a.axis)
+                    } else {
+                        a.confidence > 0.0 && a.confidence < below
+                    };
                 if ask {
                     let kind = if missing { "missing" } else { "low_confidence" };
                     reviews.push(vec![
@@ -469,6 +478,7 @@ fn run(
                 ]);
             }
             report.evidence += verdict.evidence.len() as i64;
+            report.silent += i64::from(verdict.silent);
             report.review_items += raised;
             report.written += 1;
             classes.push(vec![

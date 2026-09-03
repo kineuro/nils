@@ -58,20 +58,31 @@ order: [excluded, provenance, swi, symri, epimix, stage, technique, base, modifi
 # because what counts as a weak answer is knowledge about MRI.
 review:
   low_confidence:
-    # The tiers are 0.95 exclusive, 0.85 keywords, 0.75 combination and
-    # alternative, 0.70 physics. Anything decided by physics alone, or by a
-    # rule that had to reach for an alternative spelling, is worth a look.
-    default: 0.75
+    # Measured over the whole live corpus, and set from the measurement. The
+    # tiers are 0.95 exclusive, 0.85 keywords, 0.75 combination and
+    # alternative, 0.70 physics. At 0.75 the queue is 16 percent of the
+    # archive and 94 percent of it is one population: a contrast inferred
+    # from the timing parameters with no keyword anywhere, 80,752 stacks of
+    # it, agreeing with v0 on every one. That is not 80,752 questions for a
+    # person. It is one question about a rule, and the run answers it by
+    # counting what each tier decided.
+    default: 0.70
     # Body part is decided at one confidence whatever the text said (0.65,
-    # v0's number), so a threshold above it would ask about every stack and
-    # tell a person nothing. What is worth asking about is the last resort:
-    # a spine inferred from a tall narrow sagittal field of view, with the
-    # text silent. That is the 0.60 rule, and only that one.
+    # v0's number), so any threshold above it asks about every stack and
+    # tells nobody anything. What is worth asking about is the last resort:
+    # a spine inferred from a tall narrow sagittal field of view with the
+    # text silent, at 0.60.
     body_part: 0.65
   # An axis with no value at all is a question only where a value is always
-  # expected. A modifier or a construct is legitimately absent on most stacks;
-  # a technique that nothing recognised is a gap in the pack.
+  # expected. A modifier or a construct is legitimately absent on most
+  # stacks; a technique that nothing recognised is a gap in the pack.
   missing: [technique]
+  # And nobody is asked about a stack the pack has ruled out. A localizer or
+  # a scout is excluded on purpose: every other axis is blank because there
+  # is nothing to say, not because the pack failed to say it. 81,296 stacks
+  # of the corpus are this, and asking about each one is exactly how v0's
+  # queue came to hold 84 percent of the archive.
+  silent_when: {axis: directory_type, is: excluded}
 
 # The lists a site may amend through an overlay, and nothing else: a pack
 # decides what is editable, not the engine (§5.3). Physics, flags and the

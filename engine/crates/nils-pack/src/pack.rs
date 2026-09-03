@@ -86,6 +86,9 @@ pub struct Review {
     /// The axes whose absence is itself a question. An axis not named here
     /// simply does not apply to a stack that has no value for it.
     pub missing: Vec<String>,
+    /// Stacks nobody is asked about at all. An excluded localizer is a
+    /// decided outcome, and a queue that carries it is v0's queue.
+    pub silent_when: Option<Expr>,
 }
 
 impl Review {
@@ -421,6 +424,27 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             }
         }
         rule_sets.sort_by_key(|r| want.iter().position(|n| *n == r.name).unwrap_or(usize::MAX));
+    }
+
+    // The one part of `review` that is an expression, compiled here because
+    // it may read an axis and the axes exist only now. A stack it holds for
+    // raises no question at all: an excluded localizer is a decided outcome
+    // and not a gap in anybody's knowledge.
+    if let Some(r) = m.get("review")
+        && let Some(w) = manifest.blame(yaml::obj(r, "review"))?.get("silent_when")
+    {
+        let mut sc = Scope {
+            derived: &derived,
+            axes: &axes,
+            parsers: &parsers,
+            parser_ix: &parser_ix,
+            buckets: &buckets,
+            within: None,
+            flags: Some(&flag_ix),
+            regexes: &mut regexes,
+            deps: HashSet::new(),
+        };
+        review.silent_when = Some(manifest.blame(compile(w, "review.silent_when", &mut sc))?);
     }
 
     // A threshold for an axis the pack does not decide is a name that names

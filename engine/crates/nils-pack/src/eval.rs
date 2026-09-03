@@ -372,6 +372,12 @@ impl Evaluated<'_> {
                 tier: hits[0].1.tier.name().to_string(),
             });
         }
+        // Last, because it reads what was decided.
+        verdict.silent = pack
+            .review
+            .silent_when
+            .as_ref()
+            .is_some_and(|e| e.eval(None, self));
         verdict
     }
 
