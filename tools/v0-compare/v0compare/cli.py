@@ -12,7 +12,20 @@ from pathlib import Path
 
 import duckdb
 
-from . import catalogue, classify, fields, instances, keys, normalize, report, stacks, subjects, v0, v1
+from . import (
+    axes,
+    catalogue,
+    classify,
+    fields,
+    instances,
+    keys,
+    normalize,
+    report,
+    stacks,
+    subjects,
+    v0,
+    v1,
+)
 from .mapping import V0_FILE_MODES
 
 
@@ -143,9 +156,11 @@ def cmd_compare(args: argparse.Namespace) -> int:
         n, stats = fields.compare_level(con, level, cat, args.sample_cap)
         rep.pairs[level] = n
         rep.fields += stats
+    rep.axes = axes.compare(con)
     rep.subjects = subjects.compare(con, args.cohort, key, classify=key is not None or args.cohort is not None)
     del key
     report.adjudicate(rep, adj)
+    report.adjudicate_axes(rep, adj)
     report.verdict(rep)
     (out_dir / "report.json").write_text(report.to_json(rep), encoding="utf-8")
     (out_dir / "report.md").write_text(report.to_markdown(rep), encoding="utf-8")
