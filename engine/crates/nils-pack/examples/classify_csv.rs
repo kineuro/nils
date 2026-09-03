@@ -130,13 +130,16 @@ fn main() {
                 .find(|e| e.axis == axis.name)
                 .map(|e| (e.tier.as_str(), e.matched.as_str()))
                 .unwrap_or(("", ""));
+            // The confidence is the sixth column: it decides nothing about
+            // the verdict, and it is what says whether a person is asked.
             writeln!(
                 w,
-                "{id}\t{}\t{}\t{}\t{}",
+                "{id}\t{}\t{}\t{}\t{}\t{}",
                 axis.name,
                 found.map(|a| a.stored()).unwrap_or_default(),
                 cited.0,
-                cited.1
+                cited.1,
+                found.map(|a| format!("{:.2}", a.confidence)).unwrap_or_default(),
             )
             .ok();
         }

@@ -62,10 +62,12 @@ review:
     # alternative, 0.70 physics. Anything decided by physics alone, or by a
     # rule that had to reach for an alternative spelling, is worth a look.
     default: 0.75
-    # A body part guessed from the text alone is the axis v0 lets a human
-    # correct and then reverts, so it is the one a person is asked about most
-    # readily.
-    body_part: 0.80
+    # Body part is decided at one confidence whatever the text said (0.65,
+    # v0's number), so a threshold above it would ask about every stack and
+    # tell a person nothing. What is worth asking about is the last resort:
+    # a spine inferred from a tall narrow sagittal field of view, with the
+    # text silent. That is the 0.60 rule, and only that one.
+    body_part: 0.65
   # An axis with no value at all is a question only where a value is always
   # expected. A modifier or a construct is legitimately absent on most stacks;
   # a technique that nothing recognised is a gap in the pack.
