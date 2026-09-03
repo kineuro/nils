@@ -22,6 +22,8 @@ pub struct Case {
     pub stack: Stack,
     /// Flags asserted by name, each with the value the author expects.
     pub flags: Vec<(String, bool)>,
+    /// Axes asserted by name, each with what the row should store.
+    pub axes: Vec<(String, String)>,
 }
 
 /// Read every case file the pack's `corpus/` directory holds, in name order,
@@ -58,6 +60,27 @@ pub fn run(pack: &Pack, cases: &[(std::path::PathBuf, Case)], what: &str) -> R<(
             if got != *want {
                 failures.push(format!(
                     "  {}: {flag} is {got}, the case says {want}",
+                    case.name
+                ));
+            }
+        }
+        if case.axes.is_empty() {
+            continue;
+        }
+        let verdict = e.classify();
+        for (axis, want) in &case.axes {
+            asserted += 1;
+            if pack.axis_index(axis).is_none() {
+                return Err(Error::at(
+                    format!("cases.{}.axes.{axis}", case.name),
+                    format!("the pack has no axis named {axis}"),
+                )
+                .in_file(file, None));
+            }
+            let got = verdict.stored(axis);
+            if got != *want {
+                failures.push(format!(
+                    "  {}: {axis} is {got:?}, the case says {want:?}",
                     case.name
                 ));
             }
@@ -133,19 +156,40 @@ pub fn cases_of(f: &File, v: &serde_json::Value) -> R<Vec<(std::path::PathBuf, C
                 .set(k, value)
                 .map_err(|e| Error::at(&where_, e).in_file(&f.path, Some(&f.source)))?;
         }
+        let mut axes = Vec::new();
+        if let Some(a) = m.get("axes") {
+            for (k, v) in f.blame(yaml::obj(a, &format!("{at}.axes")))? {
+                axes.push((
+                    k.clone(),
+                    f.blame(yaml::text(v, &format!("{at}.axes.{k}")))?,
+                ));
+            }
+        }
         let mut flags = Vec::new();
-        for (k, v) in f.blame(yaml::obj(yaml::get(m, "flags", &at)?, &at))? {
+        for (k, v) in f.blame(yaml::obj(
+            m.get("flags")
+                .unwrap_or(&serde_json::Value::Object(Default::default())),
+            &at,
+        ))? {
             let want = v.as_bool().ok_or_else(|| {
                 Error::at(format!("{at}.flags.{k}"), "expected true or false")
                     .in_file(&f.path, Some(&f.source))
             })?;
             flags.push((k.clone(), want));
         }
-        if flags.is_empty() {
-            return Err(Error::at(format!("{at}.flags"), "asserts nothing")
+        if flags.is_empty() && axes.is_empty() {
+            return Err(Error::at(&at, "asserts nothing about flags or axes")
                 .in_file(&f.path, Some(&f.source)));
         }
-        out.push((f.path.clone(), Case { name, stack, flags }));
+        out.push((
+            f.path.clone(),
+            Case {
+                name,
+                stack,
+                flags,
+                axes,
+            },
+        ));
     }
     Ok(out)
 }

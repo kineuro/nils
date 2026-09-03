@@ -16,7 +16,9 @@ use serde_json::Value;
 
 use crate::error::{Error, R};
 use crate::expr::{Case, Cmp, Expr, NumOp};
+use crate::normalize::{Conditional, Normalizer};
 use crate::overlay::Overlay;
+use crate::rules::{Axis, AxisValue, Clause, Rule, RuleSet, SetValue, Sets, Tier};
 use crate::stack::field_index;
 use crate::version::Version;
 use crate::yaml::{self, File};
@@ -50,6 +52,13 @@ pub struct Pack {
     /// Flags in an order where every reference is already computed.
     pub flag_order: Vec<usize>,
     pub regexes: Vec<Regex>,
+    /// Text the pack derives for itself, published as fields of its own: the
+    /// semantic normalizer of §6.4 is one.
+    pub derived: Vec<Normalizer>,
+    /// The axes this pack decides, in declaration order.
+    pub axes: Vec<Axis>,
+    /// The rule sets, in the order they run.
+    pub rule_sets: Vec<RuleSet>,
     /// The overlay applied, when one was, for the classified row to record.
     pub overlay: Option<String>,
     /// How many cases its own corpus holds, all of which passed.
@@ -68,6 +77,10 @@ impl Pack {
 
     pub fn parser_index(&self, name: &str) -> Option<usize> {
         self.parsers.iter().position(|p| p.name == name)
+    }
+
+    pub fn axis_index(&self, name: &str) -> Option<usize> {
+        self.axes.iter().position(|a| a.name == name)
     }
 }
 
@@ -128,6 +141,13 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             buckets.insert(bucket.clone(), crate::overlay::merge(&base, edit));
         }
         overlay_id = Some(o.id.clone());
+    }
+
+    // --- text the pack derives for itself. First, because a parser, a flag
+    // or an axis may read it, and it reads only the fingerprint.
+    let mut derived: Vec<Normalizer> = Vec::new();
+    for f in files_of(m, &manifest, dir, "normalize")? {
+        derived.push(load_normalizer(&f)?);
     }
 
     // --- parsers
@@ -204,6 +224,10 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             let mut out = Vec::with_capacity(preds.len());
             for (n, e) in preds {
                 let mut sc = Scope {
+                    derived: &derived,
+                    // Parsers and flags are read before any axis is decided,
+                    // so an axis atom in one has nothing to name.
+                    axes: &[],
                     parsers: &parsers,
                     parser_ix: &parser_ix,
                     buckets: &buckets,
@@ -246,6 +270,8 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
     for (which, body, n) in &flag_bodies {
         let f = &flag_files[*which];
         let mut sc = Scope {
+            derived: &derived,
+            axes: &[],
             parsers: &parsers,
             parser_ix: &parser_ix,
             buckets: &buckets,
@@ -259,7 +285,35 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
     }
     let flag_order = topological(&deps, &flag_names)?;
 
+    // --- axes, each of which is a rule set written compactly (§6.3)
+    let mut axes: Vec<Axis> = Vec::new();
+    let mut rule_sets: Vec<RuleSet> = Vec::new();
+    for f in files_of(m, &manifest, dir, "axes")? {
+        let loaded = load_axis(
+            &f,
+            axes.len(),
+            &axes,
+            &derived,
+            &flag_ix,
+            &parsers,
+            &parser_ix,
+            &buckets,
+            &mut regexes,
+        )?;
+        if axes.iter().any(|a| a.name == loaded.axis.name) {
+            return Err(
+                Error::at(format!("axis {}", loaded.axis.name), "is declared twice")
+                    .in_file(&f.path, Some(&f.source)),
+            );
+        }
+        axes.push(loaded.axis);
+        rule_sets.push(loaded.set);
+    }
+
     let mut pack = Pack {
+        derived,
+        axes,
+        rule_sets,
         name,
         version,
         contract,
@@ -281,6 +335,16 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         pack.cases = crate::corpus::check(&pack, dir)?;
     }
     Ok(pack)
+}
+
+/// A field a pack may name: one the fingerprint carries, or one the pack
+/// derives for itself. A derived field sits past the end of the fingerprint's
+/// own, which is how the evaluator tells them apart.
+fn resolve_field(derived: &[Normalizer], name: &str) -> Option<usize> {
+    if let Some(i) = derived.iter().position(|d| d.into == name) {
+        return Some(crate::stack::FIELDS.len() + i);
+    }
+    field_index(name)
 }
 
 /// The files a manifest key names, relative to the pack directory.
@@ -346,6 +410,12 @@ fn topological(deps: &[HashSet<usize>], names: &[String]) -> R<Vec<usize>> {
 // The compiler. `Scope` says which references are legal where.
 
 struct Scope<'a> {
+    /// The text the pack derives, which a field or text atom may name.
+    derived: &'a [Normalizer],
+    /// The axes declared before this point. An atom may only name one of
+    /// them, which is also what guarantees it has been decided by the time
+    /// this expression runs.
+    axes: &'a [Axis],
     parsers: &'a [ParserDef],
     parser_ix: &'a HashMap<String, usize>,
     buckets: &'a BTreeMap<String, Vec<String>>,
@@ -503,8 +573,8 @@ fn list(v: &Value, at: &str, sc: &mut Scope) -> R<Vec<Expr>> {
 fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<Expr> {
     if let Some(f) = m.get("field") {
         let name = yaml::text(f, at)?;
-        let ix =
-            field_index(&name).ok_or_else(|| Error::at(at, format!("no field named {name}")))?;
+        let ix = resolve_field(sc.derived, &name)
+            .ok_or_else(|| Error::at(at, format!("no field named {name}")))?;
         let mut out: Vec<Expr> = Vec::new();
         for (k, v) in m {
             if k == "field" {
@@ -549,8 +619,8 @@ fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<
     };
     if let Some((key, default_case)) = text_key {
         let name = yaml::text(&m[key], at)?;
-        let ix =
-            field_index(&name).ok_or_else(|| Error::at(at, format!("no field named {name}")))?;
+        let ix = resolve_field(sc.derived, &name)
+            .ok_or_else(|| Error::at(at, format!("no field named {name}")))?;
         let case = match m.get("case") {
             Some(c) => Case::parse(&yaml::text(c, at)?)
                 .ok_or_else(|| Error::at(at, "case is raw, lower or upper"))?,
@@ -592,6 +662,34 @@ fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<
         };
     }
 
+    if let Some(a) = m.get("axis") {
+        let name = yaml::text(a, at)?;
+        let ix = sc.axes.iter().position(|x| x.name == name).ok_or_else(|| {
+            Error::at(
+                at,
+                format!(
+                    "no axis named {name} is declared before this one; an axis atom reads what an earlier rule set decided"
+                ),
+            )
+        })?;
+        let want = yaml::text(
+            m.get("is")
+                .ok_or_else(|| Error::at(at, "an axis atom needs `is`"))?,
+            at,
+        )?;
+        if sc.axes[ix].value_index(&want).is_none() && sc.axes[ix].default.as_deref() != Some(&want)
+        {
+            return Err(Error::at(
+                at,
+                format!("{want} is not a value of the {name} axis"),
+            ));
+        }
+        return Ok(Expr::Axis {
+            axis: ix,
+            value: want,
+        });
+    }
+
     if let Some(p) = m.get("parser") {
         let name = yaml::text(p, at)?;
         let pi = *sc
@@ -628,4 +726,492 @@ fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<
             m.keys().collect::<Vec<_>>()
         ),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Axes, and the rule sets they expand into (§6.3).
+
+/// The confidences v0 fixes per tier, which a pack may restate.
+const DEFAULT_TIERS: [(&str, f64); 6] = [
+    ("exclusive", 0.95),
+    ("keywords", 0.85),
+    ("combination", 0.75),
+    ("alternative", 0.75),
+    ("physics", 0.70),
+    ("default", 0.0),
+];
+
+struct AxisFile {
+    axis: Axis,
+    set: RuleSet,
+}
+
+/// An axis file is a rule set written compactly: one rule per value, in
+/// `order`, with up to three clauses in v0's order. Writing four hundred
+/// keyword rules longhand would be worse than v0, which is why the dense form
+/// stays and the loader expands it.
+#[allow(clippy::too_many_arguments)]
+fn load_axis(
+    f: &File,
+    axis_index: usize,
+    axes: &[Axis],
+    derived: &[Normalizer],
+    flag_ix: &HashMap<String, usize>,
+    parsers: &[ParserDef],
+    parser_ix: &HashMap<String, usize>,
+    buckets: &BTreeMap<String, Vec<String>>,
+    regexes: &mut Vec<Regex>,
+) -> R<AxisFile> {
+    let m = f.blame(yaml::obj(&f.value, "axis"))?;
+    let name = f.blame(yaml::text(yaml::get(m, "axis", "axis")?, "axis"))?;
+    let multi = match m.get("kind") {
+        None => false,
+        Some(k) => match f.blame(yaml::text(k, "kind"))?.as_str() {
+            "single" => false,
+            "multi" => true,
+            other => {
+                return Err(Error::at("kind", format!("single or multi, not {other}"))
+                    .in_file(&f.path, Some(&f.source)));
+            }
+        },
+    };
+    let search_field = match m.get("search") {
+        Some(v) => f.blame(yaml::text(v, "search"))?,
+        None => "text_all".to_string(),
+    };
+    let search = resolve_field(derived, &search_field).ok_or_else(|| {
+        Error::at("search", format!("no field named {search_field}"))
+            .in_file(&f.path, Some(&f.source))
+    })?;
+
+    let mut tiers: HashMap<String, f64> = DEFAULT_TIERS
+        .iter()
+        .map(|(k, v)| (k.to_string(), *v))
+        .collect();
+    if let Some(t) = m.get("tiers") {
+        for (k, v) in f.blame(yaml::obj(t, "tiers"))? {
+            if !tiers.contains_key(k) {
+                return Err(Error::at(
+                    format!("tiers.{k}"),
+                    "no clause has that tier; they are exclusive, keywords, alternative, combination, physics and default",
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+            tiers.insert(k.clone(), f.blame(yaml::number(v, &format!("tiers.{k}")))?);
+        }
+    }
+    let tier_of = |t: Tier| -> f64 { tiers.get(t.name()).copied().unwrap_or(0.0) };
+
+    // --- the vocabulary, in the order it is tried
+    let order = f.blame(yaml::texts(yaml::get(m, "order", "axis")?, "order"))?;
+    let values_m = f.blame(yaml::obj(yaml::get(m, "values", "axis")?, "values"))?;
+    for id in &order {
+        if !values_m.contains_key(id) {
+            return Err(Error::at(
+                "order",
+                format!("{id} is in the order and not in the values"),
+            )
+            .in_file(&f.path, Some(&f.source)));
+        }
+    }
+    // A value outside the order is part of the vocabulary and not part of
+    // this axis's own rule set: a route sets it, and it is checked against
+    // this vocabulary when the route is loaded. v0 has seven such constructs,
+    // which its SWI and SyMRI branches write and its detector never tries.
+
+    let mut vocabulary: Vec<String> = order.clone();
+    for id in values_m.keys() {
+        if !vocabulary.contains(id) {
+            vocabulary.push(id.clone());
+        }
+    }
+    let mut values = Vec::with_capacity(vocabulary.len());
+    for id in &vocabulary {
+        let at = format!("values.{id}");
+        let v = f.blame(yaml::obj(&values_m[id], &at))?;
+        values.push(AxisValue {
+            id: id.clone(),
+            group: match v.get("group") {
+                Some(x) => Some(f.blame(yaml::text(x, &at))?),
+                None => None,
+            },
+            priority: match v.get("priority") {
+                Some(x) => Some(f.blame(yaml::number(x, &at))? as i64),
+                None => None,
+            },
+            label: match v.get("label") {
+                Some(l) => f.blame(yaml::text(l, &at))?,
+                None => id.clone(),
+            },
+            family: match v.get("family") {
+                Some(x) => Some(f.blame(yaml::text(x, &at))?),
+                None => None,
+            },
+        });
+    }
+
+    let default = match m.get("default") {
+        Some(d) => Some(f.blame(yaml::text(d, "default"))?),
+        None => None,
+    };
+    let default_confidence = tier_of(Tier::Default);
+
+    let stores_label = match m.get("stores") {
+        None => false,
+        Some(v) => match f.blame(yaml::text(v, "stores"))?.as_str() {
+            "id" => false,
+            "label" => true,
+            other => {
+                return Err(Error::at("stores", format!("id or label, not {other}"))
+                    .in_file(&f.path, Some(&f.source)));
+            }
+        },
+    };
+
+    // --- one rule per value, three clauses in v0's order
+    // v0 tries the priority order first and then every remaining value in
+    // declaration order: the order is a partial ordering, not a filter. A
+    // value no clause can reach produces no rule at all, which is what its
+    // loop does when it finds nothing to check.
+    let mut rules = Vec::with_capacity(vocabulary.len());
+    for id in vocabulary.iter() {
+        let i = vocabulary
+            .iter()
+            .position(|v| v == id)
+            .expect("the order is inside the vocabulary");
+        let at = format!("values.{id}");
+        let v = f.blame(yaml::obj(&values_m[id], &at))?;
+        let mut clauses: Vec<Clause> = Vec::new();
+
+        let detection = match v.get("detection") {
+            Some(d) => f.blame(yaml::obj(d, &format!("{at}.detection")))?.clone(),
+            None => serde_json::Map::new(),
+        };
+        if let Some(x) = detection.get("exclusive") {
+            let flag = f.blame(yaml::text(x, &format!("{at}.detection.exclusive")))?;
+            clauses.push(Clause::Flag {
+                tier: Tier::Exclusive,
+                confidence: tier_of(Tier::Exclusive),
+                flag: *flag_ix.get(&flag).ok_or_else(|| {
+                    Error::at(
+                        format!("{at}.detection.exclusive"),
+                        format!("{flag} is not a flag of this pack"),
+                    )
+                    .in_file(&f.path, Some(&f.source))
+                })?,
+                name: flag,
+            });
+        }
+        if let Some(c) = v.get("alternative_flags") {
+            let at_a = format!("{at}.alternative_flags");
+            let names = f.blame(yaml::texts(c, &at_a))?;
+            let mut flags = Vec::with_capacity(names.len());
+            for n in &names {
+                flags.push(*flag_ix.get(n).ok_or_else(|| {
+                    Error::at(&at_a, format!("{n} is not a flag of this pack"))
+                        .in_file(&f.path, Some(&f.source))
+                })?);
+            }
+            if !flags.is_empty() {
+                clauses.push(Clause::AnyFlag {
+                    tier: Tier::Alternative,
+                    confidence: tier_of(Tier::Alternative),
+                    names,
+                    flags,
+                });
+            }
+        }
+        if let Some(k) = v.get("keywords").or_else(|| detection.get("keywords")) {
+            let at_k = format!("{at}.keywords");
+            let list = match k {
+                Value::Object(mm) if mm.contains_key("bucket") => {
+                    let b = f.blame(yaml::text(&mm["bucket"], &at_k))?;
+                    buckets.get(&b).cloned().ok_or_else(|| {
+                        Error::at(
+                            &at_k,
+                            format!("no bucket named {b} is declared by the pack"),
+                        )
+                        .in_file(&f.path, Some(&f.source))
+                    })?
+                }
+                _ => f.blame(yaml::texts(k, &at_k))?,
+            };
+            if !list.is_empty() {
+                clauses.push(Clause::Keywords {
+                    tier: Tier::Keywords,
+                    confidence: tier_of(Tier::Keywords),
+                    field: search,
+                    list,
+                });
+            }
+        }
+        if let Some(c) = detection.get("combination") {
+            let at_c = format!("{at}.detection.combination");
+            let names = f.blame(yaml::texts(c, &at_c))?;
+            let mut flags = Vec::with_capacity(names.len());
+            for n in &names {
+                flags.push(*flag_ix.get(n).ok_or_else(|| {
+                    Error::at(&at_c, format!("{n} is not a flag of this pack"))
+                        .in_file(&f.path, Some(&f.source))
+                })?);
+            }
+            if !flags.is_empty() {
+                clauses.push(Clause::Combination {
+                    tier: Tier::Combination,
+                    confidence: tier_of(Tier::Combination),
+                    names,
+                    flags,
+                });
+            }
+        }
+
+        if clauses.is_empty() {
+            // Vocabulary only: a route sets it, or it is the axis's default.
+            continue;
+        }
+
+        let requires = match v.get("requires") {
+            Some(r) => {
+                let mut sc = Scope {
+                    derived,
+                    axes,
+                    parsers,
+                    parser_ix,
+                    buckets,
+                    within: None,
+                    flags: Some(flag_ix),
+                    regexes,
+                    deps: HashSet::new(),
+                };
+                Some(f.blame(compile(r, &format!("{at}.requires"), &mut sc))?)
+            }
+            None => None,
+        };
+        let stated = match v.get("confidence") {
+            Some(c) => Some(f.blame(yaml::number(c, &format!("{at}.confidence")))?),
+            None => None,
+        };
+        rules.push(Rule {
+            id: id.clone(),
+            requires,
+            clauses,
+            sets: vec![Sets {
+                axis: axis_index,
+                values: vec![SetValue {
+                    value: i,
+                    when: None,
+                }],
+            }],
+            confidence: stated,
+            why: None,
+        });
+    }
+
+    // --- physics windows: rules with a numeric clause, tried after the
+    // vocabulary, so a keyword always beats a number as v0 intends
+    if let Some(ph) = m.get("physics") {
+        for (i, r) in f.blame(yaml::arr(ph, "physics"))?.iter().enumerate() {
+            let at = format!("physics[{i}]");
+            let rm = f.blame(yaml::obj(r, &at))?;
+            let id = f.blame(yaml::text(yaml::get(rm, "value", &at)?, &at))?;
+            let value = vocabulary.iter().position(|v| *v == id).ok_or_else(|| {
+                Error::at(&at, format!("{id} is not a value of this axis"))
+                    .in_file(&f.path, Some(&f.source))
+            })?;
+            let mut sc = Scope {
+                derived,
+                axes,
+                parsers,
+                parser_ix,
+                buckets,
+                within: None,
+                flags: Some(flag_ix),
+                regexes,
+                deps: HashSet::new(),
+            };
+            let expr = f.blame(compile(
+                yaml::get(rm, "when", &at)?,
+                &format!("{at}.when"),
+                &mut sc,
+            ))?;
+            let confidence = match rm.get("confidence") {
+                Some(c) => Some(f.blame(yaml::number(c, &at))?),
+                None => None,
+            };
+            rules.push(Rule {
+                id: format!("physics:{id}"),
+                requires: None,
+                clauses: vec![Clause::When {
+                    tier: Tier::Physics,
+                    confidence: tier_of(Tier::Physics),
+                    cite: format!("physics window {i}"),
+                    source: "physics".into(),
+                    expr,
+                }],
+                sets: vec![Sets {
+                    axis: axis_index,
+                    values: vec![SetValue { value, when: None }],
+                }],
+                confidence,
+                why: rm.get("why").map(|w| yaml::text(w, &at)).transpose()?,
+            });
+        }
+    }
+
+    Ok(AxisFile {
+        axis: Axis {
+            name: name.clone(),
+            multi,
+            values,
+            default,
+            default_confidence,
+            stores_label,
+        },
+        set: RuleSet {
+            name,
+            collect: multi,
+            decides: vec![axis_index],
+            enter_when: None,
+            rules,
+        },
+    })
+}
+
+/// The semantic normalizer of §6.4, as data: twelve ordered steps, no code.
+fn load_normalizer(f: &File) -> R<Normalizer> {
+    let m = f.blame(yaml::obj(&f.value, "normalize"))?;
+    let into = f.blame(yaml::text(
+        yaml::get(m, "normalize", "normalize")?,
+        "normalize",
+    ))?;
+    if field_index(&into).is_some() {
+        return Err(Error::at(
+            "normalize",
+            format!("{into} is already a field of the fingerprint; a pack's derived text needs a name of its own"),
+        )
+        .in_file(&f.path, Some(&f.source)));
+    }
+    let mut from = Vec::new();
+    for (i, n) in f
+        .blame(yaml::texts(yaml::get(m, "from", "normalize")?, "from"))?
+        .iter()
+        .enumerate()
+    {
+        from.push(field_index(n).ok_or_else(|| {
+            Error::at(format!("from[{i}]"), format!("no field named {n}"))
+                .in_file(&f.path, Some(&f.source))
+        })?);
+    }
+
+    let one_char = |s: &str, at: &str| -> R<char> {
+        let mut it = s.chars();
+        match (it.next(), it.next()) {
+            (Some(c), None) => Ok(c),
+            _ => Err(Error::at(at, format!("{s:?} is not a single character"))),
+        }
+    };
+
+    let (mut meaningful, mut to_space, mut remove) = (Vec::new(), Vec::new(), Vec::new());
+    if let Some(c) = m.get("characters") {
+        let c = f.blame(yaml::obj(c, "characters"))?;
+        if let Some(x) = c.get("meaningful") {
+            for (k, v) in f.blame(yaml::obj(x, "characters.meaningful"))? {
+                meaningful.push((
+                    f.blame(one_char(k, "characters.meaningful"))?,
+                    f.blame(yaml::text(v, "characters.meaningful"))?,
+                ));
+            }
+        }
+        for (key, into) in [("to_space", &mut to_space), ("remove", &mut remove)] {
+            if let Some(x) = c.get(key) {
+                for s in f.blame(yaml::texts(x, &format!("characters.{key}")))? {
+                    into.push(f.blame(one_char(&s, &format!("characters.{key}")))?);
+                }
+            }
+        }
+    }
+
+    let token_removals = match m.get("token_removals") {
+        Some(v) => f
+            .blame(yaml::texts(v, "token_removals"))?
+            .iter()
+            .map(|t| t.to_lowercase())
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut token_replacements = std::collections::BTreeMap::new();
+    if let Some(v) = m.get("token_replacements") {
+        for (token, canonical) in f.blame(yaml::obj(v, "token_replacements"))? {
+            token_replacements.insert(
+                token.to_lowercase(),
+                f.blame(yaml::text(canonical, "token_replacements"))?
+                    .to_lowercase(),
+            );
+        }
+    }
+
+    let mut conditional = Vec::new();
+    if let Some(v) = m.get("conditional_replacements") {
+        for (i, r) in f
+            .blame(yaml::arr(v, "conditional_replacements"))?
+            .iter()
+            .enumerate()
+        {
+            let at = format!("conditional_replacements[{i}]");
+            let rm = f.blame(yaml::obj(r, &at))?;
+            let words = |key: &str| -> R<Vec<String>> {
+                Ok(match rm.get(key) {
+                    Some(x) => yaml::texts(x, &at)?
+                        .iter()
+                        .map(|w| w.to_lowercase())
+                        .collect(),
+                    None => Vec::new(),
+                })
+            };
+            let c = Conditional {
+                canonical: f
+                    .blame(yaml::text(yaml::get(rm, "canonical", &at)?, &at))?
+                    .to_lowercase(),
+                replace: f
+                    .blame(yaml::text(yaml::get(rm, "replace", &at)?, &at))?
+                    .to_lowercase(),
+                when_has_any: f.blame(words("when_has_any"))?,
+                when_has_all: f.blame(words("when_has_all"))?,
+            };
+            if c.when_has_any.is_empty() && c.when_has_all.is_empty() {
+                return Err(Error::at(&at, "has no condition, so it is not conditional")
+                    .in_file(&f.path, Some(&f.source)));
+            }
+            // v0's one rule reads a token an earlier step has already
+            // replaced, so it never fires. A pack that repeats the mistake is
+            // refused rather than left to be discovered on a corpus.
+            for w in c.when_has_any.iter().chain(c.when_has_all.iter()) {
+                if let Some(to) = token_replacements.get(w) {
+                    return Err(Error::at(
+                        &at,
+                        format!(
+                            "waits for {w}, which an unconditional replacement has already turned into {to}, so it could never fire"
+                        ),
+                    )
+                    .in_file(&f.path, Some(&f.source)));
+                }
+            }
+            conditional.push(c);
+        }
+    }
+
+    Ok(Normalizer {
+        into,
+        from,
+        raw_removals: match m.get("raw_removals") {
+            Some(v) => f.blame(yaml::texts(v, "raw_removals"))?,
+            None => Vec::new(),
+        },
+        meaningful,
+        to_space,
+        remove,
+        token_removals,
+        token_replacements,
+        conditional,
+    })
 }

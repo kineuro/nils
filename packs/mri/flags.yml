@@ -15,6 +15,9 @@
 #   {parser: p, <atom>}   an inline parser atom, for the two places v0 reaches
 #                         past its own named predicates into the token set
 #   {field: f, <cmp>}     a comparison on a fingerprint scalar
+#
+# The text these read is `search_text`, which the pack normalizes for itself
+# (normalize.yml): the same text v0's flags read, built the same way.
 #   {text: f, <str>}      a match on a case-folded text field
 #   {any|all|not: ...}    composition
 
@@ -29,15 +32,15 @@ flags:
     # number makes the comparison false, never an error.
     all: [{field: diffusion_b_value, gt: 0}, {field: diffusion_b_value, le: 20000}]
 
-  has_mp2rage_context: {text: text_all, substring: mp2rage}
+  has_mp2rage_context: {text: search_text, substring: mp2rage}
 
   has_mpr_in_text:
     # 'mpr' as a word, and only on DERIVED: on an ORIGINAL it is the tail of
     # MPRAGE, on a DERIVED it is a reformat.
-    all: [image_type.is_derived, {text: text_all, matches: '\bmpr\b'}]
+    all: [image_type.is_derived, {text: search_text, matches: '\bmpr\b'}]
 
-  has_inv1_in_text: {text: text_all, matches: '\binv1\b'}
-  has_inv2_in_text: {text: text_all, matches: '\binv2\b'}
+  has_inv1_in_text: {text: search_text, matches: '\binv1\b'}
+  has_inv2_in_text: {text: search_text, matches: '\binv2\b'}
 
   is_mp2rage_inv1_by_ti:
     all: [image_type.is_original, has_mp2rage_context,
@@ -51,10 +54,10 @@ flags:
       - image_type.is_derived
       - image_type.has_uniform
       - any:
-          - {text: text_all, matches: 'uni\s*-\s*den'}
-          - {text: text_all, matches: 'uniden'}
-          - {text: text_all, matches: 'uniform\s+denoised'}
-          - {text: text_all, matches: 'denoised\s+uniform'}
+          - {text: search_text, matches: 'uni\s*-\s*den'}
+          - {text: search_text, matches: 'uniden'}
+          - {text: search_text, matches: 'uniform\s+denoised'}
+          - {text: search_text, matches: 'denoised\s+uniform'}
 
   # === 1. pulse sequence physics ============================================
 
@@ -282,8 +285,8 @@ flags:
   is_normalized: image_type.is_normalized
   has_nd:        image_type.has_nd
   # These two read the blob as stored, not case-folded, and after a left strip.
-  is_ge_orig:     {text_raw: text_all, prefix: 'orig '}
-  is_ge_filtered: {text_raw: text_all, prefix: 'filtered '}
+  is_ge_orig:     {text_raw: search_text, prefix: 'orig '}
+  is_ge_filtered: {text_raw: search_text, prefix: 'filtered '}
 
   # === 8. exclusion / QA ====================================================
 

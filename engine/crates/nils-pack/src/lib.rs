@@ -16,9 +16,12 @@ pub mod corpus;
 pub mod error;
 pub mod eval;
 pub mod expr;
+pub mod normalize;
 pub mod overlay;
 pub mod pack;
+pub mod rules;
 pub mod stack;
+pub mod verdict;
 pub mod version;
 mod yaml;
 
@@ -27,4 +30,5 @@ pub use eval::Evaluated;
 pub use overlay::Overlay;
 pub use pack::{CONTRACT, Pack, load};
 pub use stack::Stack;
+pub use verdict::{AxisVerdict, Evidence, Verdict};
 pub use version::Version;

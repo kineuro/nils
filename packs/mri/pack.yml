@@ -17,6 +17,18 @@ parsers:
   - parsers.yml
 flags:
   - flags.yml
+# The pack's own text: the twelve steps that turn the fingerprint's folded
+# fields into what a keyword is matched against (spec section 6.4).
+normalize:
+  - normalize.yml
+
+axes:
+  # The order is the order the axes are decided in, and an axis may read one
+  # declared before it: construct's synthetic values require a provenance.
+  - axes/provenance.yml
+  - axes/technique.yml
+  - axes/modifier.yml
+  - axes/construct.yml
 
 # The lists a site may amend through an overlay, and nothing else: a pack
 # decides what is editable, not the engine (§5.3). Physics, flags and the

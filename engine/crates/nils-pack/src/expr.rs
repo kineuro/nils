@@ -139,6 +139,12 @@ pub enum Expr {
         case: Case,
         inner: Box<Expr>,
     },
+    /// An axis an earlier rule set decided holds this value. How a route is
+    /// entered, and how the intent cascade reads what came before it.
+    Axis {
+        axis: usize,
+        value: String,
+    },
 
     Any(Vec<Expr>),
     All(Vec<Expr>),
@@ -154,6 +160,12 @@ pub trait Ctx {
     fn present(&self, field: usize) -> bool;
     fn text(&self, field: usize) -> &str;
     fn re(&self, idx: usize) -> &Regex;
+    /// Whether an axis decided so far carries this value. False before
+    /// anything is decided, which is why an axis atom may only name an axis
+    /// declared before it.
+    fn axis_is(&self, _axis: usize, _value: &str) -> bool {
+        false
+    }
 }
 
 impl Expr {
@@ -215,6 +227,8 @@ impl Expr {
                 let t = case.apply(c.text(*field));
                 inner.eval(Some(&Subject::text(t.as_ref())), c)
             }
+
+            Expr::Axis { axis, value } => c.axis_is(*axis, value),
 
             Expr::Any(xs) => xs.iter().any(|x| x.eval(subj, c)),
             Expr::All(xs) => xs.iter().all(|x| x.eval(subj, c)),

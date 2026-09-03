@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The provenance axis, transcribed from v0 0.5.3
+# `classification/detection_yaml/provenance-detection.yaml` and the detector that reads it.
+#
+# An axis file is a rule set written compactly: one rule per value, in the
+# order below, with up to three clauses in v0's order (an exclusive flag,
+# then a keyword, then a combination of flags). The first value whose first
+# clause holds decides, and which clause fired fixes the confidence.
+
+axis: provenance
+kind: single
+default: RawRecon
+# The confidences v0 fixes per tier, from its own `confidence_thresholds`.
+tiers: {exclusive: 0.95, keywords: 0.85, combination: 0.75, alternative: 0.85, default: 0.8}
+# The text a keyword is matched against is the pack's own, normalized by
+# its twelve steps from the fingerprint's folded fields (spec section 6.4).
+search: search_text
+
+# Only these are tried by this axis's own rules; any other value
+# below is vocabulary a route sets (spec section 6.5).
+order:
+  - SyMRI
+  - EPIMix
+  - STAGE
+  - SWIRecon
+  - DTIRecon
+  - PerfusionRecon
+  - ASLRecon
+  - BOLDRecon
+  - Localizer
+  - ProjectionDerived
+  - SubtractionDerived
+
+values:
+  SyMRI:
+    keywords:
+      - symri
+      - magic
+      - syntac
+      - synthetic mr
+      - syntetisk
+      - synthetic
+      - synt
+      - qrapmaster
+    alternative_flags: [has_t1_synthetic, has_t2_synthetic, has_pd_synthetic, has_flair_synthetic, is_mdme, is_qalas, has_multi_qmap]
+    detection:
+      combination: [is_synthetic, is_derived]
+  EPIMix:
+    keywords:
+      - epimix
+      - ksepimix
+      - axepimix
+      - neuromix
+      - mix2
+      - mix3
+  STAGE:
+    keywords:
+      - stage
+  SWIRecon:
+    keywords:
+      - swi
+      - swan
+      - fsbb
+      - susceptibility
+      - qsm
+      - r2star
+    detection:
+      exclusive: is_swi
+      combination: [has_swi, is_derived]
+  DTIRecon:
+    keywords:
+      - adc map
+      - apparent diffusion
+      - fractional anisotropy
+      - dti
+      - tensor
+    alternative_flags: [has_adc, has_eadc, has_fa, has_trace]
+    detection:
+      exclusive: is_diffusion_derived
+  PerfusionRecon:
+    keywords:
+      - cerebral blood flow
+      - cerebral blood volume
+      - mean transit time
+      - time to peak
+      - perfusion map
+    alternative_flags: [has_cbf, has_cbv, has_mtt, has_ttp, has_tmax]
+    detection:
+      exclusive: is_perfusion_derived
+  ASLRecon:
+    keywords:
+      - asl
+      - pcasl
+      - pasl
+      - arterial spin
+    detection:
+      exclusive: is_asl
+  BOLDRecon:
+    keywords:
+      - bold
+      - fmri
+      - resting state
+      - task fmri
+      - functional mri
+    detection:
+      exclusive: is_bold
+  Localizer:
+    keywords:
+      - localizer
+      - scout
+      - survey
+      - '3 plan'
+      - autoalign
+      - calibration
+      - asset cal
+      - locator
+      - versikt
+      - kalibrering
+    detection:
+      exclusive: is_localizer
+  ProjectionDerived:
+    keywords:
+      - maximum intensity
+      - minimum intensity
+      - multiplanar reformat
+    alternative_flags: [is_mip, is_minip, is_mpr, is_projection]
+  SubtractionDerived:
+    keywords:
+      - subtraction
+      - subtracted
+      - difference
+      - pre post
+    detection:
+      exclusive: is_subtraction
+  RawRecon: {}
