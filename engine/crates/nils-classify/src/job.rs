@@ -123,8 +123,22 @@ fn claim(registry: &mut Registry, settings: &Settings) -> Result<i64, Error> {
     let pid = i64::from(std::process::id());
     let job_t = table("job");
     let store = registry.store();
+    let dialect = store.dialect();
+    let stamp = |name: &str| {
+        dialect.text_of_qualified(
+            None,
+            job_t
+                .column(name)
+                .unwrap_or_else(|| panic!("job.{name} is not a column")),
+        )
+    };
+    // The two timestamps are read as text: Postgres hands a timestamp back in
+    // a type the store does not read, and this select only ever sees a row
+    // when another job is running, which is exactly when it must not fail.
     let sql = format!(
-        "SELECT id, heartbeat_at, started_at, pid, host FROM {} WHERE state = 'running'",
+        "SELECT id, {}, {}, pid, host FROM {} WHERE state = 'running'",
+        stamp("heartbeat_at"),
+        stamp("started_at"),
         store.qualified("job")
     );
     for j in store.query(&sql, &[])? {

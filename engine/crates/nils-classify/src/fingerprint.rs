@@ -158,12 +158,22 @@ pub struct First {
     pub image_comments: Option<String>,
 }
 
-/// The select that reads one window of stacks, ordered by id.
+/// The select that reads one window of stacks, ordered by id. Every column
+/// goes through the dialect's text cast, so a date, a time or a JSON column
+/// comes back as text on Postgres too; forgetting one fails only once a row
+/// of that shape exists.
 pub fn select(store: &Store, extra: &str) -> String {
-    let cols = |alias: &str, names: &[&str]| -> String {
+    let dialect = store.dialect();
+    let cols = |alias: &str, table_name: &str, names: &[&str]| -> String {
+        let t = table(table_name);
         names
             .iter()
-            .map(|c| format!("{alias}.{c}"))
+            .map(|c| {
+                let column = t
+                    .column(c)
+                    .unwrap_or_else(|| panic!("{table_name}.{c} is not a column"));
+                dialect.text_of_qualified(Some(alias), column)
+            })
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -174,10 +184,10 @@ pub fn select(store: &Store, extra: &str) -> String {
          JOIN {} sy ON sy.id = se.study_id \
          LEFT JOIN {} mr ON mr.series_id = se.id \
          WHERE st.id > {}{extra} ORDER BY st.id LIMIT {}",
-        cols("st", STACK),
-        cols("se", SERIES),
-        cols("mr", MR),
-        cols("sy", STUDY),
+        cols("st", "stack", STACK),
+        cols("se", "series", SERIES),
+        cols("mr", "series_mr", MR),
+        cols("sy", "study", STUDY),
         store.qualified("stack"),
         store.qualified("series"),
         store.qualified("study"),

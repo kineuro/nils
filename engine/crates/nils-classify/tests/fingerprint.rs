@@ -410,3 +410,75 @@ fn a_split_series_says_why_it_split() {
         );
     }
 }
+
+#[test]
+fn a_stale_job_is_taken_over_and_a_live_one_holds_the_registry() {
+    use nils_registry::schema::table;
+    use nils_registry::store::{Insert, Param};
+
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap();
+
+        // A job whose heartbeat is old and whose process is another host's:
+        // reading its row is the one path that only sees a timestamp when
+        // something is already running, which is when it must not fail.
+        let insert = |reg: &mut Registry, beat: &str, host: &str| {
+            reg.store()
+                .insert(
+                    &Insert::new(
+                        table("job"),
+                        &[
+                            "kind",
+                            "name",
+                            "args",
+                            "state",
+                            "pid",
+                            "host",
+                            "started_at",
+                            "heartbeat_at",
+                        ],
+                    )
+                    .returning(&["id"]),
+                    &[vec![
+                        Param::from("fingerprint"),
+                        Param::from("held"),
+                        Param::from("{}"),
+                        Param::from("running"),
+                        Param::Int(1),
+                        Param::from(host),
+                        Param::from(beat),
+                        Param::from(beat),
+                    ]],
+                )
+                .unwrap()
+                .first()
+                .unwrap()
+                .int(0)
+                .unwrap()
+        };
+
+        let stale = insert(&mut reg, "2020-01-01T00:00:00Z", "elsewhere");
+        let report = run(&mut reg, &Settings::default(), &Cancel::new()).unwrap();
+        assert!(report.written > 0, "{name}: a stale job does not hold it");
+        let states: Vec<String> = rows(
+            &mut reg,
+            "SELECT state FROM {job} WHERE kind = 'fingerprint' ORDER BY id",
+        )
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect();
+        assert_eq!(states, vec!["failed", "done"], "{name}: {stale} was failed");
+
+        // A fresh one does hold it.
+        let now = nils_registry::time::now_iso();
+        insert(&mut reg, &now, "elsewhere");
+        let err = run(&mut reg, &Settings::default(), &Cancel::new()).unwrap_err();
+        assert!(
+            matches!(err, nils_classify::Error::Busy { .. }),
+            "{name}: {err}"
+        );
+    }
+}
