@@ -16,7 +16,8 @@ import pytest
 
 from conftest import Synth, harvest_patient_ids, make_synth
 from v0compare import cli
-from v0compare.mapping import ORDER_DEPENDENT
+from v0compare.instances import SEVERAL_COHORTS
+from v0compare.mapping import MULTI_STACK, MULTI_STACK_NOTE, ORDER_DEPENDENT
 from v0shape import Inject, project
 
 # what the projection cannot reproduce: v0 filled study.modality from the
@@ -138,19 +139,24 @@ def test_injected_divergences_are_found(synth: Synth, tmp_path: Path) -> None:
         phantom_unwalked=1,
         phantom_quarantined=2,
         split_stack=1,
+        other_first_echo=3,
         recode=1,
+        second_cohort=1,
     )
     _counts, done = project(synth.registry, export, root=synth.root, inject=inject)
     for name in ("drop_max_sop", "drop_lower_sop", "phantom_missing", "phantom_unwalked", "phantom_quarantined",
-                 "split_stack", "recode"):
+                 "split_stack", "other_first_echo", "recode", "second_cohort"):
         assert done[name] == getattr(inject, name), (name, done)
     assert done["upper_series_description"] >= 1 and done["null_sar"] >= 1 and done["other_institution"] >= 1
     code, rep = _compare(synth, export, tmp_path)
     assert code == 1 and not rep["passed"]
 
-    # §12.2, both directions
+    # §12.2, both directions; the phantoms' subject sits in two cohorts, so
+    # its paths absent from disk say so
     inst = rep["instances"]
-    assert inst["v0_only"]["path not in v1: no such file under root"] == done["phantom_missing"]
+    assert inst["v0_subjects_in_several_cohorts"] == 1
+    assert inst["v0_only"][SEVERAL_COHORTS] == done["phantom_missing"]
+    assert "path not in v1: no such file under root" not in inst["v0_only"]
     assert inst["v0_only"]["path not in v1: file under root (v1 missed it)"] == done["phantom_unwalked"]
     quarantined = {k: v for k, v in inst["v0_only"].items() if k.startswith("path in v1, quarantined")}
     assert sum(quarantined.values()) == done["phantom_quarantined"]
@@ -168,11 +174,24 @@ def test_injected_divergences_are_found(synth: Synth, tmp_path: Path) -> None:
     # institution_name is quasi-identifying: the pattern collapses to
     # `other` and the group carries no shapes
     assert _groups(rep, "study", "institution_name") == {"other": done["other_institution"]}
+    # echo_time is a stack-signature column: the row of the split series is
+    # grouped apart and is the tool's own to accept, the single-stack rows
+    # keep their plain pattern and stay unclassified
+    echo = _groups(rep, "series_mr", "echo_time")
+    assert sum(echo.values()) == done["other_first_echo"]
+    assert [n for p, n in echo.items() if p.endswith(MULTI_STACK)] == [1]
+    assert sum(n for p, n in echo.items() if not p.endswith(MULTI_STACK)) == done["other_first_echo"] - 1
+    auto = []
     for stat in rep["fields"]:
         for g in stat["groups"]:
-            assert g["classification"] is None
+            if g["pattern"].endswith(MULTI_STACK):
+                auto.append(g)
+                assert (g["classification"], g["note"]) == ("accepted", MULTI_STACK_NOTE)
+            else:
+                assert g["classification"] is None
             if stat["sensitivity"] != "technical":
                 assert g["samples"] == []
+    assert len(auto) == 1
     assert not _bar(rep, "12.3 every other field")["passed"]
 
     # §12.3 stacks: the split series is the one multi-stack series in v0
@@ -190,14 +209,32 @@ def test_injected_divergences_are_found(synth: Synth, tmp_path: Path) -> None:
     assert not _bar(rep, "12.4 every v0 subject code")["passed"]
     assert not _bar(rep, "12.4 every common study")["passed"]
 
-    # nothing is adjudicated: every group counts
+    # nothing is adjudicated: every group counts, but the tool's own
     assert rep["instance_classes"] == {
         "v0-only": {k: None for k in inst["v0_only"]},
         "v1-only": {k: None for k in inst["v1_only"]},
     }
     n_groups = sum(len(stat["groups"]) for stat in rep["fields"])
-    assert rep["unclassified"] == n_groups + len(inst["v0_only"]) + len(inst["v1_only"]) + 1
+    assert rep["unclassified"] == n_groups - len(auto) + len(inst["v0_only"]) + len(inst["v1_only"]) + 1
     assert not _bar(rep, "12.3 every divergence is classified")["passed"]
+
+
+def test_fs_cap_leaves_the_rest_unchecked(synth: Synth, tmp_path: Path) -> None:
+    """`--fs-cap` bounds the paths checked on disk; what lies beyond it is
+    reported as unchecked, and `0` lifts the cap."""
+    export = tmp_path / "export"
+    _counts, done = project(synth.registry, export, root=synth.root, inject=Inject(phantom_missing=3))
+    assert done["phantom_missing"] == 3
+    _code, rep = _compare(synth, export, tmp_path, "--fs-cap", "2")
+    inst = rep["instances"]
+    assert inst["fs_checked"] == 2
+    assert inst["v0_only"]["path not in v1: no such file under root"] == 2
+    assert inst["v0_only"]["path not in v1: unchecked"] == 1
+    _code, rep = _compare(synth, export, tmp_path, "--fs-cap", "0")
+    inst = rep["instances"]
+    assert inst["fs_checked"] == 3
+    assert inst["v0_only"]["path not in v1: no such file under root"] == 3
+    assert "path not in v1: unchecked" not in inst["v0_only"]
 
 
 def test_adjudication_classifies_the_groups(synth: Synth, tmp_path: Path) -> None:

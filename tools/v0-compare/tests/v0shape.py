@@ -54,15 +54,25 @@ class Inject:
     phantom_quarantined: int = 0  # v0 rows pointing at files v1 quarantined: `path in v1, quarantined: …`
     # stacks
     split_stack: int = 0  # v0 splits n single-stack series in two: `v0 2 stack(s), v1 1, 0 matched`
+    # v0's series_mr row carries another instance's echo_time in n MR series,
+    # the split ones first: `rounded (multi-stack)` there, accepted by the
+    # tool itself; plain `rounded` in a single-stack series
+    other_first_echo: int = 0
     # subjects
     recode: int = 0  # n v0 subjects carry a code v1 does not have
+    # the subject the phantoms hang on is listed under a second cohort too:
+    # its missing paths class as `no such file under root (subject in several cohorts)`
+    second_cohort: int = 0
     #: v0 subject code -> PatientID-type identifier written to subject_other_identifiers
     identifiers: dict[str, str] = field(default_factory=dict)
 
 
 def _open(registry: Path) -> duckdb.DuckDBPyConnection:
+    """The registry by its declared types, so that a double reaches the CSV
+    as Python writes it (the shortest spelling that reads back to the same
+    value, as v0's `str()` did), not through SQLite's 15-digit text."""
     con = duckdb.connect()
-    con.execute("INSTALL sqlite; LOAD sqlite; SET sqlite_all_varchar = true")
+    con.execute("INSTALL sqlite; LOAD sqlite; SET sqlite_all_varchar = false")
     con.execute(f"ATTACH {quote(str(registry / 'registry.db'))} AS v1 (TYPE sqlite, READ_ONLY)")
     return con
 
@@ -407,12 +417,14 @@ def _inject(
         n += 1
         done["phantom_quarantined"] += 1
 
-    # stacks: split the first n single-stack series with enough instances
+    # stacks: split the first n single-stack MR series with enough instances
     next_stack = max(int(r["series_stack_id"]) for r in stack_rows) + 1
-    split = 0
+    split: list[int] = []
     for row in stack_rows:
-        if split >= inject.split_stack:
+        if len(split) >= inject.split_stack:
             break
+        if row["stack_modality"] != "MR":
+            continue
         members = [r for r in inst_rows if r["series_stack_id"] == row["series_stack_id"]]
         if len(members) < 4:
             continue
@@ -425,13 +437,37 @@ def _inject(
         row["stack_n_instances"] = len(members) - len(half)
         stack_rows.append(second)
         next_stack += 1
-        split += 1
-    done["split_stack"] = split
+        split.append(int(row["series_id"]))
+    done["split_stack"] = len(split)
+
+    # a stack-signature column that names another first instance: the split
+    # series first, so the tool's own multi-stack class is exercised, then
+    # single-stack series, which stay unclassified
+    mr_rows = tables["mri_series_details"]
+    ordered = [r for r in mr_rows if int(r["series_id"]) in split] + [
+        r for r in mr_rows if int(r["series_id"]) not in split
+    ]
+    for row in ordered:
+        if done["other_first_echo"] >= inject.other_first_echo:
+            break
+        if row.get("echo_time") in (None, ""):
+            continue
+        row["echo_time"] = float(row["echo_time"]) + 7.0
+        done["other_first_echo"] += 1
 
     # subjects: another code
     for i, row in enumerate(tables["subject"][: inject.recode]):
         row["subject_code"] = f"deadbeef{i:08x}"
         done["recode"] += 1
+
+    # the phantoms' subject under a second cohort too
+    if inject.second_cohort:
+        subject_of_series = {int(r["series_id"]): int(r["subject_id"]) for r in series_rows}
+        tables["cohort"].append({"cohort_id": 2, "name": "other", "path": "/data/other", "is_active": True})
+        tables["subject_cohorts"].append(
+            {"subject_id": subject_of_series[int(template["series_id"])], "cohort_id": 2}
+        )
+        done["second_cohort"] = 1
     return done
 
 

@@ -82,13 +82,15 @@ def from_dsn(dsn: str, schema: str = DEFAULT_SCHEMA) -> Registry:
 
 
 def attach(con: duckdb.DuckDBPyConnection, registry: Registry) -> None:
-    """Attach the registry as `v1`, read-only."""
+    """Attach the registry as `v1`, read-only. A SQLite registry is read by
+    its declared types (INTEGER, REAL, TEXT), not as text: the writer binds
+    every value typed by the catalogue, and a text read would render every
+    REAL through SQLite's 15-significant-digit conversion, so a double that
+    needs 16 or 17 digits (a float32 widened, as B1rms is) would no longer
+    meet the same value spelled by v0."""
     if registry.backend == "sqlite":
         con.execute("INSTALL sqlite; LOAD sqlite")
-        # Every column as text, cast by the catalogue below: SQLite's
-        # affinities are not types and the scanner would otherwise fail on
-        # a value that does not fit the declared one.
-        con.execute("SET sqlite_all_varchar = true")
+        con.execute("SET sqlite_all_varchar = false")
         con.execute(f"ATTACH {quote(str(registry.path))} AS v1 (TYPE sqlite, READ_ONLY)")
     else:
         con.execute("INSTALL postgres; LOAD postgres")

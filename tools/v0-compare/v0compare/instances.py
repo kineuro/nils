@@ -15,8 +15,16 @@ import duckdb
 
 from .mapping import V0_MODALITIES, V0_SOP_CLASSES
 
-#: Files checked on disk for the v0 instances v1 has no path for, at most.
-FS_CAP = 100_000
+#: Files checked on disk for the v0 instances v1 has no path for, at most,
+#: by default (`--fs-cap`; 0 lifts the cap). A v0 path is relative to its
+#: cohort's root, so a subject listed under several cohorts has instances
+#: under other roots than the compared one, and the check is what tells
+#: those from files v1 should have seen.
+FS_CAP = 1_000_000
+
+#: The class of a v0 path absent from disk, when the subject is listed
+#: under several cohorts and the file may sit under another cohort's root.
+SEVERAL_COHORTS = "path not in v1: no such file under root (subject in several cohorts)"
 
 
 @dataclass
@@ -83,13 +91,16 @@ def compare(
     v0_files: str,
     root: Path | None,
     check_fs: bool,
+    fs_cap: int = FS_CAP,
 ) -> InstanceReport:
     rep = InstanceReport()
     scope(con, cohort)
-    rep.v0_subjects_in_several_cohorts = con.execute(
-        "SELECT count(*) FROM (SELECT subject_id FROM v0db.v0.subject_cohorts "
-        "WHERE subject_id IN (SELECT subject_id FROM w.v0_subject) GROUP BY subject_id HAVING count(*) > 1)"
-    ).fetchone()[0]
+    con.execute(
+        "CREATE OR REPLACE TABLE w.v0_subject_several AS "
+        "SELECT subject_id FROM v0db.v0.subject_cohorts "
+        "WHERE subject_id IN (SELECT subject_id FROM w.v0_subject) GROUP BY subject_id HAVING count(*) > 1"
+    )
+    rep.v0_subjects_in_several_cohorts = con.execute("SELECT count(*) FROM w.v0_subject_several").fetchone()[0]
     rep.v0_total = con.execute("SELECT count(*) FROM w.v0_instance").fetchone()[0]
     rep.v1_total = con.execute("SELECT count(*) FROM w.instance").fetchone()[0]
 
@@ -97,6 +108,7 @@ def compare(
     con.execute(
         "CREATE OR REPLACE TABLE w.v0_instance_class AS "
         "SELECT v.instance_id, v.path, "
+        "v.subject_id IN (SELECT subject_id FROM w.v0_subject_several) AS several_cohorts, "
         "CASE WHEN b.id IS NOT NULL THEN 'matched' "
         "     WHEN f.id IS NULL THEN 'path not in v1' "
         "     WHEN f.status = 'ingested' THEN 'path in v1, ingested under another sop' "
@@ -113,20 +125,27 @@ def compare(
     missing = rep.v0_only.pop("path not in v1", 0)
     if missing:
         if check_fs and root is not None:
-            paths = [
-                r[0]
-                for r in con.execute(
-                    f"SELECT path FROM w.v0_instance_class WHERE class = 'path not in v1' LIMIT {FS_CAP}"
-                ).fetchall()
-            ]
-            exists = sum(1 for p in paths if (root / p).is_file())
-            rep.fs_checked = len(paths)
+            limit = f" LIMIT {int(fs_cap)}" if fs_cap else ""
+            rows = con.execute(
+                "SELECT path, several_cohorts FROM w.v0_instance_class WHERE class = 'path not in v1' "
+                f"ORDER BY several_cohorts, instance_id{limit}"
+            ).fetchall()
+            exists = 0
+            absent = {False: 0, True: 0}
+            for path, several in rows:
+                if (root / path).is_file():
+                    exists += 1
+                else:
+                    absent[bool(several)] += 1
+            rep.fs_checked = len(rows)
             if exists:
                 rep.v0_only["path not in v1: file under root (v1 missed it)"] = exists
-            if len(paths) - exists:
-                rep.v0_only["path not in v1: no such file under root"] = len(paths) - exists
-            if missing > len(paths):
-                rep.v0_only["path not in v1: unchecked"] = missing - len(paths)
+            if absent[False]:
+                rep.v0_only["path not in v1: no such file under root"] = absent[False]
+            if absent[True]:
+                rep.v0_only[SEVERAL_COHORTS] = absent[True]
+            if missing > len(rows):
+                rep.v0_only["path not in v1: unchecked"] = missing - len(rows)
         else:
             rep.v0_only["path not in v1: unverified"] = missing
     _log(f"instances: v0 {rep.v0_total:,}, v1 {rep.v1_total:,}, common {rep.common:,}")

@@ -31,7 +31,9 @@ copy() {
         psql -U "$user" -d "$db" -q -X -v ON_ERROR_STOP=1 \
         -c "COPY ($query) TO STDOUT WITH (FORMAT csv, HEADER true)" \
         | zstd -q -T0 -o "$out/$name.csv.zst" -f
-    printf '%s rows\n' "$(zstd -dc "$out/$name.csv.zst" | wc -l | awk '{print $1 - 1}')" >&2
+    # lines, not rows: a value holding a newline spans several, and the count
+    # is here to show the copy ran, not to be compared with a row count
+    printf '%s lines\n' "$(zstd -dc "$out/$name.csv.zst" | wc -l | awk '{print $1 - 1}')" >&2
 }
 
 copy schema_version "SELECT id, version, applied_at FROM schema_version"

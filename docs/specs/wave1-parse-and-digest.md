@@ -1167,7 +1167,11 @@ Postgres scanner with a DSN that is never printed, or from the zstd CSVs that
 `tools/v0-compare/export.sh` takes in a session forced read-only
 (`default_transaction_read_only`), and either lands in one DuckDB file
 (`v0-compare extract`); `v0-compare compare` then reads v1 through the SQLite or
-the Postgres scanner. Each v0 digest's file-name mode (`--v0-files all | dcm | DCM
+the Postgres scanner. A SQLite registry is read by its declared types, not as
+text: the writer binds every value typed by the catalogue, and SQLite's text
+conversion of a REAL keeps 15 significant digits where a float32 widened to a
+double (B1rms) needs 17, so a text read made hundreds of series differ on
+nothing but that in the first real run. Each v0 digest's file-name mode (`--v0-files all | dcm | DCM
 | all_dcm | no_ext`) names the union `files` filter v1 is digested with (§5.2),
 so that both sides see the same candidates. Normalization is symmetric: v0's
 Python list literals and multi-valued strings to the backslash form, numbers to
@@ -1203,8 +1207,14 @@ Settled in slice 7: instances are paired on the SOP Instance UID. A v0 instance
 v1 does not hold is classed by what v1 knows of its path: refused under a
 quarantine class, ingested under another SOP, or never seen, in which case the
 tool looks on disk under the root (`--root`) and says whether the file is there
-(v1 missed it) or not (v0 holds a file that is gone). Only the two classes where
-v1 saw the path pass the bar by themselves; the rest need the adjudication. A
+(v1 missed it) or not (v0 holds a file that is gone). A v0 path is relative to
+its cohort's root, so a subject listed under several cohorts has instances under
+roots other than the compared one: an absent path whose subject is in several
+cohorts is reported apart from one whose subject is in a single cohort, since
+only the second is a file v0 holds and nobody has. The check is bounded by
+`--fs-cap` (a million paths by default, `0` for all of them) and what lies
+beyond the cap is reported as unchecked, never as absent. Only the two classes
+where v1 saw the path pass the bar by themselves; the rest need the adjudication. A
 v1 instance v0 does not hold is `in v0 under another subject or cohort`, `name
 outside v0 mode`, `sop class not in v0's nine`, `modality not in v0's`, `resume
 skip` (its SOP sorts at or below the highest one v0 holds for the series, or
@@ -1235,7 +1245,15 @@ instance's value on both sides (`media_storage_sop_instance_uid` and
 `image_position_patient`, the engine's `VARIES_PER_INSTANCE`), and which instance
 is first follows the walk order, so two digests of one corpus disagree on them by
 construction; the tool compares and reports them and classes their divergences
-`accepted` itself unless the adjudication says otherwise. v0's `study.modality`
+`accepted` itself unless the adjudication says otherwise. The thirteen
+stack-signature columns of the series tables (§8) carry the first instance's
+value the same way, but only where a series has several stacks do the instances
+differ on them by definition: the tool derives the thirteen from the catalogue
+as the engine does, groups a divergence of one of them apart when either side
+gives the series more than one stack (the pattern with ` (multi-stack)`
+appended) and classes that group `accepted` itself; the same field in a
+single-stack series keeps its plain pattern and needs the adjudication, because
+there the two sides read one value from files that agree. v0's `study.modality`
 is the first file's modality where v1's `modalities_in_study` is the study's, so
 that pair is expected to show `subset` or `null↔value` and is declared accepted
 in the adjudication of each run.
@@ -1316,8 +1334,10 @@ Settled in slice 7: the compare tool has a gate of its own, synthetic and in CI
 (`v0-compare` job). `tools/v0-compare/tests/v0shape.py` projects a v0-shaped
 export out of a v1 registry digested from the generator's corpus and injects
 known divergences (a case change, a null, another institution, dropped and
-phantom instances in each of v1's classes, a split stack, a recoded subject, an
-identifier per subject); the tests assert that a clean projection passes and
+phantom instances in each of v1's classes, a split stack, another first
+instance's echo time in a multi-stack and in single-stack series, a subject
+listed under a second cohort, a recoded subject, an identifier per subject); the
+tests assert that a clean projection passes and
 that every injected divergence lands in its class, the linkage CSV round trip
 through `nils linkage import` files every code as already known, the key
 classes come out right with the right key and `other` with a wrong one, and the
