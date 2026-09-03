@@ -573,3 +573,170 @@ fn two_identifiers_on_one_code_stop_the_job_with_a_review_item() {
         assert_eq!(evidence["batch_id"], 3, "{name}");
     }
 }
+
+#[test]
+fn a_person_may_hold_several_identifiers_of_one_type() {
+    // A personnummer is not for life: a temporary number becomes a permanent
+    // one when residency is granted, someone may carry several temporary ones
+    // before that, and the permanent one itself changes when a legal sex
+    // change does (the number says which). However many they are, they are one
+    // person: the import files them all on the one subject, in one file or in
+    // several, and a digest of any of them lands there (§7.4).
+    for lab in labs() {
+        let name = lab.name;
+        let numbers = ["spare-01", "spare-02", "main-01"];
+        let dir = TempDir::new("identity-spare");
+        for (i, number) in numbers.iter().enumerate() {
+            let study = format!("S{i}");
+            dir.file(
+                &format!("{study}/IM_0001"),
+                &mr(
+                    &study,
+                    &format!("{study}.1"),
+                    &format!("{study}.1.1"),
+                    number,
+                    &[],
+                ),
+            );
+        }
+        // the number the sex change brought, digested after the others
+        dir.file("S9/IM_0001", &mr("S9", "S9.1", "S9.1.1", "main-02", &[]));
+        let s = settings(&dir);
+        let mut reg = lab.open();
+        let mut store = reg.open_linkage().unwrap();
+        let keys = Subkeys::derive(&reg.pseudonym_key().unwrap());
+        let row = |line: usize, identifier: &str| ImportRow {
+            line,
+            identifier: identifier.to_string(),
+            code: "one-person".to_string(),
+        };
+        let rows: Vec<ImportRow> = numbers
+            .iter()
+            .enumerate()
+            .map(|(i, n)| row(i + 2, n))
+            .collect();
+        let imported =
+            linkage::import(reg.store(), &mut store, &keys, "patient-id", &rows).unwrap();
+        assert_eq!(
+            (
+                imported.subjects_created,
+                imported.identities_added,
+                imported.second_identifiers
+            ),
+            (1, 3, 2),
+            "{name}"
+        );
+        // a later file adds a fourth to the subject the first import created
+        let again = linkage::import(
+            reg.store(),
+            &mut store,
+            &keys,
+            "patient-id",
+            &[row(2, "main-02")],
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                again.subjects_created,
+                again.identities_added,
+                again.second_identifiers
+            ),
+            (0, 1, 1),
+            "{name}"
+        );
+        let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(report.written.unwrap().subjects_created, 0, "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {subject}"), 1, "{name}");
+        let subject = subject_of_study(&mut reg, "S0");
+        for study in ["S1", "S2", "S9"] {
+            assert_eq!(
+                subject_of_study(&mut reg, study),
+                subject,
+                "{name}: {study}"
+            );
+        }
+        let mut held = revealed(&mut reg, &mut store, subject);
+        held.sort();
+        assert_eq!(
+            held,
+            [
+                identity("patient-id", "main-01", "csv"),
+                identity("patient-id", "main-02", "csv"),
+                identity("patient-id", "spare-01", "csv"),
+                identity("patient-id", "spare-02", "csv"),
+            ],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_verbatim_rule_files_the_code_the_files_carry() {
+    // Data pseudonymized before it reaches us: the anonymizer wrote the
+    // subject code into PatientID, so the digest files it as the code
+    // instead of deriving one (§7.3). A value that is not shaped like a code
+    // is not one, and the file falls back to its study UID.
+    let rule = Rule::parse(
+        "identity:\n  id_type: subject-code\n  from:\n    - field: PatientID\n      pattern: '^(?<id>[0-9a-f]{16})$'\n  code: verbatim\n",
+    )
+    .unwrap();
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("identity-verbatim");
+        dir.file(
+            "a/IM_0001",
+            &mr("A", "A.1", "A.1.1", "771c4326c89c082c", &[]),
+        );
+        dir.file(
+            "a/IM_0002",
+            &mr("A", "A.2", "A.2.1", "771c4326c89c082c", &[]),
+        );
+        // a personnummer where a code was expected: no subject code of ours
+        dir.file("b/IM_0001", &mr("B", "B.1", "B.1.1", "19800101-1234", &[]));
+        let mut s = settings(&dir);
+        s.identity = rule.clone();
+        let mut reg = lab.open();
+        let mut store = reg.open_linkage().unwrap();
+        linkage::add_id_type(
+            &mut store,
+            "subject-code",
+            Some("the code the anonymizer wrote"),
+        )
+        .unwrap();
+        let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            report.written.clone().unwrap().subjects_created,
+            2,
+            "{name}"
+        );
+        // the code is the value, not a hash of it
+        let codes = texts(&mut reg, "SELECT code FROM {subject} ORDER BY code");
+        assert!(
+            codes.contains(&"771c4326c89c082c".to_string()),
+            "{name}: {codes:?}"
+        );
+        assert_eq!(codes.len(), 2, "{name}: {codes:?}");
+        let subject = subject_of_study(&mut reg, "A");
+        assert_eq!(
+            revealed(&mut reg, &mut store, subject),
+            [identity("subject-code", "771c4326c89c082c", "dicom")],
+            "{name}"
+        );
+        // the file whose PatientID is no code fell back to its study UID
+        assert_eq!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|d| d.kind == "identity_fallback")
+                .count(),
+            1,
+            "{name}"
+        );
+        let other = subject_of_study(&mut reg, "B");
+        assert_eq!(
+            revealed(&mut reg, &mut store, other),
+            [identity("study-instance-uid", "B", "dicom")],
+            "{name}"
+        );
+    }
+}

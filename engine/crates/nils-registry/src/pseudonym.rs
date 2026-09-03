@@ -83,6 +83,20 @@ pub struct Code {
     pub digest: Vec<u8>,
 }
 
+/// The code of a value that is already one (§7.3): the code as read, with
+/// the digest the scheme would have derived, so that the display-code check
+/// and the linkage store work as they do for a derived code.
+pub fn verbatim(scheme: Scheme, key: &[u8], code: &str) -> Code {
+    let digest = match scheme {
+        Scheme::Blake2b8 => keyed::<U8>(key, code.as_bytes()),
+        Scheme::Blake2b32 => keyed::<U32>(key, code.as_bytes()),
+    };
+    Code {
+        code: code.to_string(),
+        digest,
+    }
+}
+
 /// The code of `identifier` under `scheme` with `key`.
 pub fn code(scheme: Scheme, key: &[u8], identifier: &str, display_length: usize) -> Code {
     match scheme {

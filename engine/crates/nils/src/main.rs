@@ -1737,12 +1737,16 @@ fn import(registry: &mut Registry, store: &mut Store, args: ImportArgs) -> Resul
     match linkage::import(registry.store(), store, &keys, &args.id_type, &rows) {
         Ok(report) => {
             println!(
-                "imported {} row(s) as {}: {} subject(s) created, {} identifier(s) filed, {} already filed",
+                "imported {} row(s) as {}: {} subject(s) created, {} identifier(s) filed, {} already filed{}",
                 report.rows,
                 args.id_type,
                 report.subjects_created,
                 report.identities_added,
-                report.unchanged
+                report.unchanged,
+                match report.second_identifiers {
+                    0 => String::new(),
+                    n => format!("; {n} of them a further identifier of a subject that had one"),
+                }
             );
             Ok(())
         }

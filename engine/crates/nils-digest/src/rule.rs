@@ -41,6 +41,12 @@ pub struct Source {
 pub struct Rule {
     pub id_type: String,
     pub from: Vec<Source>,
+    /// The value the rule reads is the subject code itself, not an
+    /// identifier to derive one from (§7.3): data pseudonymized before it
+    /// reaches us, where the code was decided by whoever holds the key. A
+    /// fallback identifier is derived as always, since a study UID is no
+    /// code.
+    pub verbatim: bool,
     /// Where the rule came from, for `--describe`: a path, or none for the
     /// default.
     pub source: Option<String>,
@@ -80,6 +86,8 @@ struct Spec {
     id_type: String,
     from: Vec<SourceSpec>,
     fallback: Option<String>,
+    /// `derived` (the default) or `verbatim`.
+    code: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +106,7 @@ impl Default for Rule {
                 field: "PatientID".into(),
                 pattern: None,
             }],
+            verbatim: false,
             source: None,
             fields: IdentityFields::default(),
         }
@@ -156,11 +165,28 @@ impl Rule {
                 "identity.fallback: {fb}; the only fallback is {FALLBACK_FIELD}"
             )));
         }
+        let verbatim = match spec.code.as_deref() {
+            None | Some("derived") => false,
+            Some("verbatim") => true,
+            Some(other) => {
+                return Err(RuleError(format!(
+                    "identity.code: {other}; the code is either derived (the default) or verbatim"
+                )));
+            }
+        };
+        if verbatim && from.iter().any(|s| s.pattern.is_none()) {
+            return Err(RuleError(
+                "identity.code: verbatim needs a pattern on every field, so that a value which is \
+                 not shaped like a subject code is never filed as one"
+                    .into(),
+            ));
+        }
         let keywords: Vec<&str> = from.iter().map(|s| s.field.as_str()).collect();
         let fields = IdentityFields::new(&keywords).map_err(|e| RuleError(e.to_string()))?;
         Ok(Rule {
             id_type: spec.id_type,
             from,
+            verbatim,
             source: None,
             fields,
         })
@@ -199,6 +225,9 @@ impl Rule {
         }
         out.push_str(&fields.join(", "));
         out.push_str(&format!(", then {FALLBACK_FIELD}"));
+        if self.verbatim {
+            out.push_str("; the value read is the code itself");
+        }
         if let Some(src) = &self.source {
             out.push_str(&format!(" (from {src})"));
         }
@@ -219,6 +248,7 @@ impl Rule {
             "id_type": self.id_type,
             "from": from,
             "fallback": FALLBACK_FIELD,
+            "code": if self.verbatim { "verbatim" } else { "derived" },
             "source": self.source,
         })
     }
@@ -381,6 +411,37 @@ identity:
     }
 
     #[test]
+    fn a_verbatim_rule_reads_the_code_itself() {
+        let yaml = r"
+identity:
+  id_type: subject-code
+  from:
+    - field: PatientID
+      pattern: '^(?<id>[0-9a-f]{16})$'
+  code: verbatim
+";
+        let rule = Rule::parse(yaml).unwrap();
+        assert!(rule.verbatim);
+        assert!(
+            rule.describe()
+                .ends_with("; the value read is the code itself")
+        );
+        assert_eq!(rule.to_json()["code"], "verbatim");
+        let mut x = extracted(vec![Some("771c4326c89c082c")]);
+        let ident = rule.apply(&mut x);
+        assert_eq!(ident.value, "771c4326c89c082c");
+        assert!(!ident.fell_back);
+        // a value that is not shaped like a code is not one: the file falls
+        // back to its study UID, which is derived like any identifier
+        let mut x = extracted(vec![Some("19800101-1234")]);
+        let ident = rule.apply(&mut x);
+        assert!(ident.fell_back);
+        // the default rule derives
+        assert!(!Rule::default().verbatim);
+        assert_eq!(Rule::default().to_json()["code"], "derived");
+    }
+
+    #[test]
     fn a_rule_file_is_refused_with_the_reason() {
         let err = |yaml: &str| Rule::parse(yaml).unwrap_err().to_string();
         assert!(err("identity: [").starts_with("the identity rule does not parse"));
@@ -403,6 +464,14 @@ identity:
         assert!(
             err("identity:\n  id_type: x\n  from:\n    - field: PatientID\n      pattern: '(\\d+)'\n")
                 .contains("has no named group `id`")
+        );
+        assert!(
+            err("identity:\n  id_type: x\n  from:\n    - field: PatientID\n  code: taken\n")
+                .contains("identity.code: taken; the code is either derived")
+        );
+        assert!(
+            err("identity:\n  id_type: x\n  from:\n    - field: PatientID\n  code: verbatim\n")
+                .contains("verbatim needs a pattern on every field")
         );
         assert_eq!(
             err(
