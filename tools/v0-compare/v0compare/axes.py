@@ -94,10 +94,10 @@ def compare(con: duckdb.DuckDBPyConnection, cap: int = 12) -> AxesReport:
     con.execute("DROP TABLE IF EXISTS w.axis_pair")
     con.execute(
         "CREATE TABLE w.axis_pair AS "
-        "SELECT p.v0_stack, p.v1_stack, "
+        "SELECT p.v0_id AS v0_stack, p.v1_id AS v1_stack, "
         + ", ".join(f'c."{v0}" AS v0_{name}' for name, v0 in AXES)
         + " FROM w.stack_pair p "
-        "JOIN v0db.v0.series_classification_cache c ON c.series_stack_id = p.v0_stack"
+        "JOIN v0db.v0.series_classification_cache c ON c.series_stack_id = p.v0_id"
     )
     rep.stacks = con.execute("SELECT count(*) FROM w.axis_pair").fetchone()[0]
     if rep.stacks == 0:
