@@ -46,7 +46,11 @@ reference:
   partition_by: directory_type
   # and the whole pool when its own says nothing.
   fallback: global
-  fallback_when: [no_match, insufficient_matches, no_compatible_match, tie]
+  # The three v0 falls back on. A tie is not among them on purpose: a pool
+  # that cannot tell two answers apart has told us something, and asking a
+  # wider one until somebody answers is how a vote talks itself into a
+  # verdict.
+  fallback_when: [no_match, insufficient_matches, no_compatible_match]
   # A misc stack votes in the misc pool like any other, and then stops: it
   # is the pool of stacks nothing else described, so widening it to the whole
   # archive would answer with the archive's average.
