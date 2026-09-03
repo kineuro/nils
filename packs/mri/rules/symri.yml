@@ -1,0 +1,211 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The SyMRI route, transcribed from v0 0.5.3 `classification/branches/symri.py`.
+#
+# One quantitative acquisition, many outputs: the maps it measured and the
+# weighted images it synthesized from them. A map has no base contrast at all,
+# which is a fact worth being able to say: it is a measurement, not a
+# weighting, and v0 stores null there rather than a guess.
+
+rule_set: symri
+enter_when: {axis: provenance, is: SyMRI}
+decides: [base, construct, modifier, technique, directory_type]
+# v0's branch adds its modifiers to what the modifier rules found; only the
+# construct list is replaced.
+adds: [modifier]
+tiers: {exclusive: 0.95, keywords: 0.9, stated: 0.9}
+
+derive:
+  symri_technique:
+    axis: technique
+    cases:
+      - {when: is_qalas, value: QALAS}
+      - {value: MDME}
+
+order:
+  - myelin
+  - multi_qmap
+  - t1_map
+  - t2_map
+  - pd_map
+  - r1_map
+  - r2_map
+  - b1_map
+  - synthetic_flair
+  - synthetic_dir
+  - synthetic_psir
+  - synthetic_stir
+  - synthetic_t1
+  - synthetic_t2
+  - synthetic_pd
+  - phase
+  - magnitude
+  - fallback
+
+rules:
+
+  myelin:
+    clauses:
+      - {flag: has_myelin, tier: exclusive}
+      - {keywords: [myelin, myc], tier: keywords}
+    set: {base: null, construct: [MyelinMap], technique: {from: symri_technique}, directory_type: anat}
+
+  multi_qmap:
+    clauses:
+      - {flag: has_multi_qmap, tier: exclusive}
+      - {keywords: [multi_qmap, qmaps], tier: keywords}
+    set: {base: null, construct: [MultiQmap], technique: {from: symri_technique}, directory_type: anat}
+    why: 'one series carrying the T1, T2 and PD maps together, as GE MAGiC writes them'
+
+  t1_map:
+    clauses:
+      - {flag: has_qmap_t1, tier: exclusive}
+      # A derived map with no QMAP prefix: v0 reaches into the token set here.
+      - when:
+          all:
+            - is_derived
+            - {parser: image_type, token: T1}
+            - {not: {parser: image_type, token: SYNTHETIC}}
+            - {not: {parser: image_type, token: QMAP}}
+            - {not: {parser: image_type, token: T1W_SYNTHETIC}}
+        cite: 'a derived T1 map'
+        source: image_type
+        tier: exclusive
+      - {flag: has_t1_map, tier: exclusive}
+      - {keywords: ['t1 map', t1map], tier: keywords}
+    set: {base: null, construct: [T1map], technique: {from: symri_technique}, directory_type: anat}
+
+  t2_map:
+    clauses:
+      - {flag: has_qmap_t2, tier: exclusive}
+      # A derived map with no QMAP prefix: v0 reaches into the token set here.
+      - when:
+          all:
+            - is_derived
+            - {parser: image_type, token: T2}
+            - {not: {parser: image_type, token: SYNTHETIC}}
+            - {not: {parser: image_type, token: QMAP}}
+            - {not: {parser: image_type, token: T2W_SYNTHETIC}}
+        cite: 'a derived T2 map'
+        source: image_type
+        tier: exclusive
+      - {flag: has_t2_map, tier: exclusive}
+      - {keywords: ['t2 map', t2map], tier: keywords}
+    set: {base: null, construct: [T2map], technique: {from: symri_technique}, directory_type: anat}
+
+  pd_map:
+    clauses:
+      - {flag: has_qmap_pd, tier: exclusive}
+      # A derived map with no QMAP prefix: v0 reaches into the token set here.
+      - when:
+          all:
+            - is_derived
+            - {parser: image_type, token: PD}
+            - {not: {parser: image_type, token: SYNTHETIC}}
+            - {not: {parser: image_type, token: QMAP}}
+            - {not: {parser: image_type, token: PDW_SYNTHETIC}}
+        cite: 'a derived PD map'
+        source: image_type
+        tier: exclusive
+      - {flag: has_pd_map, tier: exclusive}
+      - {keywords: ['pd map', pdmap, 'proton density map'], tier: keywords}
+    set: {base: null, construct: [PDmap], technique: {from: symri_technique}, directory_type: anat}
+
+  r1_map:
+    clauses:
+      - {flag: has_r1, tier: exclusive}
+      - {keywords: ['r1 map', r1map], tier: keywords}
+    set: {base: null, construct: [R1map], technique: {from: symri_technique}, directory_type: anat}
+
+  r2_map:
+    clauses:
+      - {flag: has_r2, tier: exclusive}
+      - {keywords: ['r2 map', r2map], tier: keywords}
+    set: {base: null, construct: [R2map], technique: {from: symri_technique}, directory_type: anat}
+
+  b1_map:
+    clauses:
+      - {flag: has_b1_map, tier: exclusive}
+      - {keywords: ['b1 map', b1map], tier: keywords}
+    set: {base: null, construct: [B1map], technique: {from: symri_technique}, directory_type: fmap}
+    why: 'a transmit field map is a field map, not an anatomy'
+
+  synthetic_flair:
+    clauses:
+      - {flag: has_flair_synthetic, tier: exclusive}
+      - {when: {all: [{text: search_text, substring: flair}, {text: search_text, substring: synthetic}]}, cite: 'synthetic flair', source: text, tier: keywords}
+    set: {base: 'T2w', construct: [SyntheticFLAIR], modifier: [FLAIR], technique: {from: symri_technique}, directory_type: anat}
+
+  synthetic_dir:
+    clauses:
+      - {flag: has_dir_synthetic, tier: exclusive}
+      - {when: {all: [{text: search_text, substring: dir}, {text: search_text, substring: synthetic}]}, cite: 'synthetic dir', source: text, tier: keywords}
+    set: {base: 'T2w', construct: [SyntheticDIR], modifier: [DIR], technique: {from: symri_technique}, directory_type: anat}
+
+  synthetic_psir:
+    clauses:
+      - {flag: has_psir_synthetic, tier: exclusive}
+      - {when: {all: [{text: search_text, substring: psir}, {text: search_text, substring: synthetic}]}, cite: 'synthetic psir', source: text, tier: keywords}
+    set: {base: 'T1w', construct: [SyntheticPSIR], modifier: [PSIR], technique: {from: symri_technique}, directory_type: anat}
+
+  synthetic_stir:
+    clauses:
+      - {flag: has_stir_synthetic, tier: exclusive}
+      - {when: {all: [{text: search_text, substring: stir}, {text: search_text, substring: synthetic}]}, cite: 'synthetic stir', source: text, tier: keywords}
+    set: {base: 'T2w', construct: [SyntheticSTIR], modifier: [STIR], technique: {from: symri_technique}, directory_type: anat}
+
+  synthetic_t1:
+    clauses:
+      - {flag: has_t1_synthetic, tier: exclusive}
+      - when:
+          all:
+            - {text: search_text, substring: t1}
+            - {text: search_text, substring: synthetic}
+            - {not: {text: search_text, substring: flair}}
+            - {not: {text: search_text, substring: dir}}
+            - {not: {text: search_text, substring: psir}}
+        cite: 'synthetic t1'
+        source: text
+        tier: keywords
+    set: {base: 'T1w', construct: [SyntheticT1w], technique: {from: symri_technique}, directory_type: anat}
+
+  synthetic_t2:
+    clauses:
+      - {flag: has_t2_synthetic, tier: exclusive}
+      - when:
+          all:
+            - {text: search_text, substring: t2}
+            - {text: search_text, substring: synthetic}
+            - {not: {text: search_text, substring: flair}}
+            - {not: {text: search_text, substring: stir}}
+        cite: 'synthetic t2'
+        source: text
+        tier: keywords
+    set: {base: 'T2w', construct: [SyntheticT2w], technique: {from: symri_technique}, directory_type: anat}
+
+  synthetic_pd:
+    clauses:
+      - {flag: has_pd_synthetic, tier: exclusive}
+      - {when: {all: [{text: search_text, substring: pd}, {text: search_text, substring: synthetic}]}, cite: 'synthetic pd', source: text, tier: keywords}
+    set: {base: 'PDw', construct: [SyntheticPDw], technique: {from: symri_technique}, directory_type: anat}
+
+  phase:
+    clauses:
+      - {flag: has_phase, tier: exclusive}
+      - {keywords: [phase], tier: keywords}
+    set: {base: null, construct: [Phase], technique: {from: symri_technique}, directory_type: anat}
+    confidence: 0.8
+
+  magnitude:
+    clauses:
+      - {flag: has_magnitude, tier: exclusive}
+      - {keywords: [magnitude], tier: keywords}
+    set: {base: null, construct: [Magnitude], technique: {from: symri_technique}, directory_type: anat}
+    confidence: 0.8
+
+  fallback:
+    clauses:
+      - {when: true, cite: SyMRI, source: provenance}
+    set: {base: null, construct: [Magnitude], technique: {from: symri_technique}, directory_type: anat}
+    confidence: 0.7
+    why: 'a SyMRI acquisition whose output is unclear is the raw source data'

@@ -10,7 +10,11 @@
 
 axis: technique
 kind: single
-default: UNKNOWN
+# v0's pipeline stores the display name and not the identity, which is how
+# `3D-TSE` came to be written `SPACE` and `SP-GRE` written `FLASH`.
+stores: label
+# The pipeline stores the display name, and v0 spells the fallback `Unknown`.
+default: Unknown
 # The text a keyword is matched against is the pack's own, normalized by
 # its twelve steps from the fingerprint's folded fields (spec section 6.4).
 search: search_text

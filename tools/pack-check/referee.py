@@ -86,6 +86,37 @@ def main() -> int:
             r = det.detect(ctx)
             return r.construct_csv, "", ""
 
+    elif a.axis.startswith("pipeline:"):
+        # The whole of v0's classifier, not one detector: what a route
+        # overrides is only visible here.
+        from classification.pipeline import ClassificationPipeline  # noqa: E402
+
+        pipe = ClassificationPipeline()
+        want = a.axis.split(":", 1)[1]
+
+        def decide(ctx):
+            r = pipe.classify(ctx)
+            v = {
+                "base": r.base,
+                "technique": r.technique,
+                "construct": r.construct_csv,
+                "modifier": r.modifier_csv,
+                "provenance": r.provenance,
+                "directory_type": r.directory_type,
+                "body_part": r.body_part,
+                "post_contrast": None if r.post_contrast is None else str(r.post_contrast),
+            }[want]
+            return v or "", "", ""
+
+    elif a.axis == "directory_type":
+        from classification.pipeline import ClassificationPipeline  # noqa: E402
+
+        pipe = ClassificationPipeline()
+
+        def decide(ctx):
+            r = pipe.classify(ctx)
+            return r.directory_type or "", "", ""
+
     elif a.axis == "post_contrast":
         from classification.detectors.contrast import ContrastDetector  # noqa: E402
 
@@ -147,10 +178,11 @@ def main() -> int:
         raise SystemExit(f"the referee does not know the {a.axis} axis yet")
 
     out = sys.stdout
+    name = a.axis.split(":", 1)[-1]
     for fp in rows(a.csv):
         ctx = ClassificationContext.from_fingerprint(fp)
         value, tier, matched = decide(ctx)
-        out.write(f"{fp['series_stack_id']}\t{a.axis}\t{value}\t{tier}\t{matched}\n")
+        out.write(f"{fp['series_stack_id']}\t{name}\t{value}\t{tier}\t{matched}\n")
     return 0
 
 

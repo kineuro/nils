@@ -340,3 +340,17 @@ values:
       - r2starmap
     detection:
       exclusive: has_r2star
+
+  # Vocabulary the routes set and this axis's own rules never try. v0 has no
+  # declaration for these at all: its SyMRI route writes them and its intent
+  # cascade tests for them, with nothing tying the two together. Three of them
+  # are in the live corpus (SyntheticDIR 241, SyntheticPSIR 287,
+  # SyntheticSTIR 28); FatFraction is tested for and was never written.
+  'SyntheticSTIR': {}
+  'SyntheticDIR': {}
+  'SyntheticPSIR': {}
+  'FatFraction': {}
+  # The SyMRI route writes it; v0 declares it nowhere and wrote it 170 times.
+  'MultiQmap': {}
+  # The EPIMix route writes it; v0 declares it nowhere and wrote it 67 times.
+  'isoDWI': {}

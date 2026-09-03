@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# What is not classified at all, transcribed from v0 0.5.3
+# `classification/pipeline.py` (its first act) and `core/context.py`.
+#
+# v0 returns an excluded result before any detector runs, so an excluded stack
+# carries no axis at all rather than an answer nobody should read. This rule
+# set runs first and decides every axis, most of them to nothing.
+
+rule_set: excluded
+decides: [directory_type, base, technique, modifier, construct, provenance, body_part, post_contrast]
+
+order: [screenshot, error_map, secondary_reformat]
+
+rules:
+
+  screenshot:
+    clauses:
+      - {flag: is_screenshot, tier: exclusive}
+    set: &blank
+      directory_type: excluded
+      base: null
+      technique: null
+      modifier: null
+      construct: null
+      provenance: null
+      body_part: null
+      post_contrast: null
+
+  error_map:
+    clauses:
+      - {flag: is_error, tier: exclusive}
+    set: *blank
+
+  # A workstation reformat: tagged SECONDARY and never PRIMARY. The session
+  # rescue of the pass layer is what lets one back in (spec section 7.2).
+  secondary_reformat:
+    clauses:
+      - {when: {all: [is_secondary, {not: is_primary}]}, cite: 'secondary without primary', source: flags, tier: exclusive}
+    set: *blank

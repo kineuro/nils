@@ -40,7 +40,8 @@ cases:
       text_series_description: 'ax T2 FLAIR'
       inversion_time: 2500
     axes:
-      technique: IR-TSE
+      # The axis stores the display name: v0 calls IR-TSE a TIRM in a row.
+      technique: TIRM
       modifier: FLAIR
 
   - name: an ADC map is a construct, and the map is what it is of

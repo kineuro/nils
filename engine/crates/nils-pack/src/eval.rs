@@ -167,8 +167,18 @@ impl Ctx for Evaluated<'_> {
 // Classifying: the rule sets in order, each leaving alone what an earlier one
 // decided (§6.3).
 
-use crate::rules::{Clause, Rule, Tier};
+use crate::rules::{Clause, Rule, Tier, Which};
 use crate::verdict::{AxisVerdict, Evidence, Verdict};
+
+/// The value index a set names: the one it wrote, or the one the rule set
+/// worked out for this stack.
+fn which(w: Which, derived: &[Option<usize>]) -> Option<usize> {
+    match w {
+        Which::Fixed(i) => Some(i),
+        Which::Nothing => None,
+        Which::Derived(d) => derived.get(d).copied().flatten(),
+    }
+}
 
 /// What fired, and what it cites.
 #[derive(Clone)]
@@ -190,7 +200,14 @@ impl Evaluated<'_> {
         // Per axis: the value indices collected so far, and their evidence.
         let mut collected: Vec<Vec<(usize, Fired, String, String)>> =
             (0..pack.axes.len()).map(|_| Vec::new()).collect();
-        let mut decided: Vec<bool> = vec![false; pack.axes.len()];
+        // An axis a rule set has closed: no later set may add to it. A set
+        // that collects (a multi-valued axis's own rules) never closes one,
+        // which is how several modifiers accumulate while a route's construct
+        // list replaces rather than joins.
+        let mut closed: Vec<bool> = vec![false; pack.axes.len()];
+        // An axis a rule decided to be nothing is closed too: the default is
+        // for an axis nobody spoke about, not for one told to stay empty.
+        let mut said_nothing: Vec<bool> = vec![false; pack.axes.len()];
 
         for set in &pack.rule_sets {
             if let Some(e) = &set.enter_when
@@ -199,14 +216,21 @@ impl Evaluated<'_> {
                 continue;
             }
             verdict.entered.push(set.name.clone());
+            // What the set works out for this stack before its rules run.
+            let derived: Vec<Option<usize>> = set
+                .derives
+                .iter()
+                .map(|d| {
+                    d.cases
+                        .iter()
+                        .find(|c| c.when.as_ref().is_none_or(|w| w.eval(None, self)))
+                        .map(|c| c.value)
+                })
+                .collect();
             for rule in &set.rules {
                 // A rule whose every axis is single-valued and already
                 // decided has nothing left to say.
-                if rule
-                    .sets
-                    .iter()
-                    .all(|s| !pack.axes[s.axis].multi && decided[s.axis])
-                {
+                if rule.sets.iter().all(|s| closed[s.axis]) {
                     continue;
                 }
                 let Some(fired) = self.fire(rule) else {
@@ -214,7 +238,7 @@ impl Evaluated<'_> {
                 };
                 for sets in &rule.sets {
                     let axis = &pack.axes[sets.axis];
-                    if !axis.multi && decided[sets.axis] {
+                    if closed[sets.axis] {
                         continue;
                     }
                     for v in &sets.values {
@@ -223,8 +247,14 @@ impl Evaluated<'_> {
                         {
                             continue;
                         }
+                        let Some(value) = which(v.value, &derived) else {
+                            // Decided, and the answer is nothing.
+                            closed[sets.axis] = true;
+                            said_nothing[sets.axis] = true;
+                            continue;
+                        };
                         collected[sets.axis].push((
-                            v.value,
+                            value,
                             Fired {
                                 tier: fired.tier,
                                 confidence: rule.confidence.unwrap_or(fired.confidence),
@@ -235,8 +265,11 @@ impl Evaluated<'_> {
                             rule.id.clone(),
                         ));
                     }
-                    if !axis.multi {
-                        decided[sets.axis] = true;
+                    // A rule set that decides rather than collects decides
+                    // the axis whole: a route replaces the construct list, it
+                    // does not add to what an axis's own rules would say.
+                    if !set.collect && !set.adds.contains(&sets.axis) {
+                        closed[sets.axis] = true;
                     }
                     // A later rule set reads what this one decided. The
                     // conditions are evaluated before the borrow, because
@@ -245,7 +278,8 @@ impl Evaluated<'_> {
                         .values
                         .iter()
                         .filter(|v| v.when.as_ref().is_none_or(|w| w.eval(None, self)))
-                        .map(|v| axis.stored(v.value).to_string())
+                        .filter_map(|v| which(v.value, &derived))
+                        .map(|i| axis.stored(i).to_string())
                         .collect();
                     self.decided.borrow_mut()[sets.axis].extend(just_set);
                 }
@@ -281,6 +315,9 @@ impl Evaluated<'_> {
             });
 
             if hits.is_empty() {
+                if said_nothing[ai] {
+                    continue;
+                }
                 if let Some(d) = &axis.default {
                     verdict.axes.push(AxisVerdict {
                         axis: axis.name.clone(),

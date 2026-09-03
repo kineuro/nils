@@ -1,0 +1,209 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The intent cascade, transcribed from v0 0.5.3 `classification/pipeline.py`,
+# stage 8 and `_synthesize_intent`.
+#
+# v0 has **two** copies of this, and they disagree: the pipeline's, below, and
+# a simplified one inside gap filling, so a stack can be given one intent when
+# it is classified and another when it is completed. There is one declaration
+# here, and the passes evaluate it too, which is what makes the second copy
+# impossible rather than merely discouraged.
+#
+# Its clauses read axes and not flags, which is the whole reason an axis atom
+# exists in the language, and why this rule set runs last.
+
+rule_set: intent
+decides: [directory_type]
+tiers: {stated: 0.8}
+
+order:
+  - localizer
+  - provenance_dwi
+  - provenance_perf
+  - provenance_func
+  - construct_dwi
+  - construct_perf
+  - construct_fmap
+  - dual_echo_fmap
+  - text_func
+  - base_dwi
+  - base_perf
+  - base_anat
+  - construct_swi
+  - construct_quant
+  - construct_synthetic
+  - construct_dixon
+  - provenance_anat
+
+rules:
+
+  localizer:
+    clauses:
+      - {when: {axis: provenance, is: Localizer}, cite: Localizer, source: provenance}
+    set: {directory_type: localizer}
+
+  provenance_dwi:
+    clauses:
+      - {when: {axis: provenance, is: DTIRecon}, cite: DTIRecon, source: provenance}
+    set: {directory_type: dwi}
+
+  provenance_perf:
+    clauses:
+      - {when: {axis: provenance, is: PerfusionRecon}, cite: PerfusionRecon, source: provenance}
+      - {when: {axis: provenance, is: ASLRecon}, cite: ASLRecon, source: provenance}
+    set: {directory_type: perf}
+
+  provenance_func:
+    clauses:
+      - {when: {axis: provenance, is: BOLDRecon}, cite: BOLDRecon, source: provenance}
+    set: {directory_type: func}
+
+  construct_dwi:
+    clauses:
+      - when:
+          any:
+            - {axis: construct, is: ADC}
+            - {axis: construct, is: eADC}
+            - {axis: construct, is: FA}
+            - {axis: construct, is: Trace}
+        cite: 'a diffusion-derived construct'
+        source: construct
+    set: {directory_type: dwi}
+
+  construct_perf:
+    clauses:
+      - when:
+          any:
+            - {axis: construct, is: CBF}
+            - {axis: construct, is: CBV}
+            - {axis: construct, is: MTT}
+            - {axis: construct, is: Tmax}
+            - {axis: construct, is: TTP}
+        cite: 'a perfusion-derived construct'
+        source: construct
+    set: {directory_type: perf}
+
+  construct_fmap:
+    clauses:
+      - {when: {axis: construct, is: B0map}, cite: B0map, source: construct}
+    set: {directory_type: fmap}
+
+  # v0 also has a PhaseMap rule here. It is unreachable: no construct of that
+  # name exists in its vocabulary and none was ever written, in 518,365
+  # stacks. It is left out rather than carried, and the count is in
+  # PROVENANCE.md.
+  dual_echo_fmap:
+    clauses:
+      - when:
+          all:
+            - {axis: construct, is: InPhase}
+            - {axis: construct, is: OutPhase}
+            - not: {any: [{axis: construct, is: Water}, {axis: construct, is: Fat}, {axis: construct, is: FatFraction}]}
+        cite: 'in-phase and out-of-phase without a Dixon output'
+        source: construct
+    set: {directory_type: fmap}
+
+  text_func:
+    clauses:
+      - when:
+          all:
+            - {text: search_text, any_substring: [bold, fmri, 'resting state', 'resting-state', 'task-', reti, retinotopy, functional]}
+            - any:
+                - {axis: technique, is: EPI}
+                - {axis: technique, is: GRE-EPI}
+                - {axis: technique, is: SE-EPI}
+                - {axis: technique, is: MS-EPI}
+                - {text: search_text, substring: epi}
+        cite: 'a functional word beside an echo-planar readout'
+        source: text
+    set: {directory_type: func}
+
+  base_dwi:
+    clauses:
+      - {when: {axis: base, is: DWI}, cite: DWI, source: base}
+    set: {directory_type: dwi}
+
+  base_perf:
+    clauses:
+      - {when: {axis: base, is: PWI}, cite: PWI, source: base}
+    set: {directory_type: perf}
+
+  # v0 guards this with `not (modifiers & {DSC, DCE, ASL})`, and none of those
+  # three is a value of its modifier axis, so the guard can never block and
+  # the rule is unconditional. Carried as it behaves, recorded in
+  # PROVENANCE.md as one more name that names nothing.
+  base_anat:
+    clauses:
+      - when:
+          all:
+            - any:
+                - {axis: base, is: 'T1w'}
+                - {axis: base, is: 'T2w'}
+                - {axis: base, is: 'PDw'}
+                - {axis: base, is: 'T2*w'}
+                - {axis: base, is: 'SWI'}
+                - {axis: base, is: 'MTw'}
+                - {axis: base, is: 'T1rho'}
+                - {axis: base, is: 'T2rho'}
+        cite: 'a tissue contrast'
+        source: base
+    set: {directory_type: anat}
+
+  construct_swi:
+    clauses:
+      - when:
+          any:
+            - {axis: construct, is: QSM}
+            - {axis: construct, is: MinIP}
+            - {axis: construct, is: Magnitude}
+        cite: 'a susceptibility output'
+        source: construct
+    set: {directory_type: anat}
+
+  construct_quant:
+    clauses:
+      - when:
+          any:
+            - {axis: construct, is: T1map}
+            - {axis: construct, is: T2map}
+            - {axis: construct, is: PDmap}
+            - {axis: construct, is: R1map}
+            - {axis: construct, is: R2map}
+            - {axis: construct, is: B1map}
+        cite: 'a quantitative map'
+        source: construct
+    set: {directory_type: anat}
+
+  construct_synthetic:
+    clauses:
+      - when:
+          any:
+            - {axis: construct, is: SyntheticT1w}
+            - {axis: construct, is: SyntheticT2w}
+            - {axis: construct, is: SyntheticPDw}
+            - {axis: construct, is: SyntheticFLAIR}
+            - {axis: construct, is: SyntheticSTIR}
+            - {axis: construct, is: SyntheticDIR}
+            - {axis: construct, is: SyntheticPSIR}
+        cite: 'a synthetic contrast'
+        source: construct
+    set: {directory_type: anat}
+
+  construct_dixon:
+    clauses:
+      - when:
+          any:
+            - {axis: construct, is: Water}
+            - {axis: construct, is: Fat}
+            - {axis: construct, is: FatFraction}
+        cite: 'a Dixon output'
+        source: construct
+    set: {directory_type: anat}
+
+  provenance_anat:
+    clauses:
+      - {when: {axis: provenance, is: SWIRecon}, cite: SWIRecon, source: provenance}
+      - {when: {axis: provenance, is: SyMRI}, cite: SyMRI, source: provenance}
+      - {when: {axis: provenance, is: ProjectionDerived}, cite: ProjectionDerived, source: provenance}
+      - {when: {axis: provenance, is: SubtractionDerived}, cite: SubtractionDerived, source: provenance}
+    set: {directory_type: anat}

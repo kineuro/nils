@@ -124,9 +124,39 @@ impl Clause {
 /// A value a rule sets on an axis, kept only when its condition holds.
 #[derive(Debug, Clone)]
 pub struct SetValue {
-    /// Index into the axis's declared values.
-    pub value: usize,
+    pub value: Which,
     pub when: Option<Expr>,
+}
+
+/// Which value: one the rule names, or one the rule set derived for this
+/// stack. A route needs the second, because one SWI acquisition's outputs are
+/// all GRE or all EPI and the rule that names the output should not have to
+/// say which twice.
+#[derive(Debug, Clone, Copy)]
+pub enum Which {
+    /// An index into the axis's declared values.
+    Fixed(usize),
+    /// Decided, and the answer is nothing. A quantitative map has no base
+    /// contrast: it is a measurement, not a weighting, and v0 stores null
+    /// there rather than a guess.
+    Nothing,
+    /// An index into the rule set's `derives`, whose cases are all values of
+    /// the axis it is assigned to; the loader checks that.
+    Derived(usize),
+}
+
+/// One derived value: ordered cases, the first that holds decides.
+#[derive(Debug, Clone)]
+pub struct Derive {
+    pub name: String,
+    pub cases: Vec<DeriveCase>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeriveCase {
+    pub when: Option<Expr>,
+    /// The axis value this case gives.
+    pub value: usize,
 }
 
 /// What a rule writes: one axis, one or more values.
@@ -211,10 +241,17 @@ impl Axis {
 #[derive(Debug, Clone)]
 pub struct RuleSet {
     pub name: String,
+    /// Values this rule set works out per stack before its rules run.
+    pub derives: Vec<Derive>,
     /// Every rule that fires contributes, rather than the first one deciding.
     /// True for a multi-valued axis (modifier, construct, acceleration),
     /// false for everything else, including every route.
     pub collect: bool,
+    /// Axes this set contributes to rather than decides: what it writes joins
+    /// what an axis's own rules say instead of replacing it. v0's branches
+    /// replace the construct list and add to the modifiers, and the
+    /// difference is 35 stacks on the live corpus.
+    pub adds: Vec<usize>,
     /// The axes a rule of this set may write. Checked at load: a rule that
     /// sets an axis its set does not declare fails the pack.
     pub decides: Vec<usize>,

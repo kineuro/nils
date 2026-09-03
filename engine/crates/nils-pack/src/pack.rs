@@ -18,7 +18,9 @@ use crate::error::{Error, R};
 use crate::expr::{Case, Cmp, Expr, NumOp};
 use crate::normalize::{Conditional, Normalizer};
 use crate::overlay::Overlay;
-use crate::rules::{Axis, AxisValue, Clause, Rule, RuleSet, SetValue, Sets, Tier};
+use crate::rules::{
+    Axis, AxisValue, Clause, Derive, DeriveCase, Rule, RuleSet, SetValue, Sets, Tier, Which,
+};
 use crate::stack::field_index;
 use crate::version::Version;
 use crate::yaml::{self, File};
@@ -731,17 +733,22 @@ fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<
                 .ok_or_else(|| Error::at(at, "an axis atom needs `is`"))?,
             at,
         )?;
-        if sc.axes[ix].value_index(&want).is_none() && sc.axes[ix].default.as_deref() != Some(&want)
-        {
-            return Err(Error::at(
-                at,
-                format!("{want} is not a value of the {name} axis"),
-            ));
-        }
-        return Ok(Expr::Axis {
-            axis: ix,
-            value: want,
-        });
+        // An axis atom may name a value by its identity or by what a row
+        // stores, and it compares against what is stored, since that is what
+        // an earlier rule set left behind.
+        let axis = &sc.axes[ix];
+        let value = match axis.value_index(&want) {
+            Some(i) => axis.stored(i).to_string(),
+            None if axis.values.iter().any(|v| v.label == want) => want,
+            None if axis.default.as_deref() == Some(&want) => want,
+            None => {
+                return Err(Error::at(
+                    at,
+                    format!("{want} is not a value of the {name} axis"),
+                ));
+            }
+        };
+        return Ok(Expr::Axis { axis: ix, value });
     }
 
     if let Some(p) = m.get("parser") {
@@ -1059,7 +1066,7 @@ fn load_axis(
             sets: vec![Sets {
                 axis: axis_index,
                 values: vec![SetValue {
-                    value: i,
+                    value: Which::Fixed(i),
                     when: None,
                 }],
             }],
@@ -1111,7 +1118,10 @@ fn load_axis(
                 }],
                 sets: vec![Sets {
                     axis: axis_index,
-                    values: vec![SetValue { value, when: None }],
+                    values: vec![SetValue {
+                        value: Which::Fixed(value),
+                        when: None,
+                    }],
                 }],
                 confidence,
                 why: rm.get("why").map(|w| yaml::text(w, &at)).transpose()?,
@@ -1130,6 +1140,8 @@ fn load_axis(
         },
         set: RuleSet {
             name,
+            derives: Vec::new(),
+            adds: Vec::new(),
             collect: multi,
             decides: vec![axis_index],
             enter_when: None,
@@ -1304,6 +1316,28 @@ fn load_rule_set(
             Error::at("decides", format!("no axis named {a}")).in_file(&f.path, Some(&f.source))
         })?);
     }
+    // Axes this set contributes to rather than decides: v0's branches replace
+    // the construct list and add to the modifiers.
+    let mut adds = Vec::new();
+    if let Some(v) = m.get("adds") {
+        for a in f.blame(yaml::texts(v, "adds"))? {
+            let i = axes.iter().position(|x| x.name == a).ok_or_else(|| {
+                Error::at("adds", format!("no axis named {a}")).in_file(&f.path, Some(&f.source))
+            })?;
+            if !decides.contains(&i) {
+                return Err(Error::at("adds", format!("{a} is not in `decides`"))
+                    .in_file(&f.path, Some(&f.source)));
+            }
+            if !axes[i].multi {
+                return Err(Error::at(
+                    "adds",
+                    format!("{a} holds one value, so there is nothing to add to"),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+            adds.push(i);
+        }
+    }
 
     let compile_here = |body: &Value, at: &str, regexes: &mut Vec<Regex>| -> R<Expr> {
         let mut sc = Scope {
@@ -1338,6 +1372,49 @@ fn load_rule_set(
         Some(w) => Some(f.blame(compile_here(w, &format!("{at}.enter_when"), regexes))?),
         None => None,
     };
+
+    // Values the set works out per stack, before its rules run.
+    let mut derives: Vec<Derive> = Vec::new();
+    if let Some(d) = m.get("derive") {
+        for (dname, spec) in f.blame(yaml::obj(d, &format!("{at}.derive")))? {
+            let dat = format!("{at}.derive.{dname}");
+            let dm = f.blame(yaml::obj(spec, &dat))?;
+            let axis_name = f.blame(yaml::text(yaml::get(dm, "axis", &dat)?, &dat))?;
+            let ai = axes
+                .iter()
+                .position(|x| x.name == axis_name)
+                .ok_or_else(|| {
+                    Error::at(&dat, format!("no axis named {axis_name}"))
+                        .in_file(&f.path, Some(&f.source))
+                })?;
+            let mut cases = Vec::new();
+            for (i, c) in f
+                .blame(yaml::arr(yaml::get(dm, "cases", &dat)?, &dat))?
+                .iter()
+                .enumerate()
+            {
+                let cat = format!("{dat}.cases[{i}]");
+                let cm = f.blame(yaml::obj(c, &cat))?;
+                let id = f.blame(yaml::text(yaml::get(cm, "value", &cat)?, &cat))?;
+                let value = axes[ai].value_index(&id).ok_or_else(|| {
+                    Error::at(&cat, format!("{id} is not a value of the {axis_name} axis"))
+                        .in_file(&f.path, Some(&f.source))
+                })?;
+                let when = match cm.get("when") {
+                    Some(w) => Some(f.blame(compile_here(w, &format!("{cat}.when"), regexes))?),
+                    None => None,
+                };
+                cases.push(DeriveCase { when, value });
+            }
+            if cases.is_empty() {
+                return Err(Error::at(&dat, "has no cases").in_file(&f.path, Some(&f.source)));
+            }
+            derives.push(Derive {
+                name: dname.clone(),
+                cases,
+            });
+        }
+    }
 
     let order = f.blame(yaml::texts(yaml::get(m, "order", &at)?, "order"))?;
     let bodies = f.blame(yaml::obj(yaml::get(m, "rules", &at)?, &at))?;
@@ -1447,6 +1524,35 @@ fn load_rule_set(
             let mut values = Vec::with_capacity(items.len());
             for (j, item) in items.iter().enumerate() {
                 let iat = format!("{sat}[{j}]");
+                if let Value::Object(mm) = item
+                    && let Some(from) = mm.get("from")
+                {
+                    let dname = f.blame(yaml::text(from, &iat))?;
+                    let di = derives
+                        .iter()
+                        .position(|d| d.name == dname)
+                        .ok_or_else(|| {
+                            Error::at(&iat, format!("nothing derives {dname}"))
+                                .in_file(&f.path, Some(&f.source))
+                        })?;
+                    values.push(SetValue {
+                        value: Which::Derived(di),
+                        when: match mm.get("when") {
+                            Some(w) => {
+                                Some(f.blame(compile_here(w, &format!("{iat}.when"), regexes))?)
+                            }
+                            None => None,
+                        },
+                    });
+                    continue;
+                }
+                if item.is_null() {
+                    values.push(SetValue {
+                        value: Which::Nothing,
+                        when: None,
+                    });
+                    continue;
+                }
                 let (id, when) = match item {
                     Value::Object(mm) if mm.contains_key("value") => (
                         f.blame(yaml::text(&mm["value"], &iat))?,
@@ -1461,11 +1567,17 @@ fn load_rule_set(
                 };
                 // A value outside the axis's vocabulary fails the pack here,
                 // which is what stops one name drifting into two.
-                let value = axes[ai].value_index(&id).ok_or_else(|| {
-                    Error::at(&iat, format!("{id} is not a value of the {axis_name} axis"))
-                        .in_file(&f.path, Some(&f.source))
-                })?;
-                values.push(SetValue { value, when });
+                let value = axes[ai]
+                    .value_index(&id)
+                    .or_else(|| axes[ai].values.iter().position(|v| v.label == id))
+                    .ok_or_else(|| {
+                        Error::at(&iat, format!("{id} is not a value of the {axis_name} axis"))
+                            .in_file(&f.path, Some(&f.source))
+                    })?;
+                values.push(SetValue {
+                    value: Which::Fixed(value),
+                    when,
+                });
             }
             sets.push(Sets { axis: ai, values });
         }
@@ -1489,6 +1601,8 @@ fn load_rule_set(
 
     Ok(RuleSet {
         name,
+        derives,
+        adds,
         collect: m.get("collect").and_then(|c| c.as_bool()).unwrap_or(false),
         decides,
         enter_when,

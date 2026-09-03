@@ -1,0 +1,166 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The EPIMix and NeuroMix route, transcribed from v0 0.5.3
+# `classification/branches/epimix.py`.
+#
+# One rapid multicontrast acquisition that yields a whole examination's worth
+# of weightings in a couple of minutes. The text says which output this is,
+# and when it does not, the inversion and echo times do.
+
+rule_set: epimix
+enter_when: {axis: provenance, is: EPIMix}
+decides: [base, construct, modifier, technique, directory_type]
+# v0's branch adds its modifiers to what the modifier rules found; only the
+# construct list is replaced.
+adds: [modifier]
+tiers: {keywords: 0.9, physics: 0.8, stated: 0.9}
+
+order:
+  - t1_flair
+  - t2_flair_ssfse
+  - t2_flair_epi
+  - swi_3depi
+  - adc
+  - iso_dwi
+  - t2star
+  - t1w_3depi
+  - t2w_ssfse
+  - t2w_fse
+  - t2w_epi
+  - ti_long_flair
+  - ti_short_t1_flair
+  - te_short_t2star
+
+rules:
+
+  t1_flair:
+    clauses:
+      - {when: {all: [{text: search_text, matches: '\bt1(?:w|flair|\s|$|-)'}, {text: search_text, substring: flair}]}, cite: 't1 and flair', source: text, tier: keywords}
+    set: {base: 'T1w', modifier: [FLAIR], technique: 'SE-EPI', directory_type: anat}
+    confidence: 0.9
+
+  # A single-shot fast spin echo readout, which NeuroMix uses for its FLAIR
+  # to avoid the geometric distortion an echo-planar readout brings.
+  t2_flair_ssfse:
+    clauses:
+      - when:
+          all:
+            - {text: search_text, matches: '\bt2(?:w|flair|\s|$|-)'}
+            - {not: {text: search_text, substring: t2star}}
+            - {text: search_text, substring: flair}
+            - {not: {text: search_text, matches: '\bt1(?:w|flair|\s|$|-)'}}
+            - any:
+                - {text: search_text, any_substring: [ssfse, 'ss-fse', haste, 'single shot fse', 'single-shot fse']}
+                - all:
+                    - {text: search_text, any_substring: [neuromix, mix2, mix3]}
+                    - {not: {text: search_text, substring: epi}}
+        cite: 't2 flair on a single-shot readout'
+        source: text
+        tier: keywords
+    set: {base: 'T2w', modifier: [FLAIR], technique: HASTE, directory_type: anat}
+    confidence: 0.9
+
+  t2_flair_epi:
+    clauses:
+      - when:
+          all:
+            - {text: search_text, matches: '\bt2(?:w|flair|\s|$|-)'}
+            - {not: {text: search_text, substring: t2star}}
+            - {text: search_text, substring: flair}
+            - {not: {text: search_text, matches: '\bt1(?:w|flair|\s|$|-)'}}
+        cite: 't2 flair'
+        source: text
+        tier: keywords
+    set: {base: 'T2w', modifier: [FLAIR], technique: 'SE-EPI', directory_type: anat}
+    confidence: 0.9
+
+  swi_3depi:
+    clauses:
+      - {keywords: [swi], tier: keywords}
+    set: {base: SWI, construct: [SWI], technique: EPI, directory_type: anat}
+    confidence: 0.9
+
+  adc:
+    clauses:
+      - {when: {any: [{text: search_text, substring: ' adc'}, {text: search_text, substring: 'adc '}, {text: search_text, prefix: adc}]}, cite: adc, source: text, tier: keywords}
+    set: {base: DWI, construct: [ADC], technique: 'SE-EPI', directory_type: dwi}
+    confidence: 0.9
+
+  iso_dwi:
+    clauses:
+      - {keywords: ['iso dwi', isodwi], tier: keywords}
+    set: {base: DWI, construct: [isoDWI], technique: 'SE-EPI', directory_type: dwi}
+    confidence: 0.9
+
+  t2star:
+    clauses:
+      - {keywords: [t2star, 't2*', 'gradient-echo', 'gradient echo'], tier: keywords}
+    set: {base: 'T2*w', technique: 'GRE-EPI', directory_type: anat}
+    confidence: 0.9
+
+  t1w_3depi:
+    clauses:
+      - {when: {all: [{text: search_text, any_substring: ['3d-epi', 3depi, '3d epi']}, {text: search_text, matches: '\bt1(?:w|flair|\s|$|-)'}]}, cite: 'a 3D echo-planar t1', source: text, tier: keywords}
+    set: {base: 'T1w', technique: EPI, directory_type: anat}
+    confidence: 0.9
+
+  t2w_ssfse:
+    clauses:
+      - when:
+          all:
+            - {text: search_text, matches: '\bt2(?:w|flair|\s|$|-)'}
+            - {not: {text: search_text, substring: t2star}}
+            - {not: {text: search_text, substring: flair}}
+            - {text: search_text, any_substring: [ssfse, 'ss-fse', haste, 'single shot fse', 'single-shot fse']}
+        cite: 't2 on a single-shot readout'
+        source: text
+        tier: keywords
+    set: {base: 'T2w', technique: HASTE, directory_type: anat}
+    confidence: 0.9
+
+  t2w_fse:
+    clauses:
+      - when:
+          all:
+            - {text: search_text, matches: '\bt2(?:w|flair|\s|$|-)'}
+            - {not: {text: search_text, substring: t2star}}
+            - {not: {text: search_text, substring: flair}}
+            - {text: search_text, substring: fse}
+            - {not: {text: search_text, any_substring: [ssfse, 'ss-fse', haste, 'single shot fse', 'single-shot fse']}}
+        cite: 't2 on a fast spin echo'
+        source: text
+        tier: keywords
+    set: {base: 'T2w', technique: TSE, directory_type: anat}
+    confidence: 0.9
+
+  t2w_epi:
+    clauses:
+      - when:
+          all:
+            - {text: search_text, matches: '\bt2(?:w|flair|\s|$|-)'}
+            - {not: {text: search_text, substring: t2star}}
+            - {not: {text: search_text, substring: flair}}
+        cite: t2
+        source: text
+        tier: keywords
+    set: {base: 'T2w', technique: 'SE-EPI', directory_type: anat}
+    confidence: 0.9
+
+  # The text said nothing useful; the inversion and echo times still can.
+  ti_long_flair:
+    clauses:
+      - {when: {field: inversion_time, gt: 2000}, cite: 'a long inversion time', source: physics, tier: physics}
+    set: {base: 'T2w', modifier: [FLAIR], technique: 'SE-EPI', directory_type: anat}
+    confidence: 0.8
+
+  ti_short_t1_flair:
+    clauses:
+      - {when: {all: [{field: inversion_time, ge: 500}, {field: inversion_time, le: 750}, {field: echo_time, lt: 40}]}, cite: 'a short inversion time', source: physics, tier: physics}
+    set: {base: 'T1w', modifier: [FLAIR], technique: 'SE-EPI', directory_type: anat}
+    confidence: 0.8
+
+  te_short_t2star:
+    clauses:
+      - {when: {all: [{field: inversion_time, eq: 0}, {field: echo_time, gt: 0}, {field: echo_time, lt: 60}]}, cite: 'no inversion and a short echo time', source: physics, tier: physics}
+    set: {base: 'T2*w', technique: 'GRE-EPI', directory_type: anat}
+    confidence: 0.8
