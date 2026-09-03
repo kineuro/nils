@@ -561,7 +561,11 @@ pub fn take(
     ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
 
     for (i, (answer, count)) in ranked.iter().enumerate() {
-        let candidate = &axes[v.vote_on[v.compat_axis]].values[answer[v.compat_axis] as usize].id;
+        // What v0 reads from its own column, which is the value as stored:
+        // its family table is keyed on that, and `BOLD` and `BOLD-EPI` are
+        // two rows of it with two different families.
+        let judged = &axes[v.vote_on[v.compat_axis]];
+        let candidate = judged.stored(answer[v.compat_axis] as usize);
         if !compatible(&v.compat, sequence, candidate, regexes) {
             continue;
         }

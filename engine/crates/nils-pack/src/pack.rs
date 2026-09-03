@@ -2184,17 +2184,25 @@ fn load_vote(
         });
     }
 
-    // Which of the voted axes the filter judges: the one whose vocabulary the
-    // family table names.
+    // Which of the voted axes the filter judges. Declared, never guessed: a
+    // family table names values, and two axes can both have a value called
+    // SWI, so guessing picks the wrong one and every verdict after it is
+    // judged against the wrong vocabulary.
+    let judged = f.blame(yaml::text(
+        yaml::get(c, "judges", &path)?,
+        &format!("{path}.judges"),
+    ))?;
+    let judged_axis = f.blame(axis_ix(&judged, &format!("{path}.judges")))?;
     let compat_axis = vote_on
         .iter()
-        .position(|a| {
-            axes[*a]
-                .values
-                .iter()
-                .any(|v| family_of.contains_key(&v.id))
+        .position(|a| *a == judged_axis)
+        .ok_or_else(|| {
+            Error::at(
+                format!("{path}.judges"),
+                format!("{judged} is not one of the axes this pass votes on"),
+            )
         })
-        .unwrap_or(0);
+        .map_err(|e| e.in_file(&f.path, Some(&f.source)))?;
 
     Ok(Vote {
         dims,

@@ -92,6 +92,9 @@ emit:
 # `family`. The two agree about SE, GRE and EPI and disagree about everything
 # the axis calls MIXED, and this is the one the vote was verified against.
 compatibility:
+  # Which of the voted axes these rules judge. Declared and not guessed: both
+  # base and technique have a value called SWI.
+  judges: technique
   # What the rules below read: the stack's own ScanningSequence, upper-cased.
   # The candidate technique is the other half of the subject, and `family`
   # and `candidate_empty` are the atoms that reach it.
