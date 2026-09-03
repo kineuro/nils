@@ -1474,10 +1474,8 @@ fn the_custody_page_is_current() {
 fn fingerprint_derives_once_and_then_skips() {
     let dir = tree();
     let home = home();
-    let registry: [&std::ffi::OsStr; 2] = [
-        std::ffi::OsStr::new("--registry"),
-        home.path().as_os_str(),
-    ];
+    let registry: [&std::ffi::OsStr; 2] =
+        [std::ffi::OsStr::new("--registry"), home.path().as_os_str()];
     let out = nils()
         .args(registry)
         .args(["digest", "--workers", "2", "--name", "t", "--json"])

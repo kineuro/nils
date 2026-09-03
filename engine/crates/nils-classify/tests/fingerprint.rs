@@ -349,3 +349,64 @@ fn the_run_is_a_job_the_registry_records() {
         );
     }
 }
+
+#[test]
+fn a_split_series_says_why_it_split() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("split");
+        let base = [
+            elem(tags::SERIES_DESCRIPTION, VR::LO, "me gre"),
+            elem(tags::REPETITION_TIME, VR::DS, "30"),
+            synth::num(tags::ROWS, VR::US, 256.0),
+            synth::num(tags::COLUMNS, VR::US, 256.0),
+            elem(tags::PIXEL_SPACING, VR::DS, "1\\1"),
+        ];
+        // one series split by echo time, one by inversion time, one whole
+        let mut a = base.to_vec();
+        a.push(elem(tags::ECHO_TIME, VR::DS, "5"));
+        let mut b = base.to_vec();
+        b.push(elem(tags::ECHO_TIME, VR::DS, "20"));
+        dir.file("x/1", &mr("A", "A.1", "A.1.1", "P1", &a));
+        dir.file("x/2", &mr("A", "A.1", "A.1.2", "P1", &b));
+
+        let mut c = base.to_vec();
+        c.push(elem(tags::INVERSION_TIME, VR::DS, "900"));
+        let mut d = base.to_vec();
+        d.push(elem(tags::INVERSION_TIME, VR::DS, "2500"));
+        dir.file("y/1", &mr("A", "A.2", "A.2.1", "P1", &c));
+        dir.file("y/2", &mr("A", "A.2", "A.2.2", "P1", &d));
+
+        dir.file("z/1", &mr("A", "A.3", "A.3.1", "P1", &base));
+
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap();
+        run(&mut reg, &Settings::default(), &Cancel::new()).unwrap();
+
+        // The walk decides which series gets which id, so compare the set.
+        let mut reasons: Vec<(i64, Option<String>)> = rows(
+            &mut reg,
+            "SELECT stacks_in_series, split_reason FROM {stack_fingerprint}",
+        )
+        .iter()
+        .map(|r| {
+            (
+                r.int(0).unwrap(),
+                r.opt_text(1).unwrap().map(str::to_string),
+            )
+        })
+        .collect();
+        reasons.sort();
+        assert_eq!(
+            reasons,
+            vec![
+                (1, None),
+                (2, Some("multi_echo".into())),
+                (2, Some("multi_echo".into())),
+                (2, Some("multi_ti".into())),
+                (2, Some("multi_ti".into())),
+            ],
+            "{name}"
+        );
+    }
+}

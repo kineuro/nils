@@ -16,7 +16,7 @@ use nils_digest::Cancel;
 use nils_digest::cancel::process_alive;
 use nils_digest::rss::peak_rss;
 use nils_registry::dialect::Conflict;
-use nils_registry::schema::table;
+use nils_registry::schema::{Column, table};
 use nils_registry::store::{Insert, Param, Store};
 use nils_registry::time::{now_iso, now_secs, secs_of};
 use nils_registry::{HomeError, Registry};
@@ -303,6 +303,11 @@ fn run(
         }
         firsts.sort_by_key(|(id, _)| *id);
 
+        // Why each multi-stack series in this window split. v0 stores this on
+        // the stack and then never reads it (spikes/pack, finding 1); it is a
+        // fact about the series, so it is derived here and a pack reads it.
+        let reasons = split_reasons(store, &rows)?;
+
         let empty = First::default();
         let mut params: Vec<Vec<Param>> = Vec::with_capacity(rows.len());
         for r in &rows {
@@ -319,7 +324,12 @@ fn run(
             if first.pixel_spacing.is_none() {
                 report.without_geometry += 1;
             }
-            params.push(fingerprint::derive(r, first, job_id, epoch)?);
+            let series_id = r.int(1)?;
+            let reason = reasons
+                .binary_search_by_key(&series_id, |(id, _)| *id)
+                .ok()
+                .and_then(|i| reasons[i].1);
+            params.push(fingerprint::derive(r, first, reason, job_id, epoch)?);
         }
 
         if !params.is_empty() {
@@ -347,4 +357,61 @@ fn run(
     report.seconds = started.elapsed().as_secs_f64();
     report.peak_rss = peak_rss();
     Ok(report)
+}
+
+/// The split reason of every series in the window that has more than one
+/// stack, read from the stacks themselves so that it is the same fact the
+/// signature was.
+fn split_reasons(
+    store: &mut Store,
+    window: &[nils_registry::store::Row],
+) -> Result<Vec<(i64, Option<&'static str>)>, Error> {
+    // series_id is column 1 of the window's select; stacks_in_series is the
+    // third of the series block.
+    let mut ids: Vec<i64> = Vec::new();
+    for r in window {
+        if r.int(fingerprint::STACKS_IN_SERIES)? > 1 {
+            ids.push(r.int(1)?);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let stack_t = table("stack");
+    let signature: Vec<&Column> =
+        std::iter::once(stack_t.column("series_id").expect("stack has a series_id"))
+            .chain(stack_t.columns.iter().filter(|c| c.catalogue))
+            .collect();
+    let rows = store.select_by_ids(stack_t, &signature, "series_id", &ids)?;
+
+    // Group by series, then name the first column the stacks disagree on.
+    let mut by_series: std::collections::BTreeMap<i64, Vec<&nils_registry::store::Row>> =
+        std::collections::BTreeMap::new();
+    for r in &rows {
+        by_series.entry(r.int(0)?).or_default().push(r);
+    }
+    let names: Vec<&str> = signature[1..].iter().map(|c| c.name).collect();
+    let mut out = Vec::with_capacity(by_series.len());
+    for (series_id, stacks) in by_series {
+        if stacks.len() < 2 {
+            out.push((series_id, None));
+            continue;
+        }
+        let first = stacks[0];
+        let mut varying: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (i, name) in names.iter().enumerate() {
+            let at = i + 1;
+            if stacks[1..]
+                .iter()
+                .any(|s| !fingerprint::same(s.get(at), first.get(at)))
+            {
+                varying.insert(name);
+            }
+        }
+        out.push((series_id, fingerprint::split_reason(&varying)));
+    }
+    Ok(out)
 }

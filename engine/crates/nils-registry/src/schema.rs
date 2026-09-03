@@ -393,8 +393,13 @@ fn build_registry() -> Vec<Table> {
                 col("orientation_confidence", Type::Double),
                 req("n_instances", Type::Int),
                 req("stack_index", Type::Int),
-                col("stack_key", Type::Text),
+                col("signature", Type::Text),
                 req("stacks_in_series", Type::Int),
+                // Why this stack's series split, when it did: v0's stack key
+                // (`sort/stack_key.py`), which its own classifier reads for
+                // three flags and never receives. Null for a single-stack
+                // series.
+                col("split_reason", Type::Text),
                 col("rows", Type::Int),
                 col("columns", Type::Int),
                 col("pixel_spacing", Type::Text),

@@ -80,6 +80,8 @@ const MR: &[&str] = &[
 const STUDY: &[&str] = &["manufacturer", "manufacturer_model_name", "station_name"];
 
 const S: usize = STACK.len();
+/// Where `stacks_in_series` sits in the window's row.
+pub const STACKS_IN_SERIES: usize = S + 2;
 const E: usize = S + SERIES.len();
 const M: usize = E + MR.len();
 
@@ -120,8 +122,9 @@ pub const WRITTEN: &[&str] = &[
     "orientation_confidence",
     "n_instances",
     "stack_index",
-    "stack_key",
+    "signature",
     "stacks_in_series",
+    "split_reason",
     "rows",
     "columns",
     "pixel_spacing",
@@ -274,7 +277,13 @@ fn fov(first: &First) -> (Option<f64>, Option<f64>, Option<f64>) {
 }
 
 /// One read row plus its first instance, as the parameters of one write.
-pub fn derive(r: &Row, first: &First, job_id: i64, epoch: i64) -> Result<Vec<Param>, Error> {
+pub fn derive(
+    r: &Row,
+    first: &First,
+    split_reason: Option<&str>,
+    job_id: i64,
+    epoch: i64,
+) -> Result<Vec<Param>, Error> {
     let stack_id = r.int(0)?;
     let series_id = r.int(1)?;
 
@@ -355,8 +364,9 @@ pub fn derive(r: &Row, first: &First, job_id: i64, epoch: i64) -> Result<Vec<Par
         num(opt_double(r, 6)?),        // orientation_confidence
         Param::Int(r.int(7)?),         // n_instances
         Param::Int(r.int(2)?),         // stack_index
-        opt(text(r, 3)?),              // stack_key
+        opt(text(r, 3)?),              // signature
         Param::Int(r.int(S + 2)?),     // stacks_in_series
+        opt(split_reason.map(str::to_string)),
         int(first.rows),
         int(first.columns),
         opt(first.pixel_spacing.clone()),
@@ -452,5 +462,85 @@ mod tests {
         }
         let declared: Vec<&str> = t.data_columns().map(|c| c.name).collect();
         assert_eq!(declared.len(), WRITTEN.len(), "{declared:?}");
+    }
+}
+
+/// Why a series split into several stacks, in v0's order
+/// (`sort/stack_key.py`). `None` for a series with one stack.
+///
+/// v0 computes this, stores it on the stack, and then never selects it into
+/// the fingerprint its classifier reads, so its `is_multi_echo`,
+/// `is_multi_ti` and `is_multi_fa` flags are false for every stack it has
+/// ever classified. The value is a fact about the series, so it belongs here
+/// and a pack reads it as `split_reason`.
+pub fn split_reason(varying: &std::collections::BTreeSet<&str>) -> Option<&'static str> {
+    if varying.is_empty() {
+        return Some("multi_stack");
+    }
+    let any = |names: &[&str]| names.iter().any(|n| varying.contains(n));
+    Some(
+        if any(&["echo_time", "echo_numbers", "echo_train_length"]) {
+            "multi_echo"
+        } else if any(&["image_type"]) {
+            "image_type_variation"
+        } else if any(&["image_orientation_patient"]) {
+            "multi_orientation"
+        } else if any(&["pet_bed_index"]) {
+            "multi_bed"
+        } else if any(&["inversion_time"]) {
+            "multi_ti"
+        } else if any(&["flip_angle"]) {
+            "multi_flip_angle"
+        } else if any(&["receive_coil_name"]) {
+            "multi_coil"
+        } else if varying.len() > 1 {
+            "multi_parameter"
+        } else {
+            "multi_stack"
+        },
+    )
+}
+
+/// A cell as text, for the only thing the split reason needs: whether two
+/// stacks of one series agree on a signature column.
+pub fn same(a: &nils_registry::store::Cell, b: &nils_registry::store::Cell) -> bool {
+    a == b
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::split_reason;
+    use std::collections::BTreeSet;
+
+    fn of(names: &[&str]) -> Option<&'static str> {
+        let set: BTreeSet<&str> = names.iter().copied().collect();
+        split_reason(&set)
+    }
+
+    #[test]
+    fn the_echo_family_wins_first() {
+        assert_eq!(of(&["echo_time"]), Some("multi_echo"));
+        assert_eq!(of(&["echo_train_length"]), Some("multi_echo"));
+        // even against a later reason
+        assert_eq!(of(&["echo_numbers", "flip_angle"]), Some("multi_echo"));
+    }
+
+    #[test]
+    fn the_order_after_it_is_v0s() {
+        assert_eq!(of(&["image_type"]), Some("image_type_variation"));
+        assert_eq!(
+            of(&["image_orientation_patient", "inversion_time"]),
+            Some("multi_orientation")
+        );
+        assert_eq!(of(&["inversion_time"]), Some("multi_ti"));
+        assert_eq!(of(&["flip_angle"]), Some("multi_flip_angle"));
+        assert_eq!(of(&["receive_coil_name"]), Some("multi_coil"));
+    }
+
+    #[test]
+    fn several_unnamed_reasons_are_multi_parameter_and_one_is_not() {
+        assert_eq!(of(&["kvp", "tube_current"]), Some("multi_parameter"));
+        assert_eq!(of(&["repetition_time"]), Some("multi_stack"));
+        assert_eq!(of(&[]), Some("multi_stack"));
     }
 }
