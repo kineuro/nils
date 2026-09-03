@@ -44,9 +44,11 @@ by stack and axis by axis, every disagreement classified, on the baseline host
 
 **The stance on v0.** This wave carries over v0's *knowledge*, not its
 behaviour. Where v0 is wrong (a flag that can never be true, a cascade that
-exists twice and disagrees with itself, a name that drifts between two tables,
-an `or` swallowed by a conditional expression), v1 is right, and the difference
-is declared before the run. Where v1 is better rather than merely correct (one
+exists twice and disagrees with itself, a name that drifts between two tables),
+v1 is right, and the difference is declared before the run. Where v0 is wrong
+and it changes nothing (an `or` swallowed by a conditional expression, whose
+values another clause catches anyway), that is worth knowing and is not worth
+declaring, and the two are not filed together. Where v1 is better rather than merely correct (one
 intent cascade, a declared reference pool, a pack per modality, evidence on
 every row), the difference is declared too. What is not allowed is a difference
 nobody can explain: every disagreement in the parity diff is investigated to a
@@ -303,7 +305,20 @@ says so.
 
 Editable buckets are declared by the pack, not by the engine. v0 permits
 keywords only, and keeps physics, flags and priority orders global; a v1 pack
-may open more, and what it opens is part of its contract.
+may open more, and what it opens is part of its contract. A bucket is a named
+list in the pack, referenced where a list of terms is wanted
+(`any_token: {bucket: diffusion_tokens}`), so an overlay names a bucket and
+never a path into the pack's internals.
+
+**Settled while building (slice 2).** Whose cases judge what. The first
+overlay written for a test made its pack fail to load, because the pack's own
+corpus said the site's new word was not an agent and the overlay had just made
+it one. Running the author's cases against a site's amendment turns the
+author's claim into a constraint on the site, which is the opposite of what an
+overlay is for. So: **the pack's corpus judges the pack, always and
+un-overlaid, and an overlay carries its own cases and is judged by those.** An
+overlay with no cases is refused, on the same reasoning that refuses a pack
+with none: it changes verdicts, so it says what it changed.
 
 ## 6. The grammar
 
@@ -741,11 +756,13 @@ The bars:
   the intent cascade (v0 has two copies that disagree), the dead flags (v0's
   `is_multi_echo`, `is_multi_ti`, `is_multi_fa` are permanently false because
   the query that loads a fingerprint never selects `stack_key`, so a rule that
-  depends on them never fires in v0 and will fire in v1), the synthetic-IR test
-  that a Python conditional expression swallows so that only the synthetic-SE
-  half of it is ever evaluated, the constructs whose names drift between v0's
-  branches and its intent, the SWI output type that two functions in one module
-  decide by different conditions, and the human decisions v0 reverts.
+  depends on them never fires in v0 and will fire in v1), the constructs whose
+  names drift between v0's branches and its intent, the SWI output type that two
+  functions in one module decide by different conditions, and the human
+  decisions v0 reverts. Not on this list, deliberately: the synthetic-IR test a
+  Python conditional expression swallows. It is unreachable code, but the token
+  test in front of it catches the same values, so it changes no verdict and the
+  gate must not be told to expect one.
 
 Each of those is a case in the **verified corpus**, which is where the wave's
 value accumulates.

@@ -1528,3 +1528,112 @@ fn fingerprint_derives_once_and_then_skips() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("stacks read"), "{}", stdout(&out));
 }
+
+#[test]
+fn pack_validate_says_what_is_wrong_and_where() {
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+
+    // the pack in the repository loads, and says what it holds
+    let out = nils()
+        .args(["pack", "validate"])
+        .arg(packs.join("mri"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let said = stdout(&out);
+    assert!(said.contains("mri@"), "{said}");
+    assert!(said.contains("220 predicates"), "{said}");
+    assert!(said.contains("cases"), "{said}");
+
+    // a pack that is wrong is refused, by file, line and path
+    let dir = TempDir::new("cli-pack");
+    dir.file(
+        "pack.yml",
+        b"pack: t\nversion: 1.0.0\ncontract: 1\nmodality: MR\nflags: [flags.yml]\n",
+    );
+    dir.file(
+        "flags.yml",
+        b"flags:\n  ok: {field: echo_time, gt: 0}\n  bad: {field: nope, gt: 0}\n",
+    );
+    dir.file(
+        "corpus/c.yml",
+        b"cases:\n  - {name: c, stack: {echo_time: 5}, flags: {ok: true}}\n",
+    );
+    let out = nils()
+        .args(["pack", "validate"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let e = stderr(&out);
+    assert!(e.contains("flags.yml:3:"), "{e}");
+    assert!(e.contains("flags.bad"), "{e}");
+    assert!(e.contains("no field named nope"), "{e}");
+
+    // and one whose own cases do not hold does not load either
+    dir.file("flags.yml", b"flags:\n  ok: {field: echo_time, gt: 0}\n");
+    dir.file(
+        "corpus/c.yml",
+        b"cases:\n  - {name: a wrong claim, stack: {echo_time: 5}, flags: {ok: false}}\n",
+    );
+    let out = nils()
+        .args(["pack", "validate"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let e = stderr(&out);
+    assert!(e.contains("a wrong claim"), "{e}");
+    assert!(e.contains("do not hold"), "{e}");
+}
+
+#[test]
+fn pack_list_and_show_read_the_pack_directory() {
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let out = nils()
+        .args(["pack", "list", "--json", "--pack-dir"])
+        .arg(&packs)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let listed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["pack"] == "mri@0.1.0"),
+        "{listed}"
+    );
+
+    let out = nils()
+        .args(["pack", "show", "mri", "--json", "--pack-dir"])
+        .arg(&packs)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(shown["modality"], "MR");
+    assert_eq!(shown["flags"], 145);
+    assert_eq!(shown["contract"], 1);
+    assert!(
+        shown["buckets"]["diffusion_tokens"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 10
+    );
+
+    // a name that is not there says so rather than listing nothing
+    let out = nils()
+        .args(["pack", "show", "nope", "--pack-dir"])
+        .arg(&packs)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("no pack named nope"),
+        "{}",
+        stderr(&out)
+    );
+}

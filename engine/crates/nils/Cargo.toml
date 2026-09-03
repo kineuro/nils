@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 nils-dicom.workspace = true
 nils-classify.workspace = true
+nils-pack.workspace = true
 nils-digest.workspace = true
 nils-registry.workspace = true
 

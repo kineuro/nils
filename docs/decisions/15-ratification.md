@@ -134,11 +134,14 @@ vote is the one piece that is not an expression at all. The language is ten
 atoms and three combinators over a stack, plus two atoms that read a pass's
 **candidate**; a pass remains a configured instance of an engine-provided kind,
 which is the boundary written into the Wave 2 spec (§5.1, §6, §7.2). Eight
-findings about v0 came with it, four of them bugs (three flags that can never be
-true and cover 11 percent of the corpus, a dead `or` in the synthetic test, two
-functions that decide an SWI output by different rules, a vote whose tie is
-broken by the database's row order); they are declared differences in the wave's
-gate rather than behaviour to reproduce.
+findings about v0 came with it, four of them bugs: three flags that can never be
+true and cover 11 percent of the corpus, two functions that decide an SWI output
+by different rules, a vote whose tie is broken by the database's row order, and
+a dead `or` in the synthetic test. The first three are declared differences in
+the wave's gate rather than behaviour to reproduce; the fourth is dead code that
+costs nothing, since the clause in front of it catches the same values, and
+knowing which of the four is which is the point of naming a cause rather than a
+class.
 
 ### C6, the baseline host
 

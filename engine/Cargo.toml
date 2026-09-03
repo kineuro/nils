@@ -23,6 +23,7 @@ nils-dicom = { path = "crates/nils-dicom" }
 nils-registry = { path = "crates/nils-registry" }
 nils-digest = { path = "crates/nils-digest" }
 nils-classify = { path = "crates/nils-classify" }
+nils-pack = { path = "crates/nils-pack" }
 
 blake2 = "0.11"
 bytes = "1"
