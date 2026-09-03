@@ -964,7 +964,11 @@ fn a_disagreed_field_is_decided_by_value_not_by_order() {
     // third series that a later run adds a file to, when the row is no longer
     // in the writer's cache and is read back. Every one of them ends with the
     // smaller value in the canonical text order (§9.1).
-    let variants = [("ep_b1000", "HEAD"), ("tse2d1_9", "NECK"), ("*fl3d1", "BRAIN")];
+    let variants = [
+        ("ep_b1000", "HEAD"),
+        ("tse2d1_9", "NECK"),
+        ("*fl3d1", "BRAIN"),
+    ];
     let file = |series: &str, i: usize, sop: &str, (sequence, part): (&str, &str)| {
         (
             format!("{series}/IM_{i:04}"),

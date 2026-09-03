@@ -1498,7 +1498,6 @@ fn text_of(v: &Value) -> String {
     v.to_string()
 }
 
-
 /// The table and key column a field of `level` is updated by.
 fn field_table(level: Level) -> (&'static Table, &'static str) {
     match level {
