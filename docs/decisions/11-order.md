@@ -43,8 +43,22 @@ building the table settled is amended into the spec (§5.3, §6.1 to §6.3): six
 keywords that never existed in the dictionary and were therefore always null (two
 accepted changes come from it: `phase_encoding_direction` from its standard tag,
 the PET radiopharmaceutical fields from their sequence), the creator-aware private
-blocks, the fallback chain's stop rule and the empty element as null. The mix
-corpus run is the slice's open item until the corpus has arrived. Slice 3, the
+blocks, the fallback chain's stop rule and the empty element as null. The mix corpus arrived on 2026-09-03 and closed the slice's open
+item: 196,086 files seen, 194,090 parsed and 1,996 quarantined, every one of
+them classified, and the classes are one, `parse_error/truncated`; nothing was
+`not_dicom`, unreadable, without a UID, or of a SOP class or modality the reader
+refuses. The corpus spans sixteen manufacturers and seventy-seven models over
+2001 to 2026, six character sets, three SOP classes (MR, Enhanced MR, CT) and
+four transfer syntaxes among the files that parse, JPEG 2000 in three quarters
+of them. The truncated files are worth their own line, because they are not a
+transfer fault: they sit under one top-level directory of the corpus, their file
+meta reads cleanly, their sizes run from 33 to 190 KB with no alignment to
+suggest a block-level cut, the copy on the scratch is byte-identical to what the
+bridge delivered (compared file by file with checksums), and v0's registry holds
+an instance for every one of the 1,996, so they were whole when v0 read them and
+lost their tail afterwards, where they came from. It is the same shape as the
+nmosd files a later writer rewrote, and the same lesson: v0's rows describe
+files that have since changed, and only v1 describes them as they are. Slice 3, the
 schema and the writer, merged 2026-09-02 (pull request 5): the schema declared
 once and rendered for both dialects, the registry home (`nils.toml`, the key
 store, `NILS_REGISTRY`, `NILS_DSN`), the writer with its three caches and
@@ -107,9 +121,17 @@ committed), equals v1's on every one of the 2,165 series both hold, 2,534 stacks
 against 2,534 v0 groups over 493,708 instances, and the 3,180 instances only v0
 holds are the non-image SOP classes §5.3 refuses; the digest with stacks takes
 32.5 s (15,600 files/s, 32 workers, 1.7 GB peak) and the same tree again 25.8 s,
-creating nothing; 34 stacks are oblique and none has an unknown orientation. Not
-in slice 5 and known: the mix half of the check waits for the corpus's copy to
-complete, and the pack-format prototype (C11) may start. Slice 6, jobs and
+creating nothing; 34 stacks are oblique and none has an unknown orientation. The mix half followed on 2026-09-03, once the
+corpus landed on the scratch (196,110 files, 23 GB, moved from the exchange
+inbox and compared against it file by file with checksums: no difference): the
+partitions equal v0's there too, 4,024 stacks against 4,024, every one matched
+by membership, 513 multi-stack series identical and 1,985 single-stack, over
+194,090 instances of 2,498 series. Three stack rows differ, and not by order:
+they are Enhanced MR series of 500 instances each where v0 stored nulls for the
+MR timing, echo and coil values and v1 reads them from the frame groups, which
+is what the catalogue's fallback chain is for. The stack *index* order matches
+on 250 of the 513, which is a walk-order difference and no bar. The pack-format
+prototype (C11) may start. Slice 6, jobs and
 custody, merged 2026-09-03 (pull request 8): the cancel token every stage
 holds (one signal stops, two abort), SIGINT and SIGTERM in the binary with exit
 code 130, the takeover of a job whose process is gone, `reparse_from` on a
@@ -232,6 +254,37 @@ v0 holds an orientation whose spelling is in no file, one digit longer per
 component than the file's and equal to it to 1e-15, which never split a stack
 because the signature carries the derived orientation class, not the raw
 cosines.
+
+Reading the run corrected two things in the engine besides. A field two files
+of one row disagree on is decided by value now, not by which file arrived
+first: the row keeps the smaller in the catalogue's canonical text order, on
+every column of the subject, study and series rows (§9.1, amended in slice 7).
+The run had shown how often that matters, with single series carrying up to
+twenty-six spellings of `sequence_name`, two acquisition matrices, two slice
+spacings and two orientations, each of them a race between the walk and the
+workers. `min` is the rule because it needs no bookkeeping and no provenance
+column: a resumed run, a late batch and a second digest of one tree reach the
+same row. The stack row is left as it was, and the mix run says why that is
+enough: over 6,558 stacks of both corpora not one differs by order, since the
+signature pins the values.
+
+And the second, from Nima's account of how v0's codes were really made: the
+anonymization step mapped a personnummer to a subject code with the key, wrote
+a project identifier into `PatientID`, and passed v0 a CSV of identifier to
+code, so the key never entered v0. That is why the key reproduces none of the
+nmosd codes: the personnummer is not in this data at all, and 42 of the 43
+subjects' identifiers are exactly the `PatientID` the files carry today. Two
+things follow. A person may hold **many** identifiers of one type, not one: a
+personnummer is not for life, since a temporary number becomes a permanent one
+with residency, several temporary ones may come before that, and the permanent
+one changes when a legal sex change does. v1 refused the second one; it now
+files them all on the one subject and counts them, and only an identifier that
+maps to two codes is refused (§7.4). And where the anonymizer writes the
+subject code into `PatientID`, which is the shape v1 takes from here, the
+identity rule's `code: verbatim` files it as the code and derives nothing, so
+the map stays where the key is and the linkage store holds no identifying value
+at all for such a cohort; it needs a pattern on every field, so a bare
+personnummer is never filed as a code (§7.3).
 
 Reading that first report also corrected the tool, in the pull request that
 followed (§12.1 to §12.3, §12.7): v1's SQLite registry is read by its declared
