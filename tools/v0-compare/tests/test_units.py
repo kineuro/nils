@@ -362,3 +362,82 @@ def test_sqlite_registry_is_read_typed(tmp_path: Path) -> None:
     con.execute(f"ATTACH '{path}' AS t2 (TYPE sqlite, READ_ONLY)")
     assert con.execute("SELECT x FROM t2.t").fetchone()[0] == "0.300000011920929"
     con.close()
+
+
+def _axes_fixture(con: duckdb.DuckDBPyConnection, rows: list[tuple]) -> None:
+    """A pair table, v0's verdicts and v1's rows, in the shape `axes` reads."""
+    con.execute("CREATE SCHEMA IF NOT EXISTS w")
+    con.execute("CREATE SCHEMA IF NOT EXISTS v1")
+    con.execute("ATTACH ':memory:' AS v0db")
+    con.execute("CREATE SCHEMA IF NOT EXISTS v0db.v0")
+    con.execute("CREATE TABLE w.stack_pair (series_instance_uid VARCHAR, v0_id BIGINT, v1_id BIGINT, n BIGINT)")
+    con.execute(
+        "CREATE TABLE v0db.v0.series_classification_cache ("
+        "series_stack_id BIGINT, directory_type VARCHAR, base VARCHAR, technique VARCHAR, "
+        "modifier_csv VARCHAR, construct_csv VARCHAR, provenance VARCHAR, acceleration_csv VARCHAR, "
+        "body_part VARCHAR, post_contrast VARCHAR, localizer VARCHAR, spinal_cord VARCHAR, "
+        "manual_review_required VARCHAR, manual_review_reasons_csv VARCHAR, dicom_origin_cohort VARCHAR)"
+    )
+    con.execute("CREATE TABLE v1.classification (stack_id BIGINT)")
+    con.execute("CREATE TABLE v1.classification_axis (stack_id BIGINT, axis VARCHAR, value VARCHAR)")
+    for i, (v0_base, v0_dt, v1_base, v1_dt) in enumerate(rows, start=1):
+        con.execute("INSERT INTO w.stack_pair VALUES (?, ?, ?, 1)", [f"1.2.{i}", i, i])
+        con.execute(
+            "INSERT INTO v0db.v0.series_classification_cache "
+            "(series_stack_id, base, directory_type) VALUES (?, ?, ?)",
+            [i, v0_base, v0_dt],
+        )
+        con.execute("INSERT INTO v1.classification VALUES (?)", [i])
+        con.execute("INSERT INTO v1.classification_axis VALUES (?, 'base', ?)", [i, v1_base])
+        con.execute("INSERT INTO v1.classification_axis VALUES (?, 'directory_type', ?)", [i, v1_dt])
+
+
+def test_axes_group_their_differences_and_name_the_two_that_are_never_allowed() -> None:
+    """§11.1: a difference is a group to be classified, but an axis v1 leaves
+    unresolved and a stack v1 excludes are bars of their own."""
+    from v0compare import axes
+
+    con = duckdb.connect()
+    _axes_fixture(
+        con,
+        [
+            ("T1w", "anat", "T1w", "anat"),  # agrees
+            ("T2w", "anat", "PDw", "anat"),  # a difference to classify
+            ("T2w", "anat", "PDw", "anat"),  # the same one, so one group
+            ("T1w", "anat", "", "anat"),  # v1 silent where v0 spoke
+            ("T1w", "anat", "T1w", "excluded"),  # v1 excludes what v0 kept
+            ("", "anat", "T2w", "anat"),  # v1 filled a gap, which is allowed
+        ],
+    )
+    rep = axes.compare(con)
+    assert rep.stacks == 6
+    base = next(a for a in rep.axes if a.axis == "base")
+    assert base.compared == 6
+    assert base.agreed == 3
+    assert base.v1_silent == 1
+    assert base.v0_silent == 1
+    assert [(g.pattern, g.count) for g in base.groups][0] == ("v0=T2w v1=PDw", 2)
+    assert rep.excluded_by_v1 == 1
+    con.close()
+
+
+def test_an_axis_difference_without_a_cause_is_refused(tmp_path: Path) -> None:
+    """§11.5: a class is where the reading of a difference is filed, not where
+    it ends."""
+    from v0compare import classify as adjudication
+
+    path = tmp_path / "a.toml"
+    path.write_text(
+        '[[axis]]\naxis = "base"\npattern = "v0=T2w v1=PDw"\nclass = "accepted"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="no cause"):
+        adjudication.load(path)
+
+    path.write_text(
+        '[[axis]]\naxis = "base"\npattern = "v0=T2w v1=PDw"\nclass = "accepted"\n'
+        'cause = "v0 reads the echo train length, the pack reads the sequence variant"\n',
+        encoding="utf-8",
+    )
+    rule = adjudication.load(path).axis("base", "v0=T2w v1=PDw")
+    assert rule is not None and rule.classification == "accepted"
