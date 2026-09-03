@@ -11,7 +11,7 @@ use crate::schema::{ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +62,29 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 2,
         apply: create_stack_fingerprint,
     },
+    Migration {
+        version: 3,
+        apply: create_classification,
+    },
 ];
+
+/// Wave 2 §8: what a pack decided, what made it decide, and the decisions
+/// that outrank it.
+fn create_classification(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(
+        store,
+        kind,
+        &[
+            "classification",
+            "classification_axis",
+            "classification_evidence",
+            "decision",
+        ],
+    )
+}
 
 /// Wave 2 §4.2. A registry created at version 1 gains the table; one created
 /// now already has it from [`create_declared_tables`], so this is a no-op

@@ -862,6 +862,15 @@ fn a_failed_batch_has_its_last_second_read_again_and_its_identities_repaired() {
             .execute(&format!("DELETE FROM {identity}"), &[])
             .unwrap();
         drop(linkage);
+        // A batch is re-read from its last second, so a run that straddles a
+        // second boundary re-reads only the files of the later one. That is
+        // the intent, and it makes the clock part of the fixture: pin every
+        // file of the batch to one second, and the whole batch is the last.
+        let pin = rows_sql(
+            &mut reg,
+            "UPDATE {source_file} SET seen_at = (SELECT MAX(f.seen_at) FROM {source_file} AS f WHERE f.batch_id = 1) WHERE batch_id = 1",
+        );
+        reg.store().execute(&pin, &[]).unwrap();
         let mark = rows_sql(
             &mut reg,
             "UPDATE {ingest_batch} SET state = 'failed', reparse_from = (SELECT MAX(f.seen_at) FROM {source_file} AS f WHERE f.batch_id = ingest_batch.id) WHERE id = 1",

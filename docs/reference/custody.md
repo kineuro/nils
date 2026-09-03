@@ -67,6 +67,19 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | export | `nils quarantine list --json` |
 | delete | with the registry |
 
+## classifications
+
+| | |
+|---|---|
+| what | what a pack decided about each stack, one row per axis, with the evidence that made it and any decision a person recorded |
+| where | rows of stack_fingerprint, classification, classification_axis, classification_evidence and decision in the registry |
+| holds | technical: the fields a pack reads, the axes, the tiers and confidences, the rule that fired<br>a person's words: the why on a decision |
+| kept | until the next run of that job replaces it; a decision until withdrawn, and a withdrawn one for good |
+| read | `nils explain <stack>`<br>`nils review list`<br>`nils pack show <name>` |
+| change | `nils fingerprint`<br>`nils classify`<br>`nils review decide <id> --value <v>` |
+| export | `nils explain <stack> --json` |
+| delete | with the registry |
+
 ## job records
 
 | | |

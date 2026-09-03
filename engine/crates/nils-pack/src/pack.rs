@@ -65,6 +65,39 @@ pub struct Pack {
     pub overlay: Option<String>,
     /// How many cases its own corpus holds, all of which passed.
     pub cases: usize,
+    /// When a person is asked about an axis. The pack's call, not the
+    /// engine's (§8.2): what counts as doubt is knowledge about the domain.
+    pub review: Review,
+}
+
+/// The pack's emission thresholds for review items.
+///
+/// v0 asks a person about 84 percent of its stacks, mostly because a keyword
+/// was missing rather than because anything was in doubt, and a queue that
+/// long is read by nobody. So the thresholds are declared, per axis, by the
+/// pack that knows what a weak answer means, and a run reports the size of
+/// the queue it produced.
+#[derive(Debug, Clone, Default)]
+pub struct Review {
+    /// An axis resolved below this confidence is asked about.
+    pub low_confidence: f64,
+    /// Per-axis overrides of it.
+    pub per_axis: BTreeMap<String, f64>,
+    /// The axes whose absence is itself a question. An axis not named here
+    /// simply does not apply to a stack that has no value for it.
+    pub missing: Vec<String>,
+}
+
+impl Review {
+    /// The confidence below which this axis is asked about.
+    pub fn below(&self, axis: &str) -> f64 {
+        *self.per_axis.get(axis).unwrap_or(&self.low_confidence)
+    }
+
+    /// Whether an axis with no value at all is a question for a person.
+    pub fn asks_when_missing(&self, axis: &str) -> bool {
+        self.missing.iter().any(|a| a == axis)
+    }
 }
 
 impl Pack {
@@ -143,6 +176,37 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             buckets.insert(bucket.clone(), crate::overlay::merge(&base, edit));
         }
         overlay_id = Some(o.id.clone());
+    }
+
+    // --- when a person is asked about an axis
+    let mut review = Review {
+        low_confidence: 0.0,
+        ..Review::default()
+    };
+    if let Some(r) = m.get("review") {
+        let rm = manifest.blame(yaml::obj(r, "review"))?;
+        if let Some(v) = rm.get("low_confidence") {
+            match yaml::obj(v, "review.low_confidence") {
+                Ok(per) => {
+                    for (axis, value) in per {
+                        let at = format!("review.low_confidence.{axis}");
+                        let n = manifest.blame(yaml::number(value, &at))?;
+                        if axis == "default" {
+                            review.low_confidence = n;
+                        } else {
+                            review.per_axis.insert(axis.clone(), n);
+                        }
+                    }
+                }
+                Err(_) => {
+                    review.low_confidence =
+                        manifest.blame(yaml::number(v, "review.low_confidence"))?;
+                }
+            }
+        }
+        if let Some(v) = rm.get("missing") {
+            review.missing = manifest.blame(yaml::texts(v, "review.missing"))?;
+        }
     }
 
     // --- text the pack derives for itself. First, because a parser, a flag
@@ -359,6 +423,17 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         rule_sets.sort_by_key(|r| want.iter().position(|n| *n == r.name).unwrap_or(usize::MAX));
     }
 
+    // A threshold for an axis the pack does not decide is a name that names
+    // nothing: it would sit in the file looking like policy and do nothing.
+    for axis in review.per_axis.keys().chain(review.missing.iter()) {
+        if !axes.iter().any(|a| a.name == *axis) {
+            return Err(
+                Error::at(format!("review.{axis}"), format!("no axis named {axis}"))
+                    .in_file(&manifest.path, Some(&manifest.source)),
+            );
+        }
+    }
+
     let mut pack = Pack {
         derived,
         axes,
@@ -376,6 +451,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         regexes,
         overlay: overlay_id,
         cases: 0,
+        review,
     };
 
     // The pack's own corpus is the last thing between it and use, and it

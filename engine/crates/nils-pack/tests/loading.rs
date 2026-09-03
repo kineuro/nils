@@ -235,3 +235,23 @@ fn a_parser_declared_twice_is_refused() {
     let e = refusal(&d);
     assert!(e.contains("is declared twice"), "{e}");
 }
+
+#[test]
+fn a_review_threshold_for_an_axis_that_does_not_exist_is_refused() {
+    let d = good();
+    d.file(
+        "pack.yml",
+        &format!("{MANIFEST}review:\n  low_confidence: {{technique: 0.8}}\n"),
+    );
+    let e = refusal(&d);
+    assert!(e.contains("no axis named technique"), "{e}");
+    assert!(e.contains("pack.yml"), "{e}");
+}
+
+#[test]
+fn a_pack_that_declares_no_review_asks_about_nothing() {
+    let d = good();
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    assert_eq!(pack.review.below("technique"), 0.0);
+    assert!(!pack.review.asks_when_missing("technique"));
+}

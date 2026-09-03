@@ -1184,6 +1184,7 @@ fn custody_quarantine_review_and_purge_go_round() {
             "linkage store",
             "key store",
             "quarantine list",
+            "classifications",
             "job records",
             "logs"
         ]
@@ -1635,5 +1636,172 @@ fn pack_list_and_show_read_the_pack_directory() {
         stderr(&out).contains("no pack named nope"),
         "{}",
         stderr(&out)
+    );
+}
+
+#[test]
+fn classify_explains_itself_and_a_decision_closes_the_question() {
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let dir = TempDir::new("cli-classify");
+    let mut e = synth::minimal_mr("1.2.4.A", "1.2.4.A.1", "1.2.4.A.1.1");
+    e.extend([
+        synth::text(
+            dicom_dictionary_std::tags::SERIES_DESCRIPTION,
+            dicom_core::VR::LO,
+            "sag T1 mprage",
+        ),
+        synth::text(
+            dicom_dictionary_std::tags::SCANNING_SEQUENCE,
+            dicom_core::VR::CS,
+            "GR",
+        ),
+        synth::text(
+            dicom_dictionary_std::tags::SEQUENCE_VARIANT,
+            dicom_core::VR::CS,
+            "SK\\SP\\MP",
+        ),
+        synth::text(
+            dicom_dictionary_std::tags::MR_ACQUISITION_TYPE,
+            dicom_core::VR::CS,
+            "3D",
+        ),
+    ]);
+    dir.file(
+        "a/IM_0001",
+        &synth::part10(&MetaFields::mr("1.2.4.A.1.1"), &e, true),
+    );
+
+    let home = home();
+    let registry: [&std::ffi::OsStr; 2] =
+        [std::ffi::OsStr::new("--registry"), home.path().as_os_str()];
+    let out = nils()
+        .args(registry)
+        .args(["digest", "--workers", "2", "--name", "t"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = nils()
+        .args(registry)
+        .args(["fingerprint", "--name", "f"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // Every axis below full confidence is asked about, which is every axis a
+    // rule decided: the queue's size is the report's number, not a guess.
+    let classify = |extra: &[&str]| -> serde_json::Value {
+        let out = nils()
+            .args(registry)
+            .args(["classify", "--json", "--review-below", "1.0", "--pack-dir"])
+            .arg(&packs)
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let first = classify(&[]);
+    assert_eq!(first["written"], 1, "{first}");
+    assert!(first["review_items"].as_i64().unwrap() > 0, "{first}");
+
+    // `explain` says what the pack decided and what made it decide that
+    let out = nils()
+        .args(registry)
+        .args(["explain", "1", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let axis = |shown: &serde_json::Value, name: &str| -> serde_json::Value {
+        shown["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["axis"] == name)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    };
+    assert_eq!(axis(&shown, "technique")["value"], "MPRAGE", "{shown}");
+    assert!(
+        shown["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["axis"] == "technique" && e["rule"].is_string()),
+        "{shown}"
+    );
+
+    let items = |status: &str| -> Vec<serde_json::Value> {
+        let out = nils()
+            .args(registry)
+            .args(["review", "list", "--json", "--status", status])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let open = items("open");
+    let base = open
+        .iter()
+        .find(|i| i["kind"] == "base:low_confidence")
+        .unwrap_or_else(|| panic!("{open:#?}"));
+    let id = base["id"].as_i64().unwrap().to_string();
+
+    let out = nils()
+        .args(registry)
+        .args([
+            "review",
+            "decide",
+            &id,
+            "--value",
+            "T2w",
+            "--actor",
+            "a person",
+            "--why",
+            "checked by eye",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let said: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(said["axis"], "base", "{said}");
+    assert_eq!(said["value"], "T2w", "{said}");
+    assert!(
+        items("open")
+            .iter()
+            .all(|i| i["kind"] != "base:low_confidence"),
+        "the question is answered"
+    );
+
+    // and the answer survives the next run, which now disagrees out loud
+    let again = classify(&[]);
+    let mut kinds: Vec<String> = items("open")
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap().to_string())
+        .collect();
+    kinds.sort();
+    let mut once = kinds.clone();
+    once.dedup();
+    assert_eq!(
+        kinds, once,
+        "a question asked again is asked once, not twice"
+    );
+    assert_eq!(again["written"], 1, "{again}");
+    let out = nils()
+        .args(registry)
+        .args(["explain", "1", "--json"])
+        .output()
+        .unwrap();
+    let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(axis(&shown, "base")["value"], "T2w", "{shown}");
+    assert_eq!(axis(&shown, "base")["tier"], "decision", "{shown}");
+    assert!(
+        items("open").iter().any(|i| i["kind"] == "base:decision"),
+        "a rule that still disagrees is said out loud"
     );
 }
