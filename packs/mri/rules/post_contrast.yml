@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Whether contrast was given. The DICOM tags settle it when they are there;
+# only when they are not does the text get a say, and a word saying no
+# beats a word saying yes.
+
+rule_set: post_contrast
+decides: [post_contrast]
+tiers: {exclusive: 0.95, keywords: 0.85}
+
+order: [structured, negative, positive]
+
+rules:
+
+  structured:
+    clauses:
+      - {when: {field: text_contrast, present: true}, cite: 'the DICOM contrast tags', source: contrast_blob, tier: exclusive}
+    set: {post_contrast: given}
+    why: 'the administration was recorded in the file, so it happened'
+
+  negative:
+    clauses:
+      - {keywords: ['utan gd', 'utan_gd', 'ej gd', 'utan kontrast', 'ej kontrast', 'utan k', 'ej k', 'ingen gd', 'ingen k', ' -k', ' -gd', ' -c', 'pre gd', 'pre-gd', 'pre contrast', 'pre-contrast', 'without contrast', 'no contrast', 'non-contrast', 'non contrast', 'no gd', 'ohne gd', 'ohne kontrast', 'ohne km', 'nativ', 'kein gd', 'sans gd', 'sans contraste', 'sans gado', 'senza gd', 'senza contrasto', 'uten gd', 'uden gd', 'zonder gd', 'geen gd', 'pre - gd'], tier: keywords}
+    set: {post_contrast: not_given}
+    why: 'a word saying no beats a word saying yes'
+
+  positive:
+    clauses:
+      - {keywords: ['dotarem', 'clariscan', 'omniscan', 'magnevist', 'gadovist', 'prohance', 'multihance', 'optimark', 'eovist', 'primovist', 'gadavist', 'gadolinium', 'gadobutrol', 'gadoterate', 'gadoteridol', 'gadobenate', 'gadoxetate', ' gd', '_gd', '+k', '+gd', '+c', '+ gd', '+ k', 'k+', 'k +', '+contrast', 'med gd', 'med kontrast', 'med-kontrast', 'med_kontrast', 'med k', 'efter kontrast', 'spruta kontrast', 'gd direkt', 'post gd', 'post-gd', 'post contrast', 'post-contrast', 'with contrast', 'after contrast', 'contrast enhanced', 'mit gd', 'mit kontrast', 'nach gd', 'nach km', 'avec gd', 'avec contraste', 'post - gd'], tier: keywords}
+    set: {post_contrast: given}

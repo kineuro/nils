@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The precedence v0 applies once it knows which categories the text
+# mentions: a spine wins outright, a neck beside a brain is both, and
+# otherwise the neck comes before the brain.
+
+rule_set: body_part
+decides: [body_part]
+tiers: {keywords: 0.65}
+
+order: [spine, brain_neck, neck, brain, portrait_sagittal]
+
+rules:
+
+  spine:
+    clauses:
+      - {keywords: ['spine', 'spinal', 'spinal cord', 'cervical', 'cerv', 'thoracic', 'thor ', 'lumbar', 'lumb', 'c-spine', 't-spine', 'l-spine', 'vertebral', 'vertebra', 'cord', 'medulla', 'rygg', 'ryggm rg', 'halsrygg', 'br strygg', 'brostrygg', 'l ndrygg', 'lumbalrygg', 'totalcolumna', 'columna', 'sag cc', 'th col', 'wirbel', 'hws', 'bws', 'lws', 'wirbels ule', 'rachis', 'cervicale', 'dorsale', 'lombaire', 'moelle', 'wervelkolom', 'ruggengraat', 'myelit', 'myelopathy', 'syringomyelia'], tier: keywords}
+    set: {body_part: spine}
+    confidence: 0.65
+    why: 'a spine mentioned at all decides it, even beside a brain'
+
+  brain_neck:
+    clauses:
+      - {when: {all: [{text: search_text, any_substring: ['neck', 'nacke', 'hals', 'nakke', 'nek', 'cou']}, {text: search_text, any_substring: ['fmri', 'bold', 'resting state', 'rs-fmri', 'task-fmri', 'rest-fmri', 'rsfmri', 'rfmri', 'hippocampus', 'amygdala', 'thalamus', 'putamen', 'caudate', 'cortex', 'cortical', 'subcortical', 'white matter', 'gray matter', 'grey matter', 'corpus callosum', 'cerebral', 'cerebellum', 'cerebellar', 'frontal', 'parietal', 'temporal', 'occipital', 'brainstem', 'midbrain', 'pons', 'brain', 'head', 'neuro', 'hcp', 'adni', 'abcd', 'hj rna', 'hjarna', 'huvud', 'kopf', 'gehirn', 'hirn', 'sch del', 'schadel', 'cerveau', 'encephale', 'cr ne', 'crane', 'hersenen', 'hoofd']}]}, cite: 'a neck and a brain', source: text, tier: keywords}
+    set: {body_part: brain-neck}
+    confidence: 0.65
+
+  neck:
+    clauses:
+      - {keywords: ['neck', 'nacke', 'hals', 'nakke', 'nek', 'cou'], tier: keywords}
+    set: {body_part: neck}
+    confidence: 0.65
+
+  brain:
+    clauses:
+      - {keywords: ['fmri', 'bold', 'resting state', 'rs-fmri', 'task-fmri', 'rest-fmri', 'rsfmri', 'rfmri', 'hippocampus', 'amygdala', 'thalamus', 'putamen', 'caudate', 'cortex', 'cortical', 'subcortical', 'white matter', 'gray matter', 'grey matter', 'corpus callosum', 'cerebral', 'cerebellum', 'cerebellar', 'frontal', 'parietal', 'temporal', 'occipital', 'brainstem', 'midbrain', 'pons', 'brain', 'head', 'neuro', 'hcp', 'adni', 'abcd', 'hj rna', 'hjarna', 'huvud', 'kopf', 'gehirn', 'hirn', 'sch del', 'schadel', 'cerveau', 'encephale', 'cr ne', 'crane', 'hersenen', 'hoofd'], tier: keywords}
+    set: {body_part: brain}
+    confidence: 0.65
+
+  # v0's last resort, and only when the text said nothing at all: a sagittal
+  # image far taller than it is wide is a spine. This is the one rule that
+  # compares two of the stack's own numbers with each other.
+  portrait_sagittal:
+    clauses:
+      - when:
+          all:
+            - {text: orientation, case: lower, equals: sagittal}
+            - {field: fov_x, gt: 0}
+            - {field: fov_y, gt: {field: fov_x}}
+            - {field: aspect_ratio, ge: 1.4}
+        cite: 'a portrait sagittal field of view'
+        source: geometry
+        tier: physics
+    set: {body_part: spine}
+    confidence: 0.6

@@ -10,9 +10,27 @@ check afterwards, which is that both classifiers are run over the whole live
 corpus and their answers diffed row by row (`tools/pack-check/`).
 
 **The result, on 518,365 stacks of the live corpus, is zero differences on
-every axis transcribed so far**, with nothing of v0's output in the input: the
-pack's own normalizer builds the search text from the six raw DICOM text
-fields, its parsers and flags read that, and its axes decide.
+every axis**, with nothing of v0's output in the input: the pack's own
+normalizer builds the search text from the six raw DICOM text fields, its
+parsers and flags read that, and its rule sets decide.
+
+| axis | stacks | differences |
+|---|---:|---:|
+| provenance | 518,365 | 0 |
+| technique | 518,365 | 0 |
+| base | 518,365 | 0 |
+| modifier | 518,365 | 0 |
+| construct | 518,365 | 0 |
+| body_part | 518,365 | 0 |
+| post_contrast | 518,365 | 0 |
+| the normalizer | 386,488 series | 0 |
+
+Four of the seven are the compact axis form, where v0's own detector is
+value-major. Three are written longhand, because v0's are not: **base** scans
+six tiers and tries every value inside each; **body_part** collects every
+category that matches and then applies a precedence; **post_contrast** lets the
+DICOM tags settle it and only then listens to the text, where a word saying no
+beats a word saying yes.
 
 ## What v0 carries and this pack does not
 

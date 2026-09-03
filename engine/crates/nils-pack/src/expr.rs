@@ -95,6 +95,10 @@ pub enum Cmp {
     Str(bool, String),
     /// `{present: true}` / `{present: false}`.
     Present(bool),
+    /// Against another of the stack's own numbers: `{field: fov_y, gt: {field:
+    /// fov_x}}`. v0's spine heuristic needs it, and nothing else in the
+    /// language could say it.
+    Field(NumOp, usize),
 }
 
 #[derive(Clone, Debug)]
@@ -221,6 +225,10 @@ impl Expr {
                     hit == *want
                 }
                 Cmp::Present(want) => c.present(*field) == *want,
+                Cmp::Field(op, other) => match (c.num(*field), c.num(*other)) {
+                    (Some(a), Some(b)) => op.apply(a, b),
+                    _ => false,
+                },
             },
 
             Expr::Text { field, case, inner } => {

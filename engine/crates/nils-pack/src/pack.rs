@@ -307,7 +307,54 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             );
         }
         axes.push(loaded.axis);
-        rule_sets.push(loaded.set);
+        // An axis with no rules of its own is vocabulary: a longhand rule set
+        // decides it, and that set carries the name.
+        if !loaded.set.rules.is_empty() {
+            rule_sets.push(loaded.set);
+        }
+    }
+
+    // --- rule sets written longhand, after the axes they decide
+    for f in files_of(m, &manifest, dir, "rules")? {
+        let set = load_rule_set(
+            &f,
+            &axes,
+            &derived,
+            &flag_ix,
+            &parsers,
+            &parser_ix,
+            &buckets,
+            &mut regexes,
+        )?;
+        if rule_sets.iter().any(|r| r.name == set.name) {
+            return Err(
+                Error::at(format!("rules {}", set.name), "is declared twice")
+                    .in_file(&f.path, Some(&f.source)),
+            );
+        }
+        rule_sets.push(set);
+    }
+
+    // The order the rule sets run in, when the pack states one. Without it
+    // they run as declared: the axes, then the longhand sets.
+    if let Some(o) = m.get("order") {
+        let want = manifest.blame(yaml::texts(o, "order"))?;
+        for n in &want {
+            if !rule_sets.iter().any(|r| r.name == *n) {
+                return Err(Error::at("order", format!("no rule set named {n}"))
+                    .in_file(&manifest.path, Some(&manifest.source)));
+            }
+        }
+        for r in &rule_sets {
+            if !want.contains(&r.name) {
+                return Err(Error::at(
+                    "order",
+                    format!("{} is not in the order, so it would never run", r.name),
+                )
+                .in_file(&manifest.path, Some(&manifest.source)));
+            }
+        }
+        rule_sets.sort_by_key(|r| want.iter().position(|n| *n == r.name).unwrap_or(usize::MAX));
     }
 
     let mut pack = Pack {
@@ -584,6 +631,13 @@ fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<
                 Cmp::Present(v.as_bool().unwrap_or(true))
             } else if let Some(op) = NumOp::parse(k) {
                 match v {
+                    // Against another of the stack's own numbers.
+                    Value::Object(mm) if mm.contains_key("field") => {
+                        let other = yaml::text(&mm["field"], at)?;
+                        let oi = resolve_field(sc.derived, &other)
+                            .ok_or_else(|| Error::at(at, format!("no field named {other}")))?;
+                        Cmp::Field(op, oi)
+                    }
                     Value::String(s) => {
                         if op != NumOp::Eq && op != NumOp::Ne {
                             return Err(Error::at(
@@ -732,7 +786,8 @@ fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<
 // Axes, and the rule sets they expand into (§6.3).
 
 /// The confidences v0 fixes per tier, which a pack may restate.
-const DEFAULT_TIERS: [(&str, f64); 6] = [
+const DEFAULT_TIERS: [(&str, f64); 7] = [
+    ("stated", 0.0),
     ("exclusive", 0.95),
     ("keywords", 0.85),
     ("combination", 0.75),
@@ -803,7 +858,13 @@ fn load_axis(
     let tier_of = |t: Tier| -> f64 { tiers.get(t.name()).copied().unwrap_or(0.0) };
 
     // --- the vocabulary, in the order it is tried
-    let order = f.blame(yaml::texts(yaml::get(m, "order", "axis")?, "order"))?;
+    // An axis with no order of its own is vocabulary: a longhand rule set
+    // decides it, which is what v0's base contrast needs, since its tiers are
+    // tier-major and not value-major.
+    let order = match m.get("order") {
+        Some(o) => f.blame(yaml::texts(o, "order"))?,
+        None => Vec::new(),
+    };
     let values_m = f.blame(yaml::obj(yaml::get(m, "values", "axis")?, "values"))?;
     for id in &order {
         if !values_m.contains_key(id) {
@@ -1213,5 +1274,224 @@ fn load_normalizer(f: &File) -> R<Normalizer> {
         token_removals,
         token_replacements,
         conditional,
+    })
+}
+
+/// A rule set written longhand (§6.5): the routes with their own logic, and
+/// the axes whose tiers are not value-major. Nothing distinguishes a route
+/// from any other rule set but its `enter_when`.
+#[allow(clippy::too_many_arguments)]
+fn load_rule_set(
+    f: &File,
+    axes: &[Axis],
+    derived: &[Normalizer],
+    flag_ix: &HashMap<String, usize>,
+    parsers: &[ParserDef],
+    parser_ix: &HashMap<String, usize>,
+    buckets: &BTreeMap<String, Vec<String>>,
+    regexes: &mut Vec<Regex>,
+) -> R<RuleSet> {
+    let m = f.blame(yaml::obj(&f.value, "rule_set"))?;
+    let name = f.blame(yaml::text(
+        yaml::get(m, "rule_set", "rule_set")?,
+        "rule_set",
+    ))?;
+    let at = format!("rule set {name}");
+
+    let mut decides = Vec::new();
+    for a in f.blame(yaml::texts(yaml::get(m, "decides", &at)?, "decides"))? {
+        decides.push(axes.iter().position(|x| x.name == a).ok_or_else(|| {
+            Error::at("decides", format!("no axis named {a}")).in_file(&f.path, Some(&f.source))
+        })?);
+    }
+
+    let compile_here = |body: &Value, at: &str, regexes: &mut Vec<Regex>| -> R<Expr> {
+        let mut sc = Scope {
+            derived,
+            axes,
+            parsers,
+            parser_ix,
+            buckets,
+            within: None,
+            flags: Some(flag_ix),
+            regexes,
+            deps: HashSet::new(),
+        };
+        compile(body, at, &mut sc)
+    };
+
+    let mut tiers: HashMap<String, f64> = DEFAULT_TIERS
+        .iter()
+        .map(|(k, v)| (k.to_string(), *v))
+        .collect();
+    if let Some(t) = m.get("tiers") {
+        for (k, v) in f.blame(yaml::obj(t, "tiers"))? {
+            if !tiers.contains_key(k) {
+                return Err(Error::at(format!("tiers.{k}"), "no clause has that tier")
+                    .in_file(&f.path, Some(&f.source)));
+            }
+            tiers.insert(k.clone(), f.blame(yaml::number(v, "tiers"))?);
+        }
+    }
+
+    let enter_when = match m.get("enter_when") {
+        Some(w) => Some(f.blame(compile_here(w, &format!("{at}.enter_when"), regexes))?),
+        None => None,
+    };
+
+    let order = f.blame(yaml::texts(yaml::get(m, "order", &at)?, "order"))?;
+    let bodies = f.blame(yaml::obj(yaml::get(m, "rules", &at)?, &at))?;
+    let mut rules = Vec::with_capacity(order.len());
+    for id in &order {
+        let rat = format!("{at}.rules.{id}");
+        let r = f.blame(yaml::obj(
+            bodies
+                .get(id)
+                .ok_or_else(|| Error::at("order", format!("no rule named {id}")))?,
+            &rat,
+        ))?;
+
+        let mut clauses = Vec::new();
+        for (i, c) in f
+            .blame(yaml::arr(yaml::get(r, "clauses", &rat)?, &rat))?
+            .iter()
+            .enumerate()
+        {
+            let cat = format!("{rat}.clauses[{i}]");
+            let cm = f.blame(yaml::obj(c, &cat))?;
+            let tier = match cm.get("tier") {
+                None => Tier::Stated,
+                Some(t) => match f.blame(yaml::text(t, &cat))?.as_str() {
+                    "exclusive" => Tier::Exclusive,
+                    "keywords" => Tier::Keywords,
+                    "combination" => Tier::Combination,
+                    "alternative" => Tier::Alternative,
+                    "physics" => Tier::Physics,
+                    "stated" => Tier::Stated,
+                    other => {
+                        return Err(Error::at(&cat, format!("{other} is not a tier"))
+                            .in_file(&f.path, Some(&f.source)));
+                    }
+                },
+            };
+            let confidence = tiers.get(tier.name()).copied().unwrap_or(0.0);
+            clauses.push(if let Some(flag) = cm.get("flag") {
+                // Cites the flag, as an axis rule does.
+                let name = f.blame(yaml::text(flag, &cat))?;
+                Clause::Flag {
+                    tier,
+                    confidence,
+                    flag: *flag_ix.get(&name).ok_or_else(|| {
+                        Error::at(&cat, format!("{name} is not a flag of this pack"))
+                            .in_file(&f.path, Some(&f.source))
+                    })?,
+                    name,
+                }
+            } else if let Some(kw) = cm.get("keywords") {
+                // Cites the keyword that matched, which is what makes the
+                // evidence worth reading.
+                let field_name = match cm.get("field") {
+                    Some(x) => f.blame(yaml::text(x, &cat))?,
+                    None => "search_text".to_string(),
+                };
+                let field = resolve_field(derived, &field_name).ok_or_else(|| {
+                    Error::at(&cat, format!("no field named {field_name}"))
+                        .in_file(&f.path, Some(&f.source))
+                })?;
+                Clause::Keywords {
+                    tier,
+                    confidence,
+                    field,
+                    list: f.blame(yaml::texts(kw, &cat))?,
+                }
+            } else {
+                Clause::When {
+                    tier,
+                    confidence,
+                    cite: f.blame(yaml::text(yaml::get(cm, "cite", &cat)?, &cat))?,
+                    source: f.blame(yaml::text(yaml::get(cm, "source", &cat)?, &cat))?,
+                    expr: f.blame(compile_here(
+                        yaml::get(cm, "when", &cat)?,
+                        &format!("{cat}.when"),
+                        regexes,
+                    ))?,
+                }
+            });
+        }
+        if clauses.is_empty() {
+            return Err(Error::at(&rat, "has no clauses, so it can never fire")
+                .in_file(&f.path, Some(&f.source)));
+        }
+
+        let mut sets = Vec::new();
+        for (axis_name, v) in f.blame(yaml::obj(yaml::get(r, "set", &rat)?, &rat))? {
+            let sat = format!("{rat}.set.{axis_name}");
+            let ai = axes
+                .iter()
+                .position(|x| x.name == *axis_name)
+                .ok_or_else(|| {
+                    Error::at(&sat, format!("no axis named {axis_name}"))
+                        .in_file(&f.path, Some(&f.source))
+                })?;
+            if !decides.contains(&ai) {
+                return Err(Error::at(
+                    &sat,
+                    format!("this rule set does not declare {axis_name} in `decides`"),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+            let items = match v {
+                Value::Array(a) => a.clone(),
+                other => vec![other.clone()],
+            };
+            let mut values = Vec::with_capacity(items.len());
+            for (j, item) in items.iter().enumerate() {
+                let iat = format!("{sat}[{j}]");
+                let (id, when) = match item {
+                    Value::Object(mm) if mm.contains_key("value") => (
+                        f.blame(yaml::text(&mm["value"], &iat))?,
+                        match mm.get("when") {
+                            Some(w) => {
+                                Some(f.blame(compile_here(w, &format!("{iat}.when"), regexes))?)
+                            }
+                            None => None,
+                        },
+                    ),
+                    other => (f.blame(yaml::text(other, &iat))?, None),
+                };
+                // A value outside the axis's vocabulary fails the pack here,
+                // which is what stops one name drifting into two.
+                let value = axes[ai].value_index(&id).ok_or_else(|| {
+                    Error::at(&iat, format!("{id} is not a value of the {axis_name} axis"))
+                        .in_file(&f.path, Some(&f.source))
+                })?;
+                values.push(SetValue { value, when });
+            }
+            sets.push(Sets { axis: ai, values });
+        }
+        if sets.is_empty() {
+            return Err(Error::at(&rat, "sets nothing").in_file(&f.path, Some(&f.source)));
+        }
+
+        let confidence = match r.get("confidence") {
+            Some(c) => Some(f.blame(yaml::number(c, &rat))?),
+            None => None,
+        };
+        rules.push(Rule {
+            id: id.clone(),
+            requires: None,
+            clauses,
+            sets,
+            confidence,
+            why: r.get("why").map(|w| yaml::text(w, &rat)).transpose()?,
+        });
+    }
+
+    Ok(RuleSet {
+        name,
+        collect: m.get("collect").and_then(|c| c.as_bool()).unwrap_or(false),
+        decides,
+        enter_when,
+        rules,
     })
 }

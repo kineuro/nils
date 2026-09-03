@@ -86,6 +86,39 @@ def main() -> int:
             r = det.detect(ctx)
             return r.construct_csv, "", ""
 
+    elif a.axis == "post_contrast":
+        from classification.detectors.contrast import ContrastDetector  # noqa: E402
+
+        det = ContrastDetector()
+
+        def decide(ctx):
+            r = det.detect_contrast(ctx)
+            v = "" if r.post_contrast is None else str(r.post_contrast)
+            return v, r.detection_method, ""
+
+    elif a.axis == "body_part":
+        from classification.detectors.body_part import BodyPartDetector  # noqa: E402
+
+        det = BodyPartDetector()
+
+        def decide(ctx):
+            r = det.detect_body_part(ctx)
+            return r.body_part or "", r.detection_method, r.matched_keyword or ""
+
+    elif a.axis == "base":
+        from classification.detectors.base_contrast import BaseContrastDetector  # noqa: E402
+        from classification.detectors.technique import TechniqueDetector  # noqa: E402
+
+        base_det = BaseContrastDetector()
+        tech_det = TechniqueDetector()
+
+        def decide(ctx):
+            # v0 hands the technique to the base detector, which is why the
+            # pack decides technique before base (spec section 6.3).
+            technique = tech_det.detect_technique(ctx).technique
+            r = base_det.detect_base(ctx, technique=technique)
+            return r.base, r.detection_method, first_evidence(r)
+
     elif a.axis == "search_text":
         # Not an axis: the normalized blob v0 builds at extract time and
         # stores, which the pack builds when it is loaded.

@@ -29,6 +29,18 @@ axes:
   - axes/technique.yml
   - axes/modifier.yml
   - axes/construct.yml
+  - axes/base.yml
+  - axes/body_part.yml
+  - axes/post_contrast.yml
+
+# Rule sets written longhand: the tiers that are not value-major.
+rules:
+  - rules/base.yml
+  - rules/post_contrast.yml
+  - rules/body_part.yml
+
+# The order the rule sets run in.
+order: [provenance, technique, base, modifier, construct, body_part, post_contrast]
 
 # The lists a site may amend through an overlay, and nothing else: a pack
 # decides what is editable, not the engine (§5.3). Physics, flags and the
