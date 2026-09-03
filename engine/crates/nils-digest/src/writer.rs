@@ -6,9 +6,11 @@
 //! is likely to meet again; a miss costs one keyed select for the whole batch,
 //! never a query per file.
 //!
-//! A row that exists is never rewritten: the first record of a subject, a
-//! study or a series stands, and a file that disagrees with it raises a
-//! `field_disagreement` naming the field.
+//! A row that exists is not replaced, and its fields do not depend on the
+//! order the files reached the writer: a null is filled by the first file
+//! that carries a value, and a field two files disagree on keeps the smaller
+//! value in the canonical text order (§9.1). A disagreement over a field the
+//! catalogue compares also raises a `field_disagreement` naming it.
 //!
 //! Subjects are resolved through the linkage store (§7.4): the lookup of a
 //! file's identifier names its subject when the store has met it; otherwise
@@ -30,7 +32,10 @@ use nils_registry::store::{Insert, Param, Store};
 use nils_registry::time::now_iso;
 use nils_registry::{HomeError, Registry, Scheme, pseudonym};
 
-use crate::batch::{Batch, Fields, Item, ParsedFile, detail_level, hash_value, hash32};
+use crate::batch::{
+    Batch, Fields, Item, ParsedFile, canonical_cell, canonical_value, detail_level, hash_value,
+    hash32,
+};
 use crate::cancel::{Cancel, Scripted};
 use crate::progress::{PROGRESS_EVERY, Progress};
 use crate::report::{Counts, Written};
@@ -52,6 +57,30 @@ pub const ABORTED: &str = "aborted: the batch in flight rolled back";
 
 struct SubjectEntry {
     hashes: Box<[u32]>,
+    kept: Kept,
+}
+
+/// The canonical text of the fields of a cached row that instances have
+/// disagreed on, read back from the row once and kept with it, so that
+/// deciding a field (§9.1) costs one read per row and field however many
+/// instances disagree on it. A row nobody disagrees about carries a null
+/// pointer and nothing more, which is the common case.
+#[derive(Default)]
+// the box is the point: eight bytes on a row nobody disagrees about, against
+// the map's forty-eight
+#[allow(clippy::box_collection)]
+struct Kept(Option<Box<HashMap<u16, Box<str>>>>);
+
+impl Kept {
+    fn get(&self, i: usize) -> Option<&str> {
+        self.0.as_ref()?.get(&(i as u16)).map(|s| &**s)
+    }
+
+    fn set(&mut self, i: usize, text: &str) {
+        self.0
+            .get_or_insert_with(Default::default)
+            .insert(i as u16, text.into());
+    }
 }
 
 /// An id type the rule files under, with its row in the linkage store.
@@ -76,6 +105,7 @@ struct StudyEntry {
     id: i64,
     subject_id: i64,
     hashes: Box<[u32]>,
+    kept: Kept,
 }
 
 struct SeriesEntry {
@@ -85,6 +115,7 @@ struct SeriesEntry {
     level: Option<Level>,
     /// The series row's hashes, then the detail row's.
     hashes: Box<[u32]>,
+    kept: Kept,
 }
 
 /// How one parsed file was filed.
@@ -383,6 +414,7 @@ impl<'a> Writer<'a> {
                     r.int(0)?,
                     SubjectEntry {
                         hashes: self.subject_fields.hash_cells(&r.0[1..]),
+                        kept: Kept::default(),
                     },
                 );
             }
@@ -408,6 +440,15 @@ impl<'a> Writer<'a> {
                 &self.subject_fields,
                 &h,
                 &mut entry.hashes,
+                id,
+                &p.extracted,
+            )?;
+            resolve(
+                self.registry.store(),
+                &self.subject_fields,
+                &h,
+                &mut entry.hashes,
+                &mut entry.kept,
                 id,
                 &p.extracted,
             )?;
@@ -505,6 +546,7 @@ impl<'a> Writer<'a> {
                         id,
                         SubjectEntry {
                             hashes: x.row(Level::Subject).map(|(_, v)| hash_value(v)).collect(),
+                            kept: Kept::default(),
                         },
                     );
                     for (lookup, i) in &g.members {
@@ -626,6 +668,7 @@ impl<'a> Writer<'a> {
                         id: r.int(0)?,
                         subject_id,
                         hashes,
+                        kept: Kept::default(),
                     },
                 );
             }
@@ -650,6 +693,7 @@ impl<'a> Writer<'a> {
                             id: r.int(0)?,
                             subject_id: r.int(2)?,
                             hashes: self.study_fields.hash_cells(&r.0[3..]),
+                            kept: Kept::default(),
                         },
                     );
                 }
@@ -683,6 +727,15 @@ impl<'a> Writer<'a> {
                 &self.study_fields,
                 &p.hashes.study,
                 &mut entry.hashes,
+                entry.id,
+                x,
+            )?;
+            resolve(
+                self.registry.store(),
+                &self.study_fields,
+                &p.hashes.study,
+                &mut entry.hashes,
+                &mut entry.kept,
                 entry.id,
                 x,
             )?;
@@ -740,6 +793,7 @@ impl<'a> Writer<'a> {
                         study_id: study_ids[i],
                         level: detail_level(&x.modality),
                         hashes: p.hashes.series.clone(),
+                        kept: Kept::default(),
                     },
                 );
                 if let Some(level) = detail_level(&x.modality) {
@@ -799,6 +853,15 @@ impl<'a> Writer<'a> {
                 ));
             }
             fill(self.registry.store(), fields, mine, theirs, entry.id, x)?;
+            resolve(
+                self.registry.store(),
+                fields,
+                mine,
+                theirs,
+                &mut entry.kept,
+                entry.id,
+                x,
+            )?;
         }
         self.note(tally, diags);
         Ok(ids)
@@ -875,6 +938,7 @@ impl<'a> Writer<'a> {
                     study_id: b.study_id,
                     level: b.level,
                     hashes: b.hashes.into_boxed_slice(),
+                    kept: Kept::default(),
                 },
             );
         }
@@ -1434,6 +1498,63 @@ fn text_of(v: &Value) -> String {
     v.to_string()
 }
 
+/// The table and key column a field of `level` is updated by.
+fn field_table(level: Level) -> (&'static Table, &'static str) {
+    match level {
+        Level::Subject | Level::Study | Level::Series => (table(level.name()), "id"),
+        _ => (table(level.name()), "series_id"),
+    }
+}
+
+/// Decide the fields a file and a stored row disagree on (§9.1): the row
+/// keeps the smaller value in the canonical text order, whichever file
+/// brought it, so that the row is the same however the walk and the workers
+/// ordered the instances. The stored value is read back the first time a
+/// field is decided and kept with the cached row.
+fn resolve(
+    store: &mut Store,
+    fields: &Fields,
+    mine: &[u32],
+    theirs: &mut [u32],
+    kept: &mut Kept,
+    id: i64,
+    x: &nils_dicom::Extracted,
+) -> Result<(), HomeError> {
+    for i in fields.resolvable(mine, theirs) {
+        let level = fields.levels[i];
+        let name = fields.names[i];
+        let Some(value) = x.value(level, name) else {
+            continue;
+        };
+        let (t, key) = field_table(level);
+        let ours = canonical_value(value).into_owned();
+        let stored = match kept.get(i) {
+            Some(text) => text.to_string(),
+            None => {
+                let column = t
+                    .column(name)
+                    .unwrap_or_else(|| panic!("{}.{name} is not a column", t.name));
+                let rows = store.select_by_ids(t, &[column], key, &[id])?;
+                match rows.first().and_then(|r| r.0.first()) {
+                    Some(cell) => match canonical_cell(fields.converters[i], cell) {
+                        Some(text) => text.into_owned(),
+                        None => continue,
+                    },
+                    None => continue,
+                }
+            }
+        };
+        if ours < stored {
+            store.update_by_id(t, &[(name, Param::from(Some(value)))], key, id)?;
+            theirs[i] = mine[i];
+            kept.set(i, &ours);
+        } else {
+            kept.set(i, &stored);
+        }
+    }
+    Ok(())
+}
+
 /// Fill the stored nulls of a row that a later file carries values for
 /// (§9.1: a null is no value, so the first value is the first file that has
 /// one), and note the values in the cached hashes.
@@ -1447,10 +1568,7 @@ fn fill(
 ) -> Result<(), HomeError> {
     for i in fields.fillable(mine, theirs) {
         let level = fields.levels[i];
-        let (t, key) = match level {
-            Level::Subject | Level::Study | Level::Series => (table(level.name()), "id"),
-            _ => (table(level.name()), "series_id"),
-        };
+        let (t, key) = field_table(level);
         let value = x.value(level, fields.names[i]);
         store.update_by_id(t, &[(fields.names[i], Param::from(value))], key, id)?;
         theirs[i] = mine[i];
