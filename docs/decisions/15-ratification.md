@@ -129,6 +129,11 @@ on the production host, a defined sample corpus digested and timed. The only dep
 DICOM sample on the storage server, which follows the migration. Nothing in v1 may
 claim "a
 small machine" before this number exists. **Accepted 2026-09-02 (section 7).**
+**Built and measured 2026-09-03**: an 8 vCPU / 64 GB VM on Asgard reading the
+corpus over NFS, v0 0.5.3 deployed on it and measured first (507 files/s,
+5.78 GiB), then v1 (5,713 files/s, 0.83 GiB) and the gate of §12, which passes
+there. The numbers and their caveats are in 11 under slice 8 and in the wave
+spec's §12.5.
 
 ### C10, what the public corpus may contain
 

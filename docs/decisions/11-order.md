@@ -341,9 +341,45 @@ decided fields and the repaired reader and with Nima's own key in place: the
 same eight bars pass, every divergence is still classified by the same rules,
 and the two that fail are still the four studies.
 
-Still not in slice 7: the cold-cache run on the baseline host, then the cohorts
-as the migration lands their raw trees, each report summarized here in counts
-and shapes; the slice closes with the last of them.
+The gate then ran on the baseline host itself, the machine C6 asked for and
+slice 8 built: the same ten bars pass there, with the digest taking
+96 s. Still not in slice 7: the cohorts as the migration lands their raw trees,
+each report summarized here in counts and shapes.
+
+Slice 8, the budget, done 2026-09-03. The baseline host is what C6 asked for
+and no longer a container: a virtual machine on Asgard, 8 vCPU, 64 GB,
+Debian 13, reading the corpus from the storage server over NFS 4.2 read-only,
+exactly as the hypervisor mounts it, and writing its registry to its own
+disk. A machine rather than a container so that the page cache and the
+kernel are the guest's own; the container that stood in for it until now
+(8 cores, 64 GB, the same NFS source) keeps its place for development. v0
+0.5.3 was deployed there as it runs, two Postgres containers and its own
+image, and measured first, which is the whole point of C6.
+
+Over 497,150 files from a cold cache, both sides producing 44 subjects,
+82 studies, 2,165 series, 2,534 stacks and 493,708 instances: v0 981 s at
+507 files/s with 5.78 GiB resident; v1 87 s at 5,713 files/s with 0.83 GiB;
+v1 on Postgres 16 93 s at 5,368 files/s; the same tree digested again 4.2 s at
+118,077 files/s and 0.17 GiB, which is the resume path of §9.2 doing its work.
+Eleven times the rate at a seventh of the memory, on the machine v0 was
+measured on, and D6's "thirty million instances in a working day" is now a
+measurement rather than a hope: the live corpus's 37.5 million instances take
+1.8 hours at that rate where v0 would take 20.5. Two honest caveats went into
+the spec with the numbers. This is not v0 as it runs in production, where a
+loaded host and a 24 GB database give it 150 to 460 files/s: v0 on a quiet
+machine with an empty database is v0 at its best, which is the comparison worth
+making. And none of it promises anything about a corpus a hundred times larger,
+where the writer's caches stop holding the working set; the migration's own runs
+will say.
+
+The small-machine gate of §12.6 is in CI as the `bench` job: 200,000 instances
+written from a seed, digested on SQLite, and held against a recorded rate per
+runner class (`engine/benches/`). The runner measured 16,846 files/s at
+0.36 GiB and the recorded gate is 12,000, set below the measurement on purpose,
+because a shared runner varies by a quarter from run to run and the job is
+there to catch a regression rather than to measure the machine. The corpus is
+200,000 instances rather than a million so that it costs three minutes on every
+pull request; the million-instance run belongs on the baseline host.
 
 **Wave 2 — fingerprint and classify.** The columnar fingerprint pass, the pack
 loader, the MRI pack carried over, evidence storage, `nils classify`. *Gate:*
