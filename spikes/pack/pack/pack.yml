@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The prototype pack of the C11 spike: not the MRI pack, three pieces of it.
+# It carries no axes: the axis layer is slice 3 of the wave and is not what
+# C11 is in doubt about.
+
+pack: mri-proto
+version: 0.1.0
+contract: 1
+modality: MR
+
+parsers: parsers.yml
+flags:   flags.yml
+branches:
+  - branches/swi.yml
+passes:
+  - passes/physics_vote.yml

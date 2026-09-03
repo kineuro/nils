@@ -1,0 +1,145 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The physics vote: fill a missing base or technique from stacks whose
+# acquisition physics is the same.
+#
+# Transcribed from v0 0.5.3 `sort/gap_filling.py` and phase 3 of
+# `sort/steps/step4_completion.py`. A pass is NOT an expression but an
+# algorithm, so the pack does not write one. It declares a configured
+# instance of a kind the engine provides, and every number the algorithm uses
+# is here rather than in the code.
+#
+# What changes from v0, declared rather than discovered:
+#   * `reference.scope` is named and pinned. v0 votes against every classified
+#     MR stack in the database as it stands at that moment, so the answer a
+#     stack gets depends on what was sorted before it.
+#   * `on_tie: none`. v0 breaks a tie by the order the reference rows arrived
+#     in, which is the order the database returned them.
+#   * `emit`. v0 computes the match count and the widening method and keeps
+#     neither, then sets the review flag on every stack it touches.
+
+pass: physics_vote
+kind: nearest_neighbour_vote
+phase: after
+
+# Which stacks the pass runs on.
+target:
+  when:
+    any:
+      - {axis: base, missing_or: Unknown}
+      - {axis: technique, missing_or: Unknown}
+
+reference:
+  scope: registry_snapshot          # v1 pins it; v0 reads the live table
+  filter:
+    modality: MR
+    base: {present: true, not: Unknown}
+    technique: {present: true, not: Unknown}
+    directory_type: {not: excluded}
+  partition_by: directory_type      # one pool per intent…
+  fallback: global                  # …and the whole pool when it says nothing
+  fallback_when: [no_match, insufficient_matches, no_compatible_match]
+  fallback_except: [misc]           # a misc stack already votes globally
+
+# `rounding` is part of the pack because the two languages disagree: Python
+# rounds a half to even and Rust rounds it away from zero, which puts a TR of
+# exactly 50 ms in a different bin.
+key:
+  tr:         {round: 100, rounding: half_even}
+  te:         {round: 5,   rounding: half_even}
+  ti:         {round: 100, rounding: half_even}
+  flip_angle: {round: 5,   rounding: half_even}
+  slices:     {ceil: 20}
+
+widen:
+  max_distance: 2
+  single: [tr, te, ti, flip_angle, slices]
+  pairs: [[te, ti], [tr, flip_angle]]
+  relaxed:
+    - {requires: ti, vary: {ti: 6, te: 4}, method: expanded_relaxed_ti}
+
+decide:
+  vote_on: [base, technique]
+  min_matches: 2
+  on_tie: none
+  filter: compatibility
+  writes: [base, technique]
+  write_when: {missing_or: Unknown}
+
+emit:
+  evidence: always                  # method, match count, pool size, distance
+  review_item_below: 0.7
+  # v0 sets manual_review_required on everything this pass touches; v1 does not.
+  review_all_touched: false
+
+# ---------------------------------------------------------------------------
+# The compatibility filter: a voted technique must fit the stack's own
+# ScanningSequence. Ordered, first match decides: the same shape as a branch.
+# Every test is a substring of the upper-cased raw value, as v0 does, so `SE`
+# matches inside `FSE` on purpose.
+compatibility:
+  # What the rules below read: the stack's own ScanningSequence, upper-cased.
+  # The candidate technique is the other half of the subject, and `family`
+  # and `candidate_empty` are the atoms that reach it.
+  subject: {text: scanning_sequence, case: upper}
+  default_family: OTHER
+  family_of:
+    SE: SE
+    TSE: SE
+    HASTE: SE
+    RESTORE: SE
+    MESE: SE
+    MDME: SE
+    SPACE: SE
+    TIRM: SE
+    3D-TSE: SE
+    SS-TSE: SE
+    IR-TSE: SE
+    ME-SE: SE
+    VFA-TSE: SE
+    GRE: GRE
+    FLASH: GRE
+    MPRAGE: GRE
+    MEMPRAGE: GRE
+    MP2RAGE: GRE
+    TOF-MRA: GRE
+    PC-MRA: GRE
+    SWI: GRE
+    CISS: GRE
+    bSSFP: GRE
+    FIESTA: GRE
+    DESS: GRE
+    SSFP: GRE
+    QALAS: GRE
+    VI-GRE: GRE
+    SP-GRE: GRE
+    SS-GRE: GRE
+    FSP-GRE: GRE
+    VFA-GRE: GRE
+    ME-GRE: GRE
+    EPI: EPI
+    DWI-EPI: EPI
+    BOLD-EPI: EPI
+    GRE-EPI: EPI
+    SE-EPI: EPI
+    GRASE: EPI
+    ASL: OTHER
+    Perfusion: OTHER
+    MRF: OTHER
+    BOLD: OTHER
+  rules:
+    - {when: {any: [{empty: true}, {candidate_empty: true}]}, allow: true}
+    # Research mode is ambiguous, so it allows everything except EPI on a
+    # sequence that says nothing but RM.
+    - when: {all: [{substring: RM}, {not: {substring: TIRM}},
+                   {any: [{equals: 'RM'}, {equals: "['RM']"}]}, {family: EPI}]}
+      allow: false
+    - {when: {all: [{substring: RM}, {not: {substring: TIRM}}]}, allow: true}
+    - {when: {family: EPI}, allow: {substring: EP}}
+    - when: {family: SE}
+      allow: {any: [{substring: SE}, {substring: FSE}, {substring: IR},
+                    {all: [{not: {substring: EP}}, {not: {substring: GR}}]}]}
+    - when: {family: GRE}
+      allow: {any: [{substring: GR},
+                    {all: [{not: {substring: SE}}, {not: {substring: EP}}]}]}
+    - {when: true, allow: true}

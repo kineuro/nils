@@ -1,0 +1,137 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The SWI branch: one acquisition, seven outputs, its own taxonomy.
+#
+# Transcribed from v0 0.5.3 `classification/branches/swi.py`. A branch is an
+# ordered first-match dispatch whose order is the knowledge: QSM is tried LAST
+# because one vendor stamps `psd/QSM/me` into the description of every output
+# of the acquisition, so `qsm` in the text says nothing until the specific
+# output labels have been ruled out.
+#
+# A rule is a list of named clauses. The rule fires when any clause is true and
+# the evidence cites the FIRST true one, which is exactly v0's
+# `"unified_flags" if uf.get(x) else "text_search_blob"`, made general.
+
+branch: swi
+enter_when: {provenance: SWIRecon}
+
+# The technique of every output, decided once for the whole branch.
+derive:
+  swi_technique:
+    - {when: has_epi, value: EPI}
+    - {when: has_gre, value: GRE}
+    - {when: {text: text_blob, any_substring: [epi, 3depi]}, value: EPI}
+    - {value: GRE}
+
+# Every rule of this branch sets these; written once rather than eight times.
+defaults:
+  set:
+    base: SWI
+    directory_type: anat
+    technique: {from: swi_technique}
+
+order: [minip, mip, phase, swi, projection, r2star, magnitude, qsm_source_echo, qsm, fallback]
+
+rules:
+
+  minip:
+    clauses:
+      - {cite: is_minip, source: unified_flags, when: is_minip}
+      - {cite: minip keyword, source: text_search_blob,
+         when: {text: text_blob, any_substring: [minip, 'min ip']}}
+    set: {construct: [MinIP]}
+    confidence: 0.95
+    why: MinIP detected → Minimum Intensity Projection
+
+  mip:
+    clauses:
+      - {cite: is_mip, source: unified_flags, when: is_mip}
+      - {cite: mip keyword, source: text_search_blob,
+         when: {all: [{text: text_blob, substring: mip},
+                      {not: {text: text_blob, substring: minip}}]}}
+    set: {construct: [MIP]}
+    confidence: 0.90
+    why: MIP detected → Maximum Intensity Projection
+
+  phase:
+    # The normalizer expands pha/phs to phase, so GE PHS outputs land here.
+    # has_qsm wins over a bare P token: DERIVED\PRIMARY\QSM\P is a QSM map.
+    clauses:
+      - {cite: has_phase, source: unified_flags,
+         when: {all: [has_phase, {not: has_magnitude}, {not: has_qsm}]}}
+      - {cite: phase keyword, source: text_search_blob,
+         when: {all: [{text: text_blob, substring: phase},
+                      {not: {text: text_blob, substring: magnitude}},
+                      {not: has_qsm}]}}
+    set:
+      construct:
+        - Phase
+        - {value: QSM, when: {text: text_blob, substring: qsm}}
+    confidence: 0.90
+    why: SWI/QSM phase output
+
+  swi:
+    clauses:
+      - {cite: has_swi, source: unified_flags, when: has_swi}
+    set: {construct: [SWI]}
+    confidence: 0.90
+    why: SWI token in ImageType → processed SWI output
+
+  projection:
+    clauses:
+      - {cite: PROJECTION IMAGE, source: is_projection, when: is_projection}
+    set: {construct: [SWI]}
+    confidence: 0.80
+    why: PROJECTION IMAGE in SWI context → processed SWI output (fallback)
+
+  r2star:
+    clauses:
+      - {cite: has_r2star, source: unified_flags, when: has_r2star}
+      - {cite: r2star keyword, source: text_search_blob, when: {text: text_blob, substring: r2star}}
+    set:
+      construct:
+        - {value: QSM, when: {any: [has_qsm, {text: text_blob, substring: qsm}]}}
+        - R2starmap
+    confidence: 0.90
+    why: R2* transverse relaxation rate map
+
+  magnitude:
+    clauses:
+      - {cite: has_magnitude (no SWI token), source: unified_flags,
+         when: {all: [has_magnitude, {not: has_swi}]}}
+      - {cite: magnitude keyword, source: text_search_blob, when: {text: text_blob, substring: magnitude}}
+    set:
+      construct:
+        - Magnitude
+        - {value: QSM, when: {text: text_blob, substring: qsm}}
+    confidence: 0.85
+    why: SWI/QSM source magnitude
+
+  qsm_source_echo:
+    # Multi-echo source data from a QSM acquisition: acquisition-style names
+    # (`qsm ax 10te 2mm`) rather than a short output label, and no QSM token.
+    clauses:
+      - {cite: multi-echo QSM source, source: text_search_blob,
+         when: {all: [{not: has_qsm},
+                      {text: text_blob, substring: qsm},
+                      {text: text_blob, any_substring: ['10te', '8te', '6te', '5te', '4te', '3te']},
+                      {text: text_blob, substring: psd}]}}
+    set: {construct: [Magnitude, QSM]}
+    confidence: 0.80
+    why: multi-echo QSM source echoes → raw T2*-weighted data
+
+  qsm:
+    clauses:
+      - {cite: has_qsm, source: unified_flags, when: has_qsm}
+      - {cite: qsm keyword (no other output token), source: text_search_blob,
+         when: {text: text_blob, substring: qsm}}
+    set: {construct: [QSM]}
+    confidence: 0.95
+    why: Quantitative Susceptibility Map
+
+  fallback:
+    clauses:
+      - {cite: SWIRecon, source: provenance, when: true}
+    set: {construct: [SWI]}
+    confidence: 0.70
+    why: SWI branch, output type unclear → default to SWI

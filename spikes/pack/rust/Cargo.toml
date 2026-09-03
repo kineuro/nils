@@ -1,0 +1,22 @@
+# The pack-format spike (docs/decisions/15, C11). Throwaway code with one job:
+# find out whether v0's grammar is expressible as data. If it is, the shape of
+# `expr.rs` and `pack.rs` is the seed of the engine's `nils-pack`.
+[package]
+name = "packeval"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "AGPL-3.0-only"
+publish = false
+
+[dependencies]
+csv = "1.4"
+regex = "1.13"
+serde = { version = "1.0", features = ["derive"] }
+serde-saphyr = "1.2"
+serde_json = { version = "1.0", features = ["preserve_order"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1

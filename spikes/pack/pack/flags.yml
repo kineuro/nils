@@ -1,0 +1,343 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The flag layer: named booleans a rule is written against.
+#
+# Transcribed from v0 0.5.3 `classification/core/flags.py` (138 flags in nine
+# categories) and the seven helper methods of `core/context.py` that three of
+# those categories take as keyword arguments. In v0 the helpers are Python and
+# the flags are Python; here both are data, and a flag may reference another
+# flag by bare name, which is how the helpers stop being a separate concept.
+#
+# Reference forms:
+#   parser.predicate      a predicate of parsers.yml
+#   flag_name             another flag in this file (evaluated in dependency
+#                         order; a cycle fails the pack at load)
+#   {parser: p, <atom>}   an inline parser atom, for the two places v0 reaches
+#                         past its own named predicates into the token set
+#   {field: f, <cmp>}     a comparison on a fingerprint scalar
+#   {text: f, <str>}      a match on a case-folded text field
+#   {any|all|not: ...}    composition
+
+flags:
+
+  # === helpers ==============================================================
+  # v0 keeps these in context.py as methods; they are flags like any other.
+
+  has_positive_b_value:
+    # b=0 is a reference image, not diffusion weighting; above 20000 s/mm² the
+    # value is garbage (v0 has seen 7.23e+75). A field that will not parse as a
+    # number makes the comparison false, never an error.
+    all: [{field: b_value, gt: 0}, {field: b_value, le: 20000}]
+
+  has_mp2rage_context: {text: text_blob, substring: mp2rage}
+
+  has_mpr_in_text:
+    # 'mpr' as a word, and only on DERIVED: on an ORIGINAL it is the tail of
+    # MPRAGE, on a DERIVED it is a reformat.
+    all: [image_type.is_derived, {text: text_blob, matches: '\bmpr\b'}]
+
+  has_inv1_in_text: {text: text_blob, matches: '\binv1\b'}
+  has_inv2_in_text: {text: text_blob, matches: '\binv2\b'}
+
+  is_mp2rage_inv1_by_ti:
+    all: [image_type.is_original, has_mp2rage_context,
+          {field: ti, gt: 0}, {field: ti, lt: 1800.0}]
+  is_mp2rage_inv2_by_ti:
+    all: [image_type.is_original, has_mp2rage_context,
+          {field: ti, gt: 0}, {field: ti, ge: 1800.0}]
+
+  is_uniform_denoised:
+    all:
+      - image_type.is_derived
+      - image_type.has_uniform
+      - any:
+          - {text: text_blob, matches: 'uni\s*-\s*den'}
+          - {text: text_blob, matches: 'uniden'}
+          - {text: text_blob, matches: 'uniform\s+denoised'}
+          - {text: text_blob, matches: 'denoised\s+uniform'}
+
+  # === 1. pulse sequence physics ============================================
+
+  has_se:
+    any:
+      - scanning_sequence.has_se
+      - scanning_sequence.has_fse
+      - scanning_sequence.has_irfse
+      - image_type.hint_se
+      - sequence_name.is_se
+      - sequence_name.is_tse
+      - sequence_name.is_haste
+      - sequence_name.is_space
+      - sequence_name.is_space_ir
+      - sequence_name.is_ir_tse
+      - sequence_name.is_fse
+      - sequence_name.is_ir_fse
+      - sequence_name.is_me_se
+      - sequence_name.is_mdme
+      - sequence_name.is_epi_se
+      # Philips/GE: IR + SK without GR implies a TSE readout.
+      - all: [scanning_sequence.has_ir, sequence_variant.has_segmented_kspace,
+              {not: scanning_sequence.has_gre}]
+
+  has_gre:
+    any: [scanning_sequence.has_gre, image_type.hint_gre, sequence_name.is_gre,
+          sequence_name.is_fgre, sequence_name.is_flash, sequence_name.is_tfl,
+          sequence_name.is_mprage, sequence_name.is_swi, sequence_name.is_ciss,
+          sequence_name.is_tof, sequence_name.is_pc, sequence_name.is_epi_gre]
+
+  has_epi:
+    any: [scanning_sequence.has_epi, sequence_name.is_epi_diff,
+          sequence_name.is_epi_gre, sequence_name.is_epi_se,
+          sequence_name.is_epi_ir, sequence_name.is_epi_diff_resolve,
+          sequence_name.is_epi_diff_b0]
+
+  has_ir:
+    any:
+      - scanning_sequence.has_ir
+      - scanning_sequence.has_irfse
+      - image_type.hint_ir
+      - image_type.has_dir
+      - image_type.has_dir_synthetic
+      - scan_options.has_ir
+      - scan_options.has_ir_gems
+      - scan_options.has_t1flair_gems
+      - scan_options.has_t2flair_gems
+      - sequence_name.is_ir_tse
+      - sequence_name.is_ir_fse
+      - sequence_name.is_space_ir
+      - sequence_name.is_epi_ir
+      - sequence_name.is_mprage
+      - sequence_name.is_flair_seq
+      - {field: ti, gt: 0}
+      # Philips: GR + MP + 3D and neither SE nor EPI is an IR-prepared 3D GRE.
+      - all: [sequence_variant.has_mag_prepared, scanning_sequence.has_gre,
+              {not: scanning_sequence.has_se}, {not: scanning_sequence.has_epi},
+              {field: acquisition_type, eq: '3D'}]
+
+  has_ir_se:
+    any:
+      - scanning_sequence.has_irfse
+      - sequence_name.is_ir_tse
+      - sequence_name.is_ir_fse
+      - sequence_name.is_space_ir
+      - sequence_name.is_flair_seq
+      - all: [{any: [scanning_sequence.has_se, scanning_sequence.has_fse]},
+              scanning_sequence.has_ir, {not: scanning_sequence.has_epi}]
+      - all: [scanning_sequence.has_ir, sequence_variant.has_segmented_kspace,
+              {not: scanning_sequence.has_gre}, {not: scanning_sequence.has_epi}]
+
+  has_saturation:
+    any: [scanning_sequence.has_saturation, scan_options.has_sat_gems,
+          scan_options.has_spatial_sat]
+
+  # === 2. technique indicators ==============================================
+
+  is_tse:
+    any:
+      - sequence_name.is_tse
+      - sequence_name.is_tse_body
+      - sequence_name.is_fse
+      - all: [sequence_variant.has_segmented_kspace, scanning_sequence.has_se]
+      - all: [sequence_variant.has_segmented_kspace, scanning_sequence.has_ir,
+              {not: scanning_sequence.has_gre}]
+  is_space:   {any: [sequence_name.is_space, sequence_name.is_space_ir]}
+  is_haste:   sequence_name.is_haste
+  is_me_se:   sequence_name.is_me_se
+  is_medic:   sequence_name.is_medic
+  is_mdme:    sequence_name.is_mdme
+  is_qalas:   sequence_name.is_qalas
+  is_flash:   {any: [sequence_name.is_flash, sequence_name.is_fgre]}
+  is_tfl:     sequence_name.is_tfl
+  is_mprage:  sequence_name.is_mprage
+  is_ssfp:    sequence_name.is_trufisp
+  is_ciss:    sequence_name.is_ciss
+  is_swi:     {any: [sequence_name.is_swi, image_type.has_swi]}
+  has_swi:    image_type.has_swi
+  is_tof:     {any: [sequence_name.is_tof, sequence_variant.is_tof,
+                     scan_options.has_tof_gems, scan_options.has_inflow_gems]}
+  is_pc:      {any: [sequence_name.is_pc, image_type.hint_pca]}
+  is_flair:   {any: [sequence_name.is_flair_seq, scan_options.has_t1flair_gems,
+                     scan_options.has_t2flair_gems, image_type.has_flair_synthetic]}
+  is_dir:     {any: [image_type.has_dir, image_type.has_dir_synthetic]}
+  is_epi_diff_resolve: sequence_name.is_epi_diff_resolve
+  is_dwi:
+    any: [sequence_name.is_epi_diff, sequence_name.is_epi_diff_resolve,
+          sequence_name.is_epi_diff_b0, image_type.has_diffusion,
+          has_positive_b_value]
+  is_bold:    {all: [image_type.has_fmri, {not: image_type.has_phase}]}
+  is_asl:     image_type.has_asl
+  is_perfusion: image_type.has_perfusion
+  is_mrf:     scan_options.has_mrf_gems
+  is_radial:  {any: [scan_options.has_propeller_gems, image_type.layout_radial]}
+  is_spiral:  scan_options.has_spiral_gems
+  is_mavric:  image_type.has_mavric
+  is_ideal:   scan_options.has_ideal_gems
+  is_cine:    scan_options.has_cine_gems
+  is_quant_map: sequence_name.is_quant_map
+
+  # === 3. sequence variants =================================================
+
+  has_spoiled:          sequence_variant.has_spoiled
+  has_steady_state:     sequence_variant.has_steady_state
+  has_segmented_kspace: sequence_variant.has_segmented_kspace
+  has_mag_prepared:     {any: [sequence_variant.has_mag_prepared, scan_options.has_mp_gems]}
+  has_mtc:              {any: [sequence_variant.has_mtc, scan_options.has_mt]}
+  has_oversampling:     sequence_variant.has_oversampling
+  has_fat_sat:          scan_options.has_fat_sat
+  has_water_excitation: scan_options.has_water_exc
+  has_flow_comp:        scan_options.has_flow_comp
+  has_partial_fourier:  {any: [scan_options.has_partial_fourier_phase,
+                               scan_options.has_partial_fourier_freq]}
+  has_parallel_imaging: {any: [scan_options.has_parallel_gems, scan_options.has_hypersense,
+                               scan_options.has_cs_gems]}
+  has_gating:           scan_options.has_gating
+
+  # === 4. acquisition properties ============================================
+
+  is_3d: {any: [{field: acquisition_type, eq: '3D'}, image_type.is_3d_view]}
+  is_2d: {any: [{field: acquisition_type, eq: '2D'}, image_type.is_2d_view]}
+  # v0 reads these three off a `stack_key` its fingerprint query never selects,
+  # so all three are permanently false there. The rule below is the one v0
+  # meant; the difference is declared (spikes/pack/README.md, finding 1).
+  is_multi_echo: {field: stack_key, eq: multi_echo}
+  is_multi_ti:   {field: stack_key, eq: multi_ti}
+  is_multi_fa:   {field: stack_key, eq: multi_flip_angle}
+
+  # === 5. derived / synthetic / quantitative ================================
+
+  is_derived: image_type.is_derived
+  is_synthetic:
+    any: [image_type.is_synthetic, scanning_sequence.has_synthetic,
+          sequence_variant.is_synthetic, image_type.has_t1_synthetic,
+          image_type.has_t2_synthetic, image_type.has_pd_synthetic,
+          image_type.has_flair_synthetic, image_type.has_stir_synthetic,
+          image_type.has_psir_synthetic, image_type.has_dir_synthetic]
+  has_t1_synthetic:    image_type.has_t1_synthetic
+  has_t2_synthetic:    image_type.has_t2_synthetic
+  has_pd_synthetic:    image_type.has_pd_synthetic
+  has_flair_synthetic: image_type.has_flair_synthetic
+  has_myelin:          image_type.has_myelin
+  is_qmap:
+    any: [image_type.has_qmap, scanning_sequence.has_qmap, image_type.has_t1_map,
+          image_type.has_t2_map, image_type.has_r1, image_type.has_r2]
+  has_t1_map: image_type.has_t1_map
+  has_t2_map: image_type.has_t2_map
+  has_r1:     image_type.has_r1
+  has_r2:     image_type.has_r2
+  has_uniform: image_type.has_uniform
+  is_mp2rage_inv1: {any: [is_mp2rage_inv1_by_ti, has_inv1_in_text]}
+  is_mp2rage_inv2: {any: [is_mp2rage_inv2_by_ti, has_inv2_in_text]}
+  is_diffusion_derived:
+    any: [image_type.has_adc, image_type.has_eadc, image_type.has_fa,
+          image_type.has_trace, image_type.has_exp_diffusion, image_type.has_calc_bval]
+  has_adc:   image_type.has_adc
+  has_eadc:  image_type.has_eadc
+  has_fa:    image_type.has_fa
+  has_trace: image_type.has_trace
+  is_perfusion_derived:
+    any: [image_type.has_cbf, image_type.has_cbv, image_type.has_mtt,
+          image_type.has_ttp, image_type.has_tmax, image_type.has_oef,
+          image_type.has_cmro2, image_type.has_leakage]
+  has_cbf:  image_type.has_cbf
+  has_cbv:  image_type.has_cbv
+  has_mtt:  image_type.has_mtt
+  has_tmax: image_type.has_tmax
+  has_ttp:  image_type.has_ttp
+
+  # === 6. image type / components ===========================================
+
+  is_original:  image_type.is_original
+  is_primary:   image_type.is_primary
+  is_secondary: image_type.is_secondary
+  is_localizer: {any: [image_type.is_localizer, sequence_name.is_localizer,
+                       scan_options.has_scout_mode]}
+  has_magnitude: image_type.has_magnitude
+  has_phase:     image_type.has_phase
+  has_real:      image_type.has_real
+  has_imaginary: image_type.has_imaginary
+  has_dixon:     {any: [image_type.has_dixon, scan_options.has_dix_fat,
+                        scan_options.has_dix_water]}
+  has_water:     image_type.has_water
+  has_fat:       image_type.has_fat
+  has_in_phase:  image_type.has_in_phase
+  has_out_phase: image_type.has_out_phase
+  has_psir:      {any: [image_type.has_psir, image_type.has_psir_synthetic]}
+  has_stir:      image_type.has_stir_synthetic
+
+  # === 7. post-processing ===================================================
+
+  is_mip:        {any: [image_type.is_mip, image_type.is_mip_thin]}
+  is_minip:      image_type.is_minip
+  is_projection: image_type.is_projection
+  is_mpr:        {any: [image_type.is_mpr, image_type.is_mpr_thick, has_mpr_in_text]}
+  is_subtraction: image_type.is_subtraction
+  is_mean:       image_type.is_mean
+  is_composite:  image_type.is_composite
+  is_vascular:   image_type.is_vascular
+  has_moco:      image_type.has_moco
+  has_distortion_correction: {any: [image_type.is_2d_view, image_type.is_3d_view]}
+  has_dis2d:     image_type.is_2d_view
+  has_dis3d:     image_type.is_3d_view
+  is_normalized: image_type.is_normalized
+  has_nd:        image_type.has_nd
+  # These two read the blob as stored, not case-folded, and after a left strip.
+  is_ge_orig:     {text_raw: text_blob, prefix: 'orig '}
+  is_ge_filtered: {text_raw: text_blob, prefix: 'filtered '}
+
+  # === 8. exclusion / QA ====================================================
+
+  is_error:      image_type.is_error
+  is_screenshot: image_type.is_screenshot
+  is_qa:         image_type.is_qa
+  is_tune:       sequence_name.is_tune
+  is_wip:        sequence_name.is_wip
+
+  # === 9. branch-specific ===================================================
+
+  is_swi_magnitude:
+    any:
+      - all: [image_type.has_magnitude,
+              {any: [sequence_name.is_swi, image_type.has_swi]}]
+      - all: [image_type.has_swi, {not: image_type.is_minip},
+              {not: image_type.has_phase}]
+  is_swi_processed:
+    any:
+      - all: [image_type.has_swi, image_type.is_derived]
+      # v0 reaches into the token set here rather than through a predicate.
+      - all: [{parser: image_type, token: SW_M_FFE}, image_type.is_derived]
+  has_qsm:    image_type.has_qsm
+  has_r2star: image_type.has_r2star
+  is_epi_swi:
+    any:
+      - all: [sequence_name.is_swi, scanning_sequence.has_epi]
+      - all: [sequence_name.is_epi_gre, image_type.has_swi]
+  is_symri_source:
+    any:
+      - all: [sequence_name.is_mdme, image_type.is_original]
+      - all: [sequence_name.is_qalas, image_type.is_original]
+  has_qmap_t1:    image_type.has_qmap_t1
+  has_qmap_t2:    image_type.has_qmap_t2
+  has_qmap_pd:    image_type.has_qmap_pd
+  has_multi_qmap: image_type.has_multi_qmap
+  has_pd_map:     image_type.has_pd_map
+  has_b1_map:     image_type.has_b1_map
+  has_b0_map:     image_type.has_b0_map
+  has_dir_synthetic:  {any: [image_type.has_dir_synthetic, image_type.has_dir_synthetic_token]}
+  has_psir_synthetic: {any: [image_type.has_psir_synthetic, image_type.has_psir_synthetic_token]}
+  has_stir_synthetic: image_type.has_stir_synthetic
+  is_magic_raw:   image_type.is_magic_raw
+  is_dixon_water:
+    any:
+      - all: [image_type.has_water, image_type.has_dixon]
+      - all: [image_type.has_water, scan_options.has_dix_water]
+      - all: [image_type.has_water,
+              {any: [image_type.has_in_phase, image_type.has_out_phase]}]
+  is_dixon_fat:
+    any:
+      - all: [image_type.has_fat, image_type.has_dixon]
+      - all: [image_type.has_fat, scan_options.has_dix_fat]
+      - all: [image_type.has_fat,
+              {any: [image_type.has_in_phase, image_type.has_out_phase]}]
+  is_dixon_in_phase:  image_type.has_in_phase
+  is_dixon_out_phase: image_type.has_out_phase
+  has_fat_fraction:   image_type.has_fat_fraction

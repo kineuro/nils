@@ -1,0 +1,332 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The parser layer: one DICOM string in, named booleans out.
+#
+# Transcribed from v0 0.5.3 `classification/core/parsers.py`, predicate for
+# predicate, including the ones that look redundant (a token test whose value
+# can never survive tokenization, a substring already implied by a token):
+# faithfulness first, tidying after the gate.
+#
+# Every parser has a `raw` (the source field, case-folded) and, unless
+# `tokenize` is absent, a token set. `token`/`any_token`/`all_tokens`/`tokens`
+# read the set; `substring`/`any_substring`/`prefix`/`matches` read `raw`. The
+# two are kept apart because v0 mixes them deliberately and the difference is
+# load-bearing (a backslash survives in `raw` and not in a token).
+
+parsers:
+
+  # ==========================================================================
+  image_type:
+    field: image_type
+    case: upper
+    tokenize: {split: '[\\/\s]+'}
+    predicates:
+
+      # --- core ---
+      is_original:   {token: ORIGINAL}
+      is_derived:    {token: DERIVED}
+      is_primary:    {token: PRIMARY}
+      is_secondary:  {token: SECONDARY}
+      is_localizer:  {token: LOCALIZER}
+      is_error:      {any: [{token: ERROR_MAP}, {substring: 'MR ERROR MESSAGE'}]}
+
+      # --- diffusion ---
+      has_diffusion: {any_token: [DIFFUSION, ADC, FA, TRACEW, ISODWI, EXP, EADC,
+                                  CALC_BVALUE, MIXED, MIX, MOTIONCORRECTION]}
+      has_trace:     {any_token: [TRACEW, ISODWI]}
+      has_adc:       {token: ADC}
+      has_eadc:      {token: EADC}
+      has_fa:        {token: FA}
+      has_exp_diffusion: {token: EXP}
+      has_mixed:     {any_token: [MIXED, MIX]}
+      has_calc_bval: {token: CALC_BVALUE}
+      has_moco:      {any_token: [MOTIONCORRECTION, MOCO]}
+
+      # --- perfusion / ASL ---
+      has_perfusion: {any: [{any_token: [PERFUSION, PWI, PERFUSION_ASL]},
+                            {substring: 'MR PWI DSC'}]}
+      has_asl:       {any_token: [ASL, PERFUSION_ASL]}
+      has_cbf:       {any_token: [CBF, RCBF, RELCBF]}
+      has_cbv:       {any_token: [CBV, RCBV, RELCBV, RCBVCORR, RCBVUNCORR]}
+      has_mtt:       {any_token: [MTT, RELMTT]}
+      has_ttp:       {token: TTP}
+      has_tmax:      {any: [{token: TMAX}, {substring: 'TMAX BASIC'}]}
+      has_oef:       {substring: 'OEF MODEL BASED'}
+      has_cmro2:     {substring: 'RCMRO2 MODEL BASED'}
+      has_leakage:   {token: RLEAKAGE}
+      has_peak_bolus: {token: PBP}
+      has_brain_mask: {substring: 'BRAIN MASK MR PWI DSC'}
+
+      # --- quantitative maps ---
+      has_qmap:       {any_token: [QMAP, MULTI_QMAP]}
+      has_multi_qmap: {token: MULTI_QMAP}
+      has_t1_map:     {any: [{token: T1MAP}, {substring: 'T1 MAP'},
+                             {all: [{token: T1MAP}, {token: DERIVED}, {not: {token: SYNTHETIC}}]}]}
+      has_t2_map:     {any: [{token: T2MAP}, {substring: 'T2 MAP'},
+                             {all: [{token: T2MAP}, {token: DERIVED}, {not: {token: SYNTHETIC}}]}]}
+      has_pd_map:     {any: [{any_token: [PDMAP, PD_MAP]}, {substring: 'PD MAP'},
+                             {all: [{token: PDMAP}, {token: MAP}]}]}
+      has_r1:         {token: R1}
+      has_r2:         {token: R2}
+      has_r2star:     {any: [{token: R2STAR}, {token: R2_STAR},
+                             {substring: 'R2*'}, {substring: 'R2 STAR'}]}
+      has_t0:         {token: T0}
+      has_k2:         {token: K2}
+      has_b1_map:     {any: [{any_token: [B1MAP, B1_MAP, 'B1+']}, {substring: 'B1 MAP'}]}
+      has_b0_map:     {any: [{any_token: [B0MAP, B0_MAP, FIELDMAP]},
+                             {substring: 'B0 MAP'}, {substring: 'FIELD MAP'}]}
+      has_fat_fraction: {any: [{any_token: [FF, FATFRACTION, FAT_FRACTION, PDFF]},
+                               {substring: 'FAT FRACTION'}]}
+      has_pd_synthetic: {any: [{token: PDW_SYNTHETIC},
+                               {all: [{token: PD}, {substring: SYNTHETIC}]}]}
+      has_t1_synthetic: {any: [{token: T1W_SYNTHETIC}, {substring: 'T1\SYNTHETIC'},
+                               {all: [{token: T1}, {token: SYNTHETIC}]}]}
+      has_t2_synthetic: {any: [{token: T2W_SYNTHETIC}, {substring: 'T2\SYNTHETIC'},
+                               {all: [{token: T2}, {token: SYNTHETIC}]},
+                               {token: T2FLAIR}, {token: T2W_FLAIR_SYNTHETIC}]}
+      has_flair_synthetic: {any: [{any_token: [T2FLAIR, T1FLAIR, T2W_FLAIR_SYNTHETIC]},
+                                  {substring: 'T1FLAIR SYNTHETIC'},
+                                  {substring: 'T2FLAIR SYNTHETIC'}]}
+      has_uniform:    {any: [{token: UNIFORM}, {substring: 'T1\UNIFORM'}, {substring: 'M\UNI'}]}
+      has_maximum:    {any: [{token: MAXIMUM}, {substring: 'T1\MAXIMUM'}, {substring: 'T2\MAXIMUM'}]}
+      has_myelin:     {token: MYC}
+      has_navail:     {token: NAVAIL}
+
+      # --- Dixon / fat-water ---
+      has_dixon:     {token: DIXON}
+      has_water:     {any: [{token: WATER},
+                            {all: [{tokens: {gt: 0}}, {token: W}, {not: {substring: WATER}}]}]}
+      has_fat:       {any: [{token: FAT},
+                            {all: [{tokens: {gt: 0}}, {token: F}, {not: {substring: FAT}}]}]}
+      has_in_phase:  {any_token: [IN_PHASE, IP]}
+      has_out_phase: {any_token: [OUT_PHASE, OP, OPP_PHASE]}
+
+      # --- PSIR / DIR / MAVRIC ---
+      has_psir:          {any: [{token: PSIR}, {substring: 'PSIR SYNTHETIC'}]}
+      has_dir:           {all: [{token: DIR}, {not: {substring: DIRECTORY}}]}
+      has_dir_synthetic: {any: [{substring: 'DIR SYNTHETIC'}, {token: DIR_SYNTHETIC}]}
+      has_mavric:        {any_token: [MAVRIC, MAVRIC_COMPOSITE]}
+      has_cmb:           {token: CMB}
+
+      # --- orientation / layout ---
+      layout_axial:     {token: AXIAL}
+      layout_sagittal:  {token: SAG}
+      layout_coronal:   {token: COR}
+      layout_transverse: {token: TRA}
+      layout_mosaic:    {token: MOSAIC}
+      layout_parallel:  {token: PARALLEL}
+      layout_radial:    {token: RADIAL}
+      layout_cpr:       {token: CPR}
+      is_distorted:     {token: DISTORTED}
+      is_2d_view:       {token: DIS2D}
+      is_3d_view:       {token: DIS3D}
+      is_mfsplit:       {token: MFSPLIT}
+
+      # --- processing ---
+      has_nd:         {token: ND}
+      is_normalized:  {token: NORM}
+      is_subtraction: {any_token: [SUB, SUBTRACT, SUBTRACTION]}
+      is_dfc:         {token: DFC}
+      is_processed:   {any_token: [PROC, PROCESSED]}
+      is_resampled:   {any: [{token: RESAMPLED}, {substring: 'CSA RESAMPLED'}]}
+      is_mean:        {token: MEAN}
+      is_sum:         {token: MSUM}
+      is_composite:   {any_token: [MULTIECHOCOMBINED, COMP_AD, COMP_SP, COMP_AN,
+                                   COMP_MIP, COMPOSED, COMPOSITE]}
+      is_mpr:         {any_token: [MPR, REFORMATTED]}
+      is_mpr_thick:   {any: [{substring: 'MPR THICK'}, {substring: 'CSA MPR THICK'}]}
+
+      # --- projection ---
+      is_mip:        {any: [{any_token: [MIP, MIP_COR, MIP_SAG, MIP_TRA]}, {substring: 'CSA MIP'}]}
+      is_minip:      {any: [{any_token: [MINIP, MNIP]}, {substring: 'MIN IP'}]}
+      is_projection: {substring: 'PROJECTION IMAGE'}
+      is_vascular:   {token: VASCULAR}
+      is_scroll:     {token: SCROLL}
+      is_mip_thin:   {substring: 'CSA MIP THIN'}
+
+      # --- components ---
+      has_magnitude: {any: [{any_token: [MAGNITUDE, M_FFE, M_SE, M_IR, M_PCA, SW_M_FFE]},
+                            {all: [{token: M}, {tokens: {gt: 2}}]}]}
+      has_phase:     {any: [{any_token: [PHASE, SW_P_FFE]}, {substring: 'PHASE MAP'},
+                            {all: [{token: P}, {tokens: {gt: 2}}]}]}
+      has_real:      {any: [{token: REAL},
+                            {all: [{token: R}, {not: {token: REFORMATTED}}]}]}
+      has_imaginary: {any: [{token: IMAGINARY},
+                            {all: [{token: I}, {not: {token: IR}}, {not: {token: IN_PHASE}}]}]}
+      has_swi:       {any_token: [SWI, SW_M_FFE, SW_P_FFE, SW_M, SW_P]}
+      has_qsm:       {any: [{any_token: [QSM, SUSCEPTIBILITY]},
+                            {substring: 'QUANTITATIVE SUSCEPTIBILITY'}]}
+
+      # --- technique hints ---
+      hint_gre: {any_token: [M_FFE, SW_M_FFE, SW_P_FFE]}
+      hint_se:  {token: M_SE}
+      hint_ir:  {token: M_IR}
+      hint_pca: {token: M_PCA}
+
+      # --- synthetic markers ---
+      is_synthetic:       {any: [{token: SYNTHETIC}, {substring: SYNTHETIC}]}
+      has_stir_synthetic: {all: [{token: T2STIR}, {substring: SYNTHETIC}]}
+      has_psir_synthetic: {all: [{token: PSIR}, {substring: SYNTHETIC}]}
+      has_qmap_t1:        {all: [{token: QMAP}, {token: T1}, {not: {token: T2}}]}
+      has_qmap_t2:        {all: [{token: QMAP}, {token: T2}]}
+      has_qmap_pd:        {all: [{token: QMAP}, {token: PD}]}
+      has_dir_synthetic_token:  {any: [{all: [{token: DIR}, {token: SYNTHETIC}]},
+                                       {token: DIR_SYNTHETIC}]}
+      has_psir_synthetic_token: {any: [{all: [{token: PSIR}, {token: SYNTHETIC}]},
+                                       {token: PSIR_SYNTHETIC}]}
+      is_magic_raw:       {all: [{token: MAGIC}, {token: ORIGINAL}]}
+
+      # --- BOLD / fMRI ---
+      has_fmri: {any_token: [FMRI, EPI]}
+
+      # --- QA / other ---
+      is_qa:         {any_token: [CTH, COV, STDDEV_COR, STDDEV_SAG, STDDEV_TRA]}
+      is_screenshot: {any_token: [SCREENSHOT, PASTED]}
+      is_posdisp:    {token: POSDISP}
+      is_gsp:        {token: GSP}
+      is_other:      {any_token: [OTHER, UNKNOWN]}
+      is_none:       {token: NONE}
+
+      # --- Siemens filters ---
+      has_filter_mask:       {any_token: [FM3_2, FM4_1, FM5_1]}
+      has_filter_sharpening: {any_token: [FS2_4, SH1_1, SH3_1, SH4_1, SH5_1, SH5_4]}
+      is_csa_manipulated:    {token: CSAMANIPULATED}
+      is_csa_parallel:       {token: CSAPARALLEL}
+
+  # ==========================================================================
+  scanning_sequence:
+    field: scanning_sequence
+    case: upper
+    tokenize: {strip: '[\[\]''"()]', split: '[,\s\\]+'}
+    predicates:
+      has_se:      {token: SE}
+      has_gre:     {any_token: [GR, GE, FE, FE3D]}
+      has_fse:     {token: FSE}
+      has_ir:      {token: IR}
+      has_irfse:   {token: IRFSE}
+      has_epi:     {token: EP}
+      has_research: {token: RM}
+      has_qmap:    {token: QMAP}
+      # v0 writes `A or B if seq else C or D if seq else False`; the conditional
+      # binds loosest, so the IR half is unreachable and only `SE (SYNTHETIC)`
+      # is ever tested. Transcribed as v0 behaves, with the dead half recorded
+      # as a bug rather than carried (spikes/pack/README.md, finding 3).
+      has_synthetic: {any: [{token: SYNTHETIC}, {substring: 'SE (SYNTHETIC)'}]}
+      is_generated:  {token: GENERATED}
+      has_saturation: {all: [{token: S}, {not: {token: SE}}, {not: {token: SS}}]}
+
+  # ==========================================================================
+  sequence_variant:
+    field: sequence_variant
+    case: upper
+    tokenize: {strip: '[\[\]''"()]', split: '[,\s\\]+'}
+    predicates:
+      has_mag_prepared:    {token: MP}
+      has_mtc:             {token: MTC}
+      has_segmented_kspace: {token: SK}
+      has_spoiled:         {token: SP}
+      has_steady_state:    {token: SS}
+      has_oversampling:    {any_token: [OSP, OS]}
+      is_none:             {token: NONE}
+      is_other:            {token: OTHER}
+      is_synthetic:        {token: SYNTHETIC}
+      is_tof:              {token: TOF}
+
+  # ==========================================================================
+  scan_options:
+    field: scan_options
+    case: upper
+    tokenize: {strip: '[\[\]''"()]', split: '[,\s\\]+'}
+    predicates:
+      has_gating:        {any_token: [CG, RG, PPG, IPG]}
+      has_parallel_gems: {token: ACC_GEMS}
+      has_hypersense:    {token: HYPERSENSE_GEMS}
+      has_cs_gems:       {token: CS_GEMS}
+      has_sat_gems:      {any_token: [SAT_GEMS, SAT1, SAT2, SAT3, SAT4]}
+      has_inflow_gems:   {token: IFLOW_GEMS}
+      has_tof_gems:      {token: VASCTOF_GEMS}
+      has_cine_gems:     {token: CINE_GEMS}
+      has_seq_gems:      {token: SEQ_GEMS}
+      has_trf_gems:      {token: TRF_GEMS}
+      has_spiral_gems:   {token: SPIRAL_GEMS}
+      has_propeller_gems: {any_token: [PROP_GEMS, PARTL_BLADE_GEMS]}
+      has_ideal_gems:    {token: IDEAL_GEMS}
+      has_flex_gems:     {token: FLEX_GEMS}
+      has_mrf_gems:      {token: MRF_GEMS}
+      has_hyperband_gems: {token: HYPERBAND_GEMS}
+      has_promo_gems:    {token: PROMO_GEMS}
+      has_dwduo_gems:    {token: DWDUO_GEMS}
+      has_t1flair_gems:  {token: T1FLAIR_GEMS}
+      has_t2flair_gems:  {token: T2FLAIR_GEMS}
+      has_mp_gems:       {token: MP_GEMS}
+      has_ir_gems:       {token: IR_GEMS}
+      has_fast_gems:     {token: FAST_GEMS}
+      has_edr_gems:      {token: EDR_GEMS}
+      has_filtered_gems: {token: FILTERED_GEMS}
+      has_fsa_gems:      {token: FSA_GEMS}
+      has_fsl_gems:      {token: FSL_GEMS}
+      has_fss_gems:      {token: FSS_GEMS}
+      has_fsi_gems:      {token: FSI_GEMS}
+      has_fsp_gems:      {token: FSP_GEMS}
+      has_fsr_gems:      {token: FSR_GEMS}
+      has_ir:            {token: IR}
+      has_fat_sat:       {all: [{any_token: [FS, SFS]}, {not: {token: FSE}}]}
+      has_mt:            {token: MT}
+      has_flow_comp:     {token: FC}
+      has_partial_fourier_phase: {token: PFP}
+      has_partial_fourier_freq:  {token: PFF}
+      has_phase_reorder: {token: PER}
+      has_spatial_sat:   {all: [{token: SP}, {not: {substring: SPGR}}]}
+      has_water_exc:     {token: WE}
+      has_no_phase_wrap: {token: NPW}
+      has_scout_mode:    {substring: 'SCOUT MODE'}
+      has_dix_fat:       {token: DIXF}
+      has_dix_water:     {token: DIXW}
+      has_cycinv:        {token: CYCINV}
+      has_aveext:        {token: AVEEXT}
+      has_enhanced:      {token: ENHANCED}
+      has_axial_mode:    {substring: 'AXIAL MODE'}
+
+  # ==========================================================================
+  # Siemens-style sequence names: substring matching over the lower-cased raw
+  # value, no tokens at all.
+  sequence_name:
+    field: sequence_name
+    case: lower
+    predicates:
+      is_epi_diff_b0:      {all: [{any_substring: [ep_b0, blade_b0]}, {not: {substring: ep_b1}}]}
+      is_epi_diff:         {any_substring: [ep_b, blade_b, ep_calc, ep_d3ta, ep_hds]}
+      is_epi_diff_resolve: {substring: re_b}
+      is_epi_gre:          {substring: epfid}
+      is_epi_se:           {substring: epse}
+      is_epi_ir:           {substring: epir}
+      is_se:               {all: [{any_substring: ['*se1', '*se2d', se2d]}, {not: {substring: tse}}]}
+      is_tse:              {any_substring: [tse1, tse2, tse3, tse_, 'tse-', tser, tseb, ts1, ts2, ts3]}
+      is_tse_body:         {substring: tser}
+      is_ir_tse:           {all: [{substring: tir}, {not: {substring: stir}}]}
+      is_haste:            {any_substring: [h2d, h3d, hr2d, haste]}
+      is_flash:            {all: [{any_substring: [fl1, fl2d, fl3d]}, {not: {substring: flair}}]}
+      is_tfl:              {substring: tfl}
+      is_gre:              {all: [{any_substring: ['*gre', ffe]}, {not: {substring: mprage}}]}
+      is_fgre:             {substring: fgre}
+      is_space:            {all: [{substring: spc}, {not: {substring: spcir}}]}
+      is_space_ir:         {substring: spcir}
+      is_swi:              {any_substring: [swi, qswi]}
+      is_me_se:            {substring: memp}
+      is_medic:            {any_substring: [me2d, me3d]}
+      is_mdme:             {substring: mdme}
+      is_qalas:            {substring: qalas}
+      is_quant_map:        {any_substring: [qtir, qtse, qfl]}
+      is_pc:               {any: [{any_substring: ['*pc2d', '*pc3d', _pc2d, _pc3d]},
+                                  {prefix: pc2d}, {prefix: pc3d}]}
+      is_tof:              {all: [{substring: tof}, {not: {substring: stir}}]}
+      is_fse:              {all: [{substring: fse}, {not: {substring: irfse}}]}
+      is_ir_fse:           {substring: irfse}
+      is_mprage:           {any_substring: [mprage, bravo, tfl3d1, irfspgr, 'ir-spgr', mpr]}
+      is_flair_seq:        {all: [{any_substring: [flair, mrcflair]},
+                                  {not: {substring: t1flair}}, {not: {substring: t2flair}}]}
+      is_ciss:             {any_substring: [ciss, ci3d]}
+      is_localizer:        {any_substring: [scout, localizer, loc_]}
+      is_wip:              {substring: wip}
+      is_tune:             {any_substring: [tun_, 'tun-', tune, fi3d1tun]}
+      is_trufisp:          {any_substring: [tfi2d, tfi3d]}
