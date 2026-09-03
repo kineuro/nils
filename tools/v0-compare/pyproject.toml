@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "v0-compare"
+version = "0.1.0"
+description = "Compares a NILS v1 registry against a v0 (0.x) one, in counts and shapes"
+readme = "README.md"
+license = "AGPL-3.0-only"
+requires-python = ">=3.11"
+dependencies = ["duckdb>=1.1"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+v0-compare = "v0compare.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["v0compare*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

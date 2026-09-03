@@ -29,11 +29,28 @@ pub enum Filter {
     NoExt,
     /// Names matching a glob.
     Glob(glob::Pattern),
+    /// Names matching any of several filters (the knob's comma-separated
+    /// form, `dcm,no-ext`): the union an earlier tool's "all" mode meant.
+    Any(Vec<Filter>),
 }
 
 impl Filter {
-    /// Parse the knob's text: `all`, `dcm`, `no-ext`, or a glob.
+    /// Parse the knob's text: `all`, `dcm`, `no-ext`, or a glob; a
+    /// comma-separated list of those is their union (a glob cannot contain a
+    /// comma in this form).
     pub fn parse(text: &str) -> Result<Filter, glob::PatternError> {
+        if text.contains(',') {
+            let parts = text
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(Filter::parse)
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(match parts.len() {
+                1 => parts.into_iter().next().expect("one part"),
+                _ => Filter::Any(parts),
+            });
+        }
         Ok(match text {
             "all" => Filter::All,
             "dcm" => Filter::Dcm,
@@ -51,6 +68,7 @@ impl Filter {
                 .is_some_and(|e| e.eq_ignore_ascii_case("dcm")),
             Filter::NoExt => Path::new(name).extension().is_none(),
             Filter::Glob(p) => p.matches(name),
+            Filter::Any(filters) => filters.iter().any(|filter| filter.matches(name)),
         }
     }
 }
@@ -62,6 +80,15 @@ impl fmt::Display for Filter {
             Filter::Dcm => f.write_str("dcm"),
             Filter::NoExt => f.write_str("no-ext"),
             Filter::Glob(p) => f.write_str(p.as_str()),
+            Filter::Any(filters) => {
+                for (i, filter) in filters.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{filter}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -311,6 +338,18 @@ mod tests {
         assert!(Filter::parse("[").is_err());
         assert_eq!(all.to_string(), "all");
         assert_eq!(glob.to_string(), "IM_*");
+    }
+
+    #[test]
+    fn a_comma_separated_list_is_a_union() {
+        let union = Filter::parse("dcm, no-ext").unwrap();
+        assert!(union.matches("a.DCM") && union.matches("IM_0001"));
+        assert!(!union.matches("a.dcm.bak") && !union.matches("notes.txt"));
+        assert_eq!(union.to_string(), "dcm,no-ext");
+        let with_glob = Filter::parse("dcm,IM_*").unwrap();
+        assert!(with_glob.matches("IM_0001.txt") && !with_glob.matches("XX_0001"));
+        assert!(matches!(Filter::parse("dcm,").unwrap(), Filter::Dcm));
+        assert!(Filter::parse("dcm,[").is_err());
     }
 
     #[test]

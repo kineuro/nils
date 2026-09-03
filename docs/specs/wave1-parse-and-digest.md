@@ -329,9 +329,11 @@ UIDs, then the extraction); v1 reads once.
 ### 5.2 Filter and resume
 
 The `files` knob selects candidates by name: `all` (default), `dcm` (`.dcm`, any
-case), `no-ext`, or a glob. The default is `all` because the check for what a file
-is costs 132 bytes (§6.1) and D17 forbids silent drops; v0 defaulted to ".dcm or
-no extension" and the gate runs with the filter set to match each v0 digest.
+case), `no-ext`, a glob, or a comma-separated union of those (`dcm,no-ext`: a name
+matching any part is a candidate). The default is `all` because the check for what
+a file is costs 132 bytes (§6.1) and D17 forbids silent drops; v0's own "all" mode
+meant ".dcm (any case) or no extension" and the gate runs with `--files dcm,no-ext`
+so that both sides see the same candidates.
 
 Before parsing, every candidate is checked against `source_file` for its source,
 one query per directory by path prefix (an index on `(source_id, path)` makes it a
@@ -1160,6 +1162,32 @@ pattern and written as a report with counts and shapes only; the classed fields
 show no value. The tool is public (nothing in it is about our data); the runs are
 private and their reports are summarized in the record.
 
+Settled while building the compare tool (slice 7): v0 is read either through the
+Postgres scanner with a DSN that is never printed, or from the zstd CSVs that
+`tools/v0-compare/export.sh` takes in a session forced read-only
+(`default_transaction_read_only`), and either lands in one DuckDB file
+(`v0-compare extract`); `v0-compare compare` then reads v1 through the SQLite or
+the Postgres scanner. Each v0 digest's file-name mode (`--v0-files all | dcm | DCM
+| all_dcm | no_ext`) names the union `files` filter v1 is digested with (§5.2),
+so that both sides see the same candidates. Normalization is symmetric: v0's
+Python list literals and multi-valued strings to the backslash form, numbers to
+one canonical spelling, dates and times to ISO, JSON to presence; the six stack
+columns v0 stored rounded are compared at v0's decimals. Rows that still differ
+are read back as shapes and grouped by field and pattern (`case`, `whitespace`,
+`number-format`, `rounded`, `scale`, `list-order`, `subset`, `prefix`,
+`null↔value`, or the shapes on both sides; a quasi-identifying or identifying
+field collapses its shapes to `other`), a residual beyond 200,000 rows sampled
+deterministically and the report saying so. An adjudication file (TOML:
+`[[divergence]]`, `[[partition]]`, `[[instance]]`, glob patterns, a class and a
+note each) classes every group, and the bars apply one rule to the classes: a
+group classed `accepted` or `v0-bug` is excused from the bar it would otherwise
+fail, a `v1-bug` and an unclassified group count in full. The floor of §12.3 is
+therefore measured net of what the record has explained, and the bar that
+matters, the classification, is unchanged. The report (`report.md`,
+`report.json`) holds counts, shapes, classes and notes; the exit code is 0 only
+when every bar passes; the `work.duckdb` beside it holds values from both
+registries and stays where the registries are.
+
 ### 12.2 Instances
 
 Every instance v0 holds under a digested root is in v1, and every v1 instance
@@ -1170,6 +1198,19 @@ resume token, or below the legacy token when the series had none, whether or not
 it had been written). The gate runs with `files` matched to each v0 digest's
 extension mode so that the first case is measured, not assumed, and it counts the
 third.
+
+Settled in slice 7: instances are paired on the SOP Instance UID. A v0 instance
+v1 does not hold is classed by what v1 knows of its path: refused under a
+quarantine class, ingested under another SOP, or never seen, in which case the
+tool looks on disk under the root (`--root`) and says whether the file is there
+(v1 missed it) or not (v0 holds a file that is gone). Only the two classes where
+v1 saw the path pass the bar by themselves; the rest need the adjudication. A
+v1 instance v0 does not hold is `in v0 under another subject or cohort`, `name
+outside v0 mode`, `sop class not in v0's nine`, `modality not in v0's`, `resume
+skip` (its SOP sorts at or below the highest one v0 holds for the series, or
+below the legacy token when the series has none), `series absent from v0` with
+what v0 knew (the study, the subject, neither), or `unexplained: series known to
+v0`, and only the last one fails.
 
 ### 12.3 Fields and stacks
 
@@ -1186,6 +1227,19 @@ the rest classified the same way. "At least 99.9 percent" is a floor for the
 comparison to be worth reading; the bar is the classification, which has to be
 complete.
 
+Settled in slice 7: the stack partition of a series is matched by membership on
+the instances both sides hold, and a series whose partition differs is reported
+by its shape (`v0 2 stack(s), v1 1, 0 matched`) and classed through the
+adjudication's `[[partition]]` rules. Two series columns carry the first
+instance's value on both sides (`media_storage_sop_instance_uid` and
+`image_position_patient`, the engine's `VARIES_PER_INSTANCE`), and which instance
+is first follows the walk order, so two digests of one corpus disagree on them by
+construction; the tool compares and reports them and classes their divergences
+`accepted` itself unless the adjudication says otherwise. v0's `study.modality`
+is the first file's modality where v1's `modalities_in_study` is the study's, so
+that pair is expected to show `subset` or `null↔value` and is declared accepted
+in the adjudication of each run.
+
 ### 12.4 Subjects
 
 With the registry created under `blake2b-8` and the v0 key, and v0's CSV maps
@@ -1201,6 +1255,19 @@ one known divergence is declared now as an accepted change: v0 opens an event pe
 modality, so a subject scanned on MR and CT the same day has two, and v1's default
 scheme has one, since one occasion is one session whatever the scanners; the live
 registry holds exactly one such day.
+
+Settled in slice 7: `v0-compare linkage-csv` writes the CSV `nils linkage import`
+takes (a code and its identifier per row, mode 600, deleted after the import),
+lists v0's id types with their counts, and counts an identifier under two codes
+or a code under two identifiers, leaving both out with `--drop-collisions` since
+the import would refuse them. With the v0 key in a file (`--key-file`, read and
+dropped) the report classes how v0 derived each code: `key-consistent` (the key
+and the identifier reproduce it), `cohort-hashed` (the hash under v0's fallback
+seed, the cohort's name, for a digest whose key was empty), `no identifier`, or
+`other` (a CSV-mapped code, or an identifier v0 overwrote); the counts say how
+many people the two v0 bugs of this section touched. Sessions are v1's (subject,
+study date) groups against v0's events, and the surplus on days with several
+events is the per-modality case above, counted and accepted.
 
 ### 12.5 Performance (D6, C6)
 
@@ -1245,6 +1312,20 @@ synthetic file that reproduces the shape (never the file, never a value from it)
 with the expected values. The fixtures are the parser's regression suite and the
 start of the verified corpus (C12).
 
+Settled in slice 7: the compare tool has a gate of its own, synthetic and in CI
+(`v0-compare` job). `tools/v0-compare/tests/v0shape.py` projects a v0-shaped
+export out of a v1 registry digested from the generator's corpus and injects
+known divergences (a case change, a null, another institution, dropped and
+phantom instances in each of v1's classes, a split stack, a recoded subject, an
+identifier per subject); the tests assert that a clean projection passes and
+that every injected divergence lands in its class, the linkage CSV round trip
+through `nils linkage import` files every code as already known, the key
+classes come out right with the right key and `other` with a wrong one, and the
+same holds against a v1 registry on Postgres. The generator gained
+`--same-day-percent` (a later study on the day of the previous one; zero by
+default, so existing seeds write what they wrote) and its manifest
+`same_day_studies`, which is what the session check counts against.
+
 ## 13. CLI reference for Wave 1
 
 ```
@@ -1255,7 +1336,7 @@ nils init [--backend sqlite|postgres] [--dsn ...] [--schema nils]
 nils key add <name> [--from-file <path>]      # otherwise from stdin
 nils key list | remove <name>
 nils digest <root> [--name <label>] [--workers N] [--walk-threads N] [--batch-rows N]
-            [--files all|dcm|no-ext|<glob>] [--identity-rule <file>]
+            [--files all|dcm|no-ext|<glob>[,...]] [--identity-rule <file>]
             [--retry-quarantine] [--restart] [--dry-run] [--describe] [--json]
 nils status [--batch <id>] [--json]
 nils quarantine list [--batch <id>] [--class <c>] [--json]
@@ -1359,7 +1440,11 @@ they share the schema.
 7. **The compare tool and the gate runs** on the baseline host: the spike's
    corpora first, then the live corpus study by study, each run's report in the
    record; the session check of §12.4 is part of the tool. *Done when:* §12.2 to
-   §12.4 hold and every divergence is classified.
+   §12.4 hold and every divergence is classified. Landed so far: the tool
+   (`tools/v0-compare/`, §12.1 to §12.4 as amended) with its synthetic gate in
+   CI (§12.7) and the walker's union filter (§5.2); the runs on the baseline
+   host follow as v0's export and the cohorts' trees arrive there, nmosd first,
+   and the slice closes with their reports in the record.
 8. **The budget.** v0 measured on the baseline host (C6); v1 tuned against it;
    the CI benchmark's baseline recorded. *Done when:* §12.5 and §12.6 hold and
    the record's D6 numbers are restated.

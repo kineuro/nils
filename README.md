@@ -16,8 +16,9 @@
 | [`spikes/`](spikes/) | Throwaway code behind decisions. The language spike, which chose Rust, reports in [`spikes/lang/`](spikes/lang/). |
 | [`evals/`](evals/) | The gold tasks and the scoring for the query language and the agent. |
 | [`tools/synth/`](tools/synth/) | The synthetic corpus generator behind the tests and the CI benchmark; nothing real. |
+| [`tools/v0-compare/`](tools/v0-compare/) | The compare tool of the Wave 1 gate: a v1 registry measured against the v0 one it replaces, in counts and shapes only. |
 
-The engine is being built in the order of the Wave 1 specification ([`docs/specs/wave1-parse-and-digest.md`](docs/specs/wave1-parse-and-digest.md), §14): the skeleton is in, the reader and the walker are next. Until the first tag, `nils --version` is the whole of what the binary does.
+The engine is being built in the order of the Wave 1 specification ([`docs/specs/wave1-parse-and-digest.md`](docs/specs/wave1-parse-and-digest.md), §14): the skeleton, the reader and the walker, the schema and the writer, identity, stacks, jobs and custody, and the compare tool are in; the gate runs against the live registry and the budget are what remains before the first tag.
 
 ## License
 

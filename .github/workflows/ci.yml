@@ -1,6 +1,7 @@
 name: ci
 # Runs on every pull request and on main. "ci" checks the text, the SPDX headers and
 # the sign-offs; "engine" formats, lints and tests the engine on both registry
+# backends; "v0-compare" tests the compare tool over a synthetic registry on both
 # backends; "build" is the six-target build of engine-build.yml, the way a release
 # is made. Main requires all of them (docs/decisions/15, R8;
 # docs/specs/wave1-parse-and-digest.md, §12.6).
@@ -78,6 +79,55 @@ jobs:
       - name: test on SQLite and Postgres 16
         working-directory: engine
         run: cargo test --workspace --locked
+
+  # The v0 compare tool (§12.1) over a synthetic corpus the release binaries
+  # write and digest: a projected v0 export with injected divergences must land
+  # every one of them in its class, and a clean one must pass the gate on both
+  # backends (§12.7).
+  v0-compare:
+    name: v0-compare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nils
+          POSTGRES_PASSWORD: nils
+          POSTGRES_DB: nils_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nils"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      NILS_TEST_POSTGRES_DSN: postgres://nils:nils@localhost:5432/nils_test
+    steps:
+      - uses: actions/checkout@v7
+      - name: the pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' engine/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - name: build nils and the corpus writer
+        working-directory: engine
+        run: |
+          cargo build --release --locked -p nils
+          cargo build --release --locked --example corpus -p nils-dicom
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install the tool
+        run: python -m pip install --quiet -e "tools/v0-compare[test]"
+      - name: test
+        working-directory: tools/v0-compare
+        run: python -m pytest -q
 
   build:
     uses: ./.github/workflows/engine-build.yml

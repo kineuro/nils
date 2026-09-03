@@ -185,8 +185,12 @@ struct DigestArgs {
     /// Instances per batch, one transaction each
     #[arg(long, value_name = "N")]
     batch_rows: Option<usize>,
-    /// Which file names are candidates: all, dcm, no-ext, or a glob
-    #[arg(long, default_value = "all", value_name = "all|dcm|no-ext|<glob>")]
+    /// Which file names are candidates: all, dcm, no-ext, a glob, or a comma-separated union of those
+    #[arg(
+        long,
+        default_value = "all",
+        value_name = "all|dcm|no-ext|<glob>[,...]"
+    )]
     files: String,
     /// A YAML file with the identity rule (§7.3); PatientID, then StudyInstanceUID, by default
     #[arg(long, value_name = "FILE")]

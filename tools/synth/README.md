@@ -19,6 +19,7 @@ cargo run --release -p nils-dicom --example corpus -- \
 | `--pixel-bytes B` | 4096 | Pixel Data appended to every accepted file, so the reader's stop before Pixel Data is exercised |
 | `--duplicate-percent P` | 1 | share of instances copied a second time under `dup/` |
 | `--refused-every K` | 500 | one refused file per K instances |
+| `--same-day-percent P` | 0 | a subject's later study falls on the day of the previous one this often; zero draws nothing, so the streams of existing seeds stay as they were |
 
 The tree is `sub-NNNNNN/st-N/se-NN-<MOD>/IM_NNNN` (some series with a `.dcm` suffix), with the duplicates under `dup/` on the same relative paths and the refused files next to the instances they follow. What it holds, so that a digest of it walks every path the spec names:
 
@@ -29,7 +30,7 @@ The tree is `sub-NNNNNN/st-N/se-NN-<MOD>/IM_NNNN` (some series with a `.dcm` suf
 - 2% of subjects without a PatientID, so identity falls to the study;
 - refused files in turn: an empty file, a truncated instance, a text file, a junk `.DS_Store`, a file without SOP Instance UID, an ultrasound file (an unsupported SOP class).
 
-The manifest on stdout carries the counts a digest report is checked against: `files` is the report's `seen`, `instances + duplicates` its `parsed`, `refused` its `quarantined`, and `studies` and `series` its own. The report's `subjects` runs a little above the manifest's, by design: a subject without a PatientID is one registry subject per study.
+The manifest on stdout carries the counts a digest report is checked against: `files` is the report's `seen`, `instances + duplicates` its `parsed`, `refused` its `quarantined`, and `studies` and `series` its own. `same_day_studies` counts the studies `--same-day-percent` placed on an earlier study's day, which is what the compare tool's session check (`tools/v0-compare`) counts against. The report's `subjects` runs a little above the manifest's, by design: a subject without a PatientID is one registry subject per study.
 
 Throughput on a laptop, single-threaded, to tmpfs: about 40,000 files per second at 256 bytes of Pixel Data. A million instances with the default 4 KB of Pixel Data take about 5.7 GB.
 

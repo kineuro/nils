@@ -52,11 +52,15 @@ struct Options {
     duplicate_percent: f64,
     /// One refused file per this many instances.
     refused_every: u64,
+    /// A subject's later study falls on the day of the previous one this
+    /// often (percent); zero draws nothing, so the streams of existing seeds
+    /// stay as they were.
+    same_day_percent: f64,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: corpus --out DIR --instances N [--seed S] [--pixel-bytes B] [--duplicate-percent P] [--refused-every K]"
+        "usage: corpus --out DIR --instances N [--seed S] [--pixel-bytes B] [--duplicate-percent P] [--refused-every K] [--same-day-percent P]"
     );
     std::process::exit(2)
 }
@@ -68,6 +72,7 @@ fn parse_args() -> Options {
     let mut pixel_bytes = 4096usize;
     let mut duplicate_percent = 1.0;
     let mut refused_every = 500u64;
+    let mut same_day_percent = 0.0;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().unwrap_or_else(|| usage());
@@ -80,6 +85,7 @@ fn parse_args() -> Options {
                 duplicate_percent = value().parse().unwrap_or_else(|_| usage())
             }
             "--refused-every" => refused_every = value().parse().unwrap_or_else(|_| usage()),
+            "--same-day-percent" => same_day_percent = value().parse().unwrap_or_else(|_| usage()),
             _ => usage(),
         }
     }
@@ -93,6 +99,7 @@ fn parse_args() -> Options {
         pixel_bytes,
         duplicate_percent,
         refused_every: refused_every.max(1),
+        same_day_percent,
     }
 }
 
@@ -228,6 +235,7 @@ struct Tally {
     subjects: u64,
     subjects_without_patient_id: u64,
     studies: u64,
+    same_day_studies: u64,
     series: u64,
     series_mr: u64,
     series_enhanced_mr: u64,
@@ -269,11 +277,20 @@ fn main() {
             tally.subjects_without_patient_id += 1;
         }
         let studies = rng.range(1, 3);
+        let mut previous_date: Option<String> = None;
         for s in 1..=studies {
             if tally.instances >= opts.instances {
                 break;
             }
-            let study = study(&mut rng, &subject, s);
+            let mut study = study(&mut rng, &subject, s);
+            if let Some(date) = &previous_date
+                && opts.same_day_percent > 0.0
+                && rng.chance(opts.same_day_percent)
+            {
+                study.date = date.clone();
+                tally.same_day_studies += 1;
+            }
+            previous_date = Some(study.date.clone());
             tally.studies += 1;
             let n_series = rng.range(1, 8);
             for k in 1..=n_series {
@@ -351,6 +368,7 @@ fn main() {
         "subjects": tally.subjects,
         "subjects_without_patient_id": tally.subjects_without_patient_id,
         "studies": tally.studies,
+        "same_day_studies": tally.same_day_studies,
         "series": tally.series,
         "series_mr": tally.series_mr,
         "series_enhanced_mr": tally.series_enhanced_mr,

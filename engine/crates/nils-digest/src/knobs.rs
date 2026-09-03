@@ -35,7 +35,7 @@ pub struct Knob {
 pub static KNOBS: &[Knob] = &[
     Knob {
         name: "files",
-        kind: "all | dcm | no-ext | <glob>",
+        kind: "all | dcm | no-ext | <glob>, or a comma-separated union",
         default: "all",
         note: "which file names are candidates",
         settable_since: 2,
