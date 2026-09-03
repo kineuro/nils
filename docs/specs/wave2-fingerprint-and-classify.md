@@ -847,6 +847,31 @@ folder name. Neither would have been found by classifying the difference and
 moving on. Classification axes will produce more of that kind, not less, because
 a wrong axis usually has an upstream reason.
 
+### 11.6 What the seam measured
+
+Slice 8's bar was that no axis name, no flag name and no vocabulary value of
+MRI appears anywhere in the engine crates. Two things had to move for that to
+be true, and one is worth naming.
+
+The engine had its own idea called `provenance`: the scope a decision or an
+overlay may be written at, meaning the machine the data came from. The MRI
+pack has an axis of that name meaning how an image was produced, RawRecon or
+Derived or a vendor's own reconstruction. Two different ideas, one word, and
+the word belonged to the pack. Both are now `origin`, which no vocabulary
+uses.
+
+What is left in the engine that names a modality is `nils-dicom`'s reader of
+vendor private tags: the b value, the number of directions, the phase-encode
+direction, each read from a manufacturer's private block. That is knowledge
+about a file format rather than about a classification, it is Wave 1's, and a
+CT pack would need its own kind of it. It stays.
+
+The seam itself is a test rather than a claim: `crates/nils-pack/tests/seam.rs`
+carries a pack for a modality that does not exist, with two axes of its own, a
+route, a vocabulary the engine has never heard of and a corpus that judges it.
+It loads, it routes, it classifies, and no line of Rust changed to make it
+work.
+
 ## 12. CLI for Wave 2
 
 ```

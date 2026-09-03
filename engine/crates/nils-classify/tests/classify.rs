@@ -322,7 +322,7 @@ fn a_modality_the_pack_does_not_judge_is_said_so_and_not_guessed() {
 }
 
 #[test]
-fn a_decision_about_a_provenance_governs_every_stack_of_it_until_one_is_looked_at() {
+fn a_decision_about_an_origin_governs_every_stack_of_it_until_one_is_looked_at() {
     let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
     for lab in labs() {
         let name = lab.name;
@@ -362,10 +362,10 @@ fn a_decision_about_a_provenance_governs_every_stack_of_it_until_one_is_looked_a
         };
 
         // The whole scanner is called wrong, and every stack it made follows.
-        decide(&mut reg, "provenance", "manufacturer=synthetic", "PDw");
+        decide(&mut reg, "origin", "manufacturer=synthetic", "PDw");
         nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
             .unwrap();
-        assert_eq!(base(&mut reg), "PDw", "{name}: the provenance decides");
+        assert_eq!(base(&mut reg), "PDw", "{name}: the origin decides");
 
         // Someone looks at one series of it and says otherwise, and the
         // narrower call wins where it applies.

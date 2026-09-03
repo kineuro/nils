@@ -113,10 +113,10 @@ mod tests {
     #[test]
     fn the_message_says_file_line_and_path() {
         let e = Error::at("flags.has_se", "no parser named x")
-            .in_file(Path::new("packs/mri/flags.yml"), Some(SRC));
+            .in_file(Path::new("packs/example/flags.yml"), Some(SRC));
         assert_eq!(
             e.to_string(),
-            "packs/mri/flags.yml:2: flags.has_se: no parser named x"
+            "packs/example/flags.yml:2: flags.has_se: no parser named x"
         );
     }
 }

@@ -2,7 +2,7 @@
 
 //! Overlays (`docs/specs/wave2-fingerprint-and-classify.md`, §5.3, C2).
 //!
-//! A site's own words for the same thing, scoped to provenance and never to a
+//! A site's own words for the same thing, scoped to an origin and never to a
 //! selection, applied when the pack is loaded and never edited into it. The
 //! merge rule is v0's, exactly, including the two things about it that are
 //! easy to get wrong: duplicates are dropped case-insensitively but the
@@ -23,7 +23,7 @@ pub struct Edit {
     pub remove: Vec<String>,
 }
 
-/// A provenance-scoped amendment to a pack.
+/// An origin-scoped amendment to a pack.
 pub struct Overlay {
     /// `name@version` of the overlay itself, recorded on every row it judged.
     pub id: String,
@@ -55,7 +55,7 @@ impl Overlay {
                     return Err(Error::at(
                         format!("scope.{k}"),
                         format!(
-                            "an overlay is scoped by provenance ({}), never by a selection",
+                            "an overlay is scoped by origin ({}), never by a selection",
                             SCOPES.join(", ")
                         ),
                     )
@@ -140,7 +140,7 @@ impl Overlay {
     }
 }
 
-/// What an overlay may be keyed on: provenance, never a selection (C2).
+/// What an overlay may be keyed on: an origin, never a selection (C2).
 pub const SCOPES: &[&str] = &["manufacturer", "model", "station", "batch"];
 
 /// v0's rule: the defaults then the additions, de-duplicated

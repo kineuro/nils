@@ -157,7 +157,7 @@ fn to_stack(r: &Row, with_ids: bool) -> Result<(Ids, Stack), Error> {
 /// its series', and so on outward.
 ///
 /// A decision is recorded at one of four scopes (§8.3): this stack, this
-/// series, this subject, or a provenance (`manufacturer=SIEMENS`, `model=...`,
+/// series, this subject, or an origin (`manufacturer=SIEMENS`, `model=...`,
 /// `station=...`). The narrowest one that names a stack is the one that
 /// applies, so a call about one series does not quietly govern the site and a
 /// call about the site is overridden where somebody looked closer.
@@ -166,7 +166,7 @@ pub struct Decisions {
     by_series: HashMap<(i64, String), Option<String>>,
     by_subject: HashMap<(i64, String), Option<String>>,
     /// Keyed by the lowercase `field=value` the decision names.
-    by_provenance: HashMap<(String, String), Option<String>>,
+    by_origin: HashMap<(String, String), Option<String>>,
 }
 
 /// Which stack a fingerprint row belongs to, and to what. Read only when a
@@ -178,9 +178,12 @@ struct Ids {
     subject: i64,
 }
 
-/// The provenance fields a decision may be scoped by, and the fingerprint
+/// The fields that name an origin, and the fingerprint field each one
+/// reads. The word is deliberately not `provenance`: the MRI pack has an
+/// axis of that name meaning how an image was produced, and the engine must
+/// not borrow a pack's vocabulary for one of its own ideas.
 /// field each one reads.
-const PROVENANCE: &[(&str, &str)] = &[
+const ORIGIN: &[(&str, &str)] = &[
     ("manufacturer", "manufacturer"),
     ("model", "manufacturer_model_name"),
     ("station", "station_name"),
@@ -196,7 +199,7 @@ impl Decisions {
             by_stack: HashMap::new(),
             by_series: HashMap::new(),
             by_subject: HashMap::new(),
-            by_provenance: HashMap::new(),
+            by_origin: HashMap::new(),
         };
         for r in store.query(&sql, &[])? {
             let scope = r.text(0)?;
@@ -214,9 +217,8 @@ impl Decisions {
                 "subject" => {
                     d.by_subject.insert((id(), axis), value);
                 }
-                "provenance" => {
-                    d.by_provenance
-                        .insert((reference.to_lowercase(), axis), value);
+                "origin" => {
+                    d.by_origin.insert((reference.to_lowercase(), axis), value);
                 }
                 // A scope the engine does not know is not silently obeyed.
                 _ => {}
@@ -235,7 +237,7 @@ impl Decisions {
         !self.by_stack.is_empty()
             || !self.by_series.is_empty()
             || !self.by_subject.is_empty()
-            || !self.by_provenance.is_empty()
+            || !self.by_origin.is_empty()
     }
 
     /// The decision in force on this axis of this stack, narrowest first.
@@ -250,10 +252,10 @@ impl Decisions {
         if let Some(v) = self.by_subject.get(&key(ids.subject)) {
             return Some(v);
         }
-        if self.by_provenance.is_empty() {
+        if self.by_origin.is_empty() {
             return None;
         }
-        for (name, field) in PROVENANCE {
+        for (name, field) in ORIGIN {
             let Some(index) = nils_pack::stack::field_index(field) else {
                 continue;
             };
@@ -262,7 +264,7 @@ impl Decisions {
                 continue;
             }
             let reference = format!("{name}={}", value.to_lowercase());
-            if let Some(v) = self.by_provenance.get(&(reference, axis.to_string())) {
+            if let Some(v) = self.by_origin.get(&(reference, axis.to_string())) {
                 return Some(v);
             }
         }

@@ -150,11 +150,11 @@ struct DecideArgs {
     /// The review item to answer
     id: i64,
     /// How far the answer reaches: this stack, or everything of its series,
-    /// its subject, or the scanner that made it
+    /// its subject, or the machine that made it
     #[arg(
         long,
         default_value = "stack",
-        value_name = "stack|series|subject|provenance"
+        value_name = "stack|series|subject|origin"
     )]
     scope: String,
     /// What the axis is, in the person's judgement
@@ -524,7 +524,7 @@ struct ClassifyArgs {
     pack: String,
     #[arg(long, value_name = "DIR")]
     pack_dir: Option<PathBuf>,
-    /// A provenance-scoped amendment to it
+    /// An origin-scoped amendment to it
     #[arg(long, value_name = "FILE")]
     overlay: Option<PathBuf>,
     /// The run's label, recorded on the job
@@ -1883,7 +1883,7 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
                 .ok_or_else(|| fail(format!("stack {stack} is not in the registry")))?;
             (scope.to_string(), found.int(0)?.to_string())
         }
-        "provenance" => {
+        "origin" => {
             let sql = format!(
                 "SELECT manufacturer FROM {} WHERE stack_id = {}",
                 store.qualified("stack_fingerprint"),
@@ -1895,17 +1895,17 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
                 .filter(|m| !m.is_empty())
                 .ok_or_else(|| {
                     fail(format!(
-                        "stack {stack} names no manufacturer, so there is no provenance to decide about"
+                        "stack {stack} names no manufacturer, so there is no origin to decide about"
                     ))
                 })?;
             (
-                "provenance".to_string(),
+                "origin".to_string(),
                 format!("manufacturer={}", made_by.to_lowercase()),
             )
         }
         other => {
             return Err(usage(format!(
-                "{other} is not a scope: stack, series, subject or provenance"
+                "{other} is not a scope: stack, series, subject or origin"
             )));
         }
     };

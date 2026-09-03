@@ -173,9 +173,10 @@ mod tests {
     fn a_field_is_named_never_positioned() {
         let mut s = Stack::new();
         s.set("inversion_time", Value::Num(Some(2500.0))).unwrap();
-        s.set("text_all", Value::Text(Some("ax t2 flair"))).unwrap();
+        s.set("text_all", Value::Text(Some("one two three")))
+            .unwrap();
         assert_eq!(s.num(field_index("inversion_time").unwrap()), Some(2500.0));
-        assert_eq!(s.text(field_index("text_all").unwrap()), "ax t2 flair");
+        assert_eq!(s.text(field_index("text_all").unwrap()), "one two three");
         assert_eq!(
             s.set("no_such_field", Value::Num(None)).unwrap_err(),
             "no field named no_such_field"

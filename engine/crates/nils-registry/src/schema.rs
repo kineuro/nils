@@ -488,7 +488,7 @@ fn build_registry() -> Vec<Table> {
             "decision",
             vec![
                 col("id", Type::Id),
-                // What it applies to: stack, series, subject or provenance.
+                // What it applies to: stack, series, subject or origin.
                 req("scope", Type::Text),
                 req("ref", Type::Text),
                 req("axis", Type::Text),
