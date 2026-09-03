@@ -47,8 +47,9 @@ reference:
   # and the whole pool when its own says nothing.
   fallback: global
   fallback_when: [no_match, insufficient_matches, no_compatible_match, tie]
-  # A misc stack votes globally to begin with, so it has no fallback of
-  # its own to fall back to.
+  # A misc stack votes in the misc pool like any other, and then stops: it
+  # is the pool of stacks nothing else described, so widening it to the whole
+  # archive would answer with the archive's average.
   fallback_except: [misc]
 
 # `rounding` is in the pack because the two languages disagree: Python rounds

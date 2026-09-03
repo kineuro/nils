@@ -882,20 +882,20 @@ pub fn run_vote(
         let ask = |pool: &Pool, name: &str| {
             take(vote, pool, &key, &sequence, &pack.axes, &pack.regexes, name)
         };
+        // Every stack votes in its own pool first, whatever the pack says
+        // about falling back: `fallback_except` names the partitions that do
+        // not then ask the whole pool, not the ones that never had one.
         let mut outcome = match &partition {
-            Some(name)
-                if pools.contains_key(name) && !pass.reference.fallback_except.contains(name) =>
-            {
-                ask(&pools[name], "scoped")
-            }
+            Some(name) if pools.contains_key(name) => ask(&pools[name], "scoped"),
             _ => ask(&global, "global"),
         };
-        // Its own pool said nothing, so the whole one is asked, which is what
-        // the pack means by a fallback.
         if outcome.answer.is_none()
             && pass.reference.fallback
             && outcome.partition != "global"
             && pass.reference.fallback_when.contains(&outcome.method)
+            && !partition
+                .as_ref()
+                .is_some_and(|n| pass.reference.fallback_except.contains(n))
         {
             outcome = ask(&global, "global");
         }
