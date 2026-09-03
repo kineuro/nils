@@ -225,21 +225,29 @@ code go from 78 to 80 of 82 and the sessions from 42 to 43 of 44. The map needed
 the many-to-one import of §7.4 to load at all: it gives one person two project
 identifiers, from the era before the identifiers were renamed.
 
-The other two are the files. One session of one subject was written into two
-subject directories by the export that pseudonymized it: one series of it has
-24 instances under the right subject's directory with the right identifier and
-the rest under another subject's, with that subject's identifier, and the
-second study of the session went there whole. The export changed identity in
-the middle of a series. Two signs say it was two runs: the misfiled sessions
-are named after their date where that subject's own sessions are named after
-the exam, and v0 has the session right because it ingested it before the
-relabelling and its resume never re-read it. It is not an identity collision:
-the two subjects have different personnummer in the project's own list, where
-exactly one pair of identifiers shares one. Nima settled it by reading the
-scans, and the anatomy is the first subject's. So v0 is right, the files are
-wrong, and v1 reports what the files say, which is what it is for. The gate's
-last two bars close when those 10,515 instances carry the right identifier
-again; the finding is written up on the host beside the run.
+The other two were the corpus, and the corpus was wrong twice over. One
+session existed **twice** on disk, under two subject directories: 10,895 files
+each, the same 10,894 instances, the right directory carrying the right
+identifier and the other carrying its own. The digest ingested whichever copy
+its walk reached first per instance, which is why the study came out under the
+wrong subject and why the two copies show as 10,515 duplicates on one side and
+24 on the other. The identifier the files kept from before the rename says how
+it happened: the subject's old identifier ended in the digits of another
+subject's number, and one export run read those digits as that other subject.
+v0 has the session right because it ingested it before the second copy existed
+and its resume never re-read anything. Nima settled the anatomy by eye, the
+project's session list agreed, and the two subjects have different personnummer
+in the project's own list, so it was never an identity collision.
+
+A script on the archive host (`scripts/fix-nmosd-duplicate-session.py` beside
+the cohort's own maps) checks that the two directories hold the same instances
+and the identifiers they should, and then moves the wrong copy beside the study
+root rather than deleting it. It ran on 2026-09-03, on the archive and on the
+gate's copy. **With the duplicate gone the nmosd gate passes every bar**: 82 of
+82 studies on the same code, 44 of 44 sessions, every field at or above its
+floor, 212 of 212 multi-stack partitions identical, every divergence
+classified. The first gate run of the rewrite is green, and it took a reader
+fix, a writer rule, an identity rule and a corpus repair to get there.
 
 The run used a throwaway key, so `code_classes` says `other` for all 43;
 with Nima's own key it stays `other`, and that is a fact about this cohort
