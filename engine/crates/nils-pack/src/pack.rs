@@ -2071,6 +2071,26 @@ fn load_vote(
             .collect()
     };
     let vote_on = named("vote_on")?;
+    if vote_on.len() > crate::pass::MAX_VOTE_AXES {
+        return Err(Error::at(
+            format!("{at}.decide.vote_on"),
+            format!(
+                "a vote is about at most {} axes, not {}",
+                crate::pass::MAX_VOTE_AXES,
+                vote_on.len()
+            ),
+        )
+        .in_file(&f.path, Some(&f.source)));
+    }
+    for a in &vote_on {
+        if axes[*a].values.len() >= u16::MAX as usize {
+            return Err(Error::at(
+                format!("{at}.decide.vote_on"),
+                format!("{} has too many values to vote on", axes[*a].name),
+            )
+            .in_file(&f.path, Some(&f.source)));
+        }
+    }
     let writes = named("writes")?;
     for a in &writes {
         if !vote_on.contains(a) {

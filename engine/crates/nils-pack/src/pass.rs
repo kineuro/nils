@@ -191,6 +191,26 @@ impl Pass {
 /// a hole.
 pub type Key = [Option<i64>; 5];
 
+/// How many axes one vote may be about. Four is more than v0 has ever needed
+/// and it keeps an answer a small copied value: a bin can hold a quarter of a
+/// million rows, and every one of them is counted for every stack that lands
+/// in it, so an answer that allocates turns a second into an hour.
+pub const MAX_VOTE_AXES: usize = 4;
+
+/// One answer: a value index per axis voted on, `u16::MAX` for the axes this
+/// vote is not about.
+pub type Answer = [u16; MAX_VOTE_AXES];
+
+const NO_VALUE: u16 = u16::MAX;
+
+fn answer_of(values: &[usize]) -> Answer {
+    let mut a = [NO_VALUE; MAX_VOTE_AXES];
+    for (i, v) in values.iter().enumerate().take(MAX_VOTE_AXES) {
+        a[i] = *v as u16;
+    }
+    a
+}
+
 fn round_half_even(x: f64) -> f64 {
     let r = x.round();
     if (x - x.trunc()).abs() == 0.5 && (r as i64) % 2 != 0 {
@@ -326,13 +346,21 @@ fn relaxed_keys(v: &Vote, k: &Key) -> Vec<Key> {
 /// The reference, binned. One answer is the tuple of the axes voted on.
 #[derive(Debug, Default, Clone)]
 pub struct Pool {
-    bins: HashMap<Key, Vec<Vec<usize>>>,
+    /// Per bin, the distinct answers with how many stacks gave them, in the
+    /// order they were first seen. A bin can hold a quarter of a million
+    /// stacks and be searched by a quarter of a million others, so what a bin
+    /// says is counted once, when it is built, and not once per question.
+    bins: HashMap<Key, Vec<(Answer, u32)>>,
     total: usize,
 }
 
 impl Pool {
-    pub fn add(&mut self, key: Key, answer: Vec<usize>) {
-        self.bins.entry(key).or_default().push(answer);
+    pub fn add(&mut self, key: Key, answer: Answer) {
+        let bin = self.bins.entry(key).or_default();
+        match bin.iter_mut().find(|(a, _)| *a == answer) {
+            Some((_, n)) => *n += 1,
+            None => bin.push((answer, 1)),
+        }
         self.total += 1;
     }
 
@@ -345,32 +373,40 @@ impl Pool {
     }
 
     /// The neighbours, and how far the search had to go to find them.
-    fn near(&self, v: &Vote, k: &Key) -> (Vec<&Vec<usize>>, String) {
+    fn near<'a>(&'a self, v: &Vote, k: &Key) -> (Counted<'a>, String) {
         if let Some(hit) = self.bins.get(k) {
-            return (hit.iter().collect(), "exact_bin".to_string());
+            return (Counted::Bin(hit), "exact_bin".to_string());
         }
-        let mut acc: Vec<&Vec<usize>> = Vec::new();
+        let mut acc: Vec<(Answer, u32)> = Vec::new();
+        let merge = |rows: &[(Answer, u32)], acc: &mut Vec<(Answer, u32)>| {
+            for (a, n) in rows {
+                match acc.iter_mut().find(|(x, _)| x == a) {
+                    Some((_, m)) => *m += n,
+                    None => acc.push((*a, *n)),
+                }
+            }
+        };
         for distance in 1..=v.max_distance {
             for nk in adjacent(v, k, distance) {
                 if let Some(rows) = self.bins.get(&nk) {
-                    acc.extend(rows.iter());
+                    merge(rows, &mut acc);
                 }
             }
             if !acc.is_empty() {
-                return (acc, "expanded_single".to_string());
+                return (Counted::Merged(acc), "expanded_single".to_string());
             }
             for nk in adjacent_pairs(v, k, distance) {
                 if let Some(rows) = self.bins.get(&nk) {
-                    acc.extend(rows.iter());
+                    merge(rows, &mut acc);
                 }
             }
             if !acc.is_empty() {
-                return (acc, "expanded_multi".to_string());
+                return (Counted::Merged(acc), "expanded_multi".to_string());
             }
         }
         for nk in relaxed_keys(v, k) {
             if let Some(rows) = self.bins.get(&nk) {
-                acc.extend(rows.iter());
+                merge(rows, &mut acc);
             }
         }
         if !acc.is_empty() {
@@ -379,9 +415,29 @@ impl Pool {
                 .as_ref()
                 .map(|r| r.method.clone())
                 .unwrap_or_else(|| "expanded_relaxed".to_string());
-            return (acc, method);
+            return (Counted::Merged(acc), method);
         }
-        (Vec::new(), "no_match".to_string())
+        (Counted::Merged(Vec::new()), "no_match".to_string())
+    }
+}
+
+/// The neighbours a search found: a bin as it stands, or several merged.
+enum Counted<'a> {
+    Bin(&'a [(Answer, u32)]),
+    Merged(Vec<(Answer, u32)>),
+}
+
+impl Counted<'_> {
+    fn rows(&self) -> &[(Answer, u32)] {
+        match self {
+            Counted::Bin(b) => b,
+            Counted::Merged(v) => v,
+        }
+    }
+
+    /// How many stacks the search saw, which is what a share is taken of.
+    fn total(&self) -> usize {
+        self.rows().iter().map(|(_, n)| *n as usize).sum()
     }
 }
 
@@ -390,7 +446,7 @@ impl Pool {
 pub struct Outcome {
     pub method: String,
     /// One value index per axis in `vote_on`, when the vote decided.
-    pub answer: Option<Vec<usize>>,
+    pub answer: Option<Answer>,
     pub matches: usize,
     pub neighbours: usize,
     pub pool: usize,
@@ -481,35 +537,31 @@ pub fn take(
     partition: &str,
 ) -> Outcome {
     let (neighbours, method) = pool.near(v, key);
+    let seen = neighbours.total();
     let silent = |method: &str, matches: usize| Outcome {
         method: method.to_string(),
         answer: None,
         matches,
-        neighbours: neighbours.len(),
+        neighbours: seen,
         pool: pool.len(),
         partition: partition.to_string(),
     };
-    if neighbours.is_empty() {
+    if seen == 0 {
         return silent("no_match", 0);
     }
 
-    let mut order: Vec<&Vec<usize>> = Vec::new();
-    let mut counts: HashMap<&Vec<usize>, usize> = HashMap::new();
-    for answer in &neighbours {
-        let n = counts.entry(*answer).or_insert(0);
-        if *n == 0 {
-            order.push(*answer);
-        }
-        *n += 1;
-    }
-    let mut ranked: Vec<(&Vec<usize>, usize)> = order.iter().map(|a| (*a, counts[*a])).collect();
+    let mut ranked: Vec<(Answer, usize)> = neighbours
+        .rows()
+        .iter()
+        .map(|(a, n)| (*a, *n as usize))
+        .collect();
     // Stable, so an equal count keeps the order the reference was seen in.
     // That order is what v0 lets decide a tie; here it only decides which of
     // two equal answers is reported as the tie.
     ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
 
     for (i, (answer, count)) in ranked.iter().enumerate() {
-        let candidate = &axes[v.vote_on[v.compat_axis]].values[answer[v.compat_axis]].id;
+        let candidate = &axes[v.vote_on[v.compat_axis]].values[answer[v.compat_axis] as usize].id;
         if !compatible(&v.compat, sequence, candidate, regexes) {
             continue;
         }
@@ -527,9 +579,9 @@ pub fn take(
         }
         return Outcome {
             method,
-            answer: Some((*answer).clone()),
+            answer: Some(*answer),
             matches: *count,
-            neighbours: neighbours.len(),
+            neighbours: seen,
             pool: pool.len(),
             partition: partition.to_string(),
         };
@@ -786,7 +838,7 @@ pub fn run_vote(
         if !pass.reference.filter.iter().all(|c| c.holds(corpus, i)) {
             continue;
         }
-        let answer: Option<Vec<usize>> = vote
+        let found: Option<Vec<usize>> = vote
             .vote_on
             .iter()
             .map(|a| {
@@ -795,13 +847,14 @@ pub fn run_vote(
                 (0..axis.values.len()).find(|v| axis.stored(*v) == stored)
             })
             .collect();
-        let Some(answer) = answer else { continue };
+        let Some(found) = found else { continue };
+        let answer = answer_of(&found);
         let row = corpus.row(i);
         let values: Vec<Option<f64>> = vote.dims.iter().map(|d| row.num(d.field)).collect();
         let key = key_of(vote, &values);
         if let Some(p) = pass.reference.partition_by {
             let name = corpus.axis_of(i, p).to_string();
-            pools.entry(name).or_default().add(key, answer.clone());
+            pools.entry(name).or_default().add(key, answer);
         }
         global.add(key, answer);
     }
@@ -853,7 +906,7 @@ pub fn run_vote(
                         .iter()
                         .position(|x| x == a)
                         .expect("an axis written is an axis voted on");
-                    (*a, pack.axes[*a].stored(answer[at]).to_string())
+                    (*a, pack.axes[*a].stored(answer[at] as usize).to_string())
                 })
                 .collect(),
         };
