@@ -39,3 +39,23 @@ contrast agent.
 
 Packs are AGPL-3.0-only like the engine. Third-party packs for other modalities
 follow the specification in `contracts/pack/`.
+
+## The passes
+
+`passes/physics_vote.yml` is the pack's one pass: v0's physics vote, as a
+configured instance of the engine's `nearest_neighbour_vote` kind. Every
+number the algorithm uses is in the file, including the rounding mode, because
+Python rounds a half to even and Rust rounds it away from zero and a TR of
+exactly 50 ms would otherwise fall in a different bin.
+
+Checked against v0's own `sort/gap_filling.py` over the whole live corpus, with
+the reference held equal so that the algorithm is compared and not the pool:
+**518,057 of 518,353 stacks get the same answer by the same method**. Every one
+of the 296 differences is a tie, where two answers are equally popular: v0
+takes whichever the database returned first, and this pack takes neither.
+
+Run as it will run, against the reference v1 declares, 8,020 stacks differ.
+The extra 7,724 are the reference itself: v0 votes against its own table, which
+already holds the answers earlier votes wrote, so 34,497 of its 397,712
+reference stacks were themselves filled by voting. v1 votes against what the
+rules decided.
