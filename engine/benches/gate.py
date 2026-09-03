@@ -59,18 +59,19 @@ def main(argv: list[str]) -> int:
             return write(baseline_path, baseline, runner, rate, rss, report, stage, seen)
         print(f"no baseline for the runner class {runner}; run with --record to write one", file=sys.stderr)
         return 1 if not record else write(baseline_path, baseline, runner, rate, rss, report, stage, seen)
-    if record or not entry.get("files_per_s"):
+    key = "files_per_s" if stage == "digest" else "stacks_per_s"
+    if record or not entry.get(key):
         return write(baseline_path, baseline, runner, rate, rss, report, stage, seen)
 
-    floor = float(baseline["floor"]) * float(entry["files_per_s"])
+    floor = float(baseline["floor"]) * float(entry[key])
     cap = float(entry["rss_gib"])
     ok = True
     if rate < floor:
-        print(f"FAIL: {rate:,.0f} files/s is below the floor of {floor:,.0f} "
-              f"({baseline['floor']:.0%} of {entry['files_per_s']:,.0f})", file=sys.stderr)
+        print(f"FAIL: {rate:,.0f} {unit}/s is below the floor of {floor:,.0f} "
+              f"({baseline['floor']:.0%} of {entry[key]:,.0f})", file=sys.stderr)
         ok = False
     else:
-        print(f"pass: {rate:,.0f} files/s against a floor of {floor:,.0f}")
+        print(f"pass: {rate:,.0f} {unit}/s against a floor of {floor:,.0f}")
     if rss > cap:
         print(f"FAIL: peak RSS {rss:.2f} GiB is above the cap of {cap:.2f} GiB", file=sys.stderr)
         ok = False
@@ -96,7 +97,7 @@ def write(
         else baseline.setdefault("stages", {}).setdefault(stage, {})
     )
     entry = where.setdefault(runner, {})
-    entry["files_per_s"] = round(rate)
+    entry["files_per_s" if stage == "digest" else "stacks_per_s"] = round(rate)
     entry.setdefault("rss_gib", 4.0)
     entry["measured"] = {
         "version": report.get("version") or report.get("nils_version"),
@@ -106,7 +107,8 @@ def write(
     }
     entry.pop("note", None)
     path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
-    print(f"recorded {round(rate):,} files/s for {runner} in {path}")
+    unit = "files" if stage == "digest" else "stacks"
+    print(f"recorded {round(rate):,} {unit}/s for {runner} in {path}")
     return 0
 
 
