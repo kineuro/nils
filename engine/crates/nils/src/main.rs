@@ -17,7 +17,7 @@
 
 use std::fs;
 use std::io::{self, Read as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
@@ -60,6 +60,11 @@ enum Command {
     Digest(DigestArgs),
     /// Derive the per-stack values a classifier reads, once, and store them
     Fingerprint(FingerprintArgs),
+    /// Classification packs: what is installed, what one says, whether it loads
+    Pack {
+        #[command(subcommand)]
+        command: PackCommand,
+    },
     /// The registry: its metadata, the running jobs, the last batches
     Status(StatusArgs),
     /// The linkage store: the identifiers behind the codes (§7)
@@ -305,6 +310,7 @@ fn main() -> ExitCode {
         Command::Key { command } => key(&home, command),
         Command::Digest(args) => digest(&home, args),
         Command::Fingerprint(args) => fingerprint(&home, args),
+        Command::Pack { command } => pack_command(&home, command),
         Command::Status(args) => status(&home, args),
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
@@ -464,6 +470,205 @@ fn key(home: &Home, command: KeyCommand) -> Result<(), Exit> {
 fn key_in_use(home: &Home, config: Option<&Config>) -> Option<String> {
     config?;
     home.open().ok().map(|r| r.meta().pseudonym_key.clone())
+}
+
+#[derive(Debug, Subcommand)]
+enum PackCommand {
+    /// The packs in the pack directory, with their versions
+    List {
+        /// Where the packs are; $NILS_PACK_DIR, else `packs/` in the registry home
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// What one pack declares: its identity, its vocabulary, its buckets
+    Show {
+        /// The pack's name
+        name: String,
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        /// Load it under this overlay as well
+        #[arg(long, value_name = "FILE")]
+        overlay: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Load a pack directory and run its own corpus, saying what is wrong
+    Validate {
+        /// The pack directory
+        dir: PathBuf,
+        /// Check an overlay against it too
+        #[arg(long, value_name = "FILE")]
+        overlay: Option<PathBuf>,
+    },
+}
+
+/// Where packs live: the flag, then the environment, then the registry home.
+fn pack_dir(home: &Home, given: Option<PathBuf>) -> Result<PathBuf, Exit> {
+    if let Some(d) = given {
+        return Ok(d);
+    }
+    if let Some(d) = std::env::var_os("NILS_PACK_DIR") {
+        return Ok(PathBuf::from(d));
+    }
+    let d = home.dir().join("packs");
+    if d.is_dir() {
+        return Ok(d);
+    }
+    Err(usage(format!(
+        "no pack directory: pass --pack-dir, set NILS_PACK_DIR, or put packs in {}",
+        d.display()
+    )))
+}
+
+/// Every subdirectory that holds a `pack.yml`, in name order.
+fn packs_in(dir: &Path) -> Result<Vec<PathBuf>, Exit> {
+    let mut out: Vec<PathBuf> = fs::read_dir(dir)
+        .map_err(|e| fail(format!("{}: {e}", dir.display())))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.join("pack.yml").is_file())
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+fn load_overlay(path: Option<&PathBuf>) -> Result<Option<nils_pack::Overlay>, Exit> {
+    match path {
+        None => Ok(None),
+        Some(p) => nils_pack::Overlay::load(p)
+            .map(Some)
+            .map_err(|e| fail(e.to_string())),
+    }
+}
+
+fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
+    match command {
+        PackCommand::List { pack_dir: d, json } => {
+            let dir = pack_dir(home, d)?;
+            let mut rows = Vec::new();
+            for p in packs_in(&dir)? {
+                // A pack that will not load is listed with why, not hidden:
+                // the one you need to fix is the one you cannot see.
+                let (id, modality, state) = match nils_pack::load(&p, None) {
+                    Ok(pack) => (
+                        pack.id(),
+                        pack.modality.clone(),
+                        format!("{} cases", pack.cases),
+                    ),
+                    Err(e) => (
+                        p.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        String::new(),
+                        format!("will not load: {e}"),
+                    ),
+                };
+                rows.push((id, modality, state, p));
+            }
+            if json {
+                let v: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|(id, m, s, p)| {
+                        serde_json::json!({"pack": id, "modality": m, "state": s, "dir": p})
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&v)
+                        .map_err(|e| fail(format!("the list will not serialize: {e}")))?
+                );
+            } else if rows.is_empty() {
+                println!("no packs in {}", dir.display());
+            } else {
+                for (id, m, s, _) in &rows {
+                    println!("{id:24} {m:4} {s}");
+                }
+            }
+            Ok(())
+        }
+
+        PackCommand::Show {
+            name,
+            pack_dir: d,
+            overlay,
+            json,
+        } => {
+            let dir = pack_dir(home, d)?;
+            let found = packs_in(&dir)?
+                .into_iter()
+                .find(|p| p.file_name().is_some_and(|f| f == name.as_str()))
+                .ok_or_else(|| fail(format!("no pack named {name} in {}", dir.display())))?;
+            let ov = load_overlay(overlay.as_ref())?;
+            let pack = nils_pack::load(&found, ov.as_ref()).map_err(|e| fail(e.to_string()))?;
+            if json {
+                let v = serde_json::json!({
+                    "pack": pack.name,
+                    "version": pack.version.to_string(),
+                    "contract": pack.contract,
+                    "modality": pack.modality,
+                    "parsers": pack.parsers.iter().map(|p| serde_json::json!({
+                        "name": p.name, "predicates": p.preds.len()
+                    })).collect::<Vec<_>>(),
+                    "flags": pack.flags.len(),
+                    "buckets": pack.buckets,
+                    "cases": pack.cases,
+                    "overlay": pack.overlay,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&v)
+                        .map_err(|e| fail(format!("the pack will not serialize: {e}")))?
+                );
+            } else {
+                println!(
+                    "{} for {}, contract {}",
+                    pack.id(),
+                    pack.modality,
+                    pack.contract
+                );
+                for p in &pack.parsers {
+                    println!("  parser {:20} {:3} predicates", p.name, p.preds.len());
+                }
+                println!("  flags   {:20} {:3}", "", pack.flags.len());
+                println!("  cases   {:20} {:3}", "", pack.cases);
+                if pack.buckets.is_empty() {
+                    println!("  buckets {:20} none open for editing", "");
+                } else {
+                    for (name, values) in &pack.buckets {
+                        println!("  bucket  {name:20} {:3} terms", values.len());
+                    }
+                }
+                if let Some(o) = &pack.overlay {
+                    println!("  under overlay {o}");
+                }
+            }
+            Ok(())
+        }
+
+        PackCommand::Validate { dir, overlay } => {
+            let ov = load_overlay(overlay.as_ref())?;
+            match nils_pack::load(&dir, ov.as_ref()) {
+                Ok(pack) => {
+                    println!(
+                        "{} loads: {} predicates, {} flags, {} cases{}",
+                        pack.id(),
+                        pack.parsers.iter().map(|p| p.preds.len()).sum::<usize>(),
+                        pack.flags.len(),
+                        pack.cases,
+                        match &pack.overlay {
+                            Some(o) => format!(", under overlay {o}"),
+                            None => String::new(),
+                        }
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(fail(e.to_string())),
+            }
+        }
+    }
 }
 
 /// `nils fingerprint` (Wave 2 §4.3).

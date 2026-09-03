@@ -1,0 +1,179 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The pack's own corpus: what its author says it does. The engine refuses to
+# load the pack if any of these does not hold, at load and not at test time,
+# which is what makes a pack written elsewhere safe to install (§11.3).
+#
+# Every stack here is invented. Nothing in this file comes from a scan of a
+# person; the values are the shapes the rules turn on.
+
+cases:
+
+  - name: a spin-echo inversion-recovery TSE is SE, IR and SE-based IR
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      scan_options: FS
+      text_sequence_name: '*tse2d1_5'
+      inversion_time: 2500
+      mr_acquisition_type: 2D
+    flags:
+      has_se: true
+      has_ir: true
+      has_ir_se: true
+      is_tse: true
+      has_fat_sat: true
+      is_3d: false
+      is_2d: true
+      has_gre: false
+
+  - name: a magnetization-prepared 3D gradient echo is IR-prepared without an IR token
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP\MP'
+      text_sequence_name: '*tfl3d1_16'
+      mr_acquisition_type: 3D
+    flags:
+      has_gre: true
+      # the Philips rule: GR + MP + 3D and neither SE nor EPI
+      has_ir: true
+      has_se: false
+      is_mprage: true
+      is_3d: true
+
+  - name: a diffusion EPI with a positive b value is diffusion weighted
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\DIFFUSION\NONE'
+      scanning_sequence: EP
+      text_sequence_name: '*ep_b1000#1'
+      diffusion_b_value: '1000'
+    flags:
+      has_epi: true
+      is_dwi: true
+      has_positive_b_value: true
+
+  - name: a b value of zero is a reference image and not diffusion weighting
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: EP
+      text_sequence_name: '*epfid2d1_64'
+      diffusion_b_value: '0'
+    flags:
+      has_positive_b_value: false
+      is_dwi: false
+      has_epi: true
+
+  - name: a b value that will not parse is not a b value
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M'
+      diffusion_b_value: "['0','1000']"
+    flags:
+      has_positive_b_value: false
+
+  - name: an unreal b value is garbage, not a very strong gradient
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M'
+      diffusion_b_value: '7.23e+75'
+    flags:
+      has_positive_b_value: false
+
+  - name: an ADC map is derived and diffusion derived
+    stack:
+      image_type: 'DERIVED\PRIMARY\ADC\ADC'
+    flags:
+      is_derived: true
+      has_adc: true
+      is_diffusion_derived: true
+      is_dwi: true
+
+  - name: a lone M token is not a magnitude, three tokens with an M are
+    stack:
+      image_type: 'M'
+    flags:
+      has_magnitude: false
+  - name: three tokens with an M make a magnitude
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M'
+    flags:
+      has_magnitude: true
+
+  - name: a W token without the word WATER is a Dixon water image
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\W\DIXON'
+    flags:
+      has_water: true
+      has_dixon: true
+      is_dixon_water: true
+      has_fat: false
+
+  - name: the SWI processed flag reaches past the named predicates for SW_M_FFE
+    stack:
+      image_type: 'DERIVED\PRIMARY\SW_M_FFE'
+    flags:
+      is_swi_processed: true
+      has_swi: true
+
+  - name: an MP2RAGE first inversion is told from the second by its inversion time
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_all: 'mp2rage inv1 sag p2 iso'
+      inversion_time: 900
+    flags:
+      is_mp2rage_inv1: true
+      is_mp2rage_inv2: false
+      has_mp2rage_context: true
+
+  - name: without the MP2RAGE context a short inversion time decides nothing
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_all: 'stir cor'
+      inversion_time: 160
+    flags:
+      has_mp2rage_context: false
+      is_mp2rage_inv1: false
+      is_mp2rage_inv2: false
+
+  - name: the multi-echo flag reads the reason the series split
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M'
+      split_reason: multi_echo
+    flags:
+      is_multi_echo: true
+      is_multi_ti: false
+      is_multi_fa: false
+
+  - name: a GE recon prefix is read from the text as stored, not folded down
+    stack:
+      image_type: 'DERIVED\SECONDARY\M'
+      text_all: 'orig ax t2 flair'
+    flags:
+      is_ge_orig: true
+      is_ge_filtered: false
+
+  # v0's scanning-sequence parser has an unreachable `or`, swallowed by a
+  # conditional expression (spikes/pack/README.md, finding 2). These two cases
+  # pin what that costs, which is nothing: the token test in front of it
+  # already catches every value the unreachable half would have, because the
+  # tokenizer strips the parentheses first.
+  - name: a synthetic inversion recovery is caught by the token, not by the dead half
+    stack:
+      image_type: 'DERIVED\PRIMARY\M'
+      scanning_sequence: 'IR (SYNTHETIC)'
+    flags:
+      is_synthetic: true
+
+  - name: without a space there is no SYNTHETIC token, and v0 says the same
+    stack:
+      image_type: 'DERIVED\PRIMARY\M'
+      scanning_sequence: 'IR(SYNTHETIC)'
+    flags:
+      is_synthetic: false
+
+  - name: a localizer is one by its sequence name, its image type or its scan options
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      text_sequence_name: '*fl2d1_scout'
+    flags:
+      is_localizer: true

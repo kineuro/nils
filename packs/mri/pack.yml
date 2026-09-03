@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The MRI pack: v0's accumulated knowledge, carried over in meaning rather
+# than in code (`docs/specs/wave2-fingerprint-and-classify.md`, §5).
+#
+# What is here today is the parser and flag layers, which the C11 prototype
+# checked against v0's own code over the whole live corpus with no
+# disagreement. The axes, the routes, the intent cascade and the passes land
+# in slices 3, 4 and 6 of the wave.
+
+pack: mri
+version: 0.1.0
+contract: 1
+modality: MR
+
+parsers:
+  - parsers.yml
+flags:
+  - flags.yml
+
+# The lists a site may amend through an overlay, and nothing else: a pack
+# decides what is editable, not the engine (§5.3). Physics, flags and the
+# order rules are tried in stay the pack's, as they are in v0.
+buckets:
+  diffusion_tokens:
+    [DIFFUSION, ADC, FA, TRACEW, ISODWI, EXP, EADC, CALC_BVALUE, MIXED, MIX,
+     MOTIONCORRECTION]
+  localizer_words: [scout, localizer, loc_]

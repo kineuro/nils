@@ -126,10 +126,18 @@ fingerprint carries the stack key, in slice 1.
 ```
 
 A conditional expression binds looser than `or`, so this parses as
-`(A or B) if seq else ((C or D) if seq else False)`, and the `else` arm is
-only reached when `seq` is falsy, where it yields `False`. The `IR (SYNTHETIC)`
-test is unreachable. The pack transcribes v0's behaviour, not v0's intent, and
-records the intent here.
+`(A or B) if seq else ((C or D) if seq else False)`, and the `else` arm is only
+reached when `seq` is falsy, where it yields `False`. The `IR (SYNTHETIC)` test
+is unreachable.
+
+**It costs nothing, and saying so is part of the finding.** The token test in
+front of it already catches every value the unreachable half would have, because
+the tokenizer strips the parentheses first: `IR (SYNTHETIC)` tokenizes to
+`{IR, SYNTHETIC}` and v0 answers true through the first clause. Checked against
+v0 rather than reasoned about. So this is dead code and a defeated intention,
+not a difference the gate will ever see. The pack transcribes the behaviour and
+its corpus pins both halves, including the one input where neither clause fires
+(`IR(SYNTHETIC)`, no space, no token).
 
 **3. Two functions in one module decide the SWI output by different rules.**
 `apply_swi_logic` is what the pipeline calls; `detect_swi_output_type` is a
