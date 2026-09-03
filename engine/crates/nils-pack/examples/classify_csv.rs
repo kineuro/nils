@@ -95,6 +95,13 @@ fn main() {
     let out = std::io::stdout();
     let mut w = BufWriter::with_capacity(1 << 20, out.lock());
     let mut n = 0u64;
+    // The queue the pack's own policy would raise over this corpus, counted
+    // by the engine's rule and not by a script that reimplements it.
+    let mut queue: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut tiers: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut asked = 0u64;
+    let mut silent = 0u64;
+    let mut stacks = 0u64;
     for rec in rdr.records() {
         let r = rec.expect("a row");
         let mut stack = nils_pack::Stack::new();
@@ -116,6 +123,34 @@ fn main() {
             continue;
         }
         let verdict = ev.classify();
+        stacks += 1;
+        silent += u64::from(verdict.silent);
+        let mut any = false;
+        for axis in &pack.axes {
+            let found = verdict.axis(&axis.name);
+            let value = found.map(|a| a.stored()).unwrap_or_default();
+            if let Some(a) = found {
+                *tiers
+                    .entry(format!("{}:{}", axis.name, a.tier))
+                    .or_default() += 1;
+            }
+            if verdict.silent {
+                continue;
+            }
+            let kind = if value.is_empty() {
+                pack.review
+                    .asks_when_missing(&axis.name)
+                    .then_some("missing")
+            } else {
+                let c = found.map(|a| a.confidence).unwrap_or(0.0);
+                (c > 0.0 && c < pack.review.below(&axis.name)).then_some("low_confidence")
+            };
+            if let Some(kind) = kind {
+                *queue.entry(format!("{}:{kind}", axis.name)).or_default() += 1;
+                any = true;
+            }
+        }
+        asked += u64::from(any);
         // A row per axis per stack, whether or not the axis resolved: an
         // axis that resolved to nothing is a fact, and leaving the row out
         // would make it look like a stack nobody judged.
@@ -149,4 +184,24 @@ fn main() {
     }
     w.flush().ok();
     eprintln!("{n} stacks");
+    if stacks > 0 {
+        let items: u64 = queue.values().sum();
+        eprintln!(
+            "queue: {items} item(s) over {asked} stack(s), {:.2}% of {stacks}; {silent} ruled out",
+            100.0 * asked as f64 / stacks as f64
+        );
+        let mut by: Vec<(&String, &u64)> = queue.iter().collect();
+        by.sort_by_key(|(_, n)| -(**n as i64));
+        for (kind, count) in by {
+            eprintln!("  {kind:<28} {count:>8}");
+        }
+        let mut weak: Vec<(&String, &u64)> = tiers
+            .iter()
+            .filter(|(k, _)| k.ends_with(":physics") || k.ends_with(":default"))
+            .collect();
+        weak.sort_by_key(|(_, n)| -(**n as i64));
+        for (what, count) in weak.iter().take(4) {
+            eprintln!("  {what:<28} {count:>8}   decided with no keyword");
+        }
+    }
 }

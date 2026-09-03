@@ -151,15 +151,6 @@ impl fmt::Display for Classified {
                 self.silent
             )?;
         }
-        let mut weakest: Vec<(&String, &i64)> = self
-            .by_tier
-            .iter()
-            .filter(|(k, _)| k.ends_with(":physics") || k.ends_with(":default"))
-            .collect();
-        weakest.sort_by_key(|(_, n)| -**n);
-        for (what, n) in weakest.iter().take(3) {
-            writeln!(f, "  {what:<28} {n:>8}   decided with no keyword")?;
-        }
         writeln!(
             f,
             "  review items     {:>12}   {:.1}% of the stacks",
