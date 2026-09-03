@@ -124,9 +124,10 @@ holds are the non-image SOP classes §5.3 refuses; the digest with stacks takes
 creating nothing; 34 stacks are oblique and none has an unknown orientation. The mix half followed on 2026-09-03, once the
 corpus landed on the scratch (196,110 files, 23 GB, moved from the exchange
 inbox and compared against it file by file with checksums: no difference): the
-partitions equal v0's there too, 4,024 stacks against 4,024, every one matched
-by membership, 513 multi-stack series identical and 1,985 single-stack, over
-194,090 instances of 2,498 series. Three stack rows differ, and not by order:
+partitions equal v0's there too, over the whole corpus once the reader was
+repaired (below): 4,120 stacks against 4,120, every one matched by membership,
+531 multi-stack series identical, over 196,086 instances of 2,567 series, and
+every instance v1 holds is one v0 holds. Three stack rows differ, and not by order:
 they are Enhanced MR series of 500 instances each where v0 stored nulls for the
 MR timing, echo and coil values and v1 reads them from the frame groups, which
 is what the catalogue's fallback chain is for. The stack *index* order matches
@@ -299,7 +300,10 @@ cohorts; and `--fs-cap` bounds the on-disk check at a million paths instead of
 stopping silently at a hundred thousand, which is what left 28,880 of the
 128,880 unchecked the first time. The adjudication of the run lives with it on
 the host (`adjudication-nmosd.toml`), one rule per group with the probe that
-settled it.
+settled it. The run was repeated on the engine as it now stands, with the
+decided fields and the repaired reader and with Nima's own key in place: the
+same eight bars pass, every divergence is still classified by the same rules,
+and the two that fail are still the four studies.
 
 Still not in slice 7: the cold-cache run on the baseline host, then the cohorts
 as the migration lands their raw trees, each report summarized here in counts
