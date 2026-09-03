@@ -141,6 +141,8 @@ pub struct Writer<'a> {
     /// The rule's id type and the fallback's.
     id_type: IdType,
     fallback: IdType,
+    /// The rule reads the code itself, not an identifier to derive one from.
+    verbatim: bool,
     source_id: i64,
     batch_id: i64,
     job_id: Option<i64>,
@@ -203,6 +205,7 @@ impl<'a> Writer<'a> {
             display_length,
             id_type,
             fallback,
+            verbatim: rule.verbatim,
             source_id,
             batch_id,
             job_id,
@@ -495,7 +498,12 @@ impl<'a> Writer<'a> {
         let mut groups: BTreeMap<String, Group> = BTreeMap::new();
         for (lookup, &i) in &misses {
             let p = parsed[i];
-            let code = pseudonym::code(self.scheme, &self.key, &p.ident.value, self.display_length);
+            let code = if self.verbatim && !p.ident.fell_back {
+                // the value the rule read is the code itself (§7.3)
+                pseudonym::verbatim(self.scheme, &self.key, &p.ident.value)
+            } else {
+                pseudonym::code(self.scheme, &self.key, &p.ident.value, self.display_length)
+            };
             let g = groups.entry(code.code).or_insert_with(|| Group {
                 digest: code.digest,
                 members: Vec::new(),

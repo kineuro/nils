@@ -663,7 +663,13 @@ identity:
 
 `field` names a DICOM keyword; `pattern` is a regex with a named group `id` (other
 named groups are recorded as diagnostics, never as identity); without a pattern
-the whole trimmed value is the identifier. A value that matches no pattern counts
+the whole trimmed value is the identifier. `code: verbatim` beside `from` says
+that the value the rule reads **is** the subject code, not an identifier to
+derive one from: data pseudonymized before it reaches us, where whoever holds
+the key decided the code and wrote it into the file. It needs a pattern on every
+field, so that a value which is not shaped like a code is never filed as one; a
+file whose value does not match takes the fallback, whose study UID is derived
+under the scheme as always. The default is `code: derived`. A value that matches no pattern counts
 an `identity_unparsed` diagnostic whose sample is the value's *shape* (its length
 and character classes, `dddddddddddd-dddddddd`), so the report can say "a
 thousand names carry an identifier and a date" without carrying either. The
@@ -691,12 +697,18 @@ For each instance, in the writer, cached by identifier:
 Imported codes (C3): `nils linkage import <csv> --id-type <t> --id-column <c>
 --code-column <c>` creates or finds the subject per code exactly as given, never
 re-derived, and files the identifier as an `identity` row with source `csv`. A
-row whose code exists under another identifier of the same type, or whose
-identifier already maps to another code, is an error listed before anything is
-written (the import is validate-then-apply, like everything that writes). This is
-how v0's per-digest CSV maps become registry facts, and the gate checks that every
-v0 subject code comes out of a v1 digest run with the v0 key and the maps imported
-(§12.4).
+row whose identifier already maps to another code is an error listed before
+anything is written (the import is validate-then-apply, like everything that
+writes). Several identifiers of one type on one code are not an error but the
+point: a person may hold more than one, and in Sweden regularly does, since a
+temporary personnummer becomes a permanent one when residency is granted, and a
+project reissues its own numbers. The import counts them ("of them a further
+identifier of a subject that had one") and files each as its own `identity` row,
+so a digest that meets either lands on the one subject. Two identifiers that
+*derive* one code are a different thing and stay a collision (§7.1); this is one
+code that two identifiers were told to share. This is how v0's per-digest CSV
+maps become registry facts, and the gate checks that every v0 subject code comes
+out of a v1 digest run with the v0 key and the maps imported (§12.4).
 
 Linkage records (`nils linkage link <a> <b> --evidence <text>`, `nils linkage
 unlink`) exist from Wave 1 with the CLI as their only door; the UI and the agent
@@ -706,7 +718,7 @@ exist so that Wave 4 does not retrofit them (11).
 Settled while building identity (slice 4):
 
 - The rule file (§7.3) is `identity: {id_type, from: [{field, pattern?}, ...],
-  fallback?}`. `fallback` may be left out and, when written, can only be
+  fallback?, code?}`. `fallback` may be left out and, when written, can only be
   `StudyInstanceUID`: there is one fallback and it is v0's. A pattern is read
   for its `id` group alone; other named groups are not recorded (the
   "diagnostics" of §7.3 wait for a rule that needs them). A value that is
@@ -724,6 +736,22 @@ Settled while building identity (slice 4):
   identifiers of one type in one batch that derive one code are a collision
   before any row is written (reason `batch`). The same value under two id
   types derives the one code, as in v0, and attaches: it is not a collision.
+- Settled while reading the first gate run (slice 7), on how a person with more
+  than one original identifier is kept whole. In Sweden a personnummer is not
+  for life: someone here on a temporary number is given a permanent one when
+  residency is granted, and the same person then arrives under a second
+  identifier (we have seen two; there is no reason it stops there). v0 kept the
+  code constant by hashing the *main* number, which meant carrying a map of
+  every spare number to the main one outside the tool. In v1 the map is a
+  registry fact: `nils linkage import` files several identifiers of one type on
+  one subject and counts them, instead of refusing the second, so both numbers
+  resolve to the one subject and the one code. Only an identifier that maps to
+  *two* codes is refused. Two identifiers that derive one code by the scheme's
+  function remain a collision (§7.1): that is a hash accident, not a person.
+  Where the anonymizer writes the subject code into `PatientID` (the shape
+  Wave 3 takes), `code: verbatim` (§7.3) files it as the code and the registry
+  derives nothing, so the map lives where the key is and the linkage store
+  holds no identifying value at all for such a cohort.
 - A collision rolls the batch back, opens the `identity.collision` item in a
   transaction of its own, marks the job and the batch `failed`, and exits 1 with
   a message that names the type, the code and the item, never an identifier. A

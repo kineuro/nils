@@ -575,12 +575,8 @@ pub enum ImportFault {
     Empty { line: usize },
     /// The identifier appears twice in the file with two codes.
     IdentifierRepeated { line: usize, first_line: usize },
-    /// Two identifiers of the file share one code.
-    CodeRepeated { line: usize, first_line: usize },
     /// The identifier already maps to another code in the registry.
     IdentifierMapped { line: usize, code: String },
-    /// The code exists under another identifier of the same type.
-    CodeTaken { line: usize },
 }
 
 impl fmt::Display for ImportFault {
@@ -591,17 +587,9 @@ impl fmt::Display for ImportFault {
                 f,
                 "line {line}: the identifier appeared on line {first_line} with another code"
             ),
-            ImportFault::CodeRepeated { line, first_line } => write!(
-                f,
-                "line {line}: the code appeared on line {first_line} with another identifier"
-            ),
             ImportFault::IdentifierMapped { line, code } => write!(
                 f,
                 "line {line}: the identifier already maps to subject {code}"
-            ),
-            ImportFault::CodeTaken { line } => write!(
-                f,
-                "line {line}: the code exists under another identifier of this type"
             ),
         }
     }
@@ -614,6 +602,9 @@ pub struct ImportReport {
     pub subjects_created: usize,
     pub identities_added: usize,
     pub unchanged: usize,
+    /// Identifiers filed on a code another identifier of the same type
+    /// already names: one person under several identifiers (§7.4).
+    pub second_identifiers: usize,
 }
 
 /// The rows of an import: `(identifier, code)` pairs with their line numbers.
@@ -640,9 +631,11 @@ pub fn import(
         ))
     })?;
     let mut faults = Vec::new();
+    // identifiers that join a code another identifier already names: one
+    // person under several identifiers of one type (§7.4)
+    let mut second = 0usize;
     // within the file
     let mut by_identifier: HashMap<&str, (usize, &str)> = HashMap::new();
-    let mut by_code: HashMap<&str, (usize, &str)> = HashMap::new();
     let mut distinct: Vec<&ImportRow> = Vec::new();
     for r in rows {
         if r.identifier.is_empty() || r.code.is_empty() {
@@ -661,18 +654,6 @@ pub fn import(
             }
             None => {
                 by_identifier.insert(&r.identifier, (r.line, &r.code));
-            }
-        }
-        match by_code.get(r.code.as_str()) {
-            Some(&(first_line, _)) => {
-                faults.push(ImportFault::CodeRepeated {
-                    line: r.line,
-                    first_line,
-                });
-                continue;
-            }
-            None => {
-                by_code.insert(&r.code, (r.line, &r.identifier));
             }
         }
         distinct.push(r);
@@ -702,6 +683,7 @@ pub fn import(
         }
     }
     let mut to_create: Vec<&ImportRow> = Vec::new();
+    let mut queued: HashSet<&str> = HashSet::new();
     let mut to_file: Vec<(&ImportRow, i64, Vec<u8>)> = Vec::new();
     let mut unchanged = 0;
     for (r, lookup) in distinct.iter().zip(lookups) {
@@ -726,17 +708,21 @@ pub fn import(
         }
         match subjects.get(&r.code) {
             Some(&subject_id) => {
-                let taken = typed
+                if typed
                     .get(&subject_id)
-                    .is_some_and(|set| !set.is_empty() && !set.contains(&lookup));
-                if taken {
-                    faults.push(ImportFault::CodeTaken { line: r.line });
-                } else {
-                    to_file.push((r, subject_id, lookup));
+                    .is_some_and(|set| !set.is_empty() && !set.contains(&lookup))
+                {
+                    second += 1;
                 }
+                to_file.push((r, subject_id, lookup));
             }
             None => {
-                to_create.push(r);
+                // one insert per code, however many identifiers name it
+                if queued.insert(r.code.as_str()) {
+                    to_create.push(r);
+                } else {
+                    second += 1;
+                }
                 to_file.push((r, 0, lookup));
             }
         }
@@ -745,9 +731,7 @@ pub fn import(
         faults.sort_by_key(|f| match f {
             ImportFault::Empty { line }
             | ImportFault::IdentifierRepeated { line, .. }
-            | ImportFault::CodeRepeated { line, .. }
-            | ImportFault::IdentifierMapped { line, .. }
-            | ImportFault::CodeTaken { line } => *line,
+            | ImportFault::IdentifierMapped { line, .. } => *line,
         });
         return Err(ImportError::Faults(faults));
     }
@@ -808,6 +792,7 @@ pub fn import(
         subjects_created: created.len(),
         identities_added: new_rows.len(),
         unchanged,
+        second_identifiers: second,
     })
 }
 
@@ -1031,7 +1016,8 @@ mod tests {
                 rows: 2,
                 subjects_created: 2,
                 identities_added: 2,
-                unchanged: 0
+                unchanged: 0,
+                second_identifiers: 0
             }
         );
         let subjects = registry
@@ -1061,7 +1047,8 @@ mod tests {
         assert_eq!(again.subjects_created, 0);
         assert_eq!(again.identities_added, 0);
 
-        // every fault is listed and nothing is written
+        // every fault is listed and nothing is written: an identifier under
+        // two codes, in the file or against the store, and an empty field
         let err = import(
             &mut registry,
             &mut linkage,
@@ -1069,10 +1056,8 @@ mod tests {
             "patient-id",
             &rows(&[
                 ("PID-0001", "sub-other"),
-                ("PID-0003", "sub-two"),
                 ("PID-0004", "sub-four"),
                 ("PID-0004", "sub-five"),
-                ("PID-0006", "sub-four"),
                 ("", "sub-seven"),
             ]),
         )
@@ -1087,22 +1072,50 @@ mod tests {
                     line: 2,
                     code: "771c4326c89c082c".to_string()
                 },
-                ImportFault::CodeTaken { line: 3 },
                 ImportFault::IdentifierRepeated {
-                    line: 5,
-                    first_line: 4
+                    line: 4,
+                    first_line: 3
                 },
-                ImportFault::CodeRepeated {
-                    line: 6,
-                    first_line: 4
-                },
-                ImportFault::Empty { line: 7 },
+                ImportFault::Empty { line: 5 },
             ]
         );
         let n = registry.query("SELECT COUNT(*) FROM subject", &[]).unwrap();
         assert_eq!(n[0].int(0).unwrap(), 2);
         let n = linkage.query("SELECT COUNT(*) FROM identity", &[]).unwrap();
         assert_eq!(n[0].int(0).unwrap(), 2);
+
+        // a person under several identifiers of one type: a personnummer that
+        // changed, an identifier a project reissued. Both are filed on the one
+        // subject, in the file and against the store (§7.4).
+        let report = import(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            "patient-id",
+            &rows(&[
+                ("PID-0002", "sub-two"),
+                ("PID-0007", "sub-two"),
+                ("PID-0008", "sub-eight"),
+                ("PID-0009", "sub-eight"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            report,
+            ImportReport {
+                rows: 4,
+                subjects_created: 1,
+                identities_added: 3,
+                unchanged: 1,
+                second_identifiers: 2
+            }
+        );
+        let shown = reveal(&mut linkage, &keys, 2, "tester", None).unwrap();
+        let mut values: Vec<&str> = shown.iter().map(|i| i.value.as_str()).collect();
+        values.sort_unstable();
+        assert_eq!(values, ["PID-0002", "PID-0007"]);
+        let n = registry.query("SELECT COUNT(*) FROM subject", &[]).unwrap();
+        assert_eq!(n[0].int(0).unwrap(), 3);
 
         // a second type attaches to an existing subject
         add_id_type(&mut linkage, "personal-number", None).unwrap();
@@ -1116,8 +1129,9 @@ mod tests {
         .unwrap();
         assert_eq!(report.subjects_created, 0);
         assert_eq!(report.identities_added, 1);
+        // the subject now holds its two patient ids and the personal number
         let shown = reveal(&mut linkage, &keys, 2, "tester", None).unwrap();
-        assert_eq!(shown.len(), 2);
-        assert_eq!(shown[1].id_type, "personal-number");
+        assert_eq!(shown.len(), 3);
+        assert_eq!(shown[2].id_type, "personal-number");
     }
 }
