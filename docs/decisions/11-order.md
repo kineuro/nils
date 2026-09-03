@@ -171,12 +171,84 @@ of a synthetic registry with injected divergences in every class, a clean
 projection passing, the CSV round trip through `nils linkage import` filing
 every code as already known, and the key classes right with the right key and
 `other` with a wrong one; the corpus generator gained `--same-day-percent` for
-the session check. Not in slice 7 and known: the runs themselves. v0's export
-(fifteen zstd CSVs, 1.26 GB, no names: 5,322 subjects, 35,220 studies, 386,488
-series, 518,887 stacks, 37,535,095 instances, 142,033 events, 10,881 identifier
-rows) reached the private host that runs the gate on 2026-09-03, verified, and
-was deleted from the host it came from; the nmosd run on the development
-container and the cold-cache run on the baseline host follow, then the cohorts
+the session check. v0's export (fifteen zstd CSVs, 1.26 GB, no names: nine
+cohorts, 5,322 subjects, 35,198 studies, 386,488 series, 518,887 stacks,
+37,531,598 instances, 142,033 events, 10,881 identifier rows) reached the host
+that runs the gate through the bridge on 2026-09-03, verified, and was deleted
+from the host it came from.
+The line counts `export.sh` printed while copying were 22 studies and 3,497
+instances above those row counts, because a value holding a newline spans
+several lines of a CSV; the script says "lines" now, and the numbers above are
+the extract's.
+
+The first gate run, nmosd on a development container on Asgard, ran
+2026-09-03. v1 digested the tree in
+`dcm,no-ext` at 32 workers: 508,045 files in 30 s, 504,247 parsed and 3,798
+quarantined, 43 subjects, 82 studies, 2,165 series (all MR), 2,534 stacks and
+493,708 instances. The compare took ten seconds. Eight of the ten bars pass and
+every divergence is classified; the two that fail are the two §12.4 predicted,
+and they are Nima's to settle, not the engine's: four of the 82 common studies
+hang off another code (two under a v1 code v0 never had, two under a code that
+is another v0 subject's; one v0 subject split over two v1 subjects, one v1
+subject holding two v0 subjects), which also costs the session bar its two
+sessions, since a study under another code lands in another (subject, date)
+group. The run used a throwaway key, so `code_classes` says `other` for all 43;
+with Nima's own key in a file on the host it will say which of v0's codes the
+key and the identifier reproduce, and that is what tells a re-linked study from
+a digest v0 ran with an empty key.
+
+What the run turned up, and what it did not, is worth keeping. The 128,880 v0
+instances v1 has no row for are the whole of the difference at the instance
+level, and every one of them was checked on disk: none is under this root.
+Seventeen of the 43 subjects are listed under more than one cohort, and a v0
+path is relative to its own cohort's root, so these are the shared subjects'
+files under the other cohorts' roots, which this run did not digest. In the
+other direction there is nothing at all: every v1 instance is in v0. Per field,
+26 of the catalogue's columns carry divergent rows and all of them are
+explained; the rest agree exactly. Three causes account for nearly everything.
+A writer rewrote part of this cohort after v0 had read it (126 series over
+three subjects transcoded from JPEG 2000 to Explicit VR Little Endian and
+stripped of ContentDate, NumberOfFrames and more), and v0's resume skips a SOP
+UID it already holds, so v0 never re-read those files: 32,696 instances where
+v0's row describes a file that no longer exists in that form, and the same
+shape without the ContentDate marker in the series-level columns
+(`body_part_examined` 275 series, `series_date` and `series_time` 149,
+`implementation_class_uid` and `implementation_version_name` 317, three subjects'
+sex and six subjects' birth date, eight studies' time). v1 fills a null column
+of a series, study or subject row from the first later instance that carries a
+value (§9.1) where v0 kept the null: 74, 10 and 8 series for the three Siemens
+DWI columns, 43 series' date and time, six subjects' sex, two studies' time.
+And where the instances of a series disagree on a series-level column, each
+side keeps its first instance's value and the walk order decides which one that
+is: `sequence_name` (2 to 26 spellings per series), `spacing_between_slices`
+(18), `acquisition_matrix` (17, one matrix the transpose of the other),
+`image_orientation_patient` in 18 series and the thirteen stack-signature
+columns in the multi-stack series the tool now classes itself. Two findings are
+v0's alone. Its `phase_encoding_direction` column was null on every row it ever
+wrote, because v0 looked the attribute up by a keyword DICOM does not have
+(`PhaseEncodingDirection`; the attribute is `InPlanePhaseEncodingDirection`,
+(0018,1312)), where v1 reads it on 1,747 of the 2,165 series. And in 171 series
+v0 holds an orientation whose spelling is in no file, one digit longer per
+component than the file's and equal to it to 1e-15, which never split a stack
+because the signature carries the derived orientation class, not the raw
+cosines.
+
+Reading that first report also corrected the tool, in the pull request that
+followed (§12.1 to §12.3, §12.7): v1's SQLite registry is read by its declared
+types rather than as text, since SQLite spells a REAL with fifteen significant
+digits and a float32 widened to a double needs seventeen, which had made 574
+series differ on `b1rms` alone; the thirteen stack-signature columns are derived
+from the catalogue the way the engine derives them, and a divergence of one of
+them in a series with several stacks is grouped apart and accepted by the tool
+itself, as the two `VARIES_PER_INSTANCE` columns already were; a v0 path absent
+from the compared root is reported apart when its subject is in several
+cohorts; and `--fs-cap` bounds the on-disk check at a million paths instead of
+stopping silently at a hundred thousand, which is what left 28,880 of the
+128,880 unchecked the first time. The adjudication of the run lives with it on
+the host (`adjudication-nmosd.toml`), one rule per group with the probe that
+settled it.
+
+Still not in slice 7: the cold-cache run on the baseline host, then the cohorts
 as the migration lands their raw trees, each report summarized here in counts
 and shapes; the slice closes with the last of them.
 
@@ -269,6 +341,16 @@ Standing items that must not silently drop off between waves — check at every 
   contracts-only deployment must render no dead links and raise no errors.
 - **Corpus hygiene**: every adjudicated disagreement in Waves 1-3 becomes a fixture;
   the corpus is the moat.
+- **Which instance is "first"** for a series-level column its instances disagree
+  on is decided today by the walk order and by which batch commits first, as it
+  was in v0, so two digests of one tree can write different rows. The nmosd gate
+  run shows how often that is real: `sequence_name` in series carrying up to 26
+  spellings, `spacing_between_slices`, `acquisition_matrix`, the orientation, and
+  the thirteen stack-signature columns wherever a series has several stacks.
+  Nothing downstream reads those columns yet. Before Wave 2's fingerprint does,
+  decide whether to leave them order-dependent and say so in the catalogue, or to
+  make them deterministic by a rule the writer applies (the value of the instance
+  whose path sorts first, say), which costs a comparison per file and an update.
 - Migration of the live registry itself (v0 Postgres → v1 schema) is Wave 4's
   hidden deliverable — spec it there, with the production data as the rehearsal.
 - **Federation stays optional at every gate** (14, D25): a deployment without
