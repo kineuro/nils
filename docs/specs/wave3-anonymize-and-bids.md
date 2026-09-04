@@ -352,6 +352,10 @@ records what was removed is a copy of the identifiers, in the registry, in
 clear. What a release removed is recoverable from the originals by someone
 entitled to read them.
 
+A release also records **which decisions it honoured**, so an exported tree can
+answer "where did this value come from" with a rule, a pass, a person or a
+model and its version (§10.1), rather than with the shrug v0's cache gives.
+
 ## 9. Two layouts, one set of facts
 
 Less than half of what we hold has a BIDS name. Routed against the published
@@ -483,6 +487,24 @@ person walks a cohort session by session and writes a token). v1 needs both, and
 already has the shape: the pick is computed with evidence, and a person's call
 is a `decision` at a scope that outranks it.
 
+### 10.1 Who authored a decision
+
+A small addition, made here because it has to exist before anything writes
+through it, and because v0's worst outcome came from its absence.
+
+Every `decision` records **who made it**: a person, an agent, or a model, and
+for a model its registered id and version (D15). The release carries that into
+the evidence of every value it exports.
+
+The reason is measured. In the live archive, 4,692 body parts are an image
+model's predictions, committed by a person through v0's body-part QC, written
+into the classifier's own column with nothing to mark them. They are only
+discoverable because v0's keyword classifier disagrees: it answers nothing for
+4,692 of that cohort's 4,699 stacks. A value that came from a model must not be
+able to sit where a rule's answer belongs and look the same.
+
+Nothing else about the review loop is Wave 3's (§13).
+
 ## 11. Repair four: handover
 
 `compress/` packs a de-identified tree into password-protected 7z archives in
@@ -516,7 +538,9 @@ against it would be a bar against being correct.
    or in the report with a reason, and the counts reconcile to the selection.
 5. **The descriptive layout names everything.**
 6. **One stack per session and role**, ties reported.
-7. **Every file is traceable** through `release_file` to an instance.
+7. **Every file is traceable** through `release_file` to an instance, and every
+   value it carries to the rule, pass, person or model that decided it, with no
+   value whose author the tree cannot name (§10.1).
 8. **The de-identification does what it says**: no tag from the removed set, no
    private tag outside the allowlist, no overlay group, no UID that appears in
    the source, and under `shift` no date that appears in the source **including
@@ -541,9 +565,25 @@ against it would be a bar against being correct.
 - **Derivative registration.** The seam is declared here; the machinery is
   Wave 7's, and v0's own ingest has its database write gated off, so there is
   nothing to carry.
-- **The image-model body-part QC.** 6,672 lines in v0, and the reason the parity
-  gate saw 4,692 differences. It is a model plus a review workflow, and it wants
-  its own wave alongside the other QC products.
+- **Pixels, at all. The binary never decodes pixel data.** Not to deface, not to
+  check for burned-in text, not to render a slice for someone to look at. Every
+  one of those is a pipeline, and the review images a person needs are
+  derivatives a pipeline produced and registered. The cost is stated rather than
+  hidden: reviewing anything *visual* requires a pipeline to have run, so the
+  "no container runtime" promise covers digest, classify, release and export,
+  and does not cover looking at an image.
+- **The curation loop**, which is v0's five QC products and the reason this
+  section grew. Decomposed, almost none of it is engine work: the encoder, the
+  zero-shot seeding, the training and the inference are pipelines producing
+  derivatives, model artifacts and **proposals**; a person's confirmation is a
+  `decision`; and staleness is the supersede idea the classifier already has.
+  What the engine owes is the doors, and one mechanism rather than five, since
+  v0's products differ in workflow rather than in what they store. **Wave 6 is
+  already this problem** ("a full annotation work, subset by selection, prep via
+  seeded pipelines, rating, adjudication, export, with zero database-level
+  integration"), so the loop belongs to its gate rather than to a new wave.
+  Wave 3 contributes exactly one thing to it, §10.1, because the shape has to
+  exist before a model writes through it.
 - **The full catalog of roles and picks** (Wave 4 and 5, C19) and **the
   migration of the live registry** (Wave 4).
 
@@ -582,9 +622,12 @@ before the rest is written.
    synthetic image in `derivatives/`. 2,543 stacks turn on it.
 4. **Who answers the task question** for functional data: a decision per study,
    per origin, or a release argument.
-5. **Whether a decision needs a draft state.** All five of v0's QC products
-   write a draft to one database and push to the other on explicit confirm.
-   v1's `decision` is a single-step commit, and D14's staged results are the
-   same idea in another place.
+5. **Whether a decision needs a state between proposed and committed.** All five
+   of v0's QC products write a draft to one database and push to the other on
+   explicit confirm, which is partly an artefact of having two databases. v1 has
+   one registry, so the question is narrower: does a proposal awaiting
+   confirmation differ from a person's unfinished edit? D14's staged results are
+   the same idea in another place. Wave 6's, not this wave's, now that the loop
+   is placed there.
 6. **The private-tag allowlist seed**, answerable from the corpus.
 7. **The default date policy per registry.** `keep` is right for KI today.

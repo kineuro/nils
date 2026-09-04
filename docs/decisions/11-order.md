@@ -617,10 +617,34 @@ manifest. Addition (C16): every gold task expressed in the notebook
 reproduces its v0 result hash on the migrated registry, and the ten families are
 expressible without an escape hatch, roles and picks included (C19).
 
-**Wave 6 — segment rebased.** Port nils-segment onto contracts only (07). *Gate:*
-a full annotation work — subset by selection, prep via seeded pipelines, rating,
-adjudication, export — with zero database-level integration. This wave is the proof
-of D1 and the contracts; treat its friction as contract bugs.
+**Wave 6 — segment rebased, and the curation loop.** Port nils-segment onto
+contracts only (07). *Gate:* a full annotation work — subset by selection, prep via
+seeded pipelines, rating, adjudication, export — with zero database-level
+integration. This wave is the proof of D1 and the contracts; treat its friction as
+contract bugs.
+
+**Widened 2026-09-04** to carry v0's QC products, because they are the same
+problem and deserve the same proof rather than a wave of their own. v0 has five
+interactive QC products inside the engine, each with its own schema; the largest
+trains an image classifier per cohort (zero-shot seeding by text-image margin with
+a diversity pick, a person curates the seed, PCA and a calibrated classifier, then
+inference over the cohort, then review and commit). Decomposed, almost none of it
+is engine work: the encoder, the seeding, the training and the inference are
+**pipelines** producing derivatives, registered model artifacts and **proposals**;
+a person's confirmation is a **decision**; staleness is the supersede idea the
+classifier already has. What the engine owes is the doors, and the second gate bar
+is therefore: **one campaign mechanism serves both segment's annotation work and a
+body-part curation run, with zero database-level integration and no QC-specific
+table.** Three calls settled the same day: the binary never decodes pixel data, so
+review images are a pipeline's registered derivatives; there is one mechanism
+rather than one per product, since v0's five differ in workflow and not in what
+they store; and the embedding cache is derivative state keyed by encoder version,
+not registry state. Wave 3 contributes one thing to this and no more (its §10.1):
+a decision records who made it, and for a model its registered id and version,
+because the shape has to exist before a model writes through it. The reason is
+measured: 4,692 body parts in the live archive are an image model's predictions
+sitting in the keyword classifier's own column with nothing to mark them, and they
+are discoverable only because the classifier disagrees.
 
 **Parallel track — agent.** From Wave 4's MCP: the Ask-query Flue pilot, then agent
 v1 growing alongside (08). Never on the critical path; review-item policies for
