@@ -29,7 +29,8 @@ def load(registry: str):
     con = sqlite3.connect(registry)
     rows = con.execute(
         """
-        SELECT sf.path, st.id, st.subject_id, st.study_date
+        SELECT sf.path, st.id, st.subject_id,
+               COALESCE(st.date_filled, st.study_date)
         FROM source_file sf
         JOIN instance i ON i.id = sf.instance_id
         JOIN series se ON se.id = i.series_id

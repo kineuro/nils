@@ -20,6 +20,7 @@
 
 pub mod batch;
 pub mod cancel;
+pub mod date;
 pub mod digest;
 pub mod knobs;
 pub mod progress;

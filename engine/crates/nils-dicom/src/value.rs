@@ -315,11 +315,38 @@ fn date(p: &PrimitiveValue) -> Conversion {
     }
 }
 
-/// `YYYYMMDD` to `YYYY-MM-DD`; an ISO value passes; anything else is refused.
+/// Whether `y-m-d` is a day that exists. Eight digits are not a date: a
+/// scanner writes `00000000` to mean nothing, and month thirteen means the
+/// value is junk rather than a day (Wave 3 §4.2).
+fn is_a_day(y: i32, m: u32, d: u32) -> bool {
+    if !(1..=12).contains(&m) || d == 0 {
+        return false;
+    }
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
+        _ => 28,
+    };
+    d <= days
+}
+
+fn day_of(y: &str, m: &str, d: &str) -> bool {
+    match (y.parse::<i32>(), m.parse::<u32>(), d.parse::<u32>()) {
+        (Ok(y), Ok(m), Ok(d)) => is_a_day(y, m, d),
+        _ => false,
+    }
+}
+
+/// `YYYYMMDD` to `YYYY-MM-DD`; an ISO value passes; anything else is refused,
+/// and so is anything that is not a day.
 pub fn normalize_date(s: &str) -> Option<String> {
     let s = s.trim();
     let b = s.as_bytes();
     if b.len() == 8 && b.iter().all(u8::is_ascii_digit) {
+        if !day_of(&s[..4], &s[4..6], &s[6..8]) {
+            return None;
+        }
         return Some(format!("{}-{}-{}", &s[..4], &s[4..6], &s[6..8]));
     }
     if b.len() == 10
@@ -329,6 +356,9 @@ pub fn normalize_date(s: &str) -> Option<String> {
         && b[5..7].iter().all(u8::is_ascii_digit)
         && b[8..].iter().all(u8::is_ascii_digit)
     {
+        if !day_of(&s[..4], &s[5..7], &s[8..]) {
+            return None;
+        }
         return Some(s.to_string());
     }
     None
