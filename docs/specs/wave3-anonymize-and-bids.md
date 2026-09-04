@@ -335,10 +335,10 @@ a screenshot, raises a review item and is not written until answered; where the
 tag is absent the release says how many stacks it could not judge. The engine
 does not look at pixels (§13).
 
-For the record, because it changes what "carried over from v0" means here: every
-cohort v0 anonymized set `anonymize_categories: ["Patient_Information"]`, so the
-Clinical_Trial and Healthcare_Provider categories in its table are declared and
-were never applied.
+A release **declares which categories it applied and records them**, because v0's
+category table is a menu rather than a policy: a deployment picks from it, and
+nothing in the output says which pick was made. "De-identified" is not a
+property a file can carry without saying under what rule.
 
 ### 8.5 The audit
 

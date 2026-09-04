@@ -417,12 +417,181 @@ of 518,365 stacks (23.3 percent) carry a missing or `Unknown` base or technique
 in v0's own cache, which is what the physics vote is for and what the verified
 corpus has to judge.
 
+**Closed 2026-09-04, eight slices.** The pack is data and the engine holds no
+vocabulary: `packs/mri/` is 220 predicates, 145 flags, eight axes, thirteen rule
+sets, one pass and 28 cases, and the classification crates carry no axis name,
+no flag name and no value of any of them. The wave's numbers, each measured
+rather than claimed:
+
+* **The rules.** Every axis of every one of the 518,365 stacks, against v0's own
+  code over v0's own fingerprints. Base differs on 6, the whole pipeline on 32,
+  each with a named cause.
+* **The vote.** v0's physics gap-filling, carried as a configured instance of the
+  engine's one pass kind, checked against `sort/gap_filling.py` with the
+  reference held equal: 518,057 of 518,353 identical by the same method, and all
+  296 differences are ties that v0 breaks by the order its database returned rows
+  and v1 refuses to break.
+* **The queue.** v0 asks a person about 84 percent of its stacks. v1 asks about
+  **0.24 percent** (1,236 of 518,365), after two measurements changed the pack:
+  a stack the pack rules out raises nothing, and a rule that fires on a sixth of
+  the archive is one question about the rule rather than 80,752 about stacks.
+* **The gate.** The nmosd cohort passes all fourteen bars, the three new ones
+  included: no axis v1 leaves unresolved that v0 resolved, no stack v1 excludes
+  that v0 kept, and every difference carrying a cause the adjudication file
+  refuses to accept without. Four groups, all four caused: two where v0's stored
+  cache disagrees with v0's own current code, one the vote, and one upstream in
+  v0's stored text, which the Wave 1 gate had already found.
+* **The cost.** On the baseline host, 2,534 stacks: 0.5 s to fingerprint and
+  0.2 s to classify, 0.09 GiB. The whole 518,365-stack corpus through the pack,
+  vote included, is 16 seconds. CI gates both stages.
+
+Two calls of yours were carried out and one was overtaken by what the code said.
+The prototype ran before the wave (C11) and every difference was driven to a
+named cause. **The CT and PET packs were held back at your word** and slice 8
+became the seam instead: a pack for a modality that does not exist, in the test
+suite, with its own axes and vocabulary, loading and classifying with no engine
+change. And reading v0's own completion step for the passes turned up the wave's
+one structural finding: **of the nine things v0 does after classifying, exactly
+one changes what a stack is classified as**. Three fill fields that belong in
+the fingerprint, three raise questions, one is a route the rules already decide,
+and the session rescue is a fact about a session rather than a phase that
+depends on which stacks are in the batch (spec §7.3). So one pass kind was built
+and the other seven were not, which is a decision and is written down as one.
+
+**Your ruling on the seven, 2026-09-04.** They stay out of the pass mechanism.
+Your words: in v0 they became phases because they were added late to a
+prototype, and v1 is to stay as neat and maintainable as it can be. So the
+placement in the table above is now binding rather than proposed: the three that
+fill a field (field strength, acquisition type, DWI enrichment) are **fingerprint
+work**, computed once from what was measured; the three that raise a flag are
+**review items**; the SWI re-route is a **rule set**; the session rescue is a
+**fingerprint field about the session**. None of them is a pass, and no new pass
+kind is added to the engine to hold them. The fingerprint four are Wave 3 work
+and are on the do-not-forget list.
+
+Measuring that ruling turned up why it matters. v0's acquisition-type fill does
+not stay in memory: it writes the inferred `mr_acquisition_type` back into
+`stack_fingerprint` (`step4_completion.py`, `_persist_acquisition_type`), and
+classification *reads* that column, where it decides among other things whether
+a magnetisation-prepared gradient echo is MPRAGE (`core/flags.py`). So a guess
+made by one run becomes an input to the next, and the same stack classified
+twice can be classified differently. That is C14 again on a different field, and
+it is the concrete argument for the rule v1 already holds: **the fingerprint
+records what was measured, a decision records what we concluded, and the second
+never quietly becomes the first.**
+
+**The vote's reference, closed 2026-09-04 on measurement** (spec §7.4). You
+asked for the most accurate answer with an empirical argument behind it. Three
+candidates were run over the whole corpus against v0's own gap filling, with
+v0's classification re-run from current code first so the reference was not
+older than the code.
+
+*Accuracy says nothing.* Hide five percent of the stacks the rules decided,
+build the reference without them, ask the vote what they are: four folds, and
+the three candidates agree to two decimal places (94.4 percent both axes
+right). The rules-only reference was at or above the other two in all four
+folds while holding ten percent fewer stacks. Ten percent more reference buys
+no extra answer to any question whose answer can be checked, and no extra
+correctness on the ones it does answer. What it buys is 5,047 more answers to
+questions nobody can check, reached by consulting the vote's own guesses.
+
+*Repeatability decides it.* Sort the corpus in eight parts, then the same parts
+in the opposite order. While the archive is being built both candidates are
+order-dependent, about a third of answers, because at the moment a part is
+sorted the reference holds only what has arrived. The difference is the second
+sort of the **finished** archive: with the vote's answers in the reference the
+two histories agree on **14 of 9,014** answers; without them, on **31,880 of
+31,880**. A reference a pass may add to carries its history for ever and a
+re-sort entrenches the accident; a reference built from the rules is a function
+of the finished archive and a re-sort is a repair.
+
+So: **the reference holds what a rule or a person decided, never what a pass
+decided.** A person's decision belongs there because it is independent evidence.
+Not a pack option, because the measurement leaves no room to want otherwise.
+And the measurement found that v1 had the same fault: the corpus was read from
+`classification_axis` whatever decided it, so on a second run the vote read its
+own answers back. Fixed, with a test.
+
+The cost, stated: 5,047 fewer fills of 518,365 stacks, which is 0.97 percent
+left for a person or a later pack rather than answered by a guess about a
+guess. And re-classification after a pack change becomes the ordinary
+operation, which it should be.
+
+**The parity corpus, resorted 2026-09-04 at your word.** The gate now compares
+against v0's current code rather than against its stored cache
+(`tools/pack-check/resort.py`, `v0-compare extract --classification`). The
+findings, in order of how much they matter:
+
+* A stack's classification in v0 **is not a function of v0's code and the
+  stack**. It also depends on `cohort_classification_overrides`, a keyword table
+  in v0's *application* database that five cohorts have rows in; on what earlier
+  runs wrote back into `stack_fingerprint`; and on what the body-part QC image
+  model committed into the classifier's own columns. None of that is recorded
+  next to the value.
+* 4,692 body parts in one cohort are that image model's predictions, not
+  classifications: where the cache says brain or brain-neck, v0's keyword
+  classifier says nothing for 4,692 of that cohort's 4,699 stacks. In v1 they
+  are decisions at a scope, which is what they are.
+* What is left after the overrides are applied is 8,537 axis values of 518,365
+  stacks over eight axes, all of it the cache being older than the code.
+
+**Rust 1.98.1** (PR #20): 1.98.0, which we pinned, emits a null pointer into a
+trait object's vtable when it decides a method's predicates are impossible
+(rust-lang/rust#161441). We write twelve trait objects and no async, so the
+reported shapes are not ours, but the same compiler builds `tokio-postgres`
+under the registry and a miscompilation is a property of the compiler. Pinned
+forward; the suite passes unchanged.
+
 **Wave 3 — anonymize and BIDS.** Strategies, audit, `dcm2niix` orchestration,
 naming/collision rules, `nils anonymize` and `nils bids`. *Gate:* BIDS validator
 clean on hand-verified reference selections, with the main acquisition per session
 and contrast taken from the registry (C8, D16). v0 exports are compared for
 information only: they are not valid BIDS (classification-derived filenames, three
 open naming bugs), so "byte-identical against v0" is not the bar.
+
+**Spec written 2026-09-04, open for ratification as PR #23**
+(`docs/specs/wave3-anonymize-and-bids.md`), after reading v0's `anonymize/`,
+`bids/`, `timeline/` and `analysis_pipeline/` end to end and measuring the live
+registry. What the reading changed:
+
+* v0's export is not a BIDS dataset with bad filenames, it is **not a BIDS
+  dataset**: no `dataset_description.json`, no `participants.tsv`, no `README`,
+  no `_scans.tsv`, and the validator is never run. The naming bugs are **four**,
+  not three; the fourth is in a docstring rather than the bug list, where the
+  collision counter counts stacks per series over the already filtered
+  selection. All four are one mistake, a name derived from what we concluded and
+  disambiguated by a counter, which the standard's entity grammar removes.
+* v0's anonymizer **removes tags and rewrites PatientID, and nothing else**.
+  Every UID survives (the scrub skips VR `UI` and any tag whose name holds
+  `uid`), and `preserve_uids` reaches one line that sets a save flag and remaps
+  nothing, so a site that turned it off de-identified nothing and was told
+  nothing. No private-tag policy, no overlay removal, no burned-in check.
+* **StudyDate is kept deliberately**, and the code says why: the exporter builds
+  sessions from it. Breaking that coupling is the wave's spine.
+
+**Nima's two rulings, 2026-09-04.** First, **the date stays**. I proposed
+replacing it with a label and he corrected me: the registry holds 139,033
+clinical events over fifteen observation types spanning 1953 to 2026, the
+clinical import matches on `(subject, event_date)`, the session anchors are
+themselves event dates, and age, disease duration and the nearest EDSS are date
+arithmetic. The date is the join key of the clinical layer; the label is a lossy
+rendering of it, since two sessions share `M06` under the default merge policy, a
+pre-anchor session is `PRE06`, and an off-schedule visit keeps its real month.
+So the registry is never rewritten, a date policy is per release, and a gate bar
+computes the nearest EDSS from the registry and from the tree and demands the
+same answer. BIDS carries the time in `sessions.tsv` and `_scans.tsv`, which is
+what frees the directory name. Second, **defacing is a pipeline**, like every
+transform of pixels, and plugs into the descriptor seam v0 already has; NILS
+holds the registry and produces the dataset. Wave 3 owns no pixel transform.
+
+Two things grew from the reading. **Roles and picks are in**, smallest form,
+because 82.5 percent of live sessions holding a T1w hold more than one and the
+worst holds 462. And **Wave 1 §4.4 under-specified the session scheme**: v0's has
+four anchor kinds including clinical events, a cadence with a float tolerance,
+four collision policies with merge as the argued default, and an answer for a
+session that fits no schedule; under a diagnosis anchor 9.9 percent of sessions
+precede their anchor and for a quarter of those subjects label order runs
+backwards against date order. Wave 3 carries all of it.
 
 **Wave 4 — server and contracts.** The thin server: jobs, API, semantic catalog,
 AST execution, selections, review items, auth modes, MCP, events
