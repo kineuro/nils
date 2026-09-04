@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +70,31 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 4,
         apply: evidence_says_which_pass,
     },
+    Migration {
+        version: 5,
+        apply: study_carries_the_date_it_was_given,
+    },
 ];
+
+/// Wave 3 §4: a study whose `StudyDate` said nothing carries the day the vote
+/// found, the source that carried the most weight for it, and how close the
+/// vote was. Never over the measured column: a registry that has the table
+/// from version 1 gains four, one created now has them already.
+fn study_carries_the_date_it_was_given(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "study",
+        &[
+            "date_filled",
+            "date_source",
+            "date_weight",
+            "date_runner_up",
+        ],
+    )
+}
 
 /// Wave 2 §7: a pass writes evidence like a rule does, and says which pass it
 /// was and which named reference it voted against. A registry that has the

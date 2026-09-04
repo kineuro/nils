@@ -37,6 +37,7 @@ use crate::batch::{
     hash32,
 };
 use crate::cancel::{Cancel, Scripted};
+use crate::date;
 use crate::progress::{PROGRESS_EVERY, Progress};
 use crate::report::{Counts, Written};
 use crate::resume::status;
@@ -137,6 +138,16 @@ pub struct Writer<'a> {
     /// The subkeys of the linkage store, derived once (§7.2).
     keys: Subkeys,
     scheme: Scheme,
+    /// The years a recovered date must fall in to be believable (§4.2). A knob
+    /// with a default, because reading eight digits out of a UID is a guess
+    /// and the range is what makes it a reasonable one.
+    date_range: date::Range,
+    /// One ballot per study the run has seen, kept across batches. A study's
+    /// files do not all arrive together, and a date decided from whichever of
+    /// them shared a batch with the row insert would be an answer about the
+    /// batch rather than about the study, which is the fault of C14 in another
+    /// place. The verdicts are written once, when the run ends.
+    ballots: HashMap<String, date::Ballot>,
     display_length: usize,
     /// The rule's id type and the fallback's.
     id_type: IdType,
@@ -202,6 +213,8 @@ impl<'a> Writer<'a> {
             key,
             keys,
             scheme,
+            date_range: date::Range::default(),
+            ballots: HashMap::new(),
             display_length,
             id_type,
             fallback,
@@ -651,6 +664,15 @@ impl<'a> Writer<'a> {
         let t = table("study");
         let mut rows = Vec::new();
         let mut pending: HashMap<String, (i64, Box<[u32]>)> = HashMap::new();
+        // The date is decided per study rather than per file, because the
+        // point of a vote is that several files can agree (§4.2). Every file
+        // of a study in this batch gets a say before the row is written.
+        for p in parsed {
+            self.ballots
+                .entry(p.extracted.study_uid.clone())
+                .or_default()
+                .cast(p, self.date_range);
+        }
         for (p, &subject_id) in parsed.iter().zip(subject_ids) {
             let x = &p.extracted;
             if self.studies.contains(&x.study_uid) || pending.contains_key(&x.study_uid) {
@@ -659,6 +681,11 @@ impl<'a> Writer<'a> {
             let mut row = vec![Param::from(x.study_uid.as_str()), Param::Int(subject_id)];
             row.extend(x.row(Level::Study).map(|(_, v)| Param::from(v)));
             row.push(Param::Int(self.batch_id));
+            // The date is not decided here: the study's other files may still
+            // be coming. `settle_dates` fills these in when the run ends.
+            for _ in 0..4 {
+                row.push(Param::Null);
+            }
             rows.push(row);
             pending.insert(x.study_uid.clone(), (subject_id, p.hashes.study.clone()));
         }
@@ -1449,6 +1476,50 @@ impl<'a> Writer<'a> {
 /// while they are quiet, until the last parser is done. A stop changes
 /// nothing here: the parsers send what they have read, and it is written.
 /// An abort lets every batch from then on go, the one in flight included.
+impl Writer<'_> {
+    /// The date of every study the run touched, decided once, when every file
+    /// of it has been seen (§4.2). A study whose `study_date` said something
+    /// keeps it: the vote fills a gap and never writes over a measurement.
+    pub fn settle_dates(&mut self) -> Result<u64, HomeError> {
+        if self.ballots.is_empty() {
+            return Ok(0);
+        }
+        let ballots = std::mem::take(&mut self.ballots);
+        let t = table("study");
+        let store = self.registry.store();
+        let mut settled: u64 = 0;
+        for (uid, ballot) in ballots {
+            let Some(v) = ballot.verdict() else { continue };
+            let sql = format!(
+                // A measured value that is a placeholder is no measurement:
+                // `19000101` is a real day, so the reader keeps it and the
+                // column still says what the file said, but the vote is
+                // allowed to answer over it (§4.2).
+                "UPDATE {} SET date_filled = {}, date_source = {}, date_weight = {}, \
+                 date_runner_up = {} WHERE study_instance_uid = {} \
+                 AND (study_date IS NULL OR study_date IN ('1900-01-01', '1901-01-01'))",
+                store.qualified(t.name),
+                store.dialect().param(1, Type::Date),
+                store.dialect().param(2, Type::Text),
+                store.dialect().param(3, Type::Int),
+                store.dialect().param(4, Type::Int),
+                store.dialect().param(5, Type::Text),
+            );
+            settled += store.execute(
+                &sql,
+                &[
+                    Param::from(v.date.as_str()),
+                    Param::from(v.source.name()),
+                    Param::Int(v.weight as i64),
+                    Param::Int(v.runner_up as i64),
+                    Param::from(uid.as_str()),
+                ],
+            )?;
+        }
+        Ok(settled)
+    }
+}
+
 pub fn run(
     writer: &mut Writer<'_>,
     rx: &Receiver<Batch>,
@@ -1470,6 +1541,10 @@ pub fn run(
             Err(RecvTimeoutError::Timeout) => writer.heartbeat(progress, false)?,
             Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+    // Every file has been seen, so every ballot is complete.
+    if !writer.cancel.abort() {
+        writer.settle_dates()?;
     }
     Ok(())
 }

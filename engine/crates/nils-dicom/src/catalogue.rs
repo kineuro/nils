@@ -287,9 +287,33 @@ pub static CATALOGUE: &[Field] = &[
         Quasi,
         "addition: v0 filled it through its importer",
     ),
-    // study (9)
+    // study (12)
     f("study_date", Study, T(tags::STUDY_DATE), Date, Quasi, ""),
     f("study_time", Study, T(tags::STUDY_TIME), Time, Quasi, ""),
+    f(
+        "pps_start_date",
+        Study,
+        T(tags::PERFORMED_PROCEDURE_STEP_START_DATE),
+        Date,
+        Quasi,
+        "addition: a date the vote reads when StudyDate is gone (Wave 3 §4.2)",
+    ),
+    f(
+        "pps_end_date",
+        Study,
+        T(tags::PERFORMED_PROCEDURE_STEP_END_DATE),
+        Date,
+        Quasi,
+        "addition: the same",
+    ),
+    f(
+        "issue_date",
+        Study,
+        T(tags::ISSUE_DATE_OF_IMAGING_SERVICE_REQUEST),
+        Date,
+        Quasi,
+        "addition: the same, and weaker",
+    ),
     f(
         "study_description",
         Study,
@@ -574,7 +598,7 @@ pub static CATALOGUE: &[Field] = &[
         Tech,
         "",
     ),
-    // instance (24)
+    // instance (26)
     f(
         "instance_number",
         Instance,
@@ -614,6 +638,23 @@ pub static CATALOGUE: &[Field] = &[
         Date,
         Quasi,
         "",
+    ),
+    f(
+        "instance_creation_date",
+        Instance,
+        T(tags::INSTANCE_CREATION_DATE),
+        Date,
+        Quasi,
+        "addition: a date the vote reads, and one an anonymiser often rewrites \
+         to a first of January (Wave 3 §4.2)",
+    ),
+    f(
+        "presentation_creation_date",
+        Instance,
+        T(tags::PRESENTATION_CREATION_DATE),
+        Date,
+        Quasi,
+        "addition: the same, and weaker",
     ),
     f(
         "content_time",
@@ -1713,14 +1754,14 @@ mod tests {
     fn counts_per_level_are_the_spec_s() {
         let count = |l: Level| CATALOGUE.iter().filter(|f| f.level == l).count();
         assert_eq!(count(Subject), 2);
-        assert_eq!(count(Study), 9);
+        assert_eq!(count(Study), 12);
         assert_eq!(count(Series), 30);
-        assert_eq!(count(Instance), 24);
+        assert_eq!(count(Instance), 26);
         assert_eq!(count(Stack), 14);
         assert_eq!(count(SeriesMr), 39);
         assert_eq!(count(SeriesCt), 24);
         assert_eq!(count(SeriesPet), 29);
-        assert_eq!(CATALOGUE.len(), 171);
+        assert_eq!(CATALOGUE.len(), 176);
     }
 
     #[test]
@@ -1809,6 +1850,6 @@ mod tests {
         ));
         let md = render_markdown();
         assert!(md.contains("## series_mr (39, MR only)"));
-        assert!(md.contains("171 columns."));
+        assert!(md.contains("176 columns."));
     }
 }

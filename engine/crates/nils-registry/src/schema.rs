@@ -276,7 +276,17 @@ fn build_registry() -> Vec<Table> {
                     req("subject_id", Type::Int),
                 ],
                 Level::Study,
-                vec![req("first_batch_id", Type::Int)],
+                vec![
+                    req("first_batch_id", Type::Int),
+                    // The day the study happened on, when `study_date` did not
+                    // say (Wave 3 §4). Never written over the measured column:
+                    // `date_source` names which vote won and `date_weight` and
+                    // `date_runner_up` say how close it was.
+                    col("date_filled", Type::Date),
+                    col("date_source", Type::Text),
+                    col("date_weight", Type::Int),
+                    col("date_runner_up", Type::Int),
+                ],
             ),
         )
         .unique(&["study_instance_uid"])

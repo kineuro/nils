@@ -31,7 +31,14 @@ class Level:
 
 LEVELS: dict[str, Level] = {
     "subject": Level("subject", "subject", renames={"birth_date": "patient_birth_date", "sex": "patient_sex"}),
-    "study": Level("study", "study", renames={"modalities_in_study": "modality"}),
+    # The three dates Wave 3 added for the date vote (spec §4.2) are v1's
+    # alone: v0 never read them, so there is nothing to compare against.
+    "study": Level(
+        "study",
+        "study",
+        renames={"modalities_in_study": "modality"},
+        absent=frozenset({"pps_start_date", "pps_end_date", "issue_date"}),
+    ),
     "series": Level("series", "series"),
     "series_mr": Level("series_mr", "mri_series_details"),
     "series_ct": Level("series_ct", "ct_series_details"),
@@ -68,7 +75,13 @@ LEVELS: dict[str, Level] = {
             "tube_current": 0,
         },
     ),
-    "instance": Level("instance", "instance", absent=frozenset({"charset"})),
+    "instance": Level(
+        "instance",
+        "instance",
+        absent=frozenset(
+            {"charset", "instance_creation_date", "presentation_creation_date"}
+        ),
+    ),
 }
 
 #: The stack columns compared besides the catalogue's: the orientation class.

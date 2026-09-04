@@ -9,12 +9,15 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `birth_date` | PatientBirthDate (0010,0030) | date | quasi-identifying | addition: v0 filled it through its importer |
 | `sex` | PatientSex (0010,0040) | text | quasi-identifying | addition: v0 filled it through its importer |
 
-## study (9)
+## study (12)
 
 | column | source | converter | class | note |
 |---|---|---|---|---|
 | `study_date` | StudyDate (0008,0020) | date | quasi-identifying |  |
 | `study_time` | StudyTime (0008,0030) | time | quasi-identifying |  |
+| `pps_start_date` | PerformedProcedureStepStartDate (0040,0244) | date | quasi-identifying | addition: a date the vote reads when StudyDate is gone (Wave 3 §4.2) |
+| `pps_end_date` | PerformedProcedureStepEndDate (0040,0250) | date | quasi-identifying | addition: the same |
+| `issue_date` | IssueDateOfImagingServiceRequest (0040,2004) | date | quasi-identifying | addition: the same, and weaker |
 | `study_description` | StudyDescription (0008,1030) | text | quasi-identifying |  |
 | `study_comments` | StudyComments (0032,4000) | text | quasi-identifying |  |
 | `modalities_in_study` | ModalitiesInStudy (0008,0061) | text | technical | v0's study.modality |
@@ -184,7 +187,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `pet_bed_index` | NumberOfSlices (0054,0081) | int | technical | NumberOfSlices, v0's name |
 | `pet_frame_type` | SeriesType (0054,1000) | text | technical | SeriesType, v0's name |
 
-## instance (24)
+## instance (26)
 
 | column | source | converter | class | note |
 |---|---|---|---|---|
@@ -193,6 +196,8 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `acquisition_date` | AcquisitionDate (0008,0022) | date | quasi-identifying |  |
 | `acquisition_time` | AcquisitionTime (0008,0032) | time | quasi-identifying |  |
 | `content_date` | ContentDate (0008,0023) | date | quasi-identifying |  |
+| `instance_creation_date` | InstanceCreationDate (0008,0012) | date | quasi-identifying | addition: a date the vote reads, and one an anonymiser often rewrites to a first of January (Wave 3 §4.2) |
+| `presentation_creation_date` | PresentationCreationDate (0070,0082) | date | quasi-identifying | addition: the same, and weaker |
 | `content_time` | ContentTime (0008,0033) | time | quasi-identifying |  |
 | `slice_location` | SliceLocation (0020,1041) | double | technical |  |
 | `pixel_spacing` | PixelSpacing, then fg PixelMeasuresSequence.PixelSpacing | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
@@ -213,4 +218,4 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `transfer_syntax_uid` | TransferSyntaxUID (0002,0010), else meta TransferSyntaxUID | text | technical | the file meta; for a bare data set the syntax it was read with (v0 stored null there) |
 | `charset` | SpecificCharacterSet (0008,0005) | text | technical | addition: SpecificCharacterSet as written |
 
-171 columns.
+176 columns.
