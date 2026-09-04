@@ -1,15 +1,16 @@
 {
   "$comment": [
-    "The regression gate of the small-machine budget (Wave 1 spec, \u00a712.6). One entry",
+    "The regression gate of the small-machine budget (Wave 1 spec, §12.6). One entry",
     "per runner class: the rate a digest of the synthetic corpus holds there and the",
     "resident memory it may take. A run below `files_per_s` times `floor` fails, and",
     "so does one above `rss_gib`.",
     "",
     "These are CI numbers on a shared runner, not the budget: the budget is measured",
     "on the baseline host of C6 and lives in the design record. What this file gates",
-    "is drift \u2014 a change that halves the rate must be a change someone meant to make,",
+    "is drift — a change that halves the rate must be a change someone meant to make,",
     "and updating these numbers is a commit of its own that says why.",
-    "The `stages` numbers are Wave 2's: a fingerprint and a classification of the same corpus, in stacks a second rather than files."
+    "The `stages` numbers are Wave 2's: a fingerprint and a classification of the same corpus, in stacks a second rather than files.",
+    "The `stages` gate numbers are set well under what the runner measures, for the same reason the digest one is and more so: a fingerprint or a classification of this corpus takes about a tenth of a second, and a tenth of a second on a shared runner is mostly noise. The same commit measured 13,861 stacks/s one day and 11,044 the next with the classifier unchanged. These numbers are here to fail on a halving, which they still do."
   ],
   "floor": 0.8,
   "instances": 200000,
@@ -30,23 +31,27 @@
   "stages": {
     "fingerprint": {
       "Linux-X64": {
-        "stacks_per_s": 4437,
+        "stacks_per_s": 3200,
         "rss_gib": 4.0,
         "measured": {
           "seen": 1527,
-          "elapsed_s": 0.3,
-          "peak_rss_gib": 0.06
+          "elapsed_s": 0.37,
+          "peak_rss_gib": 0.06,
+          "when": "2026-09-04",
+          "note": "4,144 stacks/s on the runner; 4,437 the day before"
         }
       }
     },
     "classify": {
       "Linux-X64": {
-        "stacks_per_s": 13861,
+        "stacks_per_s": 9800,
         "rss_gib": 4.0,
         "measured": {
           "seen": 1527,
-          "elapsed_s": 0.1,
-          "peak_rss_gib": 0.02
+          "elapsed_s": 0.14,
+          "peak_rss_gib": 0.02,
+          "when": "2026-09-04",
+          "note": "11,044 stacks/s on the runner; 13,861 the day before; 13,300 on a quiet machine"
         }
       }
     }

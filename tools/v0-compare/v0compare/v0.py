@@ -369,6 +369,38 @@ def from_export(export_dir: Path, out: Path, *, threads: int | None = None) -> d
     return counts
 
 
+def reclassify(out: Path, cache: Path) -> int:
+    """Replace the stored `series_classification_cache` with one v0's current
+    code wrote (`tools/pack-check/resort.py`).
+
+    The stored table is what v0 said when it last sorted each cohort, which is
+    older than v0's code, so a comparison against it reports v0 disagreeing
+    with itself as though v1 had caused it. Pointing the gate at a re-sorted
+    cache makes the comparison one between v1 and v0 as v0 is today. The
+    origin row records that it happened, so a report always says which of the
+    two it compared against.
+    """
+    con = duckdb.connect()
+    con.execute(f"ATTACH {quote(str(out))} AS out")
+    con.execute(
+        "CREATE OR REPLACE TABLE out.v0.series_classification_cache AS "
+        + _typed_select(
+            "series_classification_cache",
+            f"read_csv({str(cache)!r}, header = true, all_varchar = true, "
+            "quote = '\"', escape = '\"', nullstr = '')",
+        )
+    )
+    _index(con, "series_classification_cache")
+    n = _count(con, "series_classification_cache")
+    con.execute(
+        "CREATE OR REPLACE TABLE out.v0.origin AS "
+        "SELECT kind || ', classification re-sorted' AS kind, source FROM out.v0.origin"
+    )
+    con.close()
+    _log(f"series_classification_cache: replaced, {n:,} rows from {cache}")
+    return n
+
+
 def from_dsn(dsn: str, out: Path, *, threads: int | None = None) -> dict[str, int]:
     """Copy the tables straight from a v0 database, read-only, into `out`."""
     con = _open(out, fresh=True)

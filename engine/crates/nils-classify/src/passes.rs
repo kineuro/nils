@@ -16,7 +16,7 @@
 //! another, and nothing about a stack explained its own result. Here the
 //! reference is named, the vote is written down, and a tie says so.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nils_pack::Pack;
 use nils_pack::pass::{Corpus, Pass, Phase, Vote, run_vote};
@@ -73,6 +73,28 @@ fn read_corpus(store: &mut Store, pack: &Pack, modality: Option<&str>) -> Result
     );
 
     // The axes first, so a stack arrives complete.
+    //
+    // A pass never reads a pass. `classification_axis` holds whatever decided
+    // a value, and on any run after the first that includes answers an earlier
+    // run's pass wrote, so taking the table as it stands would let the vote
+    // count its own guesses as evidence. Measured on the live corpus: with the
+    // pass's answers in the reference, sorting the same archive again from two
+    // different ingest histories agrees on 14 of 9,014 answers, and without
+    // them on 31,880 of 31,880 (spec section 7.4). The evidence row says which
+    // it was: `pass` is null exactly when a rule or a person decided.
+    //
+    // Read as two queries rather than one anti-join: what a pass wrote is a
+    // small set, most runs have none of it, and a correlated subquery over
+    // every axis of every stack costs more than the set does.
+    let mut by_a_pass: HashSet<(i64, String)> = HashSet::new();
+    let sql_pass = format!(
+        "SELECT stack_id, axis FROM {} WHERE pass IS NOT NULL",
+        store.qualified("classification_evidence")
+    );
+    for r in store.query(&sql_pass, &[])? {
+        by_a_pass.insert((r.int(0)?, r.text(1)?.to_string()));
+    }
+
     let mut decided: HashMap<i64, Vec<String>> = HashMap::new();
     let sql_axes = format!(
         "SELECT stack_id, axis, value FROM {}",
@@ -83,9 +105,13 @@ fn read_corpus(store: &mut Store, pack: &Pack, modality: Option<&str>) -> Result
         let Some(a) = pack.axes.iter().position(|x| x.name == name) else {
             continue;
         };
+        let id = r.int(0)?;
+        if !by_a_pass.is_empty() && by_a_pass.contains(&(id, name.to_string())) {
+            continue;
+        }
         let value = r.opt_text(2)?.unwrap_or("").to_string();
         decided
-            .entry(r.int(0)?)
+            .entry(id)
             .or_insert_with(|| vec![String::new(); pack.axes.len()])[a] = value;
     }
 

@@ -683,6 +683,100 @@ and is not needed for the gate, because none of them changes an axis. They are
 written down here as the wave's finding, with what each one becomes, so the
 decision is a decision and not an omission.
 
+Ruled on 2026-09-04: the placement in the table stands and none of the seven
+becomes a pass kind. In v0 they are phases because they were added late to a
+prototype, and v1 keeps the mechanism it needs and no more. The four that are
+fingerprint work are Wave 3's.
+
+Measuring that turned up why the placement matters. v0's acquisition-type fill
+does not stay in memory: it writes the inferred `MRAcquisitionType` back into
+`stack_fingerprint`, and classification reads that column, where among other
+things it decides whether a magnetisation-prepared gradient echo is MPRAGE. So
+a guess one run made is an input the next run treats as measurement, and the
+same stack classified twice can be classified differently. That is the
+complaint of C14 on a second field, and it is the argument for the rule v1
+already holds: the fingerprint records what was measured, a decision records
+what was concluded, and the second never quietly becomes the first.
+
+### 7.4 Which stacks the vote may learn from, measured
+
+Written after the wave, because the wave left it open. The pass declares its
+reference and the engine records the name, but nothing said which stacks belong
+in it, and that is the one thing v0 never decides in code: it reads whatever
+its database holds at that moment, which includes what its own earlier runs
+filled in.
+
+Three candidates were run over the whole corpus, against v0's own
+`sort/gap_filling.py`, with v0's classification re-run from current code first
+so that the reference was not older than the code
+(`tools/pack-check/resort.py`):
+
+| the reference holds | stacks | fills |
+|---|---|---|
+| what the rules decided | 363,209 | 31,880 |
+| that, plus the vote's own answers, to a fixed point | 400,136 | 36,927 |
+| what v0's live database happens to hold | 397,700 | 36,038 |
+
+**Accuracy.** Hide five percent of the stacks the rules decided, build the
+reference without them, and ask the vote what they are
+(`tools/pack-check/vote_reference.py holdout`, four folds of 18,160 stacks
+each). The three are the same answer to two decimal places, and the rules-only
+reference was at or above the other two in all four folds:
+
+| the reference holds | answered | base and technique both right |
+|---|---|---|
+| what the rules decided | 97.72% | 94.85, 94.45, 94.44, 94.43% |
+| that, plus the vote's answers | 97.72% | 94.81, 94.39, 94.43, 94.38% |
+| v0's live database | 97.73% | 94.80, 94.39, 94.42, 94.37% |
+
+Ten percent more reference buys nothing. It answers no more of the questions
+whose answer can be checked and it gets no more of them right. What it does buy
+is 5,047 more answers to questions whose answer cannot be checked, reached by
+consulting the vote's own guesses.
+
+**Repeatability.** Split the corpus into eight parts and sort them one after
+another the way a database receives them; then do it again with the parts in the
+opposite order (`vote_reference.py order`). While the archive is being built,
+both candidates are order-dependent and to the same degree, around a third of
+the answers, because at the moment a part is sorted the reference holds only
+what has arrived. That is not the difference. The difference is what a second
+sort of the *finished* archive does:
+
+| the reference holds | what the second sort answers | the two histories agree |
+|---|---|---|
+| what the rules decided | 31,880 | 31,880, 100% |
+| that, plus the vote's answers | 9,014 | 14, 0.16% |
+
+The two denominators differ, and the difference is the point. When the vote's
+answers are in the table, a stack that took one is no longer missing anything,
+so the second sort does not reconsider it: 35,262 answers from the first pass
+are simply frozen, whichever history produced them, and of the 9,014 the second
+sort does reach it agrees with itself 14 times. When they are not, the second
+sort reconsiders every stack that still has a gap and reaches the same 31,880
+answers from either history.
+
+A reference the vote may add to carries its history for ever: the answers are
+in the table the next run reads, indistinguishable from what a rule decided, so
+running the sort again entrenches the accident rather than repairing it. A
+reference built from the rules is a function of the finished archive, so running
+the sort again is a repair, and the same data gives the same answer whatever
+order it arrived in.
+
+**So the call is confirmed and made narrower than it was.** The reference holds
+what a rule or a person decided, never what a pass decided. A person's decision
+belongs there because it is independent evidence and it does not grow from the
+vote's own output; a pass's answer does not, for the reason above. This is not
+a pack option. The engine enforces it when it reads the corpus, by leaving out
+any axis whose evidence names a pass, and a test in `nils-classify` holds it.
+
+Two things this costs, stated rather than hidden. The rules-only reference
+fills 5,047 fewer stacks of 518,365, which is 0.97 percent of the archive left
+for a person or for a later pack rather than answered by a guess about a guess.
+And a site whose archive is still growing gets order-dependent answers from
+either candidate until it sorts again; what v1 adds is that sorting again fixes
+it, which makes re-classification after a pack change the ordinary operation it
+should be rather than a thing to be avoided.
+
 ## 8. Evidence, review and decisions (D7, C15)
 
 ### 8.1 Evidence is stored
@@ -804,6 +898,48 @@ The bars:
 
 Each of those is a case in the **verified corpus**, which is where the wave's
 value accumulates.
+
+#### The parity corpus is not v0, and now it does not have to be
+
+Written after the wave. `series_classification_cache` is what v0 said the last
+time it sorted each cohort, and v0's code has moved since, so a run against it
+reports v0 disagreeing with itself as though v1 had caused it. Two of the
+nmosd gate's four difference groups were exactly that.
+
+`tools/pack-check/resort.py` runs v0's own classification over the same stacks
+from current v0 code, plus the two step 4 phases that change an axis, and writes
+the same columns. `v0-compare extract --classification` puts that table in place
+of the stored one and records on the origin row that it did, so a report always
+says which of the two it compared against. Over the whole corpus, 8,537 axis
+values of 518,365 stacks across eight axes differ between the stored table and
+what the code says today, and each group has a cause:
+
+- **4,692 body parts**, all in one cohort, are not classifications. That cohort
+  is the only one whose body-part QC state is `committed`, with a trained image
+  classifier behind it, and where the cache says brain, brain-neck or spine
+  v0's keyword classifier says nothing at all for 4,692 of its 4,699 stacks.
+  Those values are an image model's predictions, committed by a person, written
+  into the classifier's own column with nothing to say so. In v1 they would be
+  `decision` rows at a named scope, which is what they are.
+- **3,845 across the other axes** are the cache being older than the code:
+  constructs the current code finds and the cache does not, techniques that were
+  renamed, bases the current code decides.
+
+Reproducing v0 needs one more thing that is not in its code either. A cohort can
+add or remove keywords in one bucket of one detector, and that table lives in
+v0's *application* database rather than in the metadata database the gate
+exports. Five cohorts have such rows. Without them the re-sort differs from the
+cache on 1,254 provenances, 1,254 intents and 174 techniques; with them, on none
+of those. `resort.py --overrides` takes them, exported read-only.
+
+This is the sharpest thing the parity work found, and it is about v0 rather than
+about v1: **a stack's classification in v0 is not a function of v0's code and
+the stack.** It also depends on a keyword table in another database, on what
+earlier runs wrote back into the fingerprint, and on what a separate image model
+committed into the same columns, and none of that is recorded next to the value.
+v1's answer is the whole of §8: every value carries evidence naming the rule set
+and rule that produced it, a pass says which pass and against which reference,
+and a person's call is a decision at a scope rather than an overwrite.
 
 ### 11.2 Correctness, against the verified corpus
 
