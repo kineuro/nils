@@ -740,3 +740,72 @@ fn a_verbatim_rule_files_the_code_the_files_carry() {
         );
     }
 }
+
+#[test]
+fn a_path_segment_is_a_source_and_a_constant_tag_says_so() {
+    // The tree several archives arrive as: the sender pseudonymized and put
+    // the code in the path, leaving a placeholder in the tag (spec §3). The
+    // pattern is what refuses the placeholder, so the tag declines and the
+    // folder answers; and because no single file can tell that a tag is
+    // constant, the batch says so instead (§3.3).
+    let rule = Rule::parse(
+        "identity:\n  id_type: subject-code\n  code: verbatim\n  from:\n    \
+         - field: PatientID\n      pattern: '^(?<id>[A-Z]{3}[0-9]{3})$'\n    \
+         - path:\n        segment: 1\n        pattern: '^(?<id>.+)$'\n",
+    )
+    .unwrap();
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("identity-path");
+        // Three people, two studies each, every file carrying the same
+        // placeholder where the identifier belongs.
+        for (person, studies) in [
+            ("AAA111", ["A", "B"]),
+            ("BBB222", ["C", "D"]),
+            ("CCC333", ["E", "F"]),
+        ] {
+            for study in studies {
+                for i in 1..=4 {
+                    dir.file(
+                        &format!("{person}/{study}/IM_{i:04}"),
+                        &mr(
+                            study,
+                            &format!("{study}.1"),
+                            &format!("{study}.1.{i}"),
+                            "XXXX",
+                            &[],
+                        ),
+                    );
+                }
+            }
+        }
+        let mut s = settings(&dir);
+        s.identity = rule.clone();
+        let mut reg = lab.open();
+        let mut store = reg.open_linkage().unwrap();
+        linkage::add_id_type(&mut store, "subject-code", None).unwrap();
+        let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+
+        // Three people, not one and not six.
+        assert_eq!(
+            report.written.clone().unwrap().subjects_created,
+            3,
+            "{name}: the folder is the identity"
+        );
+        let codes = texts(&mut reg, "SELECT code FROM {subject} ORDER BY code");
+        assert_eq!(codes, ["AAA111", "BBB222", "CCC333"], "{name}");
+
+        // And the placeholder is named, as a shape rather than a value.
+        let constant: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.kind == "identity_constant")
+            .collect();
+        assert_eq!(constant.len(), 1, "{name}: {:?}", report.diagnostics);
+        assert!(
+            constant[0].samples.iter().any(|s| s.ends_with("AAAA")),
+            "{name}: the sample is the shape of the placeholder, not its value: {:?}",
+            constant[0].samples
+        );
+    }
+}

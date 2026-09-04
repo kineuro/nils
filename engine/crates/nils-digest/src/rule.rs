@@ -87,6 +87,10 @@ fn segment(rel: &str, n: usize) -> Option<&str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ident {
     pub value: String,
+    /// What the rule's first *field* source read, whatever answered in the
+    /// end. A batch whose files all read one value there is looking at a
+    /// placeholder, and only the batch can see that (§3.3).
+    pub probe: Option<String>,
     /// The fallback was taken: the value is the study UID, the type
     /// [`FALLBACK_ID_TYPE`].
     pub fell_back: bool,
@@ -342,11 +346,18 @@ impl Rule {
         // two lists are walked together rather than zipped: a path source
         // consumes no extracted value.
         let mut next_field = 0usize;
+        let mut probe: Option<String> = None;
         for source in &self.from {
             let read: Option<String> = match &source.from {
                 From::Field(_) => {
                     let v = values.get(next_field).and_then(|v| v.clone());
                     next_field += 1;
+                    if probe.is_none()
+                        && let Some(raw) = v.as_deref().map(str::trim)
+                        && !raw.is_empty()
+                    {
+                        probe = Some(raw.to_string());
+                    }
                     v
                 }
                 From::Segment(n) => segment(rel, *n).map(str::to_string),
@@ -358,6 +369,7 @@ impl Rule {
                 None => {
                     return Ident {
                         value: value.to_string(),
+                        probe,
                         fell_back: false,
                     };
                 }
@@ -371,6 +383,7 @@ impl Rule {
                         Some(id) => {
                             return Ident {
                                 value: id.to_string(),
+                                probe,
                                 fell_back: false,
                             };
                         }
@@ -389,6 +402,7 @@ impl Rule {
         ));
         Ident {
             value: x.study_uid.clone(),
+            probe,
             fell_back: true,
         }
     }
@@ -433,6 +447,7 @@ mod tests {
             ident,
             Ident {
                 value: "P1".into(),
+                probe: Some("P1".into()),
                 fell_back: false
             }
         );
