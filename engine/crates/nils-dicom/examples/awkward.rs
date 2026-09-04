@@ -124,6 +124,14 @@ struct File {
     series_date: Option<&'static str>,
     acquisition_date: Option<&'static str>,
     content_date: Option<&'static str>,
+    /// `InstanceCreationDate`, which an anonymiser often rewrites to a first
+    /// of January.
+    instance_creation_date: Option<&'static str>,
+    /// `PerformedProcedureStepStartDate`, which survives some scrubs.
+    pps_start_date: Option<&'static str>,
+    /// A Siemens CSA private element whose value carries a date, written under
+    /// its private creator so a reader has to go looking for it.
+    csa_version: Option<&'static str>,
     /// Written without a SOP Instance UID, which the reader refuses.
     no_sop: bool,
 }
@@ -141,6 +149,9 @@ impl File {
             series_date: Some("20220115"),
             acquisition_date: Some("20220115"),
             content_date: Some("20220115"),
+            instance_creation_date: None,
+            pps_start_date: None,
+            csa_version: None,
             no_sop: false,
         }
     }
@@ -180,6 +191,35 @@ fn elements(f: &File, pixel_bytes: usize) -> Vec<Elem> {
     }
     if let Some(v) = f.content_date {
         e.push(synth::text(tags::CONTENT_DATE, VR::DA, v));
+    }
+    if let Some(v) = f.instance_creation_date {
+        e.push(synth::text(tags::INSTANCE_CREATION_DATE, VR::DA, v));
+    }
+    if let Some(v) = f.pps_start_date {
+        e.push(synth::text(
+            tags::PERFORMED_PROCEDURE_STEP_START_DATE,
+            VR::DA,
+            v,
+        ));
+    }
+    if let Some(v) = f.csa_version {
+        // The private creator claims the block, and the date rides inside a
+        // version string, which is where Siemens leaves it.
+        e.push(synth::text(
+            dicom_core::Tag(0x0029, 0x0010),
+            VR::LO,
+            "SIEMENS CSA HEADER",
+        ));
+        e.push(synth::text(
+            dicom_core::Tag(0x0029, 0x1008),
+            VR::CS,
+            "IMAGE NUM 4",
+        ));
+        e.push(synth::text(
+            dicom_core::Tag(0x0029, 0x1009),
+            VR::LO,
+            &format!("syngo MR B17 {v}"),
+        ));
     }
     if let Some(v) = f.patient_id {
         e.push(synth::text(tags::PATIENT_ID, VR::LO, v));
@@ -576,9 +616,18 @@ fn main() {
         series: Option<&'static str>,
         acquisition: Option<&'static str>,
         content: Option<&'static str>,
+        instance_creation: Option<&'static str>,
+        pps_start: Option<&'static str>,
+        /// A date carried inside a Siemens CSA private element's version.
+        csa: Option<&'static str>,
         /// Extra path components spliced into the study UID.
         uid_date: Option<&'static str>,
         series_uid_date: Option<&'static str>,
+        /// Unix epoch seconds spliced into the SOP UID, which is how some GE
+        /// scanners leave a timestamp behind.
+        uid_epoch: Option<&'static str>,
+        /// A `YYYYMMDD` component in the directory path itself.
+        path_date: Option<&'static str>,
         want: Option<&'static str>,
         source: &'static str,
         needs: &'static str,
@@ -592,8 +641,13 @@ fn main() {
             series: Some("20220115"),
             acquisition: Some("20220115"),
             content: Some("20220115"),
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: None,
             series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
             want: Some("20220115"),
             source: "study_date",
             needs: "nothing",
@@ -605,8 +659,13 @@ fn main() {
             series: Some("20220216"),
             acquisition: None,
             content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: None,
             series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
             want: Some("20220216"),
             source: "series_date",
             needs: "the first rung of the fallback",
@@ -618,8 +677,13 @@ fn main() {
             series: None,
             acquisition: Some("20220317"),
             content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: None,
             series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
             want: Some("20220317"),
             source: "acquisition_date",
             needs: "the second rung",
@@ -631,8 +695,13 @@ fn main() {
             series: None,
             acquisition: None,
             content: Some("20220418"),
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: None,
             series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
             want: Some("20220418"),
             source: "content_date",
             needs: "the third rung",
@@ -644,8 +713,13 @@ fn main() {
             series: None,
             acquisition: None,
             content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: Some("20220519"),
             series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
             want: Some("20220519"),
             source: "uid",
             needs: "reading eight digits out of a UID, and believing them",
@@ -657,8 +731,13 @@ fn main() {
             series: None,
             acquisition: None,
             content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: None,
             series_uid_date: Some("20220620"),
+            uid_epoch: None,
+            path_date: None,
             want: Some("20220620"),
             source: "uid",
             needs: "trying more than the study UID",
@@ -670,8 +749,13 @@ fn main() {
             series: None,
             acquisition: None,
             content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: None,
             series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
             want: None,
             source: "none",
             needs: "a review item; this study cannot be placed in a session",
@@ -683,8 +767,13 @@ fn main() {
             series: None,
             acquisition: None,
             content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: Some("20221345"),
             series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
             want: None,
             source: "none",
             needs: "refusing eight digits that do not parse as a date",
@@ -696,8 +785,13 @@ fn main() {
             series: None,
             acquisition: None,
             content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: Some("17000101"),
             series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
             want: None,
             source: "none",
             needs: "the year range, which is the only thing making a UID date reasonable",
@@ -709,8 +803,13 @@ fn main() {
             series: None,
             acquisition: None,
             content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: None,
             series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
             want: Some("18990101"),
             source: "study_date",
             needs: "keeping what was measured, and raising a diagnostic about it",
@@ -722,8 +821,13 @@ fn main() {
             series: Some("20220721"),
             acquisition: None,
             content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: None,
             series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
             want: Some("20220115"),
             source: "study_date",
             needs: "reading a non-conformant but unambiguous value rather than refusing it",
@@ -735,8 +839,13 @@ fn main() {
             series: Some("20220722"),
             acquisition: None,
             content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: None,
             series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
             want: Some("20220722"),
             source: "series_date",
             needs: "treating the zero a scanner writes instead of nothing as no value, rather than storing it as a date",
@@ -748,16 +857,169 @@ fn main() {
             series: Some("20220802"),
             acquisition: Some("20220803"),
             content: Some("20220804"),
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
             uid_date: None,
             series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
             want: Some("20220801"),
             source: "study_date",
             needs: "the order of preference, and a diagnostic that they disagree",
         },
+        DateCase {
+            name: "date-instance-creation",
+            what: "only InstanceCreationDate survived the scrub",
+            study: None,
+            series: None,
+            acquisition: None,
+            content: None,
+            instance_creation: Some("20220901"),
+            pps_start: None,
+            csa: None,
+            uid_date: None,
+            series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
+            want: Some("20220901"),
+            source: "instance_creation_date",
+            needs: "looking past the four obvious date elements",
+        },
+        DateCase {
+            name: "date-pps",
+            what: "only the performed procedure step start date survived",
+            study: None,
+            series: None,
+            acquisition: None,
+            content: None,
+            instance_creation: None,
+            pps_start: Some("20221003"),
+            csa: None,
+            uid_date: None,
+            series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
+            want: Some("20221003"),
+            source: "pps_start_date",
+            needs: "the procedure step, which some scrubs leave alone",
+        },
+        DateCase {
+            name: "date-private-csa",
+            what: "the only date left is inside a Siemens CSA private element",
+            study: None,
+            series: None,
+            acquisition: None,
+            content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: Some("20221104"),
+            uid_date: None,
+            series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
+            want: Some("20221104"),
+            source: "private",
+            needs: "resolving a private creator and reading a date out of a version string",
+        },
+        DateCase {
+            name: "date-jan-first-trap",
+            what: "InstanceCreationDate is a first of January and SeriesDate is not",
+            study: None,
+            series: Some("20220615"),
+            acquisition: None,
+            content: None,
+            instance_creation: Some("20220101"),
+            pps_start: None,
+            csa: None,
+            uid_date: None,
+            series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
+            want: Some("20220615"),
+            source: "series_date",
+            needs: "distrusting a first of January when any other candidate exists",
+        },
+        DateCase {
+            name: "date-1900",
+            what: "StudyDate is 19000101, an anonymiser's idea of nothing",
+            study: Some("19000101"),
+            series: Some("20221205"),
+            acquisition: None,
+            content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
+            uid_date: None,
+            series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
+            want: Some("20221205"),
+            source: "series_date",
+            needs: "a placeholder list, not just a parse",
+        },
+        DateCase {
+            name: "date-uid-epoch",
+            what: "no date anywhere; the SOP UID carries Unix epoch seconds",
+            study: None,
+            series: None,
+            acquisition: None,
+            content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
+            uid_date: None,
+            series_uid_date: None,
+            uid_epoch: Some("1572249167"),
+            path_date: None,
+            want: Some("20191028"),
+            source: "uid_epoch",
+            needs: "reading a timestamp, not only a YYYYMMDD, out of a UID",
+        },
+        DateCase {
+            name: "date-in-path",
+            what: "no date in any element; the directory name is the date",
+            study: None,
+            series: None,
+            acquisition: None,
+            content: None,
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
+            uid_date: None,
+            series_uid_date: None,
+            uid_epoch: None,
+            path_date: Some("20220815"),
+            want: Some("20220815"),
+            source: "path",
+            needs: "the path as a source, which is where a sorted archive puts it",
+        },
+        DateCase {
+            name: "date-outvoted",
+            what: "two independent sources agree and one disagrees",
+            study: None,
+            series: Some("20230301"),
+            acquisition: Some("20230301"),
+            content: Some("20230415"),
+            instance_creation: None,
+            pps_start: None,
+            csa: None,
+            uid_date: None,
+            series_uid_date: None,
+            uid_epoch: None,
+            path_date: None,
+            want: Some("20230301"),
+            source: "vote",
+            needs: "weighing sources rather than taking the first that answers",
+        },
     ];
 
     for (n, c) in dates.iter().enumerate() {
-        let dir = format!("{}/DATE{:03}/visit1", c.name, n + 1);
+        // A sorted archive puts the date in the path, so one scenario does too.
+        let dir = match c.path_date {
+            Some(d) => format!("{}/DATE{:03}/{d}/visit1", c.name, n + 1),
+            None => format!("{}/DATE{:03}/visit1", c.name, n + 1),
+        };
         let su = match c.uid_date {
             Some(d) => uid(&["10", &n.to_string(), d, "1"]),
             None => uid(&["10", &n.to_string(), "1"]),
@@ -767,13 +1029,22 @@ fn main() {
             None => uid(&["10", &n.to_string(), "s1"]),
         };
         let series_uid = seru.clone();
-        let f = study(root, &dir, &su, &format!("10-{n}"), 2, px, move |f, _| {
+        let epoch = c.uid_epoch;
+        let f = study(root, &dir, &su, &format!("10-{n}"), 2, px, move |f, i| {
             f.patient_id = Some("DATECASE");
             f.series_uid = series_uid.clone();
             f.study_date = c.study;
             f.series_date = c.series;
             f.acquisition_date = c.acquisition;
             f.content_date = c.content;
+            f.instance_creation_date = c.instance_creation;
+            f.pps_start_date = c.pps_start;
+            f.csa_version = c.csa;
+            if let Some(ts) = epoch {
+                // GE leaves the timestamp in the SOP UID rather than in a date
+                // element, so the UID is where a reader has to look.
+                f.sop = uid(&["10", "ge", ts, &i.to_string()]);
+            }
         });
         seeds.push((c.name, f));
         scenarios.push(Scenario {
