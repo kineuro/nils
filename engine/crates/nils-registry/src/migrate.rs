@@ -7,11 +7,11 @@
 
 use std::fmt;
 
-use crate::schema::{ID_TYPES, Table, linkage_tables, registry_tables};
+use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +62,44 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 2,
         apply: create_stack_fingerprint,
     },
+    Migration {
+        version: 3,
+        apply: create_classification,
+    },
+    Migration {
+        version: 4,
+        apply: evidence_says_which_pass,
+    },
 ];
+
+/// Wave 2 §7: a pass writes evidence like a rule does, and says which pass it
+/// was and which named reference it voted against. A registry that has the
+/// table from version 3 gains the two columns; one created now has them
+/// already.
+fn evidence_says_which_pass(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "classification_evidence", &["pass", "reference"])
+}
+
+/// Wave 2 §8: what a pack decided, what made it decide, and the decisions
+/// that outrank it.
+fn create_classification(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(
+        store,
+        kind,
+        &[
+            "classification",
+            "classification_axis",
+            "classification_evidence",
+            "decision",
+        ],
+    )
+}
 
 /// Wave 2 §4.2. A registry created at version 1 gains the table; one created
 /// now already has it from [`create_declared_tables`], so this is a no-op
@@ -88,6 +125,48 @@ fn add_tables(store: &mut Store, kind: Kind, names: &[&str]) -> Result<(), Error
         }
     }
     Ok(())
+}
+
+/// Add declared columns a table has not got yet. A column is added, never
+/// changed: what an older binary wrote stays readable.
+fn add_columns(store: &mut Store, table: &str, names: &[&str]) -> Result<(), Error> {
+    if !table_exists(store, table)? {
+        return Ok(());
+    }
+    let dialect = store.dialect();
+    let qualified = store.qualified(table);
+    let declared = schema::table(table);
+    for name in names {
+        if column_exists(store, table, name)? {
+            continue;
+        }
+        let column = declared
+            .column(name)
+            .unwrap_or_else(|| panic!("{table}.{name} is not a declared column"));
+        store.batch(&format!(
+            "ALTER TABLE {qualified} ADD COLUMN {name} {}",
+            dialect.type_name(column.ty)
+        ))?;
+    }
+    Ok(())
+}
+
+fn column_exists(store: &mut Store, table: &str, column: &str) -> Result<bool, Error> {
+    Ok(match store {
+        Store::Sqlite(_) => store
+            .query(&format!("PRAGMA table_info({table})"), &[])?
+            .iter()
+            .any(|r| r.text(1).map(|n| n == column).unwrap_or(false)),
+        Store::Postgres { .. } => {
+            let schema = store.schema().unwrap_or("public").to_string();
+            store
+                .query_opt(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
+                    &[Param::from(schema), Param::from(table), Param::from(column)],
+                )?
+                .is_some()
+        }
+    })
 }
 
 fn table_exists(store: &mut Store, name: &str) -> Result<bool, Error> {
@@ -324,5 +403,34 @@ mod tests {
             standing(&mut store, Kind::Linkage).unwrap(),
             Standing::Current
         );
+    }
+}
+
+#[cfg(test)]
+mod column_migration {
+    use super::*;
+
+    /// A registry written before Wave 2's passes opens under this binary with
+    /// the two columns added rather than being rebuilt.
+    #[test]
+    fn a_column_a_later_wave_declared_is_added_to_an_existing_table() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        // Everything up to the version that created the table, and no further.
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 3) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        store
+            .batch("ALTER TABLE classification_evidence DROP COLUMN pass")
+            .unwrap();
+        store
+            .batch("ALTER TABLE classification_evidence DROP COLUMN reference")
+            .unwrap();
+        assert!(!column_exists(&mut store, "classification_evidence", "pass").unwrap());
+
+        evidence_says_which_pass(&mut store, Kind::Registry).unwrap();
+        assert!(column_exists(&mut store, "classification_evidence", "pass").unwrap());
+        assert!(column_exists(&mut store, "classification_evidence", "reference").unwrap());
+        // and again, because a migration that has run must be safe to run
+        evidence_says_which_pass(&mut store, Kind::Registry).unwrap();
     }
 }

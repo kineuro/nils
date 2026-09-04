@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 from . import __version__
+from .axes import AxesReport
 from .classify import Adjudication
 from .fields import FieldStat, Group
 from .instances import InstanceReport
@@ -50,6 +51,7 @@ class Report:
     instances: InstanceReport = field(default_factory=InstanceReport)
     stacks: StackReport = field(default_factory=StackReport)
     subjects: SubjectReport = field(default_factory=SubjectReport)
+    axes: AxesReport = field(default_factory=AxesReport)
     fields: list[FieldStat] = field(default_factory=list)
     #: the adjudication of the partition and instance classes
     partition_classes: dict[str, str | None] = field(default_factory=dict)
@@ -60,6 +62,17 @@ class Report:
     @property
     def passed(self) -> bool:
         return all(b.passed for b in self.bars)
+
+
+def adjudicate_axes(rep: Report, adj: Adjudication) -> None:
+    """Every axis group is classified by the file, or it is an open item.
+    A group of stacks where both sides agree is not a group at all."""
+    for stat in rep.axes.axes:
+        for g in stat.groups:
+            rule = adj.axis(stat.axis, g.pattern)
+            if rule is not None:
+                g.classification = rule.classification
+                g.note = f"{rule.cause} {rule.note}".strip()
 
 
 def adjudicate(rep: Report, adj: Adjudication) -> None:
@@ -110,12 +123,44 @@ def _instance_bar(rep: Report, side: str, counts: dict[str, int], fails: Callabl
     return sum(failing.values()), excused
 
 
+def _axis_bars(rep: Report) -> list[Bar]:
+    """§11.1's three bars: nothing left unclassified, nothing v1 leaves
+    unresolved that v0 resolved, and no stack v1 excludes that v0 kept."""
+    a = rep.axes
+    if a.stacks == 0:
+        return []
+    open_items = a.unclassified_groups
+    silent = sum(s.v1_silent for s in a.axes)
+    compared = sum(s.compared for s in a.axes)
+    agreed = sum(s.agreed for s in a.axes)
+    return [
+        Bar(
+            "11.1 every axis agrees or its difference is classified",
+            open_items == 0,
+            f"{agreed:,} of {compared:,} axis verdicts agree over {a.stacks:,} stacks; "
+            f"{open_items:,} group(s) without a cause",
+        ),
+        Bar(
+            "11.1 v1 leaves nothing unresolved that v0 resolved",
+            silent == 0 and a.unclassified_by_v1 == 0,
+            f"{silent:,} axis verdict(s) v0 made and v1 did not, "
+            f"{a.unclassified_by_v1:,} stack(s) v0 classified and v1 has no row for",
+        ),
+        Bar(
+            "11.1 v1 excludes no stack v0 classified",
+            a.excluded_by_v1 == 0,
+            f"{a.excluded_by_v1:,} stack(s) excluded by v1 with a directory type in v0",
+        ),
+    ]
+
+
 def verdict(rep: Report) -> None:
     """The bars of §12.2 to §12.4, each passed or not, with the number
     behind it. A divergence the adjudication classes as accepted or as
     v0's bug is excused from the bar it would fail; a v1 bug and an
     unclassified group are not."""
     bars: list[Bar] = []
+    bars.extend(_axis_bars(rep))
     inst = rep.instances
     v0_missing, v0_excused = _instance_bar(rep, "v0-only", inst.v0_only, lambda c: not c.startswith("path in v1, "))
     bars.append(

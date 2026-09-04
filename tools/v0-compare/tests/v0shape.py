@@ -271,6 +271,10 @@ def project(
             row[v0] = value
         stack_rows.append(row)
     tables["series_stack"] = stack_rows
+    # v0's verdicts. The projection carries none: a fixture that classified
+    # nothing is what a registry looks like before anything was sorted, and
+    # the axes bar has nothing to compare, which is what it should say.
+    tables["series_classification_cache"] = []
 
     # instances, with v1's path
     inst_cols = _level_columns(fields, "instance")

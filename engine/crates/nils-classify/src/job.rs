@@ -41,6 +41,11 @@ pub struct Settings {
     pub force: bool,
     /// Only this modality, when given.
     pub modality: Option<String>,
+    /// One threshold for every axis, overriding what the pack declares. The
+    /// numbers are the pack's (§8.2): a pack that flags everything has failed
+    /// even if it agrees with v0. This is the operator's override of them,
+    /// for a run that wants to see more or less than the pack asks for.
+    pub review_below: Option<f64>,
     /// Stacks per window.
     pub window: usize,
 }
@@ -51,6 +56,7 @@ impl Default for Settings {
             name: String::new(),
             force: false,
             modality: None,
+            review_below: None,
             window: WINDOW,
         }
     }
@@ -62,6 +68,7 @@ impl Settings {
         serde_json::json!({
             "force": self.force,
             "modality": self.modality,
+            "review_below": self.review_below,
             "window": self.window,
         })
     }
@@ -116,7 +123,7 @@ fn hostname() -> String {
 /// Take the registry, failing a stale job and refusing a live one, then insert
 /// this run's job row. The same rule the digest uses (Wave 1 §10): a job of
 /// this host whose process is gone left no one to beat its heart.
-fn claim(registry: &mut Registry, settings: &Settings) -> Result<i64, Error> {
+pub fn claim_for(registry: &mut Registry, settings: &Settings, kind: &str) -> Result<i64, Error> {
     registry.refresh_meta()?;
     let now = now_iso();
     let host = hostname();
@@ -185,7 +192,7 @@ fn claim(registry: &mut Registry, settings: &Settings) -> Result<i64, Error> {
         )
         .returning(&["id"]),
         &[vec![
-            Param::from("fingerprint"),
+            Param::from(kind),
             Param::from(settings.name.as_str()),
             Param::from(settings.config().to_string()),
             Param::from("running"),
@@ -205,7 +212,12 @@ fn claim(registry: &mut Registry, settings: &Settings) -> Result<i64, Error> {
         .int(0)?)
 }
 
-fn finish(store: &mut Store, job_id: i64, state: &str, error: Option<&str>) -> Result<(), Error> {
+pub fn finish(
+    store: &mut Store,
+    job_id: i64,
+    state: &str,
+    error: Option<&str>,
+) -> Result<(), Error> {
     let now = now_iso();
     let mut set: Vec<(&str, Param)> = vec![
         ("state", Param::from(state)),
@@ -218,7 +230,7 @@ fn finish(store: &mut Store, job_id: i64, state: &str, error: Option<&str>) -> R
     Ok(())
 }
 
-fn beat(store: &mut Store, job_id: i64) -> Result<(), Error> {
+pub fn beat(store: &mut Store, job_id: i64) -> Result<(), Error> {
     let now = now_iso();
     store.update_by_id(
         table("job"),
@@ -236,7 +248,7 @@ pub fn fingerprint(
     cancel: &Cancel,
 ) -> Result<Report, Error> {
     let started = Instant::now();
-    let job_id = claim(registry, settings)?;
+    let job_id = claim_for(registry, settings, "fingerprint")?;
     let result = run(registry, settings, cancel, job_id, started);
     let store = registry.store();
     match &result {

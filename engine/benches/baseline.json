@@ -8,7 +8,8 @@
     "These are CI numbers on a shared runner, not the budget: the budget is measured",
     "on the baseline host of C6 and lives in the design record. What this file gates",
     "is drift \u2014 a change that halves the rate must be a change someone meant to make,",
-    "and updating these numbers is a commit of its own that says why."
+    "and updating these numbers is a commit of its own that says why.",
+    "The `stages` numbers are Wave 2's: a fingerprint and a classification of the same corpus, in stacks a second rather than files."
   ],
   "floor": 0.8,
   "instances": 200000,
@@ -24,6 +25,30 @@
         "when": "2026-09-03"
       },
       "note": "the gate number is set below what the runner measured on purpose: a shared runner varies by a quarter run to run, and this is here to catch a real regression, not to measure the machine"
+    }
+  },
+  "stages": {
+    "fingerprint": {
+      "Linux-X64": {
+        "stacks_per_s": 4437,
+        "rss_gib": 4.0,
+        "measured": {
+          "seen": 1527,
+          "elapsed_s": 0.3,
+          "peak_rss_gib": 0.06
+        }
+      }
+    },
+    "classify": {
+      "Linux-X64": {
+        "stacks_per_s": 13861,
+        "rss_gib": 4.0,
+        "measured": {
+          "seen": 1527,
+          "elapsed_s": 0.1,
+          "peak_rss_gib": 0.02
+        }
+      }
     }
   }
 }

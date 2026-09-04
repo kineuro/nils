@@ -645,6 +645,44 @@ strength is normalized into the fingerprint, not into `mri_series_details`), and
 a pass no longer sets the review flag on everything it touches; it sets it
 when it has something to say.
 
+### 7.3 What the other phases turned out to be
+
+Written after slice 6, from v0's own code rather than from its documentation.
+v0 has eight phases around per-stack classification, and the wave assumed each
+one would become a pass kind. Reading them, only one of them changes what a
+stack is classified as:
+
+| v0 phase | what it actually does | what it is in v1 |
+|---|---|---|
+| physics vote | fills a missing base and technique | the `nearest_neighbour_vote` pass, verified |
+| session rescue | marks `ORIGINAL\SECONDARY` stacks of a session with no primary, in memory, so exclusion skips them | a fact about a session, which belongs in the fingerprint |
+| SWI re-route | rewrites construct and technique for SWI outputs | already a route, decided by the rules (§6.5) |
+| field-strength normalization | rounds field strength to standard values, in a table shared with every cohort | a fingerprint field |
+| acquisition-type fill | fills `MRAcquisitionType` from other fields | a fingerprint field |
+| DWI enrichment | reads b values and phase-encode direction from vendor private tags | the reader's, in Wave 1 |
+| orientation confidence | raises a flag | a question for a person |
+| contrast duplicates | raises a flag on two identical stacks that both say PRE, or both POST | a question for a person |
+| incomplete 4D | raises a flag when slices hold different numbers of instances | a question for a person |
+
+Three of them fill fields, three raise questions, one is a route and one is a
+fact about a session. So a pass kind is needed for exactly one of the nine
+things v0 does after classifying, and the wave implements that one.
+
+The three that fill fields belong to the fingerprint, where they are computed
+once and are the same for every reader, rather than to a phase that rewrites a
+table shared with every cohort. The three that raise questions are review
+items, and what v1 changes about them is not the detection but the emission
+(§8.2): v0 sets its review flag on everything it touches. The session rescue is
+the interesting one: as a phase it depends on which stacks happen to be in the
+batch, so the same stack classified twice can be classified differently, which
+is the whole complaint of C14. As a fingerprint field, computed from the
+session and not from the batch, it is a fact and stays one.
+
+Carrying those four into the fingerprint and the queue is not this wave's work
+and is not needed for the gate, because none of them changes an axis. They are
+written down here as the wave's finding, with what each one becomes, so the
+decision is a decision and not an omission.
+
 ## 8. Evidence, review and decisions (D7, C15)
 
 ### 8.1 Evidence is stored
@@ -808,6 +846,31 @@ session duplicated on disk by an export that read a subject number out of a
 folder name. Neither would have been found by classifying the difference and
 moving on. Classification axes will produce more of that kind, not less, because
 a wrong axis usually has an upstream reason.
+
+### 11.6 What the seam measured
+
+Slice 8's bar was that no axis name, no flag name and no vocabulary value of
+MRI appears anywhere in the engine crates. Two things had to move for that to
+be true, and one is worth naming.
+
+The engine had its own idea called `provenance`: the scope a decision or an
+overlay may be written at, meaning the machine the data came from. The MRI
+pack has an axis of that name meaning how an image was produced, RawRecon or
+Derived or a vendor's own reconstruction. Two different ideas, one word, and
+the word belonged to the pack. Both are now `origin`, which no vocabulary
+uses.
+
+What is left in the engine that names a modality is `nils-dicom`'s reader of
+vendor private tags: the b value, the number of directions, the phase-encode
+direction, each read from a manufacturer's private block. That is knowledge
+about a file format rather than about a classification, it is Wave 1's, and a
+CT pack would need its own kind of it. It stays.
+
+The seam itself is a test rather than a claim: `crates/nils-pack/tests/seam.rs`
+carries a pack for a modality that does not exist, with two axes of its own, a
+route, a vocabulary the engine has never heard of and a corpus that judges it.
+It loads, it routes, it classifies, and no line of Rust changed to make it
+work.
 
 ## 12. CLI for Wave 2
 

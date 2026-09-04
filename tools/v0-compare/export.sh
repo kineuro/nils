@@ -62,6 +62,8 @@ copy mri_series_details "SELECT * FROM mri_series_details"
 copy ct_series_details "SELECT * FROM ct_series_details"
 copy pet_series_details "SELECT * FROM pet_series_details"
 copy series_stack "SELECT * FROM series_stack"
+# v0's verdicts, which the Wave 2 gate compares v1's against.
+copy series_classification_cache "SELECT * FROM series_classification_cache"
 copy instance "SELECT instance_id, series_id, series_instance_uid, sop_instance_uid, instance_number,
     acquisition_number, acquisition_date, acquisition_time, content_date, content_time,
     slice_location, pixel_spacing, rows, columns, bits_allocated, bits_stored, high_bit,

@@ -109,8 +109,8 @@ mod tests {
     #[test]
     fn folds_whitespace_and_keeps_case() {
         assert_eq!(
-            fold(Some("  T2  FLAIR\tax \n")).as_deref(),
-            Some("T2 FLAIR ax")
+            fold(Some("  one  TWO\tthree \n")).as_deref(),
+            Some("one TWO three")
         );
         assert_eq!(fold(Some("")), None);
         assert_eq!(fold(Some("   ")), None);
@@ -140,8 +140,8 @@ mod tests {
 
     #[test]
     fn joins_the_present_parts_in_order() {
-        let parts = [Some("ax t2"), None, Some(""), Some("tse")];
-        assert_eq!(join(&parts).as_deref(), Some("ax t2 tse"));
+        let parts = [Some("one two"), None, Some(""), Some("three")];
+        assert_eq!(join(&parts).as_deref(), Some("one two three"));
         assert_eq!(join(&[None, Some("")]), None);
     }
 

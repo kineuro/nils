@@ -53,6 +53,10 @@ pub struct Verdict {
     pub evidence: Vec<Evidence>,
     /// The rule sets that were entered, in the order they ran.
     pub entered: Vec<String>,
+    /// Whether the pack says nobody is to be asked about this stack, however
+    /// weakly an axis resolved (§8.2). A localizer excluded on purpose is
+    /// the case it exists for.
+    pub silent: bool,
 }
 
 impl Verdict {

@@ -9,10 +9,12 @@
 //! MRI in here. Folding text is here because folding is a fact about text;
 //! deciding that `ir` means inversion recovery is not, and it lives in a pack.
 
+pub mod classify;
 pub mod fingerprint;
 pub mod fold;
 pub mod job;
+pub mod passes;
 pub mod report;
 
 pub use job::{Error, Settings, fingerprint as run};
-pub use report::Report;
+pub use report::{Classified, Report};

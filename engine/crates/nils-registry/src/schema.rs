@@ -420,6 +420,88 @@ fn build_registry() -> Vec<Table> {
         .unique(&["stack_id"])
         .index(&["series_id"])
         .index(&["modality"]),
+        // What a pack decided, and what made it decide
+        // (`docs/specs/wave2-fingerprint-and-classify.md`, §8).
+        //
+        // The axes are the pack's and not the engine's, so they are rows and
+        // not columns: the registry stores what a pack says without knowing
+        // what any of it means, which is what lets a modality be added
+        // without touching this file (§13, slice 8).
+        Table::new(
+            "classification",
+            vec![
+                col("id", Type::Id),
+                req("stack_id", Type::Int),
+                // Which pack judged it, and under which overlay. This is the
+                // column that turns a re-classification from a blind
+                // overwrite into a diff (§5.2).
+                req("pack", Type::Text),
+                req("pack_version", Type::Text),
+                req("contract", Type::Int),
+                col("overlay", Type::Text),
+                req("job_id", Type::Int),
+                req("epoch", Type::Int),
+                // How many review items this stack's verdict raised.
+                req("review_items", Type::Int),
+            ],
+        )
+        .unique(&["stack_id"])
+        .index(&["pack", "pack_version"]),
+        Table::new(
+            "classification_axis",
+            vec![
+                col("id", Type::Id),
+                req("stack_id", Type::Int),
+                req("axis", Type::Text),
+                // What a row stores: one value, or several comma-joined for a
+                // multi-valued axis, exactly as v0 wrote them.
+                col("value", Type::Text),
+                req("confidence", Type::Double),
+                req("tier", Type::Text),
+            ],
+        )
+        .unique(&["stack_id", "axis"])
+        .index(&["axis", "value"]),
+        Table::new(
+            "classification_evidence",
+            vec![
+                col("id", Type::Id),
+                req("stack_id", Type::Int),
+                req("axis", Type::Text),
+                req("value", Type::Text),
+                req("tier", Type::Text),
+                req("confidence", Type::Double),
+                req("rule_set", Type::Text),
+                req("rule", Type::Text),
+                req("source", Type::Text),
+                col("matched", Type::Text),
+                // A pass wrote this, and against which named reference. Null
+                // when a rule did, which is most of the time.
+                col("pass", Type::Text),
+                col("reference", Type::Text),
+            ],
+        )
+        .index(&["stack_id"]),
+        // A person's or an agent's verdict, which outranks a rule and
+        // survives a re-classification (C15, D7).
+        Table::new(
+            "decision",
+            vec![
+                col("id", Type::Id),
+                // What it applies to: stack, series, subject or origin.
+                req("scope", Type::Text),
+                req("ref", Type::Text),
+                req("axis", Type::Text),
+                col("value", Type::Text),
+                req("actor", Type::Text),
+                col("why", Type::Text),
+                req("decided_at", Type::Timestamp),
+                // A decision a later person withdrew stays, and stops
+                // applying: nothing about a human's judgement is deleted.
+                col("withdrawn_at", Type::Timestamp),
+            ],
+        )
+        .index(&["scope", "ref", "axis"]),
         Table::new(
             "diagnostic",
             vec![

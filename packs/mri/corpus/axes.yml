@@ -76,3 +76,45 @@ cases:
     axes:
       # FLAIR and STIR are both in IR_CONTRAST; the lower priority wins.
       modifier: FLAIR
+
+  # --- from the nmosd gate (spec section 11.2). Each of these is a case the
+  # parity diff produced: v0's stored verdict disagreed, v0's own code agreed,
+  # and the case is what keeps the answer once nobody remembers the argument.
+
+  - name: a multi-echo Siemens sequence is MEDIC, and its contrast is T2 star
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'GR'
+      sequence_variant: 'SP\OSP'
+      text_sequence_name: '*me2d1r3'
+      text_series_description: 'ax t2 medic'
+      echo_time: 20
+      repetition_time: 700
+      flip_angle: 20
+    axes:
+      technique: MEDIC
+      base: 'T2*w'
+
+  - name: a stack marked ND carries the ND construct
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      text_series_description: 'ax t1 se'
+      scanning_sequence: 'SE'
+      echo_time: 12
+      repetition_time: 500
+    axes:
+      construct: ND
+
+  # The word that decided this one in the gate: the normalizer drops `brain`
+  # and `head` as boilerplate, which is right for telling techniques apart,
+  # so what says brain here is the Swedish for it, with the non-ASCII folded
+  # to a space exactly as the keyword list spells it.
+  - name: a description in Swedish says which body part it is
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_series_description: 'ax t2 hjärna'
+      scanning_sequence: 'SE'
+      echo_time: 100
+      repetition_time: 4000
+    axes:
+      body_part: brain

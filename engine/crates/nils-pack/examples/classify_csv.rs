@@ -12,6 +12,7 @@
 //! Column names are the fingerprint's (`nils_pack::stack::FIELDS`). A v0
 //! export uses its own names for the same things, so those are accepted too.
 
+use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 
 /// v0's column name for the same field, where it differs.
@@ -92,9 +93,53 @@ fn main() {
     });
     eprintln!("{} columns feed a field", cols.len());
 
+    // With --passes, the phases that read more than one stack run too, over
+    // the corpus in the file: the reference is the CSV, which is what makes
+    // the result comparable with v0's over the same rows.
+    let with_passes = args.iter().any(|a| a == "--passes");
+    // v0 votes for every MR stack whether or not the answer is written, so a
+    // comparison asks for every one of them.
+    let vote_all = args.iter().any(|a| a == "--vote-all");
+    let mut corpus = nils_pack::pass::Corpus::new(&pack);
+    // A pass reads what the rules decided. To compare the algorithm with v0's
+    // while holding the reference equal, the axes may instead be read from a
+    // CSV of v0's own verdicts: then the two votes see the same pool and any
+    // difference left is the algorithm and not the reference.
+    let axes_from: Option<HashMap<String, Vec<String>>> = arg(&args, "--axes-from").map(|path| {
+        let mut by_id = HashMap::new();
+        let mut rdr = csv::Reader::from_path(&path).unwrap_or_else(|e| {
+            eprintln!("{path}: {e}");
+            std::process::exit(2)
+        });
+        let head = rdr.headers().expect("a header row").clone();
+        let at = |name: &str| head.iter().position(|h| h == name);
+        let id_at = at("series_stack_id").unwrap_or(0);
+        let axis_at: Vec<Option<usize>> = pack.axes.iter().map(|a| at(&a.name)).collect();
+        for rec in rdr.records() {
+            let r = rec.expect("a row");
+            by_id.insert(
+                r.get(id_at).unwrap_or("").to_string(),
+                axis_at
+                    .iter()
+                    .map(|c| c.and_then(|i| r.get(i)).unwrap_or("").to_string())
+                    .collect(),
+            );
+        }
+        eprintln!("axes read from {path}: {} stacks", by_id.len());
+        by_id
+    });
+    let no_axes: Vec<String> = vec![String::new(); pack.axes.len()];
+
     let out = std::io::stdout();
     let mut w = BufWriter::with_capacity(1 << 20, out.lock());
     let mut n = 0u64;
+    // The queue the pack's own policy would raise over this corpus, counted
+    // by the engine's rule and not by a script that reimplements it.
+    let mut queue: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut tiers: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut asked = 0u64;
+    let mut silent = 0u64;
+    let mut stacks = 0u64;
     for rec in rdr.records() {
         let r = rec.expect("a row");
         let mut stack = nils_pack::Stack::new();
@@ -116,6 +161,48 @@ fn main() {
             continue;
         }
         let verdict = ev.classify();
+        stacks += 1;
+        if with_passes {
+            let theirs = axes_from.as_ref().map(|m| m.get(id).unwrap_or(&no_axes));
+            corpus.push(
+                id.parse().unwrap_or(0),
+                |f| stack.as_text(f).into_owned(),
+                |a| match theirs {
+                    Some(v) => v[a].clone(),
+                    None => verdict
+                        .axis(&pack.axes[a].name)
+                        .map(|v| v.stored())
+                        .unwrap_or_default(),
+                },
+            );
+        }
+        silent += u64::from(verdict.silent);
+        let mut any = false;
+        for axis in &pack.axes {
+            let found = verdict.axis(&axis.name);
+            let value = found.map(|a| a.stored()).unwrap_or_default();
+            if let Some(a) = found {
+                *tiers
+                    .entry(format!("{}:{}", axis.name, a.tier))
+                    .or_default() += 1;
+            }
+            if verdict.silent {
+                continue;
+            }
+            let kind = if value.is_empty() {
+                pack.review
+                    .asks_when_missing(&axis.name)
+                    .then_some("missing")
+            } else {
+                let c = found.map(|a| a.confidence).unwrap_or(0.0);
+                (c > 0.0 && c < pack.review.below(&axis.name)).then_some("low_confidence")
+            };
+            if let Some(kind) = kind {
+                *queue.entry(format!("{}:{kind}", axis.name)).or_default() += 1;
+                any = true;
+            }
+        }
+        asked += u64::from(any);
         // A row per axis per stack, whether or not the axis resolved: an
         // axis that resolved to nothing is a fact, and leaving the row out
         // would make it look like a stack nobody judged.
@@ -130,18 +217,90 @@ fn main() {
                 .find(|e| e.axis == axis.name)
                 .map(|e| (e.tier.as_str(), e.matched.as_str()))
                 .unwrap_or(("", ""));
+            // The confidence is the sixth column: it decides nothing about
+            // the verdict, and it is what says whether a person is asked.
             writeln!(
                 w,
-                "{id}\t{}\t{}\t{}\t{}",
+                "{id}\t{}\t{}\t{}\t{}\t{}",
                 axis.name,
                 found.map(|a| a.stored()).unwrap_or_default(),
                 cited.0,
-                cited.1
+                cited.1,
+                found
+                    .map(|a| format!("{:.2}", a.confidence))
+                    .unwrap_or_default(),
             )
             .ok();
         }
         n += 1;
     }
     w.flush().ok();
+    if with_passes {
+        run_passes(&pack, &corpus, vote_all, &mut w);
+    }
     eprintln!("{n} stacks");
+    if stacks > 0 {
+        let items: u64 = queue.values().sum();
+        eprintln!(
+            "queue: {items} item(s) over {asked} stack(s), {:.2}% of {stacks}; {silent} ruled out",
+            100.0 * asked as f64 / stacks as f64
+        );
+        let mut by: Vec<(&String, &u64)> = queue.iter().collect();
+        by.sort_by_key(|(_, n)| -(**n as i64));
+        for (kind, count) in by {
+            eprintln!("  {kind:<28} {count:>8}");
+        }
+        let mut weak: Vec<(&String, &u64)> = tiers
+            .iter()
+            .filter(|(k, _)| k.ends_with(":physics") || k.ends_with(":default"))
+            .collect();
+        weak.sort_by_key(|(_, n)| -(**n as i64));
+        for (what, count) in weak.iter().take(4) {
+            eprintln!("  {what:<28} {count:>8}   decided with no keyword");
+        }
+    }
+}
+
+/// Every pass of the pack over the corpus in the file, written in the shape
+/// the referee writes v0's, so the two diff row by row.
+fn run_passes(
+    pack: &nils_pack::Pack,
+    corpus: &nils_pack::pass::Corpus,
+    vote_all: bool,
+    w: &mut impl Write,
+) {
+    for pass in &pack.passes {
+        let Some(vote) = pass.vote() else { continue };
+        let (answers, pool, pools) = nils_pack::pass::run_vote(pack, pass, vote, corpus, vote_all);
+        eprintln!(
+            "{}: reference {pool} stacks, {pools} pools, {} answered of {}",
+            pass.name,
+            answers.iter().filter(|a| !a.writes.is_empty()).count(),
+            answers.len()
+        );
+        for a in &answers {
+            let answer = vote
+                .vote_on
+                .iter()
+                .map(|axis| {
+                    a.writes
+                        .iter()
+                        .find(|(x, _)| x == axis)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+                .join("|");
+            writeln!(
+                w,
+                "{}\tvote\t{answer}\t{}\t{} of {} in {}",
+                corpus.ids[a.at],
+                a.outcome.method,
+                a.outcome.matches,
+                a.outcome.neighbours,
+                a.outcome.partition
+            )
+            .ok();
+        }
+    }
 }

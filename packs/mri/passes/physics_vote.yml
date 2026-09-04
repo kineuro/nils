@@ -1,0 +1,167 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The physics vote: fill a missing base or technique from the stacks whose
+# acquisition physics is the same.
+#
+# Carried from v0 0.5.3 `sort/gap_filling.py` and phase 3 of
+# `sort/steps/step4_completion.py`, by way of the C11 prototype, which ran
+# this against v0's own code over 518,353 votes of the live corpus with no
+# disagreement (spec section 5.1).
+#
+# A pass is not an expression but an algorithm, so the pack does not write
+# one. It declares a configured instance of a kind the engine provides, and
+# every number the algorithm uses is here rather than in the code.
+#
+# What changes from v0, declared rather than discovered (spec section 7.2):
+#   * `reference.scope` is named and recorded on the row. v0 votes against
+#     every classified MR stack in the database as it stands at that moment,
+#     so the answer a stack gets depends on what was sorted before it, and
+#     sorting one cohort can change another.
+#   * `on_tie: none`. v0 breaks a tie by the order the reference rows arrived
+#     in, which is the order the database happened to return them.
+#   * `emit`. v0 computes the match count and the widening method, keeps
+#     neither, and then sets its review flag on every stack it touches, which
+#     is why a person who cleared a flag sees it come back.
+
+pass: physics_vote
+kind: nearest_neighbour_vote
+phase: after
+
+# Which stacks it runs on: the ones with a gap it could fill.
+target:
+  when:
+    any:
+      - {axis: base, missing_or: Unknown}
+      - {axis: technique, missing_or: Unknown}
+
+reference:
+  # Named, and recorded on every row the pass writes.
+  scope: registry_snapshot
+  filter:
+    modality: MR
+    base: {present: true, not: Unknown}
+    technique: {present: true, not: Unknown}
+    directory_type: {not: excluded}
+  # One pool per intent, so an anatomical stack votes among anatomical ones,
+  partition_by: directory_type
+  # and the whole pool when its own says nothing.
+  fallback: global
+  # The three v0 falls back on. A tie is not among them on purpose: a pool
+  # that cannot tell two answers apart has told us something, and asking a
+  # wider one until somebody answers is how a vote talks itself into a
+  # verdict.
+  fallback_when: [no_match, insufficient_matches, no_compatible_match]
+  # A misc stack votes in the misc pool like any other, and then stops: it
+  # is the pool of stacks nothing else described, so widening it to the whole
+  # archive would answer with the archive's average.
+  fallback_except: [misc]
+
+# `rounding` is in the pack because the two languages disagree: Python rounds
+# a half to even and Rust rounds it away from zero, which puts a TR of exactly
+# 50 ms in a different bin. A pack that does not carry its conventions is not
+# portable, only untested on the other implementation.
+key:
+  repetition_time: {round: 100, rounding: half_even}
+  echo_time:       {round: 5,   rounding: half_even}
+  inversion_time:  {round: 100, rounding: half_even}
+  flip_angle:      {round: 5,   rounding: half_even}
+  n_instances:     {ceil: 20}
+
+widen:
+  max_distance: 2
+  pairs: [[echo_time, inversion_time], [repetition_time, flip_angle]]
+  relaxed:
+    - requires: inversion_time
+      vary: {inversion_time: 6, echo_time: 4}
+      method: expanded_relaxed_ti
+
+decide:
+  vote_on: [base, technique]
+  min_matches: 2
+  on_tie: none
+  writes: [base, technique]
+  write_when: {missing_or: Unknown}
+
+emit:
+  evidence: always
+  review_item_below: 0.7
+  review_all_touched: false
+
+# ---------------------------------------------------------------------------
+# The compatibility filter: a voted technique must fit the stack's own
+# ScanningSequence. Ordered, first match decides: the shape of a rule set.
+# Every test is a substring of the upper-cased raw value, as v0 does, so `SE`
+# matches inside `FSE` on purpose.
+#
+# This table is v0's gap-filling one and not the technique axis's own
+# `family`. The two agree about SE, GRE and EPI and disagree about everything
+# the axis calls MIXED, and this is the one the vote was verified against.
+compatibility:
+  # Which of the voted axes these rules judge. Declared and not guessed: both
+  # base and technique have a value called SWI.
+  judges: technique
+  # What the rules below read: the stack's own ScanningSequence, upper-cased.
+  # The candidate technique is the other half of the subject, and `family`
+  # and `candidate_empty` are the atoms that reach it.
+  subject: {text: scanning_sequence, case: upper}
+  default_family: OTHER
+  family_of:
+    SE: SE
+    TSE: SE
+    HASTE: SE
+    RESTORE: SE
+    MESE: SE
+    MDME: SE
+    SPACE: SE
+    TIRM: SE
+    3D-TSE: SE
+    SS-TSE: SE
+    IR-TSE: SE
+    ME-SE: SE
+    VFA-TSE: SE
+    GRE: GRE
+    FLASH: GRE
+    MPRAGE: GRE
+    MEMPRAGE: GRE
+    MP2RAGE: GRE
+    TOF-MRA: GRE
+    PC-MRA: GRE
+    SWI: GRE
+    CISS: GRE
+    bSSFP: GRE
+    FIESTA: GRE
+    DESS: GRE
+    SSFP: GRE
+    QALAS: GRE
+    VI-GRE: GRE
+    SP-GRE: GRE
+    SS-GRE: GRE
+    FSP-GRE: GRE
+    VFA-GRE: GRE
+    ME-GRE: GRE
+    EPI: EPI
+    DWI-EPI: EPI
+    BOLD-EPI: EPI
+    GRE-EPI: EPI
+    SE-EPI: EPI
+    GRASE: EPI
+    ASL: OTHER
+    Perfusion: OTHER
+    MRF: OTHER
+    BOLD: OTHER
+  rules:
+    - {when: {any: [{empty: true}, {candidate_empty: true}]}, allow: true}
+    # Research mode is ambiguous, so it allows everything except EPI on a
+    # sequence that says nothing but RM.
+    - when: {all: [{substring: RM}, {not: {substring: TIRM}},
+                   {any: [{equals: 'RM'}, {equals: "['RM']"}]}, {family: EPI}]}
+      allow: false
+    - {when: {all: [{substring: RM}, {not: {substring: TIRM}}]}, allow: true}
+    - {when: {family: EPI}, allow: {substring: EP}}
+    - when: {family: SE}
+      allow: {any: [{substring: SE}, {substring: FSE}, {substring: IR},
+                    {all: [{not: {substring: EP}}, {not: {substring: GR}}]}]}
+    - when: {family: GRE}
+      allow: {any: [{substring: GR},
+                    {all: [{not: {substring: SE}}, {not: {substring: EP}}]}]}
+    - {when: true, allow: true}

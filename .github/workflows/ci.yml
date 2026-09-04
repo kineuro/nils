@@ -168,6 +168,21 @@ jobs:
       - name: hold it against the baseline
         working-directory: engine
         run: python3 benches/gate.py "$RUNNER_TEMP/report.json" benches/baseline.json "${{ runner.os }}-${{ runner.arch }}"
+      - name: fingerprint and classify the same corpus
+        working-directory: engine
+        run: |
+          ./target/release/nils fingerprint --registry "$RUNNER_TEMP/reg" --name bench --json \
+              > "$RUNNER_TEMP/fingerprint.json"
+          ./target/release/nils classify --registry "$RUNNER_TEMP/reg" --pack-dir ../packs \
+              --name bench --json > "$RUNNER_TEMP/classify.json"
+          tail -c 600 "$RUNNER_TEMP/classify.json"
+      - name: hold the classification against the baseline
+        working-directory: engine
+        run: |
+          python3 benches/gate.py "$RUNNER_TEMP/fingerprint.json" benches/baseline.json \
+              "${{ runner.os }}-${{ runner.arch }}" --stage fingerprint
+          python3 benches/gate.py "$RUNNER_TEMP/classify.json" benches/baseline.json \
+              "${{ runner.os }}-${{ runner.arch }}" --stage classify
 
   build:
     uses: ./.github/workflows/engine-build.yml

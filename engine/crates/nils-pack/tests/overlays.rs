@@ -201,7 +201,7 @@ fn an_overlay_scoped_by_a_selection_is_refused() {
         "overlay: k\nversion: 1.0.0\npack: t\nscope: {cohort: nmosd}\nbuckets:\n  agents: {add: [x]}\ncases:\n  - {name: c, stack: {text_contrast: x}, flags: {has_agent: true}}\n",
     );
     let e = nils_pack::Overlay::load(&o).err().unwrap().to_string();
-    assert!(e.contains("scoped by provenance"), "{e}");
+    assert!(e.contains("scoped by origin"), "{e}");
     assert!(e.contains("never by a selection"), "{e}");
 }
 

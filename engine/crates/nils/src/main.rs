@@ -60,6 +60,16 @@ enum Command {
     Digest(DigestArgs),
     /// Derive the per-stack values a classifier reads, once, and store them
     Fingerprint(FingerprintArgs),
+    /// Judge every stack with a pack, and write the verdict with its evidence
+    Classify(ClassifyArgs),
+    /// Why one stack was judged the way it was: the axes, the evidence, the decisions
+    Explain {
+        /// The stack's id
+        stack: i64,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
     /// Classification packs: what is installed, what one says, whether it loads
     Pack {
         #[command(subcommand)]
@@ -130,6 +140,38 @@ enum ReviewCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Answer one review item: record the person's decision and close it
+    Decide(DecideArgs),
+}
+
+/// `nils review decide` (Wave 2 §8.3).
+#[derive(Debug, Args)]
+struct DecideArgs {
+    /// The review item to answer
+    id: i64,
+    /// How far the answer reaches: this stack, or everything of its series,
+    /// its subject, or the machine that made it
+    #[arg(
+        long,
+        default_value = "stack",
+        value_name = "stack|series|subject|origin"
+    )]
+    scope: String,
+    /// What the axis is, in the person's judgement
+    #[arg(long, value_name = "VALUE", conflicts_with = "nothing")]
+    value: Option<String>,
+    /// The axis has no value on this stack
+    #[arg(long)]
+    nothing: bool,
+    /// Who decided; the operating system's user by default
+    #[arg(long, value_name = "WHO")]
+    actor: Option<String>,
+    /// Why, in the person's own words
+    #[arg(long, value_name = "TEXT")]
+    why: Option<String>,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -310,6 +352,8 @@ fn main() -> ExitCode {
         Command::Key { command } => key(&home, command),
         Command::Digest(args) => digest(&home, args),
         Command::Fingerprint(args) => fingerprint(&home, args),
+        Command::Classify(args) => classify(&home, args),
+        Command::Explain { stack, json } => explain(&home, stack, json),
         Command::Pack { command } => pack_command(&home, command),
         Command::Status(args) => status(&home, args),
         Command::Linkage { command } => linkage_command(&home, command),
@@ -472,6 +516,209 @@ fn key_in_use(home: &Home, config: Option<&Config>) -> Option<String> {
     home.open().ok().map(|r| r.meta().pseudonym_key.clone())
 }
 
+/// `nils classify` (Wave 2 §9).
+#[derive(Debug, Parser)]
+struct ClassifyArgs {
+    /// The pack's name, looked up in the pack directory
+    #[arg(long, default_value = "mri")]
+    pack: String,
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<PathBuf>,
+    /// An origin-scoped amendment to it
+    #[arg(long, value_name = "FILE")]
+    overlay: Option<PathBuf>,
+    /// The run's label, recorded on the job
+    #[arg(long)]
+    name: Option<String>,
+    /// Only stacks of this modality
+    #[arg(long, value_name = "MR|CT|PT|...")]
+    modality: Option<String>,
+    /// Ask about every axis below this confidence, whatever the pack declares
+    #[arg(long, value_name = "0..1")]
+    review_below: Option<f64>,
+    /// Stacks per window, one transaction each
+    #[arg(long, value_name = "N")]
+    window: Option<usize>,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
+}
+
+fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
+    let dir = pack_dir(home, args.pack_dir)?;
+    let found = packs_in(&dir)?
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|f| f == args.pack.as_str()))
+        .ok_or_else(|| fail(format!("no pack named {} in {}", args.pack, dir.display())))?;
+    let overlay = load_overlay(args.overlay.as_ref())?;
+    let pack = nils_pack::load(&found, overlay.as_ref()).map_err(|e| fail(e.to_string()))?;
+
+    let mut settings = nils_classify::Settings {
+        modality: args.modality,
+        ..nils_classify::Settings::default()
+    };
+    if let Some(n) = args.name {
+        settings.name = n;
+    }
+    if let Some(w) = args.window {
+        if w == 0 {
+            return Err(usage("--window must be at least 1"));
+        }
+        settings.window = w;
+    }
+    if let Some(r) = args.review_below {
+        if !(0.0..=1.0).contains(&r) {
+            return Err(usage("--review-below is a confidence, between 0 and 1"));
+        }
+        settings.review_below = Some(r);
+    }
+
+    let cancel = stop_on_signal()?;
+    let mut registry = open(home)?;
+    let report = nils_classify::classify::classify(&mut registry, &pack, &settings, &cancel)
+        .map_err(|e| match e {
+            nils_classify::Error::Busy { .. } => Exit {
+                code: BUSY,
+                message: e.to_string(),
+            },
+            other => fail(other.to_string()),
+        })?;
+    if args.json {
+        let text = serde_json::to_string_pretty(&report)
+            .map_err(|e| fail(format!("the report will not serialize: {e}")))?;
+        println!("{text}");
+    } else {
+        print!("{report}");
+    }
+    if report.cancelled {
+        return Err(Exit {
+            code: STOPPED,
+            message: "stopped: what was judged is written; run again to go on".into(),
+        });
+    }
+    Ok(())
+}
+
+/// `nils explain` (Wave 2 §12): small, and load-bearing. It is the answer to
+/// "why is this a T2w", which v0 cannot give at all.
+fn explain(home: &Home, stack: i64, json: bool) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let store = registry.store();
+    let meta = store
+        .query(
+            &format!(
+                "SELECT pack, pack_version, contract, overlay, review_items FROM {} WHERE stack_id = {}",
+                store.qualified("classification"),
+                store.dialect().param(1, nils_registry::schema::Type::Int)
+            ),
+            &[nils_registry::store::Param::Int(stack)],
+        )
+        .map_err(|e| fail(e.to_string()))?;
+    let Some(m) = meta.first() else {
+        return Err(fail(format!("stack {stack} has not been classified")));
+    };
+    let pack = format!(
+        "{}@{}",
+        m.text(0).map_err(|e| fail(e.to_string()))?,
+        m.text(1).map_err(|e| fail(e.to_string()))?
+    );
+    let overlay = m
+        .opt_text(3)
+        .map_err(|e| fail(e.to_string()))?
+        .map(str::to_string);
+    let review_items = m.int(4).map_err(|e| fail(e.to_string()))?;
+
+    let axes = store
+        .query(
+            &format!(
+                "SELECT axis, value, confidence, tier FROM {} WHERE stack_id = {} ORDER BY axis",
+                store.qualified("classification_axis"),
+                store.dialect().param(1, nils_registry::schema::Type::Int)
+            ),
+            &[nils_registry::store::Param::Int(stack)],
+        )
+        .map_err(|e| fail(e.to_string()))?;
+    let ev = store
+        .query(
+            &format!(
+                "SELECT axis, value, tier, confidence, rule_set, rule, source, matched FROM {} \
+                 WHERE stack_id = {} ORDER BY axis, id",
+                store.qualified("classification_evidence"),
+                store.dialect().param(1, nils_registry::schema::Type::Int)
+            ),
+            &[nils_registry::store::Param::Int(stack)],
+        )
+        .map_err(|e| fail(e.to_string()))?;
+
+    if json {
+        let axes_json: Vec<serde_json::Value> = axes
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "axis": r.text(0).unwrap_or_default(),
+                    "value": r.opt_text(1).ok().flatten(),
+                    "confidence": r.double(2).unwrap_or(0.0),
+                    "tier": r.text(3).unwrap_or_default(),
+                })
+            })
+            .collect();
+        let ev_json: Vec<serde_json::Value> = ev
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "axis": r.text(0).unwrap_or_default(),
+                    "value": r.text(1).unwrap_or_default(),
+                    "tier": r.text(2).unwrap_or_default(),
+                    "confidence": r.double(3).unwrap_or(0.0),
+                    "rule_set": r.text(4).unwrap_or_default(),
+                    "rule": r.text(5).unwrap_or_default(),
+                    "source": r.text(6).unwrap_or_default(),
+                    "matched": r.opt_text(7).ok().flatten(),
+                })
+            })
+            .collect();
+        let v = serde_json::json!({
+            "stack": stack, "pack": pack, "overlay": overlay,
+            "review_items": review_items, "axes": axes_json, "evidence": ev_json,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&v)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
+
+    println!("stack {stack}, judged by {pack}");
+    if let Some(o) = &overlay {
+        println!("  under overlay {o}");
+    }
+    for r in &axes {
+        let axis = r.text(0).unwrap_or_default();
+        let value = r.opt_text(1).ok().flatten().unwrap_or("");
+        println!(
+            "  {axis:16} {:20} {:.2}  {}",
+            if value.is_empty() { "(nothing)" } else { value },
+            r.double(2).unwrap_or(0.0),
+            r.text(3).unwrap_or_default()
+        );
+        for e in ev.iter().filter(|e| e.text(0).unwrap_or_default() == axis) {
+            println!(
+                "      {} said {} by {}, from {} {}",
+                e.text(4).unwrap_or_default(),
+                e.text(1).unwrap_or_default(),
+                e.text(2).unwrap_or_default(),
+                e.text(6).unwrap_or_default(),
+                e.opt_text(7).ok().flatten().unwrap_or("")
+            );
+        }
+    }
+    if review_items > 0 {
+        println!("  {review_items} review item(s) were raised for this stack");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Subcommand)]
 enum PackCommand {
     /// The packs in the pack directory, with their versions
@@ -613,6 +860,20 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                         "name": p.name, "predicates": p.preds.len()
                     })).collect::<Vec<_>>(),
                     "flags": pack.flags.len(),
+                    "axes": pack.axes.iter().map(|a| serde_json::json!({
+                        "axis": a.name, "multi": a.multi, "values": a.values.len(),
+                        "review_below": pack.review.below(&a.name),
+                        "asks_when_missing": pack.review.asks_when_missing(&a.name),
+                    })).collect::<Vec<_>>(),
+                    "passes": pack.passes.iter().map(|p| serde_json::json!({
+                        "pass": p.name, "kind": p.kind_name(),
+                        "phase": format!("{:?}", p.phase).to_lowercase(),
+                        "reference": p.reference.scope,
+                    })).collect::<Vec<_>>(),
+                    "rule_sets": pack.rule_sets.iter().map(|r| serde_json::json!({
+                        "rule_set": r.name, "rules": r.rules.len(),
+                        "decides": r.decides, "entered": r.enter_when.is_some(),
+                    })).collect::<Vec<_>>(),
                     "buckets": pack.buckets,
                     "cases": pack.cases,
                     "overlay": pack.overlay,
@@ -634,6 +895,39 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                 }
                 println!("  flags   {:20} {:3}", "", pack.flags.len());
                 println!("  cases   {:20} {:3}", "", pack.cases);
+                for a in &pack.axes {
+                    let asked = if pack.review.asks_when_missing(&a.name) {
+                        ", asked when missing"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  axis    {:20} {:3} values, asked below {:.2}{asked}",
+                        a.name,
+                        a.values.len(),
+                        pack.review.below(&a.name)
+                    );
+                }
+                for p in &pack.passes {
+                    println!(
+                        "  pass    {:20} {} against {}",
+                        p.name,
+                        p.kind_name(),
+                        p.reference.scope
+                    );
+                }
+                for r in &pack.rule_sets {
+                    println!(
+                        "  rules   {:20} {:3} rules{}",
+                        r.name,
+                        r.rules.len(),
+                        if r.enter_when.is_some() {
+                            ", entered by a condition"
+                        } else {
+                            ""
+                        }
+                    );
+                }
                 if pack.buckets.is_empty() {
                     println!("  buckets {:20} none open for editing", "");
                 } else {
@@ -1456,6 +1750,10 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             }
             Ok(())
         }
+        ReviewCommand::Decide(args) => {
+            drop(columns);
+            review_decide(&mut registry, args)
+        }
         ReviewCommand::Show { id, json } => {
             let sql = format!(
                 "SELECT {columns} FROM {} WHERE id = {}",
@@ -1494,6 +1792,286 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             Ok(())
         }
     }
+}
+
+/// `nils review decide`: a person's answer to one item.
+///
+/// The answer is written twice on purpose. The `decision` row is what the
+/// classifier reads on every later run, so the judgement outlives the pack
+/// version that prompted it; the review item is closed with the same words,
+/// so the queue shrinks by exactly what was answered. A decision that
+/// replaces an earlier one on the same axis withdraws it rather than
+/// overwriting it: nothing a person said is deleted.
+fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> {
+    let DecideArgs {
+        id,
+        scope,
+        value,
+        nothing,
+        actor,
+        why,
+        json,
+    } = args;
+    if value.is_none() && !nothing {
+        return Err(usage(
+            "say what the axis is: --value <v>, or --nothing when it has none",
+        ));
+    }
+    let store = registry.store();
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT kind, scope, status, {}, {} FROM {} WHERE id = {}",
+        text_of(store, "review_item", "ref"),
+        text_of(store, "review_item", "evidence"),
+        store.qualified("review_item"),
+        d.param(1, Type::Int)
+    );
+    let row = store
+        .query_opt(&sql, &[Param::Int(id)])?
+        .ok_or_else(|| fail(format!("no review item {id}")))?;
+    let kind = row.text(0)?.to_string();
+    let status = row.text(2)?.to_string();
+    let json_of = |i: usize| -> serde_json::Value {
+        row.opt_text(i)
+            .ok()
+            .flatten()
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(serde_json::Value::Null)
+    };
+    let reference = json_of(3);
+    let evidence = json_of(4);
+
+    // Only the classifier's questions are about an axis. A quarantine or an
+    // identity collision is answered by `review apply`, which is Wave 4's.
+    let axis = evidence["axis"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            fail(format!(
+                "review item {id} is a {kind}, which is not a question about an axis"
+            ))
+        })?;
+    let stack = match &reference["stack_id"] {
+        serde_json::Value::Number(n) => n.as_i64().unwrap_or(0),
+        _ => return Err(fail(format!("review item {id} names no stack"))),
+    };
+    if status != "open" {
+        return Err(fail(format!(
+            "review item {id} is already {status}; decide the axis again with a new run"
+        )));
+    }
+
+    // How far the answer reaches. A person answers about one stack and may
+    // mean the whole series, the whole subject or the scanner: the wider call
+    // is written at that scope, and a narrower one still overrides it later.
+    let (scope, subject) = match scope.as_str() {
+        "stack" => ("stack".to_string(), stack.to_string()),
+        "series" | "subject" => {
+            let column = if scope == "series" {
+                "k.series_id"
+            } else {
+                "r.subject_id"
+            };
+            let sql = format!(
+                "SELECT {column} FROM {} AS k JOIN {} AS r ON r.id = k.series_id WHERE k.id = {}",
+                store.qualified("stack"),
+                store.qualified("series"),
+                d.param(1, Type::Int)
+            );
+            let found = store
+                .query_opt(&sql, &[Param::Int(stack)])?
+                .ok_or_else(|| fail(format!("stack {stack} is not in the registry")))?;
+            (scope.to_string(), found.int(0)?.to_string())
+        }
+        "origin" => {
+            let sql = format!(
+                "SELECT manufacturer FROM {} WHERE stack_id = {}",
+                store.qualified("stack_fingerprint"),
+                d.param(1, Type::Int)
+            );
+            let made_by = store
+                .query_opt(&sql, &[Param::Int(stack)])?
+                .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
+                .filter(|m| !m.is_empty())
+                .ok_or_else(|| {
+                    fail(format!(
+                        "stack {stack} names no manufacturer, so there is no origin to decide about"
+                    ))
+                })?;
+            (
+                "origin".to_string(),
+                format!("manufacturer={}", made_by.to_lowercase()),
+            )
+        }
+        other => {
+            return Err(usage(format!(
+                "{other} is not a scope: stack, series, subject or origin"
+            )));
+        }
+    };
+
+    let who = actor.unwrap_or_else(|| {
+        std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "a person".to_string())
+    });
+    let now = nils_registry::time::now_iso();
+    let answer = serde_json::json!({
+        "axis": axis,
+        "value": value,
+        "actor": who,
+        "why": why,
+    });
+
+    store.begin()?;
+    let write = (|| -> Result<(), nils_registry::store::Error> {
+        let withdraw = format!(
+            "UPDATE {} SET withdrawn_at = {} WHERE scope = {} AND ref = {} AND axis = {} AND withdrawn_at IS NULL",
+            store.qualified("decision"),
+            d.param(1, Type::Timestamp),
+            d.param(2, Type::Text),
+            d.param(3, Type::Text),
+            d.param(4, Type::Text),
+        );
+        store.execute(
+            &withdraw,
+            &[
+                Param::from(now.as_str()),
+                Param::from(scope.as_str()),
+                Param::from(subject.as_str()),
+                Param::from(axis.as_str()),
+            ],
+        )?;
+        store.insert(
+            &Insert::new(
+                table("decision"),
+                &[
+                    "scope",
+                    "ref",
+                    "axis",
+                    "value",
+                    "actor",
+                    "why",
+                    "decided_at",
+                ],
+            ),
+            &[vec![
+                Param::from(scope.as_str()),
+                Param::from(subject.as_str()),
+                Param::from(axis.as_str()),
+                match &value {
+                    Some(v) => Param::from(v.as_str()),
+                    None => Param::Null,
+                },
+                Param::from(who.as_str()),
+                match &why {
+                    Some(w) => Param::from(w.as_str()),
+                    None => Param::Null,
+                },
+                Param::from(now.as_str()),
+            ]],
+        )?;
+        Ok(())
+    })();
+    match write {
+        Ok(()) => {}
+        Err(e) => {
+            store.rollback().ok();
+            return Err(fail(e.to_string()));
+        }
+    }
+
+    // Every open question about this axis on this stack is answered by the
+    // one decision, not just the item that happened to be quoted. The items
+    // are matched here rather than in SQL because a JSON column compares as
+    // JSON on one backend and as text on the other.
+    let same = format!(
+        "SELECT id, {} FROM {} WHERE status = 'open' AND scope = 'stack' AND kind LIKE {}",
+        text_of(store, "review_item", "ref"),
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+    );
+    let mut closing: Vec<i64> = Vec::new();
+    let found = store.query(&same, &[Param::from(format!("{axis}:%"))]);
+    let found = match found {
+        Ok(rows) => rows,
+        Err(e) => {
+            store.rollback().ok();
+            return Err(fail(e.to_string()));
+        }
+    };
+    for r in &found {
+        let its: serde_json::Value = r
+            .opt_text(1)
+            .ok()
+            .flatten()
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(serde_json::Value::Null);
+        if its == reference {
+            closing.push(r.int(0).unwrap_or(0));
+        }
+    }
+    let write = (|| -> Result<(), nils_registry::store::Error> {
+        for item in &closing {
+            let close = format!(
+                "UPDATE {} SET status = 'accepted', decided_at = {}, actor = {}, decision = {} WHERE id = {}",
+                store.qualified("review_item"),
+                d.param(1, Type::Timestamp),
+                d.param(2, Type::Text),
+                d.param(3, Type::Json),
+                d.param(4, Type::Int),
+            );
+            store.execute(
+                &close,
+                &[
+                    Param::from(now.as_str()),
+                    Param::from(who.as_str()),
+                    Param::from(answer.to_string()),
+                    Param::Int(*item),
+                ],
+            )?;
+        }
+        Ok(())
+    })();
+    match write {
+        Ok(()) => store.commit()?,
+        Err(e) => {
+            store.rollback().ok();
+            return Err(fail(e.to_string()));
+        }
+    }
+
+    let open = store
+        .query(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE status = 'open'",
+                store.qualified("review_item")
+            ),
+            &[],
+        )?
+        .first()
+        .and_then(|r| r.int(0).ok())
+        .unwrap_or(0);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "item": id, "scope": scope, "axis": axis,
+                "value": value, "actor": who, "why": why,
+                "decided_at": now, "open_review_items": open,
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        let said = match &value {
+            Some(v) => v.clone(),
+            None => "nothing".to_string(),
+        };
+        println!("review item {id}   {axis} = {said}   by {who}");
+        println!("  the classifier reads this on every later run");
+        println!("  {open} review item(s) still open");
+    }
+    Ok(())
 }
 
 /// One line on what a review item is about, from its `ref` and evidence:
@@ -1535,6 +2113,9 @@ fn custody(home: &Home, json: bool, markdown: bool) -> Result<(), Exit> {
         let sql = format!("SELECT COUNT(*) FROM {}{filter}", store.qualified(t));
         count(store, &sql)
     };
+    let fingerprints = count_of(store, "stack_fingerprint", "")?;
+    let classified = count_of(store, "classification", "")?;
+    let decisions = count_of(store, "decision", " WHERE withdrawn_at IS NULL")?;
     let subjects = count_of(store, "subject", "")?;
     let studies = count_of(store, "study", "")?;
     let series = count_of(store, "series", "")?;
@@ -1682,6 +2263,21 @@ fn custody(home: &Home, json: bool, markdown: bool) -> Result<(), Exit> {
                 "read": ["nils quarantine list [--batch <id>] [--class <c>]", "nils review list [--kind ingest.quarantine]", "nils review show <id>"],
                 "change": ["nils digest <root> --retry-quarantine"],
                 "export": ["nils quarantine list --json"],
+                "delete": "with the registry",
+            },
+        }),
+        serde_json::json!({
+            "store": "classifications",
+            "what": "what a pack decided about each stack, one row per axis, with the evidence that made it and any decision a person recorded",
+            "where": "rows of stack_fingerprint, classification, classification_axis, classification_evidence and decision in the registry",
+            "files": [],
+            "holds": ["technical: the fields a pack reads, the axes, the tiers and confidences, the rule that fired", "a person's words: the why on a decision"],
+            "counts": { "fingerprints": fingerprints, "classified": classified, "decisions": decisions },
+            "kept": "until the next run of that job replaces it; a decision until withdrawn, and a withdrawn one for good",
+            "commands": {
+                "read": ["nils explain <stack>", "nils review list", "nils pack show <name>"],
+                "change": ["nils fingerprint", "nils classify", "nils review decide <id> --value <v>"],
+                "export": ["nils explain <stack> --json"],
                 "delete": "with the registry",
             },
         }),

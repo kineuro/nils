@@ -115,6 +115,21 @@ impl Stack {
         }
     }
 
+    /// The field as the text something else stores, numbers included. A
+    /// corpus keeps what a pass reads as text and parses it back, so this is
+    /// the one accessor that does not care which half of the stack a field
+    /// lives in.
+    pub fn as_text(&self, i: usize) -> std::borrow::Cow<'_, str> {
+        if i < FIRST_TEXT {
+            match self.num[i] {
+                None => std::borrow::Cow::Borrowed(""),
+                Some(v) => std::borrow::Cow::Owned(format!("{v}")),
+            }
+        } else {
+            std::borrow::Cow::Borrowed(&self.text[i - FIRST_TEXT])
+        }
+    }
+
     /// Whether the field carries anything at all.
     pub fn present(&self, i: usize) -> bool {
         if i < FIRST_TEXT {
@@ -158,9 +173,10 @@ mod tests {
     fn a_field_is_named_never_positioned() {
         let mut s = Stack::new();
         s.set("inversion_time", Value::Num(Some(2500.0))).unwrap();
-        s.set("text_all", Value::Text(Some("ax t2 flair"))).unwrap();
+        s.set("text_all", Value::Text(Some("one two three")))
+            .unwrap();
         assert_eq!(s.num(field_index("inversion_time").unwrap()), Some(2500.0));
-        assert_eq!(s.text(field_index("text_all").unwrap()), "ax t2 flair");
+        assert_eq!(s.text(field_index("text_all").unwrap()), "one two three");
         assert_eq!(
             s.set("no_such_field", Value::Num(None)).unwrap_err(),
             "no field named no_such_field"
