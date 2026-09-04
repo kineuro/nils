@@ -107,11 +107,42 @@ struct Scenario {
     people: usize,
     /// What a reader must do to get that right.
     needs: &'static str,
-    /// The path segment that carries the subject code, counted from one and
-    /// including the scenario's own directory, or none when the code is in the
-    /// file rather than the path.
-    segment: Option<usize>,
     studies: Vec<StudyWant>,
+}
+
+/// Which path segment carries the subject code, counted from one within the
+/// scenario's own directory. `None` means the code is in the file, so the
+/// default rule reads it and no path source is needed.
+///
+/// It is per scenario because one rule cannot read every layout: an archive
+/// whose subject folder sits under a site directory has to be told so, and
+/// pretending otherwise lets a scenario pass for the wrong reason.
+fn rule_of(name: &str) -> &'static str {
+    match name {
+        // the tag is the identity, which is v1's default rule
+        "id-good" | "id-inconsistent" => "default",
+        // the code hides in PatientName beside a date, so a pattern is the
+        // only way to read it without taking the date too
+        "id-in-name" => "name",
+        // a site directory or a branch sits above the subject
+        "id-depth2" | "id-two-paths" => "path:2",
+        // and everywhere else the subject is the top directory
+        n if n.starts_with("id-") => "path:1",
+        // a date or session scenario says nothing about identity
+        _ => "default",
+    }
+}
+
+/// The diagnostic a scenario exists to provoke, when its point is that the
+/// reader must speak rather than that it must be right.
+fn diagnostic_of(name: &str) -> Option<&'static str> {
+    match name {
+        // v1 says it as a row-field disagreement on the study's subject,
+        // which is the same observation under an older name.
+        "id-inconsistent" => Some("field_disagreement"),
+        "id-xxxx" | "id-constant" => Some("identity_constant"),
+        _ => None,
+    }
 }
 
 /// One instance, described by everything a scenario may want to bend.
@@ -390,7 +421,6 @@ fn main() {
             what: "everything present and consistent",
             people: 3,
             needs: "the PatientID tag alone",
-            segment: None,
             studies,
         });
     }
@@ -445,7 +475,6 @@ fn main() {
             what,
             people: 4,
             needs: "the first path segment, because the tag says nothing",
-            segment: None,
             studies,
         });
     }
@@ -481,7 +510,6 @@ fn main() {
             what: "the code hides in PatientName next to a date",
             people: 3,
             needs: "a pattern with an id group, so the date is not taken as identity",
-            segment: None,
             studies,
         });
     }
@@ -498,9 +526,11 @@ fn main() {
         scenarios.push(Scenario {
             name,
             what: "one study whose files carry two different PatientIDs",
-            people: 2,
+            // A study belongs to one person, so one is the only honest answer;
+            // what the scenario checks is that the reader says the tree is
+            // wrong rather than choosing quietly.
+            people: 1,
             needs: "a diagnostic; the tree is wrong and the reader must say so",
-            segment: None,
             studies: vec![StudyWant {
                 dir,
                 date: Some("20220115"),
@@ -534,7 +564,6 @@ fn main() {
             what: "a site directory sits above the subject directory",
             people: 3,
             needs: "the second path segment, so the segment is a setting and not a constant",
-            segment: None,
             studies,
         });
     }
@@ -564,7 +593,6 @@ fn main() {
             what: "folder names with non-ASCII, a space, a plus and a dot",
             people: 4,
             needs: "the segment taken whole, and a code that survives the round trip",
-            segment: None,
             studies,
         });
     }
@@ -593,7 +621,6 @@ fn main() {
             what: "two subject folders differing only in case",
             people: 2,
             needs: "two subjects on a case-sensitive filesystem, and a diagnostic either way",
-            segment: None,
             studies,
         });
     }
@@ -621,7 +648,6 @@ fn main() {
             what: "one person's studies filed under two different branches",
             people: 1,
             needs: "the segment that holds the code, not the branch above it",
-            segment: None,
             studies,
         });
     }
@@ -1072,7 +1098,6 @@ fn main() {
             what: c.what,
             people: 1,
             needs: c.needs,
-            segment: None,
             studies: vec![StudyWant {
                 dir,
                 date: c.want,
@@ -1152,7 +1177,6 @@ fn main() {
             what: c.what,
             people: 1,
             needs: c.needs,
-            segment: None,
             studies,
         });
     }
@@ -1183,9 +1207,10 @@ fn main() {
         writeln!(out, "      \"what\": {:?},", s.what).unwrap();
         writeln!(out, "      \"needs\": {:?},", s.needs).unwrap();
         writeln!(out, "      \"people\": {},", s.people).unwrap();
-        match s.segment {
-            Some(n) => writeln!(out, "      \"segment\": {n},").unwrap(),
-            None => writeln!(out, "      \"segment\": null,").unwrap(),
+        writeln!(out, "      \"rule\": {:?},", rule_of(s.name)).unwrap();
+        match diagnostic_of(s.name) {
+            Some(d) => writeln!(out, "      \"diagnostic\": {d:?},").unwrap(),
+            None => writeln!(out, "      \"diagnostic\": null,").unwrap(),
         }
         writeln!(out, "      \"studies\": [").unwrap();
         for (j, w) in s.studies.iter().enumerate() {
