@@ -146,12 +146,21 @@ Three properties the engine enforces, each because of something measured:
 ### 3.3 The placeholder diagnostic
 
 A tag that is constant across a batch is a placeholder, and nothing in v1 would
-have said so. The digest counts `identity_constant` when one distinct value of
-the chosen field covers more than a configured share of a batch's instances,
-with the value's **shape** as its sample, never the value. A run that produces
-one subject per study while this diagnostic fires is a misconfiguration, and the
-report says it in those words rather than leaving someone to notice the subject
-count later.
+have said so, because no single file can tell. The digest therefore counts
+`identity_constant` once per batch, when the rule's **first field source** gave
+a value on at least twenty files and every one of those values was the same. Its
+sample is the value's **shape**, never the value, so a report can say "the
+identifier is four capitals on every file" without carrying one.
+
+**Settled while building.** The check reads the first field source rather than
+whichever source answered, which matters: on a tree read correctly by a path
+source the tag is still a placeholder, and that is worth saying. It is what
+turns the two failure modes into one sentence. A constant tag with no path
+source collapses an archive into one subject; an absent tag does the opposite
+and gives one subject per study; and a path source aimed at the wrong segment
+collapses it again. All three are a misconfiguration rather than a fact about
+the data, and all three now announce themselves instead of being noticed later
+in a subject count.
 
 ### 3.4 A path can be a direct identifier
 

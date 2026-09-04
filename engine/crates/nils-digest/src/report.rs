@@ -51,7 +51,22 @@ pub struct Counts {
     charsets: BTreeMap<String, u64>,
     forms: BTreeMap<&'static str, u64>,
     diagnostics: BTreeMap<DiagnosticKind, Tally>,
+    /// How many files the rule's first field source gave a value for, and the
+    /// distinct values among them, hashed and capped. A batch whose whole
+    /// archive reads one value there is looking at a placeholder, and no
+    /// single file can see that (§3.3).
+    identity_probed: u64,
+    identity_values: HashSet<u64>,
+    /// The shape of the first value seen, which is what the sample carries.
+    identity_shape: Option<String>,
 }
+
+/// Beyond this many distinct values the field is plainly not a constant, and
+/// the set stops growing.
+const PROBE_MAX: usize = 64;
+
+/// Below this many probed files a batch is too small to call a value constant.
+const PROBE_MIN: u64 = 20;
 
 #[derive(Debug, Default, Clone)]
 struct Tally {
@@ -109,6 +124,38 @@ impl Counts {
         *self.forms.entry(x.form.name()).or_default() += 1;
         for d in &x.diagnostics {
             self.diagnostic(d);
+        }
+    }
+
+    /// What the rule's first field source read on one file, for the constant
+    /// check. `None` is a file where that source had nothing.
+    pub fn probe_identity(&mut self, value: Option<&str>) {
+        let Some(value) = value else { return };
+        self.identity_probed += 1;
+        if self.identity_values.len() < PROBE_MAX {
+            self.identity_values.insert(hash_of(value));
+        }
+        if self.identity_shape.is_none() {
+            self.identity_shape = Some(nils_dicom::diagnostic::shape(value));
+        }
+    }
+
+    /// The diagnostic no file can raise: one value covering a whole batch.
+    /// Called once, when the threads' counts have been merged.
+    pub fn batch_diagnostics(&mut self) {
+        if self.identity_probed >= PROBE_MIN && self.identity_values.len() == 1 {
+            let shape = self.identity_shape.clone().unwrap_or_default();
+            let d = Diagnostic::new(DiagnosticKind::IdentityConstant, "the rule's first field");
+            let sample = match shape.is_empty() {
+                true => d.sample(),
+                false => format!("{}={shape}", d.subject),
+            };
+            let tally = self
+                .diagnostics
+                .entry(DiagnosticKind::IdentityConstant)
+                .or_default();
+            tally.count = self.identity_probed;
+            tally.samples.insert(sample);
         }
     }
 
@@ -186,6 +233,15 @@ impl Counts {
             for (k, v) in keys {
                 *mine.entry(k).or_default() += v;
             }
+        }
+        self.identity_probed += other.identity_probed;
+        for v in other.identity_values {
+            if self.identity_values.len() < PROBE_MAX {
+                self.identity_values.insert(v);
+            }
+        }
+        if self.identity_shape.is_none() {
+            self.identity_shape = other.identity_shape;
         }
         self.studies.extend(other.studies);
         self.series.extend(other.series);

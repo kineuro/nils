@@ -530,6 +530,9 @@ fn execute(
     if let Some(own) = own {
         counts.merge(own);
     }
+    // The threads' counts are one batch now, so the diagnostic no single file
+    // can raise is raised here.
+    counts.batch_diagnostics();
     wrote?;
     let cancelled = if cancel.abort() {
         Some(Cancelled::Aborted)
@@ -709,6 +712,7 @@ fn parse_all(
             } => match nils_dicom::extract_with(&path, rule.fields()) {
                 Ok(mut x) => {
                     let ident = rule.apply(&mut x, &rel);
+                    counts.probe_identity(ident.probe.as_deref());
                     let signature = Signature::of(&x);
                     counts.accepted(
                         &x,
