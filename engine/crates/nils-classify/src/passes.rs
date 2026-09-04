@@ -73,10 +73,22 @@ fn read_corpus(store: &mut Store, pack: &Pack, modality: Option<&str>) -> Result
     );
 
     // The axes first, so a stack arrives complete.
+    //
+    // A pass never reads a pass. `classification_axis` holds whatever decided
+    // a value, and on any run after the first that includes answers an earlier
+    // run's pass wrote, so taking the table as it stands would let the vote
+    // count its own guesses as evidence. Measured on the live corpus: with the
+    // pass's answers in the reference, sorting the same archive again from two
+    // different ingest histories agrees on 14 of 9,014 answers, and without
+    // them on 31,880 of 31,880 (spec section 7.4). The evidence row says which
+    // it was: `pass` is null exactly when a rule or a person decided.
     let mut decided: HashMap<i64, Vec<String>> = HashMap::new();
     let sql_axes = format!(
-        "SELECT stack_id, axis, value FROM {}",
-        store.qualified("classification_axis")
+        "SELECT a.stack_id, a.axis, a.value FROM {a} a WHERE NOT EXISTS \
+         (SELECT 1 FROM {e} e WHERE e.stack_id = a.stack_id AND e.axis = a.axis \
+          AND e.pass IS NOT NULL)",
+        a = store.qualified("classification_axis"),
+        e = store.qualified("classification_evidence"),
     );
     for r in store.query(&sql_axes, &[])? {
         let name = r.text(1)?;

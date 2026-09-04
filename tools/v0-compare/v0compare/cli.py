@@ -44,6 +44,8 @@ def cmd_extract(args: argparse.Namespace) -> int:
         counts = v0.from_export(Path(args.export), out, threads=args.threads)
     else:
         counts = v0.from_dsn(args.dsn, out, threads=args.threads)
+    if args.classification:
+        counts["series_classification_cache"] = v0.reclassify(out, Path(args.classification))
     _log(f"wrote {out}: " + ", ".join(f"{t} {n:,}" for t, n in counts.items()))
     return 0
 
@@ -180,6 +182,11 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument("--export", help="the directory export.sh wrote")
     src.add_argument("--dsn", help="the v0 database, read-only; never printed")
     p.add_argument("--out", required=True, help="the DuckDB file to write (replaced)")
+    p.add_argument(
+        "--classification",
+        help="a series_classification_cache written by tools/pack-check/resort.py, "
+        "which replaces the stored one so the comparison is against v0's current code",
+    )
     p.add_argument("--threads", type=int)
     p.set_defaults(run=cmd_extract)
 

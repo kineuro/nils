@@ -35,7 +35,12 @@ target:
       - {axis: technique, missing_or: Unknown}
 
 reference:
-  # Named, and recorded on every row the pass writes.
+  # Named, and recorded on every row the pass writes. It holds what a rule or a
+  # person decided and never what a pass decided: the engine enforces that, and
+  # it is not a knob, because the measurement that settled it leaves no room for
+  # a site to want otherwise. Sorting the same archive again from two different
+  # ingest histories agrees on 14 of 9,014 answers when the vote may read its
+  # own answers, and on 31,880 of 31,880 when it may not (spec section 7.4).
   scope: registry_snapshot
   filter:
     modality: MR

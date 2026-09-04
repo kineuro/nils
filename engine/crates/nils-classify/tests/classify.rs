@@ -382,3 +382,53 @@ fn a_decision_about_an_origin_governs_every_stack_of_it_until_one_is_looked_at()
         assert_eq!(base(&mut reg), "FLAIR", "{name}: the stack is closest");
     }
 }
+
+/// A pass does not read a pass.
+///
+/// The reference is built from `classification_axis`, which holds whatever
+/// decided a value. On any run after the first that includes what an earlier
+/// run's pass wrote, so without this the vote counts its own guesses as
+/// evidence for the next guess. Measured on the live corpus, that is the
+/// difference between an archive that can be sorted again and one that cannot:
+/// from two ingest histories, a second sort agrees on 14 of 9,014 answers with
+/// the pass's answers in the reference, and on all 31,880 without them.
+#[test]
+fn the_reference_holds_what_a_rule_decided_and_not_what_a_pass_did() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    let dir = tree();
+    for lab in labs() {
+        let name = lab.name;
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+
+        let pool = |reg: &mut Registry| {
+            nils_classify::passes::run(
+                reg.store(),
+                &pack,
+                &Default::default(),
+                &Cancel::new(),
+                nils_pack::pass::Phase::After,
+                1,
+            )
+            .unwrap()[0]
+                .pool
+        };
+        assert_eq!(
+            pool(&mut reg),
+            1,
+            "{name}: the one stack the rules decided is the whole reference"
+        );
+
+        // The same stack, with its base now attributed to the pass, which is
+        // what the row looks like on the run after a fill.
+        let evidence = reg.store().qualified("classification_evidence");
+        let sql = format!("UPDATE {evidence} SET pass = 'physics_vote' WHERE axis = 'base'");
+        reg.store().execute(&sql, &[]).unwrap();
+        assert_eq!(
+            pool(&mut reg),
+            0,
+            "{name}: a value a pass wrote is not evidence for the next vote"
+        );
+    }
+}
