@@ -107,6 +107,10 @@ struct Scenario {
     people: usize,
     /// What a reader must do to get that right.
     needs: &'static str,
+    /// The path segment that carries the subject code, counted from one and
+    /// including the scenario's own directory, or none when the code is in the
+    /// file rather than the path.
+    segment: Option<usize>,
     studies: Vec<StudyWant>,
 }
 
@@ -262,8 +266,16 @@ fn write(root: &Path, f: &File, pixel_bytes: usize) {
 
 /// The mess a real tree carries, added to every scenario so a repair is never
 /// tested on a clean one.
-fn sprinkle(root: &Path, rng: &mut Rng, scenario: &str, one: &File, pixel_bytes: usize) {
-    let base = format!("{scenario}/_mess");
+fn sprinkle(root: &Path, rng: &mut Rng, _scenario: &str, one: &File, pixel_bytes: usize) {
+    // Inside the seed's own study, never beside it: a `_mess` directory at the
+    // subject level is indistinguishable from a subject, and a path-based rule
+    // would read it as one.
+    let study_dir = one
+        .path
+        .rsplit_once('/')
+        .map(|(d, _)| d.to_string())
+        .unwrap_or_default();
+    let base = format!("{study_dir}/_mess");
     fs::create_dir_all(root.join(format!("{base}/empty-dir"))).expect("mkdir");
 
     // Not DICOM at all.
@@ -378,6 +390,7 @@ fn main() {
             what: "everything present and consistent",
             people: 3,
             needs: "the PatientID tag alone",
+            segment: None,
             studies,
         });
     }
@@ -432,6 +445,7 @@ fn main() {
             what,
             people: 4,
             needs: "the first path segment, because the tag says nothing",
+            segment: None,
             studies,
         });
     }
@@ -467,6 +481,7 @@ fn main() {
             what: "the code hides in PatientName next to a date",
             people: 3,
             needs: "a pattern with an id group, so the date is not taken as identity",
+            segment: None,
             studies,
         });
     }
@@ -485,6 +500,7 @@ fn main() {
             what: "one study whose files carry two different PatientIDs",
             people: 2,
             needs: "a diagnostic; the tree is wrong and the reader must say so",
+            segment: None,
             studies: vec![StudyWant {
                 dir,
                 date: Some("20220115"),
@@ -518,6 +534,7 @@ fn main() {
             what: "a site directory sits above the subject directory",
             people: 3,
             needs: "the second path segment, so the segment is a setting and not a constant",
+            segment: None,
             studies,
         });
     }
@@ -547,6 +564,7 @@ fn main() {
             what: "folder names with non-ASCII, a space, a plus and a dot",
             people: 4,
             needs: "the segment taken whole, and a code that survives the round trip",
+            segment: None,
             studies,
         });
     }
@@ -575,6 +593,7 @@ fn main() {
             what: "two subject folders differing only in case",
             people: 2,
             needs: "two subjects on a case-sensitive filesystem, and a diagnostic either way",
+            segment: None,
             studies,
         });
     }
@@ -602,6 +621,7 @@ fn main() {
             what: "one person's studies filed under two different branches",
             people: 1,
             needs: "the segment that holds the code, not the branch above it",
+            segment: None,
             studies,
         });
     }
@@ -1052,6 +1072,7 @@ fn main() {
             what: c.what,
             people: 1,
             needs: c.needs,
+            segment: None,
             studies: vec![StudyWant {
                 dir,
                 date: c.want,
@@ -1131,6 +1152,7 @@ fn main() {
             what: c.what,
             people: 1,
             needs: c.needs,
+            segment: None,
             studies,
         });
     }
@@ -1161,6 +1183,10 @@ fn main() {
         writeln!(out, "      \"what\": {:?},", s.what).unwrap();
         writeln!(out, "      \"needs\": {:?},", s.needs).unwrap();
         writeln!(out, "      \"people\": {},", s.people).unwrap();
+        match s.segment {
+            Some(n) => writeln!(out, "      \"segment\": {n},").unwrap(),
+            None => writeln!(out, "      \"segment\": null,").unwrap(),
+        }
         writeln!(out, "      \"studies\": [").unwrap();
         for (j, w) in s.studies.iter().enumerate() {
             let date = match w.date {
