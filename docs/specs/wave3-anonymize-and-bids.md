@@ -181,29 +181,57 @@ every study is, the step fails. That is the answer to why it matters: without a
 date there is no session, no order, no clinical join and no `ses-` directory.
 The date is a precondition, not a convenience.
 
-### 4.2 What v1 does
+### 4.2 Not all dates are the same
 
-The repair runs at digest, where the facts are, and it never writes over what
-was measured, which is the fault Wave 2 measured in v0's acquisition-type fill:
+v0's chain takes the first source that answers. That is the wrong shape, and the
+evidence is a working script written for the very cohort this repair exists for,
+which does something better: it gathers candidates from **many** sources, gives
+each source a weight, sums the weights per candidate date over a sample of a
+study's files, and takes the heaviest. A source is not a rung, it is a vote with
+a weight, because a date that three independent elements agree on is worth more
+than one that a single element asserts.
 
-- `study.study_date` keeps what `StudyDate` said, and stays null when it said
-  nothing.
-- `study.date_filled` and `study.date_source` are added. `date_source` is one of
-  `study_date`, `series_date`, `acquisition_date`, `content_date`, `uid`, or
-  null when nothing yielded a date.
-- Everything downstream reads the study's date through one accessor that
-  prefers the measured value, so no query has to know the repair happened, and
-  every report can say how many dates were derived and from where.
+The sources, and roughly what each is worth:
 
-A study still without a date is **not** excluded. It is kept, it counts a
-`study_undated` diagnostic, and it raises a review item, because in v1 an
-unanswerable question is a question rather than a deletion. What it cannot do is
-join a session (§5), and the release says so per subject rather than dropping
-the files silently.
+| source | why |
+|---|---|
+| `StudyDate` | the answer when it is there |
+| `InstanceCreationDate`, `PerformedProcedureStepStartDate` and `...EndDate` | survive scrubs that remove the obvious ones |
+| a **private element**, notably the Siemens CSA header's version string | the date rides inside text nobody thought to clean |
+| `SeriesDate`, `AcquisitionDate`, `ContentDate` | close to the acquisition, sometimes copied |
+| `IssueDateOfImagingServiceRequest`, `PresentationCreationDate` | weaker, but real |
+| a `YYYYMMDD` inside a UID | v0's recovery, and worth little on its own |
+| **Unix epoch seconds inside a UID** | some GE scanners leave a timestamp in the SOP UID; it is a date nobody meant to keep |
+| the **path** | a sorted archive puts the session date in a directory name |
 
-The year range that makes a UID date credible is a knob with a default, exposed
-like every other knob (C37), because "eight digits that parse as a date" is a
-guess and the range is what makes it a reasonable one.
+Two rules that are not weights, and both come from the same script:
+
+- **A placeholder is not a date.** `00000000`, `19000101`, `1900`, `XXXX` and
+  the empty value are how a scanner or an anonymiser writes nothing. v1 stores
+  `00000000` as the date `0000-00-00` today, which would corrupt every interval
+  downstream; the corpus catches it (§12.1).
+- **Distrust the first of January.** Anonymisers write `YYYY0101` into creation
+  and issue dates. When the heaviest candidate is a first of January and any
+  other candidate exists, the other one wins.
+
+What is stored, never over what was measured, which is the fault Wave 2 found in
+v0's acquisition-type fill:
+
+- `study.study_date` keeps what `StudyDate` said, null when it said nothing.
+- `study.date_filled` and `study.date_source` are added, the source naming which
+  vote won, and `date_confidence` carrying the winning weight and the margin
+  over the runner-up, because a date decided 4 to 3 is not the same fact as one
+  decided 9 to 0.
+- Everything downstream reads one accessor that prefers the measured value.
+
+A study still without a date is **not** excluded, unlike v0. It is kept, counts
+a `study_undated` diagnostic and raises a review item, because an unanswerable
+question is a question rather than a deletion. What it cannot do is join a
+session (§5).
+
+Every weight, the placeholder list, the year range and the epoch bounds are pack
+shaped data with defaults, exposed like every other knob (C37). "Eight digits
+that parse as a date" is a guess, and the range is what makes it reasonable.
 
 ### 4.3 The UID carries the date, so the two policies are one
 
@@ -238,7 +266,20 @@ v0's `timeline/` is richer and already right, so v1 carries it whole:
 - **Collision policy**, four of them, with **merge** the default and the
   argument for it carried over: two sessions on one label is normal clinical
   reality, a continuation scan or a brain study and a spine study a day apart,
-  and demoting the second invents a timepoint nobody scanned.
+  and demoting the second invents a timepoint nobody scanned. A working script
+  for the cohort this wave repairs clusters at **thirty days** for exactly that
+  reason, split brain and spine appointments, which is longer than Wave 1 §4.4
+  assumed and is a default rather than a law.
+- **The label is shared, the date is not.** Studies in one cluster share a
+  label; each keeps its own real date, and the export disambiguates by date
+  rather than by inventing labels. Collisions are allowed on purpose.
+- **The source's own label is evidence.** An archive that already carries `M06`
+  in its paths is telling you something: when the arrival label is canonical and
+  within tolerance of the computed gap, it wins, because it records intent the
+  dates alone do not. When no label and no anchor exist, a subject with one
+  session keeps what the source called it rather than being renamed `M00`.
+- **Prefer an unused slot.** When two cadence points are both within tolerance
+  and one is taken, the free one wins, so a schedule fills rather than collides.
 - **Unmatched policy** for a session with no anchor.
 - **Pre-anchor** sessions are `PRE06`, never `M-06`, because a hyphen is BIDS's
   key-value separator. Under a diagnosis anchor, 9.9 percent of live sessions
@@ -574,13 +615,19 @@ two rather than one; a folder name with non-ASCII characters and a space; two
 folders differing only in case; and one subject whose studies sit under two
 different top-level folders.
 
-**Dates.** `StudyDate` present; absent with `SeriesDate` present; both absent
-with `AcquisitionDate`; only `ContentDate`; no date field at all with the date
-embedded in the study UID; the same with the date only in a series UID; no date
-anywhere and none in any UID; implausible dates at both ends of the range; a UID
-carrying eight digits that are not a calendar date and another carrying a valid
-date outside the year range, both of which must be refused; malformed values
-(`2022-01-15`, `00000000`, `2022`); and the four date fields disagreeing.
+**Dates**, one per source and one per trap. `StudyDate` present; absent with
+`SeriesDate`; only `AcquisitionDate`; only `ContentDate`; only
+`InstanceCreationDate`; only the performed procedure step; the date left solely
+inside a **Siemens CSA private element's version string**; the date only in a
+study UID, and only in a series UID; **Unix epoch seconds in a SOP UID**, which
+is what some GE scanners leave behind; the date only in the **directory path**;
+two sources agreeing against a third, which a chain gets wrong and a weighted
+vote gets right; a first of January against a real date, which an anonymiser
+produces and a naive reader believes; the placeholders `00000000` and
+`19000101`; a non-conformant but unambiguous `2022-01-15`; an implausible but
+real `18990101`; a UID carrying eight digits that are not a calendar date and
+another carrying a real date far outside the range, both of which must be
+refused; and no date anywhere in any element, any UID or the path.
 
 **Sessions.** Two studies on one day; two studies three days apart; studies at
 zero, six, nine and twelve months against an anchor, so the cadence snaps three
