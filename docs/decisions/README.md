@@ -50,6 +50,7 @@ listed in [SCRUB.md](SCRUB.md). Nothing that was left out changes a decision.
 | [13-query-and-agent-study.md](13-query-and-agent-study.md) | The 2026-09-02 study of nils-query and nils-agent against Metabase's and Flue's source and the live agent traffic: ten use-case families, amendments C16-C25, decisions D20-D24 |
 | [14-federation.md](14-federation.md) | The 2026-09-02 federation design: engines as nodes, optional and node-addable, disclosure levels at the door, compute travels and data stays, the cluster question; amendments C26-C34, decisions D25-D29 |
 | [15-ratification.md](15-ratification.md) | The 2026-09-02 ratification sheet: every open item of 12, 13 and 14, the license and the repository restart, each with a recommended verdict; every verdict recorded the same day (sections 7 to 10), the four items Nima raised in section 8, the repository as built (section 11) |
+| [16-v0-capability-audit.md](16-v0-capability-audit.md) | Every package of v0's engine backend walked, capability by capability, against v1's status: done, partial, missing, dropped or planned. Written 2026-09-04 after the Wave 3 draft proved to rest on a partial reading. Names four capabilities no wave owns, the largest being identity from the path and study-date repair, which together block digesting the legacy MS data |
 
 ## Decision register
 
