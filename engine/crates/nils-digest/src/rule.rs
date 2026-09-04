@@ -28,11 +28,33 @@ pub const FALLBACK_FIELD: &str = "StudyInstanceUID";
 /// The id type the fallback files under.
 pub const FALLBACK_ID_TYPE: &str = "study-instance-uid";
 
-/// One field of the rule, with its pattern when it carries more than one
-/// thing.
+/// Where one source of the rule reads from.
+#[derive(Debug, Clone)]
+pub enum From {
+    /// A DICOM keyword, read out of the file.
+    Field(String),
+    /// A directory of the file's path under the batch root, counted from one.
+    /// v0 calls this `depth_after_root`, and it is the only identity several
+    /// archives have: the sender pseudonymised and put the code in the path
+    /// rather than in the tag (spec section 3).
+    Segment(usize),
+}
+
+impl From {
+    /// What a message calls it.
+    pub fn label(&self) -> String {
+        match self {
+            From::Field(f) => f.clone(),
+            From::Segment(n) => format!("path segment {n}"),
+        }
+    }
+}
+
+/// One source of the rule, with its pattern when the value carries more than
+/// one thing.
 #[derive(Debug, Clone)]
 pub struct Source {
-    pub field: String,
+    pub from: From,
     pub pattern: Option<Regex>,
 }
 
@@ -51,6 +73,14 @@ pub struct Rule {
     /// default.
     pub source: Option<String>,
     fields: IdentityFields,
+}
+
+/// The `n`th directory of `rel`, counted from one. The last component is the
+/// file itself and is never a segment: a subject is a directory.
+fn segment(rel: &str, n: usize) -> Option<&str> {
+    let mut parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+    parts.pop()?;
+    parts.get(n - 1).copied()
 }
 
 /// The identifier of one file as the rule resolved it.
@@ -93,7 +123,16 @@ struct Spec {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SourceSpec {
-    field: String,
+    field: Option<String>,
+    path: Option<PathSpec>,
+    pattern: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PathSpec {
+    /// Counted from one, which is v0's `depth_after_root`.
+    segment: usize,
     pattern: Option<String>,
 }
 
@@ -103,7 +142,7 @@ impl Default for Rule {
         Rule {
             id_type: DEFAULT_ID_TYPE.into(),
             from: vec![Source {
-                field: "PatientID".into(),
+                from: From::Field("PatientID".into()),
                 pattern: None,
             }],
             verbatim: false,
@@ -134,13 +173,41 @@ impl Rule {
         }
         let mut from = Vec::with_capacity(spec.from.len());
         for (i, s) in spec.from.into_iter().enumerate() {
-            if tag_of(&s.field).is_none() {
-                return Err(RuleError(format!(
-                    "identity.from[{i}].field: {} is not a DICOM keyword",
-                    s.field
-                )));
-            }
-            let pattern = match s.pattern {
+            let (kind, raw_pattern) = match (s.field, s.path) {
+                (Some(_), Some(_)) => {
+                    return Err(RuleError(format!(
+                        "identity.from[{i}]: a source reads a field or a path, not both"
+                    )));
+                }
+                (None, None) => {
+                    return Err(RuleError(format!(
+                        "identity.from[{i}]: a source needs a field or a path"
+                    )));
+                }
+                (Some(field), None) => {
+                    if tag_of(&field).is_none() {
+                        return Err(RuleError(format!(
+                            "identity.from[{i}].field: {field} is not a DICOM keyword"
+                        )));
+                    }
+                    (From::Field(field), s.pattern)
+                }
+                (None, Some(path)) => {
+                    if path.segment == 0 {
+                        return Err(RuleError(format!(
+                            "identity.from[{i}].path.segment: segments are counted from one"
+                        )));
+                    }
+                    if s.pattern.is_some() && path.pattern.is_some() {
+                        return Err(RuleError(format!(
+                            "identity.from[{i}]: the pattern belongs either beside the path or \
+                             inside it, not in both places"
+                        )));
+                    }
+                    (From::Segment(path.segment), path.pattern.or(s.pattern))
+                }
+            };
+            let pattern = match raw_pattern {
                 Some(p) => {
                     let re = Regex::new(&p)
                         .map_err(|e| RuleError(format!("identity.from[{i}].pattern: {e}")))?;
@@ -154,7 +221,7 @@ impl Rule {
                 None => None,
             };
             from.push(Source {
-                field: s.field,
+                from: kind,
                 pattern,
             });
         }
@@ -176,12 +243,18 @@ impl Rule {
         };
         if verbatim && from.iter().any(|s| s.pattern.is_none()) {
             return Err(RuleError(
-                "identity.code: verbatim needs a pattern on every field, so that a value which is \
-                 not shaped like a subject code is never filed as one"
+                "identity.code: verbatim needs a pattern on every source, so that a value which \
+                 is not shaped like a subject code is never filed as one"
                     .into(),
             ));
         }
-        let keywords: Vec<&str> = from.iter().map(|s| s.field.as_str()).collect();
+        let keywords: Vec<&str> = from
+            .iter()
+            .filter_map(|s| match &s.from {
+                From::Field(f) => Some(f.as_str()),
+                From::Segment(_) => None,
+            })
+            .collect();
         let fields = IdentityFields::new(&keywords).map_err(|e| RuleError(e.to_string()))?;
         Ok(Rule {
             id_type: spec.id_type,
@@ -192,7 +265,8 @@ impl Rule {
         })
     }
 
-    /// The fields the reader must extract, in the rule's order.
+    /// The fields the reader must extract, in the rule's order. A path source
+    /// is not among them: it is read from the path, not from the file.
     pub fn fields(&self) -> &IdentityFields {
         &self.fields
     }
@@ -213,9 +287,9 @@ impl Rule {
             .iter()
             .map(|s| {
                 if s.pattern.is_some() {
-                    format!("{} (pattern)", s.field)
+                    format!("{} (pattern)", s.from.label())
                 } else {
-                    s.field.clone()
+                    s.from.label()
                 }
             })
             .collect();
@@ -239,9 +313,15 @@ impl Rule {
         let from: Vec<serde_json::Value> = self
             .from
             .iter()
-            .map(|s| match &s.pattern {
-                Some(re) => json!({ "field": s.field, "pattern": re.as_str() }),
-                None => json!({ "field": s.field }),
+            .map(|s| {
+                let mut o = match &s.from {
+                    From::Field(f) => json!({ "field": f }),
+                    From::Segment(n) => json!({ "path": { "segment": n } }),
+                };
+                if let Some(re) = &s.pattern {
+                    o["pattern"] = json!(re.as_str());
+                }
+                o
             })
             .collect();
         json!({
@@ -256,10 +336,22 @@ impl Rule {
     /// Resolve one file: the first field that yields, else the fallback; the
     /// diagnostics of §7.3 go on the file, and the identifying values are
     /// taken out of it.
-    pub fn apply(&self, x: &mut Extracted) -> Ident {
+    pub fn apply(&self, x: &mut Extracted, rel: &str) -> Ident {
         let values = std::mem::take(&mut x.identity.values);
-        for (source, value) in self.from.iter().zip(&values) {
-            let Some(value) = value.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        // The reader extracted one value per *field* source, in order, so the
+        // two lists are walked together rather than zipped: a path source
+        // consumes no extracted value.
+        let mut next_field = 0usize;
+        for source in &self.from {
+            let read: Option<String> = match &source.from {
+                From::Field(_) => {
+                    let v = values.get(next_field).and_then(|v| v.clone());
+                    next_field += 1;
+                    v
+                }
+                From::Segment(n) => segment(rel, *n).map(str::to_string),
+            };
+            let Some(value) = read.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
                 continue;
             };
             match &source.pattern {
@@ -283,14 +375,14 @@ impl Rule {
                             };
                         }
                         None => x.diagnostics.push(
-                            Diagnostic::new(DiagnosticKind::IdentityUnparsed, &source.field)
+                            Diagnostic::new(DiagnosticKind::IdentityUnparsed, source.from.label())
                                 .with_shape(value),
                         ),
                     }
                 }
             }
         }
-        let tried: Vec<&str> = self.from.iter().map(|s| s.field.as_str()).collect();
+        let tried: Vec<String> = self.from.iter().map(|s| s.from.label()).collect();
         x.diagnostics.push(Diagnostic::new(
             DiagnosticKind::IdentityFallback,
             tried.join(", "),
@@ -336,7 +428,7 @@ mod tests {
         assert_eq!(rule.describe(), "PatientID, then StudyInstanceUID");
         assert_eq!(rule.fields().keywords().collect::<Vec<_>>(), ["PatientID"]);
         let mut x = extracted(vec![Some(" P1 ")]);
-        let ident = rule.apply(&mut x);
+        let ident = rule.apply(&mut x, "s/1.dcm");
         assert_eq!(
             ident,
             Ident {
@@ -349,7 +441,7 @@ mod tests {
         assert!(x.diagnostics.is_empty());
 
         let mut x = extracted(vec![Some("   ")]);
-        let ident = rule.apply(&mut x);
+        let ident = rule.apply(&mut x, "s/1.dcm");
         assert_eq!(ident.value, "1.2.826.0.1.3680043.8.498.1");
         assert!(ident.fell_back);
         assert_eq!(rule.id_type_of(&ident), "study-instance-uid");
@@ -382,20 +474,20 @@ identity:
         );
         // the pattern yields
         let mut x = extracted(vec![Some("199001011234-20240131"), Some("P1")]);
-        let ident = rule.apply(&mut x);
+        let ident = rule.apply(&mut x, "s/1.dcm");
         assert_eq!(ident.value, "199001011234");
         assert!(!ident.fell_back);
         assert!(x.diagnostics.is_empty());
         // the pattern does not: unparsed, with the shape, then the next field
         let mut x = extracted(vec![Some("Doe^Jane"), Some("P1")]);
-        let ident = rule.apply(&mut x);
+        let ident = rule.apply(&mut x, "s/1.dcm");
         assert_eq!(ident.value, "P1");
         assert_eq!(x.diagnostics.len(), 1);
         assert_eq!(x.diagnostics[0].kind, DiagnosticKind::IdentityUnparsed);
         assert_eq!(x.diagnostics[0].sample(), "PatientName=Aaa^Aaaa");
         // nothing yields: the fallback, after the unparsed one
         let mut x = extracted(vec![Some("Doe^Jane"), None]);
-        let ident = rule.apply(&mut x);
+        let ident = rule.apply(&mut x, "s/1.dcm");
         assert!(ident.fell_back);
         assert_eq!(x.diagnostics.len(), 2);
         assert_eq!(x.diagnostics[1].sample(), "PatientName, PatientID");
@@ -428,13 +520,13 @@ identity:
         );
         assert_eq!(rule.to_json()["code"], "verbatim");
         let mut x = extracted(vec![Some("771c4326c89c082c")]);
-        let ident = rule.apply(&mut x);
+        let ident = rule.apply(&mut x, "s/1.dcm");
         assert_eq!(ident.value, "771c4326c89c082c");
         assert!(!ident.fell_back);
         // a value that is not shaped like a code is not one: the file falls
         // back to its study UID, which is derived like any identifier
         let mut x = extracted(vec![Some("19800101-1234")]);
-        let ident = rule.apply(&mut x);
+        let ident = rule.apply(&mut x, "s/1.dcm");
         assert!(ident.fell_back);
         // the default rule derives
         assert!(!Rule::default().verbatim);
@@ -471,7 +563,7 @@ identity:
         );
         assert!(
             err("identity:\n  id_type: x\n  from:\n    - field: PatientID\n  code: verbatim\n")
-                .contains("verbatim needs a pattern on every field")
+                .contains("verbatim needs a pattern on every source")
         );
         assert_eq!(
             err(

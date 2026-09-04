@@ -708,7 +708,7 @@ fn parse_all(
                 prior,
             } => match nils_dicom::extract_with(&path, rule.fields()) {
                 Ok(mut x) => {
-                    let ident = rule.apply(&mut x);
+                    let ident = rule.apply(&mut x, &rel);
                     let signature = Signature::of(&x);
                     counts.accepted(
                         &x,
