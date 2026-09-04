@@ -526,10 +526,16 @@ The password is a key, handled as the registry handles keys, and never a column.
 The oracle is not v0 (D16): its export is not valid BIDS, so byte-identity
 against it would be a bar against being correct.
 
-1. **The repairs are proved on the data that needed them.** The MS trees with
-   placeholder identifiers digest into the right number of subjects and
+1. **The repairs are proved on the data that needed them.** The legacy trees
+   with placeholder identifiers digest into the right number of subjects and
    sessions, hand-verified against the folder structure; and studies whose date
    is only in a UID are dated, with the source recorded.
+
+   This bar, alone in this list, depends on something outside the code: the
+   engine can be built and unit-tested against synthetic trees, but it cannot be
+   *proved* without the trees it was written for. They are on the storage server
+   and are not readable by the account the work runs as. Arranging that is a
+   prerequisite of the bar rather than of the slice.
 2. **The validator passes** on the reference selections, no warnings suppressed.
 3. **The reference selections are right**: hand-verified, in the pack's corpus
    the way Wave 2's cases are, each naming the session, the role, the pick, the
@@ -593,17 +599,25 @@ The repairs first, because everything after them assumes a subject and a date.
 
 1. Identity from the path, and the placeholder diagnostic (§3).
 2. The study date repair, at digest (§4).
-3. Migration 5: the date columns, the release tables, the fingerprint columns.
-4. The session scheme, whole (§5).
-5. The four fingerprint fields (§6).
-6. The disposition, in the pack, with its corpus cases (§7).
-7. Roles and picks, carrying v0's weights (§10).
-8. `nils release`: selection, identifiers, UIDs, dates, with §4.3 enforced (§8).
-9. Private tags, overlays, burned-in, the audit (§8.4, §8.5).
-10. The descriptive layout (§9.1).
-11. The BIDS layout, the dataset files, `sourcedata`, `derivatives` (§9.2-§9.6).
-12. Handover (§11).
-13. The gate (§12).
+3. The session scheme, whole (§5).
+4. The four fingerprint fields (§6).
+5. The disposition, in the pack, with its corpus cases (§7).
+6. Roles and picks, carrying v0's weights (§10), and §10.1.
+7. `nils release`: selection, identifiers, UIDs, dates, with §4.3 enforced (§8).
+8. Private tags, overlays, burned-in, the audit (§8.4, §8.5).
+9. The descriptive layout (§9.1).
+10. The BIDS layout, the dataset files, `sourcedata`, `derivatives` (§9.2-§9.6).
+11. Handover (§11).
+12. The gate (§12).
+
+**A schema change lands with the slice that needs it**, as migrations 2 and 4 did
+in Wave 2, rather than as a slice of its own. An earlier draft of this list had a
+migration slice sitting after the date repair that was supposed to create the
+columns the date repair writes, which is the sort of thing a list is for.
+
+Slices 1 and 2 are one piece of work: both are digest, both are small, and both
+are proved by the same run over the same tree. They are worth landing together
+and using before the rest is written.
 
 This is a large wave, and it is worth saying so rather than discovering it.
 Slices 1 and 2 are small and unblock real data, so they can land and be used
