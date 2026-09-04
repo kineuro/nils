@@ -742,10 +742,18 @@ the answers, because at the moment a part is sorted the reference holds only
 what has arrived. That is not the difference. The difference is what a second
 sort of the *finished* archive does:
 
-| the reference holds | the two histories agree |
-|---|---|
-| what the rules decided | 31,880 of 31,880, 100% |
-| that, plus the vote's answers | 14 of 9,014, 0.16% |
+| the reference holds | what the second sort answers | the two histories agree |
+|---|---|---|
+| what the rules decided | 31,880 | 31,880, 100% |
+| that, plus the vote's answers | 9,014 | 14, 0.16% |
+
+The two denominators differ, and the difference is the point. When the vote's
+answers are in the table, a stack that took one is no longer missing anything,
+so the second sort does not reconsider it: 35,262 answers from the first pass
+are simply frozen, whichever history produced them, and of the 9,014 the second
+sort does reach it agrees with itself 14 times. When they are not, the second
+sort reconsiders every stack that still has a gap and reaches the same 31,880
+answers from either history.
 
 A reference the vote may add to carries its history for ever: the answers are
 in the table the next run reads, indistinguishable from what a rule decided, so
