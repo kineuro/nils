@@ -105,6 +105,15 @@ fn drop_schemas(dsn: &str) {
         .expect("drop the test schemas");
 }
 
+/// The pack every test releases under, loaded once.
+fn pack() -> &'static nils_pack::pack::Pack {
+    static PACK: std::sync::OnceLock<nils_pack::pack::Pack> = std::sync::OnceLock::new();
+    PACK.get_or_init(|| {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+        nils_pack::load(&dir, None).expect("the MRI pack loads")
+    })
+}
+
 fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) -> run::Settings<'a> {
     run::Settings {
         name: "test",
@@ -117,8 +126,12 @@ fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) ->
         on_unknown: nils_release::burned::OnUnknown::Write,
         actor: "a test",
         key: KEY,
-        pack: "mri",
-        pack_version: "0.1.0",
+        pack: pack(),
+        layout: run::Layout::Descriptive,
+        places: nils_release::bids::place::Options::default(),
+        converter: None,
+        compress: true,
+        authors: &[],
     }
 }
 

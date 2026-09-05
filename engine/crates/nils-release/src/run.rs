@@ -94,7 +94,83 @@ pub struct Report {
     /// worth reading: "no tag" is not "no text".
     pub burned_in: i64,
     pub unjudged: i64,
+    /// Which layout was written, and for BIDS what it chose (§9.3).
+    pub layout: String,
+    pub placements: BTreeMap<String, String>,
+    /// The converter that was found, if one was needed (§9.6).
+    pub converter: Option<String>,
+    /// Stacks by the route of §9.3 they took.
+    pub routes: BTreeMap<String, i64>,
+    /// And, for the ones that went nowhere, why. Never a silent drop.
+    pub nowhere: BTreeMap<String, i64>,
+    /// Stacks written as DICOM because the converter would not convert them.
+    /// v0 carries a hard-coded list of vendors instead, so a stack it could
+    /// have converted is skipped and one it cannot is a failure.
+    pub unconvertible: BTreeMap<String, i64>,
     pub seconds: f64,
+}
+
+/// Which of the two layouts of §9 a release writes.
+///
+/// Neither is a fallback for the other. The descriptive one names every stack
+/// in the archive; the BIDS one names the 47 percent the standard admits and
+/// routes the rest, which is what makes it a dataset a validator passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Layout {
+    #[default]
+    Descriptive,
+    Bids,
+}
+
+impl Layout {
+    pub fn name(self) -> &'static str {
+        match self {
+            Layout::Descriptive => "descriptive",
+            Layout::Bids => "bids",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Layout> {
+        match text {
+            "descriptive" => Some(Layout::Descriptive),
+            "bids" => Some(Layout::Bids),
+            _ => None,
+        }
+    }
+}
+
+/// Where a stack's files go: a directory, and in BIDS the stem they share.
+///
+/// The two layouts differ in exactly this. In the descriptive one a stack owns
+/// a directory, so its place is that directory. In BIDS stacks share `anat/`
+/// and are told apart by their filenames, so its place is the directory and the
+/// stem. Either way **the place is a prefix of every file's path**, which is
+/// what lets §8.6 rename a stack without knowing which layout it is in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    pub dir: String,
+    pub stem: Option<String>,
+}
+
+impl Place {
+    fn dir(dir: String) -> Place {
+        Place { dir, stem: None }
+    }
+
+    fn file(dir: String, stem: String) -> Place {
+        Place {
+            dir,
+            stem: Some(stem),
+        }
+    }
+
+    /// The prefix every file of the stack shares.
+    pub fn key(&self) -> String {
+        match &self.stem {
+            Some(stem) => format!("{}/{stem}", self.dir),
+            None => self.dir.clone(),
+        }
+    }
 }
 
 /// What one release needs beyond its policy.
@@ -112,8 +188,21 @@ pub struct Settings<'a> {
     pub actor: &'a str,
     /// The key the pseudonyms and the UID remapping are derived from.
     pub key: &'a [u8],
-    pub pack: &'a str,
-    pub pack_version: &'a str,
+    /// The pack itself, for its BIDS mapping and its axis vocabularies (§9.2).
+    pub pack: &'a nils_pack::pack::Pack,
+    /// Which layout to write (§9).
+    pub layout: Layout,
+    /// The placements the release chose, for the two BIDS has no answer for
+    /// (§9.3).
+    pub places: crate::bids::place::Options,
+    /// The converter, found before anything is written (§9.6). Required by the
+    /// BIDS layout and unused by the descriptive one.
+    pub converter: Option<&'a crate::bids::convert::Converter>,
+    /// Whether the NIfTI is gzipped.
+    pub compress: bool,
+    /// Whose dataset it is (§9.5). Empty means the actor who ran the release,
+    /// which is the honest default and not a claim about authorship.
+    pub authors: &'a [String],
 }
 
 /// What went wrong.
@@ -161,7 +250,10 @@ struct Instance {
 /// what became of it since the last version (§8.6).
 struct Job {
     stack: i64,
-    dir: String,
+    place: Place,
+    /// Which of §9.3's routes it took. In the descriptive layout there is one.
+    route: String,
+    /// The BIDS stem, when the tree is BIDS and the standard named it.
     content: String,
     change: crate::version::Change,
     /// Where the last version put it, when there was one.
@@ -175,13 +267,27 @@ struct Job {
 struct Previous {
     id: i64,
     version: String,
-    /// Per stack, what it wrote and where: the state this version compares
-    /// against.
-    stacks: HashMap<i64, crate::version::Was>,
-    /// Per instance, the file it wrote. Carried forward unchanged, so that
-    /// every version's manifest is the whole tree rather than only the part of
-    /// it this run touched (§11).
-    files: HashMap<i64, (String, String, i64)>,
+    /// Per stack, what it wrote, where, and by which route: the state this
+    /// version compares against.
+    stacks: HashMap<i64, (crate::version::Was, String)>,
+    /// Per stack, the files it wrote. Carried forward unchanged, so that every
+    /// version's manifest is the whole tree rather than only the part of it
+    /// this run touched (§11).
+    ///
+    /// By stack and not by instance, because a converted file is not one
+    /// instance written out: a NIfTI is a whole stack, and its sidecar,
+    /// `.bval` and `.bvec` are the stack's too.
+    files: HashMap<i64, Vec<Wrote>>,
+}
+
+/// One file a version wrote.
+#[derive(Debug, Clone)]
+struct Wrote {
+    /// The instance, when the file is one instance written out.
+    instance: Option<i64>,
+    path: String,
+    digest: String,
+    bytes: i64,
 }
 
 /// Run one release.
@@ -204,17 +310,50 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         )));
     }
 
+    // §9.2 and §9.6, before a registry row exists. A pack with no mapping
+    // cannot name a BIDS tree, and a converter is not a thing to discover
+    // halfway through an archive.
+    if settings.layout == Layout::Bids {
+        if settings.pack.bids.is_empty() {
+            return Err(Error::Refused(format!(
+                "the {} pack declares no BIDS mapping, so it cannot say which of its values \
+                 means T1w (§9.2). Release the descriptive layout, or give the pack a \
+                 bids.yml.",
+                settings.pack.name
+            )));
+        }
+        if settings.converter.is_none() {
+            return Err(Error::Refused(
+                "a BIDS tree is NIfTI and no converter was found (§9.6)".to_string(),
+            ));
+        }
+    }
+
     let instances = select(registry.store(), &settings.selection)?;
     let days = study_days(registry.store())?;
     let pixels = pixel_verdicts(registry.store())?;
-    let named = names(registry.store(), &days, settings.scheme)?;
+    let named = places(registry.store(), &days, settings.scheme, settings.pack)?;
     // The version this run is worked out against, read before anything is
     // written, and the version this run will be.
     let earlier = previous(registry.store(), settings.name, settings.root)?;
     let version = crate::version::next(today(), earlier.as_ref().map(|p| p.version.as_str()));
 
+    let mut placements: BTreeMap<String, String> = BTreeMap::new();
+    if settings.layout == Layout::Bids {
+        placements.insert(
+            "localizers".to_string(),
+            settings.places.localizers.name().to_string(),
+        );
+        placements.insert(
+            "synthetic".to_string(),
+            settings.places.synthetic.name().to_string(),
+        );
+    }
     let mut report = Report {
         name: settings.name.to_string(),
+        layout: settings.layout.name().to_string(),
+        placements,
+        converter: settings.converter.map(|c| c.describe()),
         version: version.clone(),
         previous: earlier.as_ref().map(|p| p.version.clone()),
         root: settings.root.display().to_string(),
@@ -225,7 +364,13 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         Uids::Remap => Some(Remap::new(settings.policy.root.clone(), settings.key)),
         Uids::Preserve => None,
     };
-    report.release_id = open_row(registry.store(), settings, &version, earlier.as_ref())?;
+    report.release_id = open_row(
+        registry.store(),
+        settings,
+        &version,
+        earlier.as_ref(),
+        &report.placements,
+    )?;
 
     // The parts of a stack's content digest that are the same for every stack
     // in the release (§8.6).
@@ -241,7 +386,7 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         .map(|a| a.text())
         .collect::<Vec<_>>()
         .join(",");
-    let pack = format!("{}@{}", settings.pack, settings.pack_version);
+    let pack = format!("{}@{}", settings.pack.name, settings.pack.version);
 
     // Which studies are one occasion, per subject, so a file lands in the
     // session it belongs to rather than in a directory named by its date.
@@ -251,12 +396,21 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
     }
     report.subjects = by_subject.len() as i64;
 
+    // §9.4: the time each stack was acquired, under the date policy, for the
+    // standard's own columns. Computed once, before anything is written.
+    let acq_times = match settings.layout {
+        Layout::Bids => acquisition_times(registry.store(), &days)?,
+        Layout::Descriptive => HashMap::new(),
+    };
+
     // What each stack is, where it goes and what became of it, worked out for
     // the whole release before a single file is touched. Nothing here reads or
     // writes a byte of the tree: the decision is what makes a re-run cheap, so
     // it is taken from the registry alone.
     let mut jobs: Vec<Job> = Vec::new();
     let mut held: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    // What went nowhere, with the reason (§9.3).
+    let mut absent: Vec<(i64, String, String)> = Vec::new();
     for (subject, mine) in by_subject {
         let labels = session_labels(&mine, &days, settings.scheme);
         let offset = match settings.policy.dates {
@@ -301,14 +455,36 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                 .get(&study)
                 .cloned()
                 .unwrap_or_else(|| "unknown".to_string());
+            let placed = named.get(&stack);
             // §9.1. A stack with no name is one nothing classified, which is a
             // stack the release should not silently rename into something
             // readable.
-            let (folder, stem) = match named.get(&stack) {
-                Some(n) => (n.folder.clone(), n.name.clone()),
+            let (folder, stem) = match placed {
+                Some(p) => (p.descriptive.folder.clone(), p.descriptive.name.clone()),
                 None => ("misc".to_string(), format!("stack-{stack:08}")),
             };
-            let dir = format!("sub-{code}/ses-{label}/{folder}/{stem}");
+            let route = match settings.layout {
+                Layout::Descriptive => crate::bids::place::Route::Raw,
+                Layout::Bids => crate::bids::place::route(
+                    placed.and_then(|p| p.disposition.as_deref()),
+                    placed.is_some_and(|p| p.synthetic),
+                    &placed
+                        .map(|p| p.bids.clone())
+                        .unwrap_or(Err(crate::bids::name::Why::NoSuffix)),
+                    settings.places,
+                ),
+            };
+            // §9.3's fourth route. Never a silent drop: the stack is out of
+            // this version, so one an earlier version wrote is removed from
+            // the tree, and the reason is recorded and reported.
+            if let crate::bids::place::Route::Nowhere(why) = &route {
+                *report.nowhere.entry(why.kind().to_string()).or_insert(0) += 1;
+                *report.routes.entry("nowhere".to_string()).or_insert(0) += 1;
+                absent.push((stack, why.kind().to_string(), why.to_string()));
+                continue;
+            }
+            *report.routes.entry(route.name().to_string()).or_insert(0) += 1;
+            let place = place_of(&route, settings, &code, &label, &folder, &stem, placed);
             let content = crate::version::content_of(
                 &subject_policy(settings, &code, offset),
                 &categories,
@@ -319,28 +495,37 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                     .map(|i| (i.id, i.size, i.mtime))
                     .collect::<Vec<_>>(),
             );
+            let key = place.key();
             let was = earlier.as_ref().and_then(|p| p.stacks.get(&stack));
-            let mut change = crate::version::compare(was, &content, &dir);
-            // A stack whose files the last version did not all write is not
-            // one this version may carry forward, whatever the digest says:
-            // the digest describes the decision and the manifest describes the
+            let mut change = crate::version::compare(was.map(|(w, _)| w), &content, &key);
+            // A route that changed changed the bytes: a stack converted last
+            // time and written as DICOM this time is not the same file under a
+            // new name.
+            if change == crate::version::Change::Moved
+                && was.is_some_and(|(_, r)| *r != route.name())
+            {
+                change = crate::version::Change::Rewritten;
+            }
+            // A stack whose files the last version did not write is not one
+            // this version may carry forward, whatever the digest says: the
+            // digest describes the decision and the manifest describes the
             // tree, and only the manifest knows a file was refused.
             let carried = !change.is_work() || change == crate::version::Change::Moved;
-            if carried
-                && !instances.iter().all(|i| {
-                    earlier
-                        .as_ref()
-                        .is_some_and(|p| p.files.contains_key(&i.id))
-                })
-            {
+            let wrote = earlier.as_ref().and_then(|p| p.files.get(&stack));
+            let complete = match settings.layout {
+                Layout::Descriptive => wrote.is_some_and(|f| f.len() == instances.len()),
+                Layout::Bids => wrote.is_some_and(|f| !f.is_empty()),
+            };
+            if carried && !complete {
                 change = crate::version::Change::Rewritten;
             }
             jobs.push(Job {
                 stack,
-                dir,
+                place,
+                route: route.name().to_string(),
                 content,
                 change,
-                was: was.map(|w| w.dir.clone()),
+                was: was.map(|(w, _)| w.dir.clone()),
                 code: code.clone(),
                 offset,
                 instances,
@@ -351,91 +536,97 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
 
     // What the last version wrote and this one does not.
     let here: std::collections::HashSet<i64> = jobs.iter().map(|j| j.stack).collect();
-    let mut gone: Vec<(i64, String)> = match &earlier {
+    let mut gone: Vec<(i64, String, Vec<Wrote>)> = match &earlier {
         Some(p) => p
             .stacks
             .iter()
             .filter(|(stack, _)| !here.contains(stack))
-            .map(|(stack, was)| (*stack, was.dir.clone()))
+            .map(|(stack, (was, _))| {
+                (
+                    *stack,
+                    was.dir.clone(),
+                    p.files.get(stack).cloned().unwrap_or_default(),
+                )
+            })
             .collect(),
         None => Vec::new(),
     };
-    gone.sort();
+    gone.sort_by_key(|(stack, _, _)| *stack);
 
-    // Everything that leaves goes first, so that a directory a move is about
-    // to land in is free by the time the move happens.
-    for (_, dir) in &gone {
-        drop_dir(settings.root, dir);
+    // Everything that leaves goes first, so that a name a move is about to
+    // take is free by the time the move happens.
+    for (_, _, files) in &gone {
+        drop_files(settings.root, files);
     }
     for job in &jobs {
-        if job.change == crate::version::Change::Rewritten {
-            if let Some(was) = &job.was {
-                drop_dir(settings.root, was);
-            }
-            drop_dir(settings.root, &job.dir);
+        if job.change == crate::version::Change::Rewritten
+            && let Some(files) = earlier.as_ref().and_then(|p| p.files.get(&job.stack))
+        {
+            drop_files(settings.root, files);
         }
     }
-    let moved = move_them(settings.root, &jobs);
+    let moved = move_them(settings.root, &jobs, earlier.as_ref());
 
     // And only now is anything written.
     let mut files: Vec<Vec<Param>> = Vec::new();
     let mut moves: Vec<Vec<Param>> = Vec::new();
     let mut rows: Vec<Vec<Param>> = Vec::new();
+    let mut scans: BTreeMap<(String, String), Vec<crate::bids::dataset::Scan>> = BTreeMap::new();
     for job in &mut jobs {
         // A move whose source is not where the last version left it is not a
         // move. Somebody emptied the tree, and the stack is written again.
         if job.change == crate::version::Change::Moved && !moved.contains(&job.stack) {
             job.change = crate::version::Change::Rewritten;
         }
-        let mut mine: Vec<Vec<Param>> = Vec::new();
+        let mut mine: Vec<Wrote> = Vec::new();
         match job.change {
             crate::version::Change::Unchanged | crate::version::Change::Moved => {
                 // The bytes are the ones the last version wrote, and the
                 // digest with them: nothing was read, so nothing is recomputed.
-                for i in &job.instances {
-                    let Some((path, digest, bytes)) =
-                        earlier.as_ref().and_then(|p| p.files.get(&i.id))
-                    else {
-                        continue;
-                    };
-                    let path = match job.change {
-                        crate::version::Change::Moved => rebase(path, &job.dir),
-                        _ => path.clone(),
-                    };
-                    report.bytes += bytes;
-                    mine.push(vec![
-                        Param::Int(report.release_id),
-                        Param::Int(i.id),
-                        Param::from(path),
-                        Param::from(digest.as_str()),
-                        Param::Int(*bytes),
-                    ]);
+                let was = job.was.clone().unwrap_or_default();
+                let key = job.place.key();
+                for w in earlier
+                    .as_ref()
+                    .and_then(|p| p.files.get(&job.stack))
+                    .into_iter()
+                    .flatten()
+                {
+                    report.bytes += w.bytes;
+                    mine.push(Wrote {
+                        path: match job.change {
+                            crate::version::Change::Moved => rebase(&w.path, &was, &key),
+                            _ => w.path.clone(),
+                        },
+                        ..w.clone()
+                    });
                 }
             }
             _ => {
+                let code = job.code.clone();
                 let plan = Plan {
                     policy: settings.policy,
                     categories: &settings.categories,
                     private: settings.private,
-                    code: &job.code,
+                    code: &code,
                     offset: job.offset,
                     remap: remap.as_ref(),
                 };
-                for i in &job.instances {
-                    match write_one(i, &plan, settings.root, &job.dir) {
-                        Ok(written) => {
+                let written = match settings.layout {
+                    Layout::Descriptive => {
+                        let dir = job.place.dir.clone();
+                        write_dicom(job, &plan, settings.root, &dir)
+                    }
+                    Layout::Bids => write_bids(job, &plan, settings, &mut report),
+                };
+                for w in written {
+                    match w {
+                        Ok(w) => {
                             report.written += 1;
-                            report.bytes += written.bytes;
-                            for ((tag, action), n) in &written.applied.changes {
+                            report.bytes += w.wrote.bytes;
+                            for ((tag, action), n) in &w.applied.changes {
                                 *report.changes.entry(format!("{tag} {action}")).or_insert(0) += n;
                             }
-                            mine.push(vec![
-                                Param::Int(report.release_id),
-                                Param::Int(i.id),
-                                Param::from(written.path.as_str()),
-                                Param::from(written.digest.as_str()),
-                                Param::Int(written.bytes),
-                            ]);
+                            mine.push(w.wrote);
                         }
                         Err(why) => {
                             // By the reason and never by the path: a report
@@ -453,7 +644,12 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
             Param::Int(report.release_id),
             Param::Int(job.stack),
             Param::from(job.content.as_str()),
-            Param::from(job.dir.as_str()),
+            Param::from(job.place.dir.as_str()),
+            match &job.place.stem {
+                Some(stem) => Param::from(stem.as_str()),
+                None => Param::Null,
+            },
+            Param::from(job.route.as_str()),
             Param::Int(mine.len() as i64),
         ]);
         match job.change {
@@ -472,13 +668,52 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                     Some(was) => Param::from(was.as_str()),
                     None => Param::Null,
                 },
-                Param::from(job.dir.as_str()),
+                Param::from(job.place.key()),
             ]);
         }
-        files.append(&mut mine);
+        // §9.4: the time in the standard's own slot, per file, so anything
+        // joining on a date reads a column instead of parsing a directory name.
+        if settings.layout == Layout::Bids {
+            let prefix = format!("sub-{}/", job.code);
+            for w in &mine {
+                // The images, and not the sidecars that describe them: a
+                // `_scans.tsv` lists the data files, and a row per `.json`,
+                // `.bval` and `.bvec` is three rows saying the same time.
+                let is_image = w.path.ends_with(".nii") || w.path.ends_with(".nii.gz");
+                if is_image
+                    && let Some(rest) = w.path.strip_prefix(&prefix)
+                    && let Some((session, file)) = rest.split_once('/')
+                    && let Some(label) = session.strip_prefix("ses-")
+                {
+                    scans
+                        .entry((job.code.clone(), label.to_string()))
+                        .or_default()
+                        .push(crate::bids::dataset::Scan {
+                            filename: file.to_string(),
+                            acq_time: acq_times
+                                .get(&job.stack)
+                                .and_then(|t| under_policy(t, settings, job.offset)),
+                        });
+                }
+            }
+        }
+        for w in mine {
+            files.push(vec![
+                Param::Int(report.release_id),
+                Param::Int(job.stack),
+                match w.instance {
+                    Some(i) => Param::Int(i),
+                    None => Param::Null,
+                },
+                Param::from(w.path),
+                Param::from(w.digest),
+                Param::Int(w.bytes),
+            ]);
+        }
     }
-    for (stack, was) in &gone {
+    for (stack, was, files) in &gone {
         report.removed += 1;
+        let _ = files;
         moves.push(vec![
             Param::Int(report.release_id),
             Param::Int(*stack),
@@ -488,11 +723,37 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         ]);
     }
 
-    write_files(registry.store(), &files)?;
+    // §9.5. The files that make the tree a dataset rather than a pile of
+    // correctly named images. v0 writes none of them.
+    if settings.layout == Layout::Bids {
+        write_dataset(settings, &report, &scans, &jobs).map_err(Error::Io)?;
+    }
+
+    write_rows(
+        registry.store(),
+        "release_file",
+        &[
+            "release_id",
+            "stack_id",
+            "instance_id",
+            "path",
+            "digest",
+            "bytes",
+        ],
+        &files,
+    )?;
     write_rows(
         registry.store(),
         "release_stack",
-        &["release_id", "stack_id", "content", "dir", "files"],
+        &[
+            "release_id",
+            "stack_id",
+            "content",
+            "dir",
+            "stem",
+            "route",
+            "files",
+        ],
         &rows,
     )?;
     write_rows(
@@ -501,13 +762,341 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         &["release_id", "stack_id", "action", "was", "now"],
         &moves,
     )?;
+    write_rows(
+        registry.store(),
+        "release_absent",
+        &["release_id", "stack_id", "kind", "why"],
+        &absent
+            .iter()
+            .map(|(stack, kind, why)| {
+                vec![
+                    Param::Int(report.release_id),
+                    Param::Int(*stack),
+                    Param::from(kind.as_str()),
+                    Param::from(why.as_str()),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    )?;
     write_changes(registry.store(), &report)?;
     if !held.is_empty() {
         raise_review(registry.store(), &report, &held, &pixels)?;
     }
+    // §9.2. `func` requires `task` and no rule can invent one, so a person is
+    // asked, **per study**: what the subject was doing is a property of the
+    // occasion and not of a stack, and one answer settles every functional
+    // stack of it.
+    ask_about_tasks(registry.store(), &report, &absent, settings)?;
     close_row(registry.store(), &report)?;
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
+}
+
+/// The files that make a tree a dataset (§9.4 and §9.5).
+///
+/// v0 writes none of them, which is why its tree is not a dataset rather than
+/// an invalid one.
+fn write_dataset(
+    settings: &Settings,
+    report: &Report,
+    scans: &BTreeMap<(String, String), Vec<crate::bids::dataset::Scan>>,
+    jobs: &[Job],
+) -> Result<(), std::io::Error> {
+    use crate::bids::dataset;
+    let root = settings.root;
+    let made_by = dataset::MadeBy {
+        name: "nils".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        dataset_version: report.version.clone(),
+        converter: report.converter.clone(),
+        policy: report.policy.clone(),
+        pack: format!("{}@{}", settings.pack.name, settings.pack.version),
+        placements: report.placements.clone(),
+        authors: match settings.authors.is_empty() {
+            true => vec![settings.actor.to_string()],
+            false => settings.authors.to_vec(),
+        },
+    };
+    std::fs::create_dir_all(root)?;
+    std::fs::write(
+        root.join("dataset_description.json"),
+        dataset::description(settings.name, &made_by, None),
+    )?;
+    std::fs::write(
+        root.join("README"),
+        dataset::readme(settings.name, &made_by, &report.routes),
+    )?;
+
+    // One row per subject the release wrote, and nothing about them that the
+    // policy did not let out.
+    let mut subjects: Vec<String> = jobs.iter().map(|j| j.code.clone()).collect();
+    subjects.sort();
+    subjects.dedup();
+    let rows: Vec<dataset::Participant> = subjects
+        .iter()
+        .map(|id| dataset::Participant {
+            id: id.clone(),
+            extra: BTreeMap::new(),
+        })
+        .collect();
+    std::fs::write(root.join("participants.tsv"), dataset::participants(&rows))?;
+
+    // §9.4. The directory is named by the session scheme and the time is in
+    // the standard's own column, so anything joining on a date reads the
+    // column rather than parsing a directory name.
+    let mut by_subject: BTreeMap<&String, Vec<dataset::Session>> = BTreeMap::new();
+    for ((code, label), rows) in scans {
+        let earliest = rows.iter().filter_map(|s| s.acq_time.clone()).min();
+        by_subject.entry(code).or_default().push(dataset::Session {
+            label: label.clone(),
+            acq_time: earliest,
+        });
+        let dir = root.join(format!("sub-{code}/ses-{label}"));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join(format!("sub-{code}_ses-{label}_scans.tsv")),
+            dataset::scans(rows),
+        )?;
+    }
+    for (code, mut sessions) in by_subject {
+        sessions.sort_by(|a, b| a.label.cmp(&b.label));
+        let dir = root.join(format!("sub-{code}"));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join(format!("sub-{code}_sessions.tsv")),
+            dataset::sessions(&sessions),
+        )?;
+    }
+
+    // §9.3. A `.bidsignore` that lists what is not there tells a reader the
+    // tree holds things it does not, so the lines are the ones this release's
+    // own choices need.
+    let mut ignore: Vec<String> = Vec::new();
+    if report.routes.contains_key("beside") {
+        ignore.push("*/*/localizer/".to_string());
+    }
+    if report.routes.contains_key("unofficial") {
+        ignore.push("*_localizer.*".to_string());
+    }
+    if !ignore.is_empty() {
+        std::fs::write(root.join(".bidsignore"), dataset::bidsignore(&ignore))?;
+    }
+
+    // And `derivatives/nils/` is a dataset in its own right, so the tree stays
+    // valid and the data stays present.
+    if report.routes.contains_key("derivatives") {
+        let dir = root.join("derivatives/nils");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("dataset_description.json"),
+            dataset::derivative_description(settings.name, &made_by),
+        )?;
+    }
+    Ok(())
+}
+
+/// One review item per study whose functional stacks nobody has placed (§9.2).
+///
+/// **Per study, not per stack.** A study is one protocol run on one occasion,
+/// so what the subject was doing is a property of it, and a person who knows
+/// the answer for one of its functional stacks knows it for all of them. v0
+/// asks about 84 percent of its stacks; this asks once per occasion, and the
+/// answer is a decision on the `task` axis scoped to the study.
+fn ask_about_tasks(
+    store: &mut Store,
+    report: &Report,
+    absent: &[(i64, String, String)],
+    settings: &Settings,
+) -> Result<(), Error> {
+    let mut stacks: Vec<i64> = absent
+        .iter()
+        .filter(|(_, kind, _)| kind == "no_task")
+        .map(|(stack, _, _)| *stack)
+        .collect();
+    if stacks.is_empty() {
+        return Ok(());
+    }
+    stacks.sort_unstable();
+    // The studies those stacks belong to, which is what is asked about.
+    let sql = format!(
+        "SELECT DISTINCT se.study_id FROM {} k JOIN {} se ON se.id = k.series_id \
+         WHERE k.id IN ({})",
+        store.qualified("stack"),
+        store.qualified("series"),
+        stacks
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let mut studies: Vec<i64> = Vec::new();
+    for r in store.query(&sql, &[])? {
+        studies.push(r.int(0)?);
+    }
+    studies.sort_unstable();
+    let choices: Vec<&str> = settings.pack.bids.task.keys().map(String::as_str).collect();
+    let now = now_iso();
+    let rows: Vec<Vec<Param>> = studies
+        .iter()
+        .map(|study| {
+            vec![
+                Param::from("release.no_task"),
+                Param::from("study"),
+                Param::from(serde_json::json!({ "study_id": study }).to_string()),
+                Param::from(
+                    serde_json::json!({
+                        "release": report.release_id,
+                        "axis": "task",
+                        "choices": choices,
+                        "why": "func requires task and nothing in a DICOM says what a \
+                                subject was doing",
+                    })
+                    .to_string(),
+                ),
+                Param::from("open"),
+                Param::from(now.as_str()),
+            ]
+        })
+        .collect();
+    write_rows(
+        store,
+        "review_item",
+        &["kind", "scope", "ref", "evidence", "status", "created_at"],
+        &rows,
+    )
+}
+
+/// Where a stack's files go, given the route it took (§9.3).
+///
+/// Both layouts end here, which is what lets §8.6 compare a place without
+/// knowing which layout it is in.
+fn place_of(
+    route: &crate::bids::place::Route,
+    settings: &Settings,
+    code: &str,
+    label: &str,
+    folder: &str,
+    stem: &str,
+    placed: Option<&Placed>,
+) -> Place {
+    use crate::bids::place::Route;
+    let session = format!("sub-{code}/ses-{label}");
+    if settings.layout == Layout::Descriptive {
+        return Place::dir(format!("{session}/{folder}/{stem}"));
+    }
+    match route {
+        // The standard's own name, in the standard's own directory.
+        Route::Raw => match placed.and_then(|p| p.bids.as_ref().ok()) {
+            Some(n) => Place::file(n.dir(code, label), n.stem(code, label)),
+            None => Place::dir(format!("{session}/{folder}/{stem}")),
+        },
+        // Kept as DICOM, one directory per stack, which is what a reader of
+        // them wants anyway. Named by §9.1, which is most of why §9.1 names
+        // everything.
+        Route::SourceData => Place::dir(format!("sourcedata/{session}/{folder}/{stem}")),
+        // A dataset in its own right, so the tree stays valid and the data
+        // stays present.
+        Route::Derivatives => Place::file(
+            format!("derivatives/nils/{session}/{folder}"),
+            unofficial(code, label, stem),
+        ),
+        // Outside the standard, so the entity set is ours and a `.bidsignore`
+        // line says the standard does not know it.
+        Route::Beside(what) => Place::file(
+            format!("{session}/{what}"),
+            format!("{}_{what}", unofficial(code, label, stem)),
+        ),
+        Route::Unofficial(datatype) => Place::file(
+            format!("{session}/{datatype}"),
+            format!("{}_localizer", unofficial(code, label, stem)),
+        ),
+        // Never reached: a stack routed nowhere is out of the version before
+        // a place is asked for.
+        Route::Nowhere(_) => Place::dir(format!("{session}/{folder}/{stem}")),
+    }
+}
+
+/// A BIDS-shaped name for something BIDS has no name for.
+///
+/// The descriptive name of §9.1 carried in `acq-`, which is where a label that
+/// describes an acquisition belongs, reduced to what a BIDS label may spell.
+/// Uniqueness comes from §9.1's own disambiguation, which already ran over the
+/// session as the registry holds it.
+fn unofficial(code: &str, label: &str, stem: &str) -> String {
+    let acq: String = stem
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '+')
+        .collect();
+    match (label.is_empty(), acq.is_empty()) {
+        (_, true) => format!("sub-{code}_ses-{label}"),
+        (true, _) => format!("sub-{code}_acq-{acq}"),
+        (false, _) => format!("sub-{code}_ses-{label}_acq-{acq}"),
+    }
+}
+
+/// When each stack was acquired, as the archive holds it: the study's day and
+/// the series' time.
+///
+/// Read from the registry rather than from the file, because the file is
+/// scrubbed by the time anything asks and because the study's day is the
+/// repaired one (§4).
+fn acquisition_times(
+    store: &mut Store,
+    days: &HashMap<i64, Day>,
+) -> Result<HashMap<i64, (Day, Option<String>)>, Error> {
+    let t = table("series");
+    let d = store.dialect();
+    let time = d.text_of_qualified(
+        Some("se"),
+        t.column("series_time")
+            .expect("series.series_time is a column"),
+    );
+    let sql = format!(
+        "SELECT k.id, se.study_id, {time} FROM {} k JOIN {} se ON se.id = k.series_id",
+        store.qualified("stack"),
+        store.qualified("series"),
+    );
+    let mut out = HashMap::new();
+    for r in store.query(&sql, &[])? {
+        if let Some(day) = days.get(&r.int(1)?) {
+            out.insert(r.int(0)?, (*day, r.opt_text(2)?.map(str::to_string)));
+        }
+    }
+    Ok(out)
+}
+
+/// One acquisition time, under the release's date policy (§9.4 and §8.3).
+///
+/// The whole point of §9.4: the directory is named by the session scheme and
+/// the time is carried in the standard's own slot, **under the same policy the
+/// files are under**. A release that shifted its dates writes the shifted time
+/// here, and one that kept only the year writes nothing, because a time whose
+/// date was truncated is not a time.
+fn under_policy(
+    (day, time): &(Day, Option<String>),
+    settings: &Settings,
+    offset: crate::dates::Offset,
+) -> Option<String> {
+    let day = match settings.policy.dates {
+        crate::dates::Policy::Keep => *day,
+        crate::dates::Policy::Shift => Day::from_days(day.to_days() + offset.0),
+        crate::dates::Policy::Year => return None,
+    };
+    let stamp = format!("{:04}-{:02}-{:02}", day.year(), day.month(), day.day());
+    let Some(t) = time.as_deref().map(str::trim).filter(|t| t.len() >= 6) else {
+        return Some(stamp);
+    };
+    // `HHMMSS` or `HH:MM:SS`, either of which the store may hand back.
+    let digits: String = t.chars().filter(char::is_ascii_digit).collect();
+    match digits.len() >= 6 {
+        true => Some(format!(
+            "{stamp}T{}:{}:{}",
+            &digits[0..2],
+            &digits[2..4],
+            &digits[4..6]
+        )),
+        false => Some(stamp),
+    }
 }
 
 /// The day this release is made, for its version.
@@ -559,33 +1148,46 @@ fn previous(store: &mut Store, name: &str, root: &Path) -> Result<Option<Previou
 
     let d = store.dialect();
     let sql = format!(
-        "SELECT stack_id, content, dir FROM {} WHERE release_id = {}",
+        "SELECT stack_id, content, dir, stem, route FROM {} WHERE release_id = {}",
         store.qualified("release_stack"),
         d.param(1, Type::Int),
     );
     let mut stacks = HashMap::new();
     for r in store.query(&sql, &[Param::Int(id)])? {
+        let dir = r.text(2)?.to_string();
+        // The place, which is the directory and, where the layout has one, the
+        // stem the stack's files share.
+        let place = match r.opt_text(3)? {
+            Some(stem) => format!("{dir}/{stem}"),
+            None => dir,
+        };
         stacks.insert(
             r.int(0)?,
-            crate::version::Was {
-                content: r.text(1)?.to_string(),
-                dir: r.text(2)?.to_string(),
-            },
+            (
+                crate::version::Was {
+                    content: r.text(1)?.to_string(),
+                    dir: place,
+                },
+                r.opt_text(4)?.unwrap_or("raw").to_string(),
+            ),
         );
     }
 
     let d = store.dialect();
     let sql = format!(
-        "SELECT instance_id, path, digest, bytes FROM {} WHERE release_id = {}",
+        "SELECT stack_id, instance_id, path, digest, bytes FROM {} WHERE release_id = {} \
+         ORDER BY id",
         store.qualified("release_file"),
         d.param(1, Type::Int),
     );
-    let mut files = HashMap::new();
+    let mut files: HashMap<i64, Vec<Wrote>> = HashMap::new();
     for r in store.query(&sql, &[Param::Int(id)])? {
-        files.insert(
-            r.int(0)?,
-            (r.text(1)?.to_string(), r.text(2)?.to_string(), r.int(3)?),
-        );
+        files.entry(r.int(0)?).or_default().push(Wrote {
+            instance: r.opt_int(1)?,
+            path: r.text(2)?.to_string(),
+            digest: r.text(3)?.to_string(),
+            bytes: r.int(4)?,
+        });
     }
     Ok(Some(Previous {
         id,
@@ -595,11 +1197,18 @@ fn previous(store: &mut Store, name: &str, root: &Path) -> Result<Option<Previou
     }))
 }
 
-/// A file keeps its name and changes directory, which is what a move is.
-fn rebase(path: &str, dir: &str) -> String {
-    match path.rsplit_once('/') {
-        Some((_, file)) => format!("{dir}/{file}"),
-        None => format!("{dir}/{path}"),
+/// A file's path under a new place.
+///
+/// The place is a prefix of every file of a stack, so a move is a prefix
+/// swap and the same arithmetic serves both layouts: `dir/00000123.dcm` under a
+/// new directory, and `.../sub-x_ses-1_T1w.nii.gz` under a new stem.
+fn rebase(path: &str, was: &str, now: &str) -> String {
+    match path.strip_prefix(was) {
+        Some(rest) => format!("{now}{rest}"),
+        // A path the old place is not a prefix of is not a file of this stack,
+        // which can only mean the manifest and the state disagree. Keeping it
+        // where it is loses nothing that was not already lost.
+        None => path.to_string(),
     }
 }
 
@@ -609,7 +1218,11 @@ fn rebase(path: &str, dir: &str) -> String {
 /// names between versions: a disambiguating suffix moves when a sibling
 /// appears or leaves, and renaming one onto the other in place would lose a
 /// tree.
-fn move_them(root: &Path, jobs: &[Job]) -> std::collections::HashSet<i64> {
+fn move_them(
+    root: &Path,
+    jobs: &[Job],
+    earlier: Option<&Previous>,
+) -> std::collections::HashSet<i64> {
     let mut arrived = std::collections::HashSet::new();
     let moving: Vec<&Job> = jobs
         .iter()
@@ -622,38 +1235,72 @@ fn move_them(root: &Path, jobs: &[Job]) -> std::collections::HashSet<i64> {
     if std::fs::create_dir_all(&staging).is_err() {
         return arrived;
     }
-    let mut staged: Vec<&Job> = Vec::new();
+    let files_of = |job: &Job| -> Vec<Wrote> {
+        earlier
+            .and_then(|p| p.files.get(&job.stack))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut staged: Vec<(&Job, Vec<(PathBuf, String)>)> = Vec::new();
     for job in &moving {
         let Some(was) = &job.was else { continue };
-        if std::fs::rename(root.join(was), staging.join(job.stack.to_string())).is_ok() {
-            staged.push(job);
+        let mut mine = Vec::new();
+        let mut whole = true;
+        for (n, w) in files_of(job).iter().enumerate() {
+            let from = root.join(&w.path);
+            let to = staging.join(format!("{}-{n}", job.stack));
+            match std::fs::rename(&from, &to) {
+                Ok(()) => mine.push((to, rebase(&w.path, was, &job.place.key()))),
+                Err(_) => whole = false,
+            }
+        }
+        // Half a move is not a move: the files that did reach the staging area
+        // are left there and the stack is written from scratch, because a tree
+        // holding some of a stack under each of two names is worse than one
+        // holding it under neither.
+        match whole && !mine.is_empty() {
+            true => staged.push((job, mine)),
+            false => {
+                for (path, _) in mine {
+                    std::fs::remove_file(path).ok();
+                }
+            }
         }
     }
-    for job in staged {
-        let to = root.join(&job.dir);
-        if let Some(parent) = to.parent()
-            && std::fs::create_dir_all(parent).is_err()
-        {
-            continue;
+    for (job, mine) in staged {
+        let mut whole = true;
+        for (from, to) in &mine {
+            let target = root.join(to);
+            if let Some(parent) = target.parent()
+                && std::fs::create_dir_all(parent).is_err()
+            {
+                whole = false;
+                continue;
+            }
+            if std::fs::rename(from, &target).is_err() {
+                whole = false;
+            }
         }
-        if std::fs::rename(staging.join(job.stack.to_string()), &to).is_ok() {
+        if whole {
             arrived.insert(job.stack);
         }
     }
     for job in &moving {
-        if let Some(was) = &job.was {
-            prune(root, root.join(was).parent());
+        for w in files_of(job) {
+            prune(root, root.join(&w.path).parent());
         }
     }
     std::fs::remove_dir_all(&staging).ok();
     arrived
 }
 
-/// Remove a stack's directory, and any parent it leaves empty.
-fn drop_dir(root: &Path, dir: &str) {
-    let full = root.join(dir);
-    std::fs::remove_dir_all(&full).ok();
-    prune(root, full.parent());
+/// Remove a stack's files, and any directory they leave empty.
+fn drop_files(root: &Path, files: &[Wrote]) {
+    for w in files {
+        let full = root.join(&w.path);
+        std::fs::remove_file(&full).ok();
+        prune(root, full.parent());
+    }
 }
 
 /// Walk up from an emptied directory, removing what is now empty.
@@ -852,9 +1499,7 @@ fn session_labels(
 }
 
 struct Written {
-    path: String,
-    digest: String,
-    bytes: i64,
+    wrote: Wrote,
     applied: scrub::Applied,
 }
 
@@ -885,11 +1530,149 @@ fn write_one(instance: &Instance, plan: &Plan, root: &Path, dir: &str) -> Result
         .map_err(|_| "could not be moved into place".to_string())?;
 
     Ok(Written {
-        path: relative.display().to_string(),
-        digest,
-        bytes: bytes.len() as i64,
+        wrote: Wrote {
+            instance: Some(instance.id),
+            path: relative.display().to_string(),
+            digest,
+            bytes: bytes.len() as i64,
+        },
         applied,
     })
+}
+
+/// One stack, as DICOM in a directory of its own: the descriptive layout and
+/// `sourcedata/` both.
+fn write_dicom(job: &Job, plan: &Plan, root: &Path, dir: &str) -> Vec<Result<Written, String>> {
+    job.instances
+        .iter()
+        .map(|i| write_one(i, plan, root, dir))
+        .collect()
+}
+
+/// One stack in the BIDS layout (§9.2 to §9.6).
+///
+/// The files are scrubbed into a staging directory first and converted from
+/// there, **never from the source**. `dcm2niix` writes its sidecar from the
+/// DICOM headers and its own anonymiser is not a de-identification: measured on
+/// `v1.0.20260724`, `-ba y` leaves `InstitutionName` and `AcquisitionTime` in
+/// the JSON. Converting the scrubbed file means the sidecar inherits the
+/// release's policy for free, including its dates.
+fn write_bids(
+    job: &mut Job,
+    plan: &Plan,
+    settings: &Settings,
+    report: &mut Report,
+) -> Vec<Result<Written, String>> {
+    let root = settings.root;
+    let staging = root.join(".nils-convert").join(job.stack.to_string());
+    std::fs::remove_dir_all(&staging).ok();
+    if std::fs::create_dir_all(&staging).is_err() {
+        return vec![Err("no directory to stage into".to_string())];
+    }
+    // `sourcedata` is the source, so the scrub is the whole of the work.
+    if job.route == "sourcedata" {
+        std::fs::remove_dir_all(&staging).ok();
+        return write_dicom(job, plan, root, &job.place.dir);
+    }
+
+    let mut staged: Vec<PathBuf> = Vec::new();
+    let mut applied = scrub::Applied::default();
+    let mut refused: Vec<Result<Written, String>> = Vec::new();
+    for i in &job.instances {
+        match stage_one(i, plan, &staging) {
+            Ok((path, done)) => {
+                staged.push(path);
+                for (what, n) in done.changes {
+                    *applied.changes.entry(what).or_insert(0) += n;
+                }
+            }
+            Err(why) => refused.push(Err(why)),
+        }
+    }
+    let Some(converter) = settings.converter else {
+        std::fs::remove_dir_all(&staging).ok();
+        refused.push(Err("no converter, and a BIDS tree is NIfTI".to_string()));
+        return refused;
+    };
+    let stem = job.place.stem.clone().unwrap_or_default();
+    let into = root.join(&job.place.dir);
+    let made = crate::bids::convert::convert(
+        converter,
+        &staged,
+        &staging,
+        &into,
+        &stem,
+        settings.compress,
+    );
+    match made {
+        Ok(made) => {
+            std::fs::remove_dir_all(&staging).ok();
+            let mut out = refused;
+            let mut first = true;
+            for file in made.files {
+                let path = format!("{}/{file}", job.place.dir);
+                match std::fs::read(root.join(&path)) {
+                    Ok(bytes) => out.push(Ok(Written {
+                        wrote: Wrote {
+                            instance: None,
+                            path,
+                            digest: hex::encode(digest_of(&bytes)),
+                            bytes: bytes.len() as i64,
+                        },
+                        // The tags changed are the stack's and not each file's,
+                        // so they are counted once rather than per output.
+                        applied: match std::mem::take(&mut first) {
+                            true => std::mem::take(&mut applied),
+                            false => scrub::Applied::default(),
+                        },
+                    })),
+                    Err(_) => out.push(Err("unreadable after converting".to_string())),
+                }
+            }
+            out
+        }
+        Err(why) => {
+            // The data stays present. A stack the converter will not convert
+            // is written as DICOM under `sourcedata/`, with the reason
+            // reported: v0 carries a hard-coded list of vendors instead, so a
+            // stack it could have converted is skipped and one it cannot is a
+            // failure.
+            std::fs::remove_dir_all(&staging).ok();
+            *report.unconvertible.entry(first_line(&why)).or_insert(0) += 1;
+            *report.routes.entry("sourcedata".to_string()).or_insert(0) += 1;
+            if let Some(n) = report.routes.get_mut(job.route.as_str()) {
+                *n -= 1;
+            }
+            job.route = "sourcedata".to_string();
+            job.place = Place::dir(format!("sourcedata/{}", trimmed(&job.place.dir)));
+            let mut out = refused;
+            out.extend(write_dicom(job, plan, root, &job.place.dir));
+            out
+        }
+    }
+}
+
+/// The BIDS directory a fallback to `sourcedata` keeps, which is the datatype
+/// directory without the tree's own root.
+fn trimmed(dir: &str) -> String {
+    dir.strip_prefix("derivatives/nils/")
+        .unwrap_or(dir)
+        .to_string()
+}
+
+/// Scrub one instance into the staging directory, ready to convert.
+fn stage_one(
+    instance: &Instance,
+    plan: &Plan,
+    staging: &Path,
+) -> Result<(PathBuf, scrub::Applied), String> {
+    let mut object = open(Path::new(&instance.path))?;
+    let applied = scrub::apply(&mut object, plan);
+    let path = staging.join(format!("{:08}.dcm", instance.id));
+    object
+        .write_to_file(&path)
+        .map_err(|e| format!("unwritable: {}", first_line(&e.to_string())))?;
+    Ok((path, applied))
 }
 
 /// Open a file whole, part 10 or bare.
@@ -994,6 +1777,7 @@ fn open_row(
     settings: &Settings,
     version: &str,
     earlier: Option<&Previous>,
+    placements: &BTreeMap<String, String>,
 ) -> Result<i64, Error> {
     let categories: Vec<&str> = settings.categories.iter().map(|c| c.name()).collect();
     let written = store.insert(
@@ -1008,6 +1792,9 @@ fn open_row(
                 "selection",
                 "categories",
                 "session_scheme",
+                "layout",
+                "placements",
+                "converter",
                 "pack",
                 "pack_version",
                 "actor",
@@ -1036,8 +1823,14 @@ fn open_row(
             Param::from(
                 serde_json::to_string(settings.scheme).unwrap_or_else(|_| "{}".to_string()),
             ),
-            Param::from(settings.pack),
-            Param::from(settings.pack_version),
+            Param::from(settings.layout.name()),
+            Param::from(serde_json::json!(placements).to_string()),
+            match settings.converter {
+                Some(c) => Param::from(c.describe()),
+                None => Param::Null,
+            },
+            Param::from(settings.pack.name.as_str()),
+            Param::from(settings.pack.version.to_string()),
             Param::from(settings.actor),
             Param::from(now_iso()),
             // Filled in when the run closes; a run that never closed says it
@@ -1052,30 +1845,6 @@ fn open_row(
         ]],
     )?;
     Ok(written.first().map(|r| r.int(0)).transpose()?.unwrap_or(0))
-}
-
-fn write_files(store: &mut Store, files: &[Vec<Param>]) -> Result<(), Error> {
-    if files.is_empty() {
-        return Ok(());
-    }
-    store.begin()?;
-    let result = store.insert(
-        &Insert::new(
-            table("release_file"),
-            &["release_id", "instance_id", "path", "digest", "bytes"],
-        ),
-        files,
-    );
-    match result {
-        Ok(_) => {
-            store.commit()?;
-            Ok(())
-        }
-        Err(e) => {
-            store.rollback().ok();
-            Err(Error::Store(e))
-        }
-    }
 }
 
 fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
@@ -1134,19 +1903,21 @@ fn write_rows(
     }
 }
 
-/// What every stack in the registry is called under the `descriptive` layout
-/// (§9.1), and where it lands.
+/// Where every stack in the registry goes, in both layouts (§9).
 ///
 /// **Every** stack, and not only the selected ones. A name has to be unique in
 /// the directory it lands in, and that directory holds what the registry holds
 /// rather than what this release picked: v0 computes the same thing over the
 /// already filtered list, so exporting one echo of a two-echo series drops the
-/// echo suffix and the file is named as though it were the only one.
-fn names(
+/// echo suffix and the file is named as though it were the only one. The same
+/// argument decides a BIDS `run-` index, which is the standard's answer to two
+/// acquisitions that are otherwise the same thing.
+fn places(
     store: &mut Store,
     days: &HashMap<i64, Day>,
     scheme: &Scheme,
-) -> Result<HashMap<i64, name::Named>, Error> {
+    pack: &nils_pack::pack::Pack,
+) -> Result<HashMap<i64, Placed>, Error> {
     let axes = axis_values(store)?;
     let t = table("stack_fingerprint");
     let d = store.dialect();
@@ -1205,6 +1976,16 @@ fn names(
         labels.insert(*subject, mine);
     }
 
+    // The BIDS name of every stack, bucketed by the directory it has to be
+    // unique in, which for BIDS is the datatype and not a directory per stack.
+    let mut bids: HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>> =
+        HashMap::new();
+    // Ordered by series, then by the stack's index in it, then by its id, so
+    // that two runs of one version assign the same `run-` numbers.
+    type Ordered = Vec<(i64, i64, i64, String)>;
+    let mut bids_buckets: BTreeMap<(i64, String, &'static str), Ordered> = BTreeMap::new();
+    let mut extra: HashMap<i64, (bool, Option<String>)> = HashMap::new();
+
     for r in &rows {
         let stack = r.int(0)?;
         let empty = BTreeMap::new();
@@ -1234,6 +2015,68 @@ fn names(
             .and_then(|m| m.get(&study))
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
+
+        // §9.2. Every axis value reaches the mapping as an **identity** and not
+        // as what a row stores: `base` stores `T2*w` and its identity is
+        // `T2starw`, which is also the word BIDS uses.
+        let id_of = |axis: &str, stored: &str| -> Option<String> {
+            pack.axes
+                .iter()
+                .find(|x| x.name == axis)
+                .and_then(|x| x.id_of_stored(stored))
+                .map(str::to_string)
+        };
+        let ids_of = |axis: &str, stored: Option<&str>| -> Vec<String> {
+            stored
+                .into_iter()
+                .flat_map(|v| v.split(','))
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .filter_map(|v| id_of(axis, v))
+                .collect()
+        };
+        let constructs = ids_of("construct", get("construct"));
+        let modifiers = ids_of("modifier", get("modifier"));
+        let technique = get("technique").and_then(|v| id_of("technique", v));
+        let base = get("base").and_then(|v| id_of("base", v));
+        let body_part = get("body_part").and_then(|v| id_of("body_part", v));
+        let provenance = get("provenance").and_then(|v| id_of("provenance", v));
+        let facts = crate::bids::name::Facts {
+            intent: get("directory_type"),
+            constructs: constructs.iter().map(String::as_str).collect(),
+            technique: technique.as_deref(),
+            modifiers: modifiers.iter().map(String::as_str).collect(),
+            base: base.as_deref(),
+            body_part: body_part.as_deref(),
+            provenance: provenance.as_deref(),
+            orientation: r.opt_text(6)?,
+            acquisition_type: r.opt_text(9)?,
+            post_contrast: get("post_contrast") == Some("yes"),
+            // The one fact no rule sets: a person answers it per study (§9.2).
+            task: get("task"),
+            // The echo number, and only where the series has more than one
+            // stack. §9.1's rule, for §9.1's reason: an `echo-1` on a series
+            // with one echo says nothing and is in every filename.
+            echo: match r.int(4)? > 1 {
+                true => r.opt_text(8)?.and_then(first_int),
+                false => None,
+            },
+            pe_direction: r.opt_text(10)?,
+        };
+        let built = crate::bids::name::build(&facts, &pack.bids);
+        let synthetic = pack.bids.is_synthetic(
+            provenance.as_deref(),
+            &constructs.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        extra.insert(stack, (synthetic, get("disposition").map(str::to_string)));
+        if let Ok(n) = &built {
+            bids_buckets
+                .entry((subject, label.clone(), n.datatype))
+                .or_default()
+                .push((r.int(3)?, r.int(5)?, stack, n.stem("s", "s")));
+        }
+        bids.insert(stack, built);
+
         buckets
             .entry((subject, label, folder.clone()))
             .or_default()
@@ -1250,14 +2093,68 @@ fn names(
             });
     }
 
+    // Two acquisitions that are otherwise the same thing are what `run-` is
+    // for, and the standard has no other answer. In a fixed order, so that two
+    // runs of one version agree: by series, then by the stack's index in it,
+    // then by its id.
+    for bucket in bids_buckets.values_mut() {
+        bucket.sort();
+        let mut counts: BTreeMap<&String, i64> = BTreeMap::new();
+        for (_, _, _, stem) in bucket.iter() {
+            *counts.entry(stem).or_insert(0) += 1;
+        }
+        let mut seen: BTreeMap<String, i64> = BTreeMap::new();
+        for (_, _, stack, stem) in bucket.iter() {
+            if counts.get(stem).copied().unwrap_or(0) < 2 {
+                continue;
+            }
+            let n = seen.entry(stem.clone()).or_insert(0);
+            *n += 1;
+            // A group the standard gives no `run` to is one where two stacks
+            // cannot be told apart in a BIDS name either. Left as it is, which
+            // makes the second a rewrite of the first and is caught by the
+            // collision check rather than hidden by a counter.
+            if let Some(name) = bids.get(stack).and_then(|b| b.as_ref().ok())
+                && let Some(with) = name.with_run(*n)
+            {
+                bids.insert(*stack, Ok(with));
+            }
+        }
+    }
+
     let mut out = HashMap::new();
     for bucket in buckets.values_mut() {
         name::disambiguate(bucket);
         for n in bucket.iter() {
-            out.insert(n.stack, n.clone());
+            let (synthetic, disposition) = extra.remove(&n.stack).unwrap_or((false, None));
+            out.insert(
+                n.stack,
+                Placed {
+                    descriptive: n.clone(),
+                    bids: bids
+                        .remove(&n.stack)
+                        .unwrap_or(Err(crate::bids::name::Why::NoSuffix)),
+                    synthetic,
+                    disposition,
+                },
+            );
         }
     }
     Ok(out)
+}
+
+/// Where one stack goes, in both layouts (§9).
+///
+/// Both are computed for every stack whatever the release asked for, because
+/// the BIDS layout falls back to the descriptive name wherever the standard has
+/// no word: `sourcedata/` and `derivatives/nils/` are named by §9.1, which is
+/// most of why §9.1 names everything.
+struct Placed {
+    descriptive: name::Named,
+    bids: Result<crate::bids::name::Name, crate::bids::name::Why>,
+    /// A vendor's synthetic contrast, which §9.3 lets a release place.
+    synthetic: bool,
+    disposition: Option<String>,
 }
 
 /// `EchoNumbers` may carry several values; the first is this stack's.
@@ -1449,13 +2346,33 @@ mod tests {
     fn job(stack: i64, was: &str, dir: &str) -> Job {
         Job {
             stack,
-            dir: dir.to_string(),
+            place: Place::dir(dir.to_string()),
+            route: "raw".to_string(),
             content: "same".to_string(),
             change: crate::version::Change::Moved,
             was: Some(was.to_string()),
             code: "x".to_string(),
             offset: crate::dates::Offset(0),
             instances: Vec::new(),
+        }
+    }
+
+    /// What the last version wrote, as the manifest holds it.
+    fn wrote(paths: &[(i64, &str)]) -> Previous {
+        let mut files: HashMap<i64, Vec<Wrote>> = HashMap::new();
+        for (stack, path) in paths {
+            files.entry(*stack).or_default().push(Wrote {
+                instance: Some(1),
+                path: path.to_string(),
+                digest: "d".to_string(),
+                bytes: 1,
+            });
+        }
+        Previous {
+            id: 1,
+            version: "2026.01.01.1".to_string(),
+            stacks: HashMap::new(),
+            files,
         }
     }
 
@@ -1482,7 +2399,11 @@ mod tests {
             job(1, "sub-x/ses-1/anat/T1w_1", "sub-x/ses-1/anat/T1w_2"),
             job(2, "sub-x/ses-1/anat/T1w_2", "sub-x/ses-1/anat/T1w_1"),
         ];
-        let arrived = move_them(root, &jobs);
+        let earlier = wrote(&[
+            (1, "sub-x/ses-1/anat/T1w_1/00000001.dcm"),
+            (2, "sub-x/ses-1/anat/T1w_2/00000002.dcm"),
+        ]);
+        let arrived = move_them(root, &jobs, Some(&earlier));
         assert_eq!(arrived.len(), 2);
         assert_eq!(
             read(root, "sub-x/ses-1/anat/T1w_2/00000001.dcm").as_deref(),
@@ -1497,12 +2418,67 @@ mod tests {
     }
 
     #[test]
+    fn a_bids_move_renames_the_files_and_not_a_directory() {
+        // The two layouts differ in exactly this: in BIDS stacks share `anat/`
+        // and are told apart by their names, so a move is a rename of files
+        // inside one directory.
+        let dir = TempDir::new("move-bids");
+        let root = dir.path();
+        write(root, "sub-x/ses-1/anat/sub-x_ses-1_T1w.nii.gz");
+        write(root, "sub-x/ses-1/anat/sub-x_ses-1_T1w.json");
+        let mut j = job(1, "sub-x/ses-1/anat/sub-x_ses-1_T1w", "sub-x/ses-1/anat");
+        j.place = Place::file(
+            "sub-x/ses-1/anat".to_string(),
+            "sub-x/ses-1/anat/sub-x_ses-1_acq-Spine_T1w"
+                .rsplit_once('/')
+                .unwrap()
+                .1
+                .to_string(),
+        );
+        let earlier = wrote(&[
+            (1, "sub-x/ses-1/anat/sub-x_ses-1_T1w.nii.gz"),
+            (1, "sub-x/ses-1/anat/sub-x_ses-1_T1w.json"),
+        ]);
+        assert_eq!(move_them(root, &[j], Some(&earlier)).len(), 1);
+        assert!(
+            root.join("sub-x/ses-1/anat/sub-x_ses-1_acq-Spine_T1w.nii.gz")
+                .exists()
+        );
+        assert!(
+            root.join("sub-x/ses-1/anat/sub-x_ses-1_acq-Spine_T1w.json")
+                .exists()
+        );
+        assert!(
+            !root
+                .join("sub-x/ses-1/anat/sub-x_ses-1_T1w.nii.gz")
+                .exists()
+        );
+    }
+
+    #[test]
     fn a_move_whose_source_is_gone_is_not_reported_as_a_move() {
         // Somebody emptied the tree. The stack is written again, which the
         // caller does by reading what did not arrive.
         let dir = TempDir::new("move-gone");
         let jobs = vec![job(1, "sub-x/ses-1/anat/T1w", "sub-x/ses-1/anat/SC_T1w")];
-        assert!(move_them(dir.path(), &jobs).is_empty());
+        let earlier = wrote(&[(1, "sub-x/ses-1/anat/T1w/00000001.dcm")]);
+        assert!(move_them(dir.path(), &jobs, Some(&earlier)).is_empty());
+    }
+
+    #[test]
+    fn half_a_move_is_not_a_move() {
+        // A tree holding some of a stack under each of two names is worse than
+        // one holding it under neither, so the stack is written from scratch.
+        let dir = TempDir::new("move-half");
+        let root = dir.path();
+        write(root, "sub-x/ses-1/anat/T1w/00000001.dcm");
+        let jobs = vec![job(1, "sub-x/ses-1/anat/T1w", "sub-x/ses-1/anat/SC_T1w")];
+        let earlier = wrote(&[
+            (1, "sub-x/ses-1/anat/T1w/00000001.dcm"),
+            (1, "sub-x/ses-1/anat/T1w/00000002.dcm"),
+        ]);
+        assert!(move_them(root, &jobs, Some(&earlier)).is_empty());
+        assert!(!root.join("sub-x/ses-1/anat/SC_T1w").exists());
     }
 
     #[test]
@@ -1513,7 +2489,13 @@ mod tests {
         let root = dir.path();
         write(root, "sub-x/ses-1/anat/T1w/00000001.dcm");
         write(root, "sub-y/ses-1/anat/T1w/00000002.dcm");
-        drop_dir(root, "sub-x/ses-1/anat/T1w");
+        drop_files(
+            root,
+            &wrote(&[(1, "sub-x/ses-1/anat/T1w/00000001.dcm")])
+                .files
+                .remove(&1)
+                .unwrap(),
+        );
         assert!(!root.join("sub-x").exists());
         assert!(root.join("sub-y/ses-1/anat/T1w").exists(), "and only that");
         assert!(root.exists());
@@ -1525,18 +2507,98 @@ mod tests {
         let root = dir.path();
         write(root, "sub-x/ses-1/anat/T1w/00000001.dcm");
         write(root, "sub-x/ses-1/anat/T2w/00000002.dcm");
-        drop_dir(root, "sub-x/ses-1/anat/T1w");
+        drop_files(
+            root,
+            &wrote(&[(1, "sub-x/ses-1/anat/T1w/00000001.dcm")])
+                .files
+                .remove(&1)
+                .unwrap(),
+        );
         assert!(root.join("sub-x/ses-1/anat/T2w").exists());
     }
 
     #[test]
-    fn a_moved_file_keeps_its_name_and_changes_directory() {
+    fn a_place_is_a_prefix_of_every_file_of_the_stack() {
+        // Which is what lets one piece of arithmetic serve both layouts.
         assert_eq!(
             rebase(
                 "sub-x/ses-1/anat/T1w/00000001.dcm",
+                "sub-x/ses-1/anat/T1w",
                 "sub-x/ses-1/anat/SC_T1w"
             ),
             "sub-x/ses-1/anat/SC_T1w/00000001.dcm"
+        );
+        assert_eq!(
+            rebase(
+                "sub-x/ses-1/anat/sub-x_ses-1_T1w.nii.gz",
+                "sub-x/ses-1/anat/sub-x_ses-1_T1w",
+                "sub-x/ses-1/anat/sub-x_ses-1_acq-Spine_T1w"
+            ),
+            "sub-x/ses-1/anat/sub-x_ses-1_acq-Spine_T1w.nii.gz"
+        );
+        assert_eq!(Place::dir("a/b".into()).key(), "a/b");
+        assert_eq!(Place::file("a/b".into(), "c".into()).key(), "a/b/c");
+    }
+
+    #[test]
+    fn a_bids_shaped_name_for_something_bids_has_no_name_for() {
+        // The descriptive name carried in `acq-`, reduced to what a BIDS label
+        // may spell, because a label is `[0-9a-zA-Z+]+` and ours are not.
+        assert_eq!(
+            unofficial("x", "M06", "Ax_T2w_2D_FLAIR-FatSat_SPACE"),
+            "sub-x_ses-M06_acq-AxT2w2DFLAIRFatSatSPACE"
+        );
+        assert_eq!(unofficial("x", "", "T1w"), "sub-x_acq-T1w");
+    }
+
+    #[test]
+    fn a_time_is_carried_under_the_policy_that_moved_it() {
+        // §9.4 and §8.3: the tree's own column says what the files say.
+        let day = Day::parse("20220115").unwrap();
+        let scheme = session::Scheme::default();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+        let pack = nils_pack::load(&dir, None).expect("the MRI pack loads");
+        let mut settings = Settings {
+            name: "t",
+            root: Path::new("/tmp"),
+            policy: &crate::policy::Policy::default(),
+            categories: Vec::new(),
+            selection: Selection::default(),
+            scheme: &scheme,
+            private: &[],
+            on_unknown: crate::burned::OnUnknown::Write,
+            actor: "t",
+            key: b"k",
+            pack: &pack,
+            layout: Layout::Bids,
+            places: crate::bids::place::Options::default(),
+            converter: None,
+            compress: true,
+            authors: &[],
+        };
+        let when = (day, Some("031415".to_string()));
+        assert_eq!(
+            under_policy(&when, &settings, crate::dates::Offset(0)).as_deref(),
+            Some("2022-01-15T03:14:15")
+        );
+        let shifted = crate::policy::Policy {
+            dates: crate::dates::Policy::Shift,
+            ..crate::policy::Policy::default()
+        };
+        settings.policy = &shifted;
+        assert_eq!(
+            under_policy(&when, &settings, crate::dates::Offset(-10)).as_deref(),
+            Some("2022-01-05T03:14:15")
+        );
+        // A time whose date was truncated is not a time.
+        let year = crate::policy::Policy {
+            dates: crate::dates::Policy::Year,
+            ..crate::policy::Policy::default()
+        };
+        settings.policy = &year;
+        assert_eq!(
+            under_policy(&when, &settings, crate::dates::Offset(0)),
+            None
         );
     }
 }

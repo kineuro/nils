@@ -62,6 +62,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
+      # Wave 3 §9.6: a BIDS release converts with dcm2niix, so the tests that
+      # write a tree need one. A deployment takes a current build from
+      # rordenlab/dcm2niix; here the distribution's is enough to prove the
+      # orchestration, and the tests say so and pass when it is absent.
+      - name: dcm2niix
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends dcm2niix
+          dcm2niix --version || true
       - name: rust-version matches the toolchain
         run: |
           channel="${{ steps.toolchain.outputs.channel }}"

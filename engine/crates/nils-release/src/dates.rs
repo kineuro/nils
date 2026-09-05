@@ -122,14 +122,8 @@ pub fn age_years(born: Day, at: Day) -> Option<i64> {
         return None;
     }
     // Not yet had the birthday this year.
-    let had = (at.month(), day_of(at)) >= (born.month(), day_of(born));
+    let had = (at.month(), at.day()) >= (born.month(), born.day());
     Some(if had { years } else { years - 1 })
-}
-
-fn day_of(d: Day) -> u32 {
-    // `Day` does not expose the day of the month; the round trip is exact.
-    let first = Day::new(d.year(), d.month(), 1).expect("the first is a day");
-    (first.days_to(d) + 1) as u32
 }
 
 /// How DICOM writes an age: three digits and a unit.

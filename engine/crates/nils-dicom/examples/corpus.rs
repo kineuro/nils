@@ -268,6 +268,10 @@ fn main() {
     let mut tally = Tally::default();
     let mut refused_due = opts.refused_every;
     let mut next_refused = 0u64;
+    // `--pixel-bytes 0` means "as many as the geometry asks for", which is
+    // what a converter needs: dcm2niix refuses a file whose Pixel Data is
+    // shorter than rows x columns x two, and every other reader we have stops
+    // before the pixels and never notices.
     let pixels = vec![0x80u8; opts.pixel_bytes];
 
     while tally.instances < opts.instances {
@@ -330,8 +334,12 @@ fn main() {
                     } else {
                         format!("IM_{i:04}")
                     };
+                    let sized = match opts.pixel_bytes {
+                        0 => vec![0x80u8; (series.rows * series.columns * 2) as usize],
+                        _ => pixels.clone(),
+                    };
                     let bytes =
-                        instance(&mut rng, &subject, &study, &series, i, &pixels, &mut tally);
+                        instance(&mut rng, &subject, &study, &series, i, &sized, &mut tally);
                     let path = dir.join(&name);
                     write(&path, &bytes);
                     tally.instances += 1;

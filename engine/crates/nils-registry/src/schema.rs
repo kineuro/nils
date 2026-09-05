@@ -658,6 +658,15 @@ fn build_registry() -> Vec<Table> {
                 // nothing in its output says which pick was made.
                 req("categories", Type::Text),
                 req("session_scheme", Type::Text),
+                // Which of the two layouts of §9 the tree is in, and for the
+                // BIDS one the placements it chose (§9.3): a tree that does
+                // not say where it put its localizers is a tree whose absence
+                // of localizers means nothing.
+                req("layout", Type::Text),
+                req("placements", Type::Json),
+                // The converter it found, recorded because a tree should say
+                // which converter made it (§9.6).
+                col("converter", Type::Text),
                 req("pack", Type::Text),
                 req("pack_version", Type::Text),
                 req("actor", Type::Text),
@@ -689,11 +698,34 @@ fn build_registry() -> Vec<Table> {
                 req("release_id", Type::Int),
                 req("stack_id", Type::Int),
                 req("content", Type::Text),
+                // Where it went. A directory in the descriptive layout, where
+                // a stack owns one; a directory and a file stem in BIDS, where
+                // stacks share `anat/` and are told apart by their names. The
+                // two together are the stack's **place**, and a change to it
+                // is a move (§8.6).
                 req("dir", Type::Text),
+                col("stem", Type::Text),
+                // Which of §9.3's routes it took, so a tree can be asked what
+                // it holds and what it left out.
+                req("route", Type::Text),
                 req("files", Type::Int),
             ],
         )
         .unique(&["release_id", "stack_id"])
+        .index(&["release_id"]),
+        // And what a version could place nowhere, with the reason. §9.3's
+        // fourth route is never a silent drop.
+        Table::new(
+            "release_absent",
+            vec![
+                col("id", Type::Id),
+                req("release_id", Type::Int),
+                req("stack_id", Type::Int),
+                // A word for the tally: `no_suffix`, `no_task`, and the rest.
+                req("kind", Type::Text),
+                req("why", Type::Text),
+            ],
+        )
         .index(&["release_id"]),
         // And what became of each stack that was not left alone, so that "what
         // did version 4 do" is a query rather than a diff of two trees.
@@ -711,12 +743,20 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["release_id"]),
+        // Every file a version wrote, which is the manifest a handover
+        // verifies (§11) and the state a re-run carries forward (§8.6).
+        //
+        // `instance_id` is null for a file that is not one instance written
+        // out: a NIfTI is a whole stack, and its sidecar, `.bval` and `.bvec`
+        // are the stack's too. `stack_id` is always there, because that is
+        // what a version compares.
         Table::new(
             "release_file",
             vec![
                 col("id", Type::Id),
                 req("release_id", Type::Int),
-                req("instance_id", Type::Int),
+                req("stack_id", Type::Int),
+                col("instance_id", Type::Int),
                 // Where it landed, under the release's root.
                 req("path", Type::Text),
                 // What was written, so a handover can be verified without

@@ -851,6 +851,22 @@ schema rather than approximated:
     [_rec-<label>][_dir-<label>][_run-<index>][_echo-<index>][_flip-<index>]
     [_inv-<index>][_mt-<label>][_part-<label>]_<suffix>.<ext>
 
+**Two halves, and which is which decides who may be wrong about what.** The
+engine carries the standard: the entity grammar, which entities a suffix takes,
+which it requires, and what a label may spell. A pack carries our half: which of
+its values means `T1w`, which becomes an entity, and which is left to describe
+the acquisition. So a pack can be wrong about MRI and cannot be wrong about
+BIDS.
+
+The engine's half is **generated from the published schema** rather than
+transcribed from the prose (`tools/bids-schema/extract.py` writes
+`nils-release/src/bids/schema.rs`), and the version it was taken from is
+recorded in the module and in every `dataset_description.json`. Reading it
+settled three things a transcription would have got wrong: the scanner-derived
+diffusion suffix is `trace` and not `Trace`; those suffixes take **no `part`**,
+so a magnitude ADC is an ADC; and `MTw` is genuinely not a suffix, which is why
+442 stacks of the archive have no BIDS name rather than a bad one.
+
 The mapping is declared in the pack, and every row is measured against the
 archive:
 
@@ -858,7 +874,7 @@ archive:
 |---|---|
 | `base` T1w, T2w, PDw, T2\*w, FLAIR | the suffix, `T2starw` for the third |
 | `construct` Magnitude, Phase, Real, Imag | `part-mag`, `part-phase`, `part-real`, `part-imag` |
-| `construct` ADC, Trace, FA, colFA, expADC | the `dwi` scanner-derivative suffixes |
+| `construct` ADC, Trace, FA, eADC | `ADC`, `trace`, `FA`, `expADC`, which take no `part` |
 | `construct` INV1, INV2 with technique MP2RAGE | suffix `MP2RAGE`, `inv-1`, `inv-2` |
 | `construct` Uniform with technique MP2RAGE | suffix `UNIT1` |
 | `construct` T1map, T2map, PDmap, R1map, QSM | the `anat` parametric suffixes, `Chimap` for QSM |
@@ -871,6 +887,20 @@ only `on|off`, `echo`, `flip`, `inv` and `run` are indices, and a suffix that
 requires an entity is not written without it. `MEGRE` requires `echo`, which
 turns v0's second export bug from a cosmetic complaint into a validator error,
 which is the right place to catch it.
+
+Three rules follow from the same place. **An entity the group does not admit is
+dropped rather than written**, because a name the standard does not admit is
+worse than a name that says less. **Two stacks that then share a name are told
+apart by `run-`**, which is the standard's own answer and the only one; it is
+assigned over the session as the registry holds it, not over the selection, for
+the same reason §9.1's disambiguation is. And **`echo-` is written only where the
+series has more than one stack**, because an `echo-1` on a single-echo series is
+in every filename and says nothing.
+
+`acq-` is the rest, joined in the pack's declared order, and the tokens are
+**spelled out rather than derived**: a BIDS label is `[0-9a-zA-Z+]+`, and any
+rule that strips the other characters makes `ME-GRE` and `MEGRE` the same token,
+which is two acquisitions in one filename.
 
 **`func` requires `task`, and no stack has one.** Of 1,173 functional stacks,
 ten carry anything resting-like in their text and none says "task". They are
@@ -917,7 +947,25 @@ neither is wrong.
 
 A release records which it chose (§8.4's rule, applied to placement): a tree
 that does not say where it put its localizers is a tree whose absence of
-localizers means nothing.
+localizers means nothing. Both choices are on the run, in
+`dataset_description.json` under `GeneratedBy.Placements`, and in the `README`.
+
+**The line between `derivatives/` and nowhere is the disposition, not the name.**
+A reformat BIDS cannot name is a derivative; an acquisition BIDS cannot name is
+a hole in the standard, and a release has to admit to it rather than file it
+under `derivatives`. That is what puts reformats, projections, SWI images and
+subtractions in one place and the 442 `MTw` stacks in the other.
+
+**A stack the converter will not convert is written as DICOM under
+`sourcedata/`, with the reason reported.** v0 carries a hard-coded list of
+vendors it believes cannot be converted, so a stack it could have converted is
+skipped and one it cannot is a failure; here the converter is asked, and what it
+refuses is kept rather than lost.
+
+Whatever the route, the name outside the raw tree is **§9.1's**, which is most
+of why §9.1 names everything. In `sourcedata/` it names the directory, as v0's
+does; in `derivatives/` and in the two unofficial placements it is carried in
+`acq-` under a BIDS-shaped name, reduced to what a label may spell.
 
 ### 9.4 Where the date goes
 
@@ -935,6 +983,20 @@ sensitivity classes are enforced; `README`; `.bidsignore`; `sessions.tsv` and
 `_scans.tsv`. v0 writes none of these, which is why its tree is not a dataset
 rather than an invalid one.
 
+`GeneratedBy` carries the release's version (§8.6), the policy, the pack, the
+converter it found, and the placements it chose, so a tree answers "what is
+this and what was done to it" without a database. `Authors` is the release's
+actor unless one is given, because the official validator warns without it and
+an empty list is not an answer.
+
+**The `.bidsignore` names only what this release's own choices put there.** One
+that lists what is not in the tree tells a reader the tree holds things it does
+not.
+
+Two smaller rules, both from running the official validator: `_scans.tsv` lists
+the images and not the sidecars that describe them, and a TSV cell holding a tab
+or a newline is flattened rather than allowed to make a column.
+
 ### 9.6 Conversion
 
 **`dcm2niix` is a prerequisite of a deployment, kept current**, from
@@ -944,6 +1006,28 @@ it records the version it found on the run and in `GeneratedBy`, so a tree says
 which converter made it. A converter is not a thing to discover halfway through
 an archive.
 
+**The conversion reads the released files and never the source.** `dcm2niix`
+writes its sidecar from the DICOM headers, and its own anonymiser is not a
+de-identification: measured on `v1.0.20260724`, `-ba y`, the default and the
+strongest of its three settings, leaves `InstitutionName` and `AcquisitionTime`
+in the JSON and drops seven keys of fifty-two. A NIfTI tree converted from the
+archive carries the institution in every sidecar. Converting the scrubbed file
+means the sidecar inherits the release's policy for free, including its dates.
+
+**The file list is recognised by its extension**, which no help text says.
+`dcm2niix -s y <list>` reads a file as a list of DICOM paths only when it is
+named `.txt`; under any other name it opens it as a DICOM, fails to parse,
+prints `Not a DICOM image`, **exits 0 and writes nothing**. v0 happens to be
+right by using a `.txt` temporary file.
+
+**The check is what appeared, not the exit code.** `dcm2niix` returns 0 and
+writes a second file when it decides a volume needs resampling to equal slice
+spacing: `..._Eq_1.nii` beside the name it was given, and `--terse` does not
+stop it. A tree that took the exit code at its word would hold files whose names
+nobody chose, and `sub-x_ses-1_T1w_Eq_1.nii.gz` is not a BIDS name. So the
+output directory is read afterwards, anything unexpected is a refusal naming the
+extra files, and the stack falls back to `sourcedata/` as DICOM.
+
 `dcm2niix` per pick with an explicit file list and the final name already
 decided. Three things v0 lacked: the source of every file comes from the
 registry, which since Wave 1 records the path of every instance, so there is no
@@ -951,6 +1035,12 @@ cohort root to go stale; directories are created only after a conversion
 succeeds, so a failure leaves no empty tree to be mistaken for a selection bug;
 and a release preflights its roots, its converter and its free space, reporting
 one refusal rather than N identical failures.
+
+**Measured.** The tree this writes was run through the official
+`bids-validator` on a synthetic corpus: no naming, structure or metadata errors,
+and the only error class is the corpus's own single-volume "diffusion" series,
+which is not a diffusion acquisition. Making that check a bar of the gate is
+§12.
 
 ## 10. Roles and picks
 

@@ -7,6 +7,7 @@
 //! two callers "only differ in scope, output root, and pipeline coupling"; all
 //! three differences are gone in v1, so there is one.
 
+pub mod bids;
 pub mod blocks;
 pub mod burned;
 pub mod dates;

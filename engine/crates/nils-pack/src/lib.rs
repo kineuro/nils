@@ -12,6 +12,7 @@
 //! facts, which is what makes a pack testable from a fixture and shippable by
 //! someone who has never seen our schema.
 
+pub mod bids;
 pub mod corpus;
 pub mod error;
 pub mod eval;

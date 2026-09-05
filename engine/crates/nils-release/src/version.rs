@@ -32,7 +32,12 @@ pub const SCRUB: u32 = 1;
 /// not runs of the engine, so a release that wrote nothing still gets one:
 /// having made no change is a fact about a version.
 pub fn next(today: nils_registry::day::Day, previous: Option<&str>) -> String {
-    let stem = format!("{:04}.{:02}.{:02}", today.year(), today.month(), day(today));
+    let stem = format!(
+        "{:04}.{:02}.{:02}",
+        today.year(),
+        today.month(),
+        today.day()
+    );
     let n = match previous {
         Some(p) if p.starts_with(&stem) => {
             p.rsplit_once('.')
@@ -43,11 +48,6 @@ pub fn next(today: nils_registry::day::Day, previous: Option<&str>) -> String {
         _ => 1,
     };
     format!("{stem}.{n}")
-}
-
-fn day(d: nils_registry::day::Day) -> u32 {
-    let first = nils_registry::day::Day::new(d.year(), d.month(), 1).expect("the first is a day");
-    (first.days_to(d) + 1) as u32
 }
 
 /// What became of one stack between two versions.
