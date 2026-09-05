@@ -25,6 +25,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+nils-classify.workspace = true
 nils-digest.workspace = true
 dicom-core.workspace = true
 dicom-dictionary-std.workspace = true

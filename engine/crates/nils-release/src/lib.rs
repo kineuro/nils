@@ -10,6 +10,7 @@
 pub mod blocks;
 pub mod burned;
 pub mod dates;
+pub mod name;
 pub mod policy;
 pub mod run;
 pub mod scrub;
