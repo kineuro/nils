@@ -15,6 +15,7 @@
 //! was stopped by a signal (§10: what was read is written, and the report
 //! says so).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
@@ -22,12 +23,14 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
+use nils_registry::day::Day;
 use nils_registry::home::{
     Config, DSN_ENV, Home, InitOptions, LINKAGE_DB, REGISTRY_DB, REGISTRY_ENV,
 };
 use nils_registry::keys::strip_newline;
 use nils_registry::linkage::{self, ImportError, ImportRow, Subkeys};
 use nils_registry::schema::{Type, table};
+use nils_registry::session;
 use nils_registry::{Backend, Insert, Param, Registry, Scheme, Store};
 
 const FAILED: u8 = 1;
@@ -92,6 +95,11 @@ enum Command {
         #[command(subcommand)]
         command: ReviewCommand,
     },
+    /// The occasions a subject came in, derived from a scheme and never stored (§5)
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     /// Every store this registry keeps: where, what it holds, how long, and the command that changes it
     Custody {
         /// Machine-readable output
@@ -101,6 +109,67 @@ enum Command {
         #[arg(long)]
         markdown: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    /// Derive every subject's sessions and print them
+    List(SessionListArgs),
+    /// The schemes this registry keeps
+    Scheme {
+        #[command(subcommand)]
+        command: SchemeCommand,
+    },
+}
+
+#[derive(Debug, Args)]
+struct SessionListArgs {
+    /// A scheme file to derive with, instead of a stored one
+    #[arg(long, value_name = "FILE", conflicts_with = "name")]
+    scheme: Option<PathBuf>,
+    /// A scheme stored in this registry, by name
+    #[arg(long = "scheme-name", value_name = "NAME")]
+    name: Option<String>,
+    /// Month zero per subject, as a CSV of `code,date`, for an explicit anchor
+    #[arg(long, value_name = "FILE")]
+    anchors: Option<PathBuf>,
+    /// Only this subject
+    #[arg(long, value_name = "CODE")]
+    subject: Option<String>,
+    /// Only the sessions worth a look
+    #[arg(long)]
+    flagged: bool,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum SchemeCommand {
+    /// Keep a scheme under a name, so a labelling can be reproduced
+    Add {
+        /// What to call it
+        name: String,
+        /// The scheme's YAML
+        file: PathBuf,
+        /// Why this scheme exists
+        #[arg(long)]
+        note: Option<String>,
+        /// Replace a scheme of this name
+        #[arg(long)]
+        force: bool,
+    },
+    /// The schemes this registry keeps
+    List,
+    /// One scheme, as the resolver will read it
+    Show {
+        name: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget a scheme
+    Remove { name: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -359,6 +428,7 @@ fn main() -> ExitCode {
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
+        Command::Session { command } => session_command(&home, command),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
     };
     match outcome {
@@ -2627,6 +2697,430 @@ fn n(v: &serde_json::Value) -> String {
     match v.as_u64() {
         Some(n) => nils_digest::report::thousands(n),
         None => "-".to_string(),
+    }
+}
+
+// --------------------------------------------------------------------------
+// Sessions (Wave 3 §5)
+// --------------------------------------------------------------------------
+
+fn session_command(home: &Home, command: SessionCommand) -> Result<(), Exit> {
+    match command {
+        SessionCommand::List(args) => session_list(home, args),
+        SessionCommand::Scheme { command } => scheme_command(home, command),
+    }
+}
+
+fn read_scheme(path: &Path) -> Result<session::Scheme, Exit> {
+    let text =
+        fs::read_to_string(path).map_err(|e| usage(format!("--scheme {}: {e}", path.display())))?;
+    session::Scheme::parse(&text).map_err(|e| usage(format!("{}: {e}", path.display())))
+}
+
+fn stored_scheme(registry: &mut Registry, name: &str) -> Result<session::Scheme, Exit> {
+    let store = registry.store();
+    let row = store
+        .query_opt(
+            &format!(
+                "SELECT definition FROM {} WHERE name = {}",
+                store.qualified("session_scheme"),
+                store.dialect().param(1, Type::Text)
+            ),
+            &[Param::Text(name.to_string())],
+        )
+        .map_err(|e| fail(e.to_string()))?;
+    let Some(row) = row else {
+        return Err(fail(format!(
+            "no scheme called {name}; `nils session scheme list` says what there is"
+        )));
+    };
+    let text = row.text(0).map_err(|e| fail(e.to_string()))?.to_string();
+    session::Scheme::from_json(&text).map_err(|e| fail(e.to_string()))
+}
+
+fn scheme_command(home: &Home, command: SchemeCommand) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    match command {
+        SchemeCommand::Add {
+            name,
+            file,
+            note,
+            force,
+        } => {
+            let scheme = read_scheme(&file)?;
+            let json = serde_json::to_string(&scheme)
+                .map_err(|e| fail(format!("the scheme will not serialize: {e}")))?;
+            let store = registry.store();
+            let exists = store
+                .query_opt(
+                    &format!(
+                        "SELECT id FROM {} WHERE name = {}",
+                        store.qualified("session_scheme"),
+                        store.dialect().param(1, Type::Text)
+                    ),
+                    &[Param::Text(name.clone())],
+                )
+                .map_err(|e| fail(e.to_string()))?;
+            if exists.is_some() {
+                if !force {
+                    return Err(fail(format!(
+                        "a scheme called {name} is already kept; --force replaces it, and every \
+                         label derived with the old one changes"
+                    )));
+                }
+                store
+                    .execute(
+                        &format!(
+                            "UPDATE {} SET definition = {}, note = {}, created_at = {} WHERE name = {}",
+                            store.qualified("session_scheme"),
+                            store.dialect().param(1, Type::Json),
+                            store.dialect().param(2, Type::Text),
+                            store.dialect().param(3, Type::Timestamp),
+                            store.dialect().param(4, Type::Text),
+                        ),
+                        &[
+                            Param::Text(json),
+                            match &note {
+                                Some(n) => Param::Text(n.clone()),
+                                None => Param::Null,
+                            },
+                            Param::Text(nils_registry::time::now_iso()),
+                            Param::Text(name.clone()),
+                        ],
+                    )
+                    .map_err(|e| fail(e.to_string()))?;
+                println!("scheme {name} replaced");
+                return Ok(());
+            }
+            store
+                .insert(
+                    &Insert::new(
+                        table("session_scheme"),
+                        &["name", "definition", "created_at", "note"],
+                    ),
+                    &[vec![
+                        Param::Text(name.clone()),
+                        Param::Text(json),
+                        Param::Text(nils_registry::time::now_iso()),
+                        match &note {
+                            Some(n) => Param::Text(n.clone()),
+                            None => Param::Null,
+                        },
+                    ]],
+                )
+                .map_err(|e| fail(e.to_string()))?;
+            println!("scheme {name} kept");
+            Ok(())
+        }
+        SchemeCommand::List => {
+            let store = registry.store();
+            let rows = store
+                .query(
+                    &format!(
+                        "SELECT name, created_at, note FROM {} ORDER BY name",
+                        store.qualified("session_scheme")
+                    ),
+                    &[],
+                )
+                .map_err(|e| fail(e.to_string()))?;
+            if rows.is_empty() {
+                println!("no schemes kept; `nils session list` uses the default");
+                return Ok(());
+            }
+            for r in &rows {
+                let name = r.text(0).unwrap_or_default();
+                let when = r.text(1).unwrap_or_default();
+                let note = r.opt_text(2).ok().flatten().unwrap_or("");
+                println!("{name:20} {when:20} {note}");
+            }
+            Ok(())
+        }
+        SchemeCommand::Show { name, json } => {
+            let scheme = stored_scheme(&mut registry, &name)?;
+            let text = if json {
+                serde_json::to_string_pretty(&scheme)
+            } else {
+                serde_json::to_string_pretty(&serde_json::json!({ "session": scheme }))
+            }
+            .map_err(|e| fail(format!("will not serialize: {e}")))?;
+            println!("{text}");
+            Ok(())
+        }
+        SchemeCommand::Remove { name } => {
+            let store = registry.store();
+            let n = store
+                .execute(
+                    &format!(
+                        "DELETE FROM {} WHERE name = {}",
+                        store.qualified("session_scheme"),
+                        store.dialect().param(1, Type::Text)
+                    ),
+                    &[Param::Text(name.clone())],
+                )
+                .map_err(|e| fail(e.to_string()))?;
+            if n == 0 {
+                return Err(fail(format!("no scheme called {name}")));
+            }
+            println!("scheme {name} forgotten");
+            Ok(())
+        }
+    }
+}
+
+/// One study as the resolver needs it, with the subject it belongs to.
+struct Point {
+    code: String,
+    study: session::Study,
+}
+
+fn session_list(home: &Home, args: SessionListArgs) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let scheme = match (&args.scheme, &args.name) {
+        (Some(path), _) => read_scheme(path)?,
+        (None, Some(name)) => stored_scheme(&mut registry, name)?,
+        (None, None) => session::Scheme::default(),
+    };
+    let anchors = match &args.anchors {
+        Some(path) => read_anchors(path)?,
+        None => BTreeMap::new(),
+    };
+    if scheme.anchor == session::Anchor::Event {
+        return Err(usage(
+            "anchor `event` needs the clinical layer, which Wave 4 brings; until then use \
+             `first_session`, `source_label` or `explicit` with --anchors",
+        ));
+    }
+    if scheme.anchor == session::Anchor::Explicit && anchors.is_empty() {
+        return Err(usage(
+            "anchor `explicit` needs --anchors FILE, a CSV of `code,date`",
+        ));
+    }
+
+    let said = match &scheme.said {
+        Some(spec) => Some((
+            spec.segment,
+            match &spec.pattern {
+                Some(p) => Some(
+                    regex::Regex::new(p)
+                        .map_err(|e| usage(format!("session.said.pattern: {e}")))?,
+                ),
+                None => None,
+            },
+        )),
+        None => None,
+    };
+    let points = read_points(&mut registry, args.subject.as_deref(), said.as_ref())?;
+
+    // One subject at a time, because a scheme is a statement about a subject's
+    // timeline and a label is meaningless across subjects.
+    let mut by_subject: BTreeMap<String, Vec<session::Study>> = BTreeMap::new();
+    for p in points {
+        by_subject.entry(p.code).or_default().push(p.study);
+    }
+
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let (mut n_sessions, mut n_flagged) = (0u64, 0u64);
+    for (code, studies) in &by_subject {
+        let anchor = match scheme.anchor {
+            session::Anchor::FirstSession => studies.iter().map(|s| s.day).min(),
+            session::Anchor::Explicit => anchors.get(code).copied(),
+            // Resolved from the labels inside the resolver, and refused above.
+            session::Anchor::SourceLabel | session::Anchor::Event => None,
+        };
+        for s in session::sessions(studies, anchor, &scheme) {
+            n_sessions += 1;
+            if s.flagged {
+                n_flagged += 1;
+            }
+            if args.flagged && !s.flagged {
+                continue;
+            }
+            out.push(serde_json::json!({
+                "subject": code,
+                "label": s.label,
+                "first": s.first.to_string(),
+                "last": s.last.to_string(),
+                "studies": s.studies.len(),
+                "months": s.months,
+                "nominal": s.nominal,
+                "offset_months": s.offset_months.map(|m| (m * 100.0).round() / 100.0),
+                "flagged": s.flagged,
+                "reason": s.reason.map(|r| r.name()),
+            }));
+        }
+    }
+
+    if args.json {
+        let doc = serde_json::json!({
+            "scheme": scheme,
+            "subjects": by_subject.len(),
+            "sessions": n_sessions,
+            "flagged": n_flagged,
+            "rows": out,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&doc)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
+
+    // The code's length is the pseudonym scheme's, which differs per registry,
+    // so the column is as wide as the codes rather than a guess that truncates.
+    let wide = out
+        .iter()
+        .filter_map(|r| r["subject"].as_str().map(str::len))
+        .max()
+        .unwrap_or(0)
+        .max("subject".len());
+    println!(
+        "{:<wide$} {:<8} {:<11} {:<11} {:>7} {:>8}  note",
+        "subject", "label", "from", "to", "studies", "months"
+    );
+    for row in &out {
+        let text = |k: &str| row[k].as_str().unwrap_or("-").to_string();
+        let months = match row["offset_months"].as_f64() {
+            Some(m) => format!("{m:.1}"),
+            None => "-".into(),
+        };
+        let note = match row["reason"].as_str() {
+            Some(r) => r.to_string(),
+            None if row["months"].is_number() && row["nominal"].is_null() => "off schedule".into(),
+            None => String::new(),
+        };
+        let line = format!(
+            "{:<wide$} {:<8} {:<11} {:<11} {:>7} {:>8}  {}",
+            text("subject"),
+            row["label"].as_str().unwrap_or("-"),
+            text("first"),
+            text("last"),
+            row["studies"].as_u64().unwrap_or(0),
+            months,
+            note
+        );
+        println!("{}", line.trim_end());
+    }
+    let subjects = by_subject.len() as u64;
+    println!(
+        "{subjects} {}, {n_sessions} {}, {n_flagged} worth a look",
+        counted("subjects", subjects),
+        counted("sessions", n_sessions)
+    );
+    Ok(())
+}
+
+/// Month zero per subject, from a CSV of `code,date`.
+fn read_anchors(path: &Path) -> Result<BTreeMap<String, Day>, Exit> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_path(path)
+        .map_err(|e| usage(format!("--anchors {}: {e}", path.display())))?;
+    let mut out = BTreeMap::new();
+    for (i, record) in reader.records().enumerate() {
+        let record = record.map_err(|e| usage(format!("--anchors line {}: {e}", i + 1)))?;
+        let (Some(code), Some(date)) = (record.get(0), record.get(1)) else {
+            return Err(usage(format!(
+                "--anchors line {}: a row is `code,date`",
+                i + 1
+            )));
+        };
+        let code = code.trim();
+        // A header, if there is one.
+        if i == 0 && code.eq_ignore_ascii_case("code") {
+            continue;
+        }
+        let Some(day) = Day::parse(date) else {
+            return Err(usage(format!(
+                "--anchors line {}: {date} is not a date",
+                i + 1
+            )));
+        };
+        out.insert(code.to_string(), day);
+    }
+    Ok(out)
+}
+
+/// Every study with a date, with what the source called its visit.
+///
+/// A study whose date the vote could not settle is left out: it is not a point
+/// on a timeline, and putting it on one would mean guessing.
+fn read_points(
+    registry: &mut Registry,
+    subject: Option<&str>,
+    said: Option<&(usize, Option<regex::Regex>)>,
+) -> Result<Vec<Point>, Exit> {
+    let store = registry.store();
+    let (study, subject_table) = (store.qualified("study"), store.qualified("subject"));
+    let mut params: Vec<Param> = Vec::new();
+    let mut where_subject = String::new();
+    if let Some(code) = subject {
+        where_subject = format!(" AND su.code = {}", store.dialect().param(1, Type::Text));
+        params.push(Param::Text(code.to_string()));
+    }
+    // The path is joined in only when the scheme asks for a source label: it
+    // is three tables deep, and most schemes do not read it.
+    let sql = if said.is_some() {
+        format!(
+            "SELECT su.code, st.id, COALESCE(st.date_filled, st.study_date), MIN(sf.path) \
+             FROM {study} st JOIN {subject_table} su ON su.id = st.subject_id \
+             JOIN {series} se ON se.study_id = st.id \
+             JOIN {instance} i ON i.series_id = se.id \
+             JOIN {source_file} sf ON sf.instance_id = i.id \
+             WHERE COALESCE(st.date_filled, st.study_date) IS NOT NULL{where_subject} \
+             GROUP BY su.code, st.id, COALESCE(st.date_filled, st.study_date) \
+             ORDER BY su.code, 3, st.id",
+            series = store.qualified("series"),
+            instance = store.qualified("instance"),
+            source_file = store.qualified("source_file"),
+        )
+    } else {
+        format!(
+            // The cast is for Postgres, which will not infer a type for a bare
+            // NULL and refuses the statement rather than guessing.
+            "SELECT su.code, st.id, COALESCE(st.date_filled, st.study_date), CAST(NULL AS TEXT) \
+             FROM {study} st JOIN {subject_table} su ON su.id = st.subject_id \
+             WHERE COALESCE(st.date_filled, st.study_date) IS NOT NULL{where_subject} \
+             ORDER BY su.code, 3, st.id"
+        )
+    };
+    let rows = store
+        .query(&sql, &params)
+        .map_err(|e| fail(e.to_string()))?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let code = r.text(0).map_err(|e| fail(e.to_string()))?.to_string();
+        let id = r.int(1).map_err(|e| fail(e.to_string()))?;
+        let date = r.text(2).map_err(|e| fail(e.to_string()))?;
+        let Some(day) = Day::parse(date) else {
+            continue;
+        };
+        let path = r.opt_text(3).ok().flatten().unwrap_or("");
+        out.push(Point {
+            code,
+            study: session::Study {
+                id,
+                day,
+                said: said
+                    .and_then(|(segment, pattern)| label_in(path, *segment, pattern.as_ref())),
+            },
+        });
+    }
+    Ok(out)
+}
+
+/// The source's own label, out of one segment of a path.
+///
+/// The filename is dropped first, as the identity rule drops it: a segment
+/// number counts directories, so that adding a file does not shift it.
+fn label_in(path: &str, segment: usize, pattern: Option<&regex::Regex>) -> Option<String> {
+    let dirs: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    let dirs = &dirs[..dirs.len().saturating_sub(1)];
+    let text = dirs.get(segment - 1)?;
+    match pattern {
+        None => Some((*text).to_string()),
+        Some(re) => Some(re.captures(text)?.name("label")?.as_str().to_string()),
     }
 }
 

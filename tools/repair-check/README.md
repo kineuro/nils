@@ -1,10 +1,11 @@
 # Checking Wave 3's repairs
 
-Wave 3 opens with two repairs to the digest: a subject whose code is only in the
-path, and a study whose date has to be found somewhere other than `StudyDate`
-(`docs/specs/wave3-anonymize-and-bids.md`, §3 and §4). Both are about data that
-is wrong in specific ways, so they are checked against a corpus built to be
-wrong in those ways.
+Wave 3 opens with three repairs: a subject whose code is only in the path, a
+study whose date has to be found somewhere other than `StudyDate`, and the
+occasion a subject came in, which no file records
+(`docs/specs/wave3-anonymize-and-bids.md`, §3, §4 and §5). All three are about
+data that is wrong in specific ways, so they are checked against a corpus built
+to be wrong in those ways.
 
     # write the corpus and its manifest
     cargo run --release -p nils-dicom --example awkward -- \
@@ -44,9 +45,28 @@ a pattern rather than a path. Digesting them all under one rule lets a scenario
 pass for the wrong reason, which is worse than failing.
 
 A scenario is right when it finds the people the manifest describes, dates every
-study the way the manifest says, and raises the diagnostic the manifest expects.
+study the way the manifest says, derives the sessions the manifest declares, and
+raises the diagnostic the manifest expects.
 That last one matters for the scenarios whose point is that the reader must
 *speak*: a tag that is one constant across an archive, or a study whose files
 name two different people. Diagnostics come from two places, and the gate reads
 both: what the writer recorded per batch is in the registry, and what the run
 concluded once every file had been seen is in the report.
+
+## Sessions
+
+A session is derived from a scheme and never stored, so the gate checks it by
+asking for it: `schemes.py` writes out the schemes a scenario declares, the gate
+runs `nils session list --scheme` under each, and `check.py` compares the labels,
+in date order, against the manifest.
+
+A scenario declares **more than one scheme** on purpose. The point of most of
+them is that the same studies label differently depending on what the scheme
+says, and a check that only ever ran one scheme would not see that. Two studies
+three days apart are two sessions at window zero and one at window fourteen; an
+archive that begins at its six-month visit is `M00, M06` from the dates and
+`M06, M12` once it is allowed to believe its own folder names.
+
+Each scheme is checked on **how many sessions it flagged** as well as on the
+labels, because a scheme that labels everything and flags nothing has hidden the
+disagreement it was asked to find.

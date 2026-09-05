@@ -20,9 +20,15 @@ repo=$(cd "$here/../.." && pwd)
 nils=${2:-$repo/engine/target/release/nils}
 awkward=${3:-$repo/engine/target/release/examples/awkward}
 
+# A run never writes into another run's directory. Re-running a gate over a
+# registry that already passed destroys the evidence of what it passed with,
+# which is how one earlier failure became impossible to diff against.
+if [ -e "$work" ]; then
+    echo "gate.sh: $work exists; give a run its own directory" >&2
+    exit 2
+fi
 corpus="$work/corpus"
 manifest="$work/manifest.json"
-rm -rf "$work"
 mkdir -p "$work"
 
 echo "corpus:" >&2
@@ -92,7 +98,16 @@ echo "$rules" | while read -r name rule; do
     # each registry are re-prefixed with the scenario they came from.
     python3 "$here/collect.py" "$reg/registry.db" "$name" "$merged" "$first" \
         "$work/report-$name.json"
+
+    # Sessions are derived, never stored, so they are checked by asking for
+    # them rather than by reading a column. A scenario may declare more than
+    # one scheme: the point of most of them is that the same studies label
+    # differently depending on what the scheme says.
+    python3 "$here/schemes.py" "$manifest" "$name" "$work" | while read -r n; do
+        "$nils" session list --registry "$reg" --scheme "$work/scheme-$name-$n.yml" \
+            --json > "$work/sessions-$name-$n.json"
+    done
     first=0
 done
 
-python3 "$here/check.py" "$merged" "$manifest" "${VERBOSE:+--verbose}"
+python3 "$here/check.py" "$merged" "$manifest" "$work" "${VERBOSE:+--verbose}"

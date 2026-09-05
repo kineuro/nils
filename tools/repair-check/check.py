@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """A v1 registry against the awkward corpus, scenario by scenario.
 
-    check.py REGISTRY.db MANIFEST.json [--verbose]
+    check.py REGISTRY.db MANIFEST.json WORKDIR [--verbose]
 
 The corpus (`nils-dicom`'s `awkward` example) writes a tree that is wrong in
 named ways and a manifest that says what a correct reader finds in it: how many
 people each scenario describes, which studies belong together, and the date of
 each study with the source that should have answered.
+
+The manifest also says what `nils session` must derive from each subtree, per
+scheme; the gate asks for that and leaves the answers in WORKDIR.
 
 This compares a digest of that tree against the manifest and prints one line per
 scenario. It is the gate of Wave 3's first two slices (spec §12, bar 1), and it
@@ -77,7 +80,7 @@ def main() -> int:
     if len(sys.argv) < 3:
         print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
         return 2
-    registry, manifest = sys.argv[1], sys.argv[2]
+    registry, manifest, work = sys.argv[1], sys.argv[2], sys.argv[3]
     verbose = "--verbose" in sys.argv
     want = json.load(open(manifest, encoding="utf-8"))
     seen, said = load(registry)
@@ -125,6 +128,8 @@ def main() -> int:
         if want_said and want_said not in said.get(name, set()):
             wrong.append(f"no {want_said} diagnostic")
 
+        wrong += sessions_wrong(s, work)
+
         n_dates = len(s["studies"])
         ok = not wrong
         failed += 0 if ok else 1
@@ -140,6 +145,36 @@ def main() -> int:
     total = len(want["scenarios"])
     print(f"{total - failed} of {total} scenarios right")
     return 1 if failed else 0
+
+
+def sessions_wrong(s, work: str) -> list[str]:
+    """What `nils session` got wrong for one scenario, per scheme.
+
+    A scheme is checked on the labels it produced, in date order, and on how
+    many sessions it flagged. Both matter: a scheme that labels everything and
+    flags nothing has hidden the disagreement it was asked to find.
+    """
+    out: list[str] = []
+    for i, check in enumerate(s.get("sessions", [])):
+        path = f"{work}/sessions-{s['name']}-{i}.json"
+        try:
+            got = json.load(open(path, encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            out.append(f"scheme {i}: no sessions ({type(exc).__name__})")
+            continue
+        rows = got.get("rows", [])
+        labels = [r["label"] for r in rows]
+        want = [None if l is None else l for l in check["labels"]]
+        if labels != want:
+            shown = ",".join("-" if l is None else l for l in labels) or "nothing"
+            wanted = ",".join("-" if l is None else l for l in want)
+            out.append(f"scheme {i} gave {shown}, wanted {wanted}")
+            continue
+        if got.get("flagged", 0) != check["flagged"]:
+            out.append(
+                f"scheme {i} flagged {got.get('flagged', 0)}, wanted {check['flagged']}"
+            )
+    return out
 
 
 def shortdir(w) -> str:

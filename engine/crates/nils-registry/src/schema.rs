@@ -178,6 +178,23 @@ fn build_registry() -> Vec<Table> {
             vec![req("key", Type::Text), req("value", Type::Text)],
         )
         .keyed_by("key"),
+        // Wave 3 §5. A scheme says HOW a subject's studies become sessions; it
+        // never stores the sessions. Labels are derived on read, so
+        // re-labelling a cohort is an edit to one row rather than a migration
+        // over every study. `definition` is the scheme itself as JSON, because
+        // it is configuration to be read whole, not something anything joins
+        // on; `check()` is what stands between it and the resolver.
+        Table::new(
+            "session_scheme",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("definition", Type::Json),
+                req("created_at", Type::Timestamp),
+                col("note", Type::Text),
+            ],
+        )
+        .unique(&["name"]),
         Table::new(
             "job",
             vec![

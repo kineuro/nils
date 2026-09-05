@@ -15,6 +15,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+pub mod day;
 pub mod dialect;
 pub mod home;
 pub mod keys;
@@ -22,6 +23,7 @@ pub mod linkage;
 pub mod migrate;
 pub mod pseudonym;
 pub mod schema;
+pub mod session;
 pub mod store;
 pub mod time;
 
