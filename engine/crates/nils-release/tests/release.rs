@@ -74,6 +74,8 @@ fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) ->
         categories: categories::Category::every(),
         selection: Selection::default(),
         scheme,
+        private: &[],
+        on_unknown: nils_release::burned::OnUnknown::Write,
         actor: "a test",
         key: KEY,
         pack: "mri",
@@ -275,4 +277,144 @@ fn the_two_halves_of_4_3_are_refused_rather_than_warned_about() {
 
     // Neither wrote anything.
     assert!(files_under(out.path()).is_empty());
+}
+
+/// A tree whose files say something about their own pixels, and carry two
+/// private blocks: one the allowlist names and one it does not.
+fn tree_with(burned: Option<&str>) -> TempDir {
+    let dir = TempDir::new("release-pixels");
+    let mut e = synth::minimal_mr("A", "A.1", "A.1.1");
+    e.extend([
+        synth::text(tags::PATIENT_ID, VR::LO, "19800101-1234"),
+        synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
+        synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+        // The block the allowlist names, and the block it does not. In real
+        // firmware the second has carried the patient name.
+        synth::text(dicom_core::Tag(0x0019, 0x0010), VR::LO, "SIEMENS MR HEADER"),
+        synth::text(dicom_core::Tag(0x0019, 0x100C), VR::IS, "1000"),
+        synth::text(
+            dicom_core::Tag(0x0029, 0x0010),
+            VR::LO,
+            "SIEMENS CSA HEADER",
+        ),
+        synth::text(dicom_core::Tag(0x0029, 0x1008), VR::CS, "IMAGE NUM 4"),
+        // And an overlay, which is where somebody's arrow and somebody's name
+        // end up.
+        synth::text(dicom_core::Tag(0x6000, 0x0022), VR::LO, "drawn at a desk"),
+    ]);
+    if let Some(v) = burned {
+        e.push(synth::text(tags::BURNED_IN_ANNOTATION, VR::CS, v));
+    }
+    dir.file("s/1", &synth::part10(&MetaFields::mr("A.1.1"), &e, true));
+    dir
+}
+
+fn allowed() -> Vec<nils_pack::private::Allowed> {
+    vec![nils_pack::private::Allowed {
+        creator: "SIEMENS MR HEADER".into(),
+        group: 0x0019,
+        element: 0x0C,
+        why: "the b value".into(),
+    }]
+}
+
+#[test]
+fn a_stack_the_file_will_not_judge_is_held_and_asked_about() {
+    // "No tag" is not "no text". An archive where most stacks are unjudgeable
+    // is a fact a release should confront rather than average away, and the
+    // engine does not look at pixels to settle it.
+    let source = tree_with(None);
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let mut s = settings(out.path(), &policy, &scheme);
+    s.on_unknown = nils_release::burned::OnUnknown::Hold;
+    let report = run::run(&mut reg, &s).unwrap();
+
+    assert_eq!(report.files, 0, "nothing left");
+    assert_eq!(report.unjudged, 1);
+    assert_eq!(report.burned_in, 0);
+    assert!(files_under(out.path()).is_empty());
+
+    // And a person was asked, so the release can be run again once answered.
+    let store = reg.store();
+    let rows = store
+        .query(
+            &format!(
+                "SELECT kind FROM {} WHERE kind LIKE 'release.%'",
+                store.qualified("review_item")
+            ),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text(0).unwrap(), "release.unjudged");
+}
+
+#[test]
+fn a_stack_the_file_says_carries_text_is_never_written() {
+    let source = tree_with(Some("YES"));
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let mut s = settings(out.path(), &policy, &scheme);
+    // Even told to write what it cannot judge: this one it can judge.
+    s.on_unknown = nils_release::burned::OnUnknown::Write;
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.burned_in, 1);
+    assert_eq!(report.files, 0);
+}
+
+#[test]
+fn a_private_block_goes_and_the_one_the_pack_names_stays() {
+    // v0 removes 119 named standard tags and touches no private element at
+    // all, so every vendor block leaves the building. Siemens CSA headers
+    // alone have carried the patient name in shipping firmware.
+    let source = tree_with(Some("NO"));
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let keep = allowed();
+    let mut s = settings(out.path(), &policy, &scheme);
+    s.private = &keep;
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.files, 1);
+
+    let written = files_under(out.path());
+    let object = dicom_object::open_file(&written[0]).unwrap();
+    let has = |g, e| {
+        object
+            .element_opt(dicom_core::Tag(g, e))
+            .ok()
+            .flatten()
+            .is_some()
+    };
+    assert!(has(0x0019, 0x100C), "the b value is named and stays");
+    assert!(
+        has(0x0019, 0x0010),
+        "and so does the creator that reserves it"
+    );
+    assert!(!has(0x0029, 0x1008), "the CSA block is not named");
+    assert!(!has(0x0029, 0x0010), "and its creator names nothing now");
+    assert!(!has(0x6000, 0x0022), "an overlay is where an arrow ends up");
+
+    // And the run said which vendors it dropped, without saying what they held.
+    assert_eq!(
+        report.changes.get("private SIEMENS CSA HEADER removed"),
+        Some(&1)
+    );
+    assert_eq!(
+        report.changes.get("(0019,xx0C) SIEMENS MR HEADER kept"),
+        Some(&1)
+    );
+    assert_eq!(report.changes.get("overlay removed"), Some(&1));
 }

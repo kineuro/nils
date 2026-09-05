@@ -677,6 +677,23 @@ fn build_registry() -> Vec<Table> {
         )
         .index(&["release_id"])
         .index(&["instance_id"]),
+        // §8.5: what a release changed, by tag and action and count. No old
+        // value: an audit that records what was removed is a copy of the
+        // identifiers, in the registry, in clear.
+        Table::new(
+            "release_change",
+            vec![
+                col("id", Type::Id),
+                req("release_id", Type::Int),
+                // `(0010,0010)` for a standard element, `(0019,xx0C) CREATOR`
+                // for a private one, `overlay` and `curve` for a whole group.
+                req("tag", Type::Text),
+                // `removed`, `replaced`, `shifted`, `remapped`, `kept`.
+                req("action", Type::Text),
+                req("count", Type::Int),
+            ],
+        )
+        .index(&["release_id"]),
         Table::new(
             "diagnostic",
             vec![

@@ -73,6 +73,11 @@ pub struct Report {
     pub refused: BTreeMap<String, i64>,
     /// Every change, by tag and action, without a value anywhere.
     pub changes: BTreeMap<String, i64>,
+    /// Stacks held back because the file says their pixels carry text, and
+    /// stacks the file said nothing about (§8.4). The second number is the one
+    /// worth reading: "no tag" is not "no text".
+    pub burned_in: i64,
+    pub unjudged: i64,
     pub seconds: f64,
 }
 
@@ -84,6 +89,10 @@ pub struct Settings<'a> {
     pub categories: Vec<Category>,
     pub selection: Selection,
     pub scheme: &'a Scheme,
+    /// The private elements the pack says are worth keeping (§8.4).
+    pub private: &'a [nils_pack::private::Allowed],
+    /// What to do with a stack whose file says nothing about its pixels.
+    pub on_unknown: crate::burned::OnUnknown,
     pub actor: &'a str,
     /// The key the pseudonyms and the UID remapping are derived from.
     pub key: &'a [u8],
@@ -160,6 +169,7 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
 
     let instances = select(registry.store(), &settings.selection)?;
     let days = study_days(registry.store())?;
+    let pixels = pixel_verdicts(registry.store())?;
     report.release_id = open_row(registry.store(), settings)?;
 
     // Which studies are one occasion, per subject, so a file lands in the
@@ -172,6 +182,7 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
 
     let mut files: Vec<Vec<Param>> = Vec::new();
     let mut stacks: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut held: std::collections::HashSet<i64> = std::collections::HashSet::new();
     for (subject, mine) in &by_subject {
         let labels = session_labels(mine, &days, settings.scheme);
         let offset = match settings.policy.dates {
@@ -186,11 +197,35 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         let plan = Plan {
             policy: settings.policy,
             categories: &settings.categories,
+            private: settings.private,
             code: &code,
             offset,
             remap: remap.as_ref(),
         };
         for instance in mine {
+            // §8.4. The engine does not look at pixels; it reads what the file
+            // says about them, and holds what the file will not say.
+            match pixels
+                .get(&instance.stack)
+                .copied()
+                .unwrap_or(crate::burned::Verdict::Unknown)
+            {
+                crate::burned::Verdict::Burned => {
+                    if held.insert(instance.stack) {
+                        report.burned_in += 1;
+                    }
+                    continue;
+                }
+                crate::burned::Verdict::Unknown
+                    if settings.on_unknown == crate::burned::OnUnknown::Hold =>
+                {
+                    if held.insert(instance.stack) {
+                        report.unjudged += 1;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             stacks.insert(instance.stack);
             let label = labels
                 .get(&instance.study)
@@ -223,6 +258,10 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
     report.stacks = stacks.len() as i64;
 
     write_files(registry.store(), &files)?;
+    write_changes(registry.store(), &report)?;
+    if !held.is_empty() {
+        raise_review(registry.store(), &report, &held, &pixels)?;
+    }
     close_row(registry.store(), &report)?;
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
@@ -621,4 +660,145 @@ fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
         ],
     )?;
     Ok(())
+}
+
+/// What each stack's file says about its own pixels (§8.4).
+///
+/// Read from the stack and its series, not from the fingerprint, so that a
+/// release after a digest alone judges as well as one after a fingerprint. A
+/// check that quietly did nothing until some earlier verb had run is a check
+/// nobody can rely on, and this is the one standing between a screenshot and a
+/// dataset.
+///
+/// The fingerprint's `image_role` is joined in where it exists, because §6
+/// worked the same three tokens out once and three things read it; where it
+/// does not, the image type is read here and reaches the same answer.
+fn pixel_verdicts(store: &mut Store) -> Result<HashMap<i64, crate::burned::Verdict>, Error> {
+    let annotation = table("series")
+        .column("burned_in_annotation")
+        .expect("series.burned_in_annotation is a column");
+    let image_type = table("stack")
+        .column("image_type")
+        .expect("stack.image_type is a column");
+    let series_image_type = table("series")
+        .column("image_type")
+        .expect("series.image_type is a column");
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT k.id, {}, f.image_role, COALESCE({}, {}) \
+         FROM {} k \
+         JOIN {} se ON se.id = k.series_id \
+         LEFT JOIN {} f ON f.stack_id = k.id",
+        d.text_of_qualified(Some("se"), annotation),
+        d.text_of_qualified(Some("k"), image_type),
+        d.text_of_qualified(Some("se"), series_image_type),
+        store.qualified("stack"),
+        store.qualified("series"),
+        store.qualified("stack_fingerprint"),
+    );
+    let mut out = HashMap::new();
+    for r in store.query(&sql, &[])? {
+        out.insert(
+            r.int(0)?,
+            crate::burned::judge(
+                r.opt_text(1)?.map(str::trim),
+                r.opt_text(2)?,
+                r.opt_text(3)?,
+            ),
+        );
+    }
+    Ok(out)
+}
+
+/// What was changed, by tag and action (§8.5). No old value anywhere.
+fn write_changes(store: &mut Store, report: &Report) -> Result<(), Error> {
+    if report.changes.is_empty() {
+        return Ok(());
+    }
+    let rows: Vec<Vec<Param>> = report
+        .changes
+        .iter()
+        .map(|(what, n)| {
+            let (tag, action) = what.rsplit_once(' ').unwrap_or((what.as_str(), ""));
+            vec![
+                Param::Int(report.release_id),
+                Param::from(tag),
+                Param::from(action),
+                Param::Int(*n),
+            ]
+        })
+        .collect();
+    store.begin()?;
+    let result = store.insert(
+        &Insert::new(
+            table("release_change"),
+            &["release_id", "tag", "action", "count"],
+        ),
+        &rows,
+    );
+    match result {
+        Ok(_) => {
+            store.commit()?;
+            Ok(())
+        }
+        Err(e) => {
+            store.rollback().ok();
+            Err(Error::Store(e))
+        }
+    }
+}
+
+/// One question per held stack, so a person can answer it and the release can
+/// be run again.
+fn raise_review(
+    store: &mut Store,
+    report: &Report,
+    held: &std::collections::HashSet<i64>,
+    pixels: &HashMap<i64, crate::burned::Verdict>,
+) -> Result<(), Error> {
+    let now = now_iso();
+    let mut ids: Vec<i64> = held.iter().copied().collect();
+    ids.sort_unstable();
+    let rows: Vec<Vec<Param>> = ids
+        .iter()
+        .map(|stack| {
+            let verdict = pixels
+                .get(stack)
+                .copied()
+                .unwrap_or(crate::burned::Verdict::Unknown);
+            vec![
+                Param::from(format!("release.{}", verdict.name())),
+                Param::from("stack"),
+                Param::from(serde_json::json!({"stack_id": stack}).to_string()),
+                Param::from(
+                    serde_json::json!({
+                        "release": report.release_id,
+                        "verdict": verdict.name(),
+                        "why": "the engine does not look at pixels; the file was asked",
+                    })
+                    .to_string(),
+                ),
+                Param::from("open"),
+                Param::from(now.as_str()),
+            ]
+        })
+        .collect();
+    store.begin()?;
+    let result = store.insert(
+        &Insert::new(
+            table("review_item"),
+            &["kind", "scope", "ref", "evidence", "status", "created_at"],
+        ),
+        &rows,
+    );
+    match result {
+        Ok(_) => {
+            store.commit()?;
+            Ok(())
+        }
+        Err(e) => {
+            store.rollback().ok();
+            Err(Error::Store(e))
+        }
+    }
 }

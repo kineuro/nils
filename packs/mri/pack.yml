@@ -70,6 +70,12 @@ passes:
 picks:
   - picks/main.yml
 
+# The private elements a release keeps (Wave 3 section 8.4). Everything not
+# named here is dropped, which is the safe answer and the one a pack has to
+# change deliberately.
+private:
+  - private.yml
+
 # When a person is asked about an axis (spec section 8.2). v0 asks about 84
 # percent of its stacks, mostly because no keyword matched rather than because
 # anything was in doubt, and a queue that long is read by nobody. These are the

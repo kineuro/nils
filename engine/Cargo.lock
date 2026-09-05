@@ -1282,6 +1282,7 @@ dependencies = [
  "hex",
  "nils-dicom",
  "nils-digest",
+ "nils-pack",
  "nils-registry",
  "serde",
  "serde_json",

@@ -96,7 +96,7 @@ enum Command {
         command: ReviewCommand,
     },
     /// Select, de-identify and write a dataset out, recording the policy it applied (§8)
-    Release(ReleaseArgs),
+    Release(Box<ReleaseArgs>),
     /// Which stack stands for each session's role, with the evidence that chose it (§10)
     Pick {
         #[command(subcommand)]
@@ -141,6 +141,10 @@ struct ReleaseArgs {
     /// Which categories of element to remove; all of them by default
     #[arg(long, value_name = "patient,trial,provider,institution,times")]
     categories: Option<String>,
+    /// What to do with a stack whose file says nothing about text in its
+    /// pixels. Holding is the default, because a release is a thing that leaves
+    #[arg(long = "on-unknown", default_value = "hold", value_name = "hold|write")]
+    on_unknown: String,
     /// Only these subjects, by code
     #[arg(long, value_name = "CODE")]
     subject: Vec<String>,
@@ -554,7 +558,7 @@ fn main() -> ExitCode {
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
-        Command::Release(args) => release(&home, args),
+        Command::Release(args) => release(&home, *args),
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
@@ -3683,6 +3687,13 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         }
     };
 
+    let on_unknown = nils_release::burned::OnUnknown::parse(&args.on_unknown).ok_or_else(|| {
+        usage(format!(
+            "--on-unknown is hold or write, not {}",
+            args.on_unknown
+        ))
+    })?;
+
     let dir = pack_dir(home, args.pack_dir)?;
     let found = packs_in(&dir)?
         .into_iter()
@@ -3719,6 +3730,11 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             modality: args.modality.clone(),
         },
         scheme: &scheme,
+        // §8.4: dropped by default, and back only by name. The pack declares
+        // the list, because which vendor element carries a gradient is
+        // knowledge about scanners.
+        private: &pack.private,
+        on_unknown,
         actor: &actor(),
         key: &key,
         pack: &pack.name,
@@ -3746,6 +3762,24 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         "  written          {:>9.2} GiB",
         report.bytes as f64 / (1u64 << 30) as f64
     );
+    // §8.4. The second number is the one worth reading: "no tag" is not "no
+    // text", and an archive where most stacks are unjudgeable is a fact a
+    // release should have to confront rather than average away.
+    if report.burned_in > 0 || report.unjudged > 0 {
+        println!("  held back");
+        if report.burned_in > 0 {
+            println!(
+                "      {:>10}   stacks the file says carry text in their pixels",
+                report.burned_in
+            );
+        }
+        if report.unjudged > 0 {
+            println!(
+                "      {:>10}   stacks the file will not say either way, each a review item",
+                report.unjudged
+            );
+        }
+    }
     if !report.refused.is_empty() {
         println!("  not written");
         for (why, n) in &report.refused {

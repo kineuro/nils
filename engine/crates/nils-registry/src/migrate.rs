@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +102,32 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 12,
         apply: create_release,
     },
+    Migration {
+        version: 13,
+        apply: create_release_change,
+    },
+    Migration {
+        version: 14,
+        apply: series_says_what_is_in_its_pixels,
+    },
 ];
+
+/// Wave 3 §8.4: `BurnedInAnnotation`, which is what a release asks instead of
+/// looking at pixels. v0 never reads it.
+fn series_says_what_is_in_its_pixels(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "series", &["burned_in_annotation"])
+}
+
+/// Wave 3 §8.5: what a release changed, by tag and action, with no old value.
+fn create_release_change(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["release_change"])
+}
 
 /// Wave 3 §8.5: what a release did, as rows rather than as a workbook.
 fn create_release(store: &mut Store, kind: Kind) -> Result<(), Error> {

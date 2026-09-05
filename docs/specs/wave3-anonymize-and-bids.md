@@ -627,6 +627,35 @@ a screenshot, raises a review item and is not written until answered; where the
 tag is absent the release says how many stacks it could not judge. The engine
 does not look at pixels (§13).
 
+Three groups a list of named tags can never cover, which is why they are handled
+by shape rather than by name: a **private** element means whatever its vendor
+decided and nothing in the file says what; an **overlay** is a bitmap drawn over
+the image, and what is drawn on it is frequently a name, an accession number or
+an arrow somebody added at a workstation; a **curve** is the retired equivalent
+and is still in old archives. v0 removes 119 named standard tags and touches
+none of the three, so every vendor block leaves the building. Siemens CSA
+headers alone have carried the patient name, the operator and the institution in
+shipping firmware.
+
+The allowlist addresses a **creator** and not a position, because the block a
+creator reserves moves from file to file: `(0019,0010)` in one and `(0019,0011)`
+in the next, with the elements at `10xx` and `11xx`. A creator element whose
+block is emptied goes with it; one that still reserves a kept element stays, or
+a reader cannot tell whose the kept element is.
+
+**"No tag" is not "no text".** The third answer is the point of the check. A
+stack the file says is burned in is not written, one it says is clean is
+written, and one whose `BurnedInAnnotation` is absent is neither: it is held and
+raises a review item, and `--on-unknown write` is the deliberate answer for an
+archive somebody has already looked at. An archive where most stacks are
+unjudgeable is a fact a release should have to confront rather than one it can
+average away, and reading absent as clean is exactly how a screenshot leaves.
+
+The judgement reads the stack and its series and not the fingerprint, so a
+release after a digest alone judges as well as one after a fingerprint. A check
+that quietly did nothing until some earlier verb had run is a check nobody can
+rely on, and this is the one standing between a screenshot and a dataset.
+
 A release **declares which categories it applied and records them**, because v0's
 category table is a menu rather than a policy: a deployment picks from it, and
 nothing in the output says which pick was made. "De-identified" is not a
@@ -649,6 +678,13 @@ Rows, not a workbook beside the originals under a password kept in a database:
 `release` (one per run, with every policy), `release_file` (one per file
 written, with its instance and the digest of what was written) and
 `release_change` (`release, tag, action, count`).
+
+A change is named by what it was, never by what it held: `(0010,0010) removed`
+for a standard element, `private SIEMENS CSA HEADER removed` for a vendor block,
+`(0019,xx0C) SIEMENS MR HEADER kept` for the exception, `overlay removed` for a
+whole group. So a release can say that it dropped fourteen elements of a Siemens
+CSA header and kept five b values, without the row being a copy of what either
+contained.
 
 There is deliberately no old-value column and no source path. An audit that
 records what was removed is a copy of the identifiers, in the registry, in
