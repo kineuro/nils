@@ -1280,6 +1280,7 @@ dependencies = [
  "dicom-object",
  "dicom-transfer-syntax-registry",
  "hex",
+ "nils-classify",
  "nils-dicom",
  "nils-digest",
  "nils-pack",

@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+use crate::name;
 use nils_registry::day::Day;
 use nils_registry::schema::{Type, table};
 use nils_registry::session::{self, Scheme};
@@ -170,6 +171,7 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
     let instances = select(registry.store(), &settings.selection)?;
     let days = study_days(registry.store())?;
     let pixels = pixel_verdicts(registry.store())?;
+    let named = names(registry.store(), &days, settings.scheme)?;
     report.release_id = open_row(registry.store(), settings)?;
 
     // Which studies are one occasion, per subject, so a file lands in the
@@ -231,7 +233,8 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                 .get(&instance.study)
                 .cloned()
                 .unwrap_or_else(|| "unknown".to_string());
-            match write_one(instance, &plan, settings.root, &code, &label) {
+            let called = named.get(&instance.stack);
+            match write_one(instance, &plan, settings.root, &code, &label, called) {
                 Ok(written) => {
                     report.files += 1;
                     report.bytes += written.bytes;
@@ -445,13 +448,21 @@ fn write_one(
     root: &Path,
     code: &str,
     label: &str,
+    called: Option<&name::Named>,
 ) -> Result<Written, String> {
     let mut object = open(Path::new(&instance.path))?;
     let applied = scrub::apply(&mut object, plan);
 
+    // §9.1. A stack with no name is one nothing classified, which is a stack
+    // the release should not silently rename into something readable.
+    let (folder, stem) = match called {
+        Some(n) => (n.folder.clone(), n.name.clone()),
+        None => ("misc".to_string(), format!("stack-{:08}", instance.stack)),
+    };
     let relative = PathBuf::from(format!("sub-{code}"))
         .join(format!("ses-{label}"))
-        .join(format!("{:08}", instance.stack))
+        .join(folder)
+        .join(&stem)
         .join(format!("{:08}.dcm", instance.id));
     let target = root.join(&relative);
     if let Some(parent) = target.parent() {
@@ -660,6 +671,172 @@ fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
         ],
     )?;
     Ok(())
+}
+
+/// What every stack in the registry is called under the `descriptive` layout
+/// (§9.1), and where it lands.
+///
+/// **Every** stack, and not only the selected ones. A name has to be unique in
+/// the directory it lands in, and that directory holds what the registry holds
+/// rather than what this release picked: v0 computes the same thing over the
+/// already filtered list, so exporting one echo of a two-echo series drops the
+/// echo suffix and the file is named as though it were the only one.
+fn names(
+    store: &mut Store,
+    days: &HashMap<i64, Day>,
+    scheme: &Scheme,
+) -> Result<HashMap<i64, name::Named>, Error> {
+    let axes = axis_values(store)?;
+    let t = table("stack_fingerprint");
+    let d = store.dialect();
+    let text = |c: &str| {
+        d.text_of_qualified(
+            Some("f"),
+            t.column(c)
+                .unwrap_or_else(|| panic!("stack_fingerprint.{c} is not a column")),
+        )
+    };
+    // The text columns are cast so that a dialect's own rendering does not
+    // decide the name; the numbers are read as numbers.
+    let sql = format!(
+        "SELECT f.stack_id, f.subject_id, f.study_id, f.series_id, f.stacks_in_series, \
+                f.stack_index, {}, {}, {}, {}, {}, \
+                f.inversion_time, f.dwi_b_value, f.dwi_directions \
+         FROM {} f ORDER BY f.stack_id",
+        text("orientation"),
+        text("split_reason"),
+        text("echo_numbers"),
+        text("mr_acquisition_type"),
+        text("dwi_pe_direction"),
+        store.qualified("stack_fingerprint"),
+    );
+
+    // Bucket by subject, session and folder, which is the directory a name has
+    // to be unique in.
+    let mut buckets: BTreeMap<(i64, String, String), Vec<name::Named>> = BTreeMap::new();
+    let mut labels: HashMap<i64, HashMap<i64, String>> = HashMap::new();
+    let mut studies_of: BTreeMap<i64, Vec<(i64, Day)>> = BTreeMap::new();
+    let rows = store.query(&sql, &[])?;
+    for r in &rows {
+        if let Some(day) = days.get(&r.int(2)?) {
+            let mine = studies_of.entry(r.int(1)?).or_default();
+            if !mine.iter().any(|(id, _)| *id == r.int(2).unwrap_or(0)) {
+                mine.push((r.int(2)?, *day));
+            }
+        }
+    }
+    for (subject, studies) in &studies_of {
+        let points: Vec<session::Study> = studies
+            .iter()
+            .map(|(id, day)| session::Study::new(*id, *day))
+            .collect();
+        let anchor = points.iter().map(|s| s.day).min();
+        let mut mine = HashMap::new();
+        for occasion in session::sessions(&points, anchor, scheme) {
+            let label = occasion
+                .label
+                .clone()
+                .unwrap_or_else(|| occasion.first.compact());
+            for study in &occasion.studies {
+                mine.insert(*study, label.clone());
+            }
+        }
+        labels.insert(*subject, mine);
+    }
+
+    for r in &rows {
+        let stack = r.int(0)?;
+        let empty = BTreeMap::new();
+        let a = axes.get(&stack).unwrap_or(&empty);
+        let get = |k: &str| a.get(k).map(String::as_str).filter(|v| !v.is_empty());
+        let folder = folder_of(get("directory_type"), get("provenance"));
+        let fields = name::Fields {
+            body_part: get("body_part"),
+            spinal_cord: get("body_part") == Some("spine"),
+            orientation: r.opt_text(6)?,
+            base: get("base"),
+            acquisition_type: r.opt_text(9)?,
+            modifier: get("modifier"),
+            technique: get("technique"),
+            acceleration: get("acceleration"),
+            construct: get("construct"),
+            post_contrast: get("post_contrast") == Some("yes"),
+            datatype: get("directory_type"),
+            dwi_b_value: r.double(12).ok(),
+            dwi_pe_direction: r.opt_text(10)?,
+            dwi_directions: r.opt_int(13)?,
+        };
+        let subject = r.int(1)?;
+        let study = r.int(2)?;
+        let label = labels
+            .get(&subject)
+            .and_then(|m| m.get(&study))
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        buckets
+            .entry((subject, label, folder.clone()))
+            .or_default()
+            .push(name::Named {
+                stack,
+                name: name::describe(&fields, true, true),
+                folder,
+                echo: r.opt_text(8)?.and_then(first_int),
+                inversion_time: r.double(11).ok(),
+                series: r.int(3)?,
+                siblings: r.int(4)?,
+                split: r.opt_text(7)?.map(str::to_string),
+                index: r.int(5)?,
+            });
+    }
+
+    let mut out = HashMap::new();
+    for bucket in buckets.values_mut() {
+        name::disambiguate(bucket);
+        for n in bucket.iter() {
+            out.insert(n.stack, n.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// `EchoNumbers` may carry several values; the first is this stack's.
+fn first_int(text: &str) -> Option<i64> {
+    text.split(['\\', ','])
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+        .filter(|n: &i64| *n > 0)
+}
+
+/// Where a stack lands, which is its intent with v0's provenance routing.
+///
+/// v0 sends a SyMRI to `anat/SyMRI` under a flag, and an SWI, a STAGE and a
+/// projection to `anat` whatever their intent says. The grouping is kept
+/// because it is what people have on disk.
+fn folder_of(datatype: Option<&str>, provenance: Option<&str>) -> String {
+    match provenance {
+        Some("SyMRI") => "anat/SyMRI".to_string(),
+        Some("SWIRecon") | Some("STAGE") | Some("ProjectionDerived") => "anat".to_string(),
+        _ => datatype.unwrap_or("misc").to_string(),
+    }
+}
+
+/// Every decided axis of every stack.
+fn axis_values(store: &mut Store) -> Result<HashMap<i64, BTreeMap<String, String>>, Error> {
+    let sql = format!(
+        "SELECT stack_id, axis, value FROM {}",
+        store.qualified("classification_axis")
+    );
+    let mut out: HashMap<i64, BTreeMap<String, String>> = HashMap::new();
+    for r in store.query(&sql, &[])? {
+        if let Some(v) = r.opt_text(2)? {
+            out.entry(r.int(0)?)
+                .or_default()
+                .insert(r.text(1)?.to_string(), v.to_string());
+        }
+    }
+    Ok(out)
 }
 
 /// What each stack's file says about its own pixels (§8.4).

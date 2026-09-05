@@ -9,6 +9,7 @@ use dicom_core::VR;
 use dicom_dictionary_std::tags;
 use nils_dicom::synth::{self, MetaFields, TempDir};
 use nils_digest::digest;
+use nils_pack as _;
 use nils_registry::home::{Home, InitOptions};
 use nils_registry::session::{Naming, Scheme as SessionScheme};
 use nils_registry::{Backend, Registry, Scheme};
@@ -417,4 +418,98 @@ fn a_private_block_goes_and_the_one_the_pack_names_stays() {
         Some(&1)
     );
     assert_eq!(report.changes.get("overlay removed"), Some(&1));
+}
+
+/// A vendor that exports every echo as its own series, which is what Siemens
+/// does and what v0's naming cannot see.
+fn two_echo_tree() -> TempDir {
+    let dir = TempDir::new("release-echoes");
+    for echo in 1..=2u32 {
+        let series = format!("A.1.{echo}");
+        let sop = format!("A.1.{echo}.1");
+        let mut e = synth::minimal_mr("A", &series, &sop);
+        e.extend([
+            synth::text(tags::PATIENT_ID, VR::LO, "P1"),
+            synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
+            synth::text(tags::BURNED_IN_ANNOTATION, VR::CS, "NO"),
+            synth::text(tags::SERIES_DESCRIPTION, VR::LO, "ax t2star megre"),
+            synth::text(tags::SCANNING_SEQUENCE, VR::CS, "GR"),
+            synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "2D"),
+            synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+            synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+            synth::text(tags::ECHO_NUMBERS, VR::IS, &echo.to_string()),
+            synth::text(
+                tags::ECHO_TIME,
+                VR::DS,
+                &format!("{}", 5.0 * f64::from(echo)),
+            ),
+            synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, "1\\0\\0\\0\\1\\0"),
+        ]);
+        dir.file(
+            &format!("s{echo}/1"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    dir
+}
+
+#[test]
+fn the_descriptive_layout_names_each_echo_by_its_own_echo_number() {
+    // v0 appends an echo suffix only when the series holds more than one
+    // stack, and this vendor gives each echo its own series, so every echo of
+    // the session builds an identical name and falls through to a counter that
+    // does not correspond between magnitude and phase.
+    let source = two_echo_tree();
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+
+    // The name is a rendering of the classification axes, so the pipeline runs.
+    nils_classify::job::fingerprint(
+        &mut reg,
+        &nils_classify::Settings::default(),
+        &nils_digest::Cancel::new(),
+    )
+    .unwrap();
+    let packs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let pack = nils_pack::load(&packs, None).unwrap();
+    nils_classify::classify::classify(
+        &mut reg,
+        &pack,
+        &nils_classify::Settings::default(),
+        &nils_digest::Cancel::new(),
+    )
+    .unwrap();
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(report.files, 2);
+
+    let mut stems: Vec<String> = files_under(out.path())
+        .iter()
+        .filter_map(|p| {
+            p.parent()?
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+        })
+        .collect();
+    stems.sort();
+    assert_eq!(stems.len(), 2);
+    // Each carries its own echo, and neither is a bare counter.
+    assert!(stems[0].ends_with("_e1"), "{stems:?}");
+    assert!(stems[1].ends_with("_e2"), "{stems:?}");
+    assert!(stems[0].contains("T2starw"), "{stems:?}");
+    // And the tree is subject, session, folder, name.
+    let one = &files_under(out.path())[0];
+    let parts: Vec<String> = one
+        .strip_prefix(out.path())
+        .unwrap()
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(parts.len(), 5, "{parts:?}");
+    assert!(parts[0].starts_with("sub-"), "{parts:?}");
+    assert!(parts[1].starts_with("ses-"), "{parts:?}");
+    assert_eq!(parts[2], "anat", "{parts:?}");
 }

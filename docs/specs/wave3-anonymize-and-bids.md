@@ -728,6 +728,24 @@ session as the registry holds it rather than over the selection; and a character
 a filesystem or a downstream tool cannot take is mapped by a declared rule
 rather than left to a converter to mangle.
 
+Each is one of v0's own known bugs, and its own report names the fix for the
+first: "derive the suffix from per-stack fields that are always populated,
+`stack_echo_numbers` for the echo index". So the echo suffix is the **measured
+echo number**, which cannot disagree with itself: v0's counter numbers by
+arrival, so its `magnitude_1` and `phase_1` need not be the same echo.
+
+Disambiguation runs in three passes, weakest last: the echo or inversion
+suffix, then a `_1`, `_2` counter in a fixed order, then nothing, because a
+name that needs more than that is a name the grammar cannot make and quietly
+numbering it hides that. A stack the registry never classified is not renamed
+into something readable: it lands as `misc/stack-00000123`, which says what it
+is.
+
+The mapping is one rule and one value matters: `*` becomes `star`, which is
+also the word BIDS uses, so `T2*w` is `T2starw` rather than the `T2_w` dcm2niix
+leaves. Everything else hostile becomes a hyphen rather than being dropped,
+because a dropped character silently joins two tokens into one.
+
 ### 9.2 `bids`
 
 The standard's entity grammar, in the standard's order, enforced from the
