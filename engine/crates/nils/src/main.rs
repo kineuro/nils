@@ -2966,8 +2966,16 @@ fn session_list(home: &Home, args: SessionListArgs) -> Result<(), Exit> {
         return Ok(());
     }
 
+    // The code's length is the pseudonym scheme's, which differs per registry,
+    // so the column is as wide as the codes rather than a guess that truncates.
+    let wide = out
+        .iter()
+        .filter_map(|r| r["subject"].as_str().map(str::len))
+        .max()
+        .unwrap_or(0)
+        .max("subject".len());
     println!(
-        "{:<14} {:<8} {:<11} {:<11} {:>7} {:>8}  note",
+        "{:<wide$} {:<8} {:<11} {:<11} {:>7} {:>8}  note",
         "subject", "label", "from", "to", "studies", "months"
     );
     for row in &out {
@@ -2981,8 +2989,8 @@ fn session_list(home: &Home, args: SessionListArgs) -> Result<(), Exit> {
             None if row["months"].is_number() && row["nominal"].is_null() => "off schedule".into(),
             None => String::new(),
         };
-        println!(
-            "{:<14} {:<8} {:<11} {:<11} {:>7} {:>8}  {}",
+        let line = format!(
+            "{:<wide$} {:<8} {:<11} {:<11} {:>7} {:>8}  {}",
             text("subject"),
             row["label"].as_str().unwrap_or("-"),
             text("first"),
@@ -2991,10 +2999,13 @@ fn session_list(home: &Home, args: SessionListArgs) -> Result<(), Exit> {
             months,
             note
         );
+        println!("{}", line.trim_end());
     }
+    let subjects = by_subject.len() as u64;
     println!(
-        "{} subjects, {n_sessions} sessions, {n_flagged} worth a look",
-        by_subject.len()
+        "{subjects} {}, {n_sessions} {}, {n_flagged} worth a look",
+        counted("subjects", subjects),
+        counted("sessions", n_sessions)
     );
     Ok(())
 }
@@ -3066,7 +3077,9 @@ fn read_points(
         )
     } else {
         format!(
-            "SELECT su.code, st.id, COALESCE(st.date_filled, st.study_date), NULL \
+            // The cast is for Postgres, which will not infer a type for a bare
+            // NULL and refuses the statement rather than guessing.
+            "SELECT su.code, st.id, COALESCE(st.date_filled, st.study_date), CAST(NULL AS TEXT) \
              FROM {study} st JOIN {subject_table} su ON su.id = st.subject_id \
              WHERE COALESCE(st.date_filled, st.study_date) IS NOT NULL{where_subject} \
              ORDER BY su.code, 3, st.id"
