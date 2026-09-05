@@ -1443,17 +1443,21 @@ repository, so the corpus is a command rather than an artefact.
   exist before a model writes through it.
 - **The full catalog of roles and picks** (Wave 4 and 5, C19) and **the
   migration of the live registry** (Wave 4).
-- **Selection as a language.** A release takes a small fixed set of narrowings:
-  subjects, dispositions, roles, picks, modality. Anything else a person means
-  by "the cohort", the 7T subset among them, is a **query**, and the query AST
-  is Wave 4's door and Wave 5's notebook. Walking a cohort through its life on
+- **Selection as a language.** A release takes an **enumeration**: subjects, a
+  subject and one of its sessions, stacks, and what the pack says a stack is.
+  Those are the four grains a cohort is actually made of, and each is a list a
+  person or a query can hand over; `--select` reads one from a file or from
+  standard input, so the answer to a query is piped in rather than typed.
+  Anything else a person means by "the cohort", the 7T subset among them, is a
+  **query**, and the query AST is Wave 4's door and Wave 5's notebook. Walking a cohort through its life on
   2026-09-05 made the case for adding a field-strength flag here and Nima
   refused it, which is right: every such flag is a predicate the query language
   will have to have anyway, and a release that grows its own filters is a
   second query language nobody designed. Wave 5's gate is exactly this, "a real
   study's cohort defined as a selection and exported end to end without a
   hand-written manifest", so the release's job is to take a selection, not to
-  compute one.
+  compute one. This is the same line that separated the cohort from the digest
+  and the apps from the engine.
 
 ## 14. Order of work
 
@@ -1495,9 +1499,13 @@ before the rest is written.
 
 ## 15. Open questions carried into the wave
 
-1. **The UID root** for keyed remapping: a registered OID arc, which is right
-   for a tool meant to be adopted, or a UUID-derived root, which is legal and
-   ugly.
+1. ~~**The UID root** for keyed remapping.~~ **Answered 2026-09-05: `2.25`
+   stays for now.** It is DICOM's own UUID-derived arc (PS3.5 B.2), legal,
+   accepted everywhere and needing no registration, and its only cost is that a
+   released UID says nothing about who issued it. A registered arc can be added
+   later without breaking anything, with one thing to know: UIDs already sent
+   out cannot be changed, so a tree released under `2.25` keeps it and only
+   later releases carry the new arc. `--uid-root` already takes one.
 2. ~~**Where localizers go.**~~ **Closed 2026-09-05**: a release's option, with
    four answers (§9.3), because all four are defensible and which is right
    depends on who the dataset is for. `sourcedata` is the default.

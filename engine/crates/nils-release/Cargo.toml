@@ -21,6 +21,9 @@ dicom-dictionary-std.workspace = true
 dicom-object.workspace = true
 dicom-transfer-syntax-registry.workspace = true
 hex.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

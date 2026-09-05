@@ -155,6 +155,19 @@ struct ReleaseArgs {
     /// Only these subjects, by code
     #[arg(long, value_name = "CODE")]
     subject: Vec<String>,
+    /// Only these sessions, as `<subject>:<label>`, by the label the scheme
+    /// gives them
+    #[arg(long, value_name = "CODE:LABEL")]
+    session: Vec<String>,
+    /// Only these stacks, by id. The grain a query returns
+    #[arg(long, value_name = "ID")]
+    stack: Vec<i64>,
+    /// Read the selection from a file, or from `-` for standard input, so the
+    /// answer to a query can be piped in rather than typed. JSON with
+    /// `subjects`, `sessions` and `stacks`, or one item a line: a number is a
+    /// stack, `<code>:<label>` is a session, anything else is a subject
+    #[arg(long, value_name = "FILE")]
+    select: Option<String>,
     /// Only stacks of these dispositions; by default everything but excluded
     #[arg(long, value_name = "KIND")]
     disposition: Vec<String>,
@@ -3758,6 +3771,96 @@ fn pick_explain(home: &Home, id: i64, json: bool) -> Result<(), Exit> {
 }
 
 // --------------------------------------------------------------------------
+/// The three grains a cohort is made of, from the flags and from `--select`.
+#[derive(Debug, Default)]
+struct Chosen {
+    subjects: Vec<String>,
+    sessions: Vec<(String, String)>,
+    stacks: Vec<i64>,
+}
+
+/// What to release, as an enumeration.
+///
+/// A release takes a selection and does not compute one: what a study means by
+/// its cohort is a query, and the query AST is the door for that. So this reads
+/// lists, from flags or from a file, and `-` is standard input so the answer to
+/// a query can be piped in rather than typed.
+fn choose(args: &ReleaseArgs) -> Result<Chosen, Exit> {
+    let mut out = Chosen {
+        subjects: args.subject.clone(),
+        stacks: args.stack.clone(),
+        ..Chosen::default()
+    };
+    for text in &args.session {
+        out.sessions.push(session_pair(text)?);
+    }
+    let Some(from) = &args.select else {
+        return Ok(out);
+    };
+    let text = match from.as_str() {
+        "-" => {
+            let mut buffer = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
+                .map_err(|e| fail(format!("standard input: {e}")))?;
+            buffer
+        }
+        path => std::fs::read_to_string(path).map_err(|e| fail(format!("{path}: {e}")))?,
+    };
+    // JSON when it is JSON, which is what a query will write; otherwise one
+    // item a line, which is what a person writes and what `cut` produces.
+    if text.trim_start().starts_with('{') {
+        let doc: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| usage(format!("the selection: {e}")))?;
+        for value in doc["subjects"].as_array().unwrap_or(&Vec::new()) {
+            if let Some(s) = value.as_str() {
+                out.subjects.push(s.to_string());
+            }
+        }
+        for value in doc["stacks"].as_array().unwrap_or(&Vec::new()) {
+            if let Some(n) = value.as_i64() {
+                out.stacks.push(n);
+            }
+        }
+        for value in doc["sessions"].as_array().unwrap_or(&Vec::new()) {
+            match value {
+                // `["abc", "M06"]` or `"abc:M06"`, because both are natural to
+                // write and neither is ambiguous.
+                serde_json::Value::Array(pair) if pair.len() == 2 => out.sessions.push((
+                    pair[0].as_str().unwrap_or_default().to_string(),
+                    pair[1].as_str().unwrap_or_default().to_string(),
+                )),
+                serde_json::Value::String(s) => out.sessions.push(session_pair(s)?),
+                _ => {}
+            }
+        }
+        return Ok(out);
+    }
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match line.parse::<i64>() {
+            Ok(id) => out.stacks.push(id),
+            Err(_) if line.contains(':') => out.sessions.push(session_pair(line)?),
+            Err(_) => out.subjects.push(line.to_string()),
+        }
+    }
+    Ok(out)
+}
+
+fn session_pair(text: &str) -> Result<(String, String), Exit> {
+    text.split_once(':')
+        .map(|(who, which)| (who.trim().to_string(), which.trim().to_string()))
+        .filter(|(who, which)| !who.is_empty() && !which.is_empty())
+        .ok_or_else(|| {
+            usage(format!(
+                "{text} is not a session; those are <subject>:<label>, as \
+                 `nils session list` prints them"
+            ))
+        })
+}
+
 // The handover (Wave 3 §11)
 // --------------------------------------------------------------------------
 
@@ -4112,6 +4215,8 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         run::Layout::Descriptive => None,
     };
 
+    // Before the pack directory is taken out of `args`.
+    let chosen = choose(&args)?;
     let dir = pack_dir(home, args.pack_dir)?;
     let found = packs_in(&dir)?
         .into_iter()
@@ -4141,7 +4246,9 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         policy: &policy,
         categories,
         selection: run::Selection {
-            subjects: args.subject.clone(),
+            subjects: chosen.subjects,
+            sessions: chosen.sessions,
+            stacks: chosen.stacks,
             dispositions: args.disposition.clone(),
             roles: args.role.clone(),
             picked_only: args.picked,
