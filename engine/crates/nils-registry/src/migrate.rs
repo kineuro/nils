@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +98,19 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 11,
         apply: create_pick,
     },
+    Migration {
+        version: 12,
+        apply: create_release,
+    },
 ];
+
+/// Wave 3 §8.5: what a release did, as rows rather than as a workbook.
+fn create_release(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["release", "release_file"])
+}
 
 /// Wave 3 §10: which stack stands for a session's role, with the evidence and
 /// the population it was chosen against.

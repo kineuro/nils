@@ -24,6 +24,7 @@ nils-registry = { path = "crates/nils-registry" }
 nils-digest = { path = "crates/nils-digest" }
 nils-classify = { path = "crates/nils-classify" }
 nils-pack = { path = "crates/nils-pack" }
+nils-release = { path = "crates/nils-release" }
 
 blake2 = "0.11"
 bytes = "1"
@@ -37,6 +38,7 @@ dicom-dictionary-std = "0.10"
 dicom-encoding = "0.10"
 dicom-json = "0.10"
 dicom-object = "0.10"
+dicom-transfer-syntax-registry = "0.10"
 glob = "0.3"
 hex = "0.4"
 libc = "0.2"
