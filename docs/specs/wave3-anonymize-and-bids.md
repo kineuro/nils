@@ -1195,6 +1195,50 @@ members and the release it belongs to, so "what did we send them, and is it
 still intact" is a query rather than a folder someone remembers.
 
 The password is a key, handled as the registry handles keys, and never a column.
+It is **derived** from a named key in the store under a domain of its own, the
+way §8.2's UID remapping is, so it is reproducible without being stored and
+neither can be used to reason about the other. `nils handover password --key
+<name>` prints it, which is a deliberate act with a verb of its own.
+
+**The plan comes from the registry, not from a scan.** v0 walks the tree and
+stats every file to learn its size; §8.6's manifest already recorded the path
+and the size of everything the release wrote, so the plan is a query. That is
+faster, and it is what lets a handover say afterwards whether the tree it packed
+is still the tree the release wrote: a file the record names and the disk does
+not is counted and reported rather than quietly skipped.
+
+**The unit is a subject**, because a recipient who has half a person has
+nothing. A subject's raw images, its `sourcedata/` and its `derivatives/` go in
+one archive whatever depth they sit at, and a subject larger than the chunk gets
+an archive of its own rather than being split. Two ways of filling the chunks,
+as in v0: in the tree's order, so the archives follow the tree, or largest first
+into the first with room, which makes fewer archives in no order anybody can
+predict.
+
+**The dataset's own files are packed.** v0 scans only top-level *directories*,
+so `dataset_description.json`, `participants.tsv` and the `README` are left
+behind and a handover of a BIDS tree arrives as something that is not a dataset.
+They go in the first archive, and a manifest and a `HANDOVER` note travel beside
+the set, because a recipient has the archives and not the registry.
+
+**The archives are read back before the run says it is done**, and that is not a
+nicety. Two things came out of it, neither documented anywhere, both found by
+running it:
+
+- **`7z a -p` asks for the password twice**, once to set it and once to confirm
+  it. A run that answers once writes the whole set, exits 0, and produces
+  archives nobody can open.
+- **`-p` means the opposite thing to `7z t`**, where it is not "ask me" but "the
+  password is the empty string", so a verification that passes it reports a
+  wrong password for every archive of a good set.
+
+v0 hits neither, because it puts the password in `argv`, where `ps` shows it to
+every user on the host for as long as a 100 GB archive takes to write. v1 writes
+it to the child's standard input and nowhere else.
+
+`nils handover verify` reads a set back later: every archive there, still its own
+checksum, and still openable. The checksum is asked first, because it says the
+file is the file without needing the password.
 
 ## 12. The gate
 
@@ -1213,21 +1257,38 @@ against it would be a bar against being correct.
    or in the report with a reason, and the counts reconcile to the selection.
 5. **The descriptive layout names everything.**
 6. **One stack per session and role**, ties reported.
-7. **Every file is traceable** through `release_file` to an instance, and every
+7. **Every file is traceable** through `release_file` to the stack it is of,
+   and to the instance where the file is one instance written out, and every
    value it carries to the rule, pass, person or model that decided it, with no
-   value whose author the tree cannot name (§10.1).
+   value whose author the tree cannot name (§10.1). The two-step is not a
+   weakening: a NIfTI is a whole stack, so its instances are the stack's, and
+   saying so is more honest than naming one of them.
 8. **The de-identification does what it says**: no tag from the removed set, no
    private tag outside the allowlist, no overlay group, no UID that appears in
    the source, and under `shift` no date that appears in the source **including
    inside a UID**, which is §4.3 as a test.
 9. **Round trip and increment**: two runs over one selection agree; a run over a
    superset leaves the first run's files untouched.
-10. **The clinical join survives**: for the reference selections, the EDSS
-    nearest each scan is the same computed from the registry and from the tree,
-    under every date policy.
+10. **The date the clinical join needs survives**: for the reference
+    selections, the acquisition time in `_sessions.tsv` and `_scans.tsv` equals
+    the registry's under every date policy, which is the coupling of §2.1
+    broken and the whole of what this wave owns.
+
+    The join itself, the EDSS nearest each scan computed both ways, **moves to
+    Wave 4's gate**, because v1 has no clinical layer to join to:
+    `metadata_imports` is Wave 4's and the registry has no events table. Gating
+    here on data that does not exist would be gating on nothing.
 11. **The handover verifies**: the archive set unpacks, every checksum matches,
     and the release record accounts for every file.
-12. **The budget**, measured on the baseline host and gated in CI.
+12. **The budget**, measured on the baseline host and gated in CI, and for the
+    release **stated as a function of size**. It holds per-file state: the rows
+    it is writing, and on a re-run the previous version's manifest. Measured on
+    a 150,000-file synthetic corpus it peaks at 196 MB for a first version and
+    232 MB for the next, which is comfortable at that size and is linear. So the
+    bar is the measurement and the number it implies, not a claim that the
+    release is bounded: streaming the manifest instead of accumulating it, and
+    comparing per stack by query, is a slice after this wave and principle 5 is
+    what will ask for it.
 
 ### 12.1 The awkward corpus
 
@@ -1330,6 +1391,12 @@ repository, so the corpus is a command rather than an artefact.
 - **Derivative registration.** The seam is declared here; the machinery is
   Wave 7's, and v0's own ingest has its database write gated off, so there is
   nothing to carry.
+- **The conversion, which is `dcm2niix`'s.** The export half of "no container
+  runtime" now has a prerequisite, and it is worth stating exactly rather than
+  leaving it to be discovered: digest, classify and a **descriptive** release
+  need nothing but `nils`; a **BIDS** release needs a converter on the path, and
+  refuses to start without one (§9.6). A converter is a binary a deployment
+  installs, not a container runtime, and it does not change the line below.
 - **Pixels, at all. The binary never decodes pixel data.** Not to deface, not to
   check for burned-in text, not to render a slice for someone to look at. Every
   one of those is a pipeline, and the review images a person needs are
