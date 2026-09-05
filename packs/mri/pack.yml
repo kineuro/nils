@@ -33,6 +33,10 @@ axes:
   - axes/body_part.yml
   - axes/post_contrast.yml
   - axes/directory_type.yml
+  # Wave 3 §7: what to do with a stack, as opposed to what it is. Decided in a
+  # phase of its own, after the passes.
+  - axes/disposition.yml
+  - axes/convertible.yml
 
 # Rule sets written longhand: the tiers that are not value-major.
 rules:
@@ -47,9 +51,10 @@ rules:
   - rules/post_contrast.yml
   - rules/body_part.yml
   - rules/intent.yml
+  - rules/disposition.yml
 
 # The order the rule sets run in.
-order: [excluded, provenance, swi, symri, epimix, stage, technique, base, modifier, construct, body_part, post_contrast, intent]
+order: [excluded, provenance, swi, symri, epimix, stage, technique, base, modifier, construct, body_part, post_contrast, intent, disposition]
 
 # The phases that read more than one stack (spec section 7). A pack that
 # declares none gets none.

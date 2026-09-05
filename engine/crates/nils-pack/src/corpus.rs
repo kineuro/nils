@@ -68,6 +68,32 @@ pub fn run(pack: &Pack, cases: &[(std::path::PathBuf, Case)], what: &str) -> R<(
             continue;
         }
         let verdict = e.classify();
+        // Wave 3 §7: a case may assert a disposition, which is decided in a
+        // phase of its own after the passes. There are no passes here, one
+        // stack being no reference, so the seed is what the rules decided;
+        // that is the whole point of a case, which states what a pack makes
+        // of one stack on its own.
+        let disposition = if pack
+            .axes
+            .iter()
+            .any(|a| a.phase == crate::rules::AxisPhase::Disposition)
+        {
+            let mut seed: Vec<Vec<String>> = vec![Vec::new(); pack.axes.len()];
+            for a in &verdict.axes {
+                if let Some(i) = pack.axis_index(&a.axis) {
+                    seed[i] = a.values.clone();
+                }
+            }
+            Some(e.dispose(&seed))
+        } else {
+            None
+        };
+        let answer = |axis: &str| -> String {
+            match disposition.as_ref().and_then(|d| d.axis(axis)) {
+                Some(a) => a.stored(),
+                None => verdict.stored(axis),
+            }
+        };
         for (axis, want) in &case.axes {
             asserted += 1;
             if pack.axis_index(axis).is_none() {
@@ -77,7 +103,7 @@ pub fn run(pack: &Pack, cases: &[(std::path::PathBuf, Case)], what: &str) -> R<(
                 )
                 .in_file(file, None));
             }
-            let got = verdict.stored(axis);
+            let got = answer(axis);
             if got != *want {
                 failures.push(format!(
                     "  {}: {axis} is {got:?}, the case says {want:?}",

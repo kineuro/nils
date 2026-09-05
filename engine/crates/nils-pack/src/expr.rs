@@ -167,6 +167,29 @@ pub enum Expr {
     Not(Box<Expr>),
 }
 
+impl Expr {
+    /// Every axis this expression reads, however deeply nested.
+    ///
+    /// The loader uses it for one check: a rule that runs before the passes
+    /// may not read an axis decided after them (Wave 3 §7). Nothing stops it
+    /// at run time, because an axis nothing has decided reads as empty, so the
+    /// rule would quietly take the wrong branch instead of failing.
+    pub fn axes_read(&self, into: &mut Vec<usize>) {
+        match self {
+            Expr::Axis { axis, .. } | Expr::AxisMissingOr { axis, .. } => into.push(*axis),
+            Expr::Any(es) | Expr::All(es) => {
+                for e in es {
+                    e.axes_read(into);
+                }
+            }
+            Expr::Not(e) | Expr::InParser { inner: e, .. } | Expr::Text { inner: e, .. } => {
+                e.axes_read(into)
+            }
+            _ => {}
+        }
+    }
+}
+
 /// What the evaluator can see while it works on one stack.
 pub trait Ctx {
     fn pred(&self, parser: usize, pred: usize) -> bool;

@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# What to do with a stack, as opposed to what it is
+# (`docs/specs/wave3-anonymize-and-bids.md`, section 7).
+#
+# The concept v0 lacks, and the one every one of its export bugs needs. v0 has
+# it in pieces and under other names: a `NIFTI_INCOMPATIBLE_PROVENANCES` set in
+# the converter, a `non_canonical_constructs` list in the pick configuration.
+# Both are dispositions written in the one place that happened to need them,
+# which is why they disagree.
+#
+# `phase: disposition` puts this after the passes. A pass fills a base or a
+# technique, and a disposition worked out before that would be worked out from
+# a gap: v0 has exactly that fault, and patches it with a second copy of its
+# intent cascade inside gap filling, which then disagrees with the first.
+
+axis: disposition
+phase: disposition
+kind: single
+tiers: {stated: 0.9}
+# A stack the scanner marked as its own primary output, with nothing saying
+# otherwise, is an acquisition. That is most of the archive, and the rules
+# below are what catch everything else.
+default: acquisition
+default_confidence: 0.7
+
+values:
+  # What the scanner acquired and meant you to look at.
+  acquisition: {}
+  # The scanner made it from images it had just taken: an ADC map, a Trace, a
+  # synthetic contrast, a quantitative map. An ordinary image, and one whose
+  # provenance a reader has to be told.
+  scanner_derived: {}
+  # A workstation made it from images: a reformat, a projection.
+  reformat: {}
+  # An intermediate the scanner used to make something else, and not an image
+  # in its own right. The MDME container is the case that proves it (7.1).
+  working_scan: {}
+  # A planning scan.
+  scout: {}
+  # Not an image at all: a screen capture, an error map, a report.
+  excluded: {}

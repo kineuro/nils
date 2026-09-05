@@ -29,6 +29,11 @@ pub const FIELDS: &[&str] = &[
     "fov_x",
     "fov_y",
     "aspect_ratio",
+    // Wave 3 §6: what the fingerprint worked out rather than read. Readable
+    // by a pack because that is the point of putting them there: the
+    // disposition of §7 is decided from them.
+    "field_strength_normalized",
+    "dwi_directions",
     // text
     "modality",
     "manufacturer",
@@ -56,10 +61,19 @@ pub const FIELDS: &[&str] = &[
     "text_image_comments",
     "text_all",
     "text_contrast",
+    "image_role",
+    "acquisition_type_filled",
+    "acquisition_type_source",
+    "dwi_b_values",
+    "dwi_b_value_source",
+    "dwi_pe_direction",
+    "dwi_pe_direction_source",
+    "dwi_directions_source",
+    "field_strength_unit",
 ];
 
 /// Where the text half begins.
-pub const FIRST_TEXT: usize = 17;
+pub const FIRST_TEXT: usize = 19;
 
 pub fn field_index(name: &str) -> Option<usize> {
     FIELDS.iter().position(|f| *f == name)

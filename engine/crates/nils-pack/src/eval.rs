@@ -174,7 +174,7 @@ impl Ctx for Evaluated<'_> {
 // Classifying: the rule sets in order, each leaving alone what an earlier one
 // decided (§6.3).
 
-use crate::rules::{Clause, Rule, Tier, Which};
+use crate::rules::{AxisPhase, Clause, Rule, Tier, Which};
 use crate::verdict::{AxisVerdict, Evidence, Verdict};
 
 /// The value index a set names: the one it wrote, or the one the rule set
@@ -199,10 +199,31 @@ struct Fired {
 impl Evaluated<'_> {
     /// The pack's verdict on this stack, with the evidence that made it.
     pub fn classify(&self) -> Verdict {
+        self.run(AxisPhase::Class, &[])
+    }
+
+    /// What to do with this stack, from what the rules and the passes decided
+    /// (Wave 3 §7).
+    ///
+    /// `decided` is one entry per axis of the pack, in the pack's order,
+    /// holding what is stored for that axis. It is seeded rather than
+    /// recomputed because the passes have run since, and a disposition worked
+    /// out from the rules alone would be worked out from a gap.
+    pub fn dispose(&self, decided: &[Vec<String>]) -> Verdict {
+        self.run(AxisPhase::Disposition, decided)
+    }
+
+    fn run(&self, phase: AxisPhase, seed: &[Vec<String>]) -> Verdict {
         let pack = self.pack;
         let mut verdict = Verdict::default();
-        for v in self.decided.borrow_mut().iter_mut() {
-            v.clear();
+        {
+            let mut d = self.decided.borrow_mut();
+            for (i, v) in d.iter_mut().enumerate() {
+                v.clear();
+                if let Some(from) = seed.get(i) {
+                    v.extend(from.iter().cloned());
+                }
+            }
         }
         // Per axis: the value indices collected so far, and their evidence.
         let mut collected: Vec<Vec<(usize, Fired, String, String)>> =
@@ -217,6 +238,9 @@ impl Evaluated<'_> {
         let mut said_nothing: Vec<bool> = vec![false; pack.axes.len()];
 
         for set in &pack.rule_sets {
+            if set.phase != phase {
+                continue;
+            }
             if let Some(e) = &set.enter_when
                 && !e.eval(None, self)
             {
@@ -297,6 +321,12 @@ impl Evaluated<'_> {
         }
 
         for (ai, axis) in pack.axes.iter().enumerate() {
+            // Only this phase's axes: the others were decided elsewhere, and
+            // emitting them again would overwrite a pass's answer with the
+            // seed it was read from.
+            if axis.phase != phase {
+                continue;
+            }
             let mut hits = std::mem::take(&mut collected[ai]);
 
             // At most one member of an exclusion group may hold, and the

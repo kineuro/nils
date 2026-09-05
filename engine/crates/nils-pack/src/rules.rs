@@ -121,6 +121,43 @@ impl Clause {
     }
 }
 
+impl RuleSet {
+    /// Every axis any rule of this set reads, for the loader's phase check.
+    pub fn axes_read(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        if let Some(e) = &self.enter_when {
+            e.axes_read(&mut out);
+        }
+        for d in &self.derives {
+            for c in &d.cases {
+                if let Some(w) = &c.when {
+                    w.axes_read(&mut out);
+                }
+            }
+        }
+        for r in &self.rules {
+            if let Some(g) = &r.requires {
+                g.axes_read(&mut out);
+            }
+            for c in &r.clauses {
+                if let Clause::When { expr, .. } = c {
+                    expr.axes_read(&mut out);
+                }
+            }
+            for s in &r.sets {
+                for v in &s.values {
+                    if let Some(w) = &v.when {
+                        w.axes_read(&mut out);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
 /// A value a rule sets on an axis, kept only when its condition holds.
 #[derive(Debug, Clone)]
 pub struct SetValue {
@@ -186,6 +223,8 @@ pub struct Rule {
 #[derive(Debug, Clone)]
 pub struct Axis {
     pub name: String,
+    /// When this axis is decided (Wave 3 §7).
+    pub phase: AxisPhase,
     /// Several values may hold at once (modifier, construct, acceleration).
     pub multi: bool,
     /// The identity of each value, in the order they are tried.
@@ -201,6 +240,34 @@ pub struct Axis {
     /// identity for technique and the label for modifier, which is how one
     /// thing came to have two names; a pack says which, once, per axis.
     pub stores_label: bool,
+}
+
+/// When an axis is decided.
+///
+/// A **disposition** axis says what to do with a stack rather than what it is,
+/// and it is decided from the axes that say what it is. So it runs in a phase
+/// of its own, after the passes, because a pass fills an axis and a disposition
+/// worked out before that would be worked out from a gap.
+///
+/// The two phases are kept apart by the loader as well as by the runner: a rule
+/// set decides axes of one phase only, and a rule of the first phase may not
+/// read an axis of the second, because there is nothing there to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AxisPhase {
+    /// What the stack is. Decided by the rules, over the fingerprint.
+    #[default]
+    Class,
+    /// What to do with it. Decided after the passes, over what was decided.
+    Disposition,
+}
+
+impl AxisPhase {
+    pub fn name(self) -> &'static str {
+        match self {
+            AxisPhase::Class => "class",
+            AxisPhase::Disposition => "disposition",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -259,4 +326,6 @@ pub struct RuleSet {
     /// distinguishes it.
     pub enter_when: Option<Expr>,
     pub rules: Vec<Rule>,
+    /// The phase of the axes it decides, which the loader checks are all one.
+    pub phase: AxisPhase,
 }

@@ -479,6 +479,22 @@ it out. It is derived from the decided axes and the fingerprint by rules the
 - **convertible**: whether a NIfTI of it is meaningful.
 - **target**: where it lands in each layout, and under what name.
 
+The first two are axes of the pack, declared `phase: disposition`, so they are
+written in the language the rest of the pack is written in and carry the same
+evidence: `nils explain` says which rule set, which rule and which axis decided
+that a stack is not convertible, next to what decided that it is a T1w. The
+third is factored: the **datatype** is `directory_type`, which the class phase
+already decides, and the **tree** it sits in follows from the kind, so a working
+scan lands in `sourcedata/` and an acquisition in the raw tree without a third
+axis saying so. The name is the layout's grammar (§9.1, §9.2).
+
+They are two axes rather than one because they are not the same question. A
+working scan is not convertible because it is not an image; a scout is an image,
+converts perfectly well, and is still not something a release puts in the raw
+tree. Folding them together is what makes v0's single
+`NIFTI_INCOMPATIBLE_PROVENANCES = {"SyMRI"}` refuse to convert all 36,692 SyMRI
+stacks when about 3,000 of them are ordinary images.
+
 v0 has this concept in pieces and under other names. Its export carries
 `NIFTI_INCOMPATIBLE_PROVENANCES = {"SyMRI"}`, and its pick config carries
 `non_canonical_constructs: [MIP, MPR, Reformat, Synthetic]`. Both are
@@ -499,6 +515,23 @@ that follows it. That only holds if the order holds, so it is written here
 rather than left implied. The corollary is the one §7 already states: the
 disposition may read a decided axis and may not read the selection.
 
+Three things the engine refuses rather than leaves to a convention, each because
+nothing would go wrong loudly:
+
+1. **A rule set decides axes of one phase.** One that mixed them would have to
+   run at both.
+2. **A rule of the class phase may not read a disposition axis.** At run time it
+   would read as empty, so the rule would quietly take the wrong branch. This is
+   the check that makes "the disposition is derived from what was decided" true
+   rather than merely intended.
+3. **A disposition reads one stack.** Not a rule the loader checks but the shape
+   of the function: it is handed one stack's fields and one stack's decided
+   axes, and there is nothing else in scope. v0's fourth export bug is that its
+   echo suffix disappears when one echo of a two-echo series is exported,
+   because it counts stacks per series over the already filtered list. v1
+   already stores `stacks_in_series` on the fingerprint, which is a fact about
+   the series and not about the selection, so §9's naming reads that.
+
 ### 7.1 SyMRI, the case that proves it is needed
 
 `provenance` alone answers nothing. The archive's 36,692 SyMRI stacks are three
@@ -513,6 +546,19 @@ different things:
 
 v0's single rule refuses to convert all 36,692, which is right for 92 percent
 and wrong for about 3,000 ordinary images.
+
+The pack tells them apart by the construct: a SyMRI series that names one of the
+synthetic contrasts or quantitative maps is that product, and one that names
+none of them is the container. The cases are in the pack's own corpus, which the
+engine runs at **load**, so a pack whose disposition rules stop agreeing with
+them does not load at all.
+
+Writing those cases turned up an interaction worth stating. A workstation
+reformat is tagged `SECONDARY` and never `PRIMARY`, which the class phase rules
+out before any detector runs, so it never reaches the disposition as a
+`reformat`: it arrives as `excluded`. That is v0's behaviour carried over and it
+is right, and the session rescue of §6 is what lets one back in for a visit whose
+every stack is like that. Both cases are in the corpus.
 
 ## 8. The release
 
