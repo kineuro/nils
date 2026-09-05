@@ -23,12 +23,12 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
+use nils_registry::day::Day;
 use nils_registry::home::{
     Config, DSN_ENV, Home, InitOptions, LINKAGE_DB, REGISTRY_DB, REGISTRY_ENV,
 };
 use nils_registry::keys::strip_newline;
 use nils_registry::linkage::{self, ImportError, ImportRow, Subkeys};
-use nils_registry::day::Day;
 use nils_registry::schema::{Type, table};
 use nils_registry::session;
 use nils_registry::{Backend, Insert, Param, Registry, Scheme, Store};
@@ -2712,8 +2712,8 @@ fn session_command(home: &Home, command: SessionCommand) -> Result<(), Exit> {
 }
 
 fn read_scheme(path: &Path) -> Result<session::Scheme, Exit> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| usage(format!("--scheme {}: {e}", path.display())))?;
+    let text =
+        fs::read_to_string(path).map_err(|e| usage(format!("--scheme {}: {e}", path.display())))?;
     session::Scheme::parse(&text).map_err(|e| usage(format!("{}: {e}", path.display())))
 }
 
@@ -2978,9 +2978,7 @@ fn session_list(home: &Home, args: SessionListArgs) -> Result<(), Exit> {
         };
         let note = match row["reason"].as_str() {
             Some(r) => r.to_string(),
-            None if row["months"].is_number() && row["nominal"].is_null() => {
-                "off schedule".into()
-            }
+            None if row["months"].is_number() && row["nominal"].is_null() => "off schedule".into(),
             None => String::new(),
         };
         println!(
@@ -3074,7 +3072,9 @@ fn read_points(
              ORDER BY su.code, 3, st.id"
         )
     };
-    let rows = store.query(&sql, &params).map_err(|e| fail(e.to_string()))?;
+    let rows = store
+        .query(&sql, &params)
+        .map_err(|e| fail(e.to_string()))?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         let code = r.text(0).map_err(|e| fail(e.to_string()))?.to_string();
@@ -3089,9 +3089,8 @@ fn read_points(
             study: session::Study {
                 id,
                 day,
-                said: said.and_then(|(segment, pattern)| {
-                    label_in(path, *segment, pattern.as_ref())
-                }),
+                said: said
+                    .and_then(|(segment, pattern)| label_in(path, *segment, pattern.as_ref())),
             },
         });
     }

@@ -186,7 +186,10 @@ mod tests {
         assert_eq!(d("2022-01-15").to_string(), "2022-01-15");
         assert!(Day::parse("20221345").is_none(), "month thirteen");
         assert!(Day::parse("20220230").is_none(), "february thirtieth");
-        assert!(Day::parse("00000000").is_none(), "the way of writing nothing");
+        assert!(
+            Day::parse("00000000").is_none(),
+            "the way of writing nothing"
+        );
         assert!(Day::parse("2022").is_none());
         assert_eq!(d("20200229").to_string(), "2020-02-29", "a leap day");
         assert!(Day::parse("20210229").is_none(), "and only in a leap year");
@@ -205,7 +208,10 @@ mod tests {
     #[test]
     fn a_timestamp_is_the_day_it_falls_on() {
         // what a GE scanner leaves in a SOP UID
-        assert_eq!(Day::from_unix(1_572_249_167).unwrap().to_string(), "2019-10-28");
+        assert_eq!(
+            Day::from_unix(1_572_249_167).unwrap().to_string(),
+            "2019-10-28"
+        );
         assert!(Day::from_unix(0).is_none());
     }
 

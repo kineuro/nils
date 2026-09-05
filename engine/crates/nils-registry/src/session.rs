@@ -561,13 +561,10 @@ fn place(grouped: &[Visit], anchor: Option<Day>, scheme: &Scheme) -> Vec<Placed>
 /// Compared on the unrounded distance, so a fractional tolerance means what it
 /// says. A tie goes to the earlier visit.
 fn nearest(exact: f64, cadence: &[i32], tolerance: f64) -> Option<i32> {
-    let best = cadence
-        .iter()
-        .copied()
-        .min_by(|a, b| {
-            let (da, db) = ((exact - *a as f64).abs(), (exact - *b as f64).abs());
-            da.partial_cmp(&db).unwrap().then(a.cmp(b))
-        })?;
+    let best = cadence.iter().copied().min_by(|a, b| {
+        let (da, db) = ((exact - *a as f64).abs(), (exact - *b as f64).abs());
+        da.partial_cmp(&db).unwrap().then(a.cmp(b))
+    })?;
     ((exact - best as f64).abs() <= tolerance).then_some(best)
 }
 
@@ -755,7 +752,9 @@ fn settle(placed: Vec<Placed>, scheme: &Scheme) -> Vec<Session> {
         out[i] = Some(demote(&placed[i], scheme, &mut taken));
     }
 
-    out.into_iter().map(|s| s.expect("every session settled")).collect()
+    out.into_iter()
+        .map(|s| s.expect("every session settled"))
+        .collect()
 }
 
 fn claim(p: &Placed) -> (f64, i64) {
@@ -971,7 +970,11 @@ mod tests {
         };
         let out = sessions(&s, Some(d("20220101")), &scheme);
         assert_eq!(out[0].label.as_deref(), Some("M06"), "closest keeps it");
-        assert_eq!(out[1].label.as_deref(), Some("M07"), "the other takes its own");
+        assert_eq!(
+            out[1].label.as_deref(),
+            Some("M07"),
+            "the other takes its own"
+        );
         assert_eq!(out[1].reason, Some(Reason::Demoted));
         assert_eq!(out[1].nominal, None, "and is no longer on the schedule");
     }
@@ -1004,7 +1007,11 @@ mod tests {
                 ..base.clone()
             },
         );
-        assert_eq!(out[1].label.as_deref(), Some("M06b"), "the base is implicitly a");
+        assert_eq!(
+            out[1].label.as_deref(),
+            Some("M06b"),
+            "the base is implicitly a"
+        );
 
         let out = sessions(
             &s,
@@ -1030,7 +1037,8 @@ mod tests {
         assert_eq!(out[0].label.as_deref(), Some("PRE06"));
         assert_eq!(out[1].label.as_deref(), Some("PRE06b"));
         assert!(
-            out.iter().all(|s| s.label.as_deref().unwrap().starts_with("PRE")),
+            out.iter()
+                .all(|s| s.label.as_deref().unwrap().starts_with("PRE")),
             "a demotion stays on its own side of month zero"
         );
     }
@@ -1047,7 +1055,11 @@ mod tests {
             ..months(&[6], 1.5)
         };
         let out = sessions(&s, Some(d("20220101")), &scheme);
-        assert_eq!(out[0].label.as_deref(), Some("M05"), "the earlier one gives way");
+        assert_eq!(
+            out[0].label.as_deref(),
+            Some("M05"),
+            "the earlier one gives way"
+        );
         assert_eq!(out[1].label.as_deref(), Some("M06"));
     }
 
@@ -1078,7 +1090,11 @@ mod tests {
             },
         );
         let labels: Vec<&str> = out.iter().map(|s| s.label.as_deref().unwrap()).collect();
-        assert_eq!(labels, ["01", "02", "03"], "in date order, not arrival order");
+        assert_eq!(
+            labels,
+            ["01", "02", "03"],
+            "in date order, not arrival order"
+        );
     }
 
     #[test]
@@ -1169,7 +1185,10 @@ mod tests {
         let s = told(&[("20220101", "MRI_BRAIN"), ("20220703", "visit 2")]);
         let out = sessions(&s, Some(d("20220101")), &months(&[0, 6, 12], 1.0));
         assert_eq!(out[1].label.as_deref(), Some("M06"));
-        assert!(out.iter().all(|s| !s.flagged), "an archive may name folders anything");
+        assert!(
+            out.iter().all(|s| !s.flagged),
+            "an archive may name folders anything"
+        );
     }
 
     #[test]
