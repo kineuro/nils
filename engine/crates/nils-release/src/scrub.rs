@@ -30,6 +30,9 @@ use nils_registry::day::Day;
 pub struct Plan<'a> {
     pub policy: &'a Policy,
     pub categories: &'a [Category],
+    /// The private elements the pack says are worth keeping (§8.4). Everything
+    /// else in an odd group goes, and so do the overlays and the curves.
+    pub private: &'a [nils_pack::private::Allowed],
     /// The pseudonym this subject's `PatientID` becomes. The registry chose
     /// it; the release does not choose a pseudonym of its own (§8.1).
     pub code: &'a str,
@@ -51,13 +54,15 @@ pub struct Applied {
 
 impl Applied {
     fn note(&mut self, tag: Tag, action: &'static str) {
-        *self
-            .changes
-            .entry((
-                format!("({:04X},{:04X})", tag.group(), tag.element()),
-                action,
-            ))
-            .or_insert(0) += 1;
+        self.count(
+            &format!("({:04X},{:04X})", tag.group(), tag.element()),
+            action,
+            1,
+        );
+    }
+
+    fn count(&mut self, what: &str, action: &'static str, n: i64) {
+        *self.changes.entry((what.to_string(), action)).or_insert(0) += n;
     }
 
     pub fn total(&self, action: &str) -> i64 {
@@ -142,7 +147,23 @@ pub fn apply(object: &mut DefaultDicomObject, plan: &Plan) -> Applied {
         }
     }
 
-    // 5. The UIDs, keyed and deterministic. Last, because everything above
+    // 5. The private blocks, the overlays and the curves, none of which a
+    //    list of named standard tags can reach.
+    let dropped = crate::blocks::strip(object, plan.private);
+    if dropped.overlay > 0 {
+        done.count("overlay", "removed", dropped.overlay);
+    }
+    if dropped.curve > 0 {
+        done.count("curve", "removed", dropped.curve);
+    }
+    for (creator, n) in &dropped.creators {
+        done.count(&format!("private {creator}"), "removed", *n);
+    }
+    for (what, n) in &dropped.kept {
+        done.count(what, "kept", *n);
+    }
+
+    // 6. The UIDs, keyed and deterministic. Last, because everything above
     //    reads the dataset as it was.
     if let Some(remap) = plan.remap {
         let uids: Vec<(Tag, String)> = object
@@ -249,6 +270,7 @@ mod tests {
     fn plan<'a>(policy: &'a Policy, remap: Option<&'a Remap>, offset: i64) -> Plan<'a> {
         Plan {
             policy,
+            private: &[],
             categories: &[
                 Category::Patient,
                 Category::Trial,

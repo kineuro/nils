@@ -39,7 +39,12 @@ LEVELS: dict[str, Level] = {
         renames={"modalities_in_study": "modality"},
         absent=frozenset({"pps_start_date", "pps_end_date", "issue_date"}),
     ),
-    "series": Level("series", "series"),
+    # `burned_in_annotation` is Wave 3 §8.4's addition: what the file says
+    # about text in its own pixels. v0 never reads it, so there is nothing to
+    # compare against.
+    "series": Level(
+        "series", "series", absent=frozenset({"burned_in_annotation"})
+    ),
     "series_mr": Level("series_mr", "mri_series_details"),
     "series_ct": Level("series_ct", "ct_series_details"),
     "series_pet": Level("series_pet", "pet_series_details"),

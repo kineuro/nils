@@ -70,6 +70,10 @@ pub struct Pack {
     /// declares none picks nothing, which is what every pack before Wave 3
     /// does.
     pub picks: Vec<crate::pick::Model>,
+    /// §8.4: the private elements a release keeps. A pack that declares none
+    /// keeps none, which is the safe answer and the one a pack has to change
+    /// deliberately.
+    pub private: Vec<crate::private::Allowed>,
     /// The passes: the phases that read more than one stack (§7). A pack that
     /// declares none gets none.
     pub passes: Vec<Pass>,
@@ -438,6 +442,45 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         rule_sets.sort_by_key(|r| want.iter().position(|n| *n == r.name).unwrap_or(usize::MAX));
     }
 
+    // §8.4. Declared here because which vendor element carries a gradient is
+    // knowledge about scanners, and it changes without the engine changing.
+    let mut private = Vec::new();
+    for f in files_of(m, &manifest, dir, "private")? {
+        let top = f.blame(yaml::obj(&f.value, "private"))?;
+        let pm = f.blame(yaml::obj(yaml::get(top, "private", "private")?, "private"))?;
+        let list = yaml::get(pm, "keep", "private")?
+            .as_array()
+            .ok_or_else(|| {
+                Error::at("private.keep", "is a list").in_file(&f.path, Some(&f.source))
+            })?;
+        for (i, item) in list.iter().enumerate() {
+            let at = format!("private.keep[{i}]");
+            let im = f.blame(yaml::obj(item, &at))?;
+            let group = f.blame(number_16(yaml::get(im, "group", &at)?, &at))?;
+            if group % 2 == 0 {
+                return Err(Error::at(
+                    &at,
+                    format!("{group:#06X} is not a private group; those are odd"),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+            let element = f.blame(number_16(yaml::get(im, "element", &at)?, &at))?;
+            if element > 0xFF {
+                return Err(Error::at(
+                    &at,
+                    "an element is the offset within the block, so it is one byte",
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+            private.push(crate::private::Allowed {
+                creator: f.blame(yaml::text(yaml::get(im, "creator", &at)?, &at))?,
+                group,
+                element: element as u8,
+                why: f.blame(yaml::text(yaml::get(im, "why", &at)?, &at))?,
+            });
+        }
+    }
+
     let mut picks = Vec::new();
     for f in files_of(m, &manifest, dir, "picks")? {
         let model = load_pick(&f, &axes)?;
@@ -526,6 +569,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         axes,
         rule_sets,
         picks,
+        private,
         passes,
         name,
         version,
@@ -1353,6 +1397,23 @@ fn load_axis(
             phase,
         },
     })
+}
+
+/// A group or element number, written as `0x0019` or as 25.
+fn number_16(v: &Value, at: &str) -> R<u16> {
+    if let Some(text) = v.as_str() {
+        let text = text.trim();
+        let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+            Some(hex) => u16::from_str_radix(hex, 16),
+            None => text.parse(),
+        };
+        return parsed.map_err(|_| Error::at(at, format!("{text} is not a tag number")));
+    }
+    let n = yaml::number(v, at)?;
+    if n < 0.0 || n > f64::from(u16::MAX) || n.fract() != 0.0 {
+        return Err(Error::at(at, "is not a tag number"));
+    }
+    Ok(n as u16)
 }
 
 /// The semantic normalizer of §6.4, as data: twelve ordered steps, no code.

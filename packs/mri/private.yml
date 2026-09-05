@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The private elements a release keeps
+# (`docs/specs/wave3-anonymize-and-bids.md`, section 8.4).
+#
+# Private elements are dropped by default. A private element is by definition
+# one whose meaning the standard does not fix: some carry a diffusion
+# direction and some carry the operator's name, and nothing in the file says
+# which. So the list below is the exception rather than the rule, and every
+# entry says what it carries so a reader can judge it.
+#
+# v0 removes 119 named standard tags and touches no private element at all, so
+# every vendor block leaves the building. Siemens CSA headers alone have
+# carried the patient name, the operator and the institution in shipping
+# firmware.
+#
+# Addressed by the creator that reserves the block rather than by position,
+# because the block moves from file to file: (0019,0010) in one and
+# (0019,0011) in the next, with the elements at 10xx and 11xx. v0's reader
+# takes the fixed slot and reads whatever is there.
+#
+# These six are the ones Wave 1 reads and Wave 3 section 6 derives from: a
+# release that dropped them would export diffusion nobody can use.
+
+private:
+  keep:
+    - creator: SIEMENS MR HEADER
+      group: 0x0019
+      element: 0x0C
+      why: the b value of this image
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0019
+      element: 0x0D
+      why: whether this image is directional, isotropic or neither
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0019
+      element: 0x0E
+      why: the gradient direction, as three cosines
+
+    - creator: GEMS_PARM_01
+      group: 0x0043
+      element: 0x39
+      why: the b value, first of four values
+
+    - creator: GEMS_PARM_01
+      group: 0x0043
+      element: 0x30
+      why: how many gradient directions were played
+
+    - creator: Philips Imaging DD 001
+      group: 0x2001
+      element: 0x03
+      why: the b value, with a sentinel above 1e37 for a volume that is not diffusion weighted
