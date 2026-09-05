@@ -265,10 +265,16 @@ Wave 1 §4.4 described a scheme with a window, three label styles and one anchor
 v0's `timeline/` is richer and already right, so v1 carries it whole:
 
 - **Anchor**: `first_session`, `onset_event`, `diagnosis_event`,
-  `explicit_per_subject`. The clinical anchors are what make `M00` mean
-  something clinical rather than "the first scan we happen to hold". Resolving a
-  kind to a date needs event rows, so the caller resolves it and hands the
-  resolver a date, which keeps the resolver pure.
+  `explicit_per_subject`, and one v0 does not have, `source_label`. The clinical
+  anchors are what make `M00` mean something clinical rather than "the first scan
+  we happen to hold". Resolving a kind to a date needs event rows, so the caller
+  resolves it and hands the resolver a date, which keeps the resolver pure.
+  `source_label` is the exception, because it needs nothing the studies do not
+  already carry: it reads month zero back out of the archive's own folder names,
+  and it is the answer for an archive that is a **fragment**. Where the copy we
+  hold starts at the six-month visit, a `first_session` anchor calls that scan
+  `M00`, which is true of our holdings and useless clinically; the folder it sat
+  in says `M06`, and that is where month zero belongs.
 - **Cadence** with a **float** tolerance. A session lands on the nearest nominal
   visit inside the tolerance, and otherwise keeps its own real month, so an
   off-schedule visit reads as `M09` rather than vanishing.
@@ -298,6 +304,28 @@ v0's `timeline/` is richer and already right, so v1 carries it whole:
 The scheme is data, stored per registry with a selection able to carry its own,
 and labels are derived on read so that re-labelling is an edit to one scheme
 rather than a migration. Nothing about a session is stored as a fact.
+
+Three things depart from v0, and only the first is reachable under the default
+scheme:
+
+1. **A session is a group of studies.** v0's resolver says of itself that it
+   "never keys on `study_date`; everything keys on `visit_key`, which today is
+   `study_date.isoformat()` and is the seam a future multi-day visit grouper
+   slots into". That grouper was never written. `window_days` is it, and v0's
+   behaviour is the same thing with the window at zero. The window is measured
+   from the session's **first** study rather than from the previous one, because
+   chaining lets a session drift a fortnight at a time without limit, and a
+   session nobody can put a length to is not one.
+2. **A contested label goes to the session nearest the nominal, measured
+   exactly.** v0 compares rounded months, which ties for almost every pair
+   inside a tolerance and then hands the label to whichever came first. The
+   tolerance is already a float for this exact reason; the distance has to be
+   one too.
+3. **A pre-anchor session demotes to a `PRE` label, never to an `M` one.** v0
+   gives the loser of a contested `PRE06` the label `M06`, which is a visit six
+   months after the anchor rather than six months before it. Its own label is
+   the one it just lost, so under `demote_then_date` it comes back unlabelled
+   and the caller falls back to the date, which is the honest answer.
 
 **A label is not a key.** `M12` does not identify a session: two can share it,
 one can be `PRE06`, one can be its own real month. Anything that joins reads the
@@ -640,7 +668,20 @@ refused; and no date anywhere in any element, any UID or the path.
 
 **Sessions.** Two studies on one day; two studies three days apart; studies at
 zero, six, nine and twelve months against an anchor, so the cadence snaps three
-and leaves the ninth on its real month; and a study before its anchor.
+and leaves the ninth on its real month; a study before its anchor; and an
+archive that begins at the six-month visit and says so in its folder names.
+
+Sessions are derived and never stored, so they are checked by asking for them
+rather than by reading a column, and a scenario declares **more than one
+scheme**, because the point of most of them is that the same studies label
+differently depending on what the scheme says. The three-days-apart pair is two
+sessions at window zero and one at window fourteen. The fragment is `M00, M06`
+from the dates alone; `M00, M06` with **both flagged** once the scheme is told
+where the folder labels are, which is the disagreement reported rather than
+resolved; and `M06, M12` with nothing flagged under `source_label`. Each scheme
+is checked on the labels it produced, in date order, **and on how many sessions
+it flagged**, because a scheme that labels everything and flags nothing has
+hidden the disagreement it was asked to find.
 
 Every scenario is salted with the mess a real tree carries, because a repair
 that only works on a clean tree is not a repair: mixed and missing extensions, a

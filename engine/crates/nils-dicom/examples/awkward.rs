@@ -108,6 +108,22 @@ struct Scenario {
     /// What a reader must do to get that right.
     needs: &'static str,
     studies: Vec<StudyWant>,
+    /// What `nils session` must derive from this subtree, per scheme. Empty
+    /// for a scenario that is about identity or dates rather than timelines.
+    sessions: Vec<SessionWant>,
+}
+
+/// One scheme, and the labels it must produce for the scenario's one subject.
+struct SessionWant {
+    /// Why this scheme is the interesting one here.
+    what: &'static str,
+    /// The scheme's YAML, written into the run directory by the gate.
+    scheme: &'static str,
+    /// The labels, in date order. `null` is a session the scheme left
+    /// unlabelled, which the caller renders as its date.
+    labels: Vec<&'static str>,
+    /// How many of them the scheme must flag as worth a look.
+    flagged: usize,
 }
 
 /// Which path segment carries the subject code, counted from one within the
@@ -422,6 +438,7 @@ fn main() {
             people: 3,
             needs: "the PatientID tag alone",
             studies,
+            sessions: Vec::new(),
         });
     }
 
@@ -476,6 +493,7 @@ fn main() {
             people: 4,
             needs: "the first path segment, because the tag says nothing",
             studies,
+            sessions: Vec::new(),
         });
     }
 
@@ -511,6 +529,7 @@ fn main() {
             people: 3,
             needs: "a pattern with an id group, so the date is not taken as identity",
             studies,
+            sessions: Vec::new(),
         });
     }
 
@@ -537,6 +556,7 @@ fn main() {
                 source: "study_date",
                 person: "ambiguous".into(),
             }],
+            sessions: Vec::new(),
         });
     }
 
@@ -565,6 +585,7 @@ fn main() {
             people: 3,
             needs: "the second path segment, so the segment is a setting and not a constant",
             studies,
+            sessions: Vec::new(),
         });
     }
 
@@ -594,6 +615,7 @@ fn main() {
             people: 4,
             needs: "the segment taken whole, and a code that survives the round trip",
             studies,
+            sessions: Vec::new(),
         });
     }
 
@@ -622,6 +644,7 @@ fn main() {
             people: 2,
             needs: "two subjects on a case-sensitive filesystem, and a diagnostic either way",
             studies,
+            sessions: Vec::new(),
         });
     }
 
@@ -649,6 +672,7 @@ fn main() {
             people: 1,
             needs: "the segment that holds the code, not the branch above it",
             studies,
+            sessions: Vec::new(),
         });
     }
 
@@ -1104,6 +1128,7 @@ fn main() {
                 source: c.source,
                 person: "P1".into(),
             }],
+            sessions: Vec::new(),
         });
     }
 
@@ -1114,7 +1139,22 @@ fn main() {
         what: &'static str,
         needs: &'static str,
         days: &'static [&'static str],
+        /// The visit directory each study sits in. An archive that named its
+        /// folders is evidence, so a scenario about that names them; the rest
+        /// use `visit1`, `visit2`.
+        folders: &'static [&'static str],
+        /// What `nils session` must derive, per scheme.
+        checks: &'static [SessionCheck],
     }
+
+    struct SessionCheck {
+        what: &'static str,
+        scheme: &'static str,
+        labels: &'static [&'static str],
+        flagged: usize,
+    }
+
+    const CADENCE: &str = "session:\n  naming:\n    months:\n      cadence: [0, 6, 12, 18, 24]\n      tolerance: 1.0\n";
 
     let sessions = [
         SessionCase {
@@ -1122,31 +1162,94 @@ fn main() {
             what: "two studies on one day",
             needs: "one session, whatever the window",
             days: &["20220901", "20220901"],
+            folders: &["visit1", "visit2"],
+            checks: &[SessionCheck {
+                what: "a day is a visit, and the default window is a day",
+                scheme: "session: {}\n",
+                labels: &["20220901"],
+                flagged: 0,
+            }],
         },
         SessionCase {
             name: "ses-window",
             what: "two studies three days apart",
             needs: "two sessions at window 0, one at window 14",
             days: &["20221001", "20221004"],
+            folders: &["visit1", "visit2"],
+            checks: &[
+                SessionCheck {
+                    what: "v0 keys on the day, so a split appointment is two visits",
+                    scheme: "session:\n  window_days: 0\n",
+                    labels: &["20221001", "20221004"],
+                    flagged: 0,
+                },
+                SessionCheck {
+                    what: "the seam v0 left: a brain study and a spine study are one visit",
+                    scheme: "session:\n  window_days: 14\n",
+                    labels: &["20221001"],
+                    flagged: 0,
+                },
+            ],
         },
         SessionCase {
             name: "ses-cadence",
             what: "visits at zero, six, nine and twelve months",
             needs: "M00, M06, M09 and M12: the ninth keeps its real month",
             days: &["20220101", "20220703", "20221002", "20230101"],
+            folders: &["visit1", "visit2", "visit3", "visit4"],
+            checks: &[SessionCheck {
+                what: "an off-schedule visit reads as when it happened, not as nothing",
+                scheme: CADENCE,
+                labels: &["M00", "M06", "M09", "M12"],
+                flagged: 0,
+            }],
         },
         SessionCase {
             name: "ses-pre-anchor",
-            what: "a visit six months before the anchor",
+            what: "a workup scan six months before the anchor",
             needs: "PRE06 and M00, never M-06, because a hyphen is BIDS's separator",
             days: &["20211201", "20220601"],
+            folders: &["PRE06", "M00"],
+            checks: &[SessionCheck {
+                what: "month zero read back out of the folders, and the earlier scan is PRE06",
+                scheme: "session:\n  anchor: source_label\n  naming:\n    months:\n      cadence: [0, 6, 12]\n      tolerance: 1.0\n  said:\n    segment: 2\n",
+                labels: &["PRE06", "M00"],
+                flagged: 1,
+            }],
+        },
+        SessionCase {
+            name: "ses-fragment",
+            what: "an archive that starts at the six-month visit and says so",
+            needs: "M06 and M12 from the folders, not M00 and M06 from the dates",
+            days: &["20220701", "20230101"],
+            folders: &["M06", "M12"],
+            checks: &[
+                SessionCheck {
+                    what: "the dates alone call the earliest scan we hold the baseline",
+                    scheme: CADENCE,
+                    labels: &["M00", "M06"],
+                    flagged: 0,
+                },
+                SessionCheck {
+                    what: "and the folders say it is not, which is a finding",
+                    scheme: "session:\n  naming:\n    months:\n      cadence: [0, 6, 12, 18, 24]\n      tolerance: 1.0\n  said:\n    segment: 2\n",
+                    labels: &["M00", "M06"],
+                    flagged: 2,
+                },
+                SessionCheck {
+                    what: "believing the folders puts month zero where the archive says",
+                    scheme: "session:\n  anchor: source_label\n  naming:\n    months:\n      cadence: [0, 6, 12, 18, 24]\n      tolerance: 1.0\n  said:\n    segment: 2\n",
+                    labels: &["M06", "M12"],
+                    flagged: 0,
+                },
+            ],
         },
     ];
 
     for (n, c) in sessions.iter().enumerate() {
         let mut studies = Vec::new();
         for (v, day) in c.days.iter().enumerate() {
-            let dir = format!("{}/SES{:03}/visit{}", c.name, n + 1, v + 1);
+            let dir = format!("{}/SES{:03}/{}", c.name, n + 1, c.folders[v]);
             let su = uid(&["11", &n.to_string(), &v.to_string()]);
             let d: &'static str = day;
             let f = study(
@@ -1178,6 +1281,16 @@ fn main() {
             people: 1,
             needs: c.needs,
             studies,
+            sessions: c
+                .checks
+                .iter()
+                .map(|k| SessionWant {
+                    what: k.what,
+                    scheme: k.scheme,
+                    labels: k.labels.to_vec(),
+                    flagged: k.flagged,
+                })
+                .collect(),
         });
     }
 
@@ -1226,6 +1339,21 @@ fn main() {
                 date,
                 w.source,
                 if j + 1 == s.studies.len() { "" } else { "," }
+            )
+            .unwrap();
+        }
+        writeln!(out, "      ],").unwrap();
+        writeln!(out, "      \"sessions\": [").unwrap();
+        for (j, w) in s.sessions.iter().enumerate() {
+            let labels: Vec<String> = w.labels.iter().map(|l| format!("{l:?}")).collect();
+            writeln!(
+                out,
+                "        {{\"what\": {:?}, \"scheme\": {:?}, \"flagged\": {}, \"labels\": [{}]}}{}",
+                w.what,
+                w.scheme,
+                w.flagged,
+                labels.join(", "),
+                if j + 1 == s.sessions.len() { "" } else { "," }
             )
             .unwrap();
         }

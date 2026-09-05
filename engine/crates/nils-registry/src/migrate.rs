@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +74,21 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 5,
         apply: study_carries_the_date_it_was_given,
     },
+    Migration {
+        version: 6,
+        apply: create_session_scheme,
+    },
 ];
+
+/// Wave 3 §5: the registry keeps the schemes it derives sessions with, so a
+/// labelling can be reproduced from the registry alone. A registry created at
+/// version 1 gains the table; one created now already has it.
+fn create_session_scheme(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["session_scheme"])
+}
 
 /// Wave 3 §4: a study whose `StudyDate` said nothing carries the day the vote
 /// found, the source that carried the most weight for it, and how close the
