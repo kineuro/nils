@@ -714,13 +714,21 @@ component, it reads as the date it was made, and `N` distinguishes two runs on
 one day. It is written into `dataset_description.json` as `GeneratedBy.Version`,
 so a tree says which version it is without a database.
 
-**What a re-run recomputes.** Each version records, per stack it wrote, an
-**input digest** over everything that decides what the file is and where it
-goes: the instances and their content, the decided axes that feed the name and
-the routing, the disposition, the role, the pick, the session label, the folder,
-the whole policy, the layout and its options, and the pack's `name@version`.
+**What a re-run compares.** Two things, per stack, and keeping them apart is
+what makes the cheap case cheap:
 
-The next version compares digests, and a stack falls into one of five:
+- a **content digest** over everything that decides the file's *bytes*: the
+  instances with the size and modification time the walker recorded, the whole
+  policy, the categories, the private allowlist, the pack's `name@version`, and
+  the pseudonym and date offset the key produced for that subject;
+- the **place** it goes, recomputed from scratch every run.
+
+**The place is deliberately not in the content digest.** A name is a rendering
+of the decided axes and not one of them touches a byte of the file, so a stack
+whose body part was corrected has the same content in a different directory, and
+the work is a rename.
+
+The next version compares both, and a stack falls into one of five:
 
 | | what is done |
 |---|---|
@@ -734,18 +742,50 @@ Renaming rather than rewriting is most of the saving in practice: a QC decision
 that corrects a body part changes the name of a few thousand files and the
 content of none.
 
-**The digest includes the version of the code that consumed the inputs**, which
-is the part that is easy to leave out and fatal to leave out. A grammar that
-changed while its inputs did not would otherwise reuse every file, and the tree
-would be a mixture of two grammars with nothing saying so. So the layout carries
-a version constant, bumped deliberately when its grammar changes, and a change
-to it recomputes every name, which is correct and is what a grammar change
-means.
+**The content digest includes the version of the code that decided those
+bytes**, which is the part that is easy to leave out and fatal to leave out. A
+de-identification that changed while its inputs did not, a tag added to a
+category or a fix to the date arithmetic, would otherwise reuse every file and
+leave a tree that is a mixture of two engines with nothing saying so. So the
+scrub carries a version constant, bumped deliberately, and a change to it
+rewrites everything, which is correct and is what such a change means.
+
+**The naming grammar needs no such constant**, and that is the other half of the
+same argument: a name is recomputed from scratch on every run and compared as a
+path, so a grammar change moves files, and moving is precisely what the
+comparison is looking for. A constant would turn a rename into a rewrite.
+
+**Two comparisons need a state to compare against**, so a version records, per
+stack, its content digest and its place. Two further rules keep that state
+honest:
+
+- **The root has to match.** A release of the same name into a different
+  directory is a different tree, and comparing against a state that describes
+  some other directory would leave every unchanged file simply missing. A
+  release into a new root is a first version.
+- **The manifest decides what was carried, not the digest.** A stack whose files
+  the last version did not all write, because a file was unreadable, is written
+  again whatever its digest says: the digest describes the decision and only the
+  manifest knows what reached the disk.
+
+Renames happen **through a staging directory**, in two phases, because two
+stacks can swap names between versions: a disambiguating suffix moves when a
+sibling appears or leaves, and renaming one onto the other in place would lose a
+tree. A move whose source is not where the last version left it is not a move,
+and the stack is written.
+
+**Every version's manifest is the whole tree**, not the part the run touched: a
+version that wrote nothing still lists every file with the digest of its bytes,
+because that is what a handover of that version needs (§11).
 
 **What changed is recorded**, per version, per stack, with the old path and the
-new one. So "what did version 4 do" is a query rather than a diff of two trees,
-and a recipient who took version 3 can be told exactly what to fetch. §11's
-handover is where that becomes an archive.
+new one, and never a row per unchanged stack, which would be a row per stack. So
+"what did version 4 do" is a query rather than a diff of two trees, and a
+recipient who took version 3 can be told exactly what to fetch.
+
+A version is made even when nothing changed. Having made no change is a fact
+about a version, and a dataset whose version did not move cannot say it was
+checked.
 
 A tree updated in place diverges from a copy somebody already took. That is the
 trade for not duplicating the archive per version, it is deliberate, and the

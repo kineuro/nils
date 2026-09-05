@@ -639,7 +639,15 @@ fn build_registry() -> Vec<Table> {
             "release",
             vec![
                 col("id", Type::Id),
+                // The dataset. Running the same name again makes the next
+                // version of the same tree (§8.6).
                 req("name", Type::Text),
+                // `YYYY.MM.DD.N`: it sorts by component, reads as the day it
+                // was made, and N separates two runs on one day.
+                req("version", Type::Text),
+                // The version this one was worked out against. Null for the
+                // first, which is why a first release writes everything.
+                col("previous_id", Type::Int),
                 req("root", Type::Text),
                 // Every policy, written down, because "de-identified" is not a
                 // property a file can carry without saying under what rule.
@@ -657,10 +665,52 @@ fn build_registry() -> Vec<Table> {
                 col("finished_at", Type::Timestamp),
                 req("files", Type::Int),
                 req("subjects", Type::Int),
+                // What a re-run did, and mostly did not do (§8.6).
+                req("unchanged", Type::Int),
+                req("moved", Type::Int),
+                req("rewritten", Type::Int),
+                req("added", Type::Int),
+                req("removed", Type::Int),
                 col("error", Type::Text),
             ],
         )
         .index(&["name"]),
+        // What a version knows about each stack it wrote, which is what the
+        // next version compares against.
+        //
+        // The digest covers everything that decides the file's **bytes** and
+        // deliberately not where it goes: keeping the place out of it is what
+        // lets a move be seen as a move rather than as a rewrite, and a name is
+        // a rendering of the decided axes, none of which touches a byte.
+        Table::new(
+            "release_stack",
+            vec![
+                col("id", Type::Id),
+                req("release_id", Type::Int),
+                req("stack_id", Type::Int),
+                req("content", Type::Text),
+                req("dir", Type::Text),
+                req("files", Type::Int),
+            ],
+        )
+        .unique(&["release_id", "stack_id"])
+        .index(&["release_id"]),
+        // And what became of each stack that was not left alone, so that "what
+        // did version 4 do" is a query rather than a diff of two trees.
+        Table::new(
+            "release_move",
+            vec![
+                col("id", Type::Id),
+                req("release_id", Type::Int),
+                req("stack_id", Type::Int),
+                // `moved`, `rewritten`, `added`, `removed`. Never `unchanged`:
+                // a row per untouched stack is a row per stack.
+                req("action", Type::Text),
+                col("was", Type::Text),
+                col("now", Type::Text),
+            ],
+        )
+        .index(&["release_id"]),
         Table::new(
             "release_file",
             vec![

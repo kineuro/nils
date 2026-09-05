@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +110,52 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 14,
         apply: series_says_what_is_in_its_pixels,
     },
+    Migration {
+        version: 15,
+        apply: a_release_has_a_version,
+    },
 ];
+
+/// Wave 3 §8.6: a release is versioned, and a re-run pays only for what
+/// changed. The release row gains the version and the counts; two tables carry
+/// the state the next version compares against and what it decided.
+///
+/// A release made before this has no version. It is given the day it started
+/// as its first, because a version that reads as a date is more use than a
+/// null, and because the release before the first comparison wrote everything
+/// either way.
+fn a_release_has_a_version(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "release",
+        &[
+            "version",
+            "previous_id",
+            "unchanged",
+            "moved",
+            "rewritten",
+            "added",
+            "removed",
+        ],
+    )?;
+    add_tables(store, kind, &["release_stack", "release_move"])?;
+    let sql = format!(
+        "UPDATE {} SET version = SUBSTR(started_at, 1, 4) || '.' || SUBSTR(started_at, 6, 2)            || '.' || SUBSTR(started_at, 9, 2) || '.1' WHERE version IS NULL",
+        store.qualified("release")
+    );
+    store.execute(&sql, &[])?;
+    for column in ["unchanged", "moved", "rewritten", "added", "removed"] {
+        let sql = format!(
+            "UPDATE {} SET {column} = 0 WHERE {column} IS NULL",
+            store.qualified("release")
+        );
+        store.execute(&sql, &[])?;
+    }
+    Ok(())
+}
 
 /// Wave 3 §8.4: `BurnedInAnnotation`, which is what a release asks instead of
 /// looking at pixels. v0 never reads it.
