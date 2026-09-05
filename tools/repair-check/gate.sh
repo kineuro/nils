@@ -20,9 +20,15 @@ repo=$(cd "$here/../.." && pwd)
 nils=${2:-$repo/engine/target/release/nils}
 awkward=${3:-$repo/engine/target/release/examples/awkward}
 
+# A run never writes into another run's directory. Re-running a gate over a
+# registry that already passed destroys the evidence of what it passed with,
+# which is how one earlier failure became impossible to diff against.
+if [ -e "$work" ]; then
+    echo "gate.sh: $work exists; give a run its own directory" >&2
+    exit 2
+fi
 corpus="$work/corpus"
 manifest="$work/manifest.json"
-rm -rf "$work"
 mkdir -p "$work"
 
 echo "corpus:" >&2
