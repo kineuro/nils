@@ -69,4 +69,8 @@ archive that begins at its six-month visit is `M00, M06` from the dates and
 
 Each scheme is checked on **how many sessions it flagged** as well as on the
 labels, because a scheme that labels everything and flags nothing has hidden the
-disagreement it was asked to find.
+disagreement it was asked to find, and on whether each occasion holds a stack
+the scanner called its output, which is the session rescue's condition (§6).
+The same brain-and-spine pair answers `no, yes` under a same-day scheme and
+`yes` under a fortnight window, which is why that answer is derived and not
+stored.

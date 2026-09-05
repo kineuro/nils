@@ -289,6 +289,10 @@ pub struct Study {
     /// whose paths already carry `M06` is telling you something the dates
     /// alone do not, so it is read as evidence rather than discarded.
     pub said: Option<String>,
+    /// Whether this study holds a stack the scanner called its output
+    /// (`study.has_original_primary`, §6). `None` when the study is not fully
+    /// fingerprinted, which is not the same as no.
+    pub has_primary: Option<bool>,
 }
 
 impl Study {
@@ -298,6 +302,7 @@ impl Study {
             id,
             day,
             said: None,
+            has_primary: None,
         }
     }
 }
@@ -369,6 +374,26 @@ pub struct Session {
     pub offset_months: Option<f64>,
     pub flagged: bool,
     pub reason: Option<Reason>,
+    /// Whether any study of this occasion holds a stack the scanner called its
+    /// output (§6).
+    ///
+    /// `Some(false)` is the session rescue's condition: some exports tag every
+    /// reconstruction `ORIGINAL\SECONDARY` and never write a primary at all,
+    /// so the ordinary exclusion of secondary-without-primary throws the whole
+    /// visit away and the subject becomes unusable. When this is false, a
+    /// stack whose role is `original_secondary` is the best the session has and
+    /// is treated as its primary.
+    ///
+    /// `None` means at least one study of the session has not been fully
+    /// fingerprinted, so the question is not answered rather than answered no.
+    /// A rescue on an unanswered question would be a rescue on a guess.
+    ///
+    /// This is why the rescue cannot be a stored field: which studies are one
+    /// session is a scheme's answer, and the same study can be a session on its
+    /// own under one scheme and part of a larger visit under another. v0 has
+    /// the same grouping hard-wired to the calendar day and computes it over
+    /// whatever stacks were in the batch.
+    pub has_primary: Option<bool>,
 }
 
 /// Group a subject's studies into sessions and name them.
@@ -416,6 +441,7 @@ fn group(studies: &[Study], window_days: i64) -> Vec<Visit> {
                 v.last = s.day;
                 v.studies.push(s.id);
                 push_said(&mut v.said, s.said);
+                v.has_primary = joined(v.has_primary, s.has_primary);
             }
             _ => {
                 let mut said = Vec::new();
@@ -425,6 +451,7 @@ fn group(studies: &[Study], window_days: i64) -> Vec<Visit> {
                     last: s.day,
                     studies: vec![s.id],
                     said,
+                    has_primary: s.has_primary,
                 });
             }
         }
@@ -441,6 +468,23 @@ struct Visit {
     /// More than one means the window pulled together studies the source kept
     /// apart, which is worth saying out loud.
     said: Vec<String>,
+    /// Whether any study of the visit holds a primary. One study that says yes
+    /// answers for the whole visit; otherwise one study that cannot say leaves
+    /// the visit unable to.
+    has_primary: Option<bool>,
+}
+
+/// Whether a visit holds a primary, given one more study.
+///
+/// One yes answers for the visit. Otherwise one study that cannot say leaves
+/// the visit unable to, because a rescue turns on the answer being no and a
+/// study that has not been fully fingerprinted has not said no.
+fn joined(so_far: Option<bool>, next: Option<bool>) -> Option<bool> {
+    match (so_far, next) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (None, _) | (_, None) => None,
+        _ => Some(false),
+    }
 }
 
 fn push_said(into: &mut Vec<String>, said: Option<String>) {
@@ -481,6 +525,7 @@ fn place(grouped: &[Visit], anchor: Option<Day>, scheme: &Scheme) -> Vec<Placed>
                 offset_months: None,
                 flagged: false,
                 reason: None,
+                has_primary: visit.has_primary,
             };
             match &scheme.naming {
                 Naming::Date => Placed {
@@ -1306,5 +1351,87 @@ session:
         };
         let text = serde_json::to_string(&scheme).unwrap();
         assert_eq!(Scheme::from_json(&text).unwrap(), scheme);
+    }
+
+    /// Studies with what each one holds, for the rescue.
+    fn held(pairs: &[(&str, Option<bool>)]) -> Vec<Study> {
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (day, has))| Study {
+                has_primary: *has,
+                ..Study::new(i as i64 + 1, d(day))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_visit_holds_a_primary_if_any_of_its_studies_does() {
+        // The case the rescue exists for: an export that tags every
+        // reconstruction ORIGINAL\SECONDARY and never writes a primary.
+        let none = held(&[("20220901", Some(false))]);
+        assert_eq!(
+            sessions(&none, None, &Scheme::default())[0].has_primary,
+            Some(false)
+        );
+
+        let some = held(&[("20220901", Some(true))]);
+        assert_eq!(
+            sessions(&some, None, &Scheme::default())[0].has_primary,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_window_decides_whether_a_session_needs_rescuing() {
+        // A brain study on the Monday with no primary anywhere in it, and a
+        // spine study on the Wednesday that has one. Under v0's grouping they
+        // are two occasions and the brain study is rescued; widen the window
+        // and they are one visit that holds a primary, so nothing is.
+        let s = held(&[("20221003", Some(false)), ("20221005", Some(true))]);
+
+        let apart = sessions(&s, None, &Scheme::default());
+        assert_eq!(apart.len(), 2);
+        assert_eq!(apart[0].has_primary, Some(false), "rescue");
+
+        let together = sessions(
+            &s,
+            None,
+            &Scheme {
+                window_days: 14,
+                ..Scheme::default()
+            },
+        );
+        assert_eq!(together.len(), 1);
+        assert_eq!(together[0].has_primary, Some(true), "no rescue");
+    }
+
+    #[test]
+    fn a_study_that_has_not_been_asked_leaves_the_question_open() {
+        // Null is not no. A rescue turns on there being no primary anywhere,
+        // and a study whose stacks are only partly fingerprinted has not said
+        // there is none: it has said it does not know.
+        let s = held(&[("20221003", Some(false)), ("20221005", None)]);
+        let one = sessions(
+            &s,
+            None,
+            &Scheme {
+                window_days: 14,
+                ..Scheme::default()
+            },
+        );
+        assert_eq!(one[0].has_primary, None);
+
+        // but one yes still answers, whatever else is unknown
+        let s = held(&[("20221003", None), ("20221005", Some(true))]);
+        let one = sessions(
+            &s,
+            None,
+            &Scheme {
+                window_days: 14,
+                ..Scheme::default()
+            },
+        );
+        assert_eq!(one[0].has_primary, Some(true));
     }
 }

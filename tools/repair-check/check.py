@@ -183,7 +183,28 @@ def sessions_wrong(s, work: str) -> list[str]:
             out.append(
                 f"scheme {i} flagged {got.get('flagged', 0)}, wanted {check['flagged']}"
             )
+            continue
+        # Whether each occasion holds a stack the scanner called its output
+        # (§6). `no` is the session rescue's condition, and it is a property of
+        # the occasion, so the same studies answer differently under a scheme
+        # that groups them differently.
+        want = check.get("primaries") or []
+        if want:
+            said = [held(r.get("has_primary")) for r in rows]
+            if said != want:
+                out.append(
+                    f"scheme {i} holds {','.join(said)}, wanted {','.join(want)}"
+                )
     return out
+
+
+def held(v) -> str:
+    """A session's `has_primary`, as the manifest writes it.
+
+    `unknown` is not `no`: a study whose stacks are not all fingerprinted has
+    not said it holds no primary, and a rescue on an unanswered question is a
+    rescue on a guess."""
+    return "unknown" if v is None else ("yes" if v else "no")
 
 
 # The derived columns, in the order collect.py stores them.

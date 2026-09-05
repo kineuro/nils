@@ -303,6 +303,12 @@ fn build_registry() -> Vec<Table> {
                     col("date_source", Type::Text),
                     col("date_weight", Type::Int),
                     col("date_runner_up", Type::Int),
+                    // Wave 3 §6: whether any stack of this study is what the
+                    // scanner called its output. A fact about the study, not
+                    // about a session: the session rescue is this composed
+                    // with a scheme, and it is composed on read because the
+                    // scheme can change.
+                    col("has_original_primary", Type::Int),
                 ],
             ),
         )

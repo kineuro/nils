@@ -139,6 +139,10 @@ struct SessionWant {
     labels: Vec<&'static str>,
     /// How many of them the scheme must flag as worth a look.
     flagged: usize,
+    /// Whether each session holds a stack the scanner called its output:
+    /// `yes`, `no` or `unknown`, in the same order as the labels. Empty when
+    /// the scenario is not about the rescue. `no` is its condition (§6).
+    primaries: Vec<&'static str>,
 }
 
 /// Which path segment carries the subject code, counted from one within the
@@ -1196,6 +1200,7 @@ fn main() {
         scheme: &'static str,
         labels: &'static [&'static str],
         flagged: usize,
+        primaries: &'static [&'static str],
     }
 
     const CADENCE: &str = "session:\n  naming:\n    months:\n      cadence: [0, 6, 12, 18, 24]\n      tolerance: 1.0\n";
@@ -1212,6 +1217,7 @@ fn main() {
                 scheme: "session: {}\n",
                 labels: &["20220901"],
                 flagged: 0,
+                primaries: &[],
             }],
         },
         SessionCase {
@@ -1226,12 +1232,14 @@ fn main() {
                     scheme: "session:\n  window_days: 0\n",
                     labels: &["20221001", "20221004"],
                     flagged: 0,
+                    primaries: &[],
                 },
                 SessionCheck {
                     what: "the seam v0 left: a brain study and a spine study are one visit",
                     scheme: "session:\n  window_days: 14\n",
                     labels: &["20221001"],
                     flagged: 0,
+                    primaries: &[],
                 },
             ],
         },
@@ -1246,6 +1254,7 @@ fn main() {
                 scheme: CADENCE,
                 labels: &["M00", "M06", "M09", "M12"],
                 flagged: 0,
+                primaries: &[],
             }],
         },
         SessionCase {
@@ -1259,6 +1268,7 @@ fn main() {
                 scheme: "session:\n  anchor: source_label\n  naming:\n    months:\n      cadence: [0, 6, 12]\n      tolerance: 1.0\n  said:\n    segment: 2\n",
                 labels: &["PRE06", "M00"],
                 flagged: 1,
+                primaries: &[],
             }],
         },
         SessionCase {
@@ -1273,18 +1283,21 @@ fn main() {
                     scheme: CADENCE,
                     labels: &["M00", "M06"],
                     flagged: 0,
+                    primaries: &[],
                 },
                 SessionCheck {
                     what: "and the folders say it is not, which is a finding",
                     scheme: "session:\n  naming:\n    months:\n      cadence: [0, 6, 12, 18, 24]\n      tolerance: 1.0\n  said:\n    segment: 2\n",
                     labels: &["M00", "M06"],
                     flagged: 2,
+                    primaries: &[],
                 },
                 SessionCheck {
                     what: "believing the folders puts month zero where the archive says",
                     scheme: "session:\n  anchor: source_label\n  naming:\n    months:\n      cadence: [0, 6, 12, 18, 24]\n      tolerance: 1.0\n  said:\n    segment: 2\n",
                     labels: &["M06", "M12"],
                     flagged: 0,
+                    primaries: &[],
                 },
             ],
         },
@@ -1333,6 +1346,7 @@ fn main() {
                     scheme: k.scheme,
                     labels: k.labels.to_vec(),
                     flagged: k.flagged,
+                    primaries: k.primaries.to_vec(),
                 })
                 .collect(),
             fingerprint: None,
@@ -1589,6 +1603,153 @@ fn main() {
         });
     }
 
+    // ------------------------------------------------------- the session rescue
+
+    // §6. Some exports tag every reconstruction ORIGINAL\SECONDARY and never
+    // write a primary at all, so the ordinary exclusion of
+    // secondary-without-primary throws the whole visit away and the subject
+    // becomes unusable. Whether that has happened is a question about the
+    // occasion, not about the stack, which is why it is derived and not stored.
+    struct ResCase {
+        name: &'static str,
+        what: &'static str,
+        needs: &'static str,
+        /// One study each: the day, and what its ImageType says.
+        studies: &'static [(&'static str, &'static str)],
+        checks: &'static [SessionCheck],
+        fingerprint: Option<FingerprintWant>,
+    }
+
+    const SECONDARY: &str = "ORIGINAL\\SECONDARY\\M\\ND";
+    const SAME_DAY: &str = "session: {}\n";
+    const A_FORTNIGHT: &str = "session:\n  window_days: 14\n";
+
+    let rescues = [
+        ResCase {
+            name: "res-no-primary",
+            what: "a visit whose every stack is ORIGINAL and SECONDARY",
+            needs: "the session says it holds no primary, which is the rescue's condition",
+            studies: &[("20220901", SECONDARY), ("20220901", SECONDARY)],
+            checks: &[SessionCheck {
+                what: "nothing in the visit is what the scanner called its output",
+                scheme: SAME_DAY,
+                labels: &["20220901"],
+                flagged: 0,
+                primaries: &["no"],
+            }],
+            fingerprint: None,
+        },
+        ResCase {
+            name: "res-has-primary",
+            what: "the same visit with one primary in it",
+            needs: "no rescue: one primary anywhere answers for the whole visit",
+            studies: &[("20220901", SECONDARY), ("20220901", PRIMARY)],
+            checks: &[SessionCheck {
+                what: "one study saying yes settles it for the others",
+                scheme: SAME_DAY,
+                labels: &["20220901"],
+                flagged: 0,
+                primaries: &["yes"],
+            }],
+            fingerprint: None,
+        },
+        ResCase {
+            name: "res-window",
+            what: "a brain study on the Monday and a spine study on the Wednesday",
+            needs: "the scheme decides: two occasions rescue the brain study, one does not",
+            studies: &[("20221003", SECONDARY), ("20221005", PRIMARY)],
+            checks: &[
+                SessionCheck {
+                    what: "v0 groups by the calendar day, so the brain study is rescued",
+                    scheme: SAME_DAY,
+                    labels: &["20221003", "20221005"],
+                    flagged: 0,
+                    primaries: &["no", "yes"],
+                },
+                SessionCheck {
+                    what: "one visit holds a primary, so there is nothing to rescue",
+                    scheme: A_FORTNIGHT,
+                    labels: &["20221003"],
+                    flagged: 0,
+                    primaries: &["yes"],
+                },
+            ],
+            fingerprint: None,
+        },
+        ResCase {
+            name: "res-screenshot-only",
+            what: "a visit whose only images are screen captures",
+            needs: "no primary, and nothing rescuable either: both facts, separately",
+            studies: &[("20220901", "ORIGINAL\\SECONDARY\\SCREENSHOT")],
+            checks: &[SessionCheck {
+                what: "the occasion says no primary, and the stack says it is not an image",
+                scheme: SAME_DAY,
+                labels: &["20220901"],
+                flagged: 0,
+                primaries: &["no"],
+            }],
+            fingerprint: Some(FingerprintWant {
+                field_strength_tesla: Some("3.0"),
+                field_strength_normalized: Some("3.0"),
+                field_strength_unit: Some("tesla"),
+                acquisition_type_filled: None,
+                acquisition_type_source: None,
+                image_role: "not_an_image",
+            }),
+        },
+    ];
+
+    for (n, c) in rescues.iter().enumerate() {
+        let mut studies = Vec::new();
+        for (v, (day, image_type)) in c.studies.iter().enumerate() {
+            let dir = format!("{}/RES{:03}/visit{}", c.name, n + 1, v + 1);
+            let su = uid(&["13", &n.to_string(), &v.to_string()]);
+            let (d, it): (&'static str, &'static str) = (day, image_type);
+            let f = study(
+                root,
+                &dir,
+                &su,
+                &format!("13-{n}-{v}"),
+                2,
+                px,
+                move |f, _| {
+                    f.patient_id = Some("RESCASE");
+                    f.study_date = Some(d);
+                    f.series_date = Some(d);
+                    f.acquisition_date = Some(d);
+                    f.content_date = Some(d);
+                    f.image_type = it;
+                },
+            );
+            seeds.push((c.name, f));
+            studies.push(StudyWant {
+                dir,
+                date: Some(d),
+                source: "study_date",
+                person: "P1".into(),
+            });
+        }
+        scenarios.push(Scenario {
+            name: c.name,
+            what: c.what,
+            people: 1,
+            needs: c.needs,
+            studies,
+            sessions: c
+                .checks
+                .iter()
+                .map(|k| SessionWant {
+                    what: k.what,
+                    scheme: k.scheme,
+                    labels: k.labels.to_vec(),
+                    flagged: k.flagged,
+                    primaries: k.primaries.to_vec(),
+                })
+                .collect(),
+            fingerprint: c.fingerprint.as_ref().map(|w| FingerprintWant { ..*w }),
+        });
+    }
+
     // ----------------------------------------------------------------- the mess
 
     // A scenario writes one seed per study; the first is its representative,
@@ -1663,13 +1824,16 @@ fn main() {
         writeln!(out, "      \"sessions\": [").unwrap();
         for (j, w) in s.sessions.iter().enumerate() {
             let labels: Vec<String> = w.labels.iter().map(|l| format!("{l:?}")).collect();
+            let primaries: Vec<String> = w.primaries.iter().map(|l| format!("{l:?}")).collect();
             writeln!(
                 out,
-                "        {{\"what\": {:?}, \"scheme\": {:?}, \"flagged\": {}, \"labels\": [{}]}}{}",
+                "        {{\"what\": {:?}, \"scheme\": {:?}, \"flagged\": {}, \"labels\": [{}], \
+                 \"primaries\": [{}]}}{}",
                 w.what,
                 w.scheme,
                 w.flagged,
                 labels.join(", "),
+                primaries.join(", "),
                 if j + 1 == s.sessions.len() { "" } else { "," }
             )
             .unwrap();

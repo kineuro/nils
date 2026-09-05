@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +82,21 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 7,
         apply: fingerprint_carries_what_it_worked_out,
     },
+    Migration {
+        version: 8,
+        apply: study_says_whether_it_holds_a_primary,
+    },
 ];
+
+/// Wave 3 §6: a study says whether any of its stacks is one the scanner called
+/// its output, which is half of the session rescue. The other half is the
+/// scheme, and it is applied on read.
+fn study_says_whether_it_holds_a_primary(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "study", &["has_original_primary"])
+}
 
 /// Wave 3 §6: the fields the fingerprint derives rather than reads, each beside
 /// the measured column it came from. A registry from Wave 2 gains six columns;
