@@ -233,6 +233,7 @@ fn a_decision_outranks_the_rule_and_survives_a_re_classification() {
                         "axis",
                         "value",
                         "actor",
+                        "author_kind",
                         "why",
                         "decided_at",
                     ],
@@ -243,6 +244,7 @@ fn a_decision_outranks_the_rule_and_survives_a_re_classification() {
                     Param::from("base"),
                     Param::from("T2w"),
                     Param::from("a person"),
+                    Param::from("person"),
                     Param::from("checked by eye"),
                     Param::from(nils_registry::time::now_iso()),
                 ]],
@@ -338,7 +340,15 @@ fn a_decision_about_an_origin_governs_every_stack_of_it_until_one_is_looked_at()
                 .insert(
                     &Insert::new(
                         nils_registry::schema::table("decision"),
-                        &["scope", "ref", "axis", "value", "actor", "decided_at"],
+                        &[
+                            "scope",
+                            "ref",
+                            "axis",
+                            "value",
+                            "actor",
+                            "author_kind",
+                            "decided_at",
+                        ],
                     ),
                     &[vec![
                         Param::from(scope),
@@ -346,6 +356,7 @@ fn a_decision_about_an_origin_governs_every_stack_of_it_until_one_is_looked_at()
                         Param::from("base"),
                         Param::from(value),
                         Param::from("a person"),
+                        Param::from("person"),
                         Param::from(nils_registry::time::now_iso()),
                     ]],
                 )
@@ -430,5 +441,127 @@ fn the_reference_holds_what_a_rule_decided_and_not_what_a_pass_did() {
             0,
             "{name}: a value a pass wrote is not evidence for the next vote"
         );
+    }
+}
+
+/// Wave 3 §10.1. In the live v0 archive, 4,692 body parts are an image model's
+/// predictions, committed by a person through its body-part QC straight into
+/// the classifier's own column with nothing to mark them. They are
+/// discoverable at all only because v0's keyword classifier disagrees,
+/// answering nothing for 4,692 of that cohort's 4,699 stacks.
+///
+/// So the thing to check is not that the value is stored. It is that a value a
+/// model produced cannot sit where a rule's answer belongs and read the same.
+#[test]
+fn a_model_s_answer_does_not_read_like_a_rule_s() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    let dir = tree();
+    for lab in labs() {
+        let name = lab.name;
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let stack = one(&mut reg, "SELECT stack_id FROM {classification}");
+
+        let decide = |reg: &mut Registry,
+                      who: &str,
+                      kind: &str,
+                      version: Option<&str>,
+                      axis: &str,
+                      value: &str| {
+            reg.store()
+                .insert(
+                    &Insert::new(
+                        nils_registry::schema::table("decision"),
+                        &[
+                            "scope",
+                            "ref",
+                            "axis",
+                            "value",
+                            "actor",
+                            "author_kind",
+                            "author_version",
+                            "decided_at",
+                        ],
+                    ),
+                    &[vec![
+                        Param::from("stack"),
+                        Param::from(stack.to_string()),
+                        Param::from(axis),
+                        Param::from(value),
+                        Param::from(who),
+                        Param::from(kind),
+                        match version {
+                            Some(v) => Param::from(v),
+                            None => Param::Null,
+                        },
+                        Param::from(nils_registry::time::now_iso()),
+                    ]],
+                )
+                .unwrap();
+        };
+        decide(
+            &mut reg,
+            "bodypart-net",
+            "model",
+            Some("2.1.0"),
+            "body_part",
+            "brain",
+        );
+        // And a person overriding an axis a rule did answer, which is the
+        // other shape the same question comes in.
+        decide(&mut reg, "a person", "person", None, "base", "T2w");
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+
+        // The value is what the model said, and the row that carries it names
+        // the model and its version. No rule wrote it and none claims to.
+        let r = &rows(
+            &mut reg,
+            "SELECT value, author, author_kind, matched, rule_set FROM {classification_evidence} \
+             WHERE axis = 'body_part' AND author_kind IS NOT NULL",
+        )[0];
+        assert_eq!(r.text(0).unwrap(), "brain", "{name}");
+        assert_eq!(r.text(1).unwrap(), "bodypart-net", "{name}");
+        assert_eq!(r.text(2).unwrap(), "model", "{name}");
+        assert_eq!(r.text(3).unwrap(), "2.1.0", "{name}: which model");
+        assert_eq!(r.text(4).unwrap(), "decision", "{name}: not a rule set");
+
+        // The rules said nothing about this axis for this stack, which is the
+        // case v0's 4,692 are: an engine that could not record an answer here
+        // would leave a person no place to put one but the rules' own column.
+        let claimed = one(
+            &mut reg,
+            "SELECT COUNT(*) FROM {classification_evidence} \
+             WHERE axis = 'body_part' AND author_kind IS NULL",
+        );
+        assert_eq!(claimed, 0, "{name}: no rule claims the body part");
+
+        // Where a rule did answer, its answer survives beside the person's:
+        // the disagreement is visible rather than overwritten.
+        let by_a_rule = one(
+            &mut reg,
+            "SELECT COUNT(*) FROM {classification_evidence} \
+             WHERE axis = 'base' AND author_kind IS NULL",
+        );
+        assert!(by_a_rule > 0, "{name}: the rule's own answer survives");
+        assert_eq!(
+            rows(
+                &mut reg,
+                "SELECT value FROM {classification_axis} WHERE axis = 'base'"
+            )[0]
+            .text(0)
+            .unwrap(),
+            "T2w",
+            "{name}: and the person's is what the axis says"
+        );
+
+        // The whole point, stated as the query an auditor would run: every
+        // value that did not come from a rule can be found.
+        let authored = one(
+            &mut reg,
+            "SELECT COUNT(*) FROM {classification_evidence} WHERE author_kind = 'model'",
+        );
+        assert_eq!(authored, 1, "{name}");
     }
 }

@@ -765,6 +765,29 @@ discoverable because v0's keyword classifier disagrees: it answers nothing for
 4,692 of that cohort's 4,699 stacks. A value that came from a model must not be
 able to sit where a rule's answer belongs and look the same.
 
+So a decision carries its author, and **writes an evidence row of its own**. The
+rule's answer is computed as usual and stays beside it, so a disagreement is
+visible rather than overwritten:
+
+    base             T2w                  0.95  decision
+        base said T1w by stated, from technique MPRAGE
+        a person, nima, decided T2w for the stack
+    body_part        brain                1.00  decision
+        a model, bodypart-net, decided brain for the stack (version 2.1.0)
+
+`--as person|agent|model` on `nils review decide`, with `--model-version`
+required for a model and refused for anything else. An auditor's question is one
+query: every value not written by a rule has an `author_kind`.
+
+**Writing the test for that found the gap that makes v0's 4,692 what they are.**
+A decision was only applied to an axis the rules had already spoken about,
+because the run walks the verdict, and an axis with no rule hits and no default
+produces no verdict at all. `body_part` is exactly such an axis. So v1 could not
+record an answer where the rules were silent, which leaves a person no place to
+put one but the rules' own column, which is how v0 came to have 4,692 values
+nobody can trace. A decision now fills a silent axis as well as overriding a
+spoken one.
+
 Nothing else about the review loop is Wave 3's (§13).
 
 ## 11. Repair four: handover

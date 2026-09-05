@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +90,32 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 9,
         apply: diffusion_is_recorded_per_image,
     },
+    Migration {
+        version: 10,
+        apply: a_decision_says_who_made_it,
+    },
 ];
+
+/// Wave 3 §10.1: a decision records whether a person, an agent or a model made
+/// it, and the evidence a decision writes says so too.
+///
+/// A registry from before this has decisions with no kind. They are people's:
+/// nothing else could have written one, because nothing else could reach the
+/// verb. So the column is backfilled rather than left null, which is the one
+/// case where a default is a fact and not a guess.
+fn a_decision_says_who_made_it(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "decision", &["author_kind", "author_version"])?;
+    add_columns(store, "classification_evidence", &["author", "author_kind"])?;
+    let sql = format!(
+        "UPDATE {} SET author_kind = 'person' WHERE author_kind IS NULL",
+        store.qualified("decision")
+    );
+    store.execute(&sql, &[])?;
+    Ok(())
+}
 
 /// Wave 3 §6: the seven diffusion values that vary from one image of a series
 /// to the next move to the instance, and the fingerprint gains what it works
