@@ -546,7 +546,7 @@ fn previous(store: &mut Store, name: &str, root: &Path) -> Result<Option<Previou
     let d = store.dialect();
     let sql = format!(
         "SELECT id, version FROM {} WHERE name = {} AND root = {} AND finished_at IS NOT NULL \
-         ORDER BY id DESC",
+         ORDER BY id DESC LIMIT 1",
         store.qualified("release"),
         d.param(1, Type::Text),
         d.param(2, Type::Text),
@@ -790,9 +790,21 @@ fn select(store: &mut Store, selection: &Selection) -> Result<Vec<Instance>, Err
 }
 
 fn study_days(store: &mut Store) -> Result<HashMap<i64, Day>, Error> {
+    // Both dates through the dialect's own rendering. Postgres hands a `date`
+    // back in a type the store reads only as text, and the release read it raw
+    // until a release was run on Postgres.
+    let t = table("study");
+    let d = store.dialect();
+    let day = |c: &str| {
+        d.text_of(
+            t.column(c)
+                .unwrap_or_else(|| panic!("study.{c} is not a column")),
+        )
+    };
+    let (filled, study) = (day("date_filled"), day("study_date"));
     let sql = format!(
-        "SELECT id, COALESCE(date_filled, study_date) FROM {} \
-         WHERE COALESCE(date_filled, study_date) IS NOT NULL",
+        "SELECT id, COALESCE({filled}, {study}) FROM {} \
+         WHERE COALESCE({filled}, {study}) IS NOT NULL",
         store.qualified("study")
     );
     let mut out = HashMap::new();

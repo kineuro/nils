@@ -48,12 +48,30 @@ fn tree() -> TempDir {
 }
 
 fn registry(home_dir: &TempDir, source: &TempDir) -> (Home, Registry) {
+    registry_on(home_dir, source, Backend::Sqlite, None)
+}
+
+/// The schema the Postgres half of these tests owns.
+const SCHEMA: &str = "nils_release_test";
+
+/// A registry on one backend, so that the release can be proved against both.
+///
+/// The date read of the session labels is the reason: Postgres hands a `date`
+/// back in a type the store reads only as text, and a select that forgets the
+/// cast fails only once a row of that shape exists, which for a release is the
+/// first time anyone runs one.
+fn registry_on(
+    home_dir: &TempDir,
+    source: &TempDir,
+    backend: Backend,
+    dsn: Option<String>,
+) -> (Home, Registry) {
     let home = Home::new(home_dir.path());
     home.keys(None).add("k", KEY).unwrap();
     home.init(&InitOptions {
-        backend: Backend::Sqlite,
-        dsn: None,
-        schema: None,
+        backend,
+        dsn,
+        schema: (backend == Backend::Postgres).then(|| SCHEMA.to_string()),
         scheme: Scheme::DEFAULT,
         key: "k".to_string(),
         display_length: 12,
@@ -65,6 +83,26 @@ fn registry(home_dir: &TempDir, source: &TempDir) -> (Home, Registry) {
     s.name = "t".into();
     digest(&s, &mut reg).unwrap();
     (home, reg)
+}
+
+/// The DSN, or nothing and a word about why.
+fn postgres_dsn() -> Option<String> {
+    match std::env::var("NILS_TEST_POSTGRES_DSN") {
+        Ok(dsn) if !dsn.is_empty() => Some(dsn),
+        _ => {
+            eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+            None
+        }
+    }
+}
+
+fn drop_schemas(dsn: &str) {
+    let mut store = nils_registry::Store::connect_postgres(dsn, SCHEMA).expect("connect");
+    store
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCHEMA}_linkage CASCADE"
+        ))
+        .expect("drop the test schemas");
 }
 
 fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) -> run::Settings<'a> {
@@ -735,4 +773,38 @@ fn a_tree_someone_emptied_is_written_again_rather_than_reported_as_moved() {
     assert_eq!(after.rewritten, 2);
     assert_eq!(after.written, 2);
     assert_eq!(files_under(out.path()).len(), 2);
+}
+
+#[test]
+fn a_release_and_its_next_version_run_on_postgres_too() {
+    // Every other test here is on SQLite, and the two backends differ in the
+    // types they hand back rather than in the SQL they accept, so a select that
+    // reads a date or a timestamp raw works until somebody runs a release on
+    // Postgres. This is that somebody.
+    let Some(dsn) = postgres_dsn() else { return };
+    drop_schemas(&dsn);
+    let source = tree();
+    let home_dir = TempDir::new("release-home-pg");
+    let out = TempDir::new("release-out-pg");
+    let (_home, mut reg) = registry_on(&home_dir, &source, Backend::Postgres, Some(dsn.clone()));
+    classified(&mut reg, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let first = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(first.added, 2);
+    assert_eq!(first.files, 2);
+    assert!(first.version.ends_with(".1"), "{}", first.version);
+
+    let second = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(second.previous.as_deref(), Some(first.version.as_str()));
+    assert_eq!(second.unchanged, 2);
+    assert_eq!(second.written, 0);
+
+    qc_says_spine(&mut reg);
+    let third = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(third.moved, 2);
+    assert_eq!(third.written, 0);
+    drop(reg);
+    drop_schemas(&dsn);
 }

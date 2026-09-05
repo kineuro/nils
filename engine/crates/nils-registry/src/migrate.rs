@@ -142,8 +142,17 @@ fn a_release_has_a_version(store: &mut Store, kind: Kind) -> Result<(), Error> {
         ],
     )?;
     add_tables(store, kind, &["release_stack", "release_move"])?;
+    // Read through the dialect's own rendering of a timestamp, or Postgres is
+    // handed `substr(timestamptz, ...)` and refuses the whole migration. Both
+    // renderings begin `YYYY-MM-DD`, so the offsets are the same.
+    let started = store.dialect().text_of(
+        schema::table("release")
+            .column("started_at")
+            .expect("release.started_at is a column"),
+    );
     let sql = format!(
-        "UPDATE {} SET version = SUBSTR(started_at, 1, 4) || '.' || SUBSTR(started_at, 6, 2)            || '.' || SUBSTR(started_at, 9, 2) || '.1' WHERE version IS NULL",
+        "UPDATE {} SET version = SUBSTR({started}, 1, 4) || '.' || SUBSTR({started}, 6, 2) \
+           || '.' || SUBSTR({started}, 9, 2) || '.1' WHERE version IS NULL",
         store.qualified("release")
     );
     store.execute(&sql, &[])?;

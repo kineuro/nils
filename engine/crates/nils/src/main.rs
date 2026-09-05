@@ -3868,8 +3868,16 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
         );
         params.push(nils_registry::store::Param::from(name.as_str()));
     }
+    // `started_at` through the dialect's own rendering: Postgres hands a
+    // timestamp back in a type the store does not read as text, and a select
+    // that forgets the cast fails only once a row exists.
+    let started = store.dialect().text_of(
+        nils_registry::schema::table("release")
+            .column("started_at")
+            .expect("release.started_at is a column"),
+    );
     let sql = format!(
-        "SELECT id, name, version, root, started_at, files, unchanged, moved, rewritten, added, \
+        "SELECT id, name, version, root, {started}, files, unchanged, moved, rewritten, added, \
          removed FROM {}{wheres} ORDER BY id",
         store.qualified("release"),
     );
