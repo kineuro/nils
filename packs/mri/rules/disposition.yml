@@ -1,0 +1,140 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# What to do with each stack (`docs/specs/wave3-anonymize-and-bids.md`, §7),
+# decided after the passes from what the rules and the passes settled between
+# them.
+#
+# The two answers are separate on purpose. A working scan is not convertible
+# because it is not an image; a scout is an image, converts perfectly well, and
+# is still not something a release puts in the raw tree. v0 folds them into one
+# `NIFTI_INCOMPATIBLE_PROVENANCES = {"SyMRI"}`, which is why it refuses to
+# convert 36,692 stacks when about 3,000 of them are ordinary images.
+#
+# Read only this stack's own axes and its own fingerprint. §7's other
+# structural rule is that a disposition never depends on what else is in the
+# selection, and there is nothing in this language that could express it.
+
+rule_set: disposition
+decides: [disposition, convertible]
+tiers: {stated: 0.9}
+
+order:
+  - not_an_image
+  - ruled_out
+  - scout
+  - symri_working_scan
+  - symri_product
+  - projection
+  - workstation_reformat
+  - derived_construct
+  - derived_provenance
+
+rules:
+
+  # The fingerprint's own reading of ImageType (§6): a screen capture, a
+  # pasted report or an error image, whatever else it claims to be.
+  not_an_image:
+    clauses:
+      - {when: {field: image_role, eq: not_an_image}, cite: not_an_image, source: image_role}
+    set: {disposition: excluded, convertible: 'no'}
+
+  # What the class phase already ruled out.
+  ruled_out:
+    clauses:
+      - {when: {axis: directory_type, is: excluded}, cite: excluded, source: directory_type}
+    set: {disposition: excluded, convertible: 'no'}
+
+  # A planning scan. An image, and convertible, and not raw material.
+  scout:
+    clauses:
+      - {when: {axis: directory_type, is: localizer}, cite: localizer, source: directory_type}
+    set: {disposition: scout, convertible: 'yes'}
+
+  # §7.1, the case that proves the concept is needed. A SyMRI series that
+  # names no product is the MDME container: a TI by TE by complex grid the
+  # scanner used to fit the maps, not an image of anything. v0 refuses to
+  # convert every SyMRI stack, which is right here and wrong for the products
+  # below it.
+  symri_working_scan:
+    clauses:
+      - when:
+          all:
+            - {axis: provenance, is: SyMRI}
+            - not:
+                any:
+                  - {axis: construct, is: SyntheticT1w}
+                  - {axis: construct, is: SyntheticT2w}
+                  - {axis: construct, is: SyntheticFLAIR}
+                  - {axis: construct, is: SyntheticPDw}
+                  - {axis: construct, is: T1map}
+                  - {axis: construct, is: T2map}
+                  - {axis: construct, is: R1map}
+                  - {axis: construct, is: R2map}
+                  - {axis: construct, is: R2starmap}
+                  - {axis: construct, is: PDmap}
+                  - {axis: construct, is: MyelinMap}
+        cite: 'SyMRI naming no product'
+        source: provenance
+    set: {disposition: working_scan, convertible: 'no'}
+
+  # And the rest of SyMRI: the synthetic contrasts and the quantitative maps,
+  # which are ordinary images the reader has to be told the provenance of.
+  symri_product:
+    clauses:
+      - {when: {axis: provenance, is: SyMRI}, cite: SyMRI, source: provenance}
+    set: {disposition: scanner_derived, convertible: 'yes'}
+
+  # A projection through a volume: made from images, by choosing along a ray.
+  projection:
+    clauses:
+      - {when: {axis: provenance, is: ProjectionDerived}, cite: ProjectionDerived, source: provenance}
+      - {when: {axis: construct, is: MIP}, cite: MIP, source: construct}
+      - {when: {axis: construct, is: MinIP}, cite: MinIP, source: construct}
+    set: {disposition: reformat, convertible: 'yes'}
+
+  # A workstation resliced a volume. v0 carries the same list under the name
+  # `non_canonical_constructs` in its pick configuration, which is a
+  # disposition written in the one place that needed it.
+  workstation_reformat:
+    clauses:
+      - {when: {axis: construct, is: MPR}, cite: MPR, source: construct}
+    set: {disposition: reformat, convertible: 'yes'}
+
+  # The scanner computed it from images it had just taken.
+  derived_construct:
+    clauses:
+      - {when: {axis: construct, is: ADC}, cite: ADC, source: construct}
+      - {when: {axis: construct, is: eADC}, cite: eADC, source: construct}
+      - {when: {axis: construct, is: Trace}, cite: Trace, source: construct}
+      - {when: {axis: construct, is: FA}, cite: FA, source: construct}
+      - {when: {axis: construct, is: MD}, cite: MD, source: construct}
+      - {when: {axis: construct, is: CBF}, cite: CBF, source: construct}
+      - {when: {axis: construct, is: CBV}, cite: CBV, source: construct}
+      - {when: {axis: construct, is: MTT}, cite: MTT, source: construct}
+      - {when: {axis: construct, is: Tmax}, cite: Tmax, source: construct}
+      - {when: {axis: construct, is: TTP}, cite: TTP, source: construct}
+      - {when: {axis: construct, is: T1map}, cite: T1map, source: construct}
+      - {when: {axis: construct, is: T2map}, cite: T2map, source: construct}
+      - {when: {axis: construct, is: R1map}, cite: R1map, source: construct}
+      - {when: {axis: construct, is: R2map}, cite: R2map, source: construct}
+      - {when: {axis: construct, is: R2starmap}, cite: R2starmap, source: construct}
+      - {when: {axis: construct, is: PDmap}, cite: PDmap, source: construct}
+      - {when: {axis: construct, is: QSM}, cite: QSM, source: construct}
+      - {when: {axis: construct, is: B0map}, cite: B0map, source: construct}
+      - {when: {axis: construct, is: B1map}, cite: B1map, source: construct}
+      - {when: {axis: construct, is: MyelinMap}, cite: MyelinMap, source: construct}
+      - {when: {axis: construct, is: Water}, cite: Water, source: construct}
+      - {when: {axis: construct, is: Fat}, cite: Fat, source: construct}
+      - {when: {axis: construct, is: InPhase}, cite: InPhase, source: construct}
+      - {when: {axis: construct, is: OutPhase}, cite: OutPhase, source: construct}
+      - {when: {axis: construct, is: SWI}, cite: SWI, source: construct}
+    set: {disposition: scanner_derived, convertible: 'yes'}
+
+  # And by provenance, for the reconstructions whose product has no construct
+  # of its own.
+  derived_provenance:
+    clauses:
+      - {when: {axis: provenance, is: SWIRecon}, cite: SWIRecon, source: provenance}
+      - {when: {axis: provenance, is: STAGE}, cite: STAGE, source: provenance}
+      - {when: {axis: provenance, is: SubtractionDerived}, cite: SubtractionDerived, source: provenance}
+    set: {disposition: scanner_derived, convertible: 'yes'}

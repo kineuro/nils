@@ -29,6 +29,12 @@ pub const WINDOW: usize = 4_096;
 
 /// The fingerprint columns a pack is fed, in the order the select reads them.
 /// The pack names a field; this is where a name becomes a column.
+/// The field a pack names, and the fingerprint column it is read from.
+///
+/// **Index-aligned with [`nils_pack::stack::FIELDS`].** A pass turns a field
+/// index from that list into a column with this one, so a field added to one
+/// and not the other reads a neighbouring column and says nothing about it.
+/// `fields_line_up` is what catches that.
 pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("echo_time", "echo_time"),
     ("repetition_time", "repetition_time"),
@@ -47,6 +53,8 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("fov_x", "fov_x"),
     ("fov_y", "fov_y"),
     ("aspect_ratio", "aspect_ratio"),
+    ("field_strength_normalized", "field_strength_normalized"),
+    ("dwi_directions", "dwi_directions"),
     ("modality", "modality"),
     ("manufacturer", "manufacturer"),
     ("manufacturer_model_name", "manufacturer_model_name"),
@@ -73,6 +81,15 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("text_image_comments", "text_image_comments"),
     ("text_all", "text_all"),
     ("text_contrast", "text_contrast"),
+    ("image_role", "image_role"),
+    ("acquisition_type_filled", "acquisition_type_filled"),
+    ("acquisition_type_source", "acquisition_type_source"),
+    ("dwi_b_values", "dwi_b_values"),
+    ("dwi_b_value_source", "dwi_b_value_source"),
+    ("dwi_pe_direction", "dwi_pe_direction"),
+    ("dwi_pe_direction_source", "dwi_pe_direction_source"),
+    ("dwi_directions_source", "dwi_directions_source"),
+    ("field_strength_unit", "field_strength_unit"),
 ];
 
 /// The select that reads one window of fingerprints, ordered by stack. With
@@ -639,7 +656,215 @@ fn run(
         }
     }
 
+    // And last, what to do with each stack (Wave 3 §7), from what the rules
+    // and the passes between them decided.
+    if !report.cancelled {
+        report.disposed = dispose(store, pack, settings, cancel, job_id, &sql)?;
+    }
+
     report.seconds = started.elapsed().as_secs_f64();
     report.peak_rss = nils_digest::rss::peak_rss();
     Ok(report)
+}
+
+/// §7: the disposition of every stack, decided after the passes.
+///
+/// A third phase rather than another rule set, because it is worked out from
+/// what was decided rather than from what was measured, and the passes fill
+/// axes. A disposition settled in the rules phase would be settled from a gap:
+/// v0 has exactly that fault, and patches it with a second copy of its intent
+/// cascade inside gap filling, which then disagrees with the first.
+///
+/// Per stack and nothing else. §7's other structural rule is that a
+/// disposition never depends on what else is in the selection, and here that
+/// is not a check but the shape of the function: it is handed one stack's
+/// fields and one stack's decided axes, and there is nothing else to read.
+fn dispose(
+    store: &mut Store,
+    pack: &Pack,
+    settings: &crate::job::Settings,
+    cancel: &nils_digest::Cancel,
+    job_id: i64,
+    sql: &str,
+) -> Result<i64, Error> {
+    let names: Vec<&str> = pack
+        .axes
+        .iter()
+        .filter(|a| a.phase == nils_pack::rules::AxisPhase::Disposition)
+        .map(|a| a.name.as_str())
+        .collect();
+    if names.is_empty() {
+        return Ok(0);
+    }
+    let window = settings.window.max(1);
+    let axis_t = table("classification_axis");
+    let ev_t = table("classification_evidence");
+    let quoted: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
+    let scope = format!("axis IN ({})", quoted.join(", "));
+
+    let mut disposed = 0i64;
+    let mut after: i64 = 0;
+    loop {
+        if cancel.stop() {
+            break;
+        }
+        let rows = store.query(sql, &[Param::Int(after), Param::Int(window as i64)])?;
+        if rows.is_empty() {
+            break;
+        }
+        let last = rows.last().expect("a non-empty window").int(0)?;
+
+        // What the rules and the passes left, for the stacks of this window.
+        // A multi-valued axis is stored comma-joined, so it is split back into
+        // the values the rules put there.
+        let mut decided: HashMap<i64, Vec<Vec<String>>> = HashMap::new();
+        let seed_sql = format!(
+            "SELECT stack_id, axis, value FROM {} WHERE stack_id > {} AND stack_id <= {}",
+            store.qualified("classification_axis"),
+            store.dialect().param(1, Type::Int),
+            store.dialect().param(2, Type::Int),
+        );
+        for r in store.query(&seed_sql, &[Param::Int(after), Param::Int(last)])? {
+            let name = r.text(1)?;
+            let Some(a) = pack.axes.iter().position(|x| x.name == name) else {
+                continue;
+            };
+            let value = r.opt_text(2)?.unwrap_or("");
+            if value.is_empty() {
+                continue;
+            }
+            decided
+                .entry(r.int(0)?)
+                .or_insert_with(|| vec![Vec::new(); pack.axes.len()])[a] =
+                value.split(',').map(|v| v.trim().to_string()).collect();
+        }
+
+        let empty: Vec<Vec<String>> = vec![Vec::new(); pack.axes.len()];
+        let mut axes: Vec<Vec<Param>> = Vec::new();
+        let mut evidence: Vec<Vec<Param>> = Vec::new();
+        for r in &rows {
+            let (ids, stack) = to_stack(r, false)?;
+            let modality =
+                stack.text(nils_pack::stack::field_index("modality").expect("modality is a field"));
+            if modality != pack.modality {
+                continue;
+            }
+            let seed = decided.get(&ids.stack).unwrap_or(&empty);
+            let verdict = Evaluated::new(pack, &stack).dispose(seed);
+            for a in &verdict.axes {
+                let value = a.stored();
+                axes.push(vec![
+                    Param::Int(ids.stack),
+                    Param::from(a.axis.as_str()),
+                    if value.is_empty() {
+                        Param::Null
+                    } else {
+                        Param::from(value.as_str())
+                    },
+                    Param::Double(a.confidence),
+                    Param::from(a.tier.as_str()),
+                ]);
+            }
+            for e in &verdict.evidence {
+                evidence.push(vec![
+                    Param::Int(ids.stack),
+                    Param::from(e.axis.as_str()),
+                    Param::from(e.value.as_str()),
+                    Param::from(e.tier.as_str()),
+                    Param::Double(e.confidence),
+                    Param::from(e.rule_set.as_str()),
+                    Param::from(e.rule.as_str()),
+                    Param::from(e.source.as_str()),
+                    if e.matched.is_empty() {
+                        Param::Null
+                    } else {
+                        Param::from(e.matched.as_str())
+                    },
+                ]);
+            }
+            disposed += 1;
+        }
+
+        if !axes.is_empty() {
+            store.begin()?;
+            let write = (|| -> Result<(), nils_registry::store::Error> {
+                // Only this phase's rows: the class phase's answers are what
+                // this one was worked out from.
+                for t in [axis_t, ev_t] {
+                    store.execute(
+                        &format!(
+                            "DELETE FROM {} WHERE stack_id > {} AND stack_id <= {} AND {scope}",
+                            store.qualified(t.name),
+                            store.dialect().param(1, Type::Int),
+                            store.dialect().param(2, Type::Int),
+                        ),
+                        &[Param::Int(after), Param::Int(last)],
+                    )?;
+                }
+                store.insert(
+                    &Insert::new(axis_t, &["stack_id", "axis", "value", "confidence", "tier"]),
+                    &axes,
+                )?;
+                store.insert(
+                    &Insert::new(
+                        ev_t,
+                        &[
+                            "stack_id",
+                            "axis",
+                            "value",
+                            "tier",
+                            "confidence",
+                            "rule_set",
+                            "rule",
+                            "source",
+                            "matched",
+                        ],
+                    ),
+                    &evidence,
+                )?;
+                Ok(())
+            })();
+            match write {
+                Ok(()) => store.commit()?,
+                Err(e) => {
+                    store.rollback().ok();
+                    return Err(Error::Store(e));
+                }
+            }
+        }
+
+        crate::job::beat(store, job_id)?;
+        after = last;
+        if rows.len() < window {
+            break;
+        }
+    }
+    Ok(disposed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fields_line_up_with_the_ones_a_pack_names() {
+        // A pass turns a field index from the pack's list into a column with
+        // this one. They are two lists because one belongs to a crate that
+        // knows nothing about a registry, and they only work because they are
+        // the same length in the same order. Adding to one and not the other
+        // makes a rule read a neighbouring column and say nothing about it,
+        // which is what happened when Wave 3 §6's fields landed.
+        assert_eq!(FIELDS.len(), nils_pack::stack::FIELDS.len());
+        for (i, (name, _)) in FIELDS.iter().enumerate() {
+            assert_eq!(*name, nils_pack::stack::FIELDS[i], "field {i}");
+        }
+    }
+
+    #[test]
+    fn every_field_is_a_fingerprint_column() {
+        let t = table("stack_fingerprint");
+        for (name, column) in FIELDS {
+            assert!(t.column(column).is_some(), "{name} reads {column}");
+        }
+    }
 }

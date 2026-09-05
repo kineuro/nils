@@ -23,7 +23,8 @@ use crate::pass::{
     What,
 };
 use crate::rules::{
-    Axis, AxisValue, Clause, Derive, DeriveCase, Rule, RuleSet, SetValue, Sets, Tier, Which,
+    Axis, AxisPhase, AxisValue, Clause, Derive, DeriveCase, Rule, RuleSet, SetValue, Sets, Tier,
+    Which,
 };
 use crate::stack::field_index;
 use crate::version::Version;
@@ -431,6 +432,29 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             }
         }
         rule_sets.sort_by_key(|r| want.iter().position(|n| *n == r.name).unwrap_or(usize::MAX));
+    }
+
+    // Wave 3 §7. A rule that runs before the passes may not read an axis that
+    // is decided after them: nothing stops it at run time, because an axis
+    // nothing has decided reads as empty, so the rule would quietly take the
+    // wrong branch rather than fail.
+    for set in &rule_sets {
+        if set.phase != AxisPhase::Class {
+            continue;
+        }
+        for a in set.axes_read() {
+            if axes[a].phase == AxisPhase::Disposition {
+                return Err(Error::at(
+                    &set.name,
+                    format!(
+                        "reads {}, which is decided after the passes; a rule of the class phase \
+                         would read it as empty",
+                        axes[a].name
+                    ),
+                )
+                .in_file(&manifest.path, Some(&manifest.source)));
+            }
+        }
     }
 
     // The one part of `review` that is an expression, compiled here because
@@ -979,6 +1003,23 @@ fn load_axis(
             }
         },
     };
+    // Wave 3 §7. An axis that says what to do with a stack rather than what it
+    // is, is decided after the passes, from what they left. Saying nothing
+    // means the ordinary phase, so every pack written before this reads the
+    // same way.
+    let phase = match m.get("phase") {
+        None => AxisPhase::Class,
+        Some(v) => match f.blame(yaml::text(v, "phase"))?.as_str() {
+            "class" => AxisPhase::Class,
+            "disposition" => AxisPhase::Disposition,
+            other => {
+                return Err(
+                    Error::at("phase", format!("class or disposition, not {other}"))
+                        .in_file(&f.path, Some(&f.source)),
+                );
+            }
+        },
+    };
     let search_field = match m.get("search") {
         Some(v) => f.blame(yaml::text(v, "search"))?,
         None => "text_all".to_string(),
@@ -1274,6 +1315,7 @@ fn load_axis(
     Ok(AxisFile {
         axis: Axis {
             name: name.clone(),
+            phase,
             multi,
             values,
             default,
@@ -1288,6 +1330,7 @@ fn load_axis(
             decides: vec![axis_index],
             enter_when: None,
             rules,
+            phase,
         },
     })
 }
@@ -1457,6 +1500,26 @@ fn load_rule_set(
         decides.push(axes.iter().position(|x| x.name == a).ok_or_else(|| {
             Error::at("decides", format!("no axis named {a}")).in_file(&f.path, Some(&f.source))
         })?);
+    }
+    // A set decides axes of one phase (§7). What a stack is and what to do
+    // with it are worked out at different moments, over different material,
+    // and a set that mixed them would have to run at both.
+    let phase = match decides.first() {
+        Some(i) => axes[*i].phase,
+        None => AxisPhase::Class,
+    };
+    if let Some(i) = decides.iter().find(|i| axes[**i].phase != phase) {
+        return Err(Error::at(
+            "decides",
+            format!(
+                "{} is a {} axis and {} is a {} one; a rule set decides one phase",
+                axes[*i].name,
+                axes[*i].phase.name(),
+                axes[decides[0]].name,
+                phase.name()
+            ),
+        )
+        .in_file(&f.path, Some(&f.source)));
     }
     // Axes this set contributes to rather than decides: v0's branches replace
     // the construct list and add to the modifiers.
@@ -1749,6 +1812,7 @@ fn load_rule_set(
         decides,
         enter_when,
         rules,
+        phase,
     })
 }
 

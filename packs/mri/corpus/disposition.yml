@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# What to do with a stack, as opposed to what it is
+# (`docs/specs/wave3-anonymize-and-bids.md`, section 7).
+#
+# The SyMRI cases first, because they are why the concept exists. v0 has one
+# rule, `NIFTI_INCOMPATIBLE_PROVENANCES = {"SyMRI"}`, and refuses to convert
+# all 36,692 SyMRI stacks in the live archive. That is right for the 33,692
+# that are the MDME container and wrong for the roughly 3,000 that are
+# ordinary images.
+
+cases:
+
+  # --- section 7.1: SyMRI is three different things
+
+  - name: the MDME container is a working scan and not an image
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_series_description: 'SyMRI MDME'
+      text_sequence_name: 'qrapmaster'
+      scanning_sequence: SE
+      image_role: original_primary
+    axes:
+      provenance: SyMRI
+      disposition: working_scan
+      convertible: 'no'
+
+  - name: a synthetic contrast from the same series is an ordinary image
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\ND'
+      text_series_description: 'SyMRI synthetic T1w'
+      image_role: derived
+    axes:
+      provenance: SyMRI
+      construct: SyntheticT1w
+      disposition: scanner_derived
+      convertible: 'yes'
+
+  - name: and so is a quantitative map, which BIDS has a word for
+    stack:
+      image_type: 'DERIVED\PRIMARY\ND'
+      text_series_description: 'SyMRI T1map'
+      image_role: derived
+    axes:
+      provenance: SyMRI
+      construct: T1map
+      disposition: scanner_derived
+      convertible: 'yes'
+
+  # --- the rest of the vocabulary
+
+  - name: an ordinary acquisition needs no rule to say so
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP\MP'
+      text_sequence_name: '*tfl3d1_16'
+      text_series_description: 'sag T1 mprage'
+      mr_acquisition_type: 3D
+      image_role: original_primary
+    axes:
+      disposition: acquisition
+      convertible: 'yes'
+
+  - name: a localizer is a scout, and converts perfectly well
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_series_description: 'localizer'
+      image_role: original_primary
+    axes:
+      directory_type: localizer
+      disposition: scout
+      convertible: 'yes'
+
+  - name: a screen capture is not an image whatever its ImageType claims
+    stack:
+      image_type: 'ORIGINAL\SECONDARY\SCREENSHOT'
+      text_series_description: 'patient protocol'
+      image_role: not_an_image
+    axes:
+      disposition: excluded
+      convertible: 'no'
+
+  - name: an ADC map is derived by the scanner from the diffusion it just ran
+    stack:
+      image_type: 'DERIVED\PRIMARY\DIFFUSION\ADC\ND\NORM'
+      text_series_description: 'ax dwi ADC'
+      scanning_sequence: EP
+      image_role: derived
+    axes:
+      # Multi-valued: the ImageType's own ND rides along with it.
+      construct: 'ADC,ND'
+      disposition: scanner_derived
+      convertible: 'yes'
+
+  - name: a reformat the scanner made is a reformat
+    stack:
+      image_type: 'DERIVED\PRIMARY\MPR'
+      text_series_description: 'cor MPR'
+      image_role: derived
+    axes:
+      construct: MPR
+      disposition: reformat
+      convertible: 'yes'
+
+  # And the interaction worth writing down: a workstation reformat is tagged
+  # SECONDARY and never PRIMARY, which the class phase rules out before any
+  # detector runs, so it never reaches the disposition as a reformat. The
+  # session rescue (section 6) is what lets one back in, for a visit whose
+  # every stack is like this.
+  - name: a workstation reformat is ruled out before it can be one
+    stack:
+      image_type: 'DERIVED\SECONDARY\MPR'
+      text_series_description: 'cor MPR'
+      image_role: derived
+    axes:
+      directory_type: excluded
+      disposition: excluded
+      convertible: 'no'

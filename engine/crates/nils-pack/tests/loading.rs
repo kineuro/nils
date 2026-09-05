@@ -286,3 +286,136 @@ fn a_pack_may_say_that_a_stack_is_nobody_s_question() {
         .unwrap();
     assert!(!nils_pack::Evaluated::new(&pack, &derived).classify().silent);
 }
+
+// ---------------------------------------------------------------------------
+// The disposition phase (Wave 3 §7)
+
+/// The good pack, plus an axis decided after the passes and one decided with
+/// the rest.
+fn phased() -> Dir {
+    let d = good();
+    d.file(
+        "pack.yml",
+        "\
+pack: t
+version: 1.0.0
+contract: 1
+modality: MR
+parsers: [parsers.yml]
+flags: [flags.yml]
+axes: [axes/kind.yml, axes/disposition.yml]
+rules: [rules/kind.yml, rules/disposition.yml]
+order: [kind, disposition]
+",
+    )
+    .file(
+        "axes/kind.yml",
+        "axis: kind\nkind: single\nvalues: {a: {}, b: {}}\n",
+    )
+    .file(
+        "axes/disposition.yml",
+        "axis: disposition\nphase: disposition\nkind: single\nvalues: {keep: {}, drop: {}}\n",
+    )
+    .file(
+        "rules/kind.yml",
+        "\
+rule_set: kind
+decides: [kind]
+tiers: {stated: 0.9}
+order: [original]
+rules:
+  original:
+    clauses: [{flag: is_original, tier: stated}]
+    set: {kind: a}
+",
+    )
+    .file(
+        "rules/disposition.yml",
+        "\
+rule_set: disposition
+decides: [disposition]
+tiers: {stated: 0.9}
+order: [from_kind]
+rules:
+  from_kind:
+    clauses: [{when: {axis: kind, is: a}, cite: a, source: kind}]
+    set: {disposition: keep}
+",
+    );
+    d
+}
+
+#[test]
+fn an_axis_may_be_decided_after_the_passes() {
+    let d = phased();
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    let kind = pack.axis_index("kind").unwrap();
+    let disposition = pack.axis_index("disposition").unwrap();
+    assert_eq!(pack.axes[kind].phase, nils_pack::rules::AxisPhase::Class);
+    assert_eq!(
+        pack.axes[disposition].phase,
+        nils_pack::rules::AxisPhase::Disposition
+    );
+
+    // The two phases decide their own axes and leave the other's alone.
+    let mut stack = nils_pack::stack::Stack::new();
+    stack
+        .set(
+            "image_type",
+            nils_pack::stack::Value::Text(Some("ORIGINAL\\PRIMARY")),
+        )
+        .unwrap();
+    let e = nils_pack::eval::Evaluated::new(&pack, &stack);
+    let verdict = e.classify();
+    assert_eq!(verdict.stored("kind"), "a");
+    assert_eq!(verdict.stored("disposition"), "", "not this phase's to say");
+
+    let mut seed = vec![Vec::new(); pack.axes.len()];
+    seed[kind] = vec!["a".to_string()];
+    let after = e.dispose(&seed);
+    assert_eq!(after.stored("disposition"), "keep");
+    assert_eq!(after.stored("kind"), "", "already decided, and not again");
+}
+
+#[test]
+fn a_rule_that_runs_before_the_passes_may_not_read_what_runs_after_them() {
+    // Nothing stops it at run time: an axis nothing has decided reads as
+    // empty, so the rule takes the wrong branch and says nothing about it.
+    let d = phased();
+    d.file(
+        "rules/kind.yml",
+        "\
+rule_set: kind
+decides: [kind]
+tiers: {stated: 0.9}
+order: [original]
+rules:
+  original:
+    clauses: [{when: {axis: disposition, is: keep}, cite: keep, source: disposition}]
+    set: {kind: a}
+",
+    );
+    let e = refusal(&d);
+    assert!(e.contains("decided after the passes"), "{e}");
+    assert!(e.contains("disposition"), "{e}");
+}
+
+#[test]
+fn a_rule_set_decides_one_phase() {
+    let d = phased();
+    d.file(
+        "rules/kind.yml",
+        "\
+rule_set: kind
+decides: [kind, disposition]
+tiers: {stated: 0.9}
+order: [original]
+rules:
+  original:
+    clauses: [{flag: is_original, tier: stated}]
+    set: {kind: a, disposition: keep}
+",
+    );
+    let e = refusal(&d);
+    assert!(e.contains("a rule set decides one phase"), "{e}");
+}

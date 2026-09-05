@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Whether a NIfTI of this stack would mean anything
+# (`docs/specs/wave3-anonymize-and-bids.md`, section 7).
+#
+# Separate from the disposition because the two are not the same question. A
+# working scan is not convertible because it is not an image; a scout is an
+# image and converts perfectly well, and is still not something a release puts
+# in the raw tree. Folding them into one axis is what makes v0's single
+# `NIFTI_INCOMPATIBLE_PROVENANCES = {"SyMRI"}` refuse to convert 36,692 stacks
+# when about 3,000 of them are ordinary images.
+#
+# The engine enforces one thing about this axis: a stack that is not
+# convertible is never handed to a converter, and the reason is reported.
+
+axis: convertible
+phase: disposition
+kind: single
+tiers: {stated: 0.9}
+default: 'yes'
+default_confidence: 0.7
+
+values:
+  'yes': {}
+  'no': {}

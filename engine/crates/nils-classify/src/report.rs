@@ -81,6 +81,9 @@ impl fmt::Display for Report {
 pub struct Classified {
     pub job_id: i64,
     pub epoch: i64,
+    /// Stacks given a disposition after the passes (Wave 3 §7).
+    #[serde(default)]
+    pub disposed: i64,
     /// `name@version` of the pack that judged, which every row records too.
     pub pack: String,
     pub read: i64,
@@ -110,6 +113,7 @@ impl Classified {
     pub fn new(job_id: i64, epoch: i64, pack: String) -> Classified {
         Classified {
             job_id,
+            disposed: 0,
             epoch,
             pack,
             read: 0,
@@ -150,6 +154,13 @@ impl fmt::Display for Classified {
         writeln!(f, "  classified       {:>12}", self.written)?;
         writeln!(f, "  no pack          {:>12}", self.no_pack)?;
         writeln!(f, "  evidence rows    {:>12}", self.evidence)?;
+        if self.disposed > 0 {
+            writeln!(
+                f,
+                "  disposed         {:>12}   after the passes",
+                self.disposed
+            )?;
+        }
         if self.decided > 0 {
             writeln!(f, "  decided by hand  {:>12}", self.decided)?;
         }
