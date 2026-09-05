@@ -41,6 +41,13 @@ pub struct Selection {
     /// Only the stacks a pick chose (§10).
     pub picked_only: bool,
     pub modality: Option<String>,
+    /// Only stacks acquired at one of these field strengths, in tesla.
+    ///
+    /// The **normalised** value of §6, which is the one a person means by "the
+    /// 7T subset": a magnet off the grid has none, deliberately, because v0's
+    /// rounding turns a 4.7 T animal scanner into a 3 T one. So this selects
+    /// what a person asked for and never a magnet that merely rounds to it.
+    pub field_strengths: Vec<f64>,
 }
 
 impl Selection {
@@ -51,6 +58,7 @@ impl Selection {
             "roles": self.roles,
             "picked_only": self.picked_only,
             "modality": self.modality,
+            "field_strengths": self.field_strengths,
         })
     }
 
@@ -251,6 +259,11 @@ struct Instance {
 struct Job {
     stack: i64,
     place: Place,
+    /// Where it goes when the converter refuses it, which is the same place
+    /// the planner would give it had it been routed to `sourcedata` in the
+    /// first place. Computed here so a fallback and a plan cannot disagree,
+    /// which is what made every re-run move them.
+    fallback: Place,
     /// Which of §9.3's routes it took. In the descriptive layout there is one.
     route: String,
     /// The BIDS stem, when the tree is BIDS and the standard named it.
@@ -483,8 +496,6 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                 absent.push((stack, why.kind().to_string(), why.to_string()));
                 continue;
             }
-            *report.routes.entry(route.name().to_string()).or_insert(0) += 1;
-            let place = place_of(&route, settings, &code, &label, &folder, &stem, placed);
             let content = crate::version::content_of(
                 &subject_policy(settings, &code, offset),
                 &categories,
@@ -495,8 +506,22 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                     .map(|i| (i.id, i.size, i.mtime))
                     .collect::<Vec<_>>(),
             );
-            let key = place.key();
             let was = earlier.as_ref().and_then(|p| p.stacks.get(&stack));
+            // A conversion the converter refused last time will refuse it
+            // again, because nothing it depends on has changed: the converter
+            // is in the content digest and so is everything about the stack.
+            // So the fallback is **planned** rather than retried, and the stack
+            // is left alone. Without this, every re-run rewrites every stack
+            // that ever fell back, which is the incremental promise broken for
+            // exactly the stacks that cost the most.
+            let fell_back = was.is_some_and(|(w, r)| w.content == content && r == "sourcedata");
+            let route = match fell_back && route.name() != "sourcedata" {
+                true => crate::bids::place::Route::SourceData,
+                false => route,
+            };
+            *report.routes.entry(route.name().to_string()).or_insert(0) += 1;
+            let place = place_of(&route, settings, &code, &label, &folder, &stem, placed);
+            let key = place.key();
             let mut change = crate::version::compare(was.map(|(w, _)| w), &content, &key);
             // A route that changed changed the bytes: a stack converted last
             // time and written as DICOM this time is not the same file under a
@@ -521,6 +546,15 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
             }
             jobs.push(Job {
                 stack,
+                fallback: place_of(
+                    &crate::bids::place::Route::SourceData,
+                    settings,
+                    &code,
+                    &label,
+                    &folder,
+                    &stem,
+                    placed,
+                ),
                 place,
                 route: route.name().to_string(),
                 content,
@@ -1116,10 +1150,16 @@ fn today() -> Day {
 /// and a comparison that could not see that would call it unchanged.
 fn subject_policy(settings: &Settings, code: &str, offset: crate::dates::Offset) -> String {
     format!(
-        "{} code={code} offset={} unknown={}",
+        "{} code={code} offset={} unknown={} layout={} converter={}",
         settings.policy.as_json(),
         offset.0,
         settings.on_unknown.name(),
+        settings.layout.name(),
+        // A different converter writes different NIfTI, so an upgrade rewrites
+        // the tree, which is what an upgrade means. It is also what lets a
+        // conversion that failed be planned as failed again: nothing about the
+        // stack or the converter changed, so nothing about the answer will.
+        settings.converter.map(|c| c.describe()).unwrap_or_default(),
     )
 }
 
@@ -1379,6 +1419,24 @@ fn select(store: &mut Store, selection: &Selection) -> Result<Vec<Instance>, Err
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = k.id AND a.axis = 'role' \
              AND ({any}))"
+        ));
+    }
+    if !selection.field_strengths.is_empty() {
+        // From the fingerprint, so a release before one selects nothing and
+        // says so in its counts rather than selecting everything.
+        let t = table("stack_fingerprint");
+        let column = t
+            .column("field_strength_normalized")
+            .expect("stack_fingerprint.field_strength_normalized is a column");
+        let any = selection
+            .field_strengths
+            .iter()
+            .map(|f| format!("ABS(sf.{} - {f}) < 0.01", column.name))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        wheres.push(format!(
+            "EXISTS (SELECT 1 FROM {} sf WHERE sf.stack_id = k.id AND ({any}))",
+            store.qualified("stack_fingerprint"),
         ));
     }
     if selection.picked_only {
@@ -1644,20 +1702,12 @@ fn write_bids(
                 *n -= 1;
             }
             job.route = "sourcedata".to_string();
-            job.place = Place::dir(format!("sourcedata/{}", trimmed(&job.place.dir)));
+            job.place = job.fallback.clone();
             let mut out = refused;
             out.extend(write_dicom(job, plan, root, &job.place.dir));
             out
         }
     }
-}
-
-/// The BIDS directory a fallback to `sourcedata` keeps, which is the datatype
-/// directory without the tree's own root.
-fn trimmed(dir: &str) -> String {
-    dir.strip_prefix("derivatives/nils/")
-        .unwrap_or(dir)
-        .to_string()
 }
 
 /// Scrub one instance into the staging directory, ready to convert.
@@ -2351,6 +2401,7 @@ mod tests {
         Job {
             stack,
             place: Place::dir(dir.to_string()),
+            fallback: Place::dir(dir.to_string()),
             route: "raw".to_string(),
             content: "same".to_string(),
             change: crate::version::Change::Moved,
