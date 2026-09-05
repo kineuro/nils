@@ -80,6 +80,9 @@ enum Command {
     },
     /// The registry: its metadata, the running jobs, the last batches
     Status(StatusArgs),
+    /// What private elements an archive carries, by creator, so an allowlist
+    /// is chosen from the data rather than from a chair (§8.4)
+    Private(PrivateArgs),
     /// The linkage store: the identifiers behind the codes (§7)
     Linkage {
         #[command(subcommand)]
@@ -217,6 +220,24 @@ struct ReleaseArgs {
     pack: String,
     #[arg(long, value_name = "DIR")]
     pack_dir: Option<PathBuf>,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Parser)]
+struct PrivateArgs {
+    /// The tree to read
+    #[arg(value_name = "ROOT")]
+    root: PathBuf,
+    /// Stop after this many files. A survey is about what is there, not about
+    /// how much of it there is, and a few thousand files of an archive answer
+    /// that as well as all of them
+    #[arg(long, default_value_t = 20_000, value_name = "N")]
+    files: usize,
+    /// How many files to read at once
+    #[arg(long, default_value_t = 8, value_name = "N")]
+    workers: usize,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -684,6 +705,7 @@ fn main() -> ExitCode {
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
+        Command::Private(args) => private_survey(args),
         Command::Release(args) => release(&home, *args),
         Command::Handover(command) => handover_command(&home, command),
         Command::Pick { command } => pick_command(&home, command),
@@ -3859,6 +3881,97 @@ fn session_pair(text: &str) -> Result<(String, String), Exit> {
                  `nils session list` prints them"
             ))
         })
+}
+
+/// What private elements an archive carries (§8.4).
+///
+/// A private element means whatever its vendor decided, and nothing in the file
+/// says what. So a release drops them all and an allowlist brings back the ones
+/// a pack names, and this is how that list is chosen: from the archive, by
+/// counting what is in it.
+///
+/// **Shapes, never values.** A creator, a block, an element, how many files
+/// carry it, how long it is, whether it is printable and how much it varies.
+/// Enough to judge whether an element is worth keeping, and safe to carry out
+/// of a private host, which a survey that quoted values would not be.
+fn private_survey(args: PrivateArgs) -> Result<(), Exit> {
+    let survey = nils_dicom::survey::walk(&args.root, args.files, args.workers);
+    let rows = survey.rows();
+    if args.json {
+        let out: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "creator": r.creator,
+                    "group": format!("{:04X}", r.group),
+                    "element": format!("{:02X}", r.element),
+                    "address": r.address(),
+                    "files": r.files,
+                    "vr": r.vrs,
+                    "shortest": r.shortest,
+                    "longest": r.longest,
+                    "printable": r.printable,
+                    "distinct": r.distinct,
+                    "varied": r.varied,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "files": survey.files,
+                "with_private": survey.with_private,
+                "orphans": survey.orphans,
+                "elements": out,
+            }))
+            .map_err(|e| fail(e.to_string()))?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} file(s) read, {} with private elements, {} distinct element(s)",
+        survey.files,
+        survey.with_private,
+        rows.len()
+    );
+    if survey.orphans > 0 {
+        // Nothing can be done with these, and saying so is the point: an
+        // element in a block no creator reserved cannot be addressed by name.
+        println!(
+            "  {} private element(s) in a block no creator reserved, which no allowlist can keep",
+            survey.orphans
+        );
+    }
+    let mut creator = String::new();
+    for r in &rows {
+        if r.creator != creator {
+            println!("\n{}", r.creator);
+            creator = r.creator.clone();
+        }
+        // `varies` is most of what decides whether an element is worth
+        // keeping: one value across an archive is a property of the scanner,
+        // and one per file is a property of the acquisition.
+        println!(
+            "  ({:04X},xx{:02X})  {:>8} files  {:<6}  {:>4}-{:<6} bytes  {}  {}",
+            r.group,
+            r.element,
+            r.files,
+            r.vrs,
+            r.shortest,
+            r.longest,
+            match r.printable {
+                true => "text  ",
+                false => "binary",
+            },
+            match (r.varied, r.distinct) {
+                (true, _) => "varies".to_string(),
+                (false, 1) => "one value".to_string(),
+                (false, n) => format!("{n} values"),
+            }
+        );
+    }
+    Ok(())
 }
 
 // The handover (Wave 3 §11)

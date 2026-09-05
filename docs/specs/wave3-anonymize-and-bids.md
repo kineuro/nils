@@ -1522,5 +1522,22 @@ before the rest is written.
    confirmation differ from a person's unfinished edit? D14's staged results are
    the same idea in another place. Wave 6's, not this wave's, now that the loop
    is placed there.
-6. **The private-tag allowlist seed**, answerable from the corpus.
+6. **The private-tag allowlist seed.** Nima's call, 2026-09-05: **use
+   everything that is there**, because the MS cohorts show how much a private
+   element can carry. So the list is chosen from the archive rather than from a
+   chair, and `nils private ROOT` is how: it walks a tree and reports, per
+   creator, every private element, how many files carry it, its VR, its length,
+   whether it is printable and how much it varies across the archive.
+
+   **Shapes and never values**, so a survey is safe to carry out of a private
+   host. Varying is most of what decides: an element with one value across an
+   archive is a property of the scanner or the site, and one with a value per
+   file is a property of the acquisition, which is the kind worth keeping. And
+   an element in a block no creator reserved is counted and never named,
+   because it cannot be addressed and so can never be kept.
+
+   What stays true whatever the survey says: **a block is never kept whole.**
+   Siemens CSA headers have carried the patient name, the operator and the
+   institution in shipping firmware, so an element comes back by name or not at
+   all.
 7. **The default date policy per registry.** `keep` is right for KI today.
