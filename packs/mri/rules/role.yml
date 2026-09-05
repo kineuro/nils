@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Which stacks are candidates for each role (section 10).
+#
+# Transcribed from v0's eligibility query in
+# `qc/cohort_main/service.py::_load_eligible_rows`, which is four conditions:
+# the intent is anatomical, the stack is not a localizer, its construct holds
+# none of `non_canonical_constructs` (MIP, MPR, Reformat, Synthetic), and the
+# base is T1w, or T2w with a FLAIR modifier.
+#
+# Three of those four are one condition here. `disposition: acquisition` rules
+# out the localizer, which is a `scout`, and every one of the banned constructs,
+# which are `reformat` or `scanner_derived`. That is section 7's point made
+# concrete: v0's banned list is a disposition written in the one place that
+# needed it, and once the concept exists in its own right the list is not
+# needed anywhere.
+#
+# Runs after the disposition, which is why `order` puts it there: a rule set of
+# this phase reads what an earlier one of the same phase decided.
+#
+# It reads `missing_or: acquisition` rather than `is: acquisition`, because an
+# axis takes its default only after every rule set has run, so a value that came
+# from a default is not there for a later set to read. Nothing decided the
+# disposition means the disposition is `acquisition`, which is what this says.
+# The coupling to that default is deliberate and is the reason it is written
+# down here.
+
+rule_set: role
+decides: [role]
+collect: true
+tiers: {stated: 1.0}
+
+order: [t1w, flair]
+
+rules:
+
+  t1w:
+    clauses:
+      - when:
+          all:
+            - {axis: disposition, missing_or: acquisition}
+            - {axis: directory_type, is: anat}
+            - {axis: base, is: T1w}
+        cite: 'an anatomical T1w acquisition'
+        source: axes
+    set: {role: t1w}
+
+  flair:
+    clauses:
+      - when:
+          all:
+            - {axis: disposition, missing_or: acquisition}
+            - {axis: directory_type, is: anat}
+            - {axis: base, is: T2w}
+            - {axis: modifier, is: FLAIR}
+        cite: 'an anatomical T2w acquisition with a FLAIR modifier'
+        source: axes
+    set: {role: flair}

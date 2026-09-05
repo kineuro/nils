@@ -37,6 +37,9 @@ axes:
   # phase of its own, after the passes.
   - axes/disposition.yml
   - axes/convertible.yml
+  # §10: what a stack is a candidate to be. Reads the disposition, so it is
+  # declared after it and ordered after it.
+  - axes/role.yml
 
 # Rule sets written longhand: the tiers that are not value-major.
 rules:
@@ -52,9 +55,10 @@ rules:
   - rules/body_part.yml
   - rules/intent.yml
   - rules/disposition.yml
+  - rules/role.yml
 
 # The order the rule sets run in.
-order: [excluded, provenance, swi, symri, epimix, stage, technique, base, modifier, construct, body_part, post_contrast, intent, disposition]
+order: [excluded, provenance, swi, symri, epimix, stage, technique, base, modifier, construct, body_part, post_contrast, intent, disposition, role]
 
 # The phases that read more than one stack (spec section 7). A pack that
 # declares none gets none.

@@ -729,6 +729,27 @@ A **role** is a named predicate over the decided axes and the fingerprint. A
 **pick** chooses one stack per session and role by an ordered preference,
 reporting ties rather than breaking them by row order.
 
+A role turns out to need no mechanism of its own: it is a **multi-valued axis of
+the disposition phase**, whose rules read what the class phase and the passes
+settled. v0's two are hard-coded as the keys of two tables in its weights file,
+so a third means editing Python; here the vocabulary is data and a cohort that
+wants another says so in an overlay.
+
+The transcription made §7's point concrete. v0's eligibility query is four
+conditions: the intent is anatomical, the stack is not a localizer, its construct
+holds none of `non_canonical_constructs`, and the base is T1w, or T2w with a
+FLAIR modifier. **Three of those four are one condition here.**
+`disposition: acquisition` rules out the localizer, which is a `scout`, and every
+banned construct, which is a `reformat` or `scanner_derived`. Once the concept
+exists in its own right the list is not needed anywhere.
+
+One coupling is worth writing down because it is not obvious from the language.
+A role reads `missing_or: acquisition` rather than `is: acquisition`, because an
+axis takes its **default** only after every rule set has run, so a value that
+came from a default is not there for a later set to read. Nothing having decided
+the disposition means the disposition is `acquisition`, which is what the atom
+says.
+
 **This already exists in v0 as tuned data** and should be carried rather than
 reinvented. `qc/cohort_main/main_qc_weights.yaml` says in its own header "edit
 this file to tune the auto-pick algorithm, no code change required", and carries
