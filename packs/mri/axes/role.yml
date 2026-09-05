@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# What a stack is a candidate to be, for a session
+# (`docs/specs/wave3-anonymize-and-bids.md`, section 10).
+#
+# A role is a named predicate over the decided axes, which is exactly what a
+# multi-valued axis of the disposition phase is: it reads what the rules and
+# the passes settled, and it says which of a small vocabulary this stack could
+# stand for. Nothing in the engine is new for it.
+#
+# v0's two are hard-coded as the keys of two tables in
+# `qc/cohort_main/main_qc_weights.yaml`, so adding a third means editing Python.
+# Here the vocabulary is data, and a cohort that wants another role says so in
+# an overlay.
+
+axis: role
+phase: disposition
+kind: multi
+
+values:
+  # The session's main T1-weighted acquisition, which is what almost every
+  # downstream measurement is registered to.
+  t1w: {}
+  # And its FLAIR, which is what a lesion is counted on.
+  flair: {}

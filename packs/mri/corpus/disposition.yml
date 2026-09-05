@@ -117,3 +117,54 @@ cases:
       directory_type: excluded
       disposition: excluded
       convertible: 'no'
+
+  # --- section 10: which stacks are candidates for a role
+
+  - name: an anatomical T1w acquisition is a candidate main T1w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP\MP'
+      text_sequence_name: '*tfl3d1_16'
+      text_series_description: 'sag T1 mprage'
+      mr_acquisition_type: 3D
+      image_role: original_primary
+    axes:
+      base: T1w
+      directory_type: anat
+      disposition: acquisition
+      role: t1w
+
+  - name: a FLAIR is a candidate FLAIR and not a candidate T1w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      sequence_variant: SK
+      text_sequence_name: '*tir2d1_15'
+      text_series_description: 'ax T2 FLAIR'
+      image_role: original_primary
+    axes:
+      base: T2w
+      disposition: acquisition
+      role: flair
+
+  # v0 spends four query conditions on this: the intent is anatomical, the
+  # stack is not a localizer, and its construct holds none of MIP, MPR,
+  # Reformat or Synthetic. Once the disposition exists, one condition does it.
+  - name: a synthetic T1w is not a candidate, because it is not an acquisition
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\ND'
+      text_series_description: 'SyMRI synthetic T1w'
+      image_role: derived
+    axes:
+      disposition: scanner_derived
+      role: ''
+
+  - name: nor is a localizer, for the same one reason
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_series_description: 'localizer'
+      image_role: original_primary
+    axes:
+      disposition: scout
+      role: ''
