@@ -578,6 +578,22 @@ ever and two releases of overlapping selections agree. Nothing downstream needs
 the original because the join is the registry's id. `preserve_uids` is a real
 policy, defaults to off, and is constrained by §4.3.
 
+It costs no table: the mapping is a function of the key, so nothing has to be
+stored and nothing can go stale. **v0 does not remap at all.** Its scrubber
+skips every element whose VR is `UI` or whose name contains "uid", so every UID
+leaves the building unchanged, which is the whole reason §4.3 exists.
+
+A UID that names a standard rather than a study, the SOP class and the transfer
+syntax, is never remapped: doing so makes the file unreadable. The file meta
+group's copy of the instance UID is remapped with the data set's, or the file
+disagrees with itself.
+
+New UIDs hang from `2.25`, the arc PS3.5 B.2 sets aside for a UUID as a decimal
+integer. It is legal, needs no registration, and cannot collide with anybody's.
+A deployment with a registered arc says so and gets shorter UIDs that name it.
+**Which arc a released dataset should carry is §15's open question 1 and is not
+answered here**; what is answered is that the default must work without one.
+
 ### 8.3 Dates
 
 The registry is never rewritten. A release declares `keep`, `shift` (one offset
@@ -585,6 +601,20 @@ per subject, drawn once, uniform within +/- 180 days, held in `date_shift`, so
 every interval survives and the clinical layer joins as before) or `year`. Age
 at study is computed before anything is applied. §4.3 binds this to §8.2, and a
 release under `shift` or `year` refuses to write a session label that is a date.
+
+A policy moves **every** date in the file rather than a list of them, because a
+list is what goes stale and because the intervals are what a reader measures on.
+A `DT` keeps its time and moves its date. The offset is drawn from the key and
+the subject, so it is reproducible, and it is **also** stored, because it is the
+thing that undoes the policy and it belongs with the identifiers: a lost row is
+recoverable and a tampered one is detectable.
+
+v0 has no date policy. Its scrubber records `StudyDate` as "retained" and moves
+on, and its fifth category removes the series, acquisition and content dates
+outright. So one v0 category becomes two things here: the dates are the policy
+above, and what is left of the category is the **times**, which are identifying
+at a granularity nobody needs. A scan at 03:14 on a known day narrows a
+population a long way, and no interval is measured in seconds.
 
 ### 8.4 Private tags, overlays, burned-in pixels
 
@@ -601,6 +631,17 @@ A release **declares which categories it applied and records them**, because v0'
 category table is a menu rather than a policy: a deployment picks from it, and
 nothing in the output says which pick was made. "De-identified" is not a
 property a file can carry without saying under what rule.
+
+The four categories that survive from v0 are carried tag for tag: patient (34),
+trial (23), provider (38), institution (5). The default is all of them, because
+the safe set is the one nobody had to think about. Two elements are never
+removed whatever a category says, the SOP class and instance UID, because
+without them the file is not a DICOM object; they are remapped rather than kept.
+
+One thing is **added** where v0 subtracts. v0 removes the birth date and
+computes nothing from it, so an age that was derivable from the archive is not
+derivable from its output. Here the age is computed first, written as
+`PatientAge`, and the birth date then goes.
 
 ### 8.5 The audit
 

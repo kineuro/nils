@@ -95,6 +95,8 @@ enum Command {
         #[command(subcommand)]
         command: ReviewCommand,
     },
+    /// Select, de-identify and write a dataset out, recording the policy it applied (§8)
+    Release(ReleaseArgs),
     /// Which stack stands for each session's role, with the evidence that chose it (§10)
     Pick {
         #[command(subcommand)]
@@ -114,6 +116,60 @@ enum Command {
         #[arg(long)]
         markdown: bool,
     },
+}
+
+#[derive(Debug, Args)]
+struct ReleaseArgs {
+    /// Where the tree is written
+    #[arg(long, value_name = "DIR")]
+    out: PathBuf,
+    /// What to call this release, on its row and in its report
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+    /// What happens to every date: as they are, moved by one offset per
+    /// subject, or the year only
+    #[arg(long, default_value = "keep", value_name = "keep|shift|year")]
+    dates: String,
+    /// What happens to UIDs. Remapping is keyed and deterministic, so two
+    /// releases of overlapping selections agree
+    #[arg(long, default_value = "remap", value_name = "remap|preserve")]
+    uids: String,
+    /// The arc new UIDs hang from. The default is DICOM's UUID arc, which is
+    /// legal and needs no registration
+    #[arg(long, value_name = "OID")]
+    uid_root: Option<String>,
+    /// Which categories of element to remove; all of them by default
+    #[arg(long, value_name = "patient,trial,provider,institution,times")]
+    categories: Option<String>,
+    /// Only these subjects, by code
+    #[arg(long, value_name = "CODE")]
+    subject: Vec<String>,
+    /// Only stacks of these dispositions; by default everything but excluded
+    #[arg(long, value_name = "KIND")]
+    disposition: Vec<String>,
+    /// Only stacks holding one of these roles
+    #[arg(long, value_name = "ROLE")]
+    role: Vec<String>,
+    /// Only the stacks a pick chose
+    #[arg(long)]
+    picked: bool,
+    /// Only stacks of this modality
+    #[arg(long, value_name = "MR|CT|PT|...")]
+    modality: Option<String>,
+    /// The session scheme the tree's `ses-` directories come from
+    #[arg(long, value_name = "FILE", conflicts_with = "scheme_name")]
+    scheme: Option<PathBuf>,
+    /// A scheme stored in this registry, by name
+    #[arg(long = "scheme-name", value_name = "NAME")]
+    scheme_name: Option<String>,
+    /// The pack, recorded on the release so a tree names what judged it
+    #[arg(long, default_value = "mri")]
+    pack: String,
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<PathBuf>,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -498,6 +554,7 @@ fn main() -> ExitCode {
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
+        Command::Release(args) => release(&home, args),
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
@@ -3579,6 +3636,134 @@ fn pick_explain(home: &Home, id: i64, json: bool) -> Result<(), Exit> {
             );
         }
     }
+    Ok(())
+}
+
+// --------------------------------------------------------------------------
+// The release (Wave 3 §8)
+// --------------------------------------------------------------------------
+
+fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
+    use nils_release::{dates, policy, run, tags, uid};
+
+    let dates_policy = dates::Policy::parse(&args.dates).ok_or_else(|| {
+        usage(format!(
+            "--dates is keep, shift or year, not {}",
+            args.dates
+        ))
+    })?;
+    let uids = policy::Uids::parse(&args.uids)
+        .ok_or_else(|| usage(format!("--uids is remap or preserve, not {}", args.uids)))?;
+    let root = match &args.uid_root {
+        Some(text) => uid::Root::new(text).map_err(|e| usage(e.to_string()))?,
+        None => uid::Root::default(),
+    };
+    let policy = policy::Policy {
+        dates: dates_policy,
+        uids,
+        root,
+    };
+    // §4.3, before a registry is even opened: the two policies are one, and a
+    // combination that would leave the date in the UID is refused rather than
+    // warned about.
+    policy.check().map_err(|e| usage(e.to_string()))?;
+
+    let categories = match &args.categories {
+        None => tags::Category::every(),
+        Some(text) => {
+            let mut out = Vec::new();
+            for name in text.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                out.push(tags::Category::parse(name).ok_or_else(|| {
+                    usage(format!(
+                        "{name} is not a category: patient, trial, provider, institution, times"
+                    ))
+                })?);
+            }
+            out
+        }
+    };
+
+    let dir = pack_dir(home, args.pack_dir)?;
+    let found = packs_in(&dir)?
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|f| f == args.pack.as_str()))
+        .ok_or_else(|| fail(format!("no pack named {} in {}", args.pack, dir.display())))?;
+    let pack = nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
+
+    let mut registry = open(home)?;
+    let scheme = match (&args.scheme, &args.scheme_name) {
+        (Some(path), _) => read_scheme(path)?,
+        (None, Some(name)) => stored_scheme(&mut registry, name)?,
+        (None, None) => session::Scheme::default(),
+    };
+    // The same key the pseudonyms were derived from: the release does not
+    // choose a pseudonym of its own (§8.1), and its UID remapping hangs off a
+    // domain of the same key so that neither can be used to reason about the
+    // other.
+    let key = registry.pseudonym_key().map_err(|e| fail(e.to_string()))?;
+
+    let name = args
+        .name
+        .clone()
+        .unwrap_or_else(nils_registry::time::now_iso);
+    let settings = run::Settings {
+        name: &name,
+        root: &args.out,
+        policy: &policy,
+        categories,
+        selection: run::Selection {
+            subjects: args.subject.clone(),
+            dispositions: args.disposition.clone(),
+            roles: args.role.clone(),
+            picked_only: args.picked,
+            modality: args.modality.clone(),
+        },
+        scheme: &scheme,
+        actor: &actor(),
+        key: &key,
+        pack: &pack.name,
+        pack_version: &pack.version.to_string(),
+    };
+    let report = run::run(&mut registry, &settings).map_err(|e| match e {
+        run::Error::Refused(m) => usage(m),
+        other => fail(other.to_string()),
+    })?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
+    println!("release {} ({})", report.name, report.policy);
+    println!("  into             {}", report.root);
+    println!("  subjects         {:>12}", report.subjects);
+    println!("  stacks           {:>12}", report.stacks);
+    println!("  files            {:>12}", report.files);
+    println!(
+        "  written          {:>9.2} GiB",
+        report.bytes as f64 / (1u64 << 30) as f64
+    );
+    if !report.refused.is_empty() {
+        println!("  not written");
+        for (why, n) in &report.refused {
+            println!("      {n:>10}   {why}");
+        }
+    }
+    // What was changed, by tag and action, and never what it was: an audit
+    // that records what was removed is a copy of the identifiers in clear.
+    println!("  what changed");
+    let mut changes: Vec<(&String, &i64)> = report.changes.iter().collect();
+    changes.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    for (what, n) in changes.iter().take(8) {
+        println!("      {n:>10}   {what}");
+    }
+    if changes.len() > 8 {
+        println!("      {:>10}   more, in release_change", changes.len() - 8);
+    }
+    println!("  {:.1} s", report.seconds);
     Ok(())
 }
 

@@ -628,6 +628,55 @@ fn build_registry() -> Vec<Table> {
         )
         .index(&["pick_id"])
         .index(&["stack_id"]),
+        // Wave 3 §8.5: what a release did, as rows.
+        //
+        // Not a workbook beside the originals under a password kept in a
+        // database, which is v0's audit, and deliberately without an old-value
+        // column anywhere: an audit that records what was removed is a copy of
+        // the identifiers, in the registry, in clear. What a release removed is
+        // recoverable from the originals by someone entitled to read them.
+        Table::new(
+            "release",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("root", Type::Text),
+                // Every policy, written down, because "de-identified" is not a
+                // property a file can carry without saying under what rule.
+                req("policy", Type::Json),
+                // What the release selected, as it was asked for.
+                req("selection", Type::Json),
+                // The categories it applied, by name. v0's table is a menu and
+                // nothing in its output says which pick was made.
+                req("categories", Type::Text),
+                req("session_scheme", Type::Text),
+                req("pack", Type::Text),
+                req("pack_version", Type::Text),
+                req("actor", Type::Text),
+                req("started_at", Type::Timestamp),
+                col("finished_at", Type::Timestamp),
+                req("files", Type::Int),
+                req("subjects", Type::Int),
+                col("error", Type::Text),
+            ],
+        )
+        .index(&["name"]),
+        Table::new(
+            "release_file",
+            vec![
+                col("id", Type::Id),
+                req("release_id", Type::Int),
+                req("instance_id", Type::Int),
+                // Where it landed, under the release's root.
+                req("path", Type::Text),
+                // What was written, so a handover can be verified without
+                // reading the file back (§11).
+                req("digest", Type::Text),
+                req("bytes", Type::Int),
+            ],
+        )
+        .index(&["release_id"])
+        .index(&["instance_id"]),
         Table::new(
             "diagnostic",
             vec![
