@@ -20,6 +20,7 @@ pub mod normalize;
 pub mod overlay;
 pub mod pack;
 pub mod pass;
+pub mod pick;
 pub mod rules;
 pub mod stack;
 pub mod verdict;

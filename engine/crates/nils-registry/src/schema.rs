@@ -570,6 +570,64 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["scope", "ref", "axis"]),
+        // Wave 3 §10: which stack stands for a session's role. One row per
+        // role and occasion, and the stacks it names in `pick_stack`.
+        //
+        // Not an axis, because it is not a property of a stack: the same
+        // stack is the session's main T1w or not depending on what else the
+        // session holds. And not derived on read either, because it is a
+        // decision with evidence and a person may overrule it.
+        Table::new(
+            "pick",
+            vec![
+                col("id", Type::Id),
+                req("model", Type::Text),
+                req("role", Type::Text),
+                req("subject_id", Type::Int),
+                // The occasion, as the day it opened. A session has no id
+                // because it is derived from a scheme (§5), so a pick names
+                // the scheme it was made under and the day it names.
+                req("session_day", Type::Date),
+                req("scheme", Type::Text),
+                col("score", Type::Double),
+                // How far ahead of the next candidate, as a fraction. Zero is
+                // a tie, and a tie is reported rather than settled by row
+                // order.
+                col("margin", Type::Double),
+                col("runner_up_score", Type::Double),
+                // `too_close`, `rare`, `nothing_eligible`, comma-joined.
+                col("borders", Type::Text),
+                // The component scores, and what each read to get there.
+                col("parts", Type::Json),
+                // Every candidate and its score: what the alternatives were.
+                col("considered", Type::Json),
+                // The population the cohort-relative components were scored
+                // against. v0 computes the same numbers and records none of
+                // them, so its picks cannot be reproduced from what is stored.
+                req("reference", Type::Text),
+                req("pack", Type::Text),
+                req("pack_version", Type::Text),
+                // Who made it (§10.1). An automatic pick is an agent's.
+                req("actor", Type::Text),
+                req("author_kind", Type::Text),
+                col("author_version", Type::Text),
+                col("job_id", Type::Int),
+                req("decided_at", Type::Timestamp),
+                // A pick a person overruled stays and stops applying.
+                col("withdrawn_at", Type::Timestamp),
+            ],
+        )
+        .index(&["role", "subject_id", "session_day"]),
+        Table::new(
+            "pick_stack",
+            vec![
+                col("id", Type::Id),
+                req("pick_id", Type::Int),
+                req("stack_id", Type::Int),
+            ],
+        )
+        .index(&["pick_id"])
+        .index(&["stack_id"]),
         Table::new(
             "diagnostic",
             vec![

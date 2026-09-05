@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +94,20 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 10,
         apply: a_decision_says_who_made_it,
     },
+    Migration {
+        version: 11,
+        apply: create_pick,
+    },
 ];
+
+/// Wave 3 §10: which stack stands for a session's role, with the evidence and
+/// the population it was chosen against.
+fn create_pick(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["pick", "pick_stack"])
+}
 
 /// Wave 3 §10.1: a decision records whether a person, an agent or a model made
 /// it, and the evidence a decision writes says so too.
