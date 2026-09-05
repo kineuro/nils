@@ -36,7 +36,10 @@ def main() -> int:
         out.execute(
             "CREATE TABLE fp (scenario TEXT, field_strength_tesla TEXT,"
             " field_strength_normalized TEXT, field_strength_unit TEXT,"
-            " acquisition_type_filled TEXT, acquisition_type_source TEXT, image_role TEXT)"
+            " acquisition_type_filled TEXT, acquisition_type_source TEXT, image_role TEXT,"
+            " dwi_b_value TEXT, dwi_b_values TEXT, dwi_b_value_source TEXT,"
+            " dwi_pe_direction TEXT, dwi_pe_direction_source TEXT,"
+            " dwi_directions TEXT, dwi_directions_source TEXT)"
         )
 
     src = sqlite3.connect(registry)
@@ -84,7 +87,10 @@ def main() -> int:
         """
         SELECT DISTINCT f.field_strength_tesla, f.field_strength_normalized,
                f.field_strength_unit, f.acquisition_type_filled,
-               f.acquisition_type_source, f.image_role
+               f.acquisition_type_source, f.image_role,
+               f.dwi_b_value, f.dwi_b_values, f.dwi_b_value_source,
+               f.dwi_pe_direction, f.dwi_pe_direction_source,
+               f.dwi_directions, f.dwi_directions_source
         FROM stack_fingerprint f
         JOIN instance i ON i.series_id = f.series_id
         JOIN source_file sf ON sf.instance_id = i.id
@@ -94,8 +100,10 @@ def main() -> int:
     src.close()
     out.executemany(
         "INSERT INTO fp (scenario, field_strength_tesla, field_strength_normalized,"
-        " field_strength_unit, acquisition_type_filled, acquisition_type_source, image_role)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        " field_strength_unit, acquisition_type_filled, acquisition_type_source, image_role,"
+        " dwi_b_value, dwi_b_values, dwi_b_value_source, dwi_pe_direction,"
+        " dwi_pe_direction_source, dwi_directions, dwi_directions_source)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [(scenario, *row) for row in derived],
     )
     out.commit()

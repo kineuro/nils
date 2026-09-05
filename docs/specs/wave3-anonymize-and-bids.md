@@ -371,6 +371,67 @@ from v0 in one place:
   applies, and the session rescue. A screenshot is checked for before anything
   else, because a session with no primaries is exactly the session whose only
   `ORIGINAL\SECONDARY` images might be screen captures.
+- **Diffusion**: the shell, every shell, the phase-encoding direction and the
+  gradient count. Everything they are worked out from is something the scanner
+  wrote about this stack, so none of it waits for a classification. §6.1 is why
+  that mattered more than it looked.
+
+### 6.1 Diffusion, and the reason the values had to move
+
+v0 runs its enrichment after classifying and only on stacks it routed to `dwi`.
+A diffusion stack it failed to route never gets its b values read, and then has
+less to be classified by, which is a circle. Deriving at the fingerprint breaks
+it. What replaces the routing gate is an **evidence** gate: the loose signals,
+which are the direction-count and phase-direction patterns in prose, are only
+consulted once something specific has established that this is diffusion at all.
+A b value in a tag, a gradient orientation, a directionality, or a b value
+spelled out in a name all count as specific; `_32_` in a protocol name does not,
+and `t1_mprage_32_sag` is in the corpus to prove it.
+
+Writing it turned up that **v1 could not express a diffusion acquisition at
+all**, and neither can v0. Seven of the nine diffusion values sat on the
+per-series detail row, and a b value, a gradient orientation and a
+directionality are per image by design: that is what a multi-shell,
+multi-direction acquisition is. v1 read them from every file and then kept one,
+the smaller of any two that disagreed, so a series that played b=0 and b=1000
+was recorded as b=0. The pack's `has_positive_b_value` rule was therefore false
+for every real diffusion series in the archive. They are now recorded per image,
+which is where a value that varies per image belongs.
+
+The same fault runs deeper in v0, in three places:
+
+1. Its enrichment joins `mri_series_details`, keyed by series, to `instance`, so
+   each of its per-image loops walks **one row repeated once per image**. Its
+   list of shells can hold one measured value.
+2. The same join makes its set of gradient vectors hold at most one, so
+   `count_gradient_directions` returns 1 and, being non-empty, never falls
+   through to the text either. Every diffusion stack with a stored gradient is
+   recorded as having **one direction**.
+3. Its phase-encoding computation reads a column filled from the keyword
+   `PhaseEncodingDirection`, which is not a DICOM element, so the column is
+   always null and the code takes its `"COL"` default. **Every Siemens direction
+   v0 ever computed used the column cosine**, whatever the file said. Wave 1
+   already reads the real `InPlanePhaseEncodingDirection`, so v1 computes it;
+   and a stack that does not say which axis gets no answer from geometry rather
+   than a guessed one, because BIDS writes the direction into the file name as
+   `dir-` and a wrong one is worse than none.
+
+None of these can be compared against v0 row for row, because there is one v0
+value for a whole series and nothing to compare an image against. That is the
+finding rather than a gap in the parity tool, and `tools/v0-compare` records it
+as such.
+
+Two smaller departures. The private and the standard element are the same
+measurement written twice, so both are read and the answers unioned; v0 stops at
+the first that answers and loses a shell whenever one vendor tag omits it. And
+the private elements are found by their creator block, so a value that is there
+identifies its own vendor; v0 gates them on the manufacturer string and reads
+nothing when that string is missing or spelled a way it does not recognise.
+
+What v0 gets right and is kept: the text is only consulted when the tags say
+nothing **or say only zero**, because a derived image such as a Trace or an ADC
+carries b=0 from the scanner even though the shell it came from was not zero,
+and the sequence name is where the real value survives.
 
 **The session rescue is not one of those**, and §5 changed what it can be. It
 asks whether a whole session has any `ORIGINAL\PRIMARY` stack, and a session is
@@ -427,6 +488,16 @@ Two rules the engine enforces because they are structural rather than
 vocabulary. A stack that is not `convertible` is never handed to a converter,
 and the reason is reported. And **a disposition never depends on what else is in
 the selection**, which is v0's fourth export bug and the same fault as C14.
+
+**The order is rules, then passes, then the disposition.** v0's step 4 has a
+phase after its gap fill, `synthesize_directory_type`, whose job is to recompute
+the routing once a base and a technique have been filled in. Wave 2's table of
+the nine phases does not list it, because in v1 it is not a step: a route is a
+rule set entered by matching an axis (§6.5), and the disposition is derived from
+the **decided** axes, so a pass that fills an axis is seen by the disposition
+that follows it. That only holds if the order holds, so it is written here
+rather than left implied. The corollary is the one §7 already states: the
+disposition may read a decided axis and may not read the selection.
 
 ### 7.1 SyMRI, the case that proves it is needed
 
@@ -743,6 +814,13 @@ from each of the three tiers, each carrying a decoy for the tier below it, and
 one that no measured field can answer, which v0 answers from the technique. And
 the four image roles, including a screen capture labelled `ORIGINAL\SECONDARY`,
 which a rescue must not pick up.
+
+**Diffusion.** One series holding two shells; six gradient directions and a
+b0; a Trace the scanner wrote b=0 on, whose shell survives only in the sequence
+name; the same shells written in both the private and the standard tag; a phase
+direction computed from the slice cosines and one read from a name; and an
+anatomical series whose name holds a number between underscores, which the loose
+patterns must not fire on. Every one of these is an answer v0 cannot reach.
 
 **The rescue.** A visit whose every stack is `ORIGINAL\SECONDARY`; the same
 visit with one primary in it, which answers for the whole visit; the split

@@ -126,6 +126,13 @@ struct FingerprintWant {
     acquisition_type_filled: Option<&'static str>,
     acquisition_type_source: Option<&'static str>,
     image_role: &'static str,
+    dwi_b_value: Option<&'static str>,
+    dwi_b_values: Option<&'static str>,
+    dwi_b_value_source: Option<&'static str>,
+    dwi_pe_direction: Option<&'static str>,
+    dwi_pe_direction_source: Option<&'static str>,
+    dwi_directions: Option<&'static str>,
+    dwi_directions_source: Option<&'static str>,
 }
 
 /// One scheme, and the labels it must produce for the scenario's one subject.
@@ -215,6 +222,19 @@ struct File {
     image_type: &'static str,
     /// `MagneticFieldStrength`, in whatever unit the scanner felt like.
     field_strength: Option<&'static str>,
+    /// The diffusion values, which differ from one image of a series to the
+    /// next: that is what a multi-shell, multi-direction acquisition is.
+    b_value: Option<String>,
+    gradient: Option<String>,
+    directionality: Option<&'static str>,
+    /// The Siemens private b value, under its own creator block.
+    siemens_b_value: Option<String>,
+    /// `ImageOrientationPatient` and `InPlanePhaseEncodingDirection`, which
+    /// with the CSA flag below are what a phase direction is computed from.
+    iop: Option<&'static str>,
+    in_plane: Option<&'static str>,
+    /// A real SV10 CSA header carrying `PhaseEncodingDirectionPositive`.
+    pe_positive: Option<&'static str>,
 }
 
 impl File {
@@ -239,6 +259,13 @@ impl File {
             mr_acquisition_type: Some("3D"),
             image_type: "ORIGINAL\\PRIMARY\\M\\ND",
             field_strength: Some("3.0"),
+            b_value: None,
+            gradient: None,
+            directionality: None,
+            siemens_b_value: None,
+            iop: None,
+            in_plane: None,
+            pe_positive: None,
         }
     }
 }
@@ -330,6 +357,47 @@ fn elements(f: &File, pixel_bytes: usize) -> Vec<Elem> {
     }
     e.push(synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"));
     e.push(synth::text(tags::IMAGE_TYPE, VR::CS, f.image_type));
+    if let Some(v) = &f.b_value {
+        e.push(fd(tags::DIFFUSION_B_VALUE, v));
+    }
+    if let Some(v) = &f.gradient {
+        e.push(fd(tags::DIFFUSION_GRADIENT_ORIENTATION, v));
+    }
+    if let Some(v) = f.directionality {
+        e.push(synth::text(tags::DIFFUSION_DIRECTIONALITY, VR::CS, v));
+    }
+    if let Some(v) = &f.siemens_b_value {
+        // The creator claims the block, so the value sits at (0019,10xx) and a
+        // reader that looks up the creator finds it wherever the block landed.
+        e.push(synth::text(
+            dicom_core::Tag(0x0019, 0x0010),
+            VR::LO,
+            "SIEMENS MR HEADER",
+        ));
+        e.push(synth::text(dicom_core::Tag(0x0019, 0x100C), VR::IS, v));
+    }
+    if let Some(v) = f.iop {
+        e.push(synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, v));
+    }
+    if let Some(v) = f.in_plane {
+        e.push(synth::text(
+            tags::IN_PLANE_PHASE_ENCODING_DIRECTION,
+            VR::CS,
+            v,
+        ));
+    }
+    if let Some(v) = f.pe_positive {
+        e.push(synth::text(
+            dicom_core::Tag(0x0029, 0x0010),
+            VR::LO,
+            "SIEMENS CSA HEADER",
+        ));
+        e.push(synth::bytes(
+            dicom_core::Tag(0x0029, 0x1010),
+            VR::OB,
+            nils_dicom::csa::build_sv10(&[("PhaseEncodingDirectionPositive", &[v])]),
+        ));
+    }
     e.push(synth::us(tags::ROWS, 64));
     e.push(synth::us(tags::COLUMNS, 64));
     e.push(synth::bytes(
@@ -338,6 +406,18 @@ fn elements(f: &File, pixel_bytes: usize) -> Vec<Elem> {
         vec![0u8; pixel_bytes],
     ));
     e
+}
+
+/// An FD element from the backslash-separated way a value is written down.
+/// The diffusion values are binary doubles on disk and text in the catalogue,
+/// so the corpus writes what a scanner writes and the reader does the joining.
+fn fd(tag: dicom_core::Tag, values: &str) -> Elem {
+    let bytes: Vec<u8> = values
+        .split('\\')
+        .filter_map(|p| p.trim().parse::<f64>().ok())
+        .flat_map(f64::to_le_bytes)
+        .collect();
+    synth::bytes(tag, VR::FD, bytes)
 }
 
 fn write(root: &Path, f: &File, pixel_bytes: usize) {
@@ -1391,6 +1471,13 @@ fn main() {
                 acquisition_type_filled: None,
                 acquisition_type_source: None,
                 image_role: "original_primary",
+                dwi_b_value: None,
+                dwi_b_values: None,
+                dwi_b_value_source: None,
+                dwi_pe_direction: None,
+                dwi_pe_direction_source: None,
+                dwi_directions: None,
+                dwi_directions_source: None,
             },
         },
         FpCase {
@@ -1409,6 +1496,13 @@ fn main() {
                 acquisition_type_filled: None,
                 acquisition_type_source: None,
                 image_role: "original_primary",
+                dwi_b_value: None,
+                dwi_b_values: None,
+                dwi_b_value_source: None,
+                dwi_pe_direction: None,
+                dwi_pe_direction_source: None,
+                dwi_directions: None,
+                dwi_directions_source: None,
             },
         },
         FpCase {
@@ -1427,6 +1521,13 @@ fn main() {
                 acquisition_type_filled: None,
                 acquisition_type_source: None,
                 image_role: "original_primary",
+                dwi_b_value: None,
+                dwi_b_values: None,
+                dwi_b_value_source: None,
+                dwi_pe_direction: None,
+                dwi_pe_direction_source: None,
+                dwi_directions: None,
+                dwi_directions_source: None,
             },
         },
         FpCase {
@@ -1445,6 +1546,13 @@ fn main() {
                 acquisition_type_filled: None,
                 acquisition_type_source: None,
                 image_role: "original_primary",
+                dwi_b_value: None,
+                dwi_b_values: None,
+                dwi_b_value_source: None,
+                dwi_pe_direction: None,
+                dwi_pe_direction_source: None,
+                dwi_directions: None,
+                dwi_directions_source: None,
             },
         },
         FpCase {
@@ -1463,6 +1571,13 @@ fn main() {
                 acquisition_type_filled: Some("3D"),
                 acquisition_type_source: Some("image_type"),
                 image_role: "original_primary",
+                dwi_b_value: None,
+                dwi_b_values: None,
+                dwi_b_value_source: None,
+                dwi_pe_direction: None,
+                dwi_pe_direction_source: None,
+                dwi_directions: None,
+                dwi_directions_source: None,
             },
         },
         FpCase {
@@ -1481,6 +1596,13 @@ fn main() {
                 acquisition_type_filled: Some("3D"),
                 acquisition_type_source: Some("sequence_name"),
                 image_role: "original_primary",
+                dwi_b_value: None,
+                dwi_b_values: None,
+                dwi_b_value_source: None,
+                dwi_pe_direction: None,
+                dwi_pe_direction_source: None,
+                dwi_directions: None,
+                dwi_directions_source: None,
             },
         },
         FpCase {
@@ -1499,6 +1621,13 @@ fn main() {
                 acquisition_type_filled: Some("2D"),
                 acquisition_type_source: Some("text"),
                 image_role: "original_primary",
+                dwi_b_value: None,
+                dwi_b_values: None,
+                dwi_b_value_source: None,
+                dwi_pe_direction: None,
+                dwi_pe_direction_source: None,
+                dwi_directions: None,
+                dwi_directions_source: None,
             },
         },
         FpCase {
@@ -1517,6 +1646,13 @@ fn main() {
                 acquisition_type_filled: None,
                 acquisition_type_source: None,
                 image_role: "original_primary",
+                dwi_b_value: None,
+                dwi_b_values: None,
+                dwi_b_value_source: None,
+                dwi_pe_direction: None,
+                dwi_pe_direction_source: None,
+                dwi_directions: None,
+                dwi_directions_source: None,
             },
         },
         FpCase {
@@ -1535,6 +1671,13 @@ fn main() {
                 acquisition_type_filled: None,
                 acquisition_type_source: None,
                 image_role: "original_secondary",
+                dwi_b_value: None,
+                dwi_b_values: None,
+                dwi_b_value_source: None,
+                dwi_pe_direction: None,
+                dwi_pe_direction_source: None,
+                dwi_directions: None,
+                dwi_directions_source: None,
             },
         },
         FpCase {
@@ -1553,6 +1696,13 @@ fn main() {
                 acquisition_type_filled: None,
                 acquisition_type_source: None,
                 image_role: "not_an_image",
+                dwi_b_value: None,
+                dwi_b_values: None,
+                dwi_b_value_source: None,
+                dwi_pe_direction: None,
+                dwi_pe_direction_source: None,
+                dwi_directions: None,
+                dwi_directions_source: None,
             },
         },
         FpCase {
@@ -1571,6 +1721,13 @@ fn main() {
                 acquisition_type_filled: None,
                 acquisition_type_source: None,
                 image_role: "derived",
+                dwi_b_value: None,
+                dwi_b_values: None,
+                dwi_b_value_source: None,
+                dwi_pe_direction: None,
+                dwi_pe_direction_source: None,
+                dwi_directions: None,
+                dwi_directions_source: None,
             },
         },
     ];
@@ -1695,6 +1852,13 @@ fn main() {
                 acquisition_type_filled: None,
                 acquisition_type_source: None,
                 image_role: "not_an_image",
+                dwi_b_value: None,
+                dwi_b_values: None,
+                dwi_b_value_source: None,
+                dwi_pe_direction: None,
+                dwi_pe_direction_source: None,
+                dwi_directions: None,
+                dwi_directions_source: None,
             }),
         },
     ];
@@ -1747,6 +1911,225 @@ fn main() {
                 })
                 .collect(),
             fingerprint: c.fingerprint.as_ref().map(|w| FingerprintWant { ..*w }),
+        });
+    }
+
+    // ------------------------------------------------------------ diffusion
+
+    // §6. Each is one series whose images differ, because that is the whole
+    // point: v0 reads one row per series and so records every acquisition as
+    // one shell and one direction.
+    struct DwiCase {
+        name: &'static str,
+        what: &'static str,
+        needs: &'static str,
+        /// One entry per image: b value, gradient, directionality.
+        images: &'static [(&'static str, &'static str, &'static str)],
+        description: &'static str,
+        /// The Siemens private b value per image, when the scenario uses it.
+        siemens: &'static [&'static str],
+        geometry: Option<(&'static str, &'static str, &'static str)>,
+        want: FingerprintWant,
+    }
+
+    fn dwi_want(
+        b_value: Option<&'static str>,
+        b_values: Option<&'static str>,
+        b_source: Option<&'static str>,
+        pe: Option<&'static str>,
+        pe_source: Option<&'static str>,
+        n: Option<&'static str>,
+        n_source: Option<&'static str>,
+    ) -> FingerprintWant {
+        FingerprintWant {
+            field_strength_tesla: Some("3.0"),
+            field_strength_normalized: Some("3.0"),
+            field_strength_unit: Some("tesla"),
+            acquisition_type_filled: None,
+            acquisition_type_source: None,
+            image_role: "original_primary",
+            dwi_b_value: b_value,
+            dwi_b_values: b_values,
+            dwi_b_value_source: b_source,
+            dwi_pe_direction: pe,
+            dwi_pe_direction_source: pe_source,
+            dwi_directions: n,
+            dwi_directions_source: n_source,
+        }
+    }
+
+    let dwis = [
+        DwiCase {
+            name: "dwi-two-shells",
+            what: "one series holding b=0 and b=1000",
+            needs: "both shells; v0 reads one row per series and sees one",
+            images: &[("0", "", "NONE"), ("1000", "1\\0\\0", "DIRECTIONAL")],
+            description: "ax dwi",
+            siemens: &[],
+            geometry: None,
+            want: dwi_want(
+                Some("1000"),
+                Some("0,1000"),
+                Some("standard"),
+                None,
+                None,
+                Some("1"),
+                Some("gradients"),
+            ),
+        },
+        DwiCase {
+            name: "dwi-directions",
+            what: "six gradient directions and a b0",
+            needs: "six; v0 reports one for every stack that has a gradient at all",
+            images: &[
+                ("0", "0\\0\\0", "NONE"),
+                ("1000", "1\\0\\0", "DIRECTIONAL"),
+                ("1000", "0\\1\\0", "DIRECTIONAL"),
+                ("1000", "0\\0\\1", "DIRECTIONAL"),
+                ("1000", "1\\1\\0", "DIRECTIONAL"),
+                ("1000", "0\\1\\1", "DIRECTIONAL"),
+                ("1000", "1\\0\\1", "DIRECTIONAL"),
+            ],
+            description: "dti 6 riktningar",
+            siemens: &[],
+            geometry: None,
+            want: dwi_want(
+                Some("1000"),
+                Some("0,1000"),
+                Some("standard"),
+                None,
+                None,
+                Some("6"),
+                Some("gradients"),
+            ),
+        },
+        DwiCase {
+            name: "dwi-trace-keeps-its-shell",
+            what: "a Trace image the scanner wrote b=0 on",
+            needs: "1000 from the sequence name, because b=0 alone is ambiguous",
+            images: &[("0", "", "ISOTROPIC")],
+            description: "ax dwi trace *re_b1000t",
+            siemens: &[],
+            geometry: None,
+            want: dwi_want(
+                Some("1000"),
+                Some("0,1000"),
+                Some("standard,text"),
+                None,
+                None,
+                None,
+                None,
+            ),
+        },
+        DwiCase {
+            name: "dwi-private-and-standard",
+            what: "the same shells written in both the private and the standard tag",
+            needs: "one set of shells, and both sources named",
+            images: &[("0", "", "NONE"), ("1000", "1\\0\\0", "DIRECTIONAL")],
+            description: "ep2d_diff",
+            siemens: &["0", "1000"],
+            geometry: None,
+            want: dwi_want(
+                Some("1000"),
+                Some("0,1000"),
+                Some("private,standard"),
+                None,
+                None,
+                Some("1"),
+                Some("gradients"),
+            ),
+        },
+        DwiCase {
+            name: "dwi-phase-direction",
+            what: "an axial slice with the phase encoding along the column",
+            needs: "AP from the cosines; v0 always takes the column, right or wrong",
+            images: &[("1000", "1\\0\\0", "DIRECTIONAL")],
+            description: "ep2d_diff",
+            siemens: &[],
+            geometry: Some(("1\\0\\0\\0\\1\\0", "COL", "1")),
+            want: dwi_want(
+                Some("1000"),
+                Some("1000"),
+                Some("standard"),
+                Some("AP"),
+                Some("geometry"),
+                Some("1"),
+                Some("gradients"),
+            ),
+        },
+        DwiCase {
+            name: "dwi-phase-from-name",
+            what: "no CSA flag, and the direction written into the name",
+            needs: "PA from the text, and the source says so",
+            images: &[("1000", "1\\0\\0", "DIRECTIONAL")],
+            description: "ep2d_diff_b1000_PA",
+            siemens: &[],
+            geometry: None,
+            want: dwi_want(
+                Some("1000"),
+                Some("1000"),
+                Some("standard"),
+                Some("PA"),
+                Some("text"),
+                Some("1"),
+                Some("gradients"),
+            ),
+        },
+        DwiCase {
+            name: "dwi-not-diffusion",
+            what: "an anatomical series whose name holds a number between underscores",
+            needs: "nothing derived: the loose patterns are only asked once something says diffusion",
+            images: &[("", "", "")],
+            description: "t1_mprage_32_sag",
+            siemens: &[],
+            geometry: None,
+            want: dwi_want(None, None, None, None, None, None, None),
+        },
+    ];
+
+    for (n, c) in dwis.iter().enumerate() {
+        let dir = format!("{}/DWI{:03}/visit1", c.name, n + 1);
+        let su = uid(&["14", &n.to_string()]);
+        let images = c.images;
+        let siemens = c.siemens;
+        let geometry = c.geometry;
+        let description = c.description;
+        let f = study(
+            root,
+            &dir,
+            &su,
+            &format!("14-{n}"),
+            images.len() as u64,
+            px,
+            move |f, i| {
+                f.patient_id = Some("DWICASE");
+                f.series_description = description;
+                let (b, g, d) = images[i as usize];
+                f.b_value = (!b.is_empty()).then(|| b.to_string());
+                f.gradient = (!g.is_empty()).then(|| g.to_string());
+                f.directionality = (!d.is_empty()).then_some(d);
+                f.siemens_b_value = siemens.get(i as usize).map(|v| (*v).to_string());
+                if let Some((iop, in_plane, positive)) = geometry {
+                    f.iop = Some(iop);
+                    f.in_plane = Some(in_plane);
+                    f.pe_positive = Some(positive);
+                }
+            },
+        );
+        seeds.push((c.name, f));
+        scenarios.push(Scenario {
+            name: c.name,
+            what: c.what,
+            people: 1,
+            needs: c.needs,
+            studies: vec![StudyWant {
+                dir,
+                date: Some("20220115"),
+                source: "study_date",
+                person: "P1".into(),
+            }],
+            sessions: Vec::new(),
+            fingerprint: Some(FingerprintWant { ..c.want }),
         });
     }
 
@@ -1809,13 +2192,23 @@ fn main() {
                     out,
                     "      \"fingerprint\": {{\"field_strength_tesla\": {}, \"field_strength_normalized\": {}, \
                      \"field_strength_unit\": {}, \"acquisition_type_filled\": {}, \
-                     \"acquisition_type_source\": {}, \"image_role\": {:?}}},",
+                     \"acquisition_type_source\": {}, \"image_role\": {:?}, \
+                     \"dwi_b_value\": {}, \"dwi_b_values\": {}, \"dwi_b_value_source\": {}, \
+                     \"dwi_pe_direction\": {}, \"dwi_pe_direction_source\": {}, \
+                     \"dwi_directions\": {}, \"dwi_directions_source\": {}}},",
                     q(w.field_strength_tesla),
                     q(w.field_strength_normalized),
                     q(w.field_strength_unit),
                     q(w.acquisition_type_filled),
                     q(w.acquisition_type_source),
-                    w.image_role
+                    w.image_role,
+                    q(w.dwi_b_value),
+                    q(w.dwi_b_values),
+                    q(w.dwi_b_value_source),
+                    q(w.dwi_pe_direction),
+                    q(w.dwi_pe_direction_source),
+                    q(w.dwi_directions),
+                    q(w.dwi_directions_source)
                 )
                 .unwrap();
             }

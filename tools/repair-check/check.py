@@ -43,7 +43,9 @@ def load(registry: str):
         for row in con.execute(
             "SELECT scenario, field_strength_tesla, field_strength_normalized,"
             " field_strength_unit, acquisition_type_filled, acquisition_type_source,"
-            " image_role FROM fp"
+            " image_role, dwi_b_value, dwi_b_values, dwi_b_value_source,"
+            " dwi_pe_direction, dwi_pe_direction_source, dwi_directions,"
+            " dwi_directions_source FROM fp"
         ):
             fp[row[0]].append(row[1:])
     if "rows" in tables:
@@ -215,6 +217,13 @@ DERIVED = (
     "acquisition_type_filled",
     "acquisition_type_source",
     "image_role",
+    "dwi_b_value",
+    "dwi_b_values",
+    "dwi_b_value_source",
+    "dwi_pe_direction",
+    "dwi_pe_direction_source",
+    "dwi_directions",
+    "dwi_directions_source",
 )
 
 

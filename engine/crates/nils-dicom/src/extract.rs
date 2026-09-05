@@ -924,15 +924,15 @@ mod tests {
         ])))
         .unwrap();
         assert_eq!(
-            x.value(Level::SeriesMr, "dwi_siemens_b_value"),
+            x.value(Level::Instance, "dwi_siemens_b_value"),
             Some(&Value::Int(1000))
         );
         assert_eq!(
-            x.value(Level::SeriesMr, "dwi_siemens_directionality"),
+            x.value(Level::Instance, "dwi_siemens_directionality"),
             Some(&Value::Text("DIRECTIONAL".into()))
         );
         assert_eq!(
-            x.value(Level::SeriesMr, "dwi_ge_b_value"),
+            x.value(Level::Instance, "dwi_ge_b_value"),
             Some(&Value::Int(1000))
         );
         assert_eq!(
@@ -940,7 +940,7 @@ mod tests {
             Some(&Value::Int(6))
         );
         assert_eq!(
-            x.value(Level::SeriesMr, "dwi_philips_b_value"),
+            x.value(Level::Instance, "dwi_philips_b_value"),
             Some(&Value::Double(800.0))
         );
     }

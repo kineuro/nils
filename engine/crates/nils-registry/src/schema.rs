@@ -414,7 +414,9 @@ fn build_registry() -> Vec<Table> {
                 col("flip_angle", Type::Double),
                 col("echo_train_length", Type::Int),
                 col("echo_numbers", Type::Text),
-                col("diffusion_b_value", Type::Text),
+                // The shell, not the raw element: the values are per image
+                // now (§6), and a rule that compares this compares a number.
+                col("diffusion_b_value", Type::Double),
                 col("magnetic_field_strength", Type::Double),
                 col("slice_thickness", Type::Double),
                 col("spacing_between_slices", Type::Double),
@@ -455,6 +457,16 @@ fn build_registry() -> Vec<Table> {
                 col("acquisition_type_filled", Type::Text),
                 col("acquisition_type_source", Type::Text),
                 col("image_role", Type::Text),
+                // Wave 3 §6, from the per-image diffusion values: the shell,
+                // every shell, the anatomical phase-encoding direction, the
+                // gradient count, and which kind of evidence answered each.
+                col("dwi_b_value", Type::Double),
+                col("dwi_b_values", Type::Text),
+                col("dwi_b_value_source", Type::Text),
+                col("dwi_pe_direction", Type::Text),
+                col("dwi_pe_direction_source", Type::Text),
+                col("dwi_directions", Type::Int),
+                col("dwi_directions_source", Type::Text),
                 // what made it
                 req("job_id", Type::Int),
                 req("epoch", Type::Int),

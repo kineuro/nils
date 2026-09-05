@@ -10,7 +10,7 @@
 use nils_registry::schema::{Table, Type, table};
 use nils_registry::store::{Error, Param, Row, Store};
 
-use crate::{derived, fold};
+use crate::{derived, dwi, fold};
 
 /// The stack's own columns, in the order the select reads them.
 const STACK: &[&str] = &[
@@ -63,18 +63,26 @@ const SERIES: &[&str] = &[
 ];
 
 /// The MR detail columns, absent for a CT or PET stack.
+///
+/// `diffusion_b_value` used to sit here. Wave 3 §6 moved it to the image, where
+/// a value that differs from one image of a series to the next belongs, and the
+/// fingerprint's column is now filled from the shell those images agree on. The
+/// three that remain per series are the ones that really are: which in-plane
+/// axis the phase encoding ran along, its sign, and GE's own direction count.
 const MR: &[&str] = &[
     "mr_acquisition_type",
     "magnetic_field_strength",
     "number_of_averages",
     "pixel_bandwidth",
-    "diffusion_b_value",
+    "phase_encoding_direction",
     "echo_time",
     "repetition_time",
     "inversion_time",
     "flip_angle",
     "echo_train_length",
     "echo_numbers",
+    "dwi_siemens_pe_dir_positive",
+    "dwi_ge_n_directions",
 ];
 
 const STUDY: &[&str] = &["manufacturer", "manufacturer_model_name", "station_name"];
@@ -142,6 +150,13 @@ pub const WRITTEN: &[&str] = &[
     "acquisition_type_filled",
     "acquisition_type_source",
     "image_role",
+    "dwi_b_value",
+    "dwi_b_values",
+    "dwi_b_value_source",
+    "dwi_pe_direction",
+    "dwi_pe_direction_source",
+    "dwi_directions",
+    "dwi_directions_source",
     "job_id",
     "epoch",
 ];
@@ -213,6 +228,34 @@ pub fn select_first_instances(store: &Store) -> String {
                   ROW_NUMBER() OVER (PARTITION BY stack_id ORDER BY sop_instance_uid) AS rn \
            FROM {} WHERE stack_id > {} AND stack_id <= {}\
          ) t WHERE rn = 1",
+        store.qualified("instance"),
+        store.dialect().param(1, Type::Int),
+        store.dialect().param(2, Type::Int),
+    )
+}
+
+/// The distinct diffusion values of every image of the stacks in the window
+/// (§6).
+///
+/// `DISTINCT` is what keeps this small: a stack of a thousand images holds a
+/// handful of shells and at most a few hundred gradients, so the rows come back
+/// in the tens rather than the thousands, and the counting is done here rather
+/// than in a dialect's aggregate.
+///
+/// Reading every image is the whole point. v0 joins its per-series detail table
+/// to `instance`, which walks one row repeated once per image, so its list of
+/// shells holds one value and its gradient count is one.
+pub fn select_diffusion(store: &Store) -> String {
+    format!(
+        "SELECT DISTINCT stack_id, diffusion_b_value, diffusion_gradient_orientation, \
+                diffusion_directionality, dwi_siemens_b_value, dwi_siemens_directionality, \
+                dwi_ge_b_value, dwi_philips_b_value \
+         FROM {} WHERE stack_id > {} AND stack_id <= {} \
+           AND (diffusion_b_value IS NOT NULL OR diffusion_gradient_orientation IS NOT NULL \
+             OR diffusion_directionality IS NOT NULL OR dwi_siemens_b_value IS NOT NULL \
+             OR dwi_siemens_directionality IS NOT NULL OR dwi_ge_b_value IS NOT NULL \
+             OR dwi_philips_b_value IS NOT NULL) \
+         ORDER BY stack_id",
         store.qualified("instance"),
         store.dialect().param(1, Type::Int),
         store.dialect().param(2, Type::Int),
@@ -297,6 +340,7 @@ pub fn derive(
     r: &Row,
     first: &First,
     split_reason: Option<&str>,
+    images: &[dwi::Image],
     job_id: i64,
     epoch: i64,
 ) -> Result<Vec<Param>, Error> {
@@ -356,6 +400,19 @@ pub fn derive(
     );
     let role = derived::role(image_type.as_deref());
 
+    let orientation = text_of(r, 9, S + 12)?;
+    let in_plane = text(r, E + 4)?;
+    let diffusion = dwi::derive(
+        images,
+        &dwi::Stack {
+            orientation: orientation.as_deref(),
+            in_plane: in_plane.as_deref(),
+            pe_positive: opt_int(r, E + 11)?,
+            ge_directions: opt_int(r, E + 12)?,
+            text: text_all.as_deref(),
+        },
+    );
+
     Ok(vec![
         Param::Int(stack_id),
         Param::Int(series_id),
@@ -374,7 +431,7 @@ pub fn derive(
         opt(text(r, S + 9)?),          // scanning_sequence
         opt(text(r, S + 10)?),         // sequence_variant
         opt(text(r, S + 11)?),         // scan_options
-        opt(text_of(r, 9, S + 12)?),   // image_orientation_patient
+        opt(orientation.clone()),      // image_orientation_patient
         num(double_of(r, 10, E + 5)?), // echo_time
         num(double_of(r, 11, E + 6)?), // repetition_time
         num(double_of(r, 12, E + 7)?), // inversion_time
@@ -384,19 +441,23 @@ pub fn derive(
             None => opt_int(r, E + 9)?,
         }), // echo_train_length
         opt(text_of(r, 15, E + 10)?),  // echo_numbers
-        opt(text(r, E + 4)?),          // diffusion_b_value
-        num(measured_field),           // magnetic_field_strength
-        num(opt_double(r, S + 13)?),   // slice_thickness
-        num(opt_double(r, S + 14)?),   // spacing_between_slices
-        num(opt_double(r, E + 2)?),    // number_of_averages
-        opt(text(r, E + 3)?),          // pixel_bandwidth
-        opt(measured_type),            // mr_acquisition_type
-        Param::from(r.text(5)?),       // orientation
-        num(opt_double(r, 6)?),        // orientation_confidence
-        Param::Int(r.int(7)?),         // n_instances
-        Param::Int(r.int(2)?),         // stack_index
-        opt(text(r, 3)?),              // signature
-        Param::Int(r.int(S + 2)?),     // stacks_in_series
+        // The shell, so that a rule asking whether any b value is positive
+        // gets an answer. The series-level column this used to read kept the
+        // smaller of two disagreeing values, which is 0 for every acquisition
+        // that played a b0, so the answer was always no.
+        num(diffusion.b_value),      // diffusion_b_value
+        num(measured_field),         // magnetic_field_strength
+        num(opt_double(r, S + 13)?), // slice_thickness
+        num(opt_double(r, S + 14)?), // spacing_between_slices
+        num(opt_double(r, E + 2)?),  // number_of_averages
+        opt(text(r, E + 3)?),        // pixel_bandwidth
+        opt(measured_type),          // mr_acquisition_type
+        Param::from(r.text(5)?),     // orientation
+        num(opt_double(r, 6)?),      // orientation_confidence
+        Param::Int(r.int(7)?),       // n_instances
+        Param::Int(r.int(2)?),       // stack_index
+        opt(text(r, 3)?),            // signature
+        Param::Int(r.int(S + 2)?),   // stacks_in_series
         opt(split_reason.map(str::to_string)),
         int(first.rows),
         int(first.columns),
@@ -415,6 +476,13 @@ pub fn derive(
         opt(filled.map(|(v, _)| v.to_string())),
         opt(filled.map(|(_, how)| how.name().to_string())),
         opt(Some(role.name().to_string())),
+        num(diffusion.b_value),
+        opt(diffusion.b_values),
+        opt(diffusion.b_value_source),
+        opt(diffusion.pe_direction),
+        opt(diffusion.pe_direction_source),
+        int(diffusion.directions),
+        opt(diffusion.directions_source),
         Param::Int(job_id),
         Param::Int(epoch),
     ])
