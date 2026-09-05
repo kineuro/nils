@@ -61,7 +61,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `contrast_flow_rate` | ContrastFlowRate (0018,1046) | double | technical |  |
 | `contrast_flow_duration` | ContrastFlowDuration (0018,1047) | double | technical |  |
 
-## series_mr (39, MR only)
+## series_mr (32, MR only)
 
 | column | source | converter | class | note |
 |---|---|---|---|---|
@@ -93,17 +93,10 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `temporal_position_identifier` | TemporalPositionIdentifier (0020,0100) | int | technical |  |
 | `number_of_temporal_positions` | NumberOfTemporalPositions (0020,0105) | int | technical |  |
 | `temporal_resolution` | TemporalResolution (0020,0110) | text | technical | text, as v0 stored it |
-| `diffusion_b_value` | DiffusionBValue, then fg MRDiffusionSequence.DiffusionBValue | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
-| `diffusion_gradient_orientation` | DiffusionGradientOrientation (0018,9089) | text | technical |  |
-| `diffusion_directionality` | DiffusionDirectionality, then fg MRDiffusionSequence.DiffusionDirectionality | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
 | `parallel_acquisition_technique` | ParallelAcquisitionTechnique, then fg MRModifierSequence.ParallelAcquisitionTechnique | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
 | `parallel_reduction_factor_in_plane` | ParallelReductionFactorInPlane, then fg MRModifierSequence.ParallelReductionFactorInPlane | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
-| `dwi_siemens_b_value` | (0019,xx0C) SIEMENS MR HEADER | int | technical | private, by creator block; bytes of an implicit VR file read as IS |
-| `dwi_siemens_directionality` | (0019,xx0D) SIEMENS MR HEADER | text | technical | private, by creator block |
 | `dwi_siemens_pe_dir_positive` | (0029,xx10) SIEMENS CSA HEADER, SV10 PhaseEncodingDirectionPositive | int | technical | CSA image header, SV10 only (v0) |
-| `dwi_ge_b_value` | (0043,xx39) GEMS_PARM_01, first value | int | technical | the first of the four values |
 | `dwi_ge_n_directions` | (0043,xx30) GEMS_PARM_01 | int | technical | private, by creator block; bytes read as SS |
-| `dwi_philips_b_value` | (2001,xx03) Philips Imaging DD 001, sentinel above 1e37 is null | double | technical | the sentinel above 1e37 is null (v0); bytes read as FL |
 
 ## series_ct (24, CT only)
 
@@ -187,7 +180,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `pet_bed_index` | NumberOfSlices (0054,0081) | int | technical | NumberOfSlices, v0's name |
 | `pet_frame_type` | SeriesType (0054,1000) | text | technical | SeriesType, v0's name |
 
-## instance (26)
+## instance (33)
 
 | column | source | converter | class | note |
 |---|---|---|---|---|
@@ -217,5 +210,12 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `image_comments` | ImageComments (0020,4000) | text | quasi-identifying |  |
 | `transfer_syntax_uid` | TransferSyntaxUID (0002,0010), else meta TransferSyntaxUID | text | technical | the file meta; for a bare data set the syntax it was read with (v0 stored null there) |
 | `charset` | SpecificCharacterSet (0008,0005) | text | technical | addition: SpecificCharacterSet as written |
+| `diffusion_b_value` | DiffusionBValue, then fg MRDiffusionSequence.DiffusionBValue | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
+| `diffusion_gradient_orientation` | DiffusionGradientOrientation (0018,9089) | text | technical |  |
+| `diffusion_directionality` | DiffusionDirectionality, then fg MRDiffusionSequence.DiffusionDirectionality | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
+| `dwi_siemens_b_value` | (0019,xx0C) SIEMENS MR HEADER | int | technical | private, by creator block; bytes of an implicit VR file read as IS |
+| `dwi_siemens_directionality` | (0019,xx0D) SIEMENS MR HEADER | text | technical | private, by creator block |
+| `dwi_ge_b_value` | (0043,xx39) GEMS_PARM_01, first value | int | technical | the first of the four values |
+| `dwi_philips_b_value` | (2001,xx03) Philips Imaging DD 001, sentinel above 1e37 is null | double | technical | the sentinel above 1e37 is null (v0); bytes read as FL |
 
 176 columns.

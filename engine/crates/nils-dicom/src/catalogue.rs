@@ -1099,7 +1099,7 @@ pub static CATALOGUE: &[Field] = &[
     ),
     f(
         "diffusion_b_value",
-        SeriesMr,
+        Instance,
         Chain(&[
             Top(tags::DIFFUSION_B_VALUE),
             Fg(tags::MR_DIFFUSION_SEQUENCE, tags::DIFFUSION_B_VALUE),
@@ -1110,7 +1110,7 @@ pub static CATALOGUE: &[Field] = &[
     ),
     f(
         "diffusion_gradient_orientation",
-        SeriesMr,
+        Instance,
         T(tags::DIFFUSION_GRADIENT_ORIENTATION),
         Text,
         Tech,
@@ -1118,7 +1118,7 @@ pub static CATALOGUE: &[Field] = &[
     ),
     f(
         "diffusion_directionality",
-        SeriesMr,
+        Instance,
         Chain(&[
             Top(tags::DIFFUSION_DIRECTIONALITY),
             Fg(tags::MR_DIFFUSION_SEQUENCE, tags::DIFFUSION_DIRECTIONALITY),
@@ -1157,7 +1157,7 @@ pub static CATALOGUE: &[Field] = &[
     ),
     f(
         "dwi_siemens_b_value",
-        SeriesMr,
+        Instance,
         Source::Special(Special::Dwi(Dwi::SiemensBValue)),
         Int,
         Tech,
@@ -1165,7 +1165,7 @@ pub static CATALOGUE: &[Field] = &[
     ),
     f(
         "dwi_siemens_directionality",
-        SeriesMr,
+        Instance,
         Source::Special(Special::Dwi(Dwi::SiemensDirectionality)),
         Text,
         Tech,
@@ -1181,7 +1181,7 @@ pub static CATALOGUE: &[Field] = &[
     ),
     f(
         "dwi_ge_b_value",
-        SeriesMr,
+        Instance,
         Source::Special(Special::Dwi(Dwi::GeBValue)),
         Int,
         Tech,
@@ -1197,7 +1197,7 @@ pub static CATALOGUE: &[Field] = &[
     ),
     f(
         "dwi_philips_b_value",
-        SeriesMr,
+        Instance,
         Source::Special(Special::Dwi(Dwi::PhilipsBValue)),
         Double,
         Tech,
@@ -1756,9 +1756,13 @@ mod tests {
         assert_eq!(count(Subject), 2);
         assert_eq!(count(Study), 12);
         assert_eq!(count(Series), 30);
-        assert_eq!(count(Instance), 26);
+        // Wave 3 §6 moved the seven diffusion values that vary from one image
+        // of a series to the next: a b value, a gradient orientation and a
+        // directionality are per image by design, and keeping one per series
+        // records a multi-shell acquisition as its smallest shell.
+        assert_eq!(count(Instance), 33);
         assert_eq!(count(Stack), 14);
-        assert_eq!(count(SeriesMr), 39);
+        assert_eq!(count(SeriesMr), 32);
         assert_eq!(count(SeriesCt), 24);
         assert_eq!(count(SeriesPet), 29);
         assert_eq!(CATALOGUE.len(), 176);
@@ -1849,7 +1853,7 @@ mod tests {
             "EchoTime, then fg MREchoSequence.EffectiveEchoTime, then private per-frame .EchoTime"
         ));
         let md = render_markdown();
-        assert!(md.contains("## series_mr (39, MR only)"));
+        assert!(md.contains("## series_mr (32, MR only)"));
         assert!(md.contains("176 columns."));
     }
 }

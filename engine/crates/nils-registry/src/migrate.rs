@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +86,53 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 8,
         apply: study_says_whether_it_holds_a_primary,
     },
+    Migration {
+        version: 9,
+        apply: diffusion_is_recorded_per_image,
+    },
 ];
+
+/// Wave 3 §6: the seven diffusion values that vary from one image of a series
+/// to the next move to the instance, and the fingerprint gains what it works
+/// out from them.
+///
+/// A b value, a gradient orientation and a directionality are per image by
+/// design: that is what a multi-shell, multi-direction acquisition is. Keeping
+/// one per series records such a series as its smallest shell and its gradient
+/// count as one. The columns on `series_mr` are left where they are in a
+/// registry that already has them, unread, because a migration adds and does
+/// not take away.
+fn diffusion_is_recorded_per_image(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "instance",
+        &[
+            "diffusion_b_value",
+            "diffusion_gradient_orientation",
+            "diffusion_directionality",
+            "dwi_siemens_b_value",
+            "dwi_siemens_directionality",
+            "dwi_ge_b_value",
+            "dwi_philips_b_value",
+        ],
+    )?;
+    add_columns(
+        store,
+        "stack_fingerprint",
+        &[
+            "dwi_b_value",
+            "dwi_b_values",
+            "dwi_b_value_source",
+            "dwi_pe_direction",
+            "dwi_pe_direction_source",
+            "dwi_directions",
+            "dwi_directions_source",
+        ],
+    )
+}
 
 /// Wave 3 §6: a study says whether any of its stacks is one the scanner called
 /// its output, which is half of the session rescue. The other half is the

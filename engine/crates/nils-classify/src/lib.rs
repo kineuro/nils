@@ -11,6 +11,7 @@
 
 pub mod classify;
 pub mod derived;
+pub mod dwi;
 pub mod fingerprint;
 pub mod fold;
 pub mod job;

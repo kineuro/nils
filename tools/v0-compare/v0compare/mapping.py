@@ -75,11 +75,29 @@ LEVELS: dict[str, Level] = {
             "tube_current": 0,
         },
     ),
+    # Wave 3 §6 moved the seven diffusion values that vary from one image of a
+    # series to the next onto the instance. v0 keeps them on
+    # `mri_series_details`, which is keyed by series, so there is one v0 value
+    # for a whole series and nothing to compare an image against. That is not a
+    # gap in the tool: it is the finding. v0's own enrichment joins that table
+    # to `instance` and walks one row repeated once per image, so its list of
+    # shells holds one value and its gradient count is one.
     "instance": Level(
         "instance",
         "instance",
         absent=frozenset(
-            {"charset", "instance_creation_date", "presentation_creation_date"}
+            {
+                "charset",
+                "instance_creation_date",
+                "presentation_creation_date",
+                "diffusion_b_value",
+                "diffusion_gradient_orientation",
+                "diffusion_directionality",
+                "dwi_siemens_b_value",
+                "dwi_siemens_directionality",
+                "dwi_ge_b_value",
+                "dwi_philips_b_value",
+            }
         ),
     ),
 }
