@@ -10,7 +10,7 @@
 use nils_registry::schema::{Table, Type, table};
 use nils_registry::store::{Error, Param, Row, Store};
 
-use crate::fold;
+use crate::{derived, fold};
 
 /// The stack's own columns, in the order the select reads them.
 const STACK: &[&str] = &[
@@ -136,6 +136,12 @@ pub const WRITTEN: &[&str] = &[
     "station_name",
     "implementation_class_uid",
     "implementation_version_name",
+    "field_strength_tesla",
+    "field_strength_normalized",
+    "field_strength_unit",
+    "acquisition_type_filled",
+    "acquisition_type_source",
+    "image_role",
     "job_id",
     "epoch",
 ];
@@ -335,6 +341,21 @@ pub fn derive(
 
     let (fov_x, fov_y, aspect) = fov(first);
 
+    // §6. Each is a pure function of this stack's own row, so a stack derives
+    // the same way whichever window it lands in, and each is written beside
+    // the measured column rather than over it.
+    let measured_field = opt_double(r, E + 1)?;
+    let field = derived::field_strength(measured_field);
+    let image_type = text_of(r, 8, S + 8)?;
+    let measured_type = text(r, E)?;
+    let filled = derived::acquisition_type(
+        measured_type.as_deref(),
+        image_type.as_deref(),
+        f_sequence.as_deref(),
+        text_all.as_deref(),
+    );
+    let role = derived::role(image_type.as_deref());
+
     Ok(vec![
         Param::Int(stack_id),
         Param::Int(series_id),
@@ -349,7 +370,7 @@ pub fn derive(
         opt(f_image_comments),
         opt(text_all),
         opt(text_contrast),
-        opt(text_of(r, 8, S + 8)?),    // image_type
+        opt(image_type.clone()),       // image_type
         opt(text(r, S + 9)?),          // scanning_sequence
         opt(text(r, S + 10)?),         // sequence_variant
         opt(text(r, S + 11)?),         // scan_options
@@ -364,12 +385,12 @@ pub fn derive(
         }), // echo_train_length
         opt(text_of(r, 15, E + 10)?),  // echo_numbers
         opt(text(r, E + 4)?),          // diffusion_b_value
-        num(opt_double(r, E + 1)?),    // magnetic_field_strength
+        num(measured_field),           // magnetic_field_strength
         num(opt_double(r, S + 13)?),   // slice_thickness
         num(opt_double(r, S + 14)?),   // spacing_between_slices
         num(opt_double(r, E + 2)?),    // number_of_averages
         opt(text(r, E + 3)?),          // pixel_bandwidth
-        opt(text(r, E)?),              // mr_acquisition_type
+        opt(measured_type),            // mr_acquisition_type
         Param::from(r.text(5)?),       // orientation
         num(opt_double(r, 6)?),        // orientation_confidence
         Param::Int(r.int(7)?),         // n_instances
@@ -388,6 +409,12 @@ pub fn derive(
         opt(text(r, M + 2)?), // station_name
         opt(text(r, S + 15)?),
         opt(text(r, S + 16)?),
+        num(field.map(|f| f.tesla)),
+        num(field.and_then(|f| f.normalized)),
+        opt(field.map(|f| f.unit.name().to_string())),
+        opt(filled.map(|(v, _)| v.to_string())),
+        opt(filled.map(|(_, how)| how.name().to_string())),
+        opt(Some(role.name().to_string())),
         Param::Int(job_id),
         Param::Int(epoch),
     ])

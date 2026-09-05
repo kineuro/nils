@@ -338,6 +338,51 @@ wave that does them: field strength normalised, acquisition type inferred, DWI
 enrichment, and the session rescue as a fact about a study. Each is computed
 from what was measured and stored **beside** the measured column, never over it.
 
+That last clause is the whole argument. v0 writes each of these back into the
+column it was inferred from: the acquisition-type fill overwrites
+`stack_fingerprint.mr_acquisition_type`, which classification reads, and where
+it decides among other things whether a magnetisation-prepared gradient echo is
+MPRAGE. So a stack can be MPRAGE because a run guessed it was 3D because a run
+called it MPRAGE. The field-strength normaliser overwrites
+`mri_series_details.magnetic_field_strength`, and there what the scanner said is
+gone for good. Storing beside is what keeps a measurement a measurement.
+
+Three of the four are pure functions of one stack's own row, which is what keeps
+a stack deriving the same way whichever window it lands in, and each departs
+from v0 in one place:
+
+- **Field strength.** v0 falls back to the nearest standard value when nothing
+  is within tolerance, so a 0.2 T open scanner is recorded as 0.5 T and a 4.7 T
+  animal scanner as 3 T. A reading that is not near a real magnet gets no
+  normalised value here; the measured column still says what the scanner said.
+  v0 also treats anything above 100 as gauss, so a scanner reporting 1500 for a
+  1.5 T magnet becomes 0.15 T and then rounds up to 0.5 T. Tesla, gauss and
+  millitesla are all tried and the scale that lands on the grid wins, with the
+  unit recorded so a reader can see that a conversion was assumed.
+- **Acquisition type.** v0's third tier reads the **technique** the classifier
+  assigned, and it is left out. The technique is a conclusion and the
+  fingerprint records measurements; that tier is what closes the loop described
+  above. A pack that wants to conclude 3D from a technique can still do it, as a
+  rule, where it is recorded as a conclusion. What is kept is the two measured
+  tiers: the `DIS2D`/`DIS3D` token in `ImageType`, then the sequence name, then
+  the rest of the text, with the source recorded alongside the value.
+- **The image role.** `ImageType`'s first two values, worked out once, because
+  three separate things read them: the disposition of §7, the exclusion a pack
+  applies, and the session rescue. A screenshot is checked for before anything
+  else, because a session with no primaries is exactly the session whose only
+  `ORIGINAL\SECONDARY` images might be screen captures.
+
+**The session rescue is not one of those**, and §5 changed what it can be. It
+asks whether a whole session has any `ORIGINAL\PRIMARY` stack, and a session is
+now derived on read from a scheme, so a value computed under one scheme would be
+wrong under another. The parts that are facts are stored, and the rescue is
+their composition, derived where it is needed exactly as a session label is: the
+stack's own role is a fingerprint field, whether a **study** holds any primary
+is a fact about the study, and "no primary anywhere in this session" is read
+from those two plus the scheme. That keeps Wave 2's finding, which was that the
+rescue must not depend on which stacks were in the batch, and it keeps §5's,
+which is that nothing about a session is stored as a fact.
+
 ## 7. The disposition
 
 The concept v0 lacks and every one of its export bugs needs.
@@ -665,6 +710,17 @@ produces and a naive reader believes; the placeholders `00000000` and
 real `18990101`; a UID carrying eight digits that are not a calendar date and
 another carrying a real date far outside the range, both of which must be
 refused; and no date anywhere in any element, any UID or the path.
+
+**Derived fields.** One study of one stack each, because these are pure
+functions of one row and what is being checked is that the right column reaches
+the right function and the answer lands in the right column, which is the class
+of mistake a unit test cannot see. A field strength in gauss; one in
+millitesla, which v0 reads as a third of the real magnet; a 4.7 T animal
+scanner, which v0 records as 3 T; no field strength at all. An acquisition type
+from each of the three tiers, each carrying a decoy for the tier below it, and
+one that no measured field can answer, which v0 answers from the technique. And
+the four image roles, including a screen capture labelled `ORIGINAL\SECONDARY`,
+which a rescue must not pick up.
 
 **Sessions.** Two studies on one day; two studies three days apart; studies at
 zero, six, nine and twelve months against an anchor, so the cadence snaps three
