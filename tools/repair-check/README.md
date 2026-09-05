@@ -31,3 +31,22 @@ v0's side of the comparison is the same pattern as `tools/pack-check`: v0's
 identity and date functions are close to pure and importable, so a referee runs
 them over the same tree and writes the rows v1 writes. v0 is private and is
 never copied here; the referee imports it from wherever it is on the host.
+
+## The gate
+
+    sh tools/repair-check/gate.sh WORKDIR
+
+Writes the corpus, digests **each scenario on its own with the identity rule its
+manifest declares**, and checks the lot. One rule cannot read every layout: an
+archive whose subject folder sits under a site directory has to be told so, one
+whose tag is good needs no path source, and one whose code hides in a name needs
+a pattern rather than a path. Digesting them all under one rule lets a scenario
+pass for the wrong reason, which is worse than failing.
+
+A scenario is right when it finds the people the manifest describes, dates every
+study the way the manifest says, and raises the diagnostic the manifest expects.
+That last one matters for the scenarios whose point is that the reader must
+*speak*: a tag that is one constant across an archive, or a study whose files
+name two different people. Diagnostics come from two places, and the gate reads
+both: what the writer recorded per batch is in the registry, and what the run
+concluded once every file had been seen is in the report.

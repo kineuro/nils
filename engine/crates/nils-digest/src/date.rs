@@ -72,16 +72,18 @@ impl Source {
     pub fn weight(self) -> u32 {
         match self {
             Source::StudyDate => 4,
-            Source::PpsStartDate
-            | Source::PpsEndDate
-            | Source::InstanceCreationDate
-            | Source::Private => 3,
+            Source::PpsStartDate | Source::PpsEndDate | Source::InstanceCreationDate => 3,
             Source::SeriesDate
             | Source::AcquisitionDate
             | Source::ContentDate
             | Source::IssueDate
             | Source::PresentationCreationDate => 2,
             Source::Path => 2,
+            // A blanket scan of private elements is looser than a named tag,
+            // so it is worth what the weak standard elements are worth. A site
+            // that names the tag its scanner uses deserves more, and naming
+            // one is pack work rather than engine work.
+            Source::Private => 2,
             Source::Uid | Source::UidEpoch => 1,
         }
     }
@@ -307,6 +309,11 @@ impl Ballot {
         for uid in [&x.study_uid, &x.series_uid, &x.sop_uid] {
             self.inside(Source::Uid, uid, range);
             self.inside(Source::UidEpoch, uid, range);
+        }
+        // Some vendors leave the acquisition date inside a private version
+        // string that no scrub touches (§4.2).
+        for text in &x.private_text {
+            self.inside(Source::Private, text, range);
         }
         // A sorted archive puts the session date in a directory name, so the
         // directory votes and the file name does not.

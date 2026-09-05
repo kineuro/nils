@@ -25,18 +25,29 @@ from collections import defaultdict
 
 
 def load(registry: str):
-    """Every study of the digest, with the scenario it came from."""
+    """Every study of the digest, with the scenario it came from.
+
+    Either a registry the whole corpus was digested into, or the combined view
+    `collect.py` builds when each scenario was digested with its own rule."""
     con = sqlite3.connect(registry)
-    rows = con.execute(
-        """
-        SELECT sf.path, st.id, st.subject_id,
-               COALESCE(st.date_filled, st.study_date)
-        FROM source_file sf
-        JOIN instance i ON i.id = sf.instance_id
-        JOIN series se ON se.id = i.series_id
-        JOIN study st ON st.id = se.study_id
-        """
-    ).fetchall()
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    said: dict[str, set[str]] = defaultdict(set)
+    if "said" in tables:
+        for scenario, kind, _n in con.execute("SELECT scenario, kind, count FROM said"):
+            said[scenario].add(kind)
+    if "rows" in tables:
+        rows = con.execute("SELECT path, study, subject, study_date FROM rows").fetchall()
+    else:
+        rows = con.execute(
+            """
+            SELECT sf.path, st.id, st.subject_id,
+                   COALESCE(st.date_filled, st.study_date)
+            FROM source_file sf
+            JOIN instance i ON i.id = sf.instance_id
+            JOIN series se ON se.id = i.series_id
+            JOIN study st ON st.id = se.study_id
+            """
+        ).fetchall()
     con.close()
     # scenario -> study dir -> (study ids, subject ids, dates)
     seen: dict[str, dict[str, tuple[set, set, set]]] = defaultdict(
@@ -52,7 +63,7 @@ def load(registry: str):
         studies.add(study_id)
         subjects.add(subject_id)
         dates.add(iso(date))
-    return seen
+    return seen, said
 
 
 def iso(value) -> str:
@@ -69,7 +80,7 @@ def main() -> int:
     registry, manifest = sys.argv[1], sys.argv[2]
     verbose = "--verbose" in sys.argv
     want = json.load(open(manifest, encoding="utf-8"))
-    seen = load(registry)
+    seen, said = load(registry)
 
     print(f"{'scenario':<24} {'people':>6} {'seen':>5}  {'dates':>7}  what is wrong")
     print("-" * 92)
@@ -107,6 +118,12 @@ def main() -> int:
                     wrong.append(f"{shortdir(w)} is {'/'.join(sorted(dates))}, wanted no date")
                 else:
                     right_dates += 1
+
+        # A scenario may exist to make the reader speak rather than to make it
+        # right, and then what it said is the check.
+        want_said = s.get("diagnostic")
+        if want_said and want_said not in said.get(name, set()):
+            wrong.append(f"no {want_said} diagnostic")
 
         n_dates = len(s["studies"])
         ok = not wrong

@@ -142,6 +142,12 @@ pub struct Extracted {
     /// not this file's stays null.
     pub values: Vec<Option<Value>>,
     pub identity: Identity,
+    /// Text found in this file's **private** elements, capped, for the date
+    /// vote (Wave 3 §4.2). Some vendors leave the acquisition date inside a
+    /// private version string that no scrub touches, so the vote is allowed to
+    /// look there. The strings are kept only long enough to be read for a
+    /// date; nothing stores them.
+    pub private_text: Vec<String>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -176,6 +182,41 @@ pub fn refusal_of(failure: ReadFailure) -> Refusal {
         ReadFailure::NotDicom => Refusal::new(QuarantineClass::NotDicom, None),
         ReadFailure::Parse { .. } => Refusal::new(QuarantineClass::ParseError, failure.detail()),
     }
+}
+
+/// How many private strings one file offers the date vote. A header carries a
+/// few; a cap keeps a pathological file from carrying thousands.
+const PRIVATE_TEXT_MAX: usize = 64;
+
+/// The text of this file's private elements. A private group is odd, and a
+/// value only interests the vote when it is a string long enough to hold a
+/// date. Sequences are not descended: a date in one is not a study's date.
+fn private_text_of(dataset: &InMemDicomObject) -> Vec<String> {
+    let mut out = Vec::new();
+    for e in dataset {
+        if out.len() >= PRIVATE_TEXT_MAX {
+            break;
+        }
+        let tag = e.header().tag;
+        // Odd group, and not the group-length element every group carries.
+        if tag.group() % 2 == 0 || tag.element() == 0 {
+            continue;
+        }
+        if !matches!(
+            e.header().vr(),
+            VR::LO | VR::SH | VR::ST | VR::LT | VR::UT | VR::UN | VR::CS | VR::DA | VR::DT
+        ) {
+            continue;
+        }
+        let Ok(text) = e.value().to_str() else {
+            continue;
+        };
+        let text = text.trim();
+        if text.len() >= 8 && text.len() <= 256 && text.chars().any(|c| c.is_ascii_digit()) {
+            out.push(text.to_string());
+        }
+    }
+    out
 }
 
 /// Extract from a header already read.
@@ -318,6 +359,8 @@ pub fn extract_header(header: Header, fields: &IdentityFields) -> Result<Extract
         values.push(conversion.value);
     }
 
+    let private_text = private_text_of(&dataset);
+
     Ok(Extracted {
         form,
         transfer_syntax,
@@ -329,6 +372,7 @@ pub fn extract_header(header: Header, fields: &IdentityFields) -> Result<Extract
         charset,
         values,
         identity,
+        private_text,
         diagnostics,
     })
 }
