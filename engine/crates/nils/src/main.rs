@@ -97,6 +97,10 @@ enum Command {
     },
     /// Select, de-identify and write a dataset out, recording the policy it applied (§8)
     Release(Box<ReleaseArgs>),
+    /// How a dataset physically leaves: encrypted archives, checksummed and
+    /// recorded against the release (§11)
+    #[command(subcommand)]
+    Handover(HandoverCommand),
     /// Which stack stands for each session's role, with the evidence that chose it (§10)
     Pick {
         #[command(subcommand)]
@@ -203,6 +207,86 @@ struct ReleaseArgs {
     /// Machine-readable output
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum HandoverCommand {
+    /// Pack a release into encrypted archives and record what was sent
+    Run(Box<HandoverArgs>),
+    /// Read a handover back: every archive there, its checksum, and openable
+    Verify(HandoverVerifyArgs),
+    /// The handovers of this registry, with what each sent
+    List(HandoverListArgs),
+    /// The password of a key, for the person the archives are going to
+    Password(HandoverPasswordArgs),
+}
+
+#[derive(Debug, Parser)]
+struct HandoverArgs {
+    /// The release to hand over, by name. Its newest finished version is the
+    /// one packed, because that is the one the tree is
+    #[arg(long, value_name = "NAME")]
+    release: String,
+    /// Where the archives go, which is not where the tree is
+    #[arg(long, value_name = "DIR")]
+    out: PathBuf,
+    /// The key the password is derived from, by name. The password is never
+    /// stored and never appears in a command line
+    #[arg(long, value_name = "NAME")]
+    key: String,
+    /// How big an archive may get, as a number with a unit
+    #[arg(long, default_value = "100GB", value_name = "SIZE")]
+    chunk: String,
+    /// How the chunks are filled: in the tree's order, or largest first into
+    /// the first with room
+    #[arg(long, default_value = "ordered", value_name = "ordered|packed")]
+    strategy: String,
+    /// 7z's compression level. Low by default: a released tree is mostly
+    /// already-compressed NIfTI and the time costs more than the bytes
+    #[arg(long, default_value_t = 1, value_name = "0-9")]
+    level: u8,
+    /// Write PAR2 recovery records at this percentage. Needs par2create
+    #[arg(long, value_name = "PERCENT")]
+    par2: Option<u8>,
+    /// Do not read the archives back after writing them
+    #[arg(long)]
+    no_verify: bool,
+    /// The archiver
+    #[arg(long = "7z", default_value = "7z", value_name = "PATH")]
+    sevenzip: PathBuf,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Parser)]
+struct HandoverVerifyArgs {
+    /// Which handover, by its id
+    #[arg(long, value_name = "ID")]
+    handover: i64,
+    /// The key its password was derived from
+    #[arg(long, value_name = "NAME")]
+    key: String,
+    #[arg(long = "7z", default_value = "7z", value_name = "PATH")]
+    sevenzip: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Parser)]
+struct HandoverListArgs {
+    /// Only the handovers of this release
+    #[arg(long, value_name = "NAME")]
+    release: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Parser)]
+struct HandoverPasswordArgs {
+    /// The key, by name
+    #[arg(long, value_name = "NAME")]
+    key: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -588,6 +672,7 @@ fn main() -> ExitCode {
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
         Command::Release(args) => release(&home, *args),
+        Command::Handover(command) => handover_command(&home, command),
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
@@ -3673,6 +3758,272 @@ fn pick_explain(home: &Home, id: i64, json: bool) -> Result<(), Exit> {
 }
 
 // --------------------------------------------------------------------------
+// The handover (Wave 3 §11)
+// --------------------------------------------------------------------------
+
+fn handover_command(home: &Home, command: HandoverCommand) -> Result<(), Exit> {
+    match command {
+        HandoverCommand::Run(args) => handover_run(home, *args),
+        HandoverCommand::Verify(args) => handover_verify(home, args),
+        HandoverCommand::List(args) => handover_list(home, args),
+        HandoverCommand::Password(args) => {
+            // Reading a password out is a deliberate act, so it is its own
+            // verb rather than a line of some other command's output.
+            let key = home
+                .keys(None)
+                .read(&args.key)
+                .map_err(|e| fail(e.to_string()))?;
+            println!("{}", nils_release::handover::password(&key));
+            Ok(())
+        }
+    }
+}
+
+/// A size with a unit, because a chunk is quoted in gigabytes and typed once.
+fn size_of(text: &str) -> Result<i64, Exit> {
+    let cleaned = text.trim().to_ascii_uppercase().replace(' ', "");
+    let (number, scale) = match cleaned.as_str() {
+        t if t.ends_with("TB") || t.ends_with("TIB") => {
+            (t.trim_end_matches(['T', 'I', 'B']), 1i64 << 40)
+        }
+        t if t.ends_with("GB") || t.ends_with("GIB") => {
+            (t.trim_end_matches(['G', 'I', 'B']), 1i64 << 30)
+        }
+        t if t.ends_with("MB") || t.ends_with("MIB") => {
+            (t.trim_end_matches(['M', 'I', 'B']), 1i64 << 20)
+        }
+        t if t.ends_with("KB") || t.ends_with("KIB") => {
+            (t.trim_end_matches(['K', 'I', 'B']), 1i64 << 10)
+        }
+        t => (t.trim_end_matches('B'), 1),
+    };
+    let value: f64 = number
+        .parse()
+        .map_err(|_| usage(format!("{text} is not a size; try 100GB")))?;
+    let bytes = (value * scale as f64) as i64;
+    match bytes > 0 {
+        true => Ok(bytes),
+        false => Err(usage(format!("{text} is not a size a chunk can be"))),
+    }
+}
+
+fn handover_run(home: &Home, args: HandoverArgs) -> Result<(), Exit> {
+    use nils_release::handover::{archive, plan, run};
+
+    let strategy = plan::Strategy::parse(&args.strategy).ok_or_else(|| {
+        usage(format!(
+            "--strategy is ordered or packed, not {}",
+            args.strategy
+        ))
+    })?;
+    if args.level > 9 {
+        return Err(usage("--level is 0 to 9".to_string()));
+    }
+    let cap = size_of(&args.chunk)?;
+    // §11, before anything is packed: the archiver, and the recovery records
+    // if they were asked for. A handover that discovers a missing archiver
+    // after writing 400 GB has written 400 GB for nothing.
+    let archiver = archive::Archiver::find(&args.sevenzip).map_err(usage)?;
+    let par2 = match args.par2 {
+        Some(percent) => Some(archive::Par2::find(percent).map_err(usage)?),
+        None => None,
+    };
+    let key = home
+        .keys(None)
+        .read(&args.key)
+        .map_err(|e| fail(e.to_string()))?;
+    let password = nils_release::handover::password(&key);
+    let mut registry = open(home)?;
+
+    let settings = run::Settings {
+        release: &args.release,
+        out: &args.out,
+        archiver: &archiver,
+        key_name: &args.key,
+        password: &password,
+        cap,
+        strategy,
+        level: args.level,
+        par2,
+        verify: !args.no_verify,
+        actor: &actor(),
+    };
+    let report = run::run(&mut registry, &settings).map_err(|e| match e {
+        run::Error::Refused(m) => usage(m),
+        other => fail(other.to_string()),
+    })?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return finish(&report);
+    }
+    println!(
+        "handover {} version {} ({})",
+        report.release, report.version, report.strategy
+    );
+    println!("  from             {}", report.root);
+    println!("  into             {}", report.out);
+    println!("  packed by        {}", report.tool);
+    println!("  subjects         {:>12}", report.subjects);
+    println!("  files            {:>12}", report.files);
+    println!("  archives         {:>12}", report.archives);
+    println!(
+        "  {:>9.2} GiB of tree into {:.2} GiB of archives",
+        report.bytes as f64 / (1u64 << 30) as f64,
+        report.packed_bytes as f64 / (1u64 << 30) as f64
+    );
+    if report.verified > 0 {
+        println!("  read back        {:>12}", report.verified);
+    }
+    // A file the record names and the disk does not: a handover of a tree
+    // somebody edited is not a handover of the release.
+    if report.missing > 0 {
+        println!(
+            "  {:>10}   file(s) the release wrote and the tree no longer holds",
+            report.missing
+        );
+    }
+    for why in &report.failed {
+        println!("  failed           {why}");
+    }
+    println!("  {:.1} s", report.seconds);
+    finish(&report)
+}
+
+/// A handover with a failed archive is a failed handover, whatever it wrote.
+fn finish(report: &nils_release::handover::run::Report) -> Result<(), Exit> {
+    match report.failed.is_empty() {
+        true => Ok(()),
+        false => Err(fail(format!(
+            "{} archive(s) did not come out right",
+            report.failed.len()
+        ))),
+    }
+}
+
+fn handover_verify(home: &Home, args: HandoverVerifyArgs) -> Result<(), Exit> {
+    use nils_release::handover::{archive, run};
+
+    let archiver = archive::Archiver::find(&args.sevenzip).map_err(usage)?;
+    let key = home
+        .keys(None)
+        .read(&args.key)
+        .map_err(|e| fail(e.to_string()))?;
+    let password = nils_release::handover::password(&key);
+    let mut registry = open(home)?;
+    let report =
+        run::verify(&mut registry, args.handover, &archiver, &password).map_err(|e| match e {
+            run::Error::Refused(m) => usage(m),
+            other => fail(other.to_string()),
+        })?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return finish(&report);
+    }
+    println!("handover {}", report.handover_id);
+    println!("  in               {}", report.out);
+    println!("  archives         {:>12}", report.archives);
+    println!("  read back        {:>12}", report.verified);
+    for why in &report.failed {
+        println!("  failed           {why}");
+    }
+    println!("  {:.1} s", report.seconds);
+    finish(&report)
+}
+
+fn handover_list(home: &Home, args: HandoverListArgs) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let store = registry.store();
+    // Qualified, because `release` has a `started_at` too and an unqualified
+    // one is ambiguous the moment the two are joined.
+    let started = store.dialect().text_of_qualified(
+        Some("h"),
+        nils_registry::schema::table("handover")
+            .column("started_at")
+            .expect("handover.started_at is a column"),
+    );
+    let mut wheres = String::new();
+    let mut params: Vec<nils_registry::store::Param> = Vec::new();
+    if let Some(name) = &args.release {
+        wheres = format!(
+            " WHERE r.name = {}",
+            store.dialect().param(1, nils_registry::schema::Type::Text)
+        );
+        params.push(nils_registry::store::Param::from(name.as_str()));
+    }
+    let sql = format!(
+        "SELECT h.id, r.name, r.version, h.root, {started}, h.archives, h.files, \
+                h.packed_bytes, h.key_name, h.error \
+         FROM {} h JOIN {} r ON r.id = h.release_id{wheres} ORDER BY h.id",
+        store.qualified("handover"),
+        store.qualified("release"),
+    );
+    let rows = store
+        .query(&sql, &params)
+        .map_err(|e| fail(e.to_string()))?;
+    if rows.is_empty() {
+        println!("no handover yet");
+        return Ok(());
+    }
+    if args.json {
+        let mut out = Vec::new();
+        for r in &rows {
+            out.push(serde_json::json!({
+                "id": r.int(0).map_err(|e| fail(e.to_string()))?,
+                "release": r.text(1).map_err(|e| fail(e.to_string()))?,
+                "version": r.text(2).map_err(|e| fail(e.to_string()))?,
+                "archives": r.int(5).map_err(|e| fail(e.to_string()))?,
+                "files": r.int(6).map_err(|e| fail(e.to_string()))?,
+                "bytes": r.int(7).map_err(|e| fail(e.to_string()))?,
+                "key": r.text(8).map_err(|e| fail(e.to_string()))?,
+            }));
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).map_err(|e| fail(e.to_string()))?
+        );
+        return Ok(());
+    }
+    for r in &rows {
+        let id = r.int(0).map_err(|e| fail(e.to_string()))?;
+        let name = r.text(1).map_err(|e| fail(e.to_string()))?;
+        let version = r.text(2).map_err(|e| fail(e.to_string()))?;
+        let when = r.text(4).map_err(|e| fail(e.to_string()))?;
+        let when = when.split('T').next().unwrap_or(when);
+        println!("{id:>4}  {name} {version}  {when}");
+        println!(
+            "        {} archive(s), {} file(s), {:.2} GiB, opened by key {}",
+            r.int(5).map_err(|e| fail(e.to_string()))?,
+            r.int(6).map_err(|e| fail(e.to_string()))?,
+            r.int(7).map_err(|e| fail(e.to_string()))? as f64 / (1u64 << 30) as f64,
+            r.text(8).map_err(|e| fail(e.to_string()))?,
+        );
+        println!(
+            "        into {}",
+            r.text(3).map_err(|e| fail(e.to_string()))?
+        );
+        // The first, and how many more: a set of a hundred archives that all
+        // failed for one reason is one line, not a hundred.
+        if let Ok(Some(error)) = r.opt_text(9) {
+            let mut parts = error.split("; ");
+            let first = parts.next().unwrap_or(error);
+            match parts.count() {
+                0 => println!("        failed: {first}"),
+                more => println!("        failed: {first}, and {more} more"),
+            }
+        }
+    }
+    Ok(())
+}
+
 // The release (Wave 3 §8)
 // --------------------------------------------------------------------------
 

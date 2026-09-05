@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,7 +118,23 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 16,
         apply: a_release_has_a_layout,
     },
+    Migration {
+        version: 17,
+        apply: a_release_can_be_handed_over,
+    },
 ];
+
+/// Wave 3 §11: how a dataset physically left, as part of the release record.
+fn a_release_can_be_handed_over(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(
+        store,
+        kind,
+        &["handover", "handover_archive", "handover_subject"],
+    )
+}
 
 /// Wave 3 §9: a release has a layout, and a BIDS one writes files that are not
 /// one instance written out.

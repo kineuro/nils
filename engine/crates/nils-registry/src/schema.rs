@@ -713,6 +713,80 @@ fn build_registry() -> Vec<Table> {
         )
         .unique(&["release_id", "stack_id"])
         .index(&["release_id"]),
+        // Wave 3 §11: how a dataset physically left. The archive set is part
+        // of the release record, so "what did we send them, and is it still
+        // intact" is a query rather than a folder somebody remembers.
+        //
+        // The password is not here and never will be: it is a key, derived
+        // from a named one in the store under a domain of its own.
+        Table::new(
+            "handover",
+            vec![
+                col("id", Type::Id),
+                req("release_id", Type::Int),
+                // Where the archives were written, which is not where the tree
+                // is: a handover leaves.
+                req("root", Type::Text),
+                req("strategy", Type::Text),
+                req("chunk_bytes", Type::Int),
+                req("level", Type::Int),
+                // The key the password was derived from, by name. Knowing which
+                // key opens an archive is not knowing the password.
+                req("key_name", Type::Text),
+                // The archiver that made it, so a set says what it needs to be
+                // opened with.
+                req("tool", Type::Text),
+                col("par2_percent", Type::Int),
+                req("actor", Type::Text),
+                req("started_at", Type::Timestamp),
+                col("finished_at", Type::Timestamp),
+                req("archives", Type::Int),
+                req("files", Type::Int),
+                req("bytes", Type::Int),
+                // The bytes the archives themselves take, which is what a
+                // recipient has to receive.
+                req("packed_bytes", Type::Int),
+                col("error", Type::Text),
+            ],
+        )
+        .index(&["release_id"]),
+        Table::new(
+            "handover_archive",
+            vec![
+                col("id", Type::Id),
+                req("handover_id", Type::Int),
+                req("ordinal", Type::Int),
+                req("name", Type::Text),
+                // Of the archive file, so a set can be checked without opening
+                // any of it.
+                req("digest", Type::Text),
+                req("bytes", Type::Int),
+                req("files", Type::Int),
+                req("subjects", Type::Int),
+                // Whether it was read back, and when. An archive nobody can
+                // open is not an archive that was handed over.
+                col("verified_at", Type::Timestamp),
+                col("error", Type::Text),
+            ],
+        )
+        .unique(&["handover_id", "ordinal"])
+        .index(&["handover_id"]),
+        // Which people are in which archive. One row per subject and archive,
+        // not per file: a subject is the unit a handover packs, because a
+        // recipient who has half a person has nothing.
+        Table::new(
+            "handover_subject",
+            vec![
+                col("id", Type::Id),
+                req("archive_id", Type::Int),
+                req("subject_id", Type::Int),
+                req("code", Type::Text),
+                req("files", Type::Int),
+                req("bytes", Type::Int),
+            ],
+        )
+        .index(&["archive_id"])
+        .index(&["subject_id"]),
         // And what a version could place nowhere, with the reason. §9.3's
         // fourth route is never a silent drop.
         Table::new(

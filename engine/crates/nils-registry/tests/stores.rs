@@ -652,11 +652,10 @@ fn migration_16_rebuilds_the_release_manifest_and_keeps_its_rows() {
         Standing::Behind(15)
     );
 
-    // Which is what opening it behind a newer binary does.
-    assert_eq!(
-        migrate::migrate(&mut store, Kind::Registry).unwrap(),
-        vec![16]
-    );
+    // Which is what opening it behind a newer binary does: every migration
+    // after its version, 16 among them.
+    let applied = migrate::migrate(&mut store, Kind::Registry).unwrap();
+    assert!(applied.contains(&16), "{applied:?}");
 
     let rows = store
         .query(
