@@ -131,12 +131,15 @@ acq:
       neck: Neck
       spine: Spine
   - from: orientation
+    # The words the fingerprint stores, which are the standard's own and not
+    # the abbreviations section 9.1 renders them as: a token here is matched
+    # against a column, and `Ax` is what a name says rather than what a row
+    # holds.
     tokens:
-      Ax: Ax
-      Sag: Sag
-      Cor: Cor
-      Obl: Obl
-      '3D': Volume
+      Axial: Ax
+      Sagittal: Sag
+      Coronal: Cor
+      Oblique: Obl
   - from: acquisition_type
     tokens:
       '2D': 2D
@@ -225,6 +228,9 @@ acq:
       Filtered: Filtered
       ORIG: ORIG
   - from: provenance
+    # `RawRecon` is not a token: it is the axis's default, so it holds on
+    # every stack nothing else claimed and would be in every filename saying
+    # nothing. The same argument as `ND`.
     tokens:
       SyMRI: SyMRI
       EPIMix: EPIMix
@@ -234,7 +240,6 @@ acq:
       PerfusionRecon: PerfusionRecon
       ASLRecon: ASLRecon
       BOLDRecon: BOLDRecon
-      RawRecon: RawRecon
 
 # What counts as a vendor's synthetic contrast, for the placement choice of
 # section 9.3: an image the scanner computed from a multi-parameter

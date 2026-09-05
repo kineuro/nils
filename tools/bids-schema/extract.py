@@ -47,6 +47,10 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--url", default=URL)
     p.add_argument("--file")
+    p.add_argument(
+        "--json",
+        help="write the same subset as JSON, for the release gate's own checker",
+    )
     args = p.parse_args()
 
     if args.file:
@@ -154,6 +158,52 @@ def main() -> int:
             w(f'        extensions: {rust_list(g.get("extensions", []))} }},')
     w("];")
     w("")
+    if args.json:
+        # The same subset, for the gate. One generator, two consumers, so the
+        # engine and the thing that checks the engine cannot drift apart.
+        subset = {
+            "bids_version": bids,
+            "schema_version": version,
+            "entities": [
+                {
+                    "key": key,
+                    "name": entities[key]["name"],
+                    "index": entities[key].get("format") == "index",
+                    "values": [
+                        v["name"] if isinstance(v, dict) else v
+                        for v in entities[key].get("enum", [])
+                    ],
+                }
+                for key in order
+                if key not in SKIP
+                and any(
+                    key in g.get("entities", {}) for dt in MRI for g in raw[dt].values()
+                )
+            ],
+            "groups": [
+                {
+                    "datatype": dt,
+                    "name": name,
+                    "suffixes": g.get("suffixes", []),
+                    "required": [
+                        k
+                        for k in order
+                        if k in g.get("entities", {})
+                        and level(g["entities"][k]) == "required"
+                        and k not in SKIP
+                    ],
+                    "allowed": [
+                        k for k in order if k in g.get("entities", {}) and k not in SKIP
+                    ],
+                }
+                for dt in MRI
+                for name, g in raw[dt].items()
+            ],
+        }
+        with open(args.json, "w", encoding="utf-8") as f:
+            json.dump(subset, f, indent=2, sort_keys=False)
+            f.write("\n")
+
     print("\n".join(out))
     return 0
 

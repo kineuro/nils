@@ -1992,33 +1992,11 @@ fn places(
         let a = axes.get(&stack).unwrap_or(&empty);
         let get = |k: &str| a.get(k).map(String::as_str).filter(|v| !v.is_empty());
         let folder = folder_of(get("directory_type"), get("provenance"));
-        let fields = name::Fields {
-            body_part: get("body_part"),
-            spinal_cord: get("body_part") == Some("spine"),
-            orientation: r.opt_text(6)?,
-            base: get("base"),
-            acquisition_type: r.opt_text(9)?,
-            modifier: get("modifier"),
-            technique: get("technique"),
-            acceleration: get("acceleration"),
-            construct: get("construct"),
-            post_contrast: get("post_contrast") == Some("yes"),
-            datatype: get("directory_type"),
-            dwi_b_value: r.double(12).ok(),
-            dwi_pe_direction: r.opt_text(10)?,
-            dwi_directions: r.opt_int(13)?,
-        };
-        let subject = r.int(1)?;
-        let study = r.int(2)?;
-        let label = labels
-            .get(&subject)
-            .and_then(|m| m.get(&study))
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-
-        // §9.2. Every axis value reaches the mapping as an **identity** and not
-        // as what a row stores: `base` stores `T2*w` and its identity is
-        // `T2starw`, which is also the word BIDS uses.
+        // §9.2. Every axis value is read as an **identity** and not as what a
+        // row stores: `base` stores `T2*w` and its identity is `T2starw`,
+        // `post_contrast` stores `1` and its identity is `given`. Both names
+        // go through this, because a name built on a stored label is a name
+        // built on v0's column types.
         let id_of = |axis: &str, stored: &str| -> Option<String> {
             pack.axes
                 .iter()
@@ -2035,6 +2013,32 @@ fn places(
                 .filter_map(|v| id_of(axis, v))
                 .collect()
         };
+        let contrast = get("post_contrast").and_then(|v| id_of("post_contrast", v));
+        let contrast = contrast.as_deref() == Some("given");
+        let fields = name::Fields {
+            body_part: get("body_part"),
+            spinal_cord: get("body_part") == Some("spine"),
+            orientation: r.opt_text(6)?,
+            base: get("base"),
+            acquisition_type: r.opt_text(9)?,
+            modifier: get("modifier"),
+            technique: get("technique"),
+            acceleration: get("acceleration"),
+            construct: get("construct"),
+            post_contrast: contrast,
+            datatype: get("directory_type"),
+            dwi_b_value: r.double(12).ok(),
+            dwi_pe_direction: r.opt_text(10)?,
+            dwi_directions: r.opt_int(13)?,
+        };
+        let subject = r.int(1)?;
+        let study = r.int(2)?;
+        let label = labels
+            .get(&subject)
+            .and_then(|m| m.get(&study))
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+
         let constructs = ids_of("construct", get("construct"));
         let modifiers = ids_of("modifier", get("modifier"));
         let technique = get("technique").and_then(|v| id_of("technique", v));
@@ -2051,7 +2055,7 @@ fn places(
             provenance: provenance.as_deref(),
             orientation: r.opt_text(6)?,
             acquisition_type: r.opt_text(9)?,
-            post_contrast: get("post_contrast") == Some("yes"),
+            post_contrast: contrast,
             // The one fact no rule sets: a person answers it per study (§9.2).
             task: get("task"),
             // The echo number, and only where the series has more than one

@@ -1,0 +1,652 @@
+{
+  "bids_version": "1.11.1",
+  "schema_version": "1.2.1",
+  "entities": [
+    {
+      "key": "task",
+      "name": "task",
+      "index": false,
+      "values": []
+    },
+    {
+      "key": "acquisition",
+      "name": "acq",
+      "index": false,
+      "values": []
+    },
+    {
+      "key": "ceagent",
+      "name": "ce",
+      "index": false,
+      "values": []
+    },
+    {
+      "key": "reconstruction",
+      "name": "rec",
+      "index": false,
+      "values": []
+    },
+    {
+      "key": "direction",
+      "name": "dir",
+      "index": false,
+      "values": []
+    },
+    {
+      "key": "run",
+      "name": "run",
+      "index": true,
+      "values": []
+    },
+    {
+      "key": "modality",
+      "name": "mod",
+      "index": false,
+      "values": []
+    },
+    {
+      "key": "echo",
+      "name": "echo",
+      "index": true,
+      "values": []
+    },
+    {
+      "key": "flip",
+      "name": "flip",
+      "index": true,
+      "values": []
+    },
+    {
+      "key": "inversion",
+      "name": "inv",
+      "index": true,
+      "values": []
+    },
+    {
+      "key": "mtransfer",
+      "name": "mt",
+      "index": false,
+      "values": [
+        "on",
+        "off"
+      ]
+    },
+    {
+      "key": "part",
+      "name": "part",
+      "index": false,
+      "values": [
+        "mag",
+        "phase",
+        "real",
+        "imag"
+      ]
+    },
+    {
+      "key": "chunk",
+      "name": "chunk",
+      "index": true,
+      "values": []
+    }
+  ],
+  "groups": [
+    {
+      "datatype": "anat",
+      "name": "nonparametric",
+      "suffixes": [
+        "T1w",
+        "T2w",
+        "PDw",
+        "T2starw",
+        "FLAIR",
+        "inplaneT1",
+        "inplaneT2",
+        "PDT2",
+        "angio",
+        "T2star",
+        "FLASH",
+        "PD"
+      ],
+      "required": [],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "echo",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "anat",
+      "name": "parametric",
+      "suffixes": [
+        "T1map",
+        "T2map",
+        "T2starmap",
+        "R1map",
+        "R2map",
+        "R2starmap",
+        "PDmap",
+        "MTRmap",
+        "MTsat",
+        "UNIT1",
+        "T1rho",
+        "MWFmap",
+        "MTVmap",
+        "Chimap",
+        "S0map",
+        "M0map"
+      ],
+      "required": [],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "anat",
+      "name": "defacemask",
+      "suffixes": [
+        "defacemask"
+      ],
+      "required": [],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "modality",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "anat",
+      "name": "megre",
+      "suffixes": [
+        "MEGRE"
+      ],
+      "required": [
+        "echo"
+      ],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "echo",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "anat",
+      "name": "mese",
+      "suffixes": [
+        "MESE"
+      ],
+      "required": [
+        "echo"
+      ],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "direction",
+        "run",
+        "echo",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "anat",
+      "name": "multiflip",
+      "suffixes": [
+        "VFA"
+      ],
+      "required": [
+        "flip"
+      ],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "echo",
+        "flip",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "anat",
+      "name": "multiinversion",
+      "suffixes": [
+        "IRT1"
+      ],
+      "required": [
+        "inversion"
+      ],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "inversion",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "anat",
+      "name": "mp2rage",
+      "suffixes": [
+        "MP2RAGE"
+      ],
+      "required": [
+        "inversion"
+      ],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "echo",
+        "flip",
+        "inversion",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "anat",
+      "name": "vfamt",
+      "suffixes": [
+        "MPM",
+        "MTS"
+      ],
+      "required": [
+        "flip",
+        "mtransfer"
+      ],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "echo",
+        "flip",
+        "mtransfer",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "anat",
+      "name": "mtr",
+      "suffixes": [
+        "MTR"
+      ],
+      "required": [
+        "mtransfer"
+      ],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "mtransfer",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "dwi",
+      "name": "dwi",
+      "suffixes": [
+        "dwi"
+      ],
+      "required": [],
+      "allowed": [
+        "acquisition",
+        "reconstruction",
+        "direction",
+        "run",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "dwi",
+      "name": "sbref",
+      "suffixes": [
+        "sbref"
+      ],
+      "required": [],
+      "allowed": [
+        "acquisition",
+        "reconstruction",
+        "direction",
+        "run",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "dwi",
+      "name": "ScannerDerivatives",
+      "suffixes": [
+        "ADC",
+        "FA",
+        "S0map",
+        "colFA",
+        "expADC",
+        "trace"
+      ],
+      "required": [],
+      "allowed": [
+        "acquisition",
+        "reconstruction",
+        "direction",
+        "run",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "fmap",
+      "name": "fieldmaps",
+      "suffixes": [
+        "phasediff",
+        "phase1",
+        "phase2",
+        "magnitude1",
+        "magnitude2",
+        "magnitude",
+        "fieldmap"
+      ],
+      "required": [],
+      "allowed": [
+        "acquisition",
+        "run",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "fmap",
+      "name": "pepolar",
+      "suffixes": [
+        "epi"
+      ],
+      "required": [],
+      "allowed": [
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "direction",
+        "run",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "fmap",
+      "name": "pepolar_m0scan",
+      "suffixes": [
+        "m0scan"
+      ],
+      "required": [],
+      "allowed": [
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "direction",
+        "run",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "fmap",
+      "name": "TB1DAM",
+      "suffixes": [
+        "TB1DAM"
+      ],
+      "required": [
+        "flip"
+      ],
+      "allowed": [
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "flip",
+        "inversion",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "fmap",
+      "name": "TB1EPI",
+      "suffixes": [
+        "TB1EPI"
+      ],
+      "required": [
+        "echo",
+        "flip"
+      ],
+      "allowed": [
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "echo",
+        "flip",
+        "inversion",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "fmap",
+      "name": "RFFieldMaps",
+      "suffixes": [
+        "TB1AFI",
+        "TB1TFL",
+        "TB1RFM",
+        "RB1COR"
+      ],
+      "required": [],
+      "allowed": [
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "echo",
+        "flip",
+        "inversion",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "fmap",
+      "name": "TB1SRGE",
+      "suffixes": [
+        "TB1SRGE"
+      ],
+      "required": [
+        "flip",
+        "inversion"
+      ],
+      "allowed": [
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "echo",
+        "flip",
+        "inversion",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "fmap",
+      "name": "parametric",
+      "suffixes": [
+        "TB1map",
+        "RB1map"
+      ],
+      "required": [],
+      "allowed": [
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "run",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "func",
+      "name": "func",
+      "suffixes": [
+        "bold",
+        "cbv",
+        "sbref"
+      ],
+      "required": [
+        "task"
+      ],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "direction",
+        "run",
+        "echo",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "func",
+      "name": "norf",
+      "suffixes": [
+        "noRF"
+      ],
+      "required": [
+        "task"
+      ],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "direction",
+        "run",
+        "modality",
+        "echo",
+        "part",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "func",
+      "name": "phase",
+      "suffixes": [
+        "phase"
+      ],
+      "required": [
+        "task"
+      ],
+      "allowed": [
+        "task",
+        "acquisition",
+        "ceagent",
+        "reconstruction",
+        "direction",
+        "run",
+        "echo",
+        "chunk"
+      ]
+    },
+    {
+      "datatype": "perf",
+      "name": "asl",
+      "suffixes": [
+        "asl",
+        "m0scan"
+      ],
+      "required": [],
+      "allowed": [
+        "acquisition",
+        "reconstruction",
+        "direction",
+        "run",
+        "echo",
+        "part"
+      ]
+    },
+    {
+      "datatype": "perf",
+      "name": "aslcontext",
+      "suffixes": [
+        "aslcontext"
+      ],
+      "required": [],
+      "allowed": [
+        "acquisition",
+        "reconstruction",
+        "direction",
+        "run"
+      ]
+    },
+    {
+      "datatype": "perf",
+      "name": "asllabeling",
+      "suffixes": [
+        "asllabeling"
+      ],
+      "required": [],
+      "allowed": [
+        "acquisition",
+        "reconstruction",
+        "run"
+      ]
+    },
+    {
+      "datatype": "perf",
+      "name": "norf",
+      "suffixes": [
+        "noRF"
+      ],
+      "required": [],
+      "allowed": [
+        "acquisition",
+        "reconstruction",
+        "direction",
+        "run",
+        "modality",
+        "echo",
+        "part"
+      ]
+    }
+  ]
+}
