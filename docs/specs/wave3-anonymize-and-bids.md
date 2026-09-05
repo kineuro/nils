@@ -695,6 +695,62 @@ A release also records **which decisions it honoured**, so an exported tree can
 answer "where did this value come from" with a rule, a pass, a person or a
 model and its version (§10.1), rather than with the shrug v0's cache gives.
 
+### 8.6 A release is versioned, and a re-run pays only for what changed
+
+Everything upstream of a release changes. The pack changes when a technique is
+renamed or a rule is fixed; a body part is corrected by QC and a stack that was
+a brain is a spinal cord; a vendor-specific `FLASH` turns out to be better read
+as a plain `GRE`; a decision is recorded; the session scheme is retuned; the
+naming grammar itself is improved. **Every one of those changes some files and
+leaves most alone.** v0 re-exports everything or nothing, so the cost of
+improving a rule is a full re-export of the archive, and the record of what the
+improvement did is the difference between two trees nobody kept.
+
+So a release has a **name**, which is the dataset, and a **version**. Running
+the same name again makes the next version of the same tree.
+
+**The version is `YYYY.MM.DD.N`**: `2026.09.05.1`. It sorts lexically and by
+component, it reads as the date it was made, and `N` distinguishes two runs on
+one day. It is written into `dataset_description.json` as `GeneratedBy.Version`,
+so a tree says which version it is without a database.
+
+**What a re-run recomputes.** Each version records, per stack it wrote, an
+**input digest** over everything that decides what the file is and where it
+goes: the instances and their content, the decided axes that feed the name and
+the routing, the disposition, the role, the pick, the session label, the folder,
+the whole policy, the layout and its options, and the pack's `name@version`.
+
+The next version compares digests, and a stack falls into one of five:
+
+| | what is done |
+|---|---|
+| unchanged | nothing at all |
+| moved | the same bytes under a new name, so the file is **renamed** and not rewritten |
+| rewritten | the content differs, so it is written again |
+| added | it was not in the last version |
+| removed | it was, and is not now |
+
+Renaming rather than rewriting is most of the saving in practice: a QC decision
+that corrects a body part changes the name of a few thousand files and the
+content of none.
+
+**The digest includes the version of the code that consumed the inputs**, which
+is the part that is easy to leave out and fatal to leave out. A grammar that
+changed while its inputs did not would otherwise reuse every file, and the tree
+would be a mixture of two grammars with nothing saying so. So the layout carries
+a version constant, bumped deliberately when its grammar changes, and a change
+to it recomputes every name, which is correct and is what a grammar change
+means.
+
+**What changed is recorded**, per version, per stack, with the old path and the
+new one. So "what did version 4 do" is a query rather than a diff of two trees,
+and a recipient who took version 3 can be told exactly what to fetch. §11's
+handover is where that becomes an archive.
+
+A tree updated in place diverges from a copy somebody already took. That is the
+trade for not duplicating the archive per version, it is deliberate, and the
+change record is what reconciles the two.
+
 ## 9. Two layouts, one set of facts
 
 Less than half of what we hold has a BIDS name. Routed against the published
@@ -780,8 +836,17 @@ which is the right place to catch it.
 ten carry anything resting-like in their text and none says "task". They are
 genuinely functional, we simply do not know what the subject was doing, and no
 rule can invent it. So a functional stack with no task raises a review item and
-a person answers it once per study or per origin. It is a missing fact, not a
-naming problem.
+a person answers it. It is a missing fact, not a naming problem.
+
+**The answer is recorded per study.** A study is one protocol run on one
+occasion, so what the subject was doing is a property of it rather than of a
+stack, and a person who knows the answer for one functional stack of a study
+knows it for all of them. In practice a BIDS export of functional data means
+subsetting a cohort into a smaller one and answering there, which is one answer
+per study and not one per file. Two things follow: `task` is a value a person
+decides rather than a rule, so it is vocabulary the pack declares and no rule
+sets; and `study` becomes a decision scope beside stack, series, subject and
+origin.
 
 ### 9.3 Where the rest goes
 
@@ -791,6 +856,28 @@ one directory per stack, which is what a reader of them wants anyway.
 its own right with its own description, so the tree stays valid and the data
 stays present. And nowhere, with a reason, reported per subject and session,
 never silently dropped.
+
+**Two of those placements are a release's choice and not this spec's**, because
+both are defensible and which is right depends on who the dataset is for.
+
+A **localizer** is 116,318 stacks, 22 percent of the archive, and BIDS has no
+word for one. Four answers, and a release says which it took:
+
+| | where | what it costs |
+|---|---|---|
+| `sourcedata` | `sourcedata/sub-*/ses-*/`, as DICOM | valid BIDS, and a reader has to know to look there |
+| `datatype` | its own folder beside `anat` and `dwi` | needs a `.bidsignore` line, because it is not a BIDS datatype |
+| `anat` | with the others, under `acq-localizer` | needs a `.bidsignore` line, because the suffix is not one BIDS has |
+| `drop` | nowhere | reported per session, and 22 percent of the archive is not in the tree |
+
+A **vendor synthetic contrast** is 2,543 stacks. The BIDS qMRI appendix permits
+a vendor's pre-generated maps in raw `anat/`; a purist puts every synthetic
+image in `derivatives/`. Both are `anat` and `derivatives` as an option, and
+neither is wrong.
+
+A release records which it chose (§8.4's rule, applied to placement): a tree
+that does not say where it put its localizers is a tree whose absence of
+localizers means nothing.
 
 ### 9.4 Where the date goes
 
@@ -809,6 +896,13 @@ sensitivity classes are enforced; `README`; `.bidsignore`; `sessions.tsv` and
 rather than an invalid one.
 
 ### 9.6 Conversion
+
+**`dcm2niix` is a prerequisite of a deployment, kept current**, from
+`rordenlab/dcm2niix` rather than from a distribution's package, which lags. A
+release **preflights it**: it refuses to start when the converter is absent, and
+it records the version it found on the run and in `GeneratedBy`, so a tree says
+which converter made it. A converter is not a thing to discover halfway through
+an archive.
 
 `dcm2niix` per pick with an explicit file list and the final name already
 decided. Three things v0 lacked: the source of every file comes from the
@@ -1141,9 +1235,17 @@ The repairs first, because everything after them assumes a subject and a date.
 7. `nils release`: selection, identifiers, UIDs, dates, with §4.3 enforced (§8).
 8. Private tags, overlays, burned-in, the audit (§8.4, §8.5).
 9. The descriptive layout (§9.1).
-10. The BIDS layout, the dataset files, `sourcedata`, `derivatives` (§9.2-§9.6).
-11. Handover (§11).
-12. The gate (§12).
+10. Versioning and the incremental re-run (§8.6).
+11. The BIDS layout, the dataset files, `sourcedata`, `derivatives` (§9.2-§9.6).
+12. Handover (§11).
+13. The gate (§12).
+
+Versioning comes **before** the BIDS layout rather than after it, although it
+was thought of later. It is built and proved against the descriptive layout,
+which already works, so the mechanism is settled before a second layout is
+written against it; and the BIDS layout is exactly the work that gives a
+deployment many new reasons to re-run, which is what makes a re-run that pays
+only for its changes worth having first.
 
 **A schema change lands with the slice that needs it**, as migrations 2 and 4 did
 in Wave 2, rather than as a slice of its own. An earlier draft of this list had a
@@ -1163,14 +1265,15 @@ before the rest is written.
 1. **The UID root** for keyed remapping: a registered OID arc, which is right
    for a tool meant to be adopted, or a UUID-derived root, which is legal and
    ugly.
-2. **Where localizers go.** 116,318 stacks, 22 percent of the archive, and BIDS
-   has no word for them. `sourcedata/` is this spec's answer and dropping them
-   from a release is also defensible.
-3. **Whether vendor synthetic contrasts belong in raw `anat/`.** The BIDS qMRI
-   appendix permits vendor pre-generated maps there; a purist would put every
-   synthetic image in `derivatives/`. 2,543 stacks turn on it.
-4. **Who answers the task question** for functional data: a decision per study,
-   per origin, or a release argument.
+2. ~~**Where localizers go.**~~ **Closed 2026-09-05**: a release's option, with
+   four answers (§9.3), because all four are defensible and which is right
+   depends on who the dataset is for. `sourcedata` is the default.
+3. ~~**Whether vendor synthetic contrasts belong in raw `anat/`.**~~ **Closed
+   2026-09-05**: an option too (§9.3), `anat` by default on the qMRI appendix's
+   reading.
+4. ~~**Who answers the task question** for functional data.~~ **Closed
+   2026-09-05**: a decision **per study** (§9.2), because a study is one
+   protocol run on one occasion and the answer is a property of it.
 5. **Whether a decision needs a state between proposed and committed.** All five
    of v0's QC products write a draft to one database and push to the other on
    explicit confirm, which is partly an artefact of having two databases. v1 has
