@@ -439,6 +439,16 @@ fn build_registry() -> Vec<Table> {
                 col("station_name", Type::Text),
                 col("implementation_class_uid", Type::Text),
                 col("implementation_version_name", Type::Text),
+                // Wave 3 §6: worked out, not read, and beside the measured
+                // column rather than over it. v0 writes each of these back
+                // into the column it was inferred from, so a guess one run
+                // made is a measurement the next run reads.
+                col("field_strength_tesla", Type::Double),
+                col("field_strength_normalized", Type::Double),
+                col("field_strength_unit", Type::Text),
+                col("acquisition_type_filled", Type::Text),
+                col("acquisition_type_source", Type::Text),
+                col("image_role", Type::Text),
                 // what made it
                 req("job_id", Type::Int),
                 req("epoch", Type::Int),

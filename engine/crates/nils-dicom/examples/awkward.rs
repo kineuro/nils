@@ -111,6 +111,21 @@ struct Scenario {
     /// What `nils session` must derive from this subtree, per scheme. Empty
     /// for a scenario that is about identity or dates rather than timelines.
     sessions: Vec<SessionWant>,
+    /// What the fingerprint must work out for this subtree's one stack (§6).
+    fingerprint: Option<FingerprintWant>,
+}
+
+/// The derived columns of one stack, as the manifest states them. `None` is a
+/// column the reader must leave empty, which is as much of the answer as a
+/// value is: v0 fills every one of these whatever the input, and half this
+/// wave's argument is that a repair that always answers is not a repair.
+struct FingerprintWant {
+    field_strength_tesla: Option<&'static str>,
+    field_strength_normalized: Option<&'static str>,
+    field_strength_unit: Option<&'static str>,
+    acquisition_type_filled: Option<&'static str>,
+    acquisition_type_source: Option<&'static str>,
+    image_role: &'static str,
 }
 
 /// One scheme, and the labels it must produce for the scenario's one subject.
@@ -185,6 +200,17 @@ struct File {
     csa_version: Option<&'static str>,
     /// Written without a SOP Instance UID, which the reader refuses.
     no_sop: bool,
+    /// `SeriesDescription`, which is most of what the text tier reads.
+    series_description: &'static str,
+    /// `SequenceName`, where Siemens puts the dimensionality.
+    sequence_name: Option<&'static str>,
+    /// `MRAcquisitionType`. `None` writes no element, which is what a scanner
+    /// that never filled it in leaves behind and what the fill exists for.
+    mr_acquisition_type: Option<&'static str>,
+    /// `ImageType`, whose first two values say what the stack is.
+    image_type: &'static str,
+    /// `MagneticFieldStrength`, in whatever unit the scanner felt like.
+    field_strength: Option<&'static str>,
 }
 
 impl File {
@@ -204,6 +230,11 @@ impl File {
             pps_start_date: None,
             csa_version: None,
             no_sop: false,
+            series_description: "ax t1 mprage",
+            sequence_name: None,
+            mr_acquisition_type: Some("3D"),
+            image_type: "ORIGINAL\\PRIMARY\\M\\ND",
+            field_strength: Some("3.0"),
         }
     }
 }
@@ -280,17 +311,21 @@ fn elements(f: &File, pixel_bytes: usize) -> Vec<Elem> {
     e.push(synth::text(
         tags::SERIES_DESCRIPTION,
         VR::LO,
-        "ax t1 mprage",
+        f.series_description,
     ));
     e.push(synth::text(tags::SCANNING_SEQUENCE, VR::CS, "GR"));
     e.push(synth::text(tags::SEQUENCE_VARIANT, VR::CS, "SK\\SP\\MP"));
-    e.push(synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "3D"));
+    if let Some(v) = f.sequence_name {
+        e.push(synth::text(tags::SEQUENCE_NAME, VR::SH, v));
+    }
+    if let Some(v) = f.mr_acquisition_type {
+        e.push(synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, v));
+    }
+    if let Some(v) = f.field_strength {
+        e.push(synth::text(tags::MAGNETIC_FIELD_STRENGTH, VR::DS, v));
+    }
     e.push(synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"));
-    e.push(synth::text(
-        tags::IMAGE_TYPE,
-        VR::CS,
-        "ORIGINAL\\PRIMARY\\M\\ND",
-    ));
+    e.push(synth::text(tags::IMAGE_TYPE, VR::CS, f.image_type));
     e.push(synth::us(tags::ROWS, 64));
     e.push(synth::us(tags::COLUMNS, 64));
     e.push(synth::bytes(
@@ -439,6 +474,7 @@ fn main() {
             needs: "the PatientID tag alone",
             studies,
             sessions: Vec::new(),
+            fingerprint: None,
         });
     }
 
@@ -494,6 +530,7 @@ fn main() {
             needs: "the first path segment, because the tag says nothing",
             studies,
             sessions: Vec::new(),
+            fingerprint: None,
         });
     }
 
@@ -530,6 +567,7 @@ fn main() {
             needs: "a pattern with an id group, so the date is not taken as identity",
             studies,
             sessions: Vec::new(),
+            fingerprint: None,
         });
     }
 
@@ -557,6 +595,7 @@ fn main() {
                 person: "ambiguous".into(),
             }],
             sessions: Vec::new(),
+            fingerprint: None,
         });
     }
 
@@ -586,6 +625,7 @@ fn main() {
             needs: "the second path segment, so the segment is a setting and not a constant",
             studies,
             sessions: Vec::new(),
+            fingerprint: None,
         });
     }
 
@@ -616,6 +656,7 @@ fn main() {
             needs: "the segment taken whole, and a code that survives the round trip",
             studies,
             sessions: Vec::new(),
+            fingerprint: None,
         });
     }
 
@@ -645,6 +686,7 @@ fn main() {
             needs: "two subjects on a case-sensitive filesystem, and a diagnostic either way",
             studies,
             sessions: Vec::new(),
+            fingerprint: None,
         });
     }
 
@@ -673,6 +715,7 @@ fn main() {
             needs: "the segment that holds the code, not the branch above it",
             studies,
             sessions: Vec::new(),
+            fingerprint: None,
         });
     }
 
@@ -1129,6 +1172,7 @@ fn main() {
                 person: "P1".into(),
             }],
             sessions: Vec::new(),
+            fingerprint: None,
         });
     }
 
@@ -1291,6 +1335,257 @@ fn main() {
                     flagged: k.flagged,
                 })
                 .collect(),
+            fingerprint: None,
+        });
+    }
+
+    // ------------------------------------------------------ derived fields
+
+    // §6. Each is one study of one stack, because these are pure functions of
+    // one row: what is being checked is that the right column reaches the
+    // right function and the answer lands in the right column, which is the
+    // class of mistake a unit test cannot see.
+    struct FpCase {
+        name: &'static str,
+        what: &'static str,
+        needs: &'static str,
+        /// What the scanner wrote.
+        field: Option<&'static str>,
+        acq: Option<&'static str>,
+        seq: Option<&'static str>,
+        image_type: &'static str,
+        description: &'static str,
+        want: FingerprintWant,
+    }
+
+    const PRIMARY: &str = "ORIGINAL\\PRIMARY\\M\\ND";
+
+    let fps = [
+        FpCase {
+            name: "fp-field-gauss",
+            what: "a field strength written in gauss",
+            needs: "15000 G is 1.5 T, converted rather than rounded",
+            field: Some("15000"),
+            acq: Some("3D"),
+            seq: None,
+            image_type: PRIMARY,
+            description: "ax t1 mprage",
+            want: FingerprintWant {
+                field_strength_tesla: Some("1.5"),
+                field_strength_normalized: Some("1.5"),
+                field_strength_unit: Some("gauss"),
+                acquisition_type_filled: None,
+                acquisition_type_source: None,
+                image_role: "original_primary",
+            },
+        },
+        FpCase {
+            name: "fp-field-milli",
+            what: "a field strength written in millitesla",
+            needs: "1500 mT is 1.5 T; v0 divides by ten thousand and calls it 0.5 T",
+            field: Some("1500"),
+            acq: Some("3D"),
+            seq: None,
+            image_type: PRIMARY,
+            description: "ax t1 mprage",
+            want: FingerprintWant {
+                field_strength_tesla: Some("1.5"),
+                field_strength_normalized: Some("1.5"),
+                field_strength_unit: Some("millitesla"),
+                acquisition_type_filled: None,
+                acquisition_type_source: None,
+                image_role: "original_primary",
+            },
+        },
+        FpCase {
+            name: "fp-field-off-grid",
+            what: "a 4.7 T animal scanner",
+            needs: "no normalised value; v0 records it as 3 T and loses the reading",
+            field: Some("4.7"),
+            acq: Some("3D"),
+            seq: None,
+            image_type: PRIMARY,
+            description: "ax t1 mprage",
+            want: FingerprintWant {
+                field_strength_tesla: Some("4.7"),
+                field_strength_normalized: None,
+                field_strength_unit: Some("tesla"),
+                acquisition_type_filled: None,
+                acquisition_type_source: None,
+                image_role: "original_primary",
+            },
+        },
+        FpCase {
+            name: "fp-field-absent",
+            what: "no field strength at all",
+            needs: "nothing derived, and nothing invented",
+            field: None,
+            acq: Some("3D"),
+            seq: None,
+            image_type: PRIMARY,
+            description: "ax t1 mprage",
+            want: FingerprintWant {
+                field_strength_tesla: None,
+                field_strength_normalized: None,
+                field_strength_unit: None,
+                acquisition_type_filled: None,
+                acquisition_type_source: None,
+                image_role: "original_primary",
+            },
+        },
+        FpCase {
+            name: "fp-acq-image-type",
+            what: "no MRAcquisitionType, but ImageType says DIS3D",
+            needs: "3D from the token, which beats the 2D word in the description",
+            field: Some("3.0"),
+            acq: None,
+            seq: Some("tse2d1_9"),
+            image_type: "ORIGINAL\\PRIMARY\\M\\DIS3D",
+            description: "ax t2 tse 2d",
+            want: FingerprintWant {
+                field_strength_tesla: Some("3.0"),
+                field_strength_normalized: Some("3.0"),
+                field_strength_unit: Some("tesla"),
+                acquisition_type_filled: Some("3D"),
+                acquisition_type_source: Some("image_type"),
+                image_role: "original_primary",
+            },
+        },
+        FpCase {
+            name: "fp-acq-sequence",
+            what: "no MRAcquisitionType, and the sequence name says spc",
+            needs: "3D from the sequence name, which beats haste in the description",
+            field: Some("3.0"),
+            acq: None,
+            seq: Some("*spc_314ns"),
+            image_type: PRIMARY,
+            description: "t2 haste cor",
+            want: FingerprintWant {
+                field_strength_tesla: Some("3.0"),
+                field_strength_normalized: Some("3.0"),
+                field_strength_unit: Some("tesla"),
+                acquisition_type_filled: Some("3D"),
+                acquisition_type_source: Some("sequence_name"),
+                image_role: "original_primary",
+            },
+        },
+        FpCase {
+            name: "fp-acq-text",
+            what: "no MRAcquisitionType and nothing but the description",
+            needs: "2D from the word haste, and the source says it was the text",
+            field: Some("3.0"),
+            acq: None,
+            seq: None,
+            image_type: PRIMARY,
+            description: "t2 haste cor",
+            want: FingerprintWant {
+                field_strength_tesla: Some("3.0"),
+                field_strength_normalized: Some("3.0"),
+                field_strength_unit: Some("tesla"),
+                acquisition_type_filled: Some("2D"),
+                acquisition_type_source: Some("text"),
+                image_role: "original_primary",
+            },
+        },
+        FpCase {
+            name: "fp-acq-unknowable",
+            what: "no MRAcquisitionType and nothing anywhere that says 2D or 3D",
+            needs: "no fill: v0's last tier reads the technique the classifier assigned",
+            field: Some("3.0"),
+            acq: None,
+            seq: Some("tfl"),
+            image_type: PRIMARY,
+            description: "localizer",
+            want: FingerprintWant {
+                field_strength_tesla: Some("3.0"),
+                field_strength_normalized: Some("3.0"),
+                field_strength_unit: Some("tesla"),
+                acquisition_type_filled: None,
+                acquisition_type_source: None,
+                image_role: "original_primary",
+            },
+        },
+        FpCase {
+            name: "fp-role-secondary",
+            what: "an original image the scanner never called primary",
+            needs: "original_secondary, which is what a session rescue looks for",
+            field: Some("1.5"),
+            acq: Some("2D"),
+            seq: None,
+            image_type: "ORIGINAL\\SECONDARY\\M\\ND",
+            description: "ax t2 tse",
+            want: FingerprintWant {
+                field_strength_tesla: Some("1.5"),
+                field_strength_normalized: Some("1.5"),
+                field_strength_unit: Some("tesla"),
+                acquisition_type_filled: None,
+                acquisition_type_source: None,
+                image_role: "original_secondary",
+            },
+        },
+        FpCase {
+            name: "fp-role-screenshot",
+            what: "a screen capture labelled ORIGINAL and SECONDARY",
+            needs: "not_an_image, so a rescue never picks it up",
+            field: Some("1.5"),
+            acq: Some("2D"),
+            seq: None,
+            image_type: "ORIGINAL\\SECONDARY\\SCREENSHOT",
+            description: "patient protocol",
+            want: FingerprintWant {
+                field_strength_tesla: Some("1.5"),
+                field_strength_normalized: Some("1.5"),
+                field_strength_unit: Some("tesla"),
+                acquisition_type_filled: None,
+                acquisition_type_source: None,
+                image_role: "not_an_image",
+            },
+        },
+        FpCase {
+            name: "fp-role-derived",
+            what: "a workstation reformat",
+            needs: "derived, whatever else the ImageType carries",
+            field: Some("1.5"),
+            acq: Some("2D"),
+            seq: None,
+            image_type: "DERIVED\\SECONDARY\\MPR",
+            description: "cor mpr",
+            want: FingerprintWant {
+                field_strength_tesla: Some("1.5"),
+                field_strength_normalized: Some("1.5"),
+                field_strength_unit: Some("tesla"),
+                acquisition_type_filled: None,
+                acquisition_type_source: None,
+                image_role: "derived",
+            },
+        },
+    ];
+
+    for (n, c) in fps.iter().enumerate() {
+        let dir = format!("{}/FP{:03}/visit1", c.name, n + 1);
+        let su = uid(&["12", &n.to_string()]);
+        let f = study(root, &dir, &su, &format!("12-{n}"), 2, px, |f, _| {
+            f.patient_id = Some("FPCASE");
+            f.field_strength = c.field;
+            f.mr_acquisition_type = c.acq;
+            f.sequence_name = c.seq;
+            f.image_type = c.image_type;
+            f.series_description = c.description;
+        });
+        seeds.push((c.name, f));
+        scenarios.push(Scenario {
+            name: c.name,
+            what: c.what,
+            people: 1,
+            needs: c.needs,
+            studies: vec![StudyWant {
+                dir,
+                date: Some("20220115"),
+                source: "study_date",
+                person: "P1".into(),
+            }],
+            sessions: Vec::new(),
+            fingerprint: Some(FingerprintWant { ..c.want }),
         });
     }
 
@@ -1343,6 +1638,28 @@ fn main() {
             .unwrap();
         }
         writeln!(out, "      ],").unwrap();
+        match &s.fingerprint {
+            Some(w) => {
+                let q = |v: Option<&str>| match v {
+                    Some(t) => format!("{t:?}"),
+                    None => "null".to_string(),
+                };
+                writeln!(
+                    out,
+                    "      \"fingerprint\": {{\"field_strength_tesla\": {}, \"field_strength_normalized\": {}, \
+                     \"field_strength_unit\": {}, \"acquisition_type_filled\": {}, \
+                     \"acquisition_type_source\": {}, \"image_role\": {:?}}},",
+                    q(w.field_strength_tesla),
+                    q(w.field_strength_normalized),
+                    q(w.field_strength_unit),
+                    q(w.acquisition_type_filled),
+                    q(w.acquisition_type_source),
+                    w.image_role
+                )
+                .unwrap();
+            }
+            None => writeln!(out, "      \"fingerprint\": null,").unwrap(),
+        }
         writeln!(out, "      \"sessions\": [").unwrap();
         for (j, w) in s.sessions.iter().enumerate() {
             let labels: Vec<String> = w.labels.iter().map(|l| format!("{l:?}")).collect();

@@ -38,6 +38,14 @@ def load(registry: str):
     if "said" in tables:
         for scenario, kind, _n in con.execute("SELECT scenario, kind, count FROM said"):
             said[scenario].add(kind)
+    fp: dict[str, list[tuple]] = defaultdict(list)
+    if "fp" in tables:
+        for row in con.execute(
+            "SELECT scenario, field_strength_tesla, field_strength_normalized,"
+            " field_strength_unit, acquisition_type_filled, acquisition_type_source,"
+            " image_role FROM fp"
+        ):
+            fp[row[0]].append(row[1:])
     if "rows" in tables:
         rows = con.execute("SELECT path, study, subject, study_date FROM rows").fetchall()
     else:
@@ -66,7 +74,7 @@ def load(registry: str):
         studies.add(study_id)
         subjects.add(subject_id)
         dates.add(iso(date))
-    return seen, said
+    return seen, said, fp
 
 
 def iso(value) -> str:
@@ -83,7 +91,7 @@ def main() -> int:
     registry, manifest, work = sys.argv[1], sys.argv[2], sys.argv[3]
     verbose = "--verbose" in sys.argv
     want = json.load(open(manifest, encoding="utf-8"))
-    seen, said = load(registry)
+    seen, said, fp = load(registry)
 
     print(f"{'scenario':<24} {'people':>6} {'seen':>5}  {'dates':>7}  what is wrong")
     print("-" * 92)
@@ -129,6 +137,7 @@ def main() -> int:
             wrong.append(f"no {want_said} diagnostic")
 
         wrong += sessions_wrong(s, work)
+        wrong += fingerprint_wrong(s, fp.get(s["name"], []))
 
         n_dates = len(s["studies"])
         ok = not wrong
@@ -175,6 +184,55 @@ def sessions_wrong(s, work: str) -> list[str]:
                 f"scheme {i} flagged {got.get('flagged', 0)}, wanted {check['flagged']}"
             )
     return out
+
+
+# The derived columns, in the order collect.py stores them.
+DERIVED = (
+    "field_strength_tesla",
+    "field_strength_normalized",
+    "field_strength_unit",
+    "acquisition_type_filled",
+    "acquisition_type_source",
+    "image_role",
+)
+
+
+def fingerprint_wrong(s, rows: list[tuple]) -> list[str]:
+    """What the fingerprint worked out wrong for one scenario (spec §6).
+
+    A scenario that declares an expectation describes one stack, so more than
+    one distinct set of derived values means something in the mess reached the
+    check and the check would be reading the wrong row.
+    """
+    want = s.get("fingerprint")
+    if not want:
+        return []
+    if len(rows) != 1:
+        return [f"{len(rows)} distinct fingerprints, wanted 1"]
+    out = []
+    for i, column in enumerate(DERIVED):
+        got, expected = rows[0][i], want[column]
+        if not near(got, expected):
+            out.append(f"{column} is {show(got)}, wanted {show(expected)}")
+    return out
+
+
+def near(got, expected) -> bool:
+    """Whether a derived value is the one the manifest asked for.
+
+    Numbers are compared as numbers: the manifest writes `1.5` and a backend
+    may store `1.5` or `1.50000000001`, and neither is the point of the check.
+    """
+    if got is None or expected is None:
+        return got is None and expected is None
+    try:
+        return abs(float(got) - float(expected)) < 1e-6
+    except (TypeError, ValueError):
+        return str(got) == str(expected)
+
+
+def show(v) -> str:
+    return "-" if v is None else str(v)
 
 
 def shortdir(w) -> str:

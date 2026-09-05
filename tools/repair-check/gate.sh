@@ -94,6 +94,11 @@ echo "$rules" | while read -r name rule; do
         ;;
     esac
 
+    # The fingerprint is derived for every scenario, not only the ones that
+    # declare an expectation: it is the cheapest way to find out that a field
+    # a scenario was not thinking about stopped being derivable.
+    "$nils" fingerprint --registry "$reg" --name "$name" >/dev/null
+
     # The scenarios are digested apart and checked together, so the paths in
     # each registry are re-prefixed with the scenario they came from.
     python3 "$here/collect.py" "$reg/registry.db" "$name" "$merged" "$first" \

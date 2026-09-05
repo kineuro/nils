@@ -32,6 +32,12 @@ def main() -> int:
         )
         out.execute("DROP TABLE IF EXISTS said")
         out.execute("CREATE TABLE said (scenario TEXT, kind TEXT, count INTEGER)")
+        out.execute("DROP TABLE IF EXISTS fp")
+        out.execute(
+            "CREATE TABLE fp (scenario TEXT, field_strength_tesla TEXT,"
+            " field_strength_normalized TEXT, field_strength_unit TEXT,"
+            " acquisition_type_filled TEXT, acquisition_type_source TEXT, image_role TEXT)"
+        )
 
     src = sqlite3.connect(registry)
     got = src.execute(
@@ -68,6 +74,29 @@ def main() -> int:
     out.executemany(
         "INSERT INTO said (scenario, kind, count) VALUES (?, ?, ?)",
         [(scenario, kind, n) for kind, n in spoke],
+    )
+
+    # The derived columns of the scenario's own stacks. The mess is excluded by
+    # path: it is a duplicate and a truncated file under the study, and a
+    # scenario is a statement about the study it declared.
+    src = sqlite3.connect(registry)
+    derived = src.execute(
+        """
+        SELECT DISTINCT f.field_strength_tesla, f.field_strength_normalized,
+               f.field_strength_unit, f.acquisition_type_filled,
+               f.acquisition_type_source, f.image_role
+        FROM stack_fingerprint f
+        JOIN instance i ON i.series_id = f.series_id
+        JOIN source_file sf ON sf.instance_id = i.id
+        WHERE sf.path NOT LIKE '%/_mess/%'
+        """
+    ).fetchall()
+    src.close()
+    out.executemany(
+        "INSERT INTO fp (scenario, field_strength_tesla, field_strength_normalized,"
+        " field_strength_unit, acquisition_type_filled, acquisition_type_source, image_role)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [(scenario, *row) for row in derived],
     )
     out.commit()
     out.close()

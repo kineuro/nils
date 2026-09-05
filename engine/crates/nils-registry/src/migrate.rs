@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +78,32 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 6,
         apply: create_session_scheme,
     },
+    Migration {
+        version: 7,
+        apply: fingerprint_carries_what_it_worked_out,
+    },
 ];
+
+/// Wave 3 §6: the fields the fingerprint derives rather than reads, each beside
+/// the measured column it came from. A registry from Wave 2 gains six columns;
+/// one created now has them already.
+fn fingerprint_carries_what_it_worked_out(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "stack_fingerprint",
+        &[
+            "field_strength_tesla",
+            "field_strength_normalized",
+            "field_strength_unit",
+            "acquisition_type_filled",
+            "acquisition_type_source",
+            "image_role",
+        ],
+    )
+}
 
 /// Wave 3 §5: the registry keeps the schemes it derives sessions with, so a
 /// labelling can be reproduced from the registry alone. A registry created at
