@@ -125,11 +125,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
-      - name: build nils and the corpus writer
+      # Wave 3 §12: the release gate writes and reads a real tree, so it needs
+      # the converter and the archiver. It rides on this job because this is
+      # the one that already builds a release binary.
+      - name: the tools a release and a handover need
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends dcm2niix p7zip-full
+      - name: build nils and the corpus writers
         working-directory: engine
         run: |
           cargo build --release --locked -p nils
           cargo build --release --locked --example corpus -p nils-dicom
+          cargo build --release --locked --example reference -p nils-dicom
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -154,11 +162,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
-      - name: build nils and the corpus writer
+      # Wave 3 §12: the release gate writes and reads a real tree, so it needs
+      # the converter and the archiver. It rides on this job because this is
+      # the one that already builds a release binary.
+      - name: the tools a release and a handover need
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends dcm2niix p7zip-full
+      - name: build nils and the corpus writers
         working-directory: engine
         run: |
           cargo build --release --locked -p nils
           cargo build --release --locked --example corpus -p nils-dicom
+          cargo build --release --locked --example reference -p nils-dicom
       - name: write the corpus
         working-directory: engine
         run: |
@@ -193,6 +209,9 @@ jobs:
               "${{ runner.os }}-${{ runner.arch }}" --stage fingerprint
           python3 benches/gate.py "$RUNNER_TEMP/classify.json" benches/baseline.json \
               "${{ runner.os }}-${{ runner.arch }}" --stage classify
+      # Wave 3 §12. Its own tree, its own registry, and every bar.
+      - name: the release gate
+        run: tools/release-check/gate.sh "$RUNNER_TEMP/release-gate"
 
   build:
     uses: ./.github/workflows/engine-build.yml

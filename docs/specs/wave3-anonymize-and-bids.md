@@ -1249,7 +1249,13 @@ against it would be a bar against being correct.
    every degenerate case the repairs exist for and several the real archive may
    not contain, and on which v0's own functions and v1's are run side by side.
    The real legacy trees are then a confirmation rather than the proof.
-2. **The validator passes** on the reference selections, no warnings suppressed.
+2. **The validator passes** on the reference selections, no warnings
+   suppressed. Structurally, against **the schema the engine carries**, so the
+   bar runs everywhere: the official `bids-validator` needs a network and a
+   node, and a gate that only runs where those exist is a gate that does not
+   run. The schema it checks against comes from the same generator as the
+   engine's copy, so the engine and the thing that checks it cannot drift
+   apart, and the official validator has been run on the same tree by hand.
 3. **The reference selections are right**: hand-verified, in the pack's corpus
    the way Wave 2's cases are, each naming the session, the role, the pick, the
    disposition and the resulting filename in both layouts.
@@ -1289,6 +1295,25 @@ against it would be a bar against being correct.
     release is bounded: streaming the manifest instead of accumulating it, and
     comparing per stack by query, is a slice after this wave and principle 5 is
     what will ask for it.
+
+**What it found the first time it ran**, all in code that had tests and passed
+them, and none of it the kind of thing a unit test sees, because each is a
+disagreement between two things that are separately right:
+
+- **`post_contrast` never reached a filename.** The axis stores `1`, after v0's
+  integer column, and the release compared it to `yes`. No released file, in
+  either layout, had ever carried `_CE` or `ce-`.
+- **The orientation never reached an `acq-` label**, because the pack's tokens
+  were the abbreviations §9.1 renders (`Ax`) and the column holds the word
+  (`Axial`).
+- **`RawRecon` was in every `acq-` label**, saying nothing: it is the
+  provenance axis's default, so it holds wherever nothing else claimed the
+  stack.
+
+The reference tree is `nils-dicom`'s `reference` example and the answers are
+`tools/release-check/reference.toml`, read off a run and checked one at a time.
+The generator does not compute them, so when a difference is right that file is
+the thing to edit and the edit is the record of the decision.
 
 ### 12.1 The awkward corpus
 

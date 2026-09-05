@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# What the reference selections come out as, in both layouts
+# (`docs/specs/wave3-anonymize-and-bids.md`, section 12, bar 3).
+#
+# Hand-verified: every line below was read off a run and checked one at a
+# time. The generator does not compute them, so a change in the pack, in either
+# grammar or in the routing shows up here as a difference rather than moving
+# with the code. When a difference is right, this file is the thing to edit,
+# and the edit is the record of the decision.
+#
+# The corpus is `nils-dicom`'s `reference` example: one person, two occasions,
+# and one of every case the release has to get right.
+
+[descriptive]
+# `sub-<code>/ses-<label>/` is stripped: the code is a pseudonym and changes
+# with the key.
+names = [
+  "ses-20220115/anat/Ax_SWI_3D_GRE_Magnitude",
+  "ses-20220115/anat/Ax_T1w_3D_MPRAGE_ND_1",
+  "ses-20220115/anat/Ax_T1w_3D_MPRAGE_ND_2",
+  "ses-20220115/anat/Ax_T2w_2D_FLAIR_TIRM_ND",
+  "ses-20220115/dwi/Ax_DWI_2D_DWI-EPI_ADC_b1000",
+  "ses-20220115/dwi/Ax_DWI_2D_DWI-EPI_Trace_b1000",
+  "ses-20220115/func/Ax_T1w_2D_MoCo_BOLD_ND",
+  "ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND",
+  "ses-20220715/anat/Ax_T1w_3D_MPRAGE_ND_CE",
+  "ses-20220715/misc/Ax_T1w_2D_GRE_ND_e1",
+  "ses-20220715/misc/Ax_T1w_2D_GRE_ND_e2",
+]
+
+[bids]
+# The subject code is masked for the same reason. Six things are being
+# asserted here at once, and each is worth naming:
+#
+#   * the two repeats of one acquisition are told apart by `run-`, which is the
+#     standard's only answer, and not by a counter of ours;
+#   * the two echoes are told apart by the measured `EchoNumbers`, which is
+#     section 9.1's first correction to v0;
+#   * the post-contrast repeat carries `ce-`, which nothing released before
+#     2026-09-05 did, because the axis stores `1` and the release compared it
+#     to `yes`;
+#   * the ADC keeps its own suffix and takes no `part`, because the standard
+#     gives its scanner derivatives none;
+#   * the SWI has no BIDS word, so it is a derivative under section 9.1's name
+#     carried in `acq-`;
+#   * the localizer is DICOM under `sourcedata/`, which is the default of the
+#     four answers a release may take.
+#
+# The functional series is not here at all, and that is the point: `func`
+# requires `task`, nothing in a DICOM says what a subject was doing, and the
+# release put it nowhere and raised one question per study.
+files = [
+  "derivatives/nils/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-AxSWI3DGREMagnitude.nii.gz",
+  "sourcedata/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax2DIRTSEFLAIR_FLAIR.nii.gz",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax3DMPRAGE_run-1_T1w.nii.gz",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax3DMPRAGE_run-2_T1w.nii.gz",
+  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-Ax2DDWIEPIDTIRecon_ADC.nii.gz",
+  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-Ax2DDWIEPI_trace.nii.gz",
+  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax2DGRE_echo-1_T1w.nii.gz",
+  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax2DGRE_echo-2_T1w.nii.gz",
+  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax3DMPRAGE_ce-contrast_T1w.nii.gz",
+]
