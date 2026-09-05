@@ -167,10 +167,6 @@ struct ReleaseArgs {
     /// Only stacks of this modality
     #[arg(long, value_name = "MR|CT|PT|...")]
     modality: Option<String>,
-    /// Only stacks acquired at this field strength, in tesla. Repeatable, and
-    /// read from the fingerprint, so it selects nothing before one is derived
-    #[arg(long = "field-strength", value_name = "TESLA")]
-    field_strength: Vec<f64>,
     /// The session scheme the tree's `ses-` directories come from
     #[arg(long, value_name = "FILE", conflicts_with = "scheme_name")]
     scheme: Option<PathBuf>,
@@ -4150,7 +4146,6 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             roles: args.role.clone(),
             picked_only: args.picked,
             modality: args.modality.clone(),
-            field_strengths: args.field_strength.clone(),
         },
         scheme: &scheme,
         // §8.4: dropped by default, and back only by name. The pack declares

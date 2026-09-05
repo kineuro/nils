@@ -1443,6 +1443,17 @@ repository, so the corpus is a command rather than an artefact.
   exist before a model writes through it.
 - **The full catalog of roles and picks** (Wave 4 and 5, C19) and **the
   migration of the live registry** (Wave 4).
+- **Selection as a language.** A release takes a small fixed set of narrowings:
+  subjects, dispositions, roles, picks, modality. Anything else a person means
+  by "the cohort", the 7T subset among them, is a **query**, and the query AST
+  is Wave 4's door and Wave 5's notebook. Walking a cohort through its life on
+  2026-09-05 made the case for adding a field-strength flag here and Nima
+  refused it, which is right: every such flag is a predicate the query language
+  will have to have anyway, and a release that grows its own filters is a
+  second query language nobody designed. Wave 5's gate is exactly this, "a real
+  study's cohort defined as a selection and exported end to end without a
+  hand-written manifest", so the release's job is to take a selection, not to
+  compute one.
 
 ## 14. Order of work
 

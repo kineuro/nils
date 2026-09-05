@@ -41,13 +41,6 @@ pub struct Selection {
     /// Only the stacks a pick chose (§10).
     pub picked_only: bool,
     pub modality: Option<String>,
-    /// Only stacks acquired at one of these field strengths, in tesla.
-    ///
-    /// The **normalised** value of §6, which is the one a person means by "the
-    /// 7T subset": a magnet off the grid has none, deliberately, because v0's
-    /// rounding turns a 4.7 T animal scanner into a 3 T one. So this selects
-    /// what a person asked for and never a magnet that merely rounds to it.
-    pub field_strengths: Vec<f64>,
 }
 
 impl Selection {
@@ -58,7 +51,6 @@ impl Selection {
             "roles": self.roles,
             "picked_only": self.picked_only,
             "modality": self.modality,
-            "field_strengths": self.field_strengths,
         })
     }
 
@@ -1419,24 +1411,6 @@ fn select(store: &mut Store, selection: &Selection) -> Result<Vec<Instance>, Err
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = k.id AND a.axis = 'role' \
              AND ({any}))"
-        ));
-    }
-    if !selection.field_strengths.is_empty() {
-        // From the fingerprint, so a release before one selects nothing and
-        // says so in its counts rather than selecting everything.
-        let t = table("stack_fingerprint");
-        let column = t
-            .column("field_strength_normalized")
-            .expect("stack_fingerprint.field_strength_normalized is a column");
-        let any = selection
-            .field_strengths
-            .iter()
-            .map(|f| format!("ABS(sf.{} - {f}) < 0.01", column.name))
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        wheres.push(format!(
-            "EXISTS (SELECT 1 FROM {} sf WHERE sf.stack_id = k.id AND ({any}))",
-            store.qualified("stack_fingerprint"),
         ));
     }
     if selection.picked_only {
