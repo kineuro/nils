@@ -235,6 +235,17 @@ struct DecideArgs {
     /// Who decided; the operating system's user by default
     #[arg(long, value_name = "WHO")]
     actor: Option<String>,
+    /// What kind of author it is (§10.1). A model's answer must be
+    /// distinguishable from a person's wherever it is read.
+    #[arg(
+        long = "as",
+        default_value = "person",
+        value_name = "person|agent|model"
+    )]
+    author_kind: String,
+    /// The model's version, required when the author is a model (D15)
+    #[arg(long, value_name = "VERSION")]
+    model_version: Option<String>,
     /// Why, in the person's own words
     #[arg(long, value_name = "TEXT")]
     why: Option<String>,
@@ -711,7 +722,8 @@ fn explain(home: &Home, stack: i64, json: bool) -> Result<(), Exit> {
     let ev = store
         .query(
             &format!(
-                "SELECT axis, value, tier, confidence, rule_set, rule, source, matched FROM {} \
+                "SELECT axis, value, tier, confidence, rule_set, rule, source, matched, \
+                        author, author_kind FROM {} \
                  WHERE stack_id = {} ORDER BY axis, id",
                 store.qualified("classification_evidence"),
                 store.dialect().param(1, nils_registry::schema::Type::Int)
@@ -744,6 +756,8 @@ fn explain(home: &Home, stack: i64, json: bool) -> Result<(), Exit> {
                     "rule": r.text(5).unwrap_or_default(),
                     "source": r.text(6).unwrap_or_default(),
                     "matched": r.opt_text(7).ok().flatten(),
+                    "author": r.opt_text(8).ok().flatten(),
+                    "author_kind": r.opt_text(9).ok().flatten(),
                 })
             })
             .collect();
@@ -773,14 +787,35 @@ fn explain(home: &Home, stack: i64, json: bool) -> Result<(), Exit> {
             r.text(3).unwrap_or_default()
         );
         for e in ev.iter().filter(|e| e.text(0).unwrap_or_default() == axis) {
-            println!(
-                "      {} said {} by {}, from {} {}",
-                e.text(4).unwrap_or_default(),
-                e.text(1).unwrap_or_default(),
-                e.text(2).unwrap_or_default(),
-                e.text(6).unwrap_or_default(),
-                e.opt_text(7).ok().flatten().unwrap_or("")
-            );
+            // §10.1. A value somebody decided says who, and with what
+            // standing, in the same place a rule's answer says which rule.
+            // Whether a model produced it has to be readable here, or it
+            // reads exactly like a rule's answer, which is v0's 4,692 body
+            // parts.
+            match e.opt_text(9).ok().flatten() {
+                Some(kind) => println!(
+                    "      a {kind}, {}, decided {} for the {}{}",
+                    e.opt_text(8).ok().flatten().unwrap_or("unnamed"),
+                    e.text(1).unwrap_or_default(),
+                    e.text(5).unwrap_or_default(),
+                    match e.opt_text(7).ok().flatten() {
+                        Some(v) => format!(" (version {v})"),
+                        None => String::new(),
+                    }
+                ),
+                None => println!(
+                    "{}",
+                    format!(
+                        "      {} said {} by {}, from {} {}",
+                        e.text(4).unwrap_or_default(),
+                        e.text(1).unwrap_or_default(),
+                        e.text(2).unwrap_or_default(),
+                        e.text(6).unwrap_or_default(),
+                        e.opt_text(7).ok().flatten().unwrap_or("")
+                    )
+                    .trim_end()
+                ),
+            }
         }
     }
     if review_items > 0 {
@@ -1879,9 +1914,29 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
         value,
         nothing,
         actor,
+        author_kind,
+        model_version,
         why,
         json,
     } = args;
+    // §10.1: a person, an agent or a model, and for a model which one. The
+    // reason is measured: 4,692 body parts in the live v0 archive are an image
+    // model's predictions, committed through its QC into the classifier's own
+    // column with nothing to mark them, and discoverable only because v0's
+    // keyword classifier happens to disagree with almost every one of them.
+    if !["person", "agent", "model"].contains(&author_kind.as_str()) {
+        return Err(usage(format!(
+            "--as is person, agent or model, not {author_kind}"
+        )));
+    }
+    if author_kind == "model" && model_version.is_none() {
+        return Err(usage(
+            "a model's answer records which model: give --model-version",
+        ));
+    }
+    if author_kind != "model" && model_version.is_some() {
+        return Err(usage("--model-version belongs to --as model"));
+    }
     if value.is_none() && !nothing {
         return Err(usage(
             "say what the axis is: --value <v>, or --nothing when it has none",
@@ -1990,6 +2045,8 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
         "axis": axis,
         "value": value,
         "actor": who,
+        "author_kind": author_kind,
+        "model_version": model_version,
         "why": why,
     });
 
@@ -2021,6 +2078,8 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
                     "axis",
                     "value",
                     "actor",
+                    "author_kind",
+                    "author_version",
                     "why",
                     "decided_at",
                 ],
@@ -2034,6 +2093,11 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
                     None => Param::Null,
                 },
                 Param::from(who.as_str()),
+                Param::from(author_kind.as_str()),
+                match &model_version {
+                    Some(v) => Param::from(v.as_str()),
+                    None => Param::Null,
+                },
                 match &why {
                     Some(w) => Param::from(w.as_str()),
                     None => Param::Null,

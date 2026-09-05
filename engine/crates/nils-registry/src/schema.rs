@@ -534,6 +534,11 @@ fn build_registry() -> Vec<Table> {
                 // when a rule did, which is most of the time.
                 col("pass", Type::Text),
                 col("reference", Type::Text),
+                // Or a person, an agent or a model did (§10.1), and which one.
+                // Null when a rule or a pass did. A value a model produced may
+                // not sit where a rule's answer belongs and look the same.
+                col("author", Type::Text),
+                col("author_kind", Type::Text),
             ],
         )
         .index(&["stack_id"]),
@@ -549,6 +554,14 @@ fn build_registry() -> Vec<Table> {
                 req("axis", Type::Text),
                 col("value", Type::Text),
                 req("actor", Type::Text),
+                // Wave 3 §10.1: whether a person, an agent or a model made
+                // it, and for a model which version. In the live v0 archive
+                // 4,692 body parts are an image model's predictions committed
+                // through its QC into the classifier's own column with nothing
+                // to mark them; they are discoverable only because v0's
+                // keyword classifier happens to disagree.
+                req("author_kind", Type::Text),
+                col("author_version", Type::Text),
                 col("why", Type::Text),
                 req("decided_at", Type::Timestamp),
                 // A decision a later person withdrew stays, and stops

@@ -179,11 +179,40 @@ fn to_stack(r: &Row, with_ids: bool) -> Result<(Ids, Stack), Error> {
 /// applies, so a call about one series does not quietly govern the site and a
 /// call about the site is overridden where somebody looked closer.
 pub struct Decisions {
-    by_stack: HashMap<(i64, String), Option<String>>,
-    by_series: HashMap<(i64, String), Option<String>>,
-    by_subject: HashMap<(i64, String), Option<String>>,
+    by_stack: HashMap<(i64, String), Decided>,
+    by_series: HashMap<(i64, String), Decided>,
+    by_subject: HashMap<(i64, String), Decided>,
     /// Keyed by the lowercase `field=value` the decision names.
-    by_origin: HashMap<(String, String), Option<String>>,
+    by_origin: HashMap<(String, String), Decided>,
+}
+
+/// What a decision says, and who said it (§10.1).
+#[derive(Debug, Clone)]
+pub struct Decided {
+    /// The value, or none when the decision is that the axis has none.
+    pub value: Option<String>,
+    /// How far the call reached: `stack`, `series`, `subject` or `origin`.
+    pub scope: String,
+    pub author: Author,
+}
+
+/// Who made a decision.
+///
+/// v0 has no such thing, and its worst outcome came from the absence: 4,692
+/// body parts in the live archive are an image model's predictions, committed
+/// by a person through its body-part QC straight into the classifier's own
+/// column, with nothing to mark them. They are discoverable only because v0's
+/// keyword classifier disagrees, answering nothing for 4,692 of that cohort's
+/// 4,699 stacks. A value a model produced may not sit where a rule's answer
+/// belongs and look the same.
+#[derive(Debug, Clone)]
+pub struct Author {
+    /// The name, the account or the model's registered id.
+    pub who: String,
+    /// `person`, `agent` or `model`.
+    pub kind: String,
+    /// A model's version. Null for anything else (D15).
+    pub version: Option<String>,
 }
 
 /// Which stack a fingerprint row belongs to, and to what. Read only when a
@@ -209,7 +238,8 @@ const ORIGIN: &[(&str, &str)] = &[
 impl Decisions {
     fn load(store: &mut Store) -> Result<Decisions, Error> {
         let sql = format!(
-            "SELECT scope, ref, axis, value FROM {} WHERE withdrawn_at IS NULL",
+            "SELECT scope, ref, axis, value, actor, author_kind, author_version FROM {} \
+             WHERE withdrawn_at IS NULL",
             store.qualified("decision")
         );
         let mut d = Decisions {
@@ -222,7 +252,16 @@ impl Decisions {
             let scope = r.text(0)?;
             let reference = r.text(1)?.to_string();
             let axis = r.text(2)?.to_string();
-            let value = r.opt_text(3)?.map(str::to_string);
+            let author = Author {
+                who: r.text(4)?.to_string(),
+                kind: r.opt_text(5)?.unwrap_or("person").to_string(),
+                version: r.opt_text(6)?.map(str::to_string),
+            };
+            let value = Decided {
+                value: r.opt_text(3)?.map(str::to_string),
+                scope: scope.to_string(),
+                author,
+            };
             let id = || reference.parse::<i64>().unwrap_or(0);
             match scope {
                 "stack" => {
@@ -258,7 +297,7 @@ impl Decisions {
     }
 
     /// The decision in force on this axis of this stack, narrowest first.
-    fn for_stack(&self, ids: Ids, stack: &Stack, axis: &str) -> Option<&Option<String>> {
+    fn for_stack(&self, ids: Ids, stack: &Stack, axis: &str) -> Option<&Decided> {
         let key = |id: i64| (id, axis.to_string());
         if let Some(v) = self.by_stack.get(&key(ids.stack)) {
             return Some(v);
@@ -376,6 +415,9 @@ fn run(
         for r in &rows {
             let (ids, stack) = to_stack(r, with_ids)?;
             let stack_id = ids.stack;
+            // The decisions that overrode a rule for this stack, with who made
+            // each: written as evidence after the rules' own (§10.1).
+            let mut authored: Vec<(String, String, Decided)> = Vec::new();
             report.read += 1;
             // A pack that does not judge this modality says so on the row: it
             // is never `misc` and never a review item, which is what v0 does
@@ -396,7 +438,7 @@ fn run(
                     .then(|| decisions.for_stack(ids, &stack, &a.axis))
                     .flatten()
                 {
-                    let decided = d.clone().unwrap_or_default();
+                    let decided = d.value.clone().unwrap_or_default();
                     if decided != value {
                         // The rule's answer is computed as usual and the
                         // decision wins; the disagreement is the review item,
@@ -422,6 +464,12 @@ fn run(
                     value = decided;
                     tier = "decision".to_string();
                     report.decided += 1;
+                    // §10.1. The verdict's own evidence says which rule
+                    // reached which answer; this says who overrode it, and
+                    // with what standing. Without it a model's prediction sits
+                    // in the same column as a rule's answer and reads the
+                    // same, which is v0's 4,692 body parts.
+                    authored.push((a.axis.clone(), value.clone(), d.clone()));
                 }
                 // What decided each axis, counted: a rule that fires on a
                 // sixth of the archive is a question about the rule, and the
@@ -479,6 +527,47 @@ fn run(
                 }
             }
 
+            // A decision on an axis the rules said nothing about. Without
+            // this it is silently dropped, because the loop above walks the
+            // verdict and an axis with no hits and no default produces none.
+            //
+            // That gap is the whole of v0's 4,692 body parts: its keyword
+            // classifier answers nothing for 4,692 of that cohort's 4,699
+            // stacks, and the image model's predictions are what fill them.
+            // An engine that cannot record an answer where the rules were
+            // silent leaves a person no place to put one but the rules' own
+            // column, which is how v0 came to have values nobody can trace.
+            if any_decision {
+                for a in &pack.axes {
+                    if a.phase != nils_pack::rules::AxisPhase::Class
+                        || verdict.axes.iter().any(|v| v.axis == a.name)
+                    {
+                        continue;
+                    }
+                    let Some(d) = decisions.for_stack(ids, &stack, &a.name) else {
+                        continue;
+                    };
+                    let value = d.value.clone().unwrap_or_default();
+                    report.decided += 1;
+                    *report
+                        .by_tier
+                        .entry(format!("{}:decision", a.name))
+                        .or_insert(0) += 1;
+                    axes.push(vec![
+                        Param::Int(stack_id),
+                        Param::from(a.name.as_str()),
+                        if value.is_empty() {
+                            Param::Null
+                        } else {
+                            Param::from(value.as_str())
+                        },
+                        Param::Double(1.0),
+                        Param::from("decision"),
+                    ]);
+                    authored.push((a.name.clone(), value, d.clone()));
+                }
+            }
+
             for e in &verdict.evidence {
                 evidence.push(vec![
                     Param::Int(stack_id),
@@ -494,9 +583,29 @@ fn run(
                     } else {
                         Param::from(e.matched.as_str())
                     },
+                    Param::Null,
+                    Param::Null,
                 ]);
             }
-            report.evidence += verdict.evidence.len() as i64;
+            for (axis, value, d) in &authored {
+                evidence.push(vec![
+                    Param::Int(stack_id),
+                    Param::from(axis.as_str()),
+                    Param::from(value.as_str()),
+                    Param::from("decision"),
+                    Param::Double(1.0),
+                    Param::from("decision"),
+                    Param::from(d.scope.as_str()),
+                    Param::from("decision"),
+                    match &d.author.version {
+                        Some(v) => Param::from(v.as_str()),
+                        None => Param::Null,
+                    },
+                    Param::from(d.author.who.as_str()),
+                    Param::from(d.author.kind.as_str()),
+                ]);
+            }
+            report.evidence += (verdict.evidence.len() + authored.len()) as i64;
             report.silent += i64::from(verdict.silent);
             report.review_items += raised;
             report.written += 1;
@@ -609,6 +718,8 @@ fn run(
                             "rule",
                             "source",
                             "matched",
+                            "author",
+                            "author_kind",
                         ],
                     ),
                     &evidence,
