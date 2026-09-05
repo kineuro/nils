@@ -16,3 +16,4 @@ pub mod run;
 pub mod scrub;
 pub mod tags;
 pub mod uid;
+pub mod version;

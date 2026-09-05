@@ -1805,3 +1805,68 @@ fn classify_explains_itself_and_a_decision_closes_the_question() {
         "a rule that still disagrees is said out loud"
     );
 }
+
+#[test]
+fn a_release_is_versioned_and_a_re_run_writes_nothing() {
+    // §8.6, at the command line: running the same name again makes the next
+    // version of the same tree, and a version that found nothing to do says so
+    // rather than writing the archive out again.
+    let home = home();
+    let dir = tree();
+    let out = TempDir::new("cli-release");
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let release = [
+        "release",
+        "--name",
+        "a-dataset",
+        "--on-unknown",
+        "write",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+        "--out",
+    ];
+
+    let done = nils()
+        .args(registry)
+        .args(["digest", "--name", "first"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", stderr(&done));
+
+    let first = nils()
+        .args(registry)
+        .args(release)
+        .arg(out.path())
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "{}", stderr(&first));
+    let text = stdout(&first);
+    assert!(text.contains("version 20"), "{text}");
+    assert!(text.contains("this is the first"), "{text}");
+
+    let second = nils()
+        .args(registry)
+        .args(release)
+        .arg(out.path())
+        .output()
+        .unwrap();
+    assert!(second.status.success(), "{}", stderr(&second));
+    let text = stdout(&second);
+    assert!(text.contains("2   stacks left alone"), "{text}");
+    assert!(text.contains("0   files written"), "{text}");
+
+    // And what every version did is a query, not a diff of two trees. It needs
+    // no output directory, because it writes nothing.
+    let history = nils()
+        .args(registry)
+        .args(["release", "--history", "--name", "a-dataset"])
+        .output()
+        .unwrap();
+    assert!(history.status.success(), "{}", stderr(&history));
+    let text = stdout(&history);
+    assert!(text.contains("a-dataset"), "{text}");
+    assert!(text.contains("stacks new"), "{text}");
+    assert!(text.contains("stacks left alone"), "{text}");
+}

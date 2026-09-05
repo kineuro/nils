@@ -121,8 +121,11 @@ enum Command {
 #[derive(Debug, Args)]
 struct ReleaseArgs {
     /// Where the tree is written
-    #[arg(long, value_name = "DIR")]
-    out: PathBuf,
+    #[arg(long, value_name = "DIR", required_unless_present = "history")]
+    out: Option<PathBuf>,
+    /// What every version of this dataset did, and write nothing (§8.6)
+    #[arg(long)]
+    history: bool,
     /// What to call this release, on its row and in its report
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
@@ -3650,6 +3653,10 @@ fn pick_explain(home: &Home, id: i64, json: bool) -> Result<(), Exit> {
 fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     use nils_release::{dates, policy, run, tags, uid};
 
+    if args.history {
+        return history(home, &args);
+    }
+    let out = args.out.clone().expect("--out, or --history");
     let dates_policy = dates::Policy::parse(&args.dates).ok_or_else(|| {
         usage(format!(
             "--dates is keep, shift or year, not {}",
@@ -3719,7 +3726,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         .unwrap_or_else(nils_registry::time::now_iso);
     let settings = run::Settings {
         name: &name,
-        root: &args.out,
+        root: &out,
         policy: &policy,
         categories,
         selection: run::Selection {
@@ -3753,15 +3760,41 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         );
         return Ok(());
     }
-    println!("release {} ({})", report.name, report.policy);
+    println!(
+        "release {} version {} ({})",
+        report.name, report.version, report.policy
+    );
     println!("  into             {}", report.root);
+    match &report.previous {
+        Some(before) => println!("  since            {before}"),
+        // The first version of a tree writes all of it, and saying so is
+        // better than a line of counts that all read as "everything new".
+        None => println!("  since            nothing; this is the first"),
+    }
     println!("  subjects         {:>12}", report.subjects);
     println!("  stacks           {:>12}", report.stacks);
     println!("  files            {:>12}", report.files);
     println!(
-        "  written          {:>9.2} GiB",
+        "  in the tree      {:>9.2} GiB",
         report.bytes as f64 / (1u64 << 30) as f64
     );
+    // §8.6, and the first number is the one worth reading: a re-run after a
+    // QC decision or a renamed technique should leave nearly everything alone.
+    if report.previous.is_some() {
+        println!("  this version");
+        for (n, what) in [
+            (report.unchanged, "stacks left alone"),
+            (report.moved, "renamed, not rewritten"),
+            (report.rewritten, "written again"),
+            (report.added, "new"),
+            (report.removed, "no longer in the release"),
+        ] {
+            if n > 0 {
+                println!("      {n:>10}   {what}");
+            }
+        }
+        println!("      {:>10}   files written", report.written);
+    }
     // §8.4. The second number is the one worth reading: "no tag" is not "no
     // text", and an archive where most stacks are unjudgeable is a fact a
     // release should have to confront rather than average away.
@@ -3787,7 +3820,12 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         }
     }
     // What was changed, by tag and action, and never what it was: an audit
-    // that records what was removed is a copy of the identifiers in clear.
+    // that records what was removed is a copy of the identifiers in clear. A
+    // version that wrote no file changed no tag, and says nothing here.
+    if report.changes.is_empty() {
+        println!("  {:.1} s", report.seconds);
+        return Ok(());
+    }
     println!("  what changed");
     let mut changes: Vec<(&String, &i64)> = report.changes.iter().collect();
     changes.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
@@ -3798,6 +3836,128 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         println!("      {:>10}   more, in release_change", changes.len() - 8);
     }
     println!("  {:.1} s", report.seconds);
+    Ok(())
+}
+
+/// One row of the version history.
+struct Version {
+    id: i64,
+    name: String,
+    version: String,
+    root: String,
+    started: String,
+    files: i64,
+    /// Unchanged, moved, rewritten, added, removed, in that order.
+    counts: [i64; 5],
+}
+
+/// Every version of one dataset, and what each did (§8.6).
+///
+/// The point of recording the changes rather than diffing two trees: a
+/// recipient who took version 3 can be told what to fetch, and a version that
+/// left everything alone says so.
+fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
+    let mut registry = home.open().map_err(|e| fail(e.to_string()))?;
+    let store = registry.store();
+    let mut wheres = String::new();
+    let mut params: Vec<nils_registry::store::Param> = Vec::new();
+    if let Some(name) = &args.name {
+        wheres = format!(
+            " WHERE name = {}",
+            store.dialect().param(1, nils_registry::schema::Type::Text)
+        );
+        params.push(nils_registry::store::Param::from(name.as_str()));
+    }
+    // `started_at` through the dialect's own rendering: Postgres hands a
+    // timestamp back in a type the store does not read as text, and a select
+    // that forgets the cast fails only once a row exists.
+    let started = store.dialect().text_of(
+        nils_registry::schema::table("release")
+            .column("started_at")
+            .expect("release.started_at is a column"),
+    );
+    let sql = format!(
+        "SELECT id, name, version, root, {started}, files, unchanged, moved, rewritten, added, \
+         removed FROM {}{wheres} ORDER BY id",
+        store.qualified("release"),
+    );
+    let rows = store
+        .query(&sql, &params)
+        .map_err(|e| fail(e.to_string()))?;
+    if rows.is_empty() {
+        println!("no release yet");
+        return Ok(());
+    }
+    let mut versions: Vec<Version> = Vec::new();
+    for r in &rows {
+        let mut counts = [0i64; 5];
+        for (i, into) in counts.iter_mut().enumerate() {
+            *into = r.int(6 + i).map_err(|e| fail(e.to_string()))?;
+        }
+        versions.push(Version {
+            id: r.int(0).map_err(|e| fail(e.to_string()))?,
+            name: r.text(1).map_err(|e| fail(e.to_string()))?.to_string(),
+            version: r.text(2).map_err(|e| fail(e.to_string()))?.to_string(),
+            root: r.text(3).map_err(|e| fail(e.to_string()))?.to_string(),
+            started: r.text(4).map_err(|e| fail(e.to_string()))?.to_string(),
+            files: r.int(5).map_err(|e| fail(e.to_string()))?,
+            counts,
+        });
+    }
+    let mut last_name = String::new();
+    for v in &versions {
+        if v.name != last_name {
+            println!("{}", v.name);
+            println!("  into             {}", v.root);
+            last_name = v.name.clone();
+        }
+        let when = v.started.split('T').next().unwrap_or(&v.started);
+        let (version, files) = (&v.version, v.files);
+        println!("  {version:<16} {when}   {files:>9} files in the tree");
+        let mut said = false;
+        for (n, what) in [
+            (v.counts[0], "left alone"),
+            (v.counts[1], "renamed"),
+            (v.counts[2], "written again"),
+            (v.counts[3], "new"),
+            (v.counts[4], "dropped"),
+        ] {
+            if n > 0 {
+                println!("      {n:>10}   stacks {what}");
+                said = true;
+            }
+        }
+        if !said {
+            println!("      nothing changed");
+        }
+        let store = registry.store();
+        let sql = format!(
+            "SELECT action, was, now FROM {} WHERE release_id = {} ORDER BY id",
+            store.qualified("release_move"),
+            store.dialect().param(1, nils_registry::schema::Type::Int),
+        );
+        let moves = store
+            .query(&sql, &[nils_registry::store::Param::Int(v.id)])
+            .map_err(|e| fail(e.to_string()))?;
+        // The renames and the drops, which are the ones a recipient of an
+        // earlier version has to act on. A first version's list is every
+        // stack in it and worth nobody's screen.
+        let interesting: Vec<&nils_registry::store::Row> = moves
+            .iter()
+            .filter(|r| !matches!(r.text(0), Ok("added")))
+            .collect();
+        for r in interesting.iter().take(6) {
+            let action = r.text(0).unwrap_or("");
+            let was = r.opt_text(1).ok().flatten().unwrap_or("");
+            match r.opt_text(2).ok().flatten() {
+                Some(now) => println!("          {action:<10} {was}  ->  {now}"),
+                None => println!("          {action:<10} {was}"),
+            }
+        }
+        if interesting.len() > 6 {
+            println!("          {} more, in release_move", interesting.len() - 6);
+        }
+    }
     Ok(())
 }
 

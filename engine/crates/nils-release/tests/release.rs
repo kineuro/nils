@@ -48,12 +48,30 @@ fn tree() -> TempDir {
 }
 
 fn registry(home_dir: &TempDir, source: &TempDir) -> (Home, Registry) {
+    registry_on(home_dir, source, Backend::Sqlite, None)
+}
+
+/// The schema the Postgres half of these tests owns.
+const SCHEMA: &str = "nils_release_test";
+
+/// A registry on one backend, so that the release can be proved against both.
+///
+/// The date read of the session labels is the reason: Postgres hands a `date`
+/// back in a type the store reads only as text, and a select that forgets the
+/// cast fails only once a row of that shape exists, which for a release is the
+/// first time anyone runs one.
+fn registry_on(
+    home_dir: &TempDir,
+    source: &TempDir,
+    backend: Backend,
+    dsn: Option<String>,
+) -> (Home, Registry) {
     let home = Home::new(home_dir.path());
     home.keys(None).add("k", KEY).unwrap();
     home.init(&InitOptions {
-        backend: Backend::Sqlite,
-        dsn: None,
-        schema: None,
+        backend,
+        dsn,
+        schema: (backend == Backend::Postgres).then(|| SCHEMA.to_string()),
         scheme: Scheme::DEFAULT,
         key: "k".to_string(),
         display_length: 12,
@@ -65,6 +83,26 @@ fn registry(home_dir: &TempDir, source: &TempDir) -> (Home, Registry) {
     s.name = "t".into();
     digest(&s, &mut reg).unwrap();
     (home, reg)
+}
+
+/// The DSN, or nothing and a word about why.
+fn postgres_dsn() -> Option<String> {
+    match std::env::var("NILS_TEST_POSTGRES_DSN") {
+        Ok(dsn) if !dsn.is_empty() => Some(dsn),
+        _ => {
+            eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+            None
+        }
+    }
+}
+
+fn drop_schemas(dsn: &str) {
+    let mut store = nils_registry::Store::connect_postgres(dsn, SCHEMA).expect("connect");
+    store
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCHEMA}_linkage CASCADE"
+        ))
+        .expect("drop the test schemas");
 }
 
 fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) -> run::Settings<'a> {
@@ -512,4 +550,261 @@ fn the_descriptive_layout_names_each_echo_by_its_own_echo_number() {
     assert!(parts[0].starts_with("sub-"), "{parts:?}");
     assert!(parts[1].starts_with("ses-"), "{parts:?}");
     assert_eq!(parts[2], "anat", "{parts:?}");
+}
+
+/// The classification a release renders into a name (§9.1), so that a test can
+/// change one the way a QC decision does.
+fn classified(reg: &mut Registry, source: &TempDir) {
+    let _ = source;
+    nils_classify::job::fingerprint(
+        reg,
+        &nils_classify::Settings::default(),
+        &nils_digest::Cancel::new(),
+    )
+    .unwrap();
+    let packs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let pack = nils_pack::load(&packs, None).unwrap();
+    nils_classify::classify::classify(
+        reg,
+        &pack,
+        &nils_classify::Settings::default(),
+        &nils_digest::Cancel::new(),
+    )
+    .unwrap();
+}
+
+/// Somebody looks at a stack and says it is a spinal cord, which is one of the
+/// changes §8.6 exists for.
+fn qc_says_spine(reg: &mut Registry) {
+    let store = reg.store();
+    let table = store.qualified("classification_axis");
+    store
+        .execute(
+            &format!("DELETE FROM {table} WHERE axis = 'body_part'"),
+            &[],
+        )
+        .unwrap();
+    store
+        .execute(
+            &format!(
+                "INSERT INTO {table} (stack_id, axis, value, confidence, tier) \
+                 SELECT id, 'body_part', 'spine', 1.0, 'decided' FROM {}",
+                store.qualified("stack")
+            ),
+            &[],
+        )
+        .unwrap();
+}
+
+/// Every file under the root, with when it was last written.
+fn stamped(root: &Path) -> std::collections::BTreeMap<String, (std::time::SystemTime, Vec<u8>)> {
+    files_under(root)
+        .iter()
+        .map(|p| {
+            let meta = std::fs::metadata(p).unwrap();
+            (
+                p.strip_prefix(root).unwrap().display().to_string(),
+                (meta.modified().unwrap(), std::fs::read(p).unwrap()),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_first_version_writes_everything_and_says_so() {
+    let source = tree();
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    classified(&mut reg, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let first = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+
+    assert!(first.previous.is_none());
+    assert!(
+        first.version.starts_with("20") && first.version.ends_with(".1"),
+        "{}",
+        first.version
+    );
+    assert_eq!(first.added, 2, "two stacks, both new");
+    assert_eq!(first.unchanged, 0);
+    assert_eq!(first.written, 2);
+    assert_eq!(first.files, 2);
+}
+
+#[test]
+fn a_re_run_that_changed_nothing_writes_nothing() {
+    // The whole point of §8.6. v0 re-exports everything or nothing.
+    let source = tree();
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    classified(&mut reg, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let first = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    let before = stamped(out.path());
+
+    let second = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(second.previous.as_deref(), Some(first.version.as_str()));
+    assert_ne!(second.version, first.version, "a version still moved");
+    assert_eq!(second.unchanged, 2);
+    assert_eq!(second.written, 0, "not one file was written again");
+    assert_eq!(second.added + second.moved + second.rewritten, 0);
+
+    // And the manifest is still the whole tree, not the part this run touched:
+    // a handover of this version has every file in it (§11).
+    assert_eq!(second.files, first.files);
+    assert_eq!(second.bytes, first.bytes);
+    assert_eq!(stamped(out.path()), before, "nothing on disk moved");
+}
+
+#[test]
+fn a_qc_decision_renames_the_files_rather_than_writing_them_again() {
+    // Nima's case: a body part is corrected, and the name of a few thousand
+    // files changes while the content of none does. The saving is the whole
+    // reason the content digest leaves the place out.
+    let source = tree();
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    classified(&mut reg, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    let before = stamped(out.path());
+
+    qc_says_spine(&mut reg);
+    let after = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(after.moved, 2);
+    assert_eq!(after.written, 0, "renamed, not rewritten");
+    assert_eq!(after.rewritten, 0);
+
+    let now = stamped(out.path());
+    assert_eq!(now.len(), before.len());
+    let was: Vec<&String> = before.keys().collect();
+    let is: Vec<&String> = now.keys().collect();
+    assert_ne!(was, is, "the tree is named differently");
+    // The same files, moved: same bytes, and the same moment of writing, which
+    // is what says they were not written again.
+    let mut old: Vec<&(std::time::SystemTime, Vec<u8>)> = before.values().collect();
+    let mut new: Vec<&(std::time::SystemTime, Vec<u8>)> = now.values().collect();
+    old.sort();
+    new.sort();
+    assert_eq!(old, new);
+}
+
+#[test]
+fn a_stack_no_longer_in_the_release_leaves_the_tree() {
+    let source = tree();
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    classified(&mut reg, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let first = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(first.files, 2);
+
+    // The pack rules one of them out, which is the ordinary way a stack stops
+    // being in a release.
+    {
+        let store = reg.store();
+        let sql = format!(
+            "UPDATE {} SET value = 'excluded' WHERE axis = 'disposition' AND stack_id = \
+             (SELECT MIN(stack_id) FROM {})",
+            store.qualified("classification_axis"),
+            store.qualified("classification_axis"),
+        );
+        store.execute(&sql, &[]).unwrap();
+    }
+    let second = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(second.removed, 1);
+    assert_eq!(second.unchanged, 1);
+    assert_eq!(second.written, 0);
+    assert_eq!(files_under(out.path()).len(), 1, "and it is off the disk");
+    // The directory it was in went with it, rather than being left empty.
+    assert_eq!(second.files, 1);
+}
+
+#[test]
+fn a_release_into_another_root_is_another_tree() {
+    // A version compares against a state that describes one directory. Read
+    // against a different one, every unchanged file would simply be missing.
+    let source = tree();
+    let home_dir = TempDir::new("release-home");
+    let a = TempDir::new("release-a");
+    let b = TempDir::new("release-b");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    classified(&mut reg, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    run::run(&mut reg, &settings(a.path(), &policy, &scheme)).unwrap();
+    let second = run::run(&mut reg, &settings(b.path(), &policy, &scheme)).unwrap();
+    assert!(second.previous.is_none(), "nothing to compare against");
+    assert_eq!(second.added, 2);
+    assert_eq!(files_under(b.path()).len(), 2);
+}
+
+#[test]
+fn a_tree_someone_emptied_is_written_again_rather_than_reported_as_moved() {
+    let source = tree();
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    classified(&mut reg, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    for entry in std::fs::read_dir(out.path()).unwrap().flatten() {
+        std::fs::remove_dir_all(entry.path()).unwrap();
+    }
+
+    qc_says_spine(&mut reg);
+    let after = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(after.moved, 0, "there was nothing to move");
+    assert_eq!(after.rewritten, 2);
+    assert_eq!(after.written, 2);
+    assert_eq!(files_under(out.path()).len(), 2);
+}
+
+#[test]
+fn a_release_and_its_next_version_run_on_postgres_too() {
+    // Every other test here is on SQLite, and the two backends differ in the
+    // types they hand back rather than in the SQL they accept, so a select that
+    // reads a date or a timestamp raw works until somebody runs a release on
+    // Postgres. This is that somebody.
+    let Some(dsn) = postgres_dsn() else { return };
+    drop_schemas(&dsn);
+    let source = tree();
+    let home_dir = TempDir::new("release-home-pg");
+    let out = TempDir::new("release-out-pg");
+    let (_home, mut reg) = registry_on(&home_dir, &source, Backend::Postgres, Some(dsn.clone()));
+    classified(&mut reg, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let first = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(first.added, 2);
+    assert_eq!(first.files, 2);
+    assert!(first.version.ends_with(".1"), "{}", first.version);
+
+    let second = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(second.previous.as_deref(), Some(first.version.as_str()));
+    assert_eq!(second.unchanged, 2);
+    assert_eq!(second.written, 0);
+
+    qc_says_spine(&mut reg);
+    let third = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(third.moved, 2);
+    assert_eq!(third.written, 0);
+    drop(reg);
+    drop_schemas(&dsn);
 }

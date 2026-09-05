@@ -64,12 +64,27 @@ impl Selection {
 pub struct Report {
     pub release_id: i64,
     pub name: String,
+    /// `YYYY.MM.DD.N` (§8.6).
+    pub version: String,
+    /// The version this one was worked out against, if there was one.
+    pub previous: Option<String>,
     pub root: String,
     pub policy: String,
     pub subjects: i64,
     pub stacks: i64,
+    /// Files in the tree at this version, which on a re-run is mostly files
+    /// this run did not touch.
     pub files: i64,
     pub bytes: i64,
+    /// Files this run actually wrote, which is what it cost.
+    pub written: i64,
+    /// Stacks by what became of them (§8.6). The first number is the point:
+    /// a re-run after a QC decision should leave nearly everything alone.
+    pub unchanged: i64,
+    pub moved: i64,
+    pub rewritten: i64,
+    pub added: i64,
+    pub removed: i64,
     /// Files a reader could not read or a writer could not write, by reason.
     pub refused: BTreeMap<String, i64>,
     /// Every change, by tag and action, without a value anywhere.
@@ -135,6 +150,38 @@ struct Instance {
     code: String,
     study: i64,
     path: String,
+    /// What the walker of Wave 1 recorded about the source file. A re-run
+    /// decides a stack is unchanged partly from these, so it trusts exactly
+    /// what the digest trusts and no more (§8.6).
+    size: i64,
+    mtime: i64,
+}
+
+/// What one stack's release is: where it goes, what decides its bytes, and
+/// what became of it since the last version (§8.6).
+struct Job {
+    stack: i64,
+    dir: String,
+    content: String,
+    change: crate::version::Change,
+    /// Where the last version put it, when there was one.
+    was: Option<String>,
+    code: String,
+    offset: crate::dates::Offset,
+    instances: Vec<Instance>,
+}
+
+/// What the version before this one wrote.
+struct Previous {
+    id: i64,
+    version: String,
+    /// Per stack, what it wrote and where: the state this version compares
+    /// against.
+    stacks: HashMap<i64, crate::version::Was>,
+    /// Per instance, the file it wrote. Carried forward unchanged, so that
+    /// every version's manifest is the whole tree rather than only the part of
+    /// it this run touched (§11).
+    files: HashMap<i64, (String, String, i64)>,
 }
 
 /// Run one release.
@@ -157,8 +204,19 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         )));
     }
 
+    let instances = select(registry.store(), &settings.selection)?;
+    let days = study_days(registry.store())?;
+    let pixels = pixel_verdicts(registry.store())?;
+    let named = names(registry.store(), &days, settings.scheme)?;
+    // The version this run is worked out against, read before anything is
+    // written, and the version this run will be.
+    let earlier = previous(registry.store(), settings.name, settings.root)?;
+    let version = crate::version::next(today(), earlier.as_ref().map(|p| p.version.as_str()));
+
     let mut report = Report {
         name: settings.name.to_string(),
+        version: version.clone(),
+        previous: earlier.as_ref().map(|p| p.version.clone()),
         root: settings.root.display().to_string(),
         policy: settings.policy.describe(),
         ..Report::default()
@@ -167,12 +225,23 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         Uids::Remap => Some(Remap::new(settings.policy.root.clone(), settings.key)),
         Uids::Preserve => None,
     };
+    report.release_id = open_row(registry.store(), settings, &version, earlier.as_ref())?;
 
-    let instances = select(registry.store(), &settings.selection)?;
-    let days = study_days(registry.store())?;
-    let pixels = pixel_verdicts(registry.store())?;
-    let named = names(registry.store(), &days, settings.scheme)?;
-    report.release_id = open_row(registry.store(), settings)?;
+    // The parts of a stack's content digest that are the same for every stack
+    // in the release (§8.6).
+    let categories: String = settings
+        .categories
+        .iter()
+        .map(|c| c.name())
+        .collect::<Vec<_>>()
+        .join(",");
+    let private: String = settings
+        .private
+        .iter()
+        .map(|a| a.text())
+        .collect::<Vec<_>>()
+        .join(",");
+    let pack = format!("{}@{}", settings.pack, settings.pack_version);
 
     // Which studies are one occasion, per subject, so a file lands in the
     // session it belongs to rather than in a directory named by its date.
@@ -182,85 +251,256 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
     }
     report.subjects = by_subject.len() as i64;
 
-    let mut files: Vec<Vec<Param>> = Vec::new();
-    let mut stacks: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    // What each stack is, where it goes and what became of it, worked out for
+    // the whole release before a single file is touched. Nothing here reads or
+    // writes a byte of the tree: the decision is what makes a re-run cheap, so
+    // it is taken from the registry alone.
+    let mut jobs: Vec<Job> = Vec::new();
     let mut held: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for (subject, mine) in &by_subject {
-        let labels = session_labels(mine, &days, settings.scheme);
+    for (subject, mine) in by_subject {
+        let labels = session_labels(&mine, &days, settings.scheme);
         let offset = match settings.policy.dates {
             crate::dates::Policy::Shift => {
-                let o = crate::dates::draw(settings.key, *subject);
-                remember_offset(registry, *subject, o)?;
+                let o = crate::dates::draw(settings.key, subject);
+                remember_offset(registry, subject, o)?;
                 o
             }
             _ => crate::dates::Offset(0),
         };
         let code = mine.first().map(|i| i.code.clone()).unwrap_or_default();
-        let plan = Plan {
-            policy: settings.policy,
-            categories: &settings.categories,
-            private: settings.private,
-            code: &code,
-            offset,
-            remap: remap.as_ref(),
-        };
-        for instance in mine {
+        let mut grouped: BTreeMap<i64, Vec<Instance>> = BTreeMap::new();
+        for i in mine {
+            grouped.entry(i.stack).or_default().push(i);
+        }
+        for (stack, instances) in grouped {
             // §8.4. The engine does not look at pixels; it reads what the file
-            // says about them, and holds what the file will not say.
+            // says about them, and holds what the file will not say. A held
+            // stack is simply not in this version, so one an earlier version
+            // wrote is removed from the tree rather than left in it.
             match pixels
-                .get(&instance.stack)
+                .get(&stack)
                 .copied()
                 .unwrap_or(crate::burned::Verdict::Unknown)
             {
                 crate::burned::Verdict::Burned => {
-                    if held.insert(instance.stack) {
-                        report.burned_in += 1;
-                    }
+                    held.insert(stack);
+                    report.burned_in += 1;
                     continue;
                 }
                 crate::burned::Verdict::Unknown
                     if settings.on_unknown == crate::burned::OnUnknown::Hold =>
                 {
-                    if held.insert(instance.stack) {
-                        report.unjudged += 1;
-                    }
+                    held.insert(stack);
+                    report.unjudged += 1;
                     continue;
                 }
                 _ => {}
             }
-            stacks.insert(instance.stack);
+            let study = instances[0].study;
             let label = labels
-                .get(&instance.study)
+                .get(&study)
                 .cloned()
                 .unwrap_or_else(|| "unknown".to_string());
-            let called = named.get(&instance.stack);
-            match write_one(instance, &plan, settings.root, &code, &label, called) {
-                Ok(written) => {
-                    report.files += 1;
-                    report.bytes += written.bytes;
-                    for ((tag, action), n) in &written.applied.changes {
-                        *report.changes.entry(format!("{tag} {action}")).or_insert(0) += n;
-                    }
-                    files.push(vec![
+            // §9.1. A stack with no name is one nothing classified, which is a
+            // stack the release should not silently rename into something
+            // readable.
+            let (folder, stem) = match named.get(&stack) {
+                Some(n) => (n.folder.clone(), n.name.clone()),
+                None => ("misc".to_string(), format!("stack-{stack:08}")),
+            };
+            let dir = format!("sub-{code}/ses-{label}/{folder}/{stem}");
+            let content = crate::version::content_of(
+                &subject_policy(settings, &code, offset),
+                &categories,
+                &private,
+                &pack,
+                &instances
+                    .iter()
+                    .map(|i| (i.id, i.size, i.mtime))
+                    .collect::<Vec<_>>(),
+            );
+            let was = earlier.as_ref().and_then(|p| p.stacks.get(&stack));
+            let mut change = crate::version::compare(was, &content, &dir);
+            // A stack whose files the last version did not all write is not
+            // one this version may carry forward, whatever the digest says:
+            // the digest describes the decision and the manifest describes the
+            // tree, and only the manifest knows a file was refused.
+            let carried = !change.is_work() || change == crate::version::Change::Moved;
+            if carried
+                && !instances.iter().all(|i| {
+                    earlier
+                        .as_ref()
+                        .is_some_and(|p| p.files.contains_key(&i.id))
+                })
+            {
+                change = crate::version::Change::Rewritten;
+            }
+            jobs.push(Job {
+                stack,
+                dir,
+                content,
+                change,
+                was: was.map(|w| w.dir.clone()),
+                code: code.clone(),
+                offset,
+                instances,
+            });
+        }
+    }
+    report.stacks = jobs.len() as i64;
+
+    // What the last version wrote and this one does not.
+    let here: std::collections::HashSet<i64> = jobs.iter().map(|j| j.stack).collect();
+    let mut gone: Vec<(i64, String)> = match &earlier {
+        Some(p) => p
+            .stacks
+            .iter()
+            .filter(|(stack, _)| !here.contains(stack))
+            .map(|(stack, was)| (*stack, was.dir.clone()))
+            .collect(),
+        None => Vec::new(),
+    };
+    gone.sort();
+
+    // Everything that leaves goes first, so that a directory a move is about
+    // to land in is free by the time the move happens.
+    for (_, dir) in &gone {
+        drop_dir(settings.root, dir);
+    }
+    for job in &jobs {
+        if job.change == crate::version::Change::Rewritten {
+            if let Some(was) = &job.was {
+                drop_dir(settings.root, was);
+            }
+            drop_dir(settings.root, &job.dir);
+        }
+    }
+    let moved = move_them(settings.root, &jobs);
+
+    // And only now is anything written.
+    let mut files: Vec<Vec<Param>> = Vec::new();
+    let mut moves: Vec<Vec<Param>> = Vec::new();
+    let mut rows: Vec<Vec<Param>> = Vec::new();
+    for job in &mut jobs {
+        // A move whose source is not where the last version left it is not a
+        // move. Somebody emptied the tree, and the stack is written again.
+        if job.change == crate::version::Change::Moved && !moved.contains(&job.stack) {
+            job.change = crate::version::Change::Rewritten;
+        }
+        let mut mine: Vec<Vec<Param>> = Vec::new();
+        match job.change {
+            crate::version::Change::Unchanged | crate::version::Change::Moved => {
+                // The bytes are the ones the last version wrote, and the
+                // digest with them: nothing was read, so nothing is recomputed.
+                for i in &job.instances {
+                    let Some((path, digest, bytes)) =
+                        earlier.as_ref().and_then(|p| p.files.get(&i.id))
+                    else {
+                        continue;
+                    };
+                    let path = match job.change {
+                        crate::version::Change::Moved => rebase(path, &job.dir),
+                        _ => path.clone(),
+                    };
+                    report.bytes += bytes;
+                    mine.push(vec![
                         Param::Int(report.release_id),
-                        Param::Int(instance.id),
-                        Param::from(written.path.as_str()),
-                        Param::from(written.digest.as_str()),
-                        Param::Int(written.bytes),
+                        Param::Int(i.id),
+                        Param::from(path),
+                        Param::from(digest.as_str()),
+                        Param::Int(*bytes),
                     ]);
                 }
-                Err(why) => {
-                    // By the reason and never by the path: a report that names
-                    // the files it could not read names the source tree, which
-                    // is the one thing a released dataset must not carry.
-                    *report.refused.entry(why).or_insert(0) += 1;
+            }
+            _ => {
+                let plan = Plan {
+                    policy: settings.policy,
+                    categories: &settings.categories,
+                    private: settings.private,
+                    code: &job.code,
+                    offset: job.offset,
+                    remap: remap.as_ref(),
+                };
+                for i in &job.instances {
+                    match write_one(i, &plan, settings.root, &job.dir) {
+                        Ok(written) => {
+                            report.written += 1;
+                            report.bytes += written.bytes;
+                            for ((tag, action), n) in &written.applied.changes {
+                                *report.changes.entry(format!("{tag} {action}")).or_insert(0) += n;
+                            }
+                            mine.push(vec![
+                                Param::Int(report.release_id),
+                                Param::Int(i.id),
+                                Param::from(written.path.as_str()),
+                                Param::from(written.digest.as_str()),
+                                Param::Int(written.bytes),
+                            ]);
+                        }
+                        Err(why) => {
+                            // By the reason and never by the path: a report
+                            // that names the files it could not read names the
+                            // source tree, which is the one thing a released
+                            // dataset must not carry.
+                            *report.refused.entry(why).or_insert(0) += 1;
+                        }
+                    }
                 }
             }
         }
+        report.files += mine.len() as i64;
+        rows.push(vec![
+            Param::Int(report.release_id),
+            Param::Int(job.stack),
+            Param::from(job.content.as_str()),
+            Param::from(job.dir.as_str()),
+            Param::Int(mine.len() as i64),
+        ]);
+        match job.change {
+            crate::version::Change::Unchanged => report.unchanged += 1,
+            crate::version::Change::Moved => report.moved += 1,
+            crate::version::Change::Rewritten => report.rewritten += 1,
+            crate::version::Change::Added => report.added += 1,
+            crate::version::Change::Removed => {}
+        }
+        if job.change.is_work() {
+            moves.push(vec![
+                Param::Int(report.release_id),
+                Param::Int(job.stack),
+                Param::from(job.change.name()),
+                match &job.was {
+                    Some(was) => Param::from(was.as_str()),
+                    None => Param::Null,
+                },
+                Param::from(job.dir.as_str()),
+            ]);
+        }
+        files.append(&mut mine);
     }
-    report.stacks = stacks.len() as i64;
+    for (stack, was) in &gone {
+        report.removed += 1;
+        moves.push(vec![
+            Param::Int(report.release_id),
+            Param::Int(*stack),
+            Param::from(crate::version::Change::Removed.name()),
+            Param::from(was.as_str()),
+            Param::Null,
+        ]);
+    }
 
     write_files(registry.store(), &files)?;
+    write_rows(
+        registry.store(),
+        "release_stack",
+        &["release_id", "stack_id", "content", "dir", "files"],
+        &rows,
+    )?;
+    write_rows(
+        registry.store(),
+        "release_move",
+        &["release_id", "stack_id", "action", "was", "now"],
+        &moves,
+    )?;
     write_changes(registry.store(), &report)?;
     if !held.is_empty() {
         raise_review(registry.store(), &report, &held, &pixels)?;
@@ -268,6 +508,171 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
     close_row(registry.store(), &report)?;
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
+}
+
+/// The day this release is made, for its version.
+fn today() -> Day {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| Day::from_unix(d.as_secs() as i64))
+        .unwrap_or_else(|| Day::new(1970, 1, 1).expect("the epoch is a day"))
+}
+
+/// The policy, as it applies to one subject.
+///
+/// The pseudonym and the date offset are in it because both are drawn from the
+/// key, and neither is anywhere else in the content digest. A release re-run
+/// under a different key writes different bytes into a differently named tree,
+/// and a comparison that could not see that would call it unchanged.
+fn subject_policy(settings: &Settings, code: &str, offset: crate::dates::Offset) -> String {
+    format!(
+        "{} code={code} offset={} unknown={}",
+        settings.policy.as_json(),
+        offset.0,
+        settings.on_unknown.name(),
+    )
+}
+
+/// The newest finished release of this dataset into this root.
+///
+/// The root has to match. A release of the same name into a different
+/// directory is a different tree, and comparing against a state that describes
+/// some other directory would leave every unchanged file simply missing.
+///
+/// Ordered by id and not by the version, because `2026.09.05.10` sorts before
+/// `2026.09.05.9` and the tenth version of a day is not the second.
+fn previous(store: &mut Store, name: &str, root: &Path) -> Result<Option<Previous>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id, version FROM {} WHERE name = {} AND root = {} AND finished_at IS NOT NULL \
+         ORDER BY id DESC LIMIT 1",
+        store.qualified("release"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+    );
+    let params = [Param::from(name), Param::from(root.display().to_string())];
+    let Some(row) = store.query_opt(&sql, &params)? else {
+        return Ok(None);
+    };
+    let (id, version) = (row.int(0)?, row.text(1)?.to_string());
+
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT stack_id, content, dir FROM {} WHERE release_id = {}",
+        store.qualified("release_stack"),
+        d.param(1, Type::Int),
+    );
+    let mut stacks = HashMap::new();
+    for r in store.query(&sql, &[Param::Int(id)])? {
+        stacks.insert(
+            r.int(0)?,
+            crate::version::Was {
+                content: r.text(1)?.to_string(),
+                dir: r.text(2)?.to_string(),
+            },
+        );
+    }
+
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT instance_id, path, digest, bytes FROM {} WHERE release_id = {}",
+        store.qualified("release_file"),
+        d.param(1, Type::Int),
+    );
+    let mut files = HashMap::new();
+    for r in store.query(&sql, &[Param::Int(id)])? {
+        files.insert(
+            r.int(0)?,
+            (r.text(1)?.to_string(), r.text(2)?.to_string(), r.int(3)?),
+        );
+    }
+    Ok(Some(Previous {
+        id,
+        version,
+        stacks,
+        files,
+    }))
+}
+
+/// A file keeps its name and changes directory, which is what a move is.
+fn rebase(path: &str, dir: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((_, file)) => format!("{dir}/{file}"),
+        None => format!("{dir}/{path}"),
+    }
+}
+
+/// Rename every moved stack's directory, and say which arrived.
+///
+/// In two phases, through a staging directory, because two stacks can swap
+/// names between versions: a disambiguating suffix moves when a sibling
+/// appears or leaves, and renaming one onto the other in place would lose a
+/// tree.
+fn move_them(root: &Path, jobs: &[Job]) -> std::collections::HashSet<i64> {
+    let mut arrived = std::collections::HashSet::new();
+    let moving: Vec<&Job> = jobs
+        .iter()
+        .filter(|j| j.change == crate::version::Change::Moved)
+        .collect();
+    if moving.is_empty() {
+        return arrived;
+    }
+    let staging = root.join(".nils-moving");
+    if std::fs::create_dir_all(&staging).is_err() {
+        return arrived;
+    }
+    let mut staged: Vec<&Job> = Vec::new();
+    for job in &moving {
+        let Some(was) = &job.was else { continue };
+        if std::fs::rename(root.join(was), staging.join(job.stack.to_string())).is_ok() {
+            staged.push(job);
+        }
+    }
+    for job in staged {
+        let to = root.join(&job.dir);
+        if let Some(parent) = to.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            continue;
+        }
+        if std::fs::rename(staging.join(job.stack.to_string()), &to).is_ok() {
+            arrived.insert(job.stack);
+        }
+    }
+    for job in &moving {
+        if let Some(was) = &job.was {
+            prune(root, root.join(was).parent());
+        }
+    }
+    std::fs::remove_dir_all(&staging).ok();
+    arrived
+}
+
+/// Remove a stack's directory, and any parent it leaves empty.
+fn drop_dir(root: &Path, dir: &str) {
+    let full = root.join(dir);
+    std::fs::remove_dir_all(&full).ok();
+    prune(root, full.parent());
+}
+
+/// Walk up from an emptied directory, removing what is now empty.
+///
+/// Bounded by the release root, which it never removes: a version that dropped
+/// a subject should not leave `sub-x/ses-1/anat` behind, and must not walk
+/// above the tree it owns. `remove_dir` refusing a directory that still holds
+/// something is the stopping condition.
+fn prune(root: &Path, from: Option<&Path>) {
+    let mut here = from.map(Path::to_path_buf);
+    while let Some(path) = here {
+        if path == root || !path.starts_with(root) {
+            break;
+        }
+        if std::fs::remove_dir(&path).is_err() {
+            break;
+        }
+        here = path.parent().map(Path::to_path_buf);
+    }
 }
 
 /// Every instance the selection names, with what the writer needs.
@@ -345,7 +750,8 @@ fn select(store: &mut Store, selection: &Selection) -> Result<Vec<Instance>, Err
     let sql = format!(
         // The stored path is relative to the batch root it was walked from,
         // which is what makes a registry portable; the root is on `source`.
-        "SELECT i.id, k.id, se.subject_id, su.code, se.study_id, so.root, sf.path \
+        "SELECT i.id, k.id, se.subject_id, su.code, se.study_id, so.root, sf.path, \
+          sf.size, sf.mtime_ns \
          FROM {instance} i \
          JOIN {stack} k ON k.id = i.stack_id \
          JOIN {series} se ON se.id = i.series_id \
@@ -376,15 +782,29 @@ fn select(store: &mut Store, selection: &Selection) -> Result<Vec<Instance>, Err
             code: r.text(3)?.to_string(),
             study: r.int(4)?,
             path: Path::new(r.text(5)?).join(r.text(6)?).display().to_string(),
+            size: r.int(7)?,
+            mtime: r.int(8)?,
         });
     }
     Ok(out)
 }
 
 fn study_days(store: &mut Store) -> Result<HashMap<i64, Day>, Error> {
+    // Both dates through the dialect's own rendering. Postgres hands a `date`
+    // back in a type the store reads only as text, and the release read it raw
+    // until a release was run on Postgres.
+    let t = table("study");
+    let d = store.dialect();
+    let day = |c: &str| {
+        d.text_of(
+            t.column(c)
+                .unwrap_or_else(|| panic!("study.{c} is not a column")),
+        )
+    };
+    let (filled, study) = (day("date_filled"), day("study_date"));
     let sql = format!(
-        "SELECT id, COALESCE(date_filled, study_date) FROM {} \
-         WHERE COALESCE(date_filled, study_date) IS NOT NULL",
+        "SELECT id, COALESCE({filled}, {study}) FROM {} \
+         WHERE COALESCE({filled}, {study}) IS NOT NULL",
         store.qualified("study")
     );
     let mut out = HashMap::new();
@@ -442,28 +862,11 @@ struct Written {
 ///
 /// Read whole, because a release writes the pixels. The digest reader stops
 /// before them, which is right for reading a header at speed and wrong here.
-fn write_one(
-    instance: &Instance,
-    plan: &Plan,
-    root: &Path,
-    code: &str,
-    label: &str,
-    called: Option<&name::Named>,
-) -> Result<Written, String> {
+fn write_one(instance: &Instance, plan: &Plan, root: &Path, dir: &str) -> Result<Written, String> {
     let mut object = open(Path::new(&instance.path))?;
     let applied = scrub::apply(&mut object, plan);
 
-    // §9.1. A stack with no name is one nothing classified, which is a stack
-    // the release should not silently rename into something readable.
-    let (folder, stem) = match called {
-        Some(n) => (n.folder.clone(), n.name.clone()),
-        None => ("misc".to_string(), format!("stack-{:08}", instance.stack)),
-    };
-    let relative = PathBuf::from(format!("sub-{code}"))
-        .join(format!("ses-{label}"))
-        .join(folder)
-        .join(&stem)
-        .join(format!("{:08}.dcm", instance.id));
+    let relative = PathBuf::from(dir).join(format!("{:08}.dcm", instance.id));
     let target = root.join(&relative);
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|_| "no directory to write into".to_string())?;
@@ -586,13 +989,20 @@ fn remember_offset(
     Ok(())
 }
 
-fn open_row(store: &mut Store, settings: &Settings) -> Result<i64, Error> {
+fn open_row(
+    store: &mut Store,
+    settings: &Settings,
+    version: &str,
+    earlier: Option<&Previous>,
+) -> Result<i64, Error> {
     let categories: Vec<&str> = settings.categories.iter().map(|c| c.name()).collect();
     let written = store.insert(
         &Insert::new(
             table("release"),
             &[
                 "name",
+                "version",
+                "previous_id",
                 "root",
                 "policy",
                 "selection",
@@ -604,11 +1014,21 @@ fn open_row(store: &mut Store, settings: &Settings) -> Result<i64, Error> {
                 "started_at",
                 "files",
                 "subjects",
+                "unchanged",
+                "moved",
+                "rewritten",
+                "added",
+                "removed",
             ],
         )
         .returning(&["id"]),
         &[vec![
             Param::from(settings.name),
+            Param::from(version),
+            match earlier {
+                Some(p) => Param::Int(p.id),
+                None => Param::Null,
+            },
             Param::from(settings.root.display().to_string()),
             Param::from(settings.policy.as_json().to_string()),
             Param::from(settings.selection.as_json().to_string()),
@@ -620,6 +1040,13 @@ fn open_row(store: &mut Store, settings: &Settings) -> Result<i64, Error> {
             Param::from(settings.pack_version),
             Param::from(settings.actor),
             Param::from(now_iso()),
+            // Filled in when the run closes; a run that never closed says it
+            // did nothing, which is what a tree it half wrote is worth.
+            Param::Int(0),
+            Param::Int(0),
+            Param::Int(0),
+            Param::Int(0),
+            Param::Int(0),
             Param::Int(0),
             Param::Int(0),
         ]],
@@ -654,12 +1081,18 @@ fn write_files(store: &mut Store, files: &[Vec<Param>]) -> Result<(), Error> {
 fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
     let d = store.dialect();
     let sql = format!(
-        "UPDATE {} SET finished_at = {}, files = {}, subjects = {} WHERE id = {}",
+        "UPDATE {} SET finished_at = {}, files = {}, subjects = {}, unchanged = {}, moved = {}, \
+         rewritten = {}, added = {}, removed = {} WHERE id = {}",
         store.qualified("release"),
         d.param(1, Type::Timestamp),
         d.param(2, Type::Int),
         d.param(3, Type::Int),
         d.param(4, Type::Int),
+        d.param(5, Type::Int),
+        d.param(6, Type::Int),
+        d.param(7, Type::Int),
+        d.param(8, Type::Int),
+        d.param(9, Type::Int),
     );
     store.execute(
         &sql,
@@ -667,10 +1100,38 @@ fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
             Param::from(now_iso()),
             Param::Int(report.files),
             Param::Int(report.subjects),
+            Param::Int(report.unchanged),
+            Param::Int(report.moved),
+            Param::Int(report.rewritten),
+            Param::Int(report.added),
+            Param::Int(report.removed),
             Param::Int(report.release_id),
         ],
     )?;
     Ok(())
+}
+
+/// Insert a batch, or leave the table as it was.
+fn write_rows(
+    store: &mut Store,
+    into: &str,
+    columns: &[&str],
+    rows: &[Vec<Param>],
+) -> Result<(), Error> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    store.begin()?;
+    match store.insert(&Insert::new(table(into), columns), rows) {
+        Ok(_) => {
+            store.commit()?;
+            Ok(())
+        }
+        Err(e) => {
+            store.rollback().ok();
+            Err(Error::Store(e))
+        }
+    }
 }
 
 /// What every stack in the registry is called under the `descriptive` layout
@@ -977,5 +1438,105 @@ fn raise_review(
             store.rollback().ok();
             Err(Error::Store(e))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nils_dicom::synth::TempDir;
+
+    fn job(stack: i64, was: &str, dir: &str) -> Job {
+        Job {
+            stack,
+            dir: dir.to_string(),
+            content: "same".to_string(),
+            change: crate::version::Change::Moved,
+            was: Some(was.to_string()),
+            code: "x".to_string(),
+            offset: crate::dates::Offset(0),
+            instances: Vec::new(),
+        }
+    }
+
+    fn write(root: &Path, path: &str) {
+        let full = root.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, path.as_bytes()).unwrap();
+    }
+
+    fn read(root: &Path, path: &str) -> Option<String> {
+        std::fs::read_to_string(root.join(path)).ok()
+    }
+
+    #[test]
+    fn two_stacks_can_swap_names_between_versions() {
+        // Which is why the moves go through a staging directory. A
+        // disambiguating suffix moves when a sibling appears or leaves, and
+        // renaming one onto the other in place would lose a tree.
+        let dir = TempDir::new("move");
+        let root = dir.path();
+        write(root, "sub-x/ses-1/anat/T1w_1/00000001.dcm");
+        write(root, "sub-x/ses-1/anat/T1w_2/00000002.dcm");
+        let jobs = vec![
+            job(1, "sub-x/ses-1/anat/T1w_1", "sub-x/ses-1/anat/T1w_2"),
+            job(2, "sub-x/ses-1/anat/T1w_2", "sub-x/ses-1/anat/T1w_1"),
+        ];
+        let arrived = move_them(root, &jobs);
+        assert_eq!(arrived.len(), 2);
+        assert_eq!(
+            read(root, "sub-x/ses-1/anat/T1w_2/00000001.dcm").as_deref(),
+            Some("sub-x/ses-1/anat/T1w_1/00000001.dcm"),
+            "the first went where the second was"
+        );
+        assert_eq!(
+            read(root, "sub-x/ses-1/anat/T1w_1/00000002.dcm").as_deref(),
+            Some("sub-x/ses-1/anat/T1w_2/00000002.dcm")
+        );
+        assert!(!root.join(".nils-moving").exists(), "and it tidied up");
+    }
+
+    #[test]
+    fn a_move_whose_source_is_gone_is_not_reported_as_a_move() {
+        // Somebody emptied the tree. The stack is written again, which the
+        // caller does by reading what did not arrive.
+        let dir = TempDir::new("move-gone");
+        let jobs = vec![job(1, "sub-x/ses-1/anat/T1w", "sub-x/ses-1/anat/SC_T1w")];
+        assert!(move_them(dir.path(), &jobs).is_empty());
+    }
+
+    #[test]
+    fn a_directory_that_empties_takes_its_parents_with_it() {
+        // A version that dropped a subject should not leave `sub-x/ses-1/anat`
+        // behind. The release root itself is never removed.
+        let dir = TempDir::new("drop");
+        let root = dir.path();
+        write(root, "sub-x/ses-1/anat/T1w/00000001.dcm");
+        write(root, "sub-y/ses-1/anat/T1w/00000002.dcm");
+        drop_dir(root, "sub-x/ses-1/anat/T1w");
+        assert!(!root.join("sub-x").exists());
+        assert!(root.join("sub-y/ses-1/anat/T1w").exists(), "and only that");
+        assert!(root.exists());
+    }
+
+    #[test]
+    fn a_parent_that_still_holds_something_stays() {
+        let dir = TempDir::new("drop-sibling");
+        let root = dir.path();
+        write(root, "sub-x/ses-1/anat/T1w/00000001.dcm");
+        write(root, "sub-x/ses-1/anat/T2w/00000002.dcm");
+        drop_dir(root, "sub-x/ses-1/anat/T1w");
+        assert!(root.join("sub-x/ses-1/anat/T2w").exists());
+    }
+
+    #[test]
+    fn a_moved_file_keeps_its_name_and_changes_directory() {
+        assert_eq!(
+            rebase(
+                "sub-x/ses-1/anat/T1w/00000001.dcm",
+                "sub-x/ses-1/anat/SC_T1w"
+            ),
+            "sub-x/ses-1/anat/SC_T1w/00000001.dcm"
+        );
     }
 }
