@@ -380,9 +380,47 @@ fn run(
         }
     }
 
+    if !report.cancelled {
+        report.studies_settled = settle_primaries(store)?;
+    }
+
     report.seconds = started.elapsed().as_secs_f64();
     report.peak_rss = peak_rss();
     Ok(report)
+}
+
+/// Whether each study holds a stack the scanner called its output (§6).
+///
+/// Half of the session rescue, and the half that is a fact: it depends only on
+/// the study's own stacks. The other half is which studies are one session,
+/// which depends on a scheme, so it is composed on read and nothing about a
+/// session is stored (§5).
+///
+/// Run once at the end, over every study rather than only the run's, because a
+/// study whose stacks were fingerprinted across two runs would otherwise carry
+/// the answer for whichever run finished last. Only studies whose stacks are
+/// **all** fingerprinted are given a value: a partly derived study cannot say
+/// it has no primary, only that it has not found one yet, and null is how that
+/// is said.
+fn settle_primaries(store: &mut Store) -> Result<i64, Error> {
+    let sql = format!(
+        "UPDATE {study} AS s SET has_original_primary = (             SELECT MAX(CASE WHEN f.image_role = 'original_primary' THEN 1 ELSE 0 END)              FROM {fp} f WHERE f.study_id = s.id)          WHERE EXISTS (SELECT 1 FROM {fp} f WHERE f.study_id = s.id)            AND NOT EXISTS (             SELECT 1 FROM {series} se JOIN {stack} k ON k.series_id = se.id              LEFT JOIN {fp} f ON f.stack_id = k.id              WHERE se.study_id = s.id AND f.id IS NULL)",
+        study = store.qualified("study"),
+        fp = store.qualified("stack_fingerprint"),
+        series = store.qualified("series"),
+        stack = store.qualified("stack"),
+    );
+    store.begin()?;
+    match store.execute(&sql, &[]) {
+        Ok(n) => {
+            store.commit()?;
+            Ok(n as i64)
+        }
+        Err(e) => {
+            store.rollback().ok();
+            Err(Error::Store(e))
+        }
+    }
 }
 
 /// The split reason of every series in the window that has more than one

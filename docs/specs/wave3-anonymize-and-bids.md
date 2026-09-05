@@ -383,6 +383,28 @@ from those two plus the scheme. That keeps Wave 2's finding, which was that the
 rescue must not depend on which stacks were in the batch, and it keeps §5's,
 which is that nothing about a session is stored as a fact.
 
+The corpus makes the argument concrete. One subject, a brain study on the Monday
+with no primary in it and a spine study on the Wednesday with one. Under a
+same-day scheme they are two occasions and the brain study is rescued; under a
+fortnight window they are one visit that holds a primary and there is nothing to
+rescue. The same two studies, two answers, and neither is a bug: the question
+"does this occasion have a primary" cannot be answered until something says what
+the occasion is.
+
+Two more things follow from that.
+
+**Unknown is not no.** `study.has_original_primary` is set only for a study all
+of whose stacks are fingerprinted; a partly derived study has not said it holds
+no primary, only that it has not found one yet. A session with one such study
+answers `unknown`, and a rescue on an unanswered question is a rescue on a
+guess. One study saying yes still answers for the whole visit, whatever else is
+unknown.
+
+**The stack's role and the session's answer are separate facts.** A visit whose
+only images are screen captures holds no primary, and there is also nothing in
+it to rescue: `not_an_image` is checked before anything else precisely so that
+the second fact survives the first.
+
 ## 7. The disposition
 
 The concept v0 lacks and every one of its export bugs needs.
@@ -721,6 +743,12 @@ from each of the three tiers, each carrying a decoy for the tier below it, and
 one that no measured field can answer, which v0 answers from the technique. And
 the four image roles, including a screen capture labelled `ORIGINAL\SECONDARY`,
 which a rescue must not pick up.
+
+**The rescue.** A visit whose every stack is `ORIGINAL\SECONDARY`; the same
+visit with one primary in it, which answers for the whole visit; the split
+brain-and-spine appointment above, checked under both schemes; and a visit whose
+only images are screen captures, which holds no primary and has nothing to
+rescue either.
 
 **Sessions.** Two studies on one day; two studies three days apart; studies at
 zero, six, nine and twelve months against an anchor, so the cadence snaps three

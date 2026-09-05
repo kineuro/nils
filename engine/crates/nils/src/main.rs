@@ -2946,6 +2946,7 @@ fn session_list(home: &Home, args: SessionListArgs) -> Result<(), Exit> {
                 "offset_months": s.offset_months.map(|m| (m * 100.0).round() / 100.0),
                 "flagged": s.flagged,
                 "reason": s.reason.map(|r| r.name()),
+                "has_primary": s.has_primary,
             }));
         }
     }
@@ -2984,11 +2985,24 @@ fn session_list(home: &Home, args: SessionListArgs) -> Result<(), Exit> {
             Some(m) => format!("{m:.1}"),
             None => "-".into(),
         };
-        let note = match row["reason"].as_str() {
+        let mut note = match row["reason"].as_str() {
             Some(r) => r.to_string(),
             None if row["months"].is_number() && row["nominal"].is_null() => "off schedule".into(),
             None => String::new(),
         };
+        // §6. Said here because it is a property of the occasion, and this is
+        // the command that derives occasions: a session with no primary
+        // anywhere is one whose secondaries are all it has.
+        if let Some(what) = match row["has_primary"].as_bool() {
+            Some(false) => Some("rescue"),
+            None => Some("primary unknown"),
+            Some(true) => None,
+        } {
+            if !note.is_empty() {
+                note.push_str(", ");
+            }
+            note.push_str(what);
+        }
         let line = format!(
             "{:<wide$} {:<8} {:<11} {:<11} {:>7} {:>8}  {}",
             text("subject"),
@@ -3063,7 +3077,8 @@ fn read_points(
     // is three tables deep, and most schemes do not read it.
     let sql = if said.is_some() {
         format!(
-            "SELECT su.code, st.id, COALESCE(st.date_filled, st.study_date), MIN(sf.path) \
+            "SELECT su.code, st.id, COALESCE(st.date_filled, st.study_date), MIN(sf.path), \
+             MAX(st.has_original_primary) \
              FROM {study} st JOIN {subject_table} su ON su.id = st.subject_id \
              JOIN {series} se ON se.study_id = st.id \
              JOIN {instance} i ON i.series_id = se.id \
@@ -3079,7 +3094,8 @@ fn read_points(
         format!(
             // The cast is for Postgres, which will not infer a type for a bare
             // NULL and refuses the statement rather than guessing.
-            "SELECT su.code, st.id, COALESCE(st.date_filled, st.study_date), CAST(NULL AS TEXT) \
+            "SELECT su.code, st.id, COALESCE(st.date_filled, st.study_date), CAST(NULL AS TEXT), \
+             st.has_original_primary \
              FROM {study} st JOIN {subject_table} su ON su.id = st.subject_id \
              WHERE COALESCE(st.date_filled, st.study_date) IS NOT NULL{where_subject} \
              ORDER BY su.code, 3, st.id"
@@ -3104,6 +3120,9 @@ fn read_points(
                 day,
                 said: said
                     .and_then(|(segment, pattern)| label_in(path, *segment, pattern.as_ref())),
+                // Null is not no: a study whose stacks are not all
+                // fingerprinted has not said it holds no primary.
+                has_primary: r.opt_int(4).ok().flatten().map(|v| v != 0),
             },
         });
     }

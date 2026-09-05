@@ -19,6 +19,10 @@ pub struct Report {
     /// view is unknown. A count worth watching: it is usually a vendor whose
     /// geometry lives somewhere the reader does not look yet.
     pub without_geometry: i64,
+    /// Studies told whether they hold a primary (§6), which is half of the
+    /// session rescue. Counted because it is not the number of stacks read:
+    /// a study whose stacks are only partly derived is left to say nothing.
+    pub studies_settled: i64,
     pub seconds: f64,
     pub peak_rss: Option<u64>,
     pub cancelled: bool,
@@ -33,6 +37,7 @@ impl Report {
             skipped: 0,
             written: 0,
             without_geometry: 0,
+            studies_settled: 0,
             seconds: 0.0,
             peak_rss: None,
             cancelled: false,
@@ -55,6 +60,7 @@ impl fmt::Display for Report {
         writeln!(f, "  written          {:>12}", self.written)?;
         writeln!(f, "  already derived  {:>12}", self.skipped)?;
         writeln!(f, "  without geometry {:>12}", self.without_geometry)?;
+        writeln!(f, "  studies settled  {:>12}", self.studies_settled)?;
         writeln!(f, "  {:.1} s, {:.0} stacks/s", self.seconds, self.rate())?;
         if let Some(rss) = self.peak_rss {
             writeln!(

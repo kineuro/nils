@@ -681,9 +681,13 @@ impl<'a> Writer<'a> {
             let mut row = vec![Param::from(x.study_uid.as_str()), Param::Int(subject_id)];
             row.extend(x.row(Level::Study).map(|(_, v)| Param::from(v)));
             row.push(Param::Int(self.batch_id));
-            // The date is not decided here: the study's other files may still
-            // be coming. `settle_dates` fills these in when the run ends.
-            for _ in 0..4 {
+            // What is left is what a later step decides: the date this study
+            // was given (`settle_dates`, when the run ends, because the
+            // study's other files may still be coming) and whether it holds a
+            // primary (`nils fingerprint`, §6). Padded to the table's width
+            // rather than by a count, so that adding a column to `study` does
+            // not silently unbalance this insert.
+            while row.len() < t.data_columns().count() {
                 row.push(Param::Null);
             }
             rows.push(row);
