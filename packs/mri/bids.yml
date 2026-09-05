@@ -1,0 +1,262 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# How this pack's vocabulary maps onto BIDS (Wave 3 section 9.2).
+#
+# The split is deliberate. The **engine** carries the standard: the entity
+# grammar, which entities a suffix takes, which it requires, and what a label
+# may spell. This file carries **our** half: which of our values means `T1w`,
+# which becomes an entity, and which is left to describe the acquisition. A
+# pack can be wrong about MRI; it cannot be wrong about BIDS.
+#
+# Everything here is measured against the archive rather than assumed, and
+# where the honest answer is "BIDS has no word for this" the value is simply
+# absent. An absent value is not a failure: it routes the stack to
+# `derivatives/` or reports it, which is the point of section 9.3. v0 writes no
+# entity name at all, so nothing below is carried from it.
+
+bids: mri
+
+# What a stack is for, as a BIDS datatype. `localizer` and `misc` have none:
+# BIDS has no datatype for a scout, which is why its placement is a release's
+# choice (section 9.3) rather than a mapping.
+datatypes:
+  anat: anat
+  dwi: dwi
+  func: func
+  fmap: fmap
+  perf: perf
+
+# The suffix, from the first of these that answers, in this order: a construct,
+# then a technique, then a modifier, then the base contrast. A construct is
+# tried first because it is the strongest statement a stack makes: one that
+# says it is an ADC map is an ADC map whatever its base contrast reads.
+#
+# A suffix may fix entities with it: an `INV1` is not merely an MP2RAGE, it is
+# its first inversion.
+suffix:
+  construct:
+    ADC: {datatype: dwi, suffix: ADC}
+    eADC: {datatype: dwi, suffix: expADC}
+    Trace: {datatype: dwi, suffix: trace}
+    FA: {datatype: dwi, suffix: FA}
+    T1map: {datatype: anat, suffix: T1map}
+    T2map: {datatype: anat, suffix: T2map}
+    R1map: {datatype: anat, suffix: R1map}
+    R2map: {datatype: anat, suffix: R2map}
+    R2starmap: {datatype: anat, suffix: R2starmap}
+    PDmap: {datatype: anat, suffix: PDmap}
+    # BIDS calls a quantitative susceptibility map a chi map, after the symbol.
+    QSM: {datatype: anat, suffix: Chimap}
+    # An MP2RAGE splits into its two inversions and the uniform image it
+    # computes from them, and BIDS has a name for each. The technique qualifier
+    # is there because `INV1` on anything else is not an MP2RAGE inversion.
+    INV1:
+      datatype: anat
+      suffix: MP2RAGE
+      when_technique: MP2RAGE
+      entities: {inversion: '1'}
+    INV2:
+      datatype: anat
+      suffix: MP2RAGE
+      when_technique: MP2RAGE
+      entities: {inversion: '2'}
+    Uniform: {datatype: anat, suffix: UNIT1, when_technique: MP2RAGE}
+    UniformDenoised: {datatype: anat, suffix: UNIT1, when_technique: MP2RAGE}
+    # A B0 map is what BIDS calls a fieldmap.
+    B0map: {datatype: fmap, suffix: fieldmap}
+    B1map: {datatype: fmap, suffix: TB1map}
+  technique:
+    ME-GRE: {datatype: anat, suffix: MEGRE}
+    ME-SE: {datatype: anat, suffix: MESE}
+    TOF-MRA: {datatype: anat, suffix: angio}
+    PC-MRA: {datatype: anat, suffix: angio}
+    BOLD-EPI: {datatype: func, suffix: bold}
+    ASL-EPI: {datatype: perf, suffix: asl}
+  modifier:
+    FLAIR: {datatype: anat, suffix: FLAIR}
+  base:
+    T1w: {datatype: anat, suffix: T1w}
+    T2w: {datatype: anat, suffix: T2w}
+    PDw: {datatype: anat, suffix: PDw}
+    T2starw: {datatype: anat, suffix: T2starw}
+    T1rho: {datatype: anat, suffix: T1rho}
+    DWI: {datatype: dwi, suffix: dwi}
+  # Deliberately absent, and each for a reason a reader should be able to
+  # check. `SWI` and `PWI`: BIDS has no suffix, so they are derivatives.
+  # `MTw`: BIDS has `MTR`, `MTS` and `MPM`, all of which are computed from more
+  # than one image, and no name for a single magnetisation-transfer-weighted
+  # one. `T2rho`: no suffix. `comb-ME-GRE`: a combination of echoes is one
+  # image, so it is not `MEGRE`, which requires an echo index; it falls through
+  # to its base and keeps its technique in `acq-`. `MP2RAGE` as a technique
+  # with no construct: the suffix requires an inversion index and nothing says
+  # which inversion it is. A DSC perfusion: the BIDS `perf` datatype is ASL.
+  # Most of `fmap` likewise: telling `phasediff` from `phase1` needs echo
+  # knowledge we do not have, and guessing writes a claim into a filename.
+
+# What an axis value contributes as an entity rather than as a description.
+entities:
+  # The complex part, which BIDS spells with the same four words we do.
+  part:
+    Magnitude: mag
+    Phase: phase
+    Real: real
+    Imaginary: imag
+  # Magnetisation transfer, on the stacks that say so.
+  mtransfer:
+    MT: 'on'
+  # The contrast agent's label. BIDS wants the agent's name and the archive
+  # does not carry one a filename may spell: `ContrastBolusAgent` is free text
+  # in a dozen spellings and two languages. So the label is declared here, and
+  # a deployment that knows what it injects should say so.
+  ceagent: contrast
+
+# Everything else that describes the acquisition, joined into `acq-`.
+#
+# A BIDS label is `[0-9a-zA-Z+]+`, so a token is spelled here rather than
+# derived by stripping characters out of a value: `ME-GRE` and `MEGRE` are the
+# same token under any such rule, and two different acquisitions that collide
+# in a filename are a worse outcome than a long name.
+#
+# A list and not a mapping, because **the order is the order the tokens are
+# joined in** and an order that depends on how a reader happens to sort its
+# keys is not an order. It is v0's naming order with what became a suffix or an
+# entity removed.
+acq:
+  - from: body_part
+    # Where in the body, which BIDS has no entity for and which a brain and a
+    # spine acquisition of one session need to tell them apart.
+    tokens:
+      brain: Brain
+      'brain-neck': BrainNeck
+      neck: Neck
+      spine: Spine
+  - from: orientation
+    tokens:
+      Ax: Ax
+      Sag: Sag
+      Cor: Cor
+      Obl: Obl
+      '3D': Volume
+  - from: acquisition_type
+    tokens:
+      '2D': 2D
+      '3D': 3D
+  - from: technique
+    tokens:
+      'MS-EPI': MSEPI
+      'DWI-EPI': DWIEPI
+      'DWI-STEAM': DWISTEAM
+      'BOLD-EPI': BOLDEPI
+      'ASL-EPI': ASLEPI
+      'Perfusion-EPI': PerfusionEPI
+      GRASE: GRASE
+      'SE-EPI': SEEPI
+      'GRE-EPI': GREEPI
+      MRF: MRF
+      MDME: MDME
+      'SS-TSE': SSTSE
+      'IR-TSE': IRTSE
+      'ME-SE': MESE
+      'VFA-TSE': VFATSE
+      TSE: TSE
+      SE: SE
+      QALAS: QALAS
+      MP2RAGE: MP2RAGE
+      MEMPRAGE: MEMPRAGE
+      MPRAGE: MPRAGE
+      'TOF-MRA': TOFMRA
+      'PC-MRA': PCMRA
+      'comb-ME-GRE': combMEGRE
+      'ME-GRE': MEGRE
+      CISS: CISS
+      bSSFP: bSSFP
+      DESS: DESS
+      SSFP: SSFP
+      'VFA-GRE': VFAGRE
+      'VI-GRE': VIGRE
+      'FSP-GRE': FSPGRE
+      'SP-GRE': SPGRE
+      'SS-GRE': SSGRE
+      GRE: GRE
+      EPI: EPI
+  - from: modifier
+    tokens:
+      FLAIR: FLAIR
+      STIR: STIR
+      DIR: DIR
+      PSIR: PSIR
+      IR: IR
+      Radial: Radial
+      Spiral: Spiral
+      FatSat: FatSat
+      WaterExcitation: WaterExc
+      Dixon: Dixon
+      MT: MT
+      FlowComp: FlowComp
+      BlackBlood: BlackBlood
+      BrightBlood: BrightBlood
+      MoCo: MoCo
+  - from: construct
+    # Deliberately not tokens here: `ND` and the four complex parts. The first
+    # says only that a vendor's distortion correction was off, which every
+    # other stack of the series also says; the other four are the `part`
+    # entity and would say it twice.
+    tokens:
+      MD: MD
+      CBF: CBF
+      CBV: CBV
+      MTT: MTT
+      Tmax: Tmax
+      TTP: TTP
+      Water: Water
+      Fat: Fat
+      InPhase: InPhase
+      OutPhase: OutPhase
+      SyntheticT1w: SynT1w
+      SyntheticT2w: SynT2w
+      SyntheticFLAIR: SynFLAIR
+      SyntheticPDw: SynPDw
+      MyelinMap: MyelinMap
+      MIP: MIP
+      MinIP: MinIP
+      MPR: MPR
+      SWI: SWI
+      UniformDenoised: Denoised
+      Filtered: Filtered
+      ORIG: ORIG
+  - from: provenance
+    tokens:
+      SyMRI: SyMRI
+      EPIMix: EPIMix
+      STAGE: STAGE
+      SWIRecon: SWIRecon
+      DTIRecon: DTIRecon
+      PerfusionRecon: PerfusionRecon
+      ASLRecon: ASLRecon
+      BOLDRecon: BOLDRecon
+      RawRecon: RawRecon
+
+# What counts as a vendor's synthetic contrast, for the placement choice of
+# section 9.3: an image the scanner computed from a multi-parameter
+# acquisition rather than one it acquired. The BIDS qMRI appendix permits
+# these in raw `anat/`; a purist puts every one in `derivatives/`. Both are
+# defensible, so a release chooses and this says which stacks the choice is
+# about.
+synthetic:
+  provenance: [SyMRI]
+  construct: [SyntheticT1w, SyntheticT2w, SyntheticFLAIR, SyntheticPDw]
+
+# What the subject was doing, which is the one thing here that no rule sets.
+#
+# `func` requires `task` and nothing in a DICOM says what a subject was doing:
+# of 1,173 functional stacks in the archive, ten carry anything resting-like in
+# their text and none says "task". So this is a vocabulary a person chooses
+# from, per study, and a functional stack whose study has no answer is reported
+# rather than named (section 9.2).
+task:
+  rest: {why: 'resting state, the subject awake with no task'}
+  sleep: {why: 'asleep or sedated'}
+  breathhold: {why: 'a breath-hold block, usually for cerebrovascular reactivity'}
+  fingertapping: {why: 'a motor paradigm'}
+  languagegen: {why: 'a language generation paradigm'}
+  visual: {why: 'a visual paradigm'}

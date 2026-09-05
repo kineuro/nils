@@ -608,3 +608,97 @@ fn the_linkage_store_files_looks_up_and_imports_on_both_backends() {
         }
     }
 }
+
+/// Wave 3 §9: `release_file` is rebuilt by migration 16, so the upgrade path
+/// is the one thing about it a fresh registry cannot prove.
+///
+/// A registry made before it has a `release_file` whose `instance_id` is NOT
+/// NULL and which has no `stack_id`, and no `ALTER` relaxes a NOT NULL on both
+/// backends. So the migration creates the new shape, copies through the join
+/// that says which stack a file's instance belongs to, and renames.
+#[test]
+fn migration_16_rebuilds_the_release_manifest_and_keeps_its_rows() {
+    use nils_registry::schema;
+
+    let dir = TempDir::new("rebuild");
+    let path = dir.path().join("registry.db");
+    let mut store = Store::open_sqlite(&path).unwrap();
+    migrate::migrate(&mut store, Kind::Registry).unwrap();
+
+    // Put `release_file` back into the shape migration 15 left it in, and the
+    // version with it, which is what a registry made last week looks like.
+    store
+        .batch(
+            "DROP TABLE release_file;
+             CREATE TABLE release_file (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               release_id INTEGER NOT NULL,
+               instance_id INTEGER NOT NULL,
+               path TEXT NOT NULL,
+               digest TEXT NOT NULL,
+               bytes INTEGER NOT NULL);
+             UPDATE registry_meta SET value = '15' WHERE key = 'schema_version';
+             INSERT INTO stack (id, series_id, stack_index, stack_key, modality, orientation, \
+                                n_instances, first_batch_id)
+               VALUES (7, 1, 0, 'k', 'MR', 'Ax', 1, 1);
+             INSERT INTO instance (id, sop_instance_uid, series_id, stack_id, first_batch_id)
+               VALUES (3, '1.2.3.4', 1, 7, 1);
+             INSERT INTO release_file (release_id, instance_id, path, digest, bytes)
+               VALUES (1, 3, 'sub-x/ses-1/anat/T1w/00000003.dcm', 'abc', 42)",
+        )
+        .unwrap();
+    assert_eq!(
+        migrate::standing(&mut store, Kind::Registry).unwrap(),
+        Standing::Behind(15)
+    );
+
+    // Which is what opening it behind a newer binary does.
+    assert_eq!(
+        migrate::migrate(&mut store, Kind::Registry).unwrap(),
+        vec![16]
+    );
+
+    let rows = store
+        .query(
+            "SELECT stack_id, instance_id, path, bytes FROM release_file",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the row survived");
+    assert_eq!(rows[0].int(0).unwrap(), 7, "and gained the stack it is of");
+    assert_eq!(rows[0].int(1).unwrap(), 3);
+    assert_eq!(rows[0].int(3).unwrap(), 42);
+
+    // And the new shape takes a file that is not one instance written out: a
+    // NIfTI is a whole stack, and its sidecar is the stack's too.
+    store
+        .insert(
+            &Insert::new(
+                schema::table("release_file"),
+                &[
+                    "release_id",
+                    "stack_id",
+                    "instance_id",
+                    "path",
+                    "digest",
+                    "bytes",
+                ],
+            ),
+            &[vec![
+                Param::Int(1),
+                Param::Int(7),
+                Param::Null,
+                Param::from("sub-x/ses-1/anat/sub-x_ses-1_T1w.nii.gz"),
+                Param::from("def"),
+                Param::Int(9),
+            ]],
+        )
+        .unwrap();
+    let rows = store
+        .query(
+            "SELECT COUNT(*) FROM release_file WHERE instance_id IS NULL",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(rows[0].int(0).unwrap(), 1);
+}

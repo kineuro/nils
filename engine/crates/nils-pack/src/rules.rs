@@ -293,6 +293,25 @@ impl Axis {
         self.values.iter().position(|v| v.id == id)
     }
 
+    /// The identity of the value a row stores.
+    ///
+    /// The inverse of [`Axis::stored`], and needed because an axis may store
+    /// the label: `base` stores `T2*w` and its identity is `T2starw`, which is
+    /// also the word BIDS uses. Anything keyed on the identity, a BIDS mapping
+    /// among them, reads a row through this.
+    pub fn id_of_stored(&self, stored: &str) -> Option<&str> {
+        self.values
+            .iter()
+            .find(|v| {
+                if self.stores_label {
+                    v.label == stored
+                } else {
+                    v.id == stored
+                }
+            })
+            .map(|v| v.id.as_str())
+    }
+
     /// What a row stores for this value.
     pub fn stored(&self, i: usize) -> &str {
         if self.stores_label {

@@ -57,6 +57,11 @@ impl Day {
         self.month
     }
 
+    /// The day of the month.
+    pub fn day(self) -> u32 {
+        self.day
+    }
+
     /// `YYYYMMDD`, which is how DICOM writes a date and how a session labelled
     /// by its date is named.
     pub fn compact(self) -> String {

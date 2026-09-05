@@ -169,6 +169,32 @@ struct ReleaseArgs {
     /// A scheme stored in this registry, by name
     #[arg(long = "scheme-name", value_name = "NAME")]
     scheme_name: Option<String>,
+    /// Which layout to write: v0's grammar, which names everything, or BIDS,
+    /// which names what the standard admits and routes the rest (§9)
+    #[arg(long, default_value = "descriptive", value_name = "descriptive|bids")]
+    layout: String,
+    /// Where a localizer goes in a BIDS tree. BIDS has no word for one, and
+    /// 22 percent of a clinical archive is one (§9.3)
+    #[arg(
+        long,
+        default_value = "sourcedata",
+        value_name = "sourcedata|datatype|anat|drop"
+    )]
+    localizers: String,
+    /// Where a vendor's synthetic contrast goes. The qMRI appendix permits it
+    /// in raw anat/; a purist puts every synthetic image in derivatives/
+    #[arg(long, default_value = "anat", value_name = "anat|derivatives")]
+    synthetic: String,
+    /// The DICOM to NIfTI converter, a prerequisite of a BIDS release (§9.6)
+    #[arg(long, default_value = "dcm2niix", value_name = "PATH")]
+    dcm2niix: PathBuf,
+    /// Write .nii rather than .nii.gz
+    #[arg(long = "no-compress")]
+    no_compress: bool,
+    /// Whose dataset it is, for dataset_description.json. Repeatable; the
+    /// default is whoever ran the release
+    #[arg(long, value_name = "NAME")]
+    author: Vec<String>,
     /// The pack, recorded on the release so a tree names what judged it
     #[arg(long, default_value = "mri")]
     pack: String,
@@ -3701,6 +3727,40 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         ))
     })?;
 
+    let layout = run::Layout::parse(&args.layout).ok_or_else(|| {
+        usage(format!(
+            "--layout is descriptive or bids, not {}",
+            args.layout
+        ))
+    })?;
+    let places = nils_release::bids::place::Options {
+        localizers: nils_release::bids::place::Localizers::parse(&args.localizers).ok_or_else(
+            || {
+                usage(format!(
+                    "--localizers is sourcedata, datatype, anat or drop, not {}",
+                    args.localizers
+                ))
+            },
+        )?,
+        synthetic: nils_release::bids::place::Synthetic::parse(&args.synthetic).ok_or_else(
+            || {
+                usage(format!(
+                    "--synthetic is anat or derivatives, not {}",
+                    args.synthetic
+                ))
+            },
+        )?,
+    };
+    // §9.6. Found once, before anything is written, and recorded on the run and
+    // in `GeneratedBy`. v0 discovers a missing converter per stack, in a worker
+    // process, as N identical failures.
+    let converter = match layout {
+        run::Layout::Bids => {
+            Some(nils_release::bids::convert::Converter::find(&args.dcm2niix).map_err(usage)?)
+        }
+        run::Layout::Descriptive => None,
+    };
+
     let dir = pack_dir(home, args.pack_dir)?;
     let found = packs_in(&dir)?
         .into_iter()
@@ -3744,8 +3804,12 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         on_unknown,
         actor: &actor(),
         key: &key,
-        pack: &pack.name,
-        pack_version: &pack.version.to_string(),
+        pack: &pack,
+        layout,
+        places,
+        converter: converter.as_ref(),
+        compress: !args.no_compress,
+        authors: &args.author,
     };
     let report = run::run(&mut registry, &settings).map_err(|e| match e {
         run::Error::Refused(m) => usage(m),
@@ -3761,10 +3825,13 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         return Ok(());
     }
     println!(
-        "release {} version {} ({})",
-        report.name, report.version, report.policy
+        "release {} version {} ({}, {})",
+        report.name, report.version, report.layout, report.policy
     );
     println!("  into             {}", report.root);
+    if let Some(c) = &report.converter {
+        println!("  converted by     {c}");
+    }
     match &report.previous {
         Some(before) => println!("  since            {before}"),
         // The first version of a tree writes all of it, and saying so is
@@ -3817,6 +3884,32 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         println!("  not written");
         for (why, n) in &report.refused {
             println!("      {n:>10}   {why}");
+        }
+    }
+    // §9.3. Less than half of a clinical archive has a BIDS name, and where
+    // the rest went is the thing a reader of the tree has to be told.
+    if !report.routes.is_empty() && report.layout == "bids" {
+        println!("  where they went");
+        for (route, n) in &report.routes {
+            let what = match route.as_str() {
+                "raw" => "in the tree, under a name the standard admits",
+                "sourcedata" => "sourcedata/, as DICOM",
+                "derivatives" => "derivatives/nils/, which BIDS has no word for",
+                "beside" => "a directory of their own, in .bidsignore",
+                "unofficial" => "the raw tree under a suffix BIDS lacks, in .bidsignore",
+                "nowhere" => "nowhere",
+                _ => route.as_str(),
+            };
+            println!("      {n:>10}   {what}");
+        }
+        for (why, n) in &report.nowhere {
+            println!("      {n:>10}   nowhere: {why}");
+        }
+        for (why, n) in &report.unconvertible {
+            println!("      {n:>10}   written as DICOM instead: {why}");
+        }
+        for (what, choice) in &report.placements {
+            println!("  {what:<16} {choice}");
         }
     }
     // What was changed, by tag and action, and never what it was: an audit

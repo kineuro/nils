@@ -74,6 +74,10 @@ pub struct Pack {
     /// keeps none, which is the safe answer and the one a pack has to change
     /// deliberately.
     pub private: Vec<crate::private::Allowed>,
+    /// §9.2: how this pack's vocabulary maps onto BIDS. A pack that declares
+    /// none cannot be released in the BIDS layout, and says so rather than
+    /// writing a tree of stacks it could not name.
+    pub bids: crate::bids::Mapping,
     /// The passes: the phases that read more than one stack (§7). A pack that
     /// declares none gets none.
     pub passes: Vec<Pass>,
@@ -481,6 +485,13 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         }
     }
 
+    // §9.2. The pack's half of BIDS: which of its values means `T1w`. The
+    // other half, the standard itself, is the engine's.
+    let mut bids = crate::bids::Mapping::default();
+    for f in files_of(m, &manifest, dir, "bids")? {
+        load_bids(&f, &axes, &mut bids)?;
+    }
+
     let mut picks = Vec::new();
     for f in files_of(m, &manifest, dir, "picks")? {
         let model = load_pick(&f, &axes)?;
@@ -570,6 +581,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         rule_sets,
         picks,
         private,
+        bids,
         passes,
         name,
         version,
@@ -606,6 +618,159 @@ fn resolve_field(derived: &[Normalizer], name: &str) -> Option<usize> {
 }
 
 /// The files a manifest key names, relative to the pack directory.
+/// The pack's BIDS mapping (§9.2).
+///
+/// Every value is checked against the axis vocabularies the pack already
+/// declares, so a mapping for a value no axis has is a load error rather than
+/// a line nothing ever reads. That is the same rule the picks load under, and
+/// it is what stops a mapping from rotting quietly when a vocabulary changes.
+fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> {
+    // Every value below is checked against the axis it claims to come from,
+    // by **identity** and not by what a row stores: `base` stores `T2*w` and
+    // its identity is `T2starw`, which is also the word BIDS uses.
+    let known = |axis: &str, value: &str| -> bool {
+        axes.iter()
+            .find(|a| a.name == axis)
+            .is_none_or(|a| a.value_index(value).is_some())
+    };
+    let check = |axis: &str, value: &str, at: &str| -> R<()> {
+        if known(axis, value) {
+            return Ok(());
+        }
+        Err(
+            Error::at(at, format!("{value} is not a value of the {axis} axis"))
+                .in_file(&f.path, Some(&f.source)),
+        )
+    };
+    let top = f.blame(yaml::obj(&f.value, "bids"))?;
+    for (key, at) in [("datatypes", "bids.datatypes")] {
+        let Some(v) = top.get(key) else { continue };
+        for (k, value) in f.blame(yaml::obj(v, at))? {
+            check("directory_type", k, at)?;
+            into.datatypes
+                .insert(k.clone(), f.blame(yaml::text(value, at))?);
+        }
+    }
+    if let Some(v) = top.get("suffix") {
+        let sm = f.blame(yaml::obj(v, "bids.suffix"))?;
+        for (source, into_map) in [
+            ("construct", &mut into.from_construct),
+            ("technique", &mut into.from_technique),
+            ("modifier", &mut into.from_modifier),
+            ("base", &mut into.from_base),
+        ] {
+            let Some(v) = sm.get(source) else { continue };
+            let at = format!("bids.suffix.{source}");
+            for (value, body) in f.blame(yaml::obj(v, &at))? {
+                let at = format!("{at}.{value}");
+                check(source, value, &at)?;
+                let bm = f.blame(yaml::obj(body, &at))?;
+                let mut entities = BTreeMap::new();
+                if let Some(e) = bm.get("entities") {
+                    let at = format!("{at}.entities");
+                    for (k, ev) in f.blame(yaml::obj(e, &at))? {
+                        entities.insert(k.clone(), f.blame(yaml::text(ev, &at))?);
+                    }
+                }
+                into_map.insert(
+                    value.clone(),
+                    crate::bids::Named {
+                        datatype: f.blame(yaml::text(yaml::get(bm, "datatype", &at)?, &at))?,
+                        suffix: f.blame(yaml::text(yaml::get(bm, "suffix", &at)?, &at))?,
+                        when_technique: match bm.get("when_technique") {
+                            Some(w) => Some(f.blame(yaml::text(w, &at))?),
+                            None => None,
+                        },
+                        entities,
+                    },
+                );
+            }
+        }
+    }
+    if let Some(v) = top.get("entities") {
+        let em = f.blame(yaml::obj(v, "bids.entities"))?;
+        for (key, axis, into_map) in [
+            ("part", "construct", &mut into.part),
+            ("mtransfer", "modifier", &mut into.mtransfer),
+        ] {
+            let Some(v) = em.get(key) else { continue };
+            let at = format!("bids.entities.{key}");
+            for (value, label) in f.blame(yaml::obj(v, &at))? {
+                check(axis, value, &at)?;
+                into_map.insert(value.clone(), f.blame(yaml::text(label, &at))?);
+            }
+        }
+        if let Some(v) = em.get("ceagent") {
+            into.ceagent = f.blame(yaml::text(v, "bids.entities.ceagent"))?;
+        }
+    }
+    if let Some(v) = top.get("acq") {
+        let list = v.as_array().ok_or_else(|| {
+            Error::at(
+                "bids.acq",
+                "is a list, because the order is the order the tokens are joined in",
+            )
+            .in_file(&f.path, Some(&f.source))
+        })?;
+        for (i, item) in list.iter().enumerate() {
+            let at = format!("bids.acq[{i}]");
+            let im = f.blame(yaml::obj(item, &at))?;
+            let from = f.blame(yaml::text(yaml::get(im, "from", &at)?, &at))?;
+            let mut tokens = BTreeMap::new();
+            let at = format!("{at}.tokens");
+            for (value, token) in f.blame(yaml::obj(yaml::get(im, "tokens", &at)?, &at))? {
+                check(&from, value, &at)?;
+                let token = f.blame(yaml::text(token, &at))?;
+                // A BIDS label is `[0-9a-zA-Z+]+`, and a token that is not one
+                // makes an invalid filename wherever it is used. Refused at
+                // load, because the alternative is a tree that fails a
+                // validator run days later.
+                if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '+') {
+                    return Err(Error::at(
+                        format!("{at}.{value}"),
+                        format!("{token} is not a BIDS label: those are [0-9a-zA-Z+]+"),
+                    )
+                    .in_file(&f.path, Some(&f.source)));
+                }
+                tokens.insert(value.clone(), token);
+            }
+            into.acq.push(crate::bids::Tokens { from, tokens });
+        }
+    }
+    if let Some(v) = top.get("synthetic") {
+        let sm = f.blame(yaml::obj(v, "bids.synthetic"))?;
+        for (key, axis, into_list) in [
+            ("provenance", "provenance", &mut into.synthetic_provenance),
+            ("construct", "construct", &mut into.synthetic_construct),
+        ] {
+            let Some(v) = sm.get(key) else { continue };
+            let at = format!("bids.synthetic.{key}");
+            for value in f.blame(yaml::texts(v, &at))? {
+                check(axis, &value, &at)?;
+                into_list.push(value);
+            }
+        }
+    }
+    if let Some(v) = top.get("task") {
+        for (value, body) in f.blame(yaml::obj(v, "bids.task"))? {
+            let at = format!("bids.task.{value}");
+            let bm = f.blame(yaml::obj(body, &at))?;
+            if !value.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(Error::at(
+                    &at,
+                    "a task is a BIDS label, so it is alphanumeric with no separator",
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+            into.task.insert(
+                value.clone(),
+                f.blame(yaml::text(yaml::get(bm, "why", &at)?, &at))?,
+            );
+        }
+    }
+    Ok(())
+}
+
 fn files_of(
     m: &serde_json::Map<String, Value>,
     manifest: &File,

@@ -76,6 +76,11 @@ picks:
 private:
   - private.yml
 
+# How this pack's vocabulary maps onto BIDS (Wave 3 section 9.2). The standard
+# itself is the engine's; this is only which of our values means `T1w`.
+bids:
+  - bids.yml
+
 # When a person is asked about an axis (spec section 8.2). v0 asks about 84
 # percent of its stacks, mostly because no keyword matched rather than because
 # anything was in doubt, and a queue that long is read by nobody. These are the

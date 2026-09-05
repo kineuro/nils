@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 16;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +114,65 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 15,
         apply: a_release_has_a_version,
     },
+    Migration {
+        version: 16,
+        apply: a_release_has_a_layout,
+    },
 ];
+
+/// Wave 3 §9: a release has a layout, and a BIDS one writes files that are not
+/// one instance written out.
+///
+/// `release_file` is rebuilt rather than extended, because its `instance_id`
+/// has to become optional and no `ALTER` relaxes a NOT NULL on both backends.
+/// A NIfTI is a whole stack, and its sidecar, `.bval` and `.bvec` are the
+/// stack's too.
+fn a_release_has_a_layout(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "release", &["layout", "placements", "converter"])?;
+    add_columns(store, "release_stack", &["stem", "route"])?;
+    add_tables(store, kind, &["release_absent"])?;
+    let sql = format!(
+        "UPDATE {} SET layout = 'descriptive', placements = '{{}}' WHERE layout IS NULL",
+        store.qualified("release")
+    );
+    store.execute(&sql, &[])?;
+    let sql = format!(
+        "UPDATE {} SET route = 'descriptive' WHERE route IS NULL",
+        store.qualified("release_stack")
+    );
+    store.execute(&sql, &[])?;
+
+    if column_exists(store, "release_file", "stack_id")? {
+        return Ok(());
+    }
+    let dialect = store.dialect();
+    let schema = store.schema().map(str::to_string);
+    let mut rebuilt = schema::table("release_file").clone();
+    rebuilt.name = "release_file_rebuilt";
+    store.batch(&dialect.create_table(schema.as_deref(), &rebuilt))?;
+    let old = store.qualified("release_file");
+    let new = store.qualified("release_file_rebuilt");
+    let instance = store.qualified("instance");
+    let stack = store.qualified("stack");
+    // The stack of each file, which the old shape only knew through its
+    // instance. A row whose instance is gone keeps its path and loses its
+    // stack, which is why the copy is a join and not an update.
+    store.batch(&format!(
+        "INSERT INTO {new} (release_id, stack_id, instance_id, path, digest, bytes) \
+         SELECT f.release_id, k.id, f.instance_id, f.path, f.digest, f.bytes \
+         FROM {old} f JOIN {instance} i ON i.id = f.instance_id \
+         JOIN {stack} k ON k.id = i.stack_id"
+    ))?;
+    store.batch(&format!("DROP TABLE {old}"))?;
+    store.batch(&format!("ALTER TABLE {new} RENAME TO release_file"))?;
+    for ix in dialect.create_indexes(schema.as_deref(), schema::table("release_file")) {
+        store.batch(&ix)?;
+    }
+    Ok(())
+}
 
 /// Wave 3 §8.6: a release is versioned, and a re-run pays only for what
 /// changed. The release row gains the version and the counts; two tables carry
