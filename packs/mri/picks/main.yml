@@ -1,0 +1,185 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Which stack stands for a session's role
+# (`docs/specs/wave3-anonymize-and-bids.md`, section 10).
+#
+# Every number here is v0's, from `qc/cohort_main/main_qc_weights.yaml`, whose
+# own header says "edit this file to tune the auto-pick algorithm, no code
+# change required". It is carried rather than reinvented. What changed is where
+# it lives, that each component is named in the answer, and that a tie is
+# reported instead of settled by whichever row the database returned first.
+#
+# The number that makes any of this necessary: 82.5 percent of the archive's
+# sessions that hold a T1w hold more than one, and the worst holds 462.
+
+pick: main
+roles: [t1w, flair]
+
+# Two stacks of one acquisition are one candidate, so that the two echoes of a
+# series do not compete with each other for the session. v0's stage-1 bundle
+# key, name for name; `orientation` and the timing are fields of the
+# fingerprint rather than axes, which is the only difference.
+same_acquisition:
+  - body_part
+  - orientation
+  - base
+  - mr_acquisition_type
+  - technique
+  - modifier
+  - construct
+  - directory_type
+  - post_contrast
+  - echo_time
+  - repetition_time
+  - inversion_time
+  - flip_angle
+
+# And one acquisition that produced several images is merged back into one
+# candidate. A Dixon gives an in-phase, an out-of-phase, a water and a fat
+# image; without this they compete with each other four ways.
+family:
+  when: {of: modifier, token: Dixon}
+  over: construct
+  # The outputs of one Dixon may differ slightly in timing, which is v0's
+  # reason for dropping it from the family key.
+  ignoring: [echo_time, repetition_time, inversion_time, flip_angle]
+  # Best first. A family holding neither is not a candidate at all: v0 drops
+  # it, and its comment says why, which is that a Dixon with no in-phase and
+  # no water image is not a T1w anybody measures on.
+  canonical: [InPhase, Water]
+
+components:
+
+  # v0's `dim_score`. 3D outright, and 2D at 0.85 less 0.30 times the share of
+  # the population that is 3D: what a 2D acquisition means depends on what else
+  # was available at the time, so it scores well in an all-2D cohort and poorly
+  # beside 3D.
+  - name: dim
+    weight: 0.18
+    kind: choice
+    of: mr_acquisition_type
+    scores: {'3D': 1.0, '2D': 0.85}
+    missing: 0.40
+    crowded_by: {value: '3D', by: 0.30}
+
+  # v0's `technique_tiers`, per role, because a TSE is a poor T1w and a good
+  # FLAIR. The two bonuses are its `dixon_tier_bonus` and
+  # `waterexc_tier_bonus`, and the Dixon one keeps its condition.
+  - name: tech
+    weight: 0.15
+    kind: tier
+    of: technique
+    missing: 0.30
+    per_role:
+      t1w:
+        MPRAGE: 1.00
+        MP2RAGE: 1.00
+        SPACE: 0.85
+        VIBE: 0.85
+        FLASH: 0.70
+        FSPGR: 0.70
+        TurboFLASH: 0.65
+        GRE: 0.55
+        SE: 0.50
+        TIRM: 0.45
+        TSE: 0.40
+        FIESTA: 0.40
+        CISS: 0.40
+        Unknown: 0.30
+      flair:
+        SPACE: 1.00
+        TSE: 0.90
+        TIRM: 0.75
+        GRASE: 0.65
+        RESOLVE: 0.50
+        Unknown: 0.40
+    bonuses:
+      - of: modifier
+        token: Dixon
+        amount: 0.10
+        needs: {of: construct, any: [InPhase, Water]}
+      - of: modifier
+        token: WaterExc
+        amount: 0.05
+
+  # v0's `modifier_score`: additive on a neutral half. MT-prep is usually for
+  # a TOF and not a main T1w; a Dixon FLAIR is rare and usually not the
+  # canonical one.
+  - name: mod
+    weight: 0.12
+    kind: tokens
+    of: modifier
+    base: 0.5
+    per_role:
+      t1w:
+        Dixon: 0.20
+        WaterExc: 0.15
+        MT: -0.05
+        PreScanNorm: 0.05
+      flair:
+        Dixon: -0.10
+        WaterExc: -0.05
+
+  # Where this volume's slice count falls among the population's, in its own
+  # dimension bucket: a 2D stack is not short for being 2D.
+  - name: slices
+    weight: 0.20
+    kind: percentile
+    of: n_instances
+    population: slices
+    split_by: mr_acquisition_type
+    missing: 0.40
+    unknown: 0.60
+
+  - name: fov
+    weight: 0.10
+    kind: percentile
+    of: fov_x
+    population: fov
+    missing: 0.40
+    unknown: 0.60
+
+  # How common this technique is. The floor is what stops a rare-but-good
+  # acquisition being buried, and the `when_bonus` row is v0's deliberate
+  # statement that a Dixon or a water-excitation bundle is a good acquisition
+  # even where it is rare.
+  - name: share
+    weight: 0.15
+    kind: share
+    of: technique
+    tops_out: 0.50
+    share_coef: 0.70
+    floor_coef: 0.30
+    floor_value: 0.50
+    when_bonus: {share_coef: 0.40, floor_coef: 0.60, floor_value: 0.85}
+
+  - name: orient
+    weight: 0.05
+    kind: present
+    of: [image_orientation_patient]
+    base: 0.40
+    each: 0.60
+
+  - name: complete
+    weight: 0.05
+    kind: present
+    of: [n_instances, fov_x]
+    base: 0.50
+    each: 0.25
+
+# v0's EPIMix penalty, whose comment says it "is allowed as a fallback but
+# never preferred when RawRecon is available". A multiplier and not a
+# component, because that is what never preferred means: no amount of slices
+# buys it back.
+penalty:
+  of: provenance
+  by_value: {EPIMix: 0.5}
+
+borders:
+  # v0's `runner_up_within_pct`. Under this the order between the top two is
+  # noise, and the answer says so instead of the first row quietly winning.
+  runner_up_within: 0.05
+  # v0's `rare_technique_share`: the pick is the best of what is here and
+  # unlike what the rest of the population did, which usually means the
+  # protocol changed or the session is missing its real one.
+  rare_within: {of: technique, share_below: 0.10}

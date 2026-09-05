@@ -95,6 +95,11 @@ enum Command {
         #[command(subcommand)]
         command: ReviewCommand,
     },
+    /// Which stack stands for each session's role, with the evidence that chose it (§10)
+    Pick {
+        #[command(subcommand)]
+        command: PickCommand,
+    },
     /// The occasions a subject came in, derived from a scheme and never stored (§5)
     Session {
         #[command(subcommand)]
@@ -109,6 +114,60 @@ enum Command {
         #[arg(long)]
         markdown: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum PickCommand {
+    /// Choose one stack per session and role, and write why
+    Run(PickArgs),
+    /// The picks, with what was chosen and what was close
+    List {
+        /// Only this role
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+        /// Only the ones worth a person's eye
+        #[arg(long)]
+        borders: bool,
+        /// Only this subject
+        #[arg(long, value_name = "CODE")]
+        subject: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Why one pick came out the way it did: every component, and what it read
+    Explain {
+        /// The pick's id, from `nils pick list`
+        id: i64,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+struct PickArgs {
+    /// The pack's name, looked up in the pack directory
+    #[arg(long, default_value = "mri")]
+    pack: String,
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<PathBuf>,
+    /// An origin-scoped amendment to it
+    #[arg(long, value_name = "FILE")]
+    overlay: Option<PathBuf>,
+    /// The session scheme, as a file; without one, the registry's stored
+    /// scheme or the default
+    #[arg(long, value_name = "FILE", conflicts_with = "scheme_name")]
+    scheme: Option<PathBuf>,
+    /// A scheme stored in this registry, by name
+    #[arg(long = "scheme-name", value_name = "NAME")]
+    scheme_name: Option<String>,
+    /// Only this subject, which also narrows the population scored against
+    #[arg(long, value_name = "CODE")]
+    subject: Option<String>,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -439,6 +498,7 @@ fn main() -> ExitCode {
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
+        Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
     };
@@ -3205,6 +3265,321 @@ fn label_in(path: &str, segment: usize, pattern: Option<&regex::Regex>) -> Optio
         None => Some((*text).to_string()),
         Some(re) => Some(re.captures(text)?.name("label")?.as_str().to_string()),
     }
+}
+
+// --------------------------------------------------------------------------
+// Picks (Wave 3 §10)
+// --------------------------------------------------------------------------
+
+fn pick_command(home: &Home, command: PickCommand) -> Result<(), Exit> {
+    match command {
+        PickCommand::Run(args) => pick_run(home, args),
+        PickCommand::List {
+            role,
+            borders,
+            subject,
+            json,
+        } => pick_list(home, role, borders, subject, json),
+        PickCommand::Explain { id, json } => pick_explain(home, id, json),
+    }
+}
+
+fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
+    let dir = pack_dir(home, args.pack_dir)?;
+    let found = packs_in(&dir)?
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|f| f == args.pack.as_str()))
+        .ok_or_else(|| fail(format!("no pack named {} in {}", args.pack, dir.display())))?;
+    let overlay = load_overlay(args.overlay.as_ref())?;
+    let pack = nils_pack::load(&found, overlay.as_ref()).map_err(|e| fail(e.to_string()))?;
+    if pack.picks.is_empty() {
+        return Err(fail(format!(
+            "{} declares no picks, so there is nothing to choose",
+            pack.id()
+        )));
+    }
+
+    let mut registry = open(home)?;
+    // A pick is made under a session scheme, because a session is derived and
+    // the same studies are one occasion or two depending on it. The row says
+    // which, so a pick made under one scheme is not mistaken for one made
+    // under another.
+    let scheme = match (&args.scheme, &args.scheme_name) {
+        (Some(path), _) => read_scheme(path)?,
+        (None, Some(name)) => stored_scheme(&mut registry, name)?,
+        (None, None) => session::Scheme::default(),
+    };
+
+    let report = nils_classify::picking::run(
+        &mut registry,
+        &pack,
+        &scheme,
+        args.subject.as_deref(),
+        &format!("pick:{}", pack.id()),
+    )
+    .map_err(|e| fail(e.to_string()))?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
+    println!("pick with {} against {}", pack.id(), report.reference);
+    println!("  occasions        {:>12}", report.sessions);
+    println!("  picked           {:>12}", report.written);
+    println!("  nothing eligible {:>12}", report.empty);
+    for (why, n) in &report.borders {
+        println!("  {why:<16} {n:>12}   worth a person's eye");
+    }
+    println!("  {:.1} s", report.seconds);
+    Ok(())
+}
+
+fn pick_list(
+    home: &Home,
+    role: Option<String>,
+    borders: bool,
+    subject: Option<String>,
+    json: bool,
+) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let store = registry.store();
+    let mut where_parts = vec!["p.withdrawn_at IS NULL".to_string()];
+    if let Some(r) = &role {
+        where_parts.push(format!("p.role = '{}'", r.replace('\'', "''")));
+    }
+    if borders {
+        where_parts.push("p.borders IS NOT NULL".to_string());
+    }
+    if let Some(c) = &subject {
+        where_parts.push(format!("su.code = '{}'", c.replace('\'', "''")));
+    }
+    let sql = format!(
+        "SELECT p.id, su.code, p.role, {}, p.score, p.margin, p.borders, p.actor, \
+                p.author_kind, COUNT(ps.stack_id) \
+         FROM {} p JOIN {} su ON su.id = p.subject_id \
+         LEFT JOIN {} ps ON ps.pick_id = p.id \
+         WHERE {} \
+         GROUP BY p.id, su.code, p.role, {}, p.score, p.margin, p.borders, p.actor, p.author_kind \
+         ORDER BY su.code, {}, p.role",
+        text_of(store, "pick", "session_day"),
+        store.qualified("pick"),
+        store.qualified("subject"),
+        store.qualified("pick_stack"),
+        where_parts.join(" AND "),
+        text_of(store, "pick", "session_day"),
+        text_of(store, "pick", "session_day"),
+    );
+    let rows = store.query(&sql, &[]).map_err(|e| fail(e.to_string()))?;
+
+    if json {
+        let out: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.int(0).unwrap_or(0),
+                    "subject": r.text(1).unwrap_or_default(),
+                    "role": r.text(2).unwrap_or_default(),
+                    "session": r.text(3).unwrap_or_default(),
+                    "score": r.double(4).unwrap_or(0.0),
+                    "margin": r.double(5).unwrap_or(0.0),
+                    "borders": r.opt_text(6).ok().flatten(),
+                    "actor": r.text(7).unwrap_or_default(),
+                    "author_kind": r.text(8).unwrap_or_default(),
+                    "stacks": r.int(9).unwrap_or(0),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
+    let wide = rows
+        .iter()
+        .filter_map(|r| r.text(1).ok().map(str::len))
+        .max()
+        .unwrap_or(0)
+        .max("subject".len());
+    println!(
+        "{:>6}  {:<wide$} {:<6} {:<11} {:>6} {:>7} {:>7}  note",
+        "id", "subject", "role", "session", "score", "margin", "stacks"
+    );
+    for r in &rows {
+        let note = match r.opt_text(6).ok().flatten() {
+            Some(b) => b.to_string(),
+            None => String::new(),
+        };
+        // §10.1: whose pick it is, said here because a person's overrules the
+        // agent's and a reader should not have to guess which they are seeing.
+        let who = r.text(8).unwrap_or_default();
+        let note = if who == "agent" {
+            note
+        } else {
+            format!(
+                "{note}{}by a {who}",
+                if note.is_empty() { "" } else { ", " }
+            )
+        };
+        println!(
+            "{:>6}  {:<wide$} {:<6} {:<11} {:>6.3} {:>7.3} {:>7}  {}",
+            r.int(0).unwrap_or(0),
+            r.text(1).unwrap_or_default(),
+            r.text(2).unwrap_or_default(),
+            r.text(3).unwrap_or_default(),
+            r.double(4).unwrap_or(0.0),
+            r.double(5).unwrap_or(0.0),
+            r.int(9).unwrap_or(0),
+            note.trim_end()
+        );
+    }
+    println!("{}", counted_line(rows.len() as u64, "picks"));
+    Ok(())
+}
+
+fn counted_line(n: u64, noun: &str) -> String {
+    format!("{n} {}", counted(noun, n))
+}
+
+/// Why one pick came out the way it did: every component, and what it read.
+///
+/// v0 computes the same breakdown and keeps it only in the response of the
+/// request that asked, so a pick made last year cannot be explained at all.
+fn pick_explain(home: &Home, id: i64, json: bool) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let store = registry.store();
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT p.role, su.code, {}, p.score, p.margin, p.runner_up_score, p.borders, \
+                {}, {}, p.reference, p.scheme, p.pack, p.pack_version, p.actor, p.author_kind \
+         FROM {} p JOIN {} su ON su.id = p.subject_id WHERE p.id = {}",
+        text_of(store, "pick", "session_day"),
+        text_of(store, "pick", "parts"),
+        text_of(store, "pick", "considered"),
+        store.qualified("pick"),
+        store.qualified("subject"),
+        d.param(1, Type::Int),
+    );
+    let row = store
+        .query_opt(&sql, &[Param::Int(id)])
+        .map_err(|e| fail(e.to_string()))?
+        .ok_or_else(|| fail(format!("no pick {id}")))?;
+    let parts: serde_json::Value = row
+        .opt_text(7)
+        .ok()
+        .flatten()
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let considered: serde_json::Value = row
+        .opt_text(8)
+        .ok()
+        .flatten()
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let stacks = store
+        .query(
+            &format!(
+                "SELECT stack_id FROM {} WHERE pick_id = {} ORDER BY stack_id",
+                store.qualified("pick_stack"),
+                store.dialect().param(1, Type::Int)
+            ),
+            &[Param::Int(id)],
+        )
+        .map_err(|e| fail(e.to_string()))?;
+    let chosen: Vec<i64> = stacks.iter().filter_map(|r| r.int(0).ok()).collect();
+
+    if json {
+        let v = serde_json::json!({
+            "id": id,
+            "role": row.text(0).unwrap_or_default(),
+            "subject": row.text(1).unwrap_or_default(),
+            "session": row.text(2).unwrap_or_default(),
+            "score": row.double(3).unwrap_or(0.0),
+            "margin": row.double(4).unwrap_or(0.0),
+            "runner_up_score": row.double(5).unwrap_or(0.0),
+            "borders": row.opt_text(6).ok().flatten(),
+            "reference": row.text(9).unwrap_or_default(),
+            "scheme": row.text(10).unwrap_or_default(),
+            "pack": format!("{}@{}", row.text(11).unwrap_or_default(), row.text(12).unwrap_or_default()),
+            "actor": row.text(13).unwrap_or_default(),
+            "author_kind": row.text(14).unwrap_or_default(),
+            "stacks": chosen,
+            "parts": parts,
+            "considered": considered,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&v)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "pick {id}: the {} of {} on {}",
+        row.text(0).unwrap_or_default(),
+        row.text(1).unwrap_or_default(),
+        row.text(2).unwrap_or_default()
+    );
+    println!(
+        "  chosen           {}   scored {:.3}, ahead by {:.1}%",
+        chosen
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+        row.double(3).unwrap_or(0.0),
+        row.double(4).unwrap_or(0.0) * 100.0
+    );
+    println!(
+        "  by               {} ({})",
+        row.text(13).unwrap_or_default(),
+        row.text(14).unwrap_or_default()
+    );
+    // The two things v0 does not record, and without which a pick cannot be
+    // reproduced: which population the cohort-relative components read, and
+    // which scheme decided what the occasion was.
+    println!("  against          {}", row.text(9).unwrap_or_default());
+    println!("  session scheme   {}", row.text(10).unwrap_or_default());
+    if let Some(b) = row.opt_text(6).ok().flatten() {
+        println!("  worth a look     {b}");
+    }
+    if let Some(list) = parts["parts"].as_array() {
+        println!("  what decided it");
+        for p in list {
+            println!(
+                "      {:<9} {:.2} x {:.2} = {:.3}   {}",
+                p["name"].as_str().unwrap_or(""),
+                p["score"].as_f64().unwrap_or(0.0),
+                p["weight"].as_f64().unwrap_or(0.0),
+                p["score"].as_f64().unwrap_or(0.0) * p["weight"].as_f64().unwrap_or(0.0),
+                p["saw"].as_str().unwrap_or("")
+            );
+        }
+        if let Some(m) = parts["penalty"].as_f64()
+            && m != 1.0
+        {
+            println!("      {:<9} x{m}", "penalty");
+        }
+    }
+    if let Some(list) = considered.as_array()
+        && list.len() > 1
+    {
+        println!("  what else was there");
+        for c in list.iter().skip(1) {
+            println!(
+                "      {:.3}   stacks {}",
+                c["score"].as_f64().unwrap_or(0.0),
+                c["stacks"]
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -770,6 +770,56 @@ person walks a cohort session by session and writes a token). v1 needs both, and
 already has the shape: the pick is computed with evidence, and a person's call
 is a `decision` at a scope that outranks it.
 
+### 10.2 What the carry changed
+
+The engine provides **component kinds** and the pack provides the numbers,
+which is the pass layer's arrangement and for the same reason: an algorithm in
+a pack is a program nobody can review, and a number in the engine is knowledge
+nobody can edit. Six kinds cover v0's eight components (`choice`, `tier`,
+`tokens`, `percentile`, `share`, `present`), so a pack that wants a component
+gone gives it no weight and one that wants another order writes another order.
+
+A pick is not an axis and is not derived on read. It is not an axis because it
+is not a property of a stack: the same stack is the session's main T1w or not
+depending on what else the session holds. It is not derived because it is a
+decision with evidence and a person may overrule it. So it is a row, and three
+things are on it that v0 does not record anywhere:
+
+- **The population.** Three of the eight components read one: how common this
+  technique is, how the cohort splits between 2D and 3D, and where this slice
+  count falls among the rest. Those are real priors and v0 is right to use
+  them. But v0 records neither the population nor the fact that it read one, so
+  the same stack scored against two cohorts gets two answers and no row says
+  so. The reference is named, which is what Wave 2 §7.4 settled for the vote.
+- **The scheme.** A session is derived (§5), so the same studies are one
+  occasion or two depending on it, and a pick made under one scheme is not the
+  same answer as one made under another.
+- **What else was there.** Every candidate and its score, and the component
+  breakdown of the winner. v0 computes the same breakdown and keeps it only in
+  the response of the request that asked, so a pick made last year cannot be
+  explained at all.
+
+And a tie is **reported**: under `runner_up_within` the order between the top
+two is noise, and the row says so instead of the first one quietly winning. v0
+sorts and takes the first, so a session whose two best differ by nothing gets
+whichever the database returned, and the same cohort re-run can return the
+other.
+
+    pick 1: the t1w of 031ff06697cf76ac on 2022-01-15
+      chosen           17, 18, 25   scored 0.775, ahead by 100.0%
+      by               pick:mri@0.1.0 (agent)
+      against          registry
+      session scheme   window=0d,date
+      what decided it
+          dim       1.00 x 0.18 = 0.180   3D
+          tech      1.00 x 0.15 = 0.150   MPRAGE
+          slices    0.80 x 0.20 = 0.160   5 in slices:3D
+          share     0.85 x 0.15 = 0.128   MPRAGE is 100% of them
+
+The automatic pick is an **agent's** (§10.1), so a person's call is
+distinguishable from it wherever it is read, and a run replaces its own rows
+and never a person's.
+
 ### 10.1 Who authored a decision
 
 A small addition, made here because it has to exist before anything writes

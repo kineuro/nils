@@ -16,6 +16,7 @@ pub mod fingerprint;
 pub mod fold;
 pub mod job;
 pub mod passes;
+pub mod picking;
 pub mod report;
 
 pub use job::{Error, Settings, fingerprint as run};

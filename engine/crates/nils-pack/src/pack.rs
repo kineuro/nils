@@ -66,6 +66,10 @@ pub struct Pack {
     pub axes: Vec<Axis>,
     /// The rule sets, in the order they run.
     pub rule_sets: Vec<RuleSet>,
+    /// §10: how one stack per session and role is chosen. A pack that
+    /// declares none picks nothing, which is what every pack before Wave 3
+    /// does.
+    pub picks: Vec<crate::pick::Model>,
     /// The passes: the phases that read more than one stack (§7). A pack that
     /// declares none gets none.
     pub passes: Vec<Pass>,
@@ -434,6 +438,21 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         rule_sets.sort_by_key(|r| want.iter().position(|n| *n == r.name).unwrap_or(usize::MAX));
     }
 
+    let mut picks = Vec::new();
+    for f in files_of(m, &manifest, dir, "picks")? {
+        let model = load_pick(&f, &axes)?;
+        if picks
+            .iter()
+            .any(|p: &crate::pick::Model| p.name == model.name)
+        {
+            return Err(
+                Error::at(format!("pick {}", model.name), "is declared twice")
+                    .in_file(&f.path, Some(&f.source)),
+            );
+        }
+        picks.push(model);
+    }
+
     // Wave 3 §7. A rule that runs before the passes may not read an axis that
     // is decided after them: nothing stops it at run time, because an axis
     // nothing has decided reads as empty, so the rule would quietly take the
@@ -506,6 +525,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         derived,
         axes,
         rule_sets,
+        picks,
         passes,
         name,
         version,
@@ -1813,6 +1833,268 @@ fn load_rule_set(
         enter_when,
         rules,
         phase,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Picks (§10). The engine provides the component kinds; the pack provides the
+// numbers, which is v0's `main_qc_weights.yaml` in the place it belongs.
+
+fn load_pick(f: &File, axes: &[Axis]) -> R<crate::pick::Model> {
+    use crate::pick::{Bonus, Borders, Component, Kind, Model, Penalty};
+
+    let m = f.blame(yaml::obj(&f.value, "pick"))?;
+    let name = f.blame(yaml::text(yaml::get(m, "pick", "pick")?, "pick"))?;
+    let at = format!("pick {name}");
+    let here = |e: Error| e.in_file(&f.path, Some(&f.source));
+
+    // A component names one thing, and it is either an axis of this pack or a
+    // field of the fingerprint. Checked here so that a typo is a refusal with
+    // a line rather than a component that quietly reads nothing.
+    let known = |n: &str, at: &str| -> R<String> {
+        if axes.iter().any(|a| a.name == n) || field_index(n).is_some() {
+            return Ok(n.to_string());
+        }
+        Err(Error::at(
+            at,
+            format!("{n} is neither an axis of this pack nor a field of the fingerprint"),
+        ))
+    };
+    let named = |mm: &serde_json::Map<String, Value>, key: &str, at: &str| -> R<String> {
+        known(&yaml::text(yaml::get(mm, key, at)?, at)?, at)
+    };
+    let table = |v: &Value, at: &str| -> R<BTreeMap<String, f64>> {
+        let obj = yaml::obj(v, at)?;
+        let mut out = BTreeMap::new();
+        for (k, n) in obj {
+            out.insert(k.clone(), yaml::number(n, at)?);
+        }
+        Ok(out)
+    };
+    let per_role = |v: &Value, at: &str| -> R<BTreeMap<String, BTreeMap<String, f64>>> {
+        let obj = yaml::obj(v, at)?;
+        let mut out = BTreeMap::new();
+        for (role, t) in obj {
+            out.insert(role.clone(), table(t, at)?);
+        }
+        Ok(out)
+    };
+    let number_at = |mm: &serde_json::Map<String, Value>, key: &str, at: &str| -> R<f64> {
+        yaml::number(yaml::get(mm, key, at)?, at)
+    };
+
+    let roles = f.blame(yaml::texts(yaml::get(m, "roles", &at)?, "roles"))?;
+    // A pick names roles, and a role is a value of the `role` axis. Naming one
+    // the pack has not got is a typo that would otherwise pick nothing and say
+    // nothing about why.
+    let role_axis = axes
+        .iter()
+        .position(|a| a.name == "role")
+        .ok_or_else(|| here(Error::at(&at, "a pick needs a `role` axis to pick for")))?;
+    for r in &roles {
+        if !axes[role_axis].values.iter().any(|v| v.id == *r) {
+            return Err(here(Error::at(
+                format!("{at}.roles"),
+                format!("{r} is not a value of the role axis"),
+            )));
+        }
+    }
+
+    let mut components = Vec::new();
+    let list = yaml::get(m, "components", &at)?
+        .as_array()
+        .ok_or_else(|| here(Error::at(&at, "components is a list")))?;
+    for (i, c) in list.iter().enumerate() {
+        let at = format!("{at}.components[{i}]");
+        let cm = f.blame(yaml::obj(c, &at))?;
+        let cname = f.blame(yaml::text(yaml::get(cm, "name", &at)?, &at))?;
+        let weight = f.blame(number_at(cm, "weight", &at))?;
+        let kind_name = f.blame(yaml::text(yaml::get(cm, "kind", &at)?, &at))?;
+        let kind = match kind_name.as_str() {
+            "choice" => Kind::Choice {
+                of: f.blame(named(cm, "of", &at))?,
+                scores: f.blame(table(yaml::get(cm, "scores", &at)?, &at))?,
+                missing: f.blame(number_at(cm, "missing", &at))?,
+                crowded_by: match cm.get("crowded_by") {
+                    None => None,
+                    Some(v) => {
+                        let b = f.blame(yaml::obj(v, &at))?;
+                        Some((
+                            f.blame(yaml::text(yaml::get(b, "value", &at)?, &at))?,
+                            f.blame(number_at(b, "by", &at))?,
+                        ))
+                    }
+                },
+            },
+            "tier" => {
+                let mut bonuses = Vec::new();
+                if let Some(bs) = cm.get("bonuses") {
+                    for b in bs.as_array().unwrap_or(&Vec::new()) {
+                        let bm = f.blame(yaml::obj(b, &at))?;
+                        let needs = match bm.get("needs") {
+                            None => (None, Vec::new()),
+                            Some(n) => {
+                                let nm = f.blame(yaml::obj(n, &at))?;
+                                (
+                                    Some(f.blame(named(nm, "of", &at))?),
+                                    f.blame(yaml::texts(yaml::get(nm, "any", &at)?, &at))?,
+                                )
+                            }
+                        };
+                        bonuses.push(Bonus {
+                            of: f.blame(named(bm, "of", &at))?,
+                            token: f.blame(yaml::text(yaml::get(bm, "token", &at)?, &at))?,
+                            amount: f.blame(number_at(bm, "amount", &at))?,
+                            needs: needs.0,
+                            needs_any: needs.1,
+                        });
+                    }
+                }
+                Kind::Tier {
+                    of: f.blame(named(cm, "of", &at))?,
+                    per_role: f.blame(per_role(yaml::get(cm, "per_role", &at)?, &at))?,
+                    missing: f.blame(number_at(cm, "missing", &at))?,
+                    bonuses,
+                }
+            }
+            "tokens" => Kind::Tokens {
+                of: f.blame(named(cm, "of", &at))?,
+                base: f.blame(number_at(cm, "base", &at))?,
+                per_role: f.blame(per_role(yaml::get(cm, "per_role", &at)?, &at))?,
+            },
+            "percentile" => Kind::Percentile {
+                of: f.blame(named(cm, "of", &at))?,
+                population: f.blame(yaml::text(yaml::get(cm, "population", &at)?, &at))?,
+                split_by: match cm.get("split_by") {
+                    None => None,
+                    Some(v) => Some(f.blame(known(&f.blame(yaml::text(v, &at))?, &at))?),
+                },
+                missing: f.blame(number_at(cm, "missing", &at))?,
+                unknown: f.blame(number_at(cm, "unknown", &at))?,
+            },
+            "share" => Kind::Share {
+                of: f.blame(named(cm, "of", &at))?,
+                tops_out: f.blame(number_at(cm, "tops_out", &at))?,
+                share_coef: f.blame(number_at(cm, "share_coef", &at))?,
+                floor_coef: f.blame(number_at(cm, "floor_coef", &at))?,
+                floor_value: f.blame(number_at(cm, "floor_value", &at))?,
+                when_bonus: match cm.get("when_bonus") {
+                    None => None,
+                    Some(v) => {
+                        let b = f.blame(yaml::obj(v, &at))?;
+                        Some((
+                            f.blame(number_at(b, "share_coef", &at))?,
+                            f.blame(number_at(b, "floor_coef", &at))?,
+                            f.blame(number_at(b, "floor_value", &at))?,
+                        ))
+                    }
+                },
+            },
+            "present" => {
+                let names = f.blame(yaml::texts(yaml::get(cm, "of", &at)?, &at))?;
+                let mut of = Vec::new();
+                for n in &names {
+                    of.push(f.blame(known(n, &at))?);
+                }
+                Kind::Present {
+                    of,
+                    base: f.blame(number_at(cm, "base", &at))?,
+                    each: f.blame(number_at(cm, "each", &at))?,
+                }
+            }
+            other => {
+                return Err(here(Error::at(
+                    &at,
+                    format!(
+                        "{other} is not a component kind this engine provides; it has \
+                         choice, tier, tokens, percentile, share and present"
+                    ),
+                )));
+            }
+        };
+        components.push(Component {
+            name: cname,
+            weight,
+            kind,
+        });
+    }
+    // The weights are relative, so what matters is that somebody meant them.
+    // A set that sums to nothing scores every candidate zero and reports every
+    // pick a tie, which is a pack that does not work rather than one that
+    // prefers nothing.
+    let sum: f64 = components.iter().map(|c| c.weight).sum();
+    if sum <= 0.0 {
+        return Err(here(Error::at(&at, "the component weights sum to nothing")));
+    }
+
+    let penalty = match m.get("penalty") {
+        None => None,
+        Some(v) => {
+            let pm = f.blame(yaml::obj(v, &at))?;
+            Some(Penalty {
+                of: f.blame(named(pm, "of", &at))?,
+                by_value: f.blame(table(yaml::get(pm, "by_value", &at)?, &at))?,
+            })
+        }
+    };
+
+    let bm = f.blame(yaml::obj(yaml::get(m, "borders", &at)?, &at))?;
+    let borders = Borders {
+        runner_up_within: f.blame(number_at(bm, "runner_up_within", &at))?,
+        rare_within: match bm.get("rare_within") {
+            None => None,
+            Some(v) => {
+                let rm = f.blame(yaml::obj(v, &at))?;
+                Some((
+                    f.blame(named(rm, "of", &at))?,
+                    f.blame(number_at(rm, "share_below", &at))?,
+                ))
+            }
+        },
+    };
+
+    let mut same_acquisition = Vec::new();
+    for n in &f.blame(yaml::texts(yaml::get(m, "same_acquisition", &at)?, &at))? {
+        same_acquisition.push(f.blame(known(n, &at)).map_err(here)?);
+    }
+    let family = match m.get("family") {
+        None => None,
+        Some(v) => {
+            let fm = f.blame(yaml::obj(v, &at))?;
+            let wm = f.blame(yaml::obj(yaml::get(fm, "when", &at)?, &at))?;
+            let canonical = f.blame(yaml::texts(yaml::get(fm, "canonical", &at)?, &at))?;
+            if canonical.is_empty() {
+                return Err(here(Error::at(
+                    &at,
+                    "a family needs `canonical`: which of its variants are worth keeping",
+                )));
+            }
+            let mut ignoring = Vec::new();
+            if let Some(g) = fm.get("ignoring") {
+                for n in &f.blame(yaml::texts(g, &at))? {
+                    ignoring.push(f.blame(known(n, &at)).map_err(here)?);
+                }
+            }
+            Some(crate::pick::Family {
+                when: (
+                    f.blame(named(wm, "of", &at))?,
+                    f.blame(yaml::text(yaml::get(wm, "token", &at)?, &at))?,
+                ),
+                over: f.blame(named(fm, "over", &at))?,
+                ignoring,
+                canonical,
+            })
+        }
+    };
+
+    Ok(Model {
+        name,
+        roles,
+        components,
+        penalty,
+        borders,
+        same_acquisition,
+        family,
     })
 }
 
