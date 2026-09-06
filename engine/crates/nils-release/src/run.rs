@@ -24,15 +24,32 @@ use crate::scrub::{self, Plan};
 use crate::tags::Category;
 use crate::uid::Remap;
 
-/// What a release will write, as a predicate over the registry.
+/// What a release will write.
 ///
-/// Every field narrows; an empty selection is everything. v0 has two shapes of
-/// scope, a cohort name and a list of stack ids, in two callers; here both are
-/// this.
+/// **An enumeration, not a language.** Every field narrows, and an empty
+/// selection is everything. What a study means by its cohort, an inclusion
+/// rule, a diagnosis, a field strength, is a **query**, and the query AST is
+/// the door for that; a release takes the answer. The grains below are the
+/// four a cohort is actually made of, and each of them is something a person
+/// or a query can hand over as a list:
+///
+/// - a set of subjects,
+/// - a subject and one of its sessions,
+/// - a stack, which already says whose session it is,
+/// - and what a stack is, which is the pack's word rather than a study's.
+///
+/// v0 has the first three in its manifest resolver and the fourth in its
+/// export config, in two callers with two shapes; here they are one.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Selection {
     /// Subject codes.
     pub subjects: Vec<String>,
+    /// A subject and one of its sessions, by the label the scheme gives it:
+    /// `("abc", "M06")`. Matched after the sessions are derived, because a
+    /// session is derived and never stored (§5).
+    pub sessions: Vec<(String, String)>,
+    /// Stacks, by id. The narrowest grain, and the one a query returns.
+    pub stacks: Vec<i64>,
     /// Stacks holding this value on the disposition axis. Empty means the
     /// release's default, which is everything that is not `excluded`.
     pub dispositions: Vec<String>,
@@ -47,6 +64,8 @@ impl Selection {
     pub fn as_json(&self) -> serde_json::Value {
         serde_json::json!({
             "subjects": self.subjects,
+            "sessions": self.sessions,
+            "stacks": self.stacks,
             "dispositions": self.dispositions,
             "roles": self.roles,
             "picked_only": self.picked_only,
@@ -251,6 +270,11 @@ struct Instance {
 struct Job {
     stack: i64,
     place: Place,
+    /// Where it goes when the converter refuses it, which is the same place
+    /// the planner would give it had it been routed to `sourcedata` in the
+    /// first place. Computed here so a fallback and a plan cannot disagree,
+    /// which is what made every re-run move them.
+    fallback: Place,
     /// Which of §9.3's routes it took. In the descriptive layout there is one.
     route: String,
     /// The BIDS stem, when the tree is BIDS and the standard named it.
@@ -330,6 +354,11 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
     }
 
     let instances = select(registry.store(), &settings.selection)?;
+    // §9.6, before a byte is written: the root has to be writable and there
+    // has to be room. A release that discovers a full disk after 400 GB has
+    // written 400 GB for nothing, and what it reports is the operating
+    // system's word for it rather than what to do about it.
+    preflight(settings.root, &instances)?;
     let days = study_days(registry.store())?;
     let pixels = pixel_verdicts(registry.store())?;
     let named = places(registry.store(), &days, settings.scheme, settings.pack)?;
@@ -394,7 +423,10 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
     for i in instances {
         by_subject.entry(i.subject).or_default().push(i);
     }
-    report.subjects = by_subject.len() as i64;
+    // The people are counted once the jobs are known, below: the people in the
+    // version, not the people the selection query returned. The two differ the
+    // moment a narrowing happens after the query, which a session, a held
+    // stack and a stack routed nowhere all are.
 
     // §9.4: the time each stack was acquired, under the date policy, for the
     // standard's own columns. Computed once, before anything is written.
@@ -427,6 +459,23 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
             grouped.entry(i.stack).or_default().push(i);
         }
         for (stack, instances) in grouped {
+            let study = instances[0].study;
+            let label = labels
+                .get(&study)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            // A subject and one of its sessions, matched here rather than in
+            // SQL because a session is derived from a scheme on read and is
+            // never a column (§5).
+            if !settings.selection.sessions.is_empty()
+                && !settings
+                    .selection
+                    .sessions
+                    .iter()
+                    .any(|(who, which)| *who == code && *which == label)
+            {
+                continue;
+            }
             // §8.4. The engine does not look at pixels; it reads what the file
             // says about them, and holds what the file will not say. A held
             // stack is simply not in this version, so one an earlier version
@@ -450,11 +499,6 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                 }
                 _ => {}
             }
-            let study = instances[0].study;
-            let label = labels
-                .get(&study)
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
             let placed = named.get(&stack);
             // §9.1. A stack with no name is one nothing classified, which is a
             // stack the release should not silently rename into something
@@ -483,8 +527,6 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                 absent.push((stack, why.kind().to_string(), why.to_string()));
                 continue;
             }
-            *report.routes.entry(route.name().to_string()).or_insert(0) += 1;
-            let place = place_of(&route, settings, &code, &label, &folder, &stem, placed);
             let content = crate::version::content_of(
                 &subject_policy(settings, &code, offset),
                 &categories,
@@ -495,8 +537,22 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                     .map(|i| (i.id, i.size, i.mtime))
                     .collect::<Vec<_>>(),
             );
-            let key = place.key();
             let was = earlier.as_ref().and_then(|p| p.stacks.get(&stack));
+            // A conversion the converter refused last time will refuse it
+            // again, because nothing it depends on has changed: the converter
+            // is in the content digest and so is everything about the stack.
+            // So the fallback is **planned** rather than retried, and the stack
+            // is left alone. Without this, every re-run rewrites every stack
+            // that ever fell back, which is the incremental promise broken for
+            // exactly the stacks that cost the most.
+            let fell_back = was.is_some_and(|(w, r)| w.content == content && r == "sourcedata");
+            let route = match fell_back && route.name() != "sourcedata" {
+                true => crate::bids::place::Route::SourceData,
+                false => route,
+            };
+            *report.routes.entry(route.name().to_string()).or_insert(0) += 1;
+            let place = place_of(&route, settings, &code, &label, &folder, &stem, placed);
+            let key = place.key();
             let mut change = crate::version::compare(was.map(|(w, _)| w), &content, &key);
             // A route that changed changed the bytes: a stack converted last
             // time and written as DICOM this time is not the same file under a
@@ -521,6 +577,15 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
             }
             jobs.push(Job {
                 stack,
+                fallback: place_of(
+                    &crate::bids::place::Route::SourceData,
+                    settings,
+                    &code,
+                    &label,
+                    &folder,
+                    &stem,
+                    placed,
+                ),
                 place,
                 route: route.name().to_string(),
                 content,
@@ -533,6 +598,11 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         }
     }
     report.stacks = jobs.len() as i64;
+    let mut people: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for job in &jobs {
+        people.insert(job.code.as_str());
+    }
+    report.subjects = people.len() as i64;
 
     // What the last version wrote and this one does not.
     let here: std::collections::HashSet<i64> = jobs.iter().map(|j| j.stack).collect();
@@ -1099,6 +1169,72 @@ fn under_policy(
     }
 }
 
+/// The root, and the room (§9.6).
+///
+/// The estimate is the source's own size, which is the right order for a
+/// descriptive release (the same pixels, a smaller header) and generous for a
+/// BIDS one (compressed NIfTI is smaller than the DICOM it came from). Being
+/// generous is the point: a release refused for want of room somebody has is a
+/// nuisance, and one that fills a filesystem at three in the morning is an
+/// incident.
+fn preflight(root: &Path, instances: &[Instance]) -> Result<(), Error> {
+    std::fs::create_dir_all(root)
+        .map_err(|e| Error::Refused(format!("{} cannot be written into ({e})", root.display())))?;
+    // A file, because a directory that cannot be written into is a permission
+    // problem and reads as one, rather than as a full disk later.
+    let probe = root.join(".nils-writable");
+    std::fs::write(&probe, b"nils")
+        .map_err(|e| Error::Refused(format!("{} is not writable ({e})", root.display())))?;
+    std::fs::remove_file(&probe).ok();
+
+    let wanted: i64 = instances.iter().map(|i| i.size).sum();
+    let Some(free) = free_bytes(root) else {
+        return Ok(());
+    };
+    if free < wanted {
+        return Err(Error::Refused(format!(
+            "{} has {:.1} GiB free and this release is about {:.1} GiB of source \
+             (§9.6). Free some room, or release a smaller selection.",
+            root.display(),
+            free as f64 / (1u64 << 30) as f64,
+            wanted as f64 / (1u64 << 30) as f64,
+        )));
+    }
+    Ok(())
+}
+
+/// What the filesystem says it has, or nothing where it will not say.
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "statvfs fills a plain struct through the pointer it is given"
+)]
+fn free_bytes(path: &Path) -> Option<i64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: `c` is a valid NUL-terminated path and the pointer is to a
+    // struct of the right type that lives for the whole call.
+    let rc = unsafe { libc::statvfs(c.as_ptr(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: statvfs returned 0, so the struct is initialised.
+    let stat = unsafe { stat.assume_init() };
+    i64::try_from(stat.f_bavail)
+        .ok()?
+        .checked_mul(i64::try_from(stat.f_frsize).ok()?)
+}
+
+#[cfg(not(unix))]
+fn free_bytes(_path: &Path) -> Option<i64> {
+    // Windows has an answer and no crate we already depend on asks for it. A
+    // release there gets the operating system's error at the moment it runs
+    // out, which is what every release got before this.
+    None
+}
+
 /// The day this release is made, for its version.
 fn today() -> Day {
     std::time::SystemTime::now()
@@ -1116,10 +1252,16 @@ fn today() -> Day {
 /// and a comparison that could not see that would call it unchanged.
 fn subject_policy(settings: &Settings, code: &str, offset: crate::dates::Offset) -> String {
     format!(
-        "{} code={code} offset={} unknown={}",
+        "{} code={code} offset={} unknown={} layout={} converter={}",
         settings.policy.as_json(),
         offset.0,
         settings.on_unknown.name(),
+        settings.layout.name(),
+        // A different converter writes different NIfTI, so an upgrade rewrites
+        // the tree, which is what an upgrade means. It is also what lets a
+        // conversion that failed be planned as failed again: nothing about the
+        // stack or the converter changed, so nothing about the answer will.
+        settings.converter.map(|c| c.describe()).unwrap_or_default(),
     )
 }
 
@@ -1332,6 +1474,17 @@ fn select(store: &mut Store, selection: &Selection) -> Result<Vec<Instance>, Err
                 .subjects
                 .iter()
                 .map(|s| format!("'{}'", s.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !selection.stacks.is_empty() {
+        wheres.push(format!(
+            "k.id IN ({})",
+            selection
+                .stacks
+                .iter()
+                .map(i64::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -1644,20 +1797,12 @@ fn write_bids(
                 *n -= 1;
             }
             job.route = "sourcedata".to_string();
-            job.place = Place::dir(format!("sourcedata/{}", trimmed(&job.place.dir)));
+            job.place = job.fallback.clone();
             let mut out = refused;
             out.extend(write_dicom(job, plan, root, &job.place.dir));
             out
         }
     }
-}
-
-/// The BIDS directory a fallback to `sourcedata` keeps, which is the datatype
-/// directory without the tree's own root.
-fn trimmed(dir: &str) -> String {
-    dir.strip_prefix("derivatives/nils/")
-        .unwrap_or(dir)
-        .to_string()
 }
 
 /// Scrub one instance into the staging directory, ready to convert.
@@ -2351,6 +2496,7 @@ mod tests {
         Job {
             stack,
             place: Place::dir(dir.to_string()),
+            fallback: Place::dir(dir.to_string()),
             route: "raw".to_string(),
             content: "same".to_string(),
             change: crate::version::Change::Moved,

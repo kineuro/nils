@@ -80,6 +80,9 @@ enum Command {
     },
     /// The registry: its metadata, the running jobs, the last batches
     Status(StatusArgs),
+    /// What private elements an archive carries, by creator, so an allowlist
+    /// is chosen from the data rather than from a chair (§8.4)
+    Private(PrivateArgs),
     /// The linkage store: the identifiers behind the codes (§7)
     Linkage {
         #[command(subcommand)]
@@ -155,6 +158,19 @@ struct ReleaseArgs {
     /// Only these subjects, by code
     #[arg(long, value_name = "CODE")]
     subject: Vec<String>,
+    /// Only these sessions, as `<subject>:<label>`, by the label the scheme
+    /// gives them
+    #[arg(long, value_name = "CODE:LABEL")]
+    session: Vec<String>,
+    /// Only these stacks, by id. The grain a query returns
+    #[arg(long, value_name = "ID")]
+    stack: Vec<i64>,
+    /// Read the selection from a file, or from `-` for standard input, so the
+    /// answer to a query can be piped in rather than typed. JSON with
+    /// `subjects`, `sessions` and `stacks`, or one item a line: a number is a
+    /// stack, `<code>:<label>` is a session, anything else is a subject
+    #[arg(long, value_name = "FILE")]
+    select: Option<String>,
     /// Only stacks of these dispositions; by default everything but excluded
     #[arg(long, value_name = "KIND")]
     disposition: Vec<String>,
@@ -204,6 +220,24 @@ struct ReleaseArgs {
     pack: String,
     #[arg(long, value_name = "DIR")]
     pack_dir: Option<PathBuf>,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Parser)]
+struct PrivateArgs {
+    /// The tree to read
+    #[arg(value_name = "ROOT")]
+    root: PathBuf,
+    /// Stop after this many files. A survey is about what is there, not about
+    /// how much of it there is, and a few thousand files of an archive answer
+    /// that as well as all of them
+    #[arg(long, default_value_t = 20_000, value_name = "N")]
+    files: usize,
+    /// How many files to read at once
+    #[arg(long, default_value_t = 8, value_name = "N")]
+    workers: usize,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -671,6 +705,7 @@ fn main() -> ExitCode {
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
+        Command::Private(args) => private_survey(args),
         Command::Release(args) => release(&home, *args),
         Command::Handover(command) => handover_command(&home, command),
         Command::Pick { command } => pick_command(&home, command),
@@ -3758,6 +3793,187 @@ fn pick_explain(home: &Home, id: i64, json: bool) -> Result<(), Exit> {
 }
 
 // --------------------------------------------------------------------------
+/// The three grains a cohort is made of, from the flags and from `--select`.
+#[derive(Debug, Default)]
+struct Chosen {
+    subjects: Vec<String>,
+    sessions: Vec<(String, String)>,
+    stacks: Vec<i64>,
+}
+
+/// What to release, as an enumeration.
+///
+/// A release takes a selection and does not compute one: what a study means by
+/// its cohort is a query, and the query AST is the door for that. So this reads
+/// lists, from flags or from a file, and `-` is standard input so the answer to
+/// a query can be piped in rather than typed.
+fn choose(args: &ReleaseArgs) -> Result<Chosen, Exit> {
+    let mut out = Chosen {
+        subjects: args.subject.clone(),
+        stacks: args.stack.clone(),
+        ..Chosen::default()
+    };
+    for text in &args.session {
+        out.sessions.push(session_pair(text)?);
+    }
+    let Some(from) = &args.select else {
+        return Ok(out);
+    };
+    let text = match from.as_str() {
+        "-" => {
+            let mut buffer = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
+                .map_err(|e| fail(format!("standard input: {e}")))?;
+            buffer
+        }
+        path => std::fs::read_to_string(path).map_err(|e| fail(format!("{path}: {e}")))?,
+    };
+    // JSON when it is JSON, which is what a query will write; otherwise one
+    // item a line, which is what a person writes and what `cut` produces.
+    if text.trim_start().starts_with('{') {
+        let doc: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| usage(format!("the selection: {e}")))?;
+        for value in doc["subjects"].as_array().unwrap_or(&Vec::new()) {
+            if let Some(s) = value.as_str() {
+                out.subjects.push(s.to_string());
+            }
+        }
+        for value in doc["stacks"].as_array().unwrap_or(&Vec::new()) {
+            if let Some(n) = value.as_i64() {
+                out.stacks.push(n);
+            }
+        }
+        for value in doc["sessions"].as_array().unwrap_or(&Vec::new()) {
+            match value {
+                // `["abc", "M06"]` or `"abc:M06"`, because both are natural to
+                // write and neither is ambiguous.
+                serde_json::Value::Array(pair) if pair.len() == 2 => out.sessions.push((
+                    pair[0].as_str().unwrap_or_default().to_string(),
+                    pair[1].as_str().unwrap_or_default().to_string(),
+                )),
+                serde_json::Value::String(s) => out.sessions.push(session_pair(s)?),
+                _ => {}
+            }
+        }
+        return Ok(out);
+    }
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match line.parse::<i64>() {
+            Ok(id) => out.stacks.push(id),
+            Err(_) if line.contains(':') => out.sessions.push(session_pair(line)?),
+            Err(_) => out.subjects.push(line.to_string()),
+        }
+    }
+    Ok(out)
+}
+
+fn session_pair(text: &str) -> Result<(String, String), Exit> {
+    text.split_once(':')
+        .map(|(who, which)| (who.trim().to_string(), which.trim().to_string()))
+        .filter(|(who, which)| !who.is_empty() && !which.is_empty())
+        .ok_or_else(|| {
+            usage(format!(
+                "{text} is not a session; those are <subject>:<label>, as \
+                 `nils session list` prints them"
+            ))
+        })
+}
+
+/// What private elements an archive carries (§8.4).
+///
+/// A private element means whatever its vendor decided, and nothing in the file
+/// says what. So a release drops them all and an allowlist brings back the ones
+/// a pack names, and this is how that list is chosen: from the archive, by
+/// counting what is in it.
+///
+/// **Shapes, never values.** A creator, a block, an element, how many files
+/// carry it, how long it is, whether it is printable and how much it varies.
+/// Enough to judge whether an element is worth keeping, and safe to carry out
+/// of a private host, which a survey that quoted values would not be.
+fn private_survey(args: PrivateArgs) -> Result<(), Exit> {
+    let survey = nils_dicom::survey::walk(&args.root, args.files, args.workers);
+    let rows = survey.rows();
+    if args.json {
+        let out: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "creator": r.creator,
+                    "group": format!("{:04X}", r.group),
+                    "element": format!("{:02X}", r.element),
+                    "address": r.address(),
+                    "files": r.files,
+                    "vr": r.vrs,
+                    "shortest": r.shortest,
+                    "longest": r.longest,
+                    "printable": r.printable,
+                    "distinct": r.distinct,
+                    "varied": r.varied,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "files": survey.files,
+                "with_private": survey.with_private,
+                "orphans": survey.orphans,
+                "elements": out,
+            }))
+            .map_err(|e| fail(e.to_string()))?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} file(s) read, {} with private elements, {} distinct element(s)",
+        survey.files,
+        survey.with_private,
+        rows.len()
+    );
+    if survey.orphans > 0 {
+        // Nothing can be done with these, and saying so is the point: an
+        // element in a block no creator reserved cannot be addressed by name.
+        println!(
+            "  {} private element(s) in a block no creator reserved, which no allowlist can keep",
+            survey.orphans
+        );
+    }
+    let mut creator = String::new();
+    for r in &rows {
+        if r.creator != creator {
+            println!("\n{}", r.creator);
+            creator = r.creator.clone();
+        }
+        // `varies` is most of what decides whether an element is worth
+        // keeping: one value across an archive is a property of the scanner,
+        // and one per file is a property of the acquisition.
+        println!(
+            "  ({:04X},xx{:02X})  {:>8} files  {:<6}  {:>4}-{:<6} bytes  {}  {}",
+            r.group,
+            r.element,
+            r.files,
+            r.vrs,
+            r.shortest,
+            r.longest,
+            match r.printable {
+                true => "text  ",
+                false => "binary",
+            },
+            match (r.varied, r.distinct) {
+                (true, _) => "varies".to_string(),
+                (false, 1) => "one value".to_string(),
+                (false, n) => format!("{n} values"),
+            }
+        );
+    }
+    Ok(())
+}
+
 // The handover (Wave 3 §11)
 // --------------------------------------------------------------------------
 
@@ -4112,6 +4328,8 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         run::Layout::Descriptive => None,
     };
 
+    // Before the pack directory is taken out of `args`.
+    let chosen = choose(&args)?;
     let dir = pack_dir(home, args.pack_dir)?;
     let found = packs_in(&dir)?
         .into_iter()
@@ -4141,7 +4359,9 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         policy: &policy,
         categories,
         selection: run::Selection {
-            subjects: args.subject.clone(),
+            subjects: chosen.subjects,
+            sessions: chosen.sessions,
+            stacks: chosen.stacks,
             dispositions: args.disposition.clone(),
             roles: args.role.clone(),
             picked_only: args.picked,

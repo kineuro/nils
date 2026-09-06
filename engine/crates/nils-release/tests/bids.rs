@@ -487,3 +487,36 @@ fn a_qc_decision_renames_a_bids_file_rather_than_writing_it_again() {
         "and the new name says so: {now:?}"
     );
 }
+
+#[test]
+fn a_conversion_the_converter_refuses_is_planned_as_refused_next_time() {
+    // Found by walking a cohort through its life: a stack the converter will
+    // not convert falls back to `sourcedata/` as DICOM, and every re-run used
+    // to plan the raw route again, fail again, and rewrite it. That is the
+    // incremental promise broken for exactly the stacks that cost the most.
+    //
+    // Nothing the answer depends on has changed between runs, and the
+    // converter is in the content digest, so the fallback is planned rather
+    // than retried. An upgraded converter changes the digest and it is tried
+    // again, which is what an upgrade means.
+    let Some(converter) = converter() else { return };
+    let source = tree();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(
+        out.path(),
+        &policy,
+        &scheme,
+        Options::default(),
+        Some(&converter),
+    );
+    let first = run::run(&mut reg, &s).unwrap();
+    let second = run::run(&mut reg, &s).unwrap();
+    assert_eq!(second.written, 0, "the first re-run is already free");
+    assert_eq!(second.rewritten, 0);
+    assert_eq!(second.moved, 0, "and nothing moved either");
+    assert_eq!(second.unchanged, first.added + first.rewritten);
+}

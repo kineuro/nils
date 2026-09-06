@@ -821,3 +821,77 @@ fn a_release_and_its_next_version_run_on_postgres_too() {
     drop(reg);
     drop_schemas(&dsn);
 }
+
+#[test]
+fn a_release_takes_an_enumeration_at_three_grains() {
+    // §13: a release takes a selection and does not compute one. The grains
+    // are the ones a cohort is actually made of, and each is a list a person
+    // or a query can hand over.
+    let source = tree();
+    let home_dir = TempDir::new("release-home");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    classified(&mut reg, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+
+    let all = TempDir::new("release-all");
+    let everything = run::run(&mut reg, &settings(all.path(), &policy, &scheme)).unwrap();
+    assert_eq!(everything.subjects, 1);
+    assert!(everything.stacks >= 2, "{everything:?}");
+
+    // One stack of it, by id.
+    let sql = format!("SELECT MIN(id) FROM {}", reg.store().qualified("stack"));
+    let one = reg.store().query(&sql, &[]).unwrap()[0].int(0).unwrap();
+    let out = TempDir::new("release-stack");
+    let mut s = settings(out.path(), &policy, &scheme);
+    s.selection.stacks = vec![one];
+    let picked = run::run(&mut reg, &s).unwrap();
+    assert_eq!(picked.stacks, 1);
+
+    // One session of it, by the label the scheme gives it, which is matched
+    // after the sessions are derived because a session is never a column.
+    let out = TempDir::new("release-session");
+    let mut s = settings(out.path(), &policy, &scheme);
+    let sql = format!("SELECT code FROM {}", reg.store().qualified("subject"));
+    let code = reg.store().query(&sql, &[]).unwrap()[0]
+        .text(0)
+        .unwrap()
+        .to_string();
+    s.selection.sessions = vec![(code.clone(), "20220115".to_string())];
+    let session = run::run(&mut reg, &s).unwrap();
+    assert_eq!(session.subjects, 1);
+    assert!(session.stacks < everything.stacks, "one of two sessions");
+    assert!(
+        files_under(out.path())
+            .iter()
+            .all(|p| p.to_string_lossy().contains("ses-20220115")),
+        "and only that session"
+    );
+
+    // A session nobody has is nothing, rather than everything.
+    let out = TempDir::new("release-none");
+    let mut s = settings(out.path(), &policy, &scheme);
+    s.selection.sessions = vec![(code, "M99".to_string())];
+    assert_eq!(run::run(&mut reg, &s).unwrap().stacks, 0);
+}
+
+#[test]
+fn a_release_looks_before_it_writes() {
+    // §9.6: a release that discovers a full disk after 400 GB has written 400
+    // GB for nothing, and what it reports is the operating system's word for
+    // it rather than what to do about it.
+    let source = tree();
+    let home_dir = TempDir::new("release-home");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+
+    // A root that cannot be made, because a file is in the way.
+    let out = TempDir::new("release-out");
+    let blocked = out.path().join("a-file");
+    std::fs::write(&blocked, b"not a directory").unwrap();
+    let e = run::run(&mut reg, &settings(&blocked, &policy, &scheme))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("cannot be written into"), "{e}");
+}
