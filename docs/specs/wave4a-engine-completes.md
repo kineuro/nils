@@ -967,15 +967,19 @@ What proves each bar:
    the archive's own service runs on it, the gate released three of the
    cohort's subjects (the first three that carry an event of the kinds the
    cohort has: weight and height, since this cohort's clinical file holds
-   no EDSS): the descriptive tree of 31,610 files in 354 s, its re-run
-   writing nothing in under a second; the BIDS tree of 4,208 files in 380
-   s with the sex, the age and the nearest weight and height on every
-   session, its re-run writing nothing; and the whole cohort's descriptive
+   no EDSS): the descriptive tree of 31,610 files, its re-run writing
+   nothing in under a second; the BIDS tree of 4,208 files with the sex,
+   the age and the nearest weight and height on every session, its re-run
+   writing nothing; the handover of the descriptive tree, 3 archives,
+   31,610 files, 2.40 GB, in 219 s; and the whole cohort's descriptive
    tree on the baseline host (bar 11). The gate found one thing here: a
    release re-run took its own bookkeeping's word that a file was in the
    tree, so a file somebody had removed was not written again. It is now:
    a carried stack whose place is gone from the disk is written again and
-   the report counts it as `restored`.
+   the report counts it as `restored`, which on the cohort's host wrote
+   the 139 stacks of a removed subject back into both trees (545 s and 575
+   s, the second passes 0.2 s and nothing) where the earlier binary had
+   carried them on the state's word.
 3. Slices 2 and 3, §5.5 and §5.6: the pack's private elements read on the
    three surveyed vendors, and the reference gate's bar 8b, which reads the
    released tree with `nils private` and finds nothing the pack did not
@@ -1002,8 +1006,11 @@ What proves each bar:
    selection, the review queue and a release through `nils serve` and holds
    the door's answers to the command line's, the release queued through the
    door and run by a worker writing the tree the command line wrote; the
-   cohort gate does the same on the cohort; the door's tests do it in every
-   auth mode.
+   cohort gate does the same on the cohort, where the door's status,
+   custody and selection matched the command line's and the release queued
+   through `POST /api/releases` and run by `nils jobs work` wrote the same
+   31,610 files the command line had written; the door's tests do it in
+   every auth mode.
 10. Every store the custody table lists carries an `owner` and a `kept`
     (§13.1): the job log keeps a year of finished jobs and `nils jobs prune`
     is its deleter, the audit log is kept for ever, and a release is never
