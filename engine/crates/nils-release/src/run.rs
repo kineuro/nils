@@ -58,6 +58,13 @@ pub struct Selection {
     /// Only the stacks a pick chose (§10).
     pub picked_only: bool,
     pub modality: Option<String>,
+    /// Wave 4a §8: stacks by what the pack says they are, as `(axis,
+    /// value)` pairs; several values of one axis are alternatives, several
+    /// axes all have to hold.
+    pub axes: Vec<(String, String)>,
+    /// Wave 4a §8: the cohorts the subjects came from, for the record; the
+    /// members are already in `subjects`.
+    pub cohorts: Vec<String>,
 }
 
 impl Selection {
@@ -70,6 +77,8 @@ impl Selection {
             "roles": self.roles,
             "picked_only": self.picked_only,
             "modality": self.modality,
+            "axes": self.axes,
+            "cohorts": self.cohorts,
         })
     }
 
@@ -1958,6 +1967,27 @@ fn selection_where(store: &mut Store, selection: &Selection) -> String {
         wheres.push(format!("se.modality = '{}'", m.replace('\'', "''")));
     }
     let axis = store.qualified("classification_axis");
+    // Wave 4a §8: stacks by what the pack says they are. One value per row
+    // (§6.1), so equality is equality; the values of one axis are
+    // alternatives, and every axis named has to hold.
+    let mut by_axis: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (name, value) in &selection.axes {
+        by_axis
+            .entry(name.as_str())
+            .or_default()
+            .push(value.as_str());
+    }
+    for (name, values) in by_axis {
+        wheres.push(format!(
+            "EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = k.id AND a.axis = '{}' AND a.value IN ({}))",
+            name.replace('\'', "''"),
+            values
+                .iter()
+                .map(|v| format!("'{}'", v.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     // A stack the pack ruled out is not written, and saying so as a default
     // rather than as a flag is what keeps a release from carrying screenshots.
     if selection.dispositions.is_empty() {
@@ -2052,6 +2082,38 @@ fn selection_bytes(store: &mut Store, selection: &Selection) -> Result<i64, Erro
         .map(|r| r.int(0))
         .transpose()?
         .unwrap_or(0))
+}
+
+/// What a selection reaches, counted (Wave 4a §8, `nils select`): the
+/// subjects, studies, stacks and files, and the bytes. Sessions are not
+/// here, because a session is derived under a scheme on read and matched
+/// then; the preview says which were asked for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Preview {
+    pub subjects: i64,
+    pub studies: i64,
+    pub stacks: i64,
+    pub files: i64,
+    pub bytes: i64,
+}
+
+pub fn preview(store: &mut Store, selection: &Selection) -> Result<Preview, Error> {
+    let from = selection_from(store);
+    let filter = selection_where(store, selection);
+    let sql = format!(
+        "SELECT COUNT(DISTINCT su.id), COUNT(DISTINCT se.study_id), COUNT(DISTINCT k.id),                 COUNT(*), CAST(COALESCE(SUM(sf.size), 0) AS BIGINT)          {from} WHERE 1 = 1{filter}"
+    );
+    let r = store.query(&sql, &[])?;
+    let Some(r) = r.first() else {
+        return Ok(Preview::default());
+    };
+    Ok(Preview {
+        subjects: r.int(0)?,
+        studies: r.int(1)?,
+        stacks: r.int(2)?,
+        files: r.int(3)?,
+        bytes: r.int(4)?,
+    })
 }
 
 /// One subject's instances, with what the planner needs.

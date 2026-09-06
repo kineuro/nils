@@ -98,6 +98,9 @@ enum Command {
         #[command(subcommand)]
         command: ReviewCommand,
     },
+    /// What a selection would release, without releasing it: each item and
+    /// how it resolved, and what it reaches (Wave 4a section 8)
+    Select(SelectArgs),
     /// Select, de-identify and write a dataset out, recording the policy it applied (§8)
     Release(Box<ReleaseArgs>),
     /// How a dataset physically leaves: encrypted archives, checksummed and
@@ -168,10 +171,19 @@ struct ReleaseArgs {
     /// Only these stacks, by id. The grain a query returns
     #[arg(long, value_name = "ID")]
     stack: Vec<i64>,
+    /// Every current member of this cohort, by name (Wave 4a section 8)
+    #[arg(long, value_name = "NAME")]
+    cohort: Vec<String>,
+    /// Only stacks holding this value on this pack axis, as `<axis>=<value>`;
+    /// several values of one axis are alternatives, several axes all hold
+    #[arg(long, value_name = "AXIS=VALUE")]
+    axis: Vec<String>,
     /// Read the selection from a file, or from `-` for standard input, so the
     /// answer to a query can be piped in rather than typed. JSON with
-    /// `subjects`, `sessions` and `stacks`, or one item a line: a number is a
-    /// stack, `<code>:<label>` is a session, anything else is a subject
+    /// `cohorts`, `subjects`, `sessions`, `stacks` and `axes`, or one item a
+    /// line: a number is a stack, `@name` a cohort, `<axis>=<value>` an axis,
+    /// `<subject>:<label>` a session, anything else a subject by code or by
+    /// any identifier the registry resolves
     #[arg(long, value_name = "FILE")]
     select: Option<String>,
     /// Only stacks of these dispositions; by default everything but excluded
@@ -270,6 +282,37 @@ struct PrivateArgs {
     json: bool,
 }
 
+#[derive(Debug, Args)]
+struct SelectArgs {
+    /// Subjects, by code or by any identifier the registry resolves
+    #[arg(long, value_name = "SUBJECT")]
+    subject: Vec<String>,
+    /// Sessions, as `<subject>:<label>`
+    #[arg(long, value_name = "SUBJECT:LABEL")]
+    session: Vec<String>,
+    /// Stacks, by id
+    #[arg(long, value_name = "ID")]
+    stack: Vec<i64>,
+    /// Every current member of this cohort, by name
+    #[arg(long, value_name = "NAME")]
+    cohort: Vec<String>,
+    /// Stacks holding this value on this pack axis, as `<axis>=<value>`
+    #[arg(long, value_name = "AXIS=VALUE")]
+    axis: Vec<String>,
+    /// The selection from a file, or `-` for standard input, in the form
+    /// `nils release --select` takes
+    #[arg(long, value_name = "FILE")]
+    select: Option<String>,
+    /// The pack whose axes an axis item is checked against
+    #[arg(long, default_value = "mri")]
+    pack: String,
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<PathBuf>,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Subcommand)]
 enum ClinicalCommand {
     /// The vocabulary: the diseases, their types, and the kinds of observation
@@ -278,6 +321,20 @@ enum ClinicalCommand {
     /// Import a CSV under a mapping: preview what would change, then apply
     /// under your name (Wave 4a section 7.2)
     Import(ClinicalImportArgs),
+    /// The cohorts and how many current members each has, which is what
+    /// `--cohort` and `@name` select (Wave 4a section 8)
+    #[command(subcommand)]
+    Cohort(CohortCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum CohortCommand {
+    /// Every cohort, with its owner and its current member count
+    List {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -793,6 +850,7 @@ fn main() -> ExitCode {
         Command::Release(args) => release(&home, *args),
         Command::Handover(command) => handover_command(&home, command),
         Command::Clinical(command) => clinical_command(&home, command),
+        Command::Select(args) => select_preview(&home, args),
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
@@ -3981,33 +4039,56 @@ fn pick_explain(home: &Home, id: i64, json: bool) -> Result<(), Exit> {
 }
 
 // --------------------------------------------------------------------------
-/// The three grains a cohort is made of, from the flags and from `--select`.
-#[derive(Debug, Default)]
-struct Chosen {
-    subjects: Vec<String>,
-    sessions: Vec<(String, String)>,
-    stacks: Vec<i64>,
-}
-
-/// What to release, as an enumeration.
+/// The selection's items, from the flags and from `--select`, in the one
+/// grammar `nils select` and `nils release` share (Wave 4a section 8).
 ///
-/// A release takes a selection and does not compute one: what a study means by
-/// its cohort is a query, and the query AST is the door for that. So this reads
-/// lists, from flags or from a file, and `-` is standard input so the answer to
-/// a query can be piped in rather than typed.
-fn choose(args: &ReleaseArgs) -> Result<Chosen, Exit> {
-    let mut out = Chosen {
-        subjects: args.subject.clone(),
-        stacks: args.stack.clone(),
-        ..Chosen::default()
-    };
-    for text in &args.session {
-        out.sessions.push(session_pair(text)?);
+/// A release takes a selection and does not compute one: what a study means
+/// by its cohort is a query, and the query AST is the door for that. So this
+/// reads lists, from flags or from a file, and `-` is standard input so the
+/// answer to a query can be piped in rather than typed.
+fn selection_items(
+    subjects: &[String],
+    sessions: &[String],
+    stacks: &[i64],
+    cohorts: &[String],
+    axes: &[String],
+    select: Option<&str>,
+) -> Result<Vec<nils_release::select::Item>, Exit> {
+    use nils_release::select;
+    let mut out: Vec<select::Item> = Vec::new();
+    for name in cohorts {
+        out.push(select::Item::Cohort(name.clone()));
     }
-    let Some(from) = &args.select else {
+    for s in subjects {
+        out.push(select::Item::Subject(s.clone()));
+    }
+    for text in sessions {
+        match select::Item::parse(text).map_err(usage)? {
+            Some(item @ select::Item::Session(..)) => out.push(item),
+            _ => {
+                return Err(usage(format!(
+                    "{text} is not a session; those are <subject>:<label>, as `nils session list` prints them"
+                )));
+            }
+        }
+    }
+    for id in stacks {
+        out.push(select::Item::Stack(*id));
+    }
+    for text in axes {
+        match select::Item::parse(text).map_err(usage)? {
+            Some(item @ select::Item::Axis(..)) => out.push(item),
+            _ => {
+                return Err(usage(format!(
+                    "{text} is not an axis; those are <axis>=<value>"
+                )));
+            }
+        }
+    }
+    let Some(from) = select else {
         return Ok(out);
     };
-    let text = match from.as_str() {
+    let text = match from {
         "-" => {
             let mut buffer = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
@@ -4016,59 +4097,181 @@ fn choose(args: &ReleaseArgs) -> Result<Chosen, Exit> {
         }
         path => std::fs::read_to_string(path).map_err(|e| fail(format!("{path}: {e}")))?,
     };
-    // JSON when it is JSON, which is what a query will write; otherwise one
-    // item a line, which is what a person writes and what `cut` produces.
-    if text.trim_start().starts_with('{') {
-        let doc: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| usage(format!("the selection: {e}")))?;
-        for value in doc["subjects"].as_array().unwrap_or(&Vec::new()) {
-            if let Some(s) = value.as_str() {
-                out.subjects.push(s.to_string());
-            }
-        }
-        for value in doc["stacks"].as_array().unwrap_or(&Vec::new()) {
-            if let Some(n) = value.as_i64() {
-                out.stacks.push(n);
-            }
-        }
-        for value in doc["sessions"].as_array().unwrap_or(&Vec::new()) {
-            match value {
-                // `["abc", "M06"]` or `"abc:M06"`, because both are natural to
-                // write and neither is ambiguous.
-                serde_json::Value::Array(pair) if pair.len() == 2 => out.sessions.push((
-                    pair[0].as_str().unwrap_or_default().to_string(),
-                    pair[1].as_str().unwrap_or_default().to_string(),
-                )),
-                serde_json::Value::String(s) => out.sessions.push(session_pair(s)?),
-                _ => {}
-            }
-        }
-        return Ok(out);
-    }
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        match line.parse::<i64>() {
-            Ok(id) => out.stacks.push(id),
-            Err(_) if line.contains(':') => out.sessions.push(session_pair(line)?),
-            Err(_) => out.subjects.push(line.to_string()),
-        }
-    }
+    out.extend(select::Item::parse_all(&text).map_err(|e| usage(format!("the selection: {e}")))?);
     Ok(out)
 }
 
-fn session_pair(text: &str) -> Result<(String, String), Exit> {
-    text.split_once(':')
-        .map(|(who, which)| (who.trim().to_string(), which.trim().to_string()))
-        .filter(|(who, which)| !who.is_empty() && !which.is_empty())
-        .ok_or_else(|| {
-            usage(format!(
-                "{text} is not a session; those are <subject>:<label>, as \
-                 `nils session list` prints them"
-            ))
-        })
+/// Resolve the items, and refuse if any did not: a release that releases
+/// less than it was asked for, silently, is the failure mode this exists
+/// to prevent.
+fn resolve_or_refuse(
+    registry: &mut Registry,
+    items: &[nils_release::select::Item],
+    pack: Option<&nils_pack::pack::Pack>,
+) -> Result<nils_release::select::Resolved, Exit> {
+    use nils_release::{run, select};
+    let resolved = select::resolve(registry, items, pack).map_err(|e| match e {
+        run::Error::Refused(m) => usage(m),
+        other => fail(other.to_string()),
+    })?;
+    if !resolved.unresolved.is_empty() {
+        let mut lines = vec![format!(
+            "{} item(s) of the selection did not resolve:",
+            resolved.unresolved.len()
+        )];
+        for (item, why) in &resolved.unresolved {
+            lines.push(format!("  {:<24} {why}", item.describe()));
+        }
+        lines
+            .push("nothing was released; `nils select` shows what a selection reaches".to_string());
+        return Err(usage(lines.join("\n")));
+    }
+    Ok(resolved)
+}
+
+/// `nils select`: what a selection reaches, without releasing it.
+fn select_preview(home: &Home, args: SelectArgs) -> Result<(), Exit> {
+    use nils_release::{run, select};
+    let items = selection_items(
+        &args.subject,
+        &args.session,
+        &args.stack,
+        &args.cohort,
+        &args.axis,
+        args.select.as_deref(),
+    )?;
+    let pack = match args.pack_dir.clone().or_else(|| pack_dir(home, None).ok()) {
+        Some(dir) => packs_in(&dir)
+            .ok()
+            .and_then(|found| {
+                found
+                    .into_iter()
+                    .find(|p| p.file_name().is_some_and(|f| f == args.pack.as_str()))
+            })
+            .and_then(|found| nils_pack::load(&found, None).ok()),
+        None => None,
+    };
+    let mut registry = open(home)?;
+    let resolved = select::resolve(&mut registry, &items, pack.as_ref()).map_err(|e| match e {
+        run::Error::Refused(m) => usage(m),
+        other => fail(other.to_string()),
+    })?;
+    let preview =
+        run::preview(registry.store(), &resolved.selection).map_err(|e| fail(e.to_string()))?;
+    if args.json {
+        let mut doc = resolved.as_json();
+        doc["reaches"] = serde_json::json!({
+            "subjects": preview.subjects, "studies": preview.studies,
+            "stacks": preview.stacks, "files": preview.files, "bytes": preview.bytes,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&doc).map_err(|e| fail(e.to_string()))?
+        );
+        return if resolved.unresolved.is_empty() {
+            Ok(())
+        } else {
+            Err(fail(format!(
+                "{} item(s) did not resolve",
+                resolved.unresolved.len()
+            )))
+        };
+    }
+    if items.is_empty() {
+        println!("no items: the selection is the whole registry");
+    }
+    for (item, how) in &resolved.items {
+        println!("  {:<24} {}", item.describe(), how.describe());
+    }
+    for (item, why) in &resolved.unresolved {
+        println!("  {:<24} NOT RESOLVED: {why}", item.describe());
+    }
+    if !resolved.selection.sessions.is_empty() {
+        println!(
+            "  {} session(s) are matched by label once the sessions are derived under the release's scheme",
+            resolved.selection.sessions.len()
+        );
+    }
+    println!(
+        "reaches  subjects {}   studies {}   stacks {}   files {}   {}",
+        preview.subjects,
+        preview.studies,
+        preview.stacks,
+        preview.files,
+        size_text(preview.bytes)
+    );
+    if resolved.unresolved.is_empty() {
+        Ok(())
+    } else {
+        Err(fail(format!(
+            "{} item(s) did not resolve",
+            resolved.unresolved.len()
+        )))
+    }
+}
+
+/// A size a person reads.
+fn size_text(bytes: i64) -> String {
+    let b = bytes as f64;
+    if b >= 1e9 {
+        format!("{:.1} GB", b / 1e9)
+    } else if b >= 1e6 {
+        format!("{:.1} MB", b / 1e6)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// `nils clinical cohort list`.
+fn cohort_list(home: &Home, json: bool) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let store = registry.store();
+    let sql = format!(
+        "SELECT c.id, c.name, c.owner, c.description, \
+                (SELECT COUNT(*) FROM {} m WHERE m.cohort_id = c.id AND m.left_at IS NULL) \
+         FROM {} c ORDER BY c.name",
+        store.qualified("cohort_member"),
+        store.qualified("cohort")
+    );
+    let mut rows = Vec::new();
+    for r in store.query(&sql, &[]).map_err(|e| fail(e.to_string()))? {
+        rows.push((
+            r.int(0).map_err(|e| fail(e.to_string()))?,
+            r.text(1).map_err(|e| fail(e.to_string()))?.to_string(),
+            r.text(2).map_err(|e| fail(e.to_string()))?.to_string(),
+            r.opt_text(3)
+                .map_err(|e| fail(e.to_string()))?
+                .map(str::to_string),
+            r.int(4).map_err(|e| fail(e.to_string()))?,
+        ));
+    }
+    if json {
+        let doc: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(id, name, owner, description, members)| {
+                serde_json::json!({
+                    "id": id, "name": name, "owner": owner,
+                    "description": description, "members": members,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&doc).map_err(|e| fail(e.to_string()))?
+        );
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("no cohorts; `nils clinical import` with a cohort mapping makes one");
+        return Ok(());
+    }
+    for (_, name, owner, description, members) in &rows {
+        println!(
+            "  {name:<24} {members:>6} member(s)   {owner}   {}",
+            description.as_deref().unwrap_or("")
+        );
+    }
+    Ok(())
 }
 
 /// What private elements an archive carries (§8.4).
@@ -4467,6 +4670,7 @@ fn yaml_text(s: &str) -> String {
 fn clinical_command(home: &Home, command: ClinicalCommand) -> Result<(), Exit> {
     match command {
         ClinicalCommand::Import(args) => clinical_import(home, args),
+        ClinicalCommand::Cohort(CohortCommand::List { json }) => cohort_list(home, json),
         ClinicalCommand::Vocabulary(VocabularyCommand::Load {
             file,
             pack_dir: dir,
@@ -5022,7 +5226,14 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     };
 
     // Before the pack directory is taken out of `args`.
-    let chosen = choose(&args)?;
+    let items = selection_items(
+        &args.subject,
+        &args.session,
+        &args.stack,
+        &args.cohort,
+        &args.axis,
+        args.select.as_deref(),
+    )?;
     let dir = pack_dir(home, args.pack_dir)?;
     let found = packs_in(&dir)?
         .into_iter()
@@ -5031,6 +5242,9 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     let pack = nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
 
     let mut registry = open(home)?;
+    // Wave 4a section 8: every item resolved up front, and a refusal that
+    // names what did not, rather than a smaller release.
+    let chosen = resolve_or_refuse(&mut registry, &items, Some(&pack))?.selection;
     let scheme = match (&args.scheme, &args.scheme_name) {
         (Some(path), _) => read_scheme(path)?,
         (None, Some(name)) => stored_scheme(&mut registry, name)?,
@@ -5059,6 +5273,8 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             roles: args.role.clone(),
             picked_only: args.picked,
             modality: args.modality.clone(),
+            axes: chosen.axes,
+            cohorts: chosen.cohorts,
         },
         scheme: &scheme,
         // §8.4: dropped by default, and back only by name. The pack declares

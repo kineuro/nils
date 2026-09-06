@@ -638,6 +638,30 @@ releasing it, so a person can see a cohort before it leaves.
 Nothing else is added. A field strength, a date range, a diagnosis, a slice
 count: each is a predicate, and predicates are the question wave's.
 
+**As built (slice 10, 2026-09-06).** One grammar, in `nils-release`'s
+`select` module, shared by `nils release` and `nils select`: a line is a
+stack (a number), a cohort (`@name`), an axis value (`<axis>=<value>`), a
+session (`<subject>:<label>`) or a subject (anything else); the JSON form
+carries `cohorts`, `subjects`, `sessions`, `stacks` and `axes` (a map of
+axis to value or values, or a list of `axis=value`). The flags `--cohort`
+and `--axis` join `--subject`, `--session`, `--stack` and `--select`. A
+subject that is not a code is tried as an identifier under every type the
+linkage store knows, and resolves with the type named; a name that is an
+identifier of two subjects is refused as ambiguous, and one that is neither
+is refused. A cohort resolves to its current members (no `left_at`),
+folded on case. An axis value is checked against the pack's axes when a
+pack is at hand, so a name that would match no row is refused rather than
+selecting nothing; values of one axis are alternatives, every axis named has
+to hold, and the match is equality on the one-value-per-row table of §6.1.
+Everything is resolved before a release plans anything, and a release with
+an unresolved item refuses, naming each one, rather than releasing less
+than it was asked for. `nils select` prints each item with how it resolved
+and what the selection reaches (subjects, studies, stacks, files, bytes;
+sessions are named, not counted, because they are derived under the
+release's scheme), exits 1 when anything did not resolve, and has `--json`.
+The release record carries the axes and the cohorts beside the codes.
+`nils clinical cohort list` names the cohorts with their member counts.
+
 ## 9. Jobs, the principal and the audit
 
 ### 9.1 One job model

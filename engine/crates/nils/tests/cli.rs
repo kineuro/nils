@@ -2771,3 +2771,193 @@ fn a_release_refuses_an_observation_it_cannot_write_before_it_plans() {
         );
     }
 }
+
+#[test]
+fn nils_select_shows_a_cohort_before_it_leaves_and_a_release_refuses_what_did_not_resolve() {
+    // Wave 4a section 8, at the command line: the four grains in one
+    // grammar, the identifier resolved through the linkage store, what the
+    // selection reaches counted, and a release that names what it could not
+    // resolve rather than releasing less.
+    let home = home();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = patients();
+    let out = TempDir::new("cli-select-out");
+    let run = |args: &[&str]| {
+        let out = nils().args(registry).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}: {}\n{}",
+            args.join(" "),
+            stderr(&out),
+            stdout(&out)
+        );
+        stdout(&out)
+    };
+    run(&[
+        "digest",
+        "--name",
+        "a",
+        "--no-private",
+        dir.path().to_str().unwrap(),
+    ]);
+    // P1's code, through the resolver itself: the patient id the digest
+    // filed resolves as an identifier of type patient-id.
+    let doc: serde_json::Value = serde_json::from_str(&run(&[
+        "select",
+        "--subject",
+        "P1",
+        "--json",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(doc["items"][0]["how"]["kind"], "identifier", "{doc}");
+    assert_eq!(doc["items"][0]["how"]["id_type"], "patient-id", "{doc}");
+    let code = doc["selection"]["subjects"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(doc["reaches"]["subjects"], 1, "{doc}");
+    assert_eq!(doc["reaches"]["files"], 2, "{doc}");
+    // A cohort, through the importer, then listed.
+    let mapping = home.path().join("cohort.yml");
+    std::fs::write(
+        &mapping,
+        "import:\n  target: cohort\n  columns:\n    name: {column: cohort}\n    owner: {value: the group}\n",
+    )
+    .unwrap();
+    let file = home.path().join("cohort.csv");
+    std::fs::write(&file, "cohort\nMS-2026\n").unwrap();
+    run(&[
+        "clinical",
+        "import",
+        "--apply",
+        "--mapping",
+        mapping.to_str().unwrap(),
+        "--file",
+        file.to_str().unwrap(),
+    ]);
+    let members = home.path().join("members.yml");
+    std::fs::write(
+        &members,
+        "import:\n  target: cohort_member\n  subject: {column: code}\n  cohort: MS-2026\n",
+    )
+    .unwrap();
+    let file = home.path().join("members.csv");
+    std::fs::write(&file, format!("code\n{code}\n")).unwrap();
+    run(&[
+        "clinical",
+        "import",
+        "--apply",
+        "--mapping",
+        members.to_str().unwrap(),
+        "--file",
+        file.to_str().unwrap(),
+    ]);
+    let listed = run(&["clinical", "cohort", "list"]);
+    assert!(listed.contains("MS-2026"), "{listed}");
+    assert!(listed.contains("1 member(s)"), "{listed}");
+
+    // The preview: the identifier the digest filed resolves to the code,
+    // the cohort to its member, the axis to its count, and the whole is
+    // counted.
+    let shown = run(&[
+        "select",
+        "--cohort",
+        "ms-2026",
+        "--subject",
+        "P1",
+        "--subject",
+        &code,
+        "--pack-dir",
+        packs.to_str().unwrap(),
+    ]);
+    assert!(shown.contains("cohort, 1 current member(s)"), "{shown}");
+    assert!(
+        shown.contains(&format!("subject {code}, by its patient-id identifier")),
+        "{shown}"
+    );
+    assert!(shown.contains("subject, by code"), "{shown}");
+    assert!(shown.contains("reaches  subjects 1"), "{shown}");
+    // An axis value nothing holds yet, because nothing is classified.
+    let shown = run(&[
+        "select",
+        "--axis",
+        "base=T1w",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+    ]);
+    assert!(shown.contains("axis value, held by 0 stack(s)"), "{shown}");
+    assert!(shown.contains("reaches  subjects 0"), "{shown}");
+    let selection = home.path().join("selection.txt");
+    std::fs::write(
+        &selection,
+        format!("# the cohort and one of its sessions\n@ms-2026\n{code}:20220115\n"),
+    )
+    .unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&run(&[
+        "select",
+        "--select",
+        selection.to_str().unwrap(),
+        "--json",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(doc["items"].as_array().unwrap().len(), 2, "{doc}");
+    assert_eq!(doc["items"][1]["how"]["kind"], "session", "{doc}");
+    assert_eq!(doc["selection"]["subjects"][0], code, "{doc}");
+    assert_eq!(doc["selection"]["cohorts"][0], "ms-2026", "{doc}");
+    assert_eq!(doc["reaches"]["subjects"], 1, "{doc}");
+    assert!(doc["unresolved"].as_array().unwrap().is_empty(), "{doc}");
+
+    // What does not resolve is named, and the exit says so.
+    let refused = nils()
+        .args(registry)
+        .args(["select", "--subject", "nobody", "--axis", "nonsense=x"])
+        .args(["--pack-dir", packs.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    let text = stdout(&refused);
+    assert!(text.contains("NOT RESOLVED"), "{text}");
+    assert!(
+        text.contains("neither a subject code nor an identifier"),
+        "{text}"
+    );
+    assert!(text.contains("decides no axis named nonsense"), "{text}");
+
+    // And a release refuses up front, writing nothing.
+    let refused = nils()
+        .args(registry)
+        .args([
+            "release",
+            "--name",
+            "r",
+            "--on-unknown",
+            "write",
+            "--layout",
+            "descriptive",
+            "--subject",
+            "nobody",
+            "--pack-dir",
+            packs.to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("1 item(s) of the selection did not resolve"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(
+        std::fs::read_dir(out.path())
+            .map(|d| d.count() == 0)
+            .unwrap_or(true),
+        "nothing was written"
+    );
+}
