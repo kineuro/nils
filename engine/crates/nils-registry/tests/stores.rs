@@ -982,7 +982,7 @@ fn the_earliest_event_anchors_and_the_nearest_event_is_found_with_its_tie_rule()
             .unwrap();
         let anchors = clinical::anchor_events(&mut store, diagnosis).unwrap();
         assert_eq!(anchors.get("a").copied(), Day::parse("20190615"), "{name}");
-        assert!(anchors.get("b").is_none(), "{name}: b has no diagnosis");
+        assert!(!anchors.contains_key("b"), "{name}: b has no diagnosis");
 
         // EDSS at 2022-01-01 (3.0), 2022-03-01 (3.5), 2022-05-01 (4.0).
         event(&mut store, a, edss, "2022-01-01", Some(3.0), None);
