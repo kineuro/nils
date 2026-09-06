@@ -66,12 +66,24 @@ fn registry_on(
     backend: Backend,
     dsn: Option<String>,
 ) -> (Home, Registry) {
+    registry_in(home_dir, source, backend, dsn, SCHEMA)
+}
+
+/// The same, in a schema of the test's own, so two tests on Postgres do not
+/// drop each other's tables.
+fn registry_in(
+    home_dir: &TempDir,
+    source: &TempDir,
+    backend: Backend,
+    dsn: Option<String>,
+    schema: &str,
+) -> (Home, Registry) {
     let home = Home::new(home_dir.path());
     home.keys(None).add("k", KEY).unwrap();
     home.init(&InitOptions {
         backend,
         dsn,
-        schema: (backend == Backend::Postgres).then(|| SCHEMA.to_string()),
+        schema: (backend == Backend::Postgres).then(|| schema.to_string()),
         scheme: Scheme::DEFAULT,
         key: "k".to_string(),
         display_length: 12,
@@ -97,10 +109,14 @@ fn postgres_dsn() -> Option<String> {
 }
 
 fn drop_schemas(dsn: &str) {
-    let mut store = nils_registry::Store::connect_postgres(dsn, SCHEMA).expect("connect");
+    drop_schemas_named(dsn, SCHEMA);
+}
+
+fn drop_schemas_named(dsn: &str, schema: &str) {
+    let mut store = nils_registry::Store::connect_postgres(dsn, schema).expect("connect");
     store
         .batch(&format!(
-            "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCHEMA}_linkage CASCADE"
+            "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
         ))
         .expect("drop the test schemas");
 }
@@ -946,4 +962,183 @@ fn a_role_is_matched_by_equality_against_a_row_per_value() {
     let t1 = run::run(&mut reg, &s).unwrap();
     assert_eq!(t1.stacks, 0, "a role is a value, not a prefix: {t1:?}");
     let _ = one;
+}
+
+/// Wave 4a §8: the selection resolves at the four grains, on both backends,
+/// and `preview` counts what it reaches.
+#[test]
+fn a_selection_resolves_at_the_four_grains_and_is_counted_before_it_leaves() {
+    use nils_registry::schema;
+    use nils_registry::store::{Insert, Param};
+    use nils_release::select::{self, How, Item};
+    const OWN: &str = "nils_select_test";
+    let mut backends: Vec<(Backend, Option<String>)> = vec![(Backend::Sqlite, None)];
+    if let Some(dsn) = postgres_dsn() {
+        drop_schemas_named(&dsn, OWN);
+        backends.push((Backend::Postgres, Some(dsn)));
+    }
+    for (backend, dsn) in backends {
+        let name = format!("{backend:?}");
+        let source = tree();
+        let home_dir = TempDir::new("select-home");
+        let (_home, mut reg) = registry_in(&home_dir, &source, backend, dsn, OWN);
+        // A cohort with the one subject in it, and an axis value on one stack.
+        let (code, stack) = {
+            let store = reg.store();
+            let row = &store
+                .query(
+                    &format!(
+                        "SELECT su.id, su.code, MIN(k.id) FROM {} su JOIN {} se ON se.subject_id = su.id \
+                         JOIN {} k ON k.series_id = se.id GROUP BY su.id, su.code",
+                        store.qualified("subject"),
+                        store.qualified("series"),
+                        store.qualified("stack")
+                    ),
+                    &[],
+                )
+                .unwrap()[0];
+            let (subject, code, stack) = (
+                row.int(0).unwrap(),
+                row.text(1).unwrap().to_string(),
+                row.int(2).unwrap(),
+            );
+            let cohort = store
+                .insert(
+                    &Insert::new(schema::table("cohort"), &["name", "owner", "created_at"])
+                        .returning(&["id"]),
+                    &[vec![
+                        Param::from("MS-2026"),
+                        Param::from("the group"),
+                        Param::from("2026-09-06T00:00:00Z"),
+                    ]],
+                )
+                .unwrap()[0]
+                .int(0)
+                .unwrap();
+            store
+                .insert(
+                    &Insert::new(
+                        schema::table("cohort_member"),
+                        &["cohort_id", "subject_id", "joined_at"],
+                    ),
+                    &[vec![
+                        Param::Int(cohort),
+                        Param::Int(subject),
+                        Param::from("2026-09-06T00:00:00Z"),
+                    ]],
+                )
+                .unwrap();
+            store
+                .insert(
+                    &Insert::new(
+                        schema::table("classification_axis"),
+                        &["stack_id", "axis", "value", "confidence", "tier"],
+                    ),
+                    &[vec![
+                        Param::Int(stack),
+                        Param::from("base"),
+                        Param::from("T1w"),
+                        Param::Double(1.0),
+                        Param::from("certain"),
+                    ]],
+                )
+                .unwrap();
+            (code, stack)
+        };
+        let items = vec![
+            Item::Cohort("ms-2026".into()),
+            Item::Subject(code.clone()),
+            Item::Subject("19800101-1234".into()),
+            Item::Subject("nobody".into()),
+            Item::Session("19800101-1234".into(), "20220115".into()),
+            Item::Stack(stack),
+            Item::Axis("base".into(), "T1w".into()),
+            Item::Axis("base".into(), "T2w".into()),
+            Item::Axis("nonsense".into(), "x".into()),
+        ];
+        let resolved = select::resolve(&mut reg, &items, Some(pack())).unwrap();
+        let how = |item: &Item| -> Option<How> {
+            resolved
+                .items
+                .iter()
+                .find(|(i, _)| i == item)
+                .map(|(_, h)| h.clone())
+        };
+        assert_eq!(how(&items[0]), Some(How::Cohort { members: 1 }), "{name}");
+        assert_eq!(how(&items[1]), Some(How::Code), "{name}");
+        // The patient id the digest filed as an identifier resolves to the
+        // same subject, and says which type it was.
+        assert_eq!(
+            how(&items[2]),
+            Some(How::Identifier {
+                id_type: "patient-id".into(),
+                code: code.clone()
+            }),
+            "{name}"
+        );
+        assert_eq!(how(&items[3]), None, "{name}: unknown");
+        assert!(
+            matches!(how(&items[4]), Some(How::Session(inner)) if matches!(*inner, How::Identifier { .. })),
+            "{name}: {:?}",
+            how(&items[4])
+        );
+        assert_eq!(how(&items[5]), Some(How::Stack), "{name}");
+        assert_eq!(how(&items[6]), Some(How::Axis { stacks: 1 }), "{name}");
+        assert_eq!(how(&items[7]), Some(How::Axis { stacks: 0 }), "{name}");
+        assert_eq!(
+            how(&items[8]),
+            None,
+            "{name}: the pack decides no such axis"
+        );
+        let unresolved: Vec<String> = resolved
+            .unresolved
+            .iter()
+            .map(|(i, _)| i.describe())
+            .collect();
+        assert_eq!(unresolved, vec!["nobody", "nonsense=x"], "{name}");
+        // The enumeration: one subject, once, whichever way it was named.
+        assert_eq!(resolved.selection.subjects, vec![code.clone()], "{name}");
+        assert_eq!(resolved.selection.cohorts, vec!["ms-2026"], "{name}");
+        assert_eq!(
+            resolved.selection.sessions,
+            vec![(code.clone(), "20220115".to_string())],
+            "{name}"
+        );
+        assert_eq!(resolved.selection.stacks, vec![stack], "{name}");
+        assert_eq!(resolved.selection.axes.len(), 2, "{name}");
+
+        // Counted before it leaves: the whole registry, then the one stack
+        // the axis value names.
+        let whole = run::preview(reg.store(), &Selection::default()).unwrap();
+        assert_eq!(whole.subjects, 1, "{name}");
+        assert!(whole.stacks > 1, "{name}: {whole:?}");
+        let axis = Selection {
+            axes: vec![("base".into(), "T1w".into())],
+            ..Selection::default()
+        };
+        let one = run::preview(reg.store(), &axis).unwrap();
+        assert_eq!(one.stacks, 1, "{name}: {one:?}");
+        assert!(one.files >= 1 && one.bytes > 0, "{name}: {one:?}");
+        let two = Selection {
+            axes: vec![("base".into(), "T1w".into()), ("base".into(), "T2w".into())],
+            ..Selection::default()
+        };
+        assert_eq!(
+            run::preview(reg.store(), &two).unwrap().stacks,
+            1,
+            "{name}: two values of one axis are alternatives"
+        );
+        let none = Selection {
+            axes: vec![
+                ("base".into(), "T1w".into()),
+                ("technique".into(), "FLAIR".into()),
+            ],
+            ..Selection::default()
+        };
+        assert_eq!(
+            run::preview(reg.store(), &none).unwrap().stacks,
+            0,
+            "{name}: two axes both have to hold"
+        );
+    }
 }
