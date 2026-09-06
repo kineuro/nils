@@ -436,6 +436,23 @@ and the rule that a version changes only by a pull request that says so. A
 contract test exists and is green, even if it tests little, because a test that
 exists is amended and one that does not is never written.
 
+**As built (slice 5).** Three directories under `contracts/`, each with a
+`README.md`, a `VERSION` and one `vN/` directory per version, and the rule
+they share written at the top of `contracts/README.md`: a version changes
+only by a pull request that says so in its title. `pack/` is at version 1,
+the manifest as the loader reads it, as a JSON Schema with a description on
+every property; the engine's `CONTRACT` constant and the file's `VERSION` are
+kept equal by a test, every key the loader reads is kept on the schema and
+every key on the schema is kept read, and the shipped MRI pack's manifest is
+held to it key by key. `review-item/` is at version 1, the item as `nils
+review list --json` prints it, with the kinds so far tabled in its README; a
+test digests a tree with one refused file and holds the printed item to the
+schema property by property. `openapi/` is at version 0 and empty, a
+skeleton a test reads, so that the first route of `nils serve` lands in a
+file already versioned and tested. The query AST, MCP, job and federation
+contracts wait for their waves, and the table in `contracts/README.md` says
+which.
+
 ## 7. The registry layer
 
 ### 7.1 The clinical schema
