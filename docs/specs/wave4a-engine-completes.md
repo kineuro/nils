@@ -483,6 +483,27 @@ the old one stays with `superseded_by`, and a retraction is a supersede by
 nothing. Nothing about a person's record is deleted, which is the same rule the
 `decision` table already lives by.
 
+**As built (slice 6).** The eight tables of the table above, in migration
+21: `cohort` and `cohort_member` (a membership fact, with `joined_at` and a
+`left_at` that is never a deletion), `disease`, `disease_type`,
+`observation_type`, `subject_disease`, `subject_disease_type` and `event`,
+the last three with `actor` and `superseded_by`, which is the correction
+rule of §13.2 built in. `event` is the one event-attribute-value shape:
+the value as text, and as a number beside it when the kind is numeric, so a
+nearest-of is arithmetic and not a parse. One thing the table above had
+wrong: the subject's birth date and sex are catalogue columns already, read
+from the files since Wave 1, so the subject gains only `deceased_at`; the
+importer fills the two where the files are silent and a disagreement is a
+review item (§13.3). The vocabulary is pack data in `packs/clinical/
+vocabulary.yml`, carried from v0's seed (eight diseases with seventeen types,
+fifteen observation kinds, EDSS the primary one), and `nils clinical
+vocabulary load` upserts it by name: what exists is updated, what is new is
+added, and nothing is ever removed by a load, because an event already
+recorded against a kind must keep its kind; a second load says it changed
+nothing. `nils clinical vocabulary list` reads it back, and the custody table
+has a `clinical layer` store with its counts and its rule (C38). The id
+types stay where Wave 1 put them.
+
 ### 7.2 One declarative importer
 
 v0 has thirteen importers, 5,807 lines, each a preview-then-apply CSV importer

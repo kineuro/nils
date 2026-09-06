@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The clinical vocabulary (`docs/specs/wave4a-engine-completes.md`, section
+# 7.1): the diseases a registry may record, their types, and the kinds of
+# observation an event may be. Pack data rather than a table the engine
+# seeds, because which scales a clinic records is knowledge about the clinic
+# and changes without the engine changing.
+#
+# Loaded by `nils clinical vocabulary load`, which upserts by name: a name
+# that exists is updated in place (its description, its unit, its bounds), a
+# new one is added, and nothing is ever removed by a load, because an event
+# already recorded against a kind must keep its kind. A load is idempotent.
+#
+# Carried from NILS v0 0.5.3's seed, which is where the fifteen observation
+# kinds and the eight diseases with their subtypes were accumulated.
+
+vocabulary:
+  diseases:
+    - name: Control
+      description: Healthy control subject, no neurological disease
+    - name: Multiple Sclerosis
+      code: G35
+      description: Chronic autoimmune demyelinating disease of the central nervous system
+      types:
+        - {name: CIS, description: Clinically isolated syndrome}
+        - {name: RRMS, description: Relapsing-remitting multiple sclerosis}
+        - {name: SPMS, description: Secondary progressive multiple sclerosis}
+        - {name: PPMS, description: Primary progressive multiple sclerosis}
+        - {name: PRMS, description: Progressive-relapsing multiple sclerosis}
+    - name: ALS
+      code: G12.21
+      description: Amyotrophic lateral sclerosis
+      types:
+        - {name: Limb-onset, description: Spinal ALS, weakness beginning in the limbs}
+        - {name: Bulbar-onset, description: Bulbar ALS, symptoms beginning in the muscles of speech and swallowing}
+        - {name: Familial, description: Familial ALS, an inherited mutation (SOD1, C9ORF72)}
+        - {name: Sporadic, description: Sporadic ALS, no known family history}
+    - name: Parkinson
+      code: G20
+      description: Parkinson's disease
+      types:
+        - {name: Tremor-Dominant, description: Tremor-dominant Parkinson's disease}
+        - {name: Akinetic-Rigid, description: Akinetic-rigid Parkinson's disease}
+        - {name: PIGD, description: Postural instability and gait difficulty}
+    - name: NMOSD
+      code: G36.0
+      description: Neuromyelitis optica spectrum disorder
+      types:
+        - {name: AQP4-positive, description: AQP4-IgG seropositive NMOSD}
+        - {name: AQP4-negative, description: AQP4-IgG seronegative NMOSD}
+        - {name: Double-negative, description: AQP4-IgG and MOG-IgG double-negative NMOSD}
+    - name: MOGAD
+      code: G36.1
+      description: Myelin oligodendrocyte glycoprotein antibody-associated disease
+    - name: Alzheimer
+      code: G30
+      description: Alzheimer's disease
+      types:
+        - {name: Early-onset, description: Early-onset Alzheimer's disease, before age 65}
+        - {name: Late-onset, description: Late-onset Alzheimer's disease, age 65 and over}
+    - name: Dementia
+      code: F03
+      description: Unspecified dementia
+
+  # value_type: numeric, text, boolean, json, or none for an observation
+  # that is a date and nothing else. primary marks the scale a release names
+  # by default (section 7.4): the nearest EDSS to each scan.
+  observation_types:
+    - {name: EDSS, category: Clinical Measurement, value_type: numeric, unit: points, min: 0, max: 10, primary: true, description: Expanded Disability Status Scale}
+    - {name: SDMT, category: Clinical Measurement, value_type: numeric, unit: correct, min: 0, max: 110, description: Symbol Digit Modalities Test}
+    - {name: FSMC, category: Clinical Measurement, value_type: numeric, unit: points, min: 20, max: 100, description: Fatigue Scale for Motor and Cognitive Functions}
+    - {name: FSS, category: Clinical Measurement, value_type: numeric, unit: score, min: 1, max: 7, description: Fatigue Severity Scale}
+    - {name: HADS, category: Clinical Measurement, value_type: numeric, unit: score, min: 0, max: 42, description: Hospital Anxiety and Depression Scale}
+    - {name: MSI, category: Clinical Measurement, value_type: numeric, unit: score, min: 1, max: 5, description: Multiple Sclerosis Impact Scale}
+    - {name: Treatment, category: Intervention, value_type: text, description: A disease-modifying treatment started, as its name}
+    - {name: Diagnosis, category: Assessment, description: The official diagnosis, on its date}
+    - {name: Disease Onset, category: Assessment, description: When symptoms first appeared}
+    - {name: SP Transition, category: Assessment, description: The transition to secondary progression, on its date}
+    - {name: MRI Scan, category: Imaging, description: An MRI study performed}
+    - {name: CT Scan, category: Imaging, description: A CT study performed}
+    - {name: PET Scan, category: Imaging, description: A PET study performed}
+    - {name: Weight, category: Anthropometric, value_type: numeric, unit: kg, min: 0, max: 500, description: Body weight}
+    - {name: Height, category: Anthropometric, value_type: numeric, unit: m, min: 0, max: 3, description: Body height}

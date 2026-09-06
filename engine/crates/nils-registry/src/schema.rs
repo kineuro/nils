@@ -314,6 +314,13 @@ fn build_registry() -> Vec<Table> {
                 vec![
                     col("first_batch_id", Type::Int),
                     req("created_at", Type::Timestamp),
+                    // Wave 4a §7.1: the birth date and the sex are catalogue
+                    // columns already, read from the files; the importer
+                    // fills them where the files are silent, and a later
+                    // file that disagrees is a review item rather than an
+                    // overwrite (§13.3). What no file carries is when the
+                    // subject died.
+                    col("deceased_at", Type::Date),
                 ],
             ),
         )
@@ -390,6 +397,139 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .unique(&["series_id"]),
+        // Wave 4a §7.1: the clinical layer, in the one registry, holding what
+        // v0 kept in a second database. The date is the join key: an import
+        // matches on (subject, event_date), a session anchor is an event
+        // date, and age, disease duration and the nearest observation are
+        // date arithmetic. Nothing here is rewritten by a date policy. A
+        // correction supersedes the old row and the old row stays
+        // (`superseded_by`), which is the rule `decision` already lives by.
+        //
+        // A cohort is a membership fact in this wave (§13.7).
+        Table::new(
+            "cohort",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("owner", Type::Text),
+                col("description", Type::Text),
+                req("created_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["name"]),
+        Table::new(
+            "cohort_member",
+            vec![
+                col("id", Type::Id),
+                req("cohort_id", Type::Int),
+                req("subject_id", Type::Int),
+                req("joined_at", Type::Timestamp),
+                col("left_at", Type::Timestamp),
+                col("notes", Type::Text),
+            ],
+        )
+        .unique(&["cohort_id", "subject_id"])
+        .index(&["subject_id"]),
+        // The vocabulary: diseases and their types, and the kinds of
+        // observation. Pack data, loaded by `nils clinical vocabulary load`,
+        // because which scales a clinic records is knowledge about the
+        // clinic and not about the engine.
+        Table::new(
+            "disease",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                col("code", Type::Text),
+                col("description", Type::Text),
+            ],
+        )
+        .unique(&["name"]),
+        Table::new(
+            "disease_type",
+            vec![
+                col("id", Type::Id),
+                req("disease_id", Type::Int),
+                req("name", Type::Text),
+                col("description", Type::Text),
+                col("sort_order", Type::Int),
+            ],
+        )
+        .unique(&["disease_id", "name"]),
+        Table::new(
+            "observation_type",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("category", Type::Text),
+                // numeric, text, boolean, json, or none for an observation
+                // that is a date and nothing else (a diagnosis, an onset).
+                col("value_type", Type::Text),
+                col("unit", Type::Text),
+                col("min_value", Type::Double),
+                col("max_value", Type::Double),
+                req("is_primary", Type::Int),
+                col("description", Type::Text),
+            ],
+        )
+        .unique(&["name"]),
+        Table::new(
+            "subject_disease",
+            vec![
+                col("id", Type::Id),
+                req("subject_id", Type::Int),
+                req("disease_id", Type::Int),
+                col("onset_event_id", Type::Int),
+                col("diagnosis_event_id", Type::Int),
+                col("notes", Type::Text),
+                col("family_history", Type::Text),
+                req("created_at", Type::Timestamp),
+                col("actor", Type::Text),
+                col("superseded_by", Type::Int),
+            ],
+        )
+        .index(&["subject_id"]),
+        Table::new(
+            "subject_disease_type",
+            vec![
+                col("id", Type::Id),
+                req("subject_disease_id", Type::Int),
+                req("disease_type_id", Type::Int),
+                col("assigned_on", Type::Date),
+                col("transition_event_id", Type::Int),
+                col("notes", Type::Text),
+                req("created_at", Type::Timestamp),
+                col("actor", Type::Text),
+                col("superseded_by", Type::Int),
+            ],
+        )
+        .index(&["subject_disease_id"]),
+        // One event-attribute-value shape for every clinical import, kept
+        // from v0 because every import is one: what was observed, when, of
+        // whom, and the value if the kind has one. `value` is the text as
+        // it arrived; `number` is the value as a number when the kind is
+        // numeric, so a window and a nearest-of are arithmetic and not a
+        // parse.
+        Table::new(
+            "event",
+            vec![
+                col("id", Type::Id),
+                req("subject_id", Type::Int),
+                req("observation_type_id", Type::Int),
+                req("event_date", Type::Date),
+                col("event_time", Type::Time),
+                col("value", Type::Text),
+                col("number", Type::Double),
+                col("unit", Type::Text),
+                col("source", Type::Text),
+                col("quality", Type::Text),
+                col("notes", Type::Text),
+                req("created_at", Type::Timestamp),
+                col("actor", Type::Text),
+                col("superseded_by", Type::Int),
+            ],
+        )
+        .index(&["subject_id", "observation_type_id", "event_date"])
+        .index(&["observation_type_id", "event_date"]),
         Table::new(
             "stack",
             with_catalogue(

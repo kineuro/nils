@@ -183,6 +183,13 @@ impl Row {
         }
     }
 
+    pub fn opt_double(&self, i: usize) -> Result<Option<f64>, Error> {
+        match &self.0[i] {
+            Cell::Null => Ok(None),
+            _ => self.double(i).map(Some),
+        }
+    }
+
     pub fn double(&self, i: usize) -> Result<f64, Error> {
         match &self.0[i] {
             Cell::Double(v) => Ok(*v),

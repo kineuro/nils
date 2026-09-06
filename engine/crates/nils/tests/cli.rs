@@ -2363,3 +2363,89 @@ fn the_openapi_contract_is_a_versioned_skeleton() {
     );
     assert!(text.contains(&format!("version: \"{version}\"")), "{text}");
 }
+
+/// Wave 4a §7.1: the clinical vocabulary is pack data, loaded by name, and
+/// the custody table knows the clinical layer.
+#[test]
+fn the_clinical_vocabulary_loads_from_the_pack_and_a_second_load_changes_nothing() {
+    let home = home();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let loaded = nils()
+        .args(registry)
+        .args(["clinical", "vocabulary", "load", "--json", "--pack-dir"])
+        .arg(&packs)
+        .output()
+        .unwrap();
+    assert!(loaded.status.success(), "{}", stderr(&loaded));
+    let v: serde_json::Value = serde_json::from_slice(&loaded.stdout).unwrap();
+    assert_eq!(v["diseases"]["added"], 8, "{v}");
+    assert_eq!(v["disease_types"]["added"], 17, "{v}");
+    assert_eq!(v["observation_types"]["added"], 15, "{v}");
+
+    let again = nils()
+        .args(registry)
+        .args(["clinical", "vocabulary", "load", "--pack-dir"])
+        .arg(&packs)
+        .output()
+        .unwrap();
+    assert!(again.status.success(), "{}", stderr(&again));
+    assert!(
+        stdout(&again).contains("nothing changed"),
+        "{}",
+        stdout(&again)
+    );
+
+    let listed = nils()
+        .args(registry)
+        .args(["clinical", "vocabulary", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let edss = v["observation_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["name"] == "EDSS")
+        .expect("EDSS");
+    assert_eq!(edss["primary"], true, "{edss}");
+    assert_eq!(edss["unit"], "points", "{edss}");
+    let ms = v["diseases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "Multiple Sclerosis")
+        .expect("MS");
+    assert_eq!(ms["types"].as_array().unwrap().len(), 5, "{ms}");
+
+    let text = nils()
+        .args(registry)
+        .args(["clinical", "vocabulary", "list"])
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&text).contains("8 disease(s), 15 observation kind(s)"),
+        "{}",
+        stdout(&text)
+    );
+
+    let custody = nils()
+        .args(registry)
+        .args(["custody", "--json"])
+        .output()
+        .unwrap();
+    assert!(custody.status.success(), "{}", stderr(&custody));
+    let v: serde_json::Value = serde_json::from_slice(&custody.stdout).unwrap();
+    let stores = v["stores"]
+        .as_array()
+        .or_else(|| v.as_array())
+        .expect("stores");
+    let clinical = stores
+        .iter()
+        .find(|s| s["store"] == "clinical layer")
+        .expect("the clinical layer has an owner in the custody table");
+    assert_eq!(clinical["counts"]["diseases"], 8, "{clinical}");
+    assert_eq!(clinical["counts"]["observation_types"], 15, "{clinical}");
+    assert_eq!(clinical["counts"]["events"], 0, "{clinical}");
+}

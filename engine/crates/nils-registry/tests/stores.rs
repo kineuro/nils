@@ -849,3 +849,53 @@ fn migration_20_makes_an_axis_value_a_row() {
         .batch("INSERT INTO classification_axis (stack_id, axis, value, confidence, tier) VALUES (7, 'role', 'swi', 0.9, 'keywords')")
         .unwrap();
 }
+
+/// Wave 4a §7.1: the clinical vocabulary is pack data, loaded by upsert on
+/// both backends: a second load changes nothing, a changed description is
+/// updated in place, and nothing is ever removed.
+#[test]
+fn a_vocabulary_loads_by_name_and_a_second_load_changes_nothing() {
+    use nils_registry::clinical::{self, Vocabulary};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let v = Vocabulary::parse(
+            "vocabulary:\n  diseases:\n    - name: MS\n      code: G35\n      types: [{name: RRMS}, {name: SPMS}]\n  observation_types:\n    - {name: EDSS, category: scale, value_type: numeric, unit: points, min: 0, max: 10, primary: true}\n    - {name: Diagnosis, category: assessment}\n",
+        )
+        .unwrap();
+        let first = clinical::load(&mut store, &v).unwrap();
+        assert_eq!(first.diseases_added, 1, "{name}");
+        assert_eq!(first.disease_types_added, 2, "{name}");
+        assert_eq!(first.observation_types_added, 2, "{name}");
+        let again = clinical::load(&mut store, &v).unwrap();
+        assert_eq!(again.changed(), 0, "{name}: idempotent");
+
+        let kinds = clinical::observation_types(&mut store).unwrap();
+        assert_eq!(kinds.len(), 2, "{name}");
+        let edss = kinds.iter().find(|k| k.name == "EDSS").unwrap();
+        assert!(edss.primary, "{name}");
+        assert_eq!(edss.unit.as_deref(), Some("points"), "{name}");
+        let diseases = clinical::diseases(&mut store).unwrap();
+        assert_eq!(diseases[0].1.types.len(), 2, "{name}");
+
+        // A changed description is an update; a dropped type is not a removal.
+        let changed = Vocabulary::parse(
+            "vocabulary:\n  diseases:\n    - name: MS\n      code: G35\n      description: multiple sclerosis\n      types: [{name: RRMS}]\n  observation_types:\n    - {name: EDSS, category: scale, value_type: numeric, unit: points, min: 0, max: 10, primary: true, description: the scale}\n",
+        )
+        .unwrap();
+        let third = clinical::load(&mut store, &changed).unwrap();
+        assert_eq!(third.diseases_updated, 1, "{name}");
+        assert_eq!(third.observation_types_updated, 1, "{name}");
+        assert_eq!(third.changed(), 2, "{name}");
+        let diseases = clinical::diseases(&mut store).unwrap();
+        assert_eq!(
+            diseases[0].1.types.len(),
+            2,
+            "{name}: nothing is removed by a load"
+        );
+        assert_eq!(
+            clinical::observation_types(&mut store).unwrap().len(),
+            2,
+            "{name}"
+        );
+    }
+}

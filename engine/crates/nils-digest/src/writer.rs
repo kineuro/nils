@@ -575,6 +575,11 @@ impl<'a> Writer<'a> {
                 row.extend(x.row(Level::Subject).map(|(_, v)| Param::from(v)));
                 row.push(Param::Int(self.batch_id));
                 row.push(Param::from(now));
+                // The columns a later wave declared after these (Wave 4a
+                // §7.1's `deceased_at`), which no file carries.
+                while row.len() < t.data_columns().count() {
+                    row.push(Param::Null);
+                }
                 rows.push(row);
             }
             let spec = Insert::all(t)
