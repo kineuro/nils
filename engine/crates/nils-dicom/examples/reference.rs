@@ -110,7 +110,17 @@ const SERIES: &[Series] = &[
         image_type: "ORIGINAL\\PRIMARY\\DIFFUSION\\NONE",
         acquisition: "2D",
         instances: 3,
-        extra: &[],
+        // A Siemens block on the diffusion series (Wave 4a section 5): the b
+        // value, which the pack's release list keeps, and the coil string,
+        // which the pack ingests and a release drops. The gate asks the
+        // released tree which of the two it carries.
+        extra: &[
+            (0x0019, 0x0010, VR::LO, "SIEMENS MR HEADER"),
+            (0x0019, 0x100C, VR::IS, "1000"),
+            (0x0019, 0x100D, VR::CS, "DIRECTIONAL"),
+            (0x0051, 0x0010, VR::LO, "SIEMENS MR HEADER"),
+            (0x0051, 0x100F, VR::LO, "HEA;HEP"),
+        ],
     },
     Series {
         key: "adc",

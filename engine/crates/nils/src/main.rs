@@ -228,8 +228,9 @@ struct ReleaseArgs {
 #[derive(Debug, Parser)]
 struct PrivateArgs {
     /// The tree to read
-    #[arg(value_name = "ROOT")]
-    root: PathBuf,
+    /// The tree to survey; with --measured, the registry is read instead
+    #[arg(value_name = "ROOT", required_unless_present = "measured")]
+    root: Option<PathBuf>,
     /// Stop after this many files. A survey is about what is there, not about
     /// how much of it there is, and a few thousand files of an archive answer
     /// that as well as all of them
@@ -249,6 +250,13 @@ struct PrivateArgs {
     /// that an element varies per acquisition, is printable and is short
     #[arg(long)]
     suggest: bool,
+    /// Read what the registry's digests kept per series instead of a tree:
+    /// per address, how many series hold it, in how many it varied within
+    /// the series, and how many distinct values it takes across series
+    /// (Wave 4a section 5.3). A value that varies inside nearly every series
+    /// is a per-image value and not a parameter of the acquisition.
+    #[arg(long, conflicts_with = "suggest")]
+    measured: bool,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -3992,7 +4000,14 @@ fn private_survey(home: &Home, args: PrivateArgs) -> Result<(), Exit> {
         Err(e) if args.pack_dir.is_some() => return Err(e),
         Err(_) => None,
     };
-    let survey = nils_dicom::survey::walk(&args.root, args.files, args.workers);
+    if args.measured {
+        return private_measured(home, pack.as_ref(), args.json);
+    }
+    let root = args
+        .root
+        .as_deref()
+        .ok_or_else(|| usage("a ROOT to survey"))?;
+    let survey = nils_dicom::survey::walk(root, args.files, args.workers);
     let rows = survey.rows();
     let name_of = |r: &nils_dicom::survey::Row| -> Option<String> {
         pack.as_ref()
@@ -4147,6 +4162,190 @@ fn private_survey(home: &Home, args: PrivateArgs) -> Result<(), Exit> {
             match ingested(r) {
                 Some(field) => format!("  [ingested as {field}]"),
                 None if r.suggested() => "  [suggested]".to_string(),
+                None => String::new(),
+            }
+        );
+    }
+    Ok(())
+}
+
+/// One address as the registry measured it (Wave 4a §5.3).
+struct Measured {
+    address: String,
+    /// Series that hold it.
+    series: i64,
+    /// Series whose files disagreed on it.
+    varied: i64,
+    /// Distinct values across series, counted by hash: shapes, never values.
+    distinct: usize,
+}
+
+/// What the digests kept per series, read back as shapes: which addresses,
+/// in how many series, varied within how many, distinct across how many.
+///
+/// This is the second half of the method that chooses the list. A survey
+/// says what varies across an archive; only a digest can say whether it
+/// varies **inside** a series, and an element that does is a per-image value
+/// (a slice position, a window) and not a parameter of the acquisition,
+/// however much it varies across the archive.
+fn private_measured(home: &Home, pack: Option<&nils_pack::Pack>, json: bool) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let store = registry.store();
+    let series: i64 = store
+        .query(
+            &format!("SELECT COUNT(*) FROM {}", store.qualified("series")),
+            &[],
+        )
+        .map_err(|e| fail(e.to_string()))?
+        .first()
+        .and_then(|r| r.int(0).ok())
+        .unwrap_or(0);
+    let t = nils_registry::schema::table("series_private");
+    let elements = store
+        .dialect()
+        .text_of(t.column("elements").expect("series_private.elements"));
+    let sql = format!(
+        "SELECT {elements}, varied FROM {}",
+        store.qualified("series_private")
+    );
+    let rows = store.query(&sql, &[]).map_err(|e| fail(e.to_string()))?;
+    let mut held: std::collections::BTreeMap<String, Measured> = std::collections::BTreeMap::new();
+    let mut seen: std::collections::HashMap<String, std::collections::HashSet<u64>> =
+        std::collections::HashMap::new();
+    for r in &rows {
+        let map: std::collections::BTreeMap<String, String> = r
+            .text(0)
+            .ok()
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or_default();
+        for (address, value) in &map {
+            let m = held.entry(address.clone()).or_insert_with(|| Measured {
+                address: address.clone(),
+                series: 0,
+                varied: 0,
+                distinct: 0,
+            });
+            m.series += 1;
+            use std::hash::{Hash, Hasher};
+            let mut h = std::hash::DefaultHasher::new();
+            value.hash(&mut h);
+            seen.entry(address.clone()).or_default().insert(h.finish());
+        }
+        if let Ok(Some(varied)) = r.opt_text(1) {
+            for address in varied.split(',').filter(|a| !a.is_empty()) {
+                if let Some(m) = held.get_mut(address) {
+                    m.varied += 1;
+                }
+            }
+        }
+    }
+    for (address, set) in seen {
+        if let Some(m) = held.get_mut(&address) {
+            m.distinct = set.len();
+        }
+    }
+    let mut out: Vec<&Measured> = held.values().collect();
+    out.sort_by(|a, b| b.series.cmp(&a.series).then(a.address.cmp(&b.address)));
+    // The address is `GGGGxxEE CREATOR`; the pack names it from the creator.
+    let split = |address: &str| -> Option<(u16, u8, String)> {
+        let (tag, creator) = address.split_once(' ')?;
+        let group = u16::from_str_radix(tag.get(0..4)?, 16).ok()?;
+        let element = u8::from_str_radix(tag.get(6..8)?, 16).ok()?;
+        Some((group, element, creator.to_string()))
+    };
+    let named = |address: &str| -> (Option<String>, Option<String>) {
+        let Some((group, element, creator)) = split(address) else {
+            return (None, None);
+        };
+        let Some(p) = pack else {
+            return (None, None);
+        };
+        (
+            p.dictionary
+                .lookup(&creator, group, element)
+                .map(|e| e.name.clone()),
+            p.ingest
+                .iter()
+                .find(|i| {
+                    i.group == group
+                        && i.element == element
+                        && i.creator.trim().eq_ignore_ascii_case(creator.trim())
+                })
+                .map(|i| i.name.clone()),
+        )
+    };
+    if json {
+        let items: Vec<serde_json::Value> = out
+            .iter()
+            .map(|m| {
+                let (name, ingested) = named(&m.address);
+                serde_json::json!({
+                    "address": m.address,
+                    "name": name,
+                    "ingested_as": ingested,
+                    "series": m.series,
+                    "varied_within": m.varied,
+                    "distinct_across": m.distinct,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "series": series,
+                "series_with_private": rows.len(),
+                "pack": pack.map(|p| p.id()),
+                "elements": items,
+            }))
+            .map_err(|e| fail(e.to_string()))?
+        );
+        return Ok(());
+    }
+    println!(
+        "{} series, {} with private elements, {} address(es) measured{}",
+        series,
+        rows.len(),
+        out.len(),
+        match pack {
+            Some(p) => format!(", named by {}", p.id()),
+            None => String::new(),
+        }
+    );
+    println!(
+        "  {:<40} {:>8} {:>14} {:>9}  reading",
+        "address", "series", "varied within", "distinct"
+    );
+    for m in &out {
+        let (name, ingested) = named(&m.address);
+        let share = match m.series {
+            0 => 0.0,
+            n => 100.0 * m.varied as f64 / n as f64,
+        };
+        // The reading is the rule of §5.3 applied: what the numbers say an
+        // element is, for a person to confirm.
+        let reading = if share >= 50.0 {
+            "per image, not a parameter"
+        } else if m.distinct <= 3 {
+            "a constant of the scanner or the site"
+        } else if share >= 5.0 {
+            "mostly a parameter, varies inside some series"
+        } else {
+            "a parameter of the acquisition"
+        };
+        println!(
+            "  {:<40} {:>8} {:>7} {:>5.1}% {:>9}  {}{}{}",
+            m.address,
+            m.series,
+            m.varied,
+            share,
+            m.distinct,
+            reading,
+            match name {
+                Some(n) => format!("  [{n}]"),
+                None => String::new(),
+            },
+            match ingested {
+                Some(f) => format!("  ingested as {f}"),
                 None => String::new(),
             }
         );

@@ -311,6 +311,71 @@ what Wave 1 already reads, each with a `kind` and a `why`; the `release` list
 is Wave 3's six, unchanged. Slice 3 settles both lists against the surveys
 with `nils private --suggest` as the method.
 
+### 5.6 As built (slice 3): the lists, settled by measurement
+
+**The method has two halves, and both are verbs.** A survey (`nils private`)
+says what varies across an archive; only a digest can say whether an element
+varies *inside* a series, and that is the question that separates a
+parameter of the acquisition from a per-image value. So each cohort was
+surveyed with the pack at hand, every candidate the survey proposed was put
+on a broad ingest list, each cohort was digested with it, and
+`nils private --measured` read back, per address, in how many series it
+varied within the series and how many distinct values it took across them.
+The reading is mechanical and the judgement is a person's: an identifier
+(`Scanner Study ID`, a `UID` in group `0009`) varies exactly like a
+parameter, and only a name tells them apart, which is why every `why` in
+the pack was written by hand and carries the numbers.
+
+**Measured, three cohorts** (varied within / series that hold it; distinct
+across series). Blank where the cohort has no such element.
+
+| address | reading | nmosd | mix | legacy MS |
+|---|---|---|---|---|
+| `0051xx0C` FoV text | parameter, kept | 0/984, 16 | 5/945, 152 | 0/921, 29 |
+| `0051xx0A` TA text | parameter, kept | 0/984, 33 | 44/824, 348 | 28/911, 88 |
+| `0051xx0B` matrix text | parameter, kept | 0/358, 14 | 0/624, 201 | 0/921, 60 |
+| `0051xx0E` orientation text | mostly parameter, kept | 30/358, 118 | 130/633, 486 | 10/921, 302 |
+| `0051xx0F` coil string | parameter, kept | 0/358, 17 | 0/566, 89 | 0/911, 20 |
+| `0051xx11` PAT mode | parameter, kept | 0/311, 3 | 0/350, 6 | 0/619, 2 |
+| `0019xx14` table position | parameter, kept | 0/358, 93 | 4/485, 150 | 0/869, 96 |
+| `0019xx0F` gradient mode | near constant, kept | 0/277, 2 | 0/471, 3 | 0/869, 3 |
+| `0021xx1C` `xx2C` `xx2D` SDS 01 | parameter by shape, kept, unnamed | 4/578, 64 to 74 | 2/222, 173 to 184 | |
+| `0021xx77` SDI 02 | parameter by shape, kept, unnamed | 0/578, 112 | 0/222, 56 | |
+| `0043xx39` GE b values | parameter, kept | | 12/573, 37 | |
+| `0019xxE0` GE directions | parameter, kept | | 0/554, 7 | |
+| `0019xx84` `xx93` GE SAR, frequency | parameter, kept | | 0/483, 463; 0/482, 446 | |
+| `2001xx03` `xx04` Philips diffusion | parameter, kept | | 11/409, 2; 7/58, 4 | |
+| `2001xx13` `xx14` `xx20` `xx21` `xx83` Philips | parameter, kept | | 0/409 each | |
+| `0051xx0D` slice position text | per image, out | 984/984 | 921/942 | 921/921 |
+| `0019xx0B` slice duration | per image, out | 38/358 | 294/566 | 648/911 |
+| `0019xx16` time after start | per image, out | 103/103 | 294/295 | 530/530 |
+| `0021xx04` `xx06` `xx88` `xx8A` SDI 02 | per image, out | all | all | |
+| `2001xx0A` slice number, `2005xx0F` `xx10` window | per image, out | | all; 307/406 | |
+| `0051xx13` PCS directions | constant, out | 1 value | 1 value | 1 value |
+| `0029xx09` `xx19` CSA versions | the software's, out | 0/358, 9 | 0/691, 496 | 0/966, 133 |
+| `0043xx62` Scanner Study ID | identifier, never | | 0/532, 431 | |
+| VA0 COAD `0019xx16` `xx60` `xxA2` | calibration, out | | | 2 to 8/124, 83 to 99 |
+
+Twenty-three entries are ingested, all of them parameters of the acquisition
+by this measure; the release list is Wave 3's six, unchanged. The
+per-image diffusion values Wave 1 reads (`0019xx0C`, `xx0D`, `xx0E`) stay in
+the catalogue, per instance, and in the release list, and are no longer on
+the ingest list: the smallest b value of a series is `0` for every series
+that played a b0, which is what Wave 3 §6 found when it read them per
+series. The legacy cohort's own blocks (Numaris VA) are per-image values,
+calibration state or administrative identifiers, and none is ingested; its
+`SIEMENS MR HEADER` elements measure the same as the other cohorts'. The
+`coverage` list in `private.yml` says so.
+
+**What the gate asserts.** The reference corpus's diffusion series carries a
+Siemens block: a b value and a directionality, which the release list
+keeps, and a coil string, which the pack ingests and a release drops. Bar 8b
+runs `nils private` over every released tree and holds what it finds against
+the release list: nothing outside the list, no block without a creator, the
+kept elements present where the series is DICOM, the dropped one absent
+everywhere. Negative-tested by taking the b value off the list: the bar names
+it in both DICOM trees.
+
 ## 6. The faults, and the contracts
 
 ### 6.1 Five faults

@@ -334,6 +334,83 @@ def bar_deidentified(work: Path) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# 8b. What the pack did not name does not leave (Wave 4a section 5)
+# --------------------------------------------------------------------------
+
+
+def release_list(pack_dir: Path) -> set[str]:
+    """The addresses the pack's `private.release` names, as `nils private`
+    prints them (`GGGGxxEE CREATOR`). Read with a small scanner rather than a
+    YAML library, so the gate needs nothing installed."""
+    text = (pack_dir / "mri" / "private.yml").read_text(encoding="utf-8")
+    start = text.index("\n  release:")
+    out: set[str] = set()
+    creator = group = element = None
+    for line in text[start:].splitlines():
+        m = re.match(r"\s*-?\s*(creator|group|element):\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).strip().strip('"').strip("'")
+        if key == "creator":
+            creator, group, element = value, None, None
+        elif key == "group":
+            group = int(value, 16) if value.lower().startswith("0x") else int(value)
+        elif key == "element":
+            element = int(value, 16) if value.lower().startswith("0x") else int(value)
+        if creator is not None and group is not None and element is not None:
+            out.add(f"{group:04X}xx{element:02X} {creator}")
+            creator = group = element = None
+    return out
+
+
+def bar_private(work: Path) -> list[str]:
+    """Ask the released tree what private elements it carries, with the engine's
+    own survey (shapes, never values), and hold every one against the pack's
+    release list. A block a release let through whole, or an element outside
+    the list, is a leak whatever the report says."""
+    nils = os.environ.get("NILS")
+    pack_dir = os.environ.get("NILS_PACK_DIR")
+    if not nils or not pack_dir:
+        return ["NILS and NILS_PACK_DIR must be set for the private bar"]
+    allowed = release_list(Path(pack_dir))
+    answers = tomllib.loads((Path(__file__).parent / "reference.toml").read_text())
+    kept = set(answers.get("private", {}).get("kept", []))
+    dropped = set(answers.get("private", {}).get("dropped", []))
+    bad = []
+    import subprocess
+
+    for tree in ("descriptive", "bids", "shifted"):
+        root = work / tree
+        if not root.is_dir():
+            continue
+        run = subprocess.run(
+            [nils, "private", "--json", "--files", "100000", str(root)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "NILS_REGISTRY": str(work / "home")},
+        )
+        if run.returncode != 0:
+            bad.append(f"{tree}: nils private failed: {run.stderr.strip()[-200:]}")
+            continue
+        survey = json.loads(run.stdout)
+        # `nils private` prints `(GGGG,xxEE) CREATOR`; the list is `GGGGxxEE CREATOR`.
+        found = {re.sub(r"^\((....),xx(..)\) ", r"\1xx\2 ", e["address"]) for e in survey["elements"]}
+        for address in sorted(found - allowed):
+            bad.append(f"{tree}: a released file carries {address}, which the pack's release list does not name")
+        if survey.get("orphans", 0):
+            bad.append(f"{tree}: {survey['orphans']} private element(s) in a block with no creator")
+        # What must be kept is asked of the trees that carry the diffusion
+        # series as DICOM; in the BIDS layout it is a NIfTI and carries no
+        # private element at all, which is the right answer there.
+        if tree != "bids":
+            for address in sorted(kept - found):
+                bad.append(f"{tree}: {address} should have been kept and was not")
+        for address in sorted(dropped & found):
+            bad.append(f"{tree}: {address} should have been dropped and was kept")
+    return bad
+
+
+# --------------------------------------------------------------------------
 # 9. Round trip and increment
 # --------------------------------------------------------------------------
 
@@ -462,6 +539,7 @@ def main() -> int:
         ("6. one stack per session and role", lambda: bar_picks(work, db)),
         ("7. every file is traceable", lambda: bar_traceable(work, db)),
         ("8. the de-identification does what it says", lambda: bar_deidentified(work)),
+        ("8b. what the pack did not name does not leave", lambda: bar_private(work)),
         ("9. round trip and increment", lambda: bar_increment(work)),
         ("10. the date the clinical join needs survives", lambda: bar_dates(work, db)),
         ("11. the handover verifies", lambda: bar_handover(work, db)),
