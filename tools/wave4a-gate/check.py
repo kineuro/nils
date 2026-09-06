@@ -88,10 +88,16 @@ def bar_importer(work: Path) -> list[str]:
         changed = again.get("added", 0) + again.get("updated", 0) + again.get("superseded", 0)
         if changed:
             bad.append(f"{name}: the re-run changed {changed} row(s)")
-        refused = sum((again.get("refused") or {}).values()) if isinstance(again.get("refused"), dict) else 0
-        if refused:
-            bad.append(f"{name}: {refused} row(s) refused")
-        print(f"       {name}: {apply.get('rows')} rows, {apply.get('added')} added, {apply.get('updated')} updated, {apply.get('superseded')} superseded; again: nothing")
+        # A row the importer refuses by its rule (a demographics row with
+        # no demographic in it, say) is refused the same way each time; a
+        # re-run that refuses more or fewer than the apply did has changed
+        # something.
+        refused_first = apply.get("refused") or {}
+        refused_again = again.get("refused") or {}
+        if refused_first != refused_again:
+            bad.append(f"{name}: the re-run refused {refused_again}, the apply {refused_first}")
+        refused = sum(refused_first.values()) if isinstance(refused_first, dict) else 0
+        print(f"       {name}: {apply.get('rows')} rows, {apply.get('added')} added, {apply.get('updated')} updated, {apply.get('superseded')} superseded, {refused} refused by rule; again: the same")
     return bad
 
 
@@ -159,8 +165,9 @@ def bar_door(work: Path) -> list[str]:
     queued = load(work, "door-release-queued") or {}
     if "job" not in queued:
         bad.append(f"the door did not queue the release: {queued}")
-    jobs = load(work, "jobs") or {}
-    door_job = next((j for j in jobs.get("jobs", jobs if isinstance(jobs, list) else []) if j.get("id") == queued.get("job")), None)
+    jobs = load(work, "jobs") or []
+    rows = jobs.get("jobs", []) if isinstance(jobs, dict) else jobs
+    door_job = next((j for j in rows if j.get("id") == queued.get("job")), None)
     if door_job is None or door_job.get("state") != "done":
         bad.append(f"the queued release did not end done: {door_job}")
     cli_tree = files_under(work / "desc")

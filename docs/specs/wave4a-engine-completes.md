@@ -962,7 +962,20 @@ What proves each bar:
    host's own root; the baseline host, reading the tank, counts 43.
 2. Slice 1's measurement, §4.4: the release's bookkeeping at 150,000 and
    1,000,000 files in both layouts, flat, and a re-run writing nothing; the
-   reference gate's bar 9 and the cohort gate's re-runs keep it so.
+   reference gate's bar 9 and the cohort gate's re-runs keep it so. On the
+   cohort's archive host, whose disk writes about a megabyte a second while
+   the archive's own service runs on it, the gate released three of the
+   cohort's subjects (the first three that carry an event of the kinds the
+   cohort has: weight and height, since this cohort's clinical file holds
+   no EDSS): the descriptive tree of 31,610 files in 354 s, its re-run
+   writing nothing in under a second; the BIDS tree of 4,208 files in 380
+   s with the sex, the age and the nearest weight and height on every
+   session, its re-run writing nothing; and the whole cohort's descriptive
+   tree on the baseline host (bar 11). The gate found one thing here: a
+   release re-run took its own bookkeeping's word that a file was in the
+   tree, so a file somebody had removed was not written again. It is now:
+   a carried stack whose place is gone from the disk is written again and
+   the report counts it as `restored`.
 3. Slices 2 and 3, §5.5 and §5.6: the pack's private elements read on the
    three surveyed vendors, and the reference gate's bar 8b, which reads the
    released tree with `nils private` and finds nothing the pack did not

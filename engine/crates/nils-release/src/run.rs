@@ -138,6 +138,10 @@ pub struct Report {
     /// Wave 4a §7.4: what the clinical export wrote, counted: subjects with
     /// a sex, with an age, sessions with an age, observations by kind.
     pub clinical: BTreeMap<String, i64>,
+    /// Wave 4a §12: stacks the last version had written whose files were
+    /// gone from the tree, written again rather than carried on the
+    /// state's word.
+    pub restored: i64,
     pub seconds: f64,
 }
 
@@ -746,6 +750,19 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             if carried && !was.as_ref().is_some_and(|w| w.files > 0) {
                 change = crate::version::Change::Rewritten;
             }
+            // Wave 4a §12, bar 9 found this: the state describes the tree as
+            // it was written, and a file somebody removed from the tree
+            // since is not carried forward on the state's word. A stack
+            // whose place is gone from the disk is written again, and the
+            // report says how many were.
+            if let (true, Some(w)) = (
+                !change.is_work() || change == crate::version::Change::Moved,
+                was.as_ref(),
+            ) && !place_on_disk(settings.root, &w.place)
+            {
+                change = crate::version::Change::Rewritten;
+                report.restored += 1;
+            }
             jobs.push(Job {
                 stack: planned.stack,
                 place,
@@ -1237,6 +1254,21 @@ fn roll_up(job: &Job, wrote: &[Wrote]) -> State {
 ///
 /// v0 writes none of them, which is why its tree is not a dataset rather than
 /// an invalid one.
+/// Whether a stack's files, as the last version placed them, are still on
+/// the disk: the directory exists, and in a layout where stacks share a
+/// directory, at least one file there carries the stack's stem.
+fn place_on_disk(root: &Path, place: &Place) -> bool {
+    let dir = root.join(&place.dir);
+    match &place.stem {
+        None => dir.is_dir(),
+        Some(stem) => std::fs::read_dir(&dir).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(stem.as_str()))
+        }),
+    }
+}
+
 /// What the clinical layer lets into the tree (Wave 4a §7.4), under the
 /// policy: per subject the sex and the age at the first session, per session
 /// the age and the nearest observation of each kind the release names.

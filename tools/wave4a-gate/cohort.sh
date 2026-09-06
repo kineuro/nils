@@ -195,11 +195,24 @@ curl -s "$url/custody" > "$work/door-custody.json"
 curl -s -X POST -H 'Content-Type: application/json' -d '{"cohorts": ["nmosd"]}' "$url/select" > "$work/door-select.json"
 curl -s "$url/review?status=open" > "$work/door-review.json"
 curl -s "$url/releases" > "$work/door-releases.json"
+# The door's release has a name of its own per run, so a run resumed over
+# an earlier attempt's work directory does not inherit that attempt's
+# bookkeeping; and the worker is run until the door's job is over, since
+# an earlier attempt may have left a job of its own on the queue.
+door_name="cohort-door-$(date +%s)"
 curl -s -X POST -H 'Content-Type: application/json' \
-  -d "{\"name\": \"cohort-door\", \"out\": \"$work/door-desc\", \"layout\": \"descriptive\", \"on_unknown\": \"write\", $door_selection}" \
+  -d "{\"name\": \"$door_name\", \"out\": \"$work/door-desc\", \"layout\": \"descriptive\", \"on_unknown\": \"write\", $door_selection}" \
   "$url/releases" > "$work/door-release-queued.json"
 wait "$serve_pid" || true
-step door-release "$nils" jobs work --once
+door_job="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("job", ""))' "$work/door-release-queued.json")"
+t0=$SECONDS
+for _ in $(seq 1 10); do
+  "$nils" jobs work --once
+  state="$("$nils" jobs show "$door_job" --json | python3 -c 'import json, sys; print(json.load(sys.stdin)["state"])')"
+  [[ "$state" == "done" || "$state" == "failed" || "$state" == "cancelled" ]] && break
+done
+printf '%s\t%s\n' "door-release" "$((SECONDS - t0))" >> "$budget"
+echo "gate: the door's release job $door_job ended $state" >&2
 "$nils" jobs list --all --json > "$work/jobs.json"
 
 # --- bar 10: the custody table; bar 11: the budget is in budget.tsv

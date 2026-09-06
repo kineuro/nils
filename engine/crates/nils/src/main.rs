@@ -5885,6 +5885,12 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         for (what, n) in &report.clinical {
             println!("      {n:>10}   clinical: {what}");
         }
+        if report.restored > 0 {
+            println!(
+                "      {:>10}   written again: their files were gone from the tree",
+                report.restored
+            );
+        }
         for (what, choice) in &report.placements {
             println!("  {what:<16} {choice}");
         }
