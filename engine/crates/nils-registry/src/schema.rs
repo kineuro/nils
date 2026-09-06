@@ -561,14 +561,17 @@ fn build_registry() -> Vec<Table> {
                 col("id", Type::Id),
                 req("stack_id", Type::Int),
                 req("axis", Type::Text),
-                // What a row stores: one value, or several comma-joined for a
-                // multi-valued axis, exactly as v0 wrote them.
+                // One value per row (Wave 4a §6.1, fault 4): a single-valued
+                // axis has one row, a multi-valued one has a row per value,
+                // and an axis decided to nothing has one row with no value.
+                // Wave 2 stored several values comma-joined, as v0 did, which
+                // is why a role match was four LIKE patterns.
                 col("value", Type::Text),
                 req("confidence", Type::Double),
                 req("tier", Type::Text),
             ],
         )
-        .unique(&["stack_id", "axis"])
+        .unique(&["stack_id", "axis", "value"])
         .index(&["axis", "value"]),
         Table::new(
             "classification_evidence",

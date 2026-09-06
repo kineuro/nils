@@ -110,9 +110,20 @@ fn read_corpus(store: &mut Store, pack: &Pack, modality: Option<&str>) -> Result
             continue;
         }
         let value = r.opt_text(2)?.unwrap_or("").to_string();
-        decided
+        if value.is_empty() {
+            continue;
+        }
+        // One row per value; the pass's corpus reads an axis as one joined
+        // string, so the rows of a multi-valued axis are joined back here.
+        let slot = &mut decided
             .entry(id)
-            .or_insert_with(|| vec![String::new(); pack.axes.len()])[a] = value;
+            .or_insert_with(|| vec![String::new(); pack.axes.len()])[a];
+        if slot.is_empty() {
+            *slot = value;
+        } else {
+            slot.push(',');
+            slot.push_str(&value);
+        }
     }
 
     let empty: Vec<String> = vec![String::new(); pack.axes.len()];
@@ -181,6 +192,7 @@ fn run_one(
     ran.targets = answers.len() as i64;
 
     let now = now_iso();
+    let mut touched: Vec<(i64, String)> = Vec::new();
     let mut axis_rows: Vec<Vec<Param>> = Vec::new();
     let mut evidence: Vec<Vec<Param>> = Vec::new();
     let mut reviews: Vec<Vec<Param>> = Vec::new();
@@ -205,13 +217,10 @@ fn run_one(
                 continue;
             }
             let name = pack.axes[*axis].name.as_str();
-            axis_rows.push(vec![
-                Param::Int(stack_id),
-                Param::from(name),
-                Param::from(stored.as_str()),
-                Param::Double(confidence),
-                Param::from("vote"),
-            ]);
+            axis_rows.extend(crate::classify::axis_rows(
+                stack_id, name, stored, confidence, "vote",
+            ));
+            touched.push((stack_id, name.to_string()));
             if pass.emit.evidence {
                 evidence.push(vec![
                     Param::Int(stack_id),
@@ -258,15 +267,35 @@ fn run_one(
     if !axis_rows.is_empty() {
         store.begin()?;
         let write = (|| -> Result<(), nils_registry::store::Error> {
+            // A pass replaces what an axis of a stack held, one axis at a
+            // time: the rows of that axis go, and one per value comes.
+            let mut by_axis: std::collections::BTreeMap<String, Vec<i64>> =
+                std::collections::BTreeMap::new();
+            for (stack, axis) in &touched {
+                by_axis.entry(axis.clone()).or_default().push(*stack);
+            }
+            let axis_t = store.qualified("classification_axis");
+            for (axis, stacks) in by_axis {
+                for chunk in stacks.chunks(500) {
+                    let list = chunk
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    store.execute(
+                        &format!(
+                            "DELETE FROM {axis_t} WHERE axis = '{}' AND stack_id IN ({list})",
+                            axis.replace('\'', "''")
+                        ),
+                        &[],
+                    )?;
+                }
+            }
             store.insert(
                 &Insert::new(
                     table("classification_axis"),
                     &["stack_id", "axis", "value", "confidence", "tier"],
-                )
-                .on_conflict(nils_registry::dialect::Conflict::Update {
-                    target: &["stack_id", "axis"],
-                    set: &["value", "confidence", "tier"],
-                }),
+                ),
                 &axis_rows,
             )?;
             if !evidence.is_empty() {

@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,7 +130,91 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 19,
         apply: a_series_carries_its_private_elements,
     },
+    Migration {
+        version: 20,
+        apply: an_axis_value_is_a_row,
+    },
 ];
+
+/// Wave 4a §6.1, fault 4: a multi-valued axis stops being a comma-joined
+/// string. The table is rebuilt because its unique key changes from
+/// `(stack_id, axis)` to `(stack_id, axis, value)`, and every row whose value
+/// held several is split into one row per value, in Rust, since neither
+/// backend splits a string the same way.
+fn an_axis_value_is_a_row(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    if !table_exists(store, "classification_axis")? {
+        return add_tables(store, kind, &["classification_axis"]);
+    }
+    let dialect = store.dialect();
+    let schema_name = store.schema().map(str::to_string);
+    let old = store.qualified("classification_axis");
+    // A registry made at this version has the shape already and no row with
+    // a comma in it; rebuilding it again is a copy of every row, which is
+    // cheap once and harmless.
+    let mut rebuilt = schema::table("classification_axis").clone();
+    rebuilt.name = "classification_axis_rebuilt";
+    store.batch(&dialect.create_table(schema_name.as_deref(), &rebuilt))?;
+    let new = store.qualified("classification_axis_rebuilt");
+    let rows = store.query(
+        &format!("SELECT stack_id, axis, value, confidence, tier FROM {old} ORDER BY id"),
+        &[],
+    )?;
+    let mut batch: Vec<Vec<Param>> = Vec::new();
+    let insert = crate::store::Insert::new(
+        &rebuilt,
+        &["stack_id", "axis", "value", "confidence", "tier"],
+    );
+    for r in &rows {
+        let stack = r.int(0)?;
+        let axis = r.text(1)?.to_string();
+        let confidence = r.double(3)?;
+        let tier = r.text(4)?.to_string();
+        let values: Vec<String> = r
+            .opt_text(2)?
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|x| !x.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if values.is_empty() {
+            batch.push(vec![
+                Param::Int(stack),
+                Param::from(axis.as_str()),
+                Param::Null,
+                Param::Double(confidence),
+                Param::from(tier.as_str()),
+            ]);
+        }
+        for v in values {
+            batch.push(vec![
+                Param::Int(stack),
+                Param::from(axis.as_str()),
+                Param::from(v),
+                Param::Double(confidence),
+                Param::from(tier.as_str()),
+            ]);
+        }
+        if batch.len() >= 5_000 {
+            store.insert(&insert, &batch)?;
+            batch.clear();
+        }
+    }
+    if !batch.is_empty() {
+        store.insert(&insert, &batch)?;
+    }
+    store.batch(&format!("DROP TABLE {old}"))?;
+    store.batch(&format!("ALTER TABLE {new} RENAME TO classification_axis"))?;
+    for ix in dialect.create_indexes(schema_name.as_deref(), schema::table("classification_axis")) {
+        store.batch(&ix)?;
+    }
+    Ok(())
+}
 
 /// Wave 4a §5.2: the private elements a pack names are read at digest time
 /// and kept per series, keyed by address, so that a classifier can read a

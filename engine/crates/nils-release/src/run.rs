@@ -1763,21 +1763,16 @@ fn selection_where(store: &mut Store, selection: &Selection) -> String {
         ));
     }
     if !selection.roles.is_empty() {
+        // One row per value (Wave 4a §6.1): a role is matched by equality.
         let any = selection
             .roles
             .iter()
-            .map(|r| {
-                format!(
-                    "a.value = '{r}' OR a.value LIKE '{r},%' OR a.value LIKE '%,{r}' \
-                     OR a.value LIKE '%,{r},%'",
-                    r = r.replace('\'', "''")
-                )
-            })
+            .map(|r| format!("'{}'", r.replace('\'', "''")))
             .collect::<Vec<_>>()
-            .join(" OR ");
+            .join(", ");
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = k.id AND a.axis = 'role' \
-             AND ({any}))"
+             AND a.value IN ({any}))"
         ));
     }
     if selection.picked_only {
@@ -2651,9 +2646,16 @@ fn axis_values(store: &mut Store) -> Result<HashMap<i64, BTreeMap<String, String
     let mut out: HashMap<i64, BTreeMap<String, String>> = HashMap::new();
     for r in store.query(&sql, &[])? {
         if let Some(v) = r.opt_text(2)? {
+            // One row per value; the naming grammar reads an axis as one
+            // joined string and splits it, so the rows are joined back.
             out.entry(r.int(0)?)
                 .or_default()
-                .insert(r.text(1)?.to_string(), v.to_string());
+                .entry(r.text(1)?.to_string())
+                .and_modify(|held| {
+                    held.push(',');
+                    held.push_str(v);
+                })
+                .or_insert_with(|| v.to_string());
         }
     }
     Ok(out)
