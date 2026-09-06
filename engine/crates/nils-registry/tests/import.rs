@@ -437,3 +437,54 @@ fn cohorts_members_diseases_and_their_types_go_through_the_same_door() {
         assert_eq!(r.skipped, 1, "{name}");
     }
 }
+
+#[test]
+fn an_event_without_a_time_is_the_same_event_on_the_next_run() {
+    // The real-data proof found this: a key naming the time compared a
+    // missing time with `= NULL`, which is never true, and every event
+    // without a time was added again on every run.
+    for mut l in labs() {
+        let name = l.name;
+        seed(&mut l.registry);
+        let mapping = Mapping::parse(
+            "import:\n  target: event\n  subject: {column: code}\n  observation_type: {column: kind}\n  columns:\n    event_date: {column: date, parser: date, format: '%Y-%m-%d'}\n    event_time: {column: time, parser: time, format: '%H:%M:%S'}\n    value: {column: value}\n  key: [event_date, event_time]\n",
+        )
+        .unwrap();
+        let csv = "code,kind,date,time,value\ns-one,Diagnosis,2021-03-01,,\ns-one,EDSS,2021-03-01,10:30:00,4\ns-one,EDSS,2021-03-01,14:00:00,4.5\n";
+        let first = import::apply(&mut l.registry, &mapping, csv, "tester").unwrap();
+        assert_eq!(first.added, 3, "{name}: {first:?}");
+        let again = import::apply(&mut l.registry, &mapping, csv, "tester").unwrap();
+        assert_eq!(again.skipped, 3, "{name}: {again:?}");
+        assert_eq!(
+            count(&mut l.registry, "SELECT COUNT(*) FROM {event}"),
+            3,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_sex_written_as_a_word_agrees_with_the_letter_the_scanner_wrote() {
+    for mut l in labs() {
+        let name = l.name;
+        let (one, _) = seed(&mut l.registry);
+        let sql = format!(
+            "UPDATE {} SET sex = 'F' WHERE id = {one}",
+            l.registry.store().qualified("subject")
+        );
+        l.registry.store().execute(&sql, &[]).unwrap();
+        let mapping = Mapping::parse(
+            "import:\n  target: subject\n  subject: {column: code}\n  columns:\n    sex: {column: sex}\n",
+        )
+        .unwrap();
+        let r = import::apply(
+            &mut l.registry,
+            &mapping,
+            "code,sex\ns-one,Female\n",
+            "tester",
+        )
+        .unwrap();
+        assert_eq!(r.skipped, 1, "{name}: {r:?}");
+        assert_eq!(r.reviewed, 0, "{name}");
+    }
+}

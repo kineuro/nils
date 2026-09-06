@@ -1090,8 +1090,16 @@ fn write_event(
             "notes" => ("notes", Type::Text),
             _ => continue,
         };
-        params.push(opt_text(r.fields.get(k)));
-        sql.push_str(&format!(" AND {column} = {}", d.param(params.len(), ty)));
+        // A key field the row does not carry matches a row that does not
+        // carry it either: `= NULL` is never true, and an event with no time
+        // would be added again on every run.
+        match r.fields.get(k) {
+            Some(v) => {
+                params.push(Param::from(v.text()));
+                sql.push_str(&format!(" AND {column} = {}", d.param(params.len(), ty)));
+            }
+            None => sql.push_str(&format!(" AND {column} IS NULL")),
+        }
     }
     sql.push_str(" ORDER BY id DESC LIMIT 1");
     let existing = store
@@ -1225,7 +1233,7 @@ fn write_subject(
             continue;
         };
         let new_text = match field {
-            &"sex" => new.text().trim().to_uppercase(),
+            &"sex" => sex_of(&new.text()),
             _ => new.text(),
         };
         match current {
@@ -1275,6 +1283,18 @@ fn write_subject(
         out.push(Verdict::Refused("the row carries no demographic".into()));
     }
     Ok(out)
+}
+
+/// A sex as the standard spells it: `F`, `M`, `O`, from whatever word or
+/// letter the file used, so that a file that says `Female` agrees with a
+/// registry that read `F` off the scanner.
+fn sex_of(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "f" | "female" | "woman" | "kvinna" => "F".to_string(),
+        "m" | "male" | "man" => "M".to_string(),
+        "o" | "other" => "O".to_string(),
+        other => other.to_uppercase(),
+    }
 }
 
 fn write_cohort(
@@ -1687,6 +1707,14 @@ mod tests {
             parse(&time, "09:05").unwrap(),
             Value::Time("09:05:00".into())
         );
+    }
+
+    #[test]
+    fn a_sex_is_the_standard_s_letter_whatever_the_file_wrote() {
+        assert_eq!(sex_of("Female"), "F");
+        assert_eq!(sex_of(" m "), "M");
+        assert_eq!(sex_of("other"), "O");
+        assert_eq!(sex_of("F"), "F");
     }
 
     #[test]
