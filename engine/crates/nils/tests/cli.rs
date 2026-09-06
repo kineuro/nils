@@ -1185,6 +1185,7 @@ fn custody_quarantine_review_and_purge_go_round() {
             "key store",
             "quarantine list",
             "classifications",
+            "clinical layer",
             "job records",
             "logs"
         ]

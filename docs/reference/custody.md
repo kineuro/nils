@@ -80,6 +80,19 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | export | `nils explain <stack> --json` |
 | delete | with the registry |
 
+## clinical layer
+
+| | |
+|---|---|
+| what | what v0 kept in a second database, in the one registry (Wave 4a section 7.1): cohorts and their members, the vocabulary of diseases and observation kinds, each subject's diseases, the events, and the subject's demographics |
+| where | `<home>/registry.db`, mode 600 (SQLite keeps registry.db-wal and registry.db-shm beside it while a connection is open) |
+| holds | quasi-identifying: birth dates, sex, dates of death, the dates of diagnoses, onsets, treatments and every observation<br>clinical: diagnoses and their types, the scales and their values, the treatments |
+| kept | for ever; a correction supersedes the old row and the old row stays (section 13.2) |
+| read | `nils clinical vocabulary list`<br>`nils custody` |
+| change | `nils clinical vocabulary load`<br>the importer (section 7.2) |
+| export | `nils release, under its date policy` (section 7.4) |
+| delete | remove `<home>/registry.db` (nils has no command for it) |
+
 ## job records
 
 | | |
