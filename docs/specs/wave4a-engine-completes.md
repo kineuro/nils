@@ -570,6 +570,21 @@ labels follow. The one temporal function the engine needs beyond that is
 gate's bar both use. It is a function, not a clause: the general windows are
 Wave 4b's.
 
+**As built (slice 8).** A scheme anchored on a kind of event says which:
+`anchor: event` with `event: Diagnosis` (or `Disease Onset`, `Treatment`,
+whatever the vocabulary names), refused without the kind, and the kind
+refused without the anchor. Month zero per subject is the earliest event of
+that kind the subject has, among those not superseded; a subject with none
+is unanchored, as an `explicit` subject with no row is, and the resolver
+stays a pure function that is handed a day. `nils session list --scheme`
+serves it, and refuses a kind the registry does not hold by name. The
+nearest event of a kind to a day is one function, `clinical::nearest`, with
+its tie rule written down: of two events the same distance away, the earlier
+one, because an observation made before a scan describes the state the scan
+saw and one made after may describe what the scan changed. It returns the
+event, its date, the signed distance in days, the value and the number, and
+it is what §7.4's release and the gate's bar read.
+
 ### 7.4 Clinical export in the release
 
 `participants.tsv` carries the sex and the age at first session; `sessions.tsv`

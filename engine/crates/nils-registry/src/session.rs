@@ -154,6 +154,13 @@ pub struct Scheme {
     /// reproduce a labelling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub said: Option<Said>,
+    /// For `anchor: event`, the kind of event month zero is: `Diagnosis`,
+    /// `Disease Onset`, `Treatment`, whatever the vocabulary names (Wave 4a
+    /// §7.3). The earliest event of that kind a subject has is the anchor,
+    /// and a subject with none is unanchored, as an `explicit` subject with
+    /// no row is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
 }
 
 /// Where the source's own label sits in a path.
@@ -224,6 +231,22 @@ impl Scheme {
     }
 
     pub fn check(&self) -> Result<(), SchemeError> {
+        match (self.anchor, &self.event) {
+            (Anchor::Event, None) => {
+                return Err(SchemeError(
+                    "session.anchor is event, so session.event names the kind of event month zero is (Diagnosis, Disease Onset, Treatment)".into(),
+                ));
+            }
+            (Anchor::Event, Some(e)) if e.trim().is_empty() => {
+                return Err(SchemeError("session.event is empty".into()));
+            }
+            (anchor, Some(_)) if anchor != Anchor::Event => {
+                return Err(SchemeError(
+                    "session.event is set, so session.anchor is event; a kind of event anchors nothing else".into(),
+                ));
+            }
+            _ => {}
+        }
         if self.window_days < 0 {
             return Err(SchemeError(
                 "session.window_days is negative; a window is a number of days".into(),
@@ -275,6 +298,7 @@ impl Default for Scheme {
             collision: Collision::Merge,
             unmatched: Unmatched::KeepDate,
             said: None,
+            event: None,
         }
     }
 }
@@ -1332,6 +1356,10 @@ session:
                 .contains("PRE")
         );
         assert!(err("session:\n  said:\n    segment: 0\n").contains("from one"));
+        assert!(err("session:\n  anchor: event\n").contains("session.event names"));
+        assert!(err("session:\n  event: Diagnosis\n").contains("anchor is event"));
+        let anchored = Scheme::parse("session:\n  anchor: event\n  event: Diagnosis\n").unwrap();
+        assert_eq!(anchored.event.as_deref(), Some("Diagnosis"));
         assert!(
             err("session:\n  said:\n    segment: 1\n    pattern: 'M(.+)'\n").contains("`label`")
         );

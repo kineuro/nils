@@ -2573,3 +2573,134 @@ fn nils_clinical_import_previews_then_applies_and_a_rerun_changes_nothing() {
         .unwrap();
     assert_eq!(clinical["counts"]["events"], 1, "{clinical}");
 }
+
+/// Wave 4a §7.3: a scheme anchored on a kind of event takes month zero from
+/// the clinical layer. A diagnosis imported for a subject with two studies,
+/// six months apart, and the labels follow the diagnosis rather than the
+/// first study.
+#[test]
+fn a_scheme_anchored_on_a_diagnosis_takes_month_zero_from_the_clinical_layer() {
+    let home = home();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = TempDir::new("cli-anchor");
+    for (study, sop, date) in [
+        ("1.2.3.A", "1.2.3.A.1.1", "20220715"),
+        ("1.2.3.B", "1.2.3.B.1.1", "20230115"),
+    ] {
+        let mut e = synth::minimal_mr(study, &format!("{study}.1"), sop);
+        e.push(synth::text(
+            dicom_dictionary_std::tags::PATIENT_ID,
+            dicom_core::VR::LO,
+            "P1",
+        ));
+        e.push(synth::text(
+            dicom_dictionary_std::tags::STUDY_DATE,
+            dicom_core::VR::DA,
+            date,
+        ));
+        dir.file(
+            &format!("{study}/{sop}"),
+            &synth::part10(&MetaFields::mr(sop), &e, true),
+        );
+    }
+    let run = |args: &[&str]| {
+        let out = nils().args(registry).args(args).output().unwrap();
+        assert!(out.status.success(), "{}: {}", args.join(" "), stderr(&out));
+        stdout(&out)
+    };
+    run(&[
+        "digest",
+        "--name",
+        "a",
+        "--no-private",
+        dir.path().to_str().unwrap(),
+    ]);
+    run(&[
+        "clinical",
+        "vocabulary",
+        "load",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+    ]);
+    let code = {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .query("SELECT code FROM subject LIMIT 1", &[])
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string()
+    };
+    // A months scheme anchored on the diagnosis: month zero is the
+    // diagnosis, in January 2022, so the two studies are M06 and M12.
+    let scheme = home.path().join("dx.yml");
+    std::fs::write(
+        &scheme,
+        "session:\n  anchor: event\n  event: Diagnosis\n  naming:\n    months:\n      cadence: [0, 6, 12, 24]\n      tolerance: 1.5\n",
+    )
+    .unwrap();
+
+    // Before the diagnosis is known, the subject is unanchored: no months.
+    let before = run(&[
+        "session",
+        "list",
+        "--json",
+        "--scheme",
+        scheme.to_str().unwrap(),
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&before).unwrap();
+    let labels = |v: &serde_json::Value| -> Vec<String> {
+        v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["label"].as_str().map(str::to_string))
+            .collect()
+    };
+    assert!(!labels(&v).iter().any(|l| l == "M06"), "{v}");
+
+    let mapping = home.path().join("dx-import.yml");
+    std::fs::write(
+        &mapping,
+        "import:\n  target: subject_disease\n  subject: {column: code}\n  disease: Multiple Sclerosis\n  columns:\n    diagnosis_date: {column: dx, parser: date, format: '%Y-%m-%d'}\n",
+    )
+    .unwrap();
+    let file = home.path().join("dx.csv");
+    std::fs::write(&file, format!("code,dx\n{code},2022-01-15\n")).unwrap();
+    run(&[
+        "clinical",
+        "import",
+        "--apply",
+        "--mapping",
+        mapping.to_str().unwrap(),
+        "--file",
+        file.to_str().unwrap(),
+    ]);
+
+    let after = run(&[
+        "session",
+        "list",
+        "--json",
+        "--scheme",
+        scheme.to_str().unwrap(),
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&after).unwrap();
+    let got = labels(&v);
+    assert!(
+        got.contains(&"M06".to_string()) && got.contains(&"M12".to_string()),
+        "{v}"
+    );
+
+    // A scheme that names a kind the registry does not hold is refused with
+    // the kind's name.
+    std::fs::write(&scheme, "session:\n  anchor: event\n  event: Wobble\n").unwrap();
+    let out = nils()
+        .args(registry)
+        .args(["session", "list", "--scheme", scheme.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("Wobble"), "{}", stderr(&out));
+}

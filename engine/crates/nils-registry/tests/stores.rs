@@ -899,3 +899,128 @@ fn a_vocabulary_loads_by_name_and_a_second_load_changes_nothing() {
         );
     }
 }
+
+/// Wave 4a §7.3: month zero from the clinical layer, and the nearest event
+/// of a kind to a day, with its tie rule, on both backends.
+#[test]
+fn the_earliest_event_anchors_and_the_nearest_event_is_found_with_its_tie_rule() {
+    use nils_registry::clinical::{self, Vocabulary};
+    use nils_registry::day::Day;
+    use nils_registry::schema;
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let v = Vocabulary::parse(
+            "vocabulary:\n  observation_types:\n    - {name: EDSS, category: scale, value_type: numeric}\n    - {name: Diagnosis, category: assessment}\n",
+        )
+        .unwrap();
+        clinical::load(&mut store, &v).unwrap();
+        let edss = clinical::kind_named(&mut store, "edss")
+            .unwrap()
+            .unwrap()
+            .id;
+        let diagnosis = clinical::kind_named(&mut store, "Diagnosis")
+            .unwrap()
+            .unwrap()
+            .id;
+        let subjects = store
+            .insert(
+                &Insert::new(schema::table("subject"), &["code", "created_at"]).returning(&["id"]),
+                &[
+                    vec![Param::from("a"), Param::from("2026-09-06T00:00:00Z")],
+                    vec![Param::from("b"), Param::from("2026-09-06T00:00:00Z")],
+                ],
+            )
+            .unwrap();
+        let (a, b) = (subjects[0].int(0).unwrap(), subjects[1].int(0).unwrap());
+        let event = |store: &mut Store,
+                     subject: i64,
+                     kind: i64,
+                     date: &str,
+                     number: Option<f64>,
+                     superseded: Option<i64>|
+         -> i64 {
+            let rows = store
+                .insert(
+                    &Insert::new(
+                        schema::table("event"),
+                        &[
+                            "subject_id",
+                            "observation_type_id",
+                            "event_date",
+                            "number",
+                            "created_at",
+                            "superseded_by",
+                        ],
+                    )
+                    .returning(&["id"]),
+                    &[vec![
+                        Param::Int(subject),
+                        Param::Int(kind),
+                        Param::from(date),
+                        number.map_or(Param::Null, Param::Double),
+                        Param::from("2026-09-06T00:00:00Z"),
+                        superseded.map_or(Param::Null, Param::Int),
+                    ]],
+                )
+                .unwrap();
+            rows[0].int(0).unwrap()
+        };
+        // Two diagnoses for a, the later one superseding nothing: the
+        // earliest anchors. A superseded one does not count.
+        event(&mut store, a, diagnosis, "2020-03-01", None, None);
+        event(&mut store, a, diagnosis, "2019-06-15", None, None);
+        let dead = event(&mut store, a, diagnosis, "2010-01-01", None, None);
+        let newer = event(&mut store, a, diagnosis, "2020-03-01", None, None);
+        store
+            .execute(
+                &format!(
+                    "UPDATE {} SET superseded_by = {newer} WHERE id = {dead}",
+                    store.qualified("event")
+                ),
+                &[],
+            )
+            .unwrap();
+        let anchors = clinical::anchor_events(&mut store, diagnosis).unwrap();
+        assert_eq!(anchors.get("a").copied(), Day::parse("20190615"), "{name}");
+        assert!(!anchors.contains_key("b"), "{name}: b has no diagnosis");
+
+        // EDSS at 2022-01-01 (3.0), 2022-03-01 (3.5), 2022-05-01 (4.0).
+        event(&mut store, a, edss, "2022-01-01", Some(3.0), None);
+        event(&mut store, a, edss, "2022-03-01", Some(3.5), None);
+        event(&mut store, a, edss, "2022-05-01", Some(4.0), None);
+        let near = |store: &mut Store, day: &str| {
+            clinical::nearest(store, a, edss, Day::parse(day).unwrap()).unwrap()
+        };
+        let n = near(&mut store, "20220310").unwrap();
+        assert_eq!(n.number, Some(3.5), "{name}");
+        assert_eq!(
+            n.offset_days, -9,
+            "{name}: nine days before the day asked about"
+        );
+        let n = near(&mut store, "20220420").unwrap();
+        assert_eq!(
+            n.number,
+            Some(4.0),
+            "{name}: eleven days on beats fifty back"
+        );
+        // The tie: an EDSS on the last day of January too, and the sixteenth
+        // is fifteen days from both; the earlier one wins.
+        event(&mut store, a, edss, "2022-01-31", Some(3.2), None);
+        let n = near(&mut store, "20220116").unwrap();
+        assert_eq!(
+            n.number,
+            Some(3.0),
+            "{name}: the earlier of two equidistant"
+        );
+        assert!(
+            near(&mut store, "19990101").is_some(),
+            "{name}: far is still nearest"
+        );
+        assert!(
+            clinical::nearest(&mut store, b, edss, Day::parse("20220201").unwrap())
+                .unwrap()
+                .is_none(),
+            "{name}"
+        );
+    }
+}
