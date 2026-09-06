@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/review-item/v1/review-item.schema.json",
+  "title": "NILS review item",
+  "description": "One thing the engine was not certain of, in a scope, with the evidence that raised it and the decision that closed it.",
+  "type": "object",
+  "required": ["id", "kind", "scope", "status", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "integer", "description": "The item's row id in the registry it lives in." },
+    "kind": {
+      "type": "string",
+      "description": "What was found: `<area>.<what>` for an engine stage, `<axis>:<reason>` for the classifier.",
+      "pattern": "^([a-z_]+\\.[a-z_]+|[a-z_]+:(low_confidence|missing|decision|vote))$"
+    },
+    "scope": {
+      "type": "string",
+      "description": "What the item is about.",
+      "enum": ["stack", "series", "study", "subject", "batch", "run"]
+    },
+    "status": {
+      "type": "string",
+      "description": "Open until decided.",
+      "enum": ["open", "decided"]
+    },
+    "actor": {
+      "type": ["string", "null"],
+      "description": "Who decided it, as the registry names them; null while open."
+    },
+    "created_at": { "type": "string", "description": "When it was raised, ISO 8601 UTC." },
+    "decided_at": { "type": ["string", "null"], "description": "When it was decided, ISO 8601 UTC; null while open." },
+    "ref": {
+      "type": ["object", "null"],
+      "description": "What the scope names: `stack_id`, `series_id`, `study_id`, `subject_id`, `batch_id` or `run_id`, as the scope requires."
+    },
+    "evidence": {
+      "type": ["object", "null"],
+      "description": "What the emitting stage found, structured, in the shape its kind describes; never a value the registry holds in confidence."
+    },
+    "decision": {
+      "type": ["object", "null"],
+      "description": "What was decided, once it was: for a classifier kind, the axis, the value, who decided (`actor`, `author_kind` person, agent or model, `model_version`) and why.",
+      "properties": {
+        "axis": { "type": "string" },
+        "value": { "type": ["string", "null"] },
+        "actor": { "type": "string" },
+        "author_kind": { "type": "string", "enum": ["person", "agent", "model"] },
+        "model_version": { "type": ["string", "null"] },
+        "why": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

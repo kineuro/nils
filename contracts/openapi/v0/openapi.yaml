@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The engine's HTTP API, version 0: no route yet. `nils serve` (Wave 4a
+# section 11) fills this in, and the version becomes 1 by a pull request that
+# says so.
+openapi: 3.1.0
+info:
+  title: NILS engine API
+  version: "0"
+  description: >-
+    The one door of the engine. Empty until the door exists; the shape it
+    will take is decision record 05 section 1.
+paths: {}

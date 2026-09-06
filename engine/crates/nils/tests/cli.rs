@@ -2264,3 +2264,102 @@ fn the_cli_runs_a_round_on_postgres_too() {
     ]);
     drop(&dsn);
 }
+
+fn contracts() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts")
+}
+
+/// The review-item contract (`contracts/review-item/`), kept honest by the
+/// CLI: what `nils review list --json` prints is the item the contract
+/// describes, property for property.
+#[test]
+fn a_review_item_the_cli_prints_is_the_one_the_contract_describes() {
+    let text = std::fs::read_to_string(contracts().join("review-item/v1/review-item.schema.json"))
+        .unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&text).expect("the schema is JSON");
+    let version: u32 = std::fs::read_to_string(contracts().join("review-item/VERSION"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(version, 1);
+    let properties = schema["properties"].as_object().unwrap();
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+
+    // A digest of a tree with one file the reader refuses raises one item
+    // of kind ingest.quarantine, scope batch.
+    let home = home();
+    let dir = tree();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let done = nils()
+        .args(registry)
+        .args(["digest", "--name", "c", "--no-private"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", stderr(&done));
+    let listed = nils()
+        .args(registry)
+        .args(["review", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let items = v
+        .as_array()
+        .or_else(|| v["items"].as_array())
+        .expect("a list of items");
+    assert!(!items.is_empty(), "{v}");
+    for item in items {
+        let keys = item.as_object().unwrap();
+        for key in keys.keys() {
+            assert!(
+                properties.contains_key(key),
+                "the CLI prints {key}, which the contract does not have"
+            );
+        }
+        for key in &required {
+            assert!(
+                keys.contains_key(*key),
+                "the contract requires {key}, which the CLI did not print: {item}"
+            );
+        }
+        let kind = item["kind"].as_str().unwrap();
+        assert!(kind.contains('.') || kind.contains(':'), "{kind}");
+        let scope = item["scope"].as_str().unwrap();
+        assert!(
+            schema["properties"]["scope"]["enum"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s == scope),
+            "{scope} is not a scope the contract names"
+        );
+    }
+}
+
+/// The HTTP API contract (`contracts/openapi/`) exists at version 0, empty,
+/// so that the first route lands in a file that is already versioned and
+/// tested.
+#[test]
+fn the_openapi_contract_is_a_versioned_skeleton() {
+    let version: u32 = std::fs::read_to_string(contracts().join("openapi/VERSION"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let text =
+        std::fs::read_to_string(contracts().join(format!("openapi/v{version}/openapi.yaml")))
+            .unwrap();
+    assert!(text.contains("openapi: 3.1.0"), "{text}");
+    assert!(
+        text.contains("paths: {}"),
+        "empty until the door exists: {text}"
+    );
+    assert!(text.contains(&format!("version: \"{version}\"")), "{text}");
+}
