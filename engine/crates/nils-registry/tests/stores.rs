@@ -1212,3 +1212,189 @@ fn one_job_model_claims_per_kind_takes_over_stale_and_queues() {
         assert!(job::enqueue(&mut store, &[], None).is_err(), "{name}");
     }
 }
+
+/// Wave 4a §9.2: the audit log is a table, on both backends; an act that
+/// changes a judgement advances the epoch and an acknowledgement does not;
+/// the listing filters by principal, by action and by prefix.
+#[test]
+fn the_audit_log_is_a_table_and_the_epoch_moves_with_a_judgement() {
+    use nils_registry::audit::{self, Action, Entry, Filter};
+    use nils_registry::home::{Home, InitOptions};
+    use nils_registry::{Backend, Scheme};
+    let mut homes: Vec<(String, Backend, Option<String>)> =
+        vec![("sqlite".into(), Backend::Sqlite, None)];
+    if let Ok(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        && !dsn.is_empty()
+    {
+        let mut s = nils_registry::Store::connect_postgres(&dsn, "nils_audit_test").unwrap();
+        s.batch("DROP SCHEMA IF EXISTS nils_audit_test CASCADE; DROP SCHEMA IF EXISTS nils_audit_test_linkage CASCADE")
+            .unwrap();
+        homes.push(("postgres".into(), Backend::Postgres, Some(dsn)));
+    }
+    for (name, backend, dsn) in homes {
+        let dir = nils_dicom::synth::TempDir::new("audit-home");
+        let home = Home::new(dir.path());
+        home.keys(None)
+            .add("k", b"an audit test key of some length")
+            .unwrap();
+        home.init(&InitOptions {
+            backend,
+            dsn,
+            schema: (backend == Backend::Postgres).then(|| "nils_audit_test".to_string()),
+            scheme: Scheme::DEFAULT,
+            key: "k".to_string(),
+            display_length: 12,
+            session_scheme: None,
+        })
+        .unwrap();
+        let mut reg = home.open().unwrap();
+        let before = reg.meta().epoch;
+        let first = audit::record(
+            &mut reg,
+            &Entry {
+                principal: "anna@ward-3",
+                action: Action::Decision,
+                scope: serde_json::json!({"review_item": 7, "axis": "base"}),
+                policy: None,
+                job_id: None,
+                details: Some(serde_json::json!({"value": "T1w"})),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            reg.meta().epoch,
+            before + 1,
+            "{name}: a decision moves the epoch"
+        );
+        audit::record(
+            &mut reg,
+            &Entry {
+                principal: "anna@ward-3",
+                action: Action::ReviewAccept,
+                scope: serde_json::json!({"review_item": 8}),
+                policy: None,
+                job_id: None,
+                details: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            reg.meta().epoch,
+            before + 1,
+            "{name}: an acknowledgement does not"
+        );
+        audit::record(
+            &mut reg,
+            &Entry {
+                principal: "bo@ward-3",
+                action: Action::LinkagePurge,
+                scope: serde_json::json!({"identities": 3}),
+                policy: None,
+                job_id: Some(42),
+                details: None,
+            },
+        )
+        .unwrap();
+        audit::record(
+            &mut reg,
+            &Entry {
+                principal: "bo@ward-3",
+                action: Action::Release,
+                scope: serde_json::json!({"release": "r", "version": "v2"}),
+                policy: Some(serde_json::json!({"dates": "shift"})),
+                job_id: Some(43),
+                details: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(reg.meta().epoch, before + 3, "{name}");
+
+        let all = audit::list(
+            reg.store(),
+            &Filter {
+                limit: 50,
+                ..Filter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(all.len(), 4, "{name}");
+        assert!(
+            all.windows(2).all(|w| w[0].id > w[1].id),
+            "{name}: newest first"
+        );
+        assert_eq!(all[0].action, "release", "{name}");
+        assert_eq!(
+            all[0].policy,
+            Some(serde_json::json!({"dates": "shift"})),
+            "{name}"
+        );
+        assert_eq!(all[0].job_id, Some(43), "{name}");
+        assert_eq!(all[0].epoch, Some(before + 3), "{name}");
+        let acknowledged = all.iter().find(|r| r.action == "review.accept").unwrap();
+        assert_eq!(
+            acknowledged.epoch, None,
+            "{name}: no epoch on an acknowledgement"
+        );
+        let decision = all.iter().find(|r| r.id == first).unwrap();
+        assert_eq!(decision.principal, "anna@ward-3", "{name}");
+        assert_eq!(decision.scope["axis"], "base", "{name}");
+        assert_eq!(
+            decision.details,
+            Some(serde_json::json!({"value": "T1w"})),
+            "{name}"
+        );
+
+        let anna = audit::list(
+            reg.store(),
+            &Filter {
+                principal: Some("anna@ward-3".into()),
+                limit: 50,
+                ..Filter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(anna.len(), 2, "{name}");
+        let linkage = audit::list(
+            reg.store(),
+            &Filter {
+                action: Some("linkage.".into()),
+                limit: 50,
+                ..Filter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(linkage.len(), 1, "{name}: the dotted prefix");
+        assert_eq!(linkage[0].action, "linkage.purge", "{name}");
+        let exact = audit::list(
+            reg.store(),
+            &Filter {
+                action: Some("release".into()),
+                limit: 50,
+                ..Filter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(exact.len(), 1, "{name}");
+        let none = audit::list(
+            reg.store(),
+            &Filter {
+                since: Some("2999-01-01T00:00:00Z".into()),
+                limit: 50,
+                ..Filter::default()
+            },
+        )
+        .unwrap();
+        assert!(none.is_empty(), "{name}");
+        // Migration 23 also gave the review item its acknowledgement columns.
+        let store = reg.store();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {} SET accepted_by = 'x', accepted_at = '2026-09-06T00:00:00Z' WHERE id = -1",
+                    store.qualified("review_item")
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+}
