@@ -1259,6 +1259,7 @@ dependencies = [
  "blake2",
  "bytes",
  "chacha20poly1305",
+ "csv",
  "hex",
  "nils-dicom",
  "postgres",

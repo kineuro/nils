@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Birth date and sex. A blank in the registry is filled; a value that
+# disagrees with what the registry holds is a review item, and the
+# registry's value stands until a person decides.
+import:
+  target: subject
+  subject: {column: code}
+  columns:
+    birth_date: {column: born, parser: date, format: "%Y-%m-%d"}
+    sex: {column: sex}

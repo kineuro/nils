@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Treatments started, the kind read per row so one file may carry several.
+import:
+  target: event
+  subject: {column: code}
+  observation_type: {column: kind}
+  columns:
+    event_date: {column: started, parser: date, format: "%d/%m/%Y"}
+    value: {column: drug}
+  on_existing: supersede

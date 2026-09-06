@@ -496,7 +496,8 @@ from the files since Wave 1, so the subject gains only `deceased_at`; the
 importer fills the two where the files are silent and a disagreement is a
 review item (§13.3). The vocabulary is pack data in `packs/clinical/
 vocabulary.yml`, carried from v0's seed (eight diseases with seventeen types,
-fifteen observation kinds, EDSS the primary one), and `nils clinical
+sixteen observation kinds counting the delivery its archive recorded without
+the seed naming it, EDSS the primary one), and `nils clinical
 vocabulary load` upserts it by name: what exists is updated, what is new is
 added, and nothing is ever removed by a load, because an event already
 recorded against a kind must keep its kind; a second load says it changed
@@ -521,6 +522,43 @@ request.
 by file, and when a later file disagrees with what the registry holds, the
 conflict becomes a review item and the registry's value stands until a person
 decides. That is what the spine is for (D7).
+
+**As built (slice 7).** `nils clinical import --mapping FILE --file CSV
+[--apply]`, one importer for six targets: `event`, `subject`, `cohort`,
+`cohort_member`, `subject_disease` and `subject_disease_type`, which are v0's
+thirteen import shapes less the four that are vocabulary (loaded by §7.1's
+verb) and the identifiers (Wave 1's linkage import). A mapping names the
+target, how a row names its subject (by the registry's code, or by an
+identifier through the linkage store, which is the way that works without
+the key that made the codes), the reference the target needs as a constant
+or a column, the columns with their parsers, the key, and what to do with a
+row that exists. A date is read under a declared format and never guessed;
+v0 accepted twelve formats, three of which cannot be told apart on most days
+of the month. A preview reads every row and writes nothing; an apply writes
+in one transaction under the caller's name; a row whose key exists is
+skipped, updated or superseded as the mapping says, and a re-run under the
+default changes nothing. A demographics row fills a blank, skips an equal
+value, and raises `subject.demographics` on a different one, the registry's
+value standing (§13.3). A diagnosis row's onset and diagnosis dates become
+events of their kinds, made if absent, so the dates are where every other
+date is and `Anchor::Event` can find them. Refusals are counted by reason,
+not listed by row, so a file with a thousand bad dates is one line. The
+example mappings and the format are in `packs/clinical/imports/`.
+
+**Proved on the real rows.** On the v0 host, read-only against v0's clinical
+database, the nmosd cohort's rows were exported keyed by the cohort's own
+identifier, the cohort's raw DICOM was digested into a scratch registry with
+the same binary (493,708 files, 44 subjects, 82 studies), and every file went
+through the importer, previewed, applied, and applied again: the cohort (1),
+its members (43 of 43), the diagnoses (40 of 40), the demographics (14 fields
+of the 7 subjects v0 holds them for, the 3 that disagreed by spelling settled
+by the standard's letter), and the events (298 of 298: 135 scans, 98 heights,
+65 weights). The second apply of each changed nothing. The first run found
+two faults, both fixed with a test: a key field the row did not carry was
+compared with `= NULL`, which is never true, so every event without a time
+was added again; and v0 stores a sex as a word where the scanner wrote a
+letter. Nothing left the host, and the scratch registry and the exported
+files were deleted afterwards.
 
 ### 7.3 `Anchor::Event`, and the nearest event
 

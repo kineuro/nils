@@ -19,6 +19,7 @@ pub mod clinical;
 pub mod day;
 pub mod dialect;
 pub mod home;
+pub mod import;
 pub mod keys;
 pub mod linkage;
 pub mod migrate;
