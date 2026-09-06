@@ -568,6 +568,50 @@ def clinical_join(work: Path, db: sqlite3.Connection) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# 9b. A second process through the door gets the same answer (Wave 4a §12)
+# --------------------------------------------------------------------------
+
+
+def bar_door(work: Path) -> list[str]:
+    """The door's answers against the command line's, on the same registry,
+    and a release queued through the door and run by a worker against the
+    tree the command line wrote."""
+    caps = load(work, "door-capabilities")
+    if not caps or "doors" not in caps:
+        return ["the door did not answer the capabilities"]
+    bad = []
+    status = load(work, "status") or {}
+    door_status = load(work, "door-status") or {}
+    if status.get("registry", {}).get("epoch") != door_status.get("registry", {}).get("epoch"):
+        bad.append("status: the door and the command line disagree on the epoch")
+    custody = load(work, "custody") or {}
+    door_custody = load(work, "door-custody") or {}
+    mine = [s["store"] for s in custody.get("stores", [])]
+    theirs = [s["store"] for s in door_custody.get("stores", [])]
+    if mine != theirs:
+        bad.append(f"custody: the door lists {theirs}, the command line {mine}")
+    sel = load(work, "select") or {}
+    door_sel = load(work, "door-select") or {}
+    if sel.get("reaches") != door_sel.get("reaches"):
+        bad.append(f"select: the door reaches {door_sel.get('reaches')}, the command line {sel.get('reaches')}")
+    queued = load(work, "door-release-queued") or {}
+    if "job" not in queued:
+        return bad + [f"the door did not queue the release: {queued}"]
+    jobs = load(work, "jobs") or {}
+    rows = jobs.get("jobs") if isinstance(jobs, dict) else jobs
+    door_job = next((j for j in rows or [] if j.get("id") == queued.get("job")), None)
+    if door_job is None or door_job.get("state") != "done":
+        bad.append(f"the queued release did not end done: {door_job}")
+    cli_tree = set(files_under(work / "descriptive"))
+    door_tree = set(files_under(work / "door-desc"))
+    if not door_tree:
+        bad.append("the release run through the door wrote no tree")
+    elif cli_tree != door_tree:
+        bad.append(f"the door's release tree differs from the command line's: {len(cli_tree ^ door_tree)} name(s)")
+    return bad
+
+
+# --------------------------------------------------------------------------
 # 11. The handover verifies
 # --------------------------------------------------------------------------
 
@@ -642,6 +686,7 @@ def main() -> int:
         ("8b. what the pack did not name does not leave", lambda: bar_private(work)),
         ("9. round trip and increment", lambda: bar_increment(work)),
         ("10. the date the clinical join needs survives", lambda: bar_dates(work, db)),
+        ("9b. a second process through the door gets the same answer", lambda: bar_door(work)),
         ("11. the handover verifies", lambda: bar_handover(work, db)),
         ("12. the budget", lambda: bar_budget(work)),
     ]

@@ -910,6 +910,11 @@ fn build_registry() -> Vec<Table> {
                 req("actor", Type::Text),
                 req("started_at", Type::Timestamp),
                 col("finished_at", Type::Timestamp),
+                // Wave 4a §13.1: a release is never removed; it may be
+                // withdrawn, with a reason, by a person.
+                col("withdrawn_at", Type::Timestamp),
+                col("withdrawn_by", Type::Text),
+                col("withdrawn_why", Type::Text),
                 req("files", Type::Int),
                 req("subjects", Type::Int),
                 // What a re-run did, and mostly did not do (§8.6).

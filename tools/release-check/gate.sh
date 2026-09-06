@@ -142,6 +142,33 @@ if [[ -e "$work/refused" ]]; then
   exit 1
 fi
 
+echo "gate: a second process through the door (Wave 4a section 12, bar 9)"
+# The same registry, driven over HTTP as a notebook or a service would: the
+# door's answers are compared with the command line's, and a release queued
+# through the door and run by a worker writes the tree the command line wrote.
+"$nils" status --json > "$work/status.json"
+"$nils" custody --json > "$work/custody.json"
+"$nils" select --json > "$work/select.json"
+"$nils" serve --bind 127.0.0.1:0 --requests 6 > "$work/serve.out" 2> "$work/serve.err" &
+serve_pid=$!
+for _ in $(seq 1 50); do
+  if [[ -s "$work/serve.out" ]]; then break; fi
+  sleep 0.2
+done
+port="$(awk 'NR == 1 {print $3}' "$work/serve.out" | cut -d: -f2)"
+url="http://127.0.0.1:$port/api"
+curl -s "$url/capabilities" > "$work/door-capabilities.json"
+curl -s "$url/status" > "$work/door-status.json"
+curl -s "$url/custody" > "$work/door-custody.json"
+curl -s -X POST -H 'Content-Type: application/json' -d '{}' "$url/select" > "$work/door-select.json"
+curl -s "$url/review?status=open" > "$work/door-review.json"
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d "{\"name\": \"gate-door\", \"out\": \"$work/door-desc\", \"layout\": \"descriptive\"}" \
+  "$url/releases" > "$work/door-release-queued.json"
+wait "$serve_pid" || true
+"$nils" jobs work --once > "$work/door-work.out"
+"$nils" jobs list --all --json > "$work/jobs.json"
+
 archiver="$(command -v 7z || true)"
 if [[ -n "$archiver" ]]; then
   echo "gate: the handover"

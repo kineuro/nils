@@ -1142,3 +1142,59 @@ fn a_selection_resolves_at_the_four_grains_and_is_counted_before_it_leaves() {
         );
     }
 }
+
+/// Wave 4a §12, bar 9: a file removed from the tree since the last version
+/// is not carried forward on the state's word. The stack is written again,
+/// and the report says how many were.
+#[test]
+fn a_stack_whose_files_left_the_tree_is_written_again_and_not_carried() {
+    let source = tree();
+    let home_dir = TempDir::new("restore-home");
+    let out = TempDir::new("restore-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let first = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert!(first.added > 0, "{first:?}");
+    assert_eq!(first.restored, 0);
+    // Somebody removes one stack's directory from the tree.
+    let mut dirs: Vec<std::path::PathBuf> = walkdir_like(out.path())
+        .into_iter()
+        .filter(|p| p.is_file())
+        .map(|p| p.parent().unwrap().to_path_buf())
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    let gone = dirs.first().expect("a stack directory").clone();
+    std::fs::remove_dir_all(&gone).unwrap();
+    assert!(!gone.exists());
+    // The re-run writes it again and says so; the rest is unchanged.
+    let again = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(again.restored, 1, "{again:?}");
+    assert_eq!(again.rewritten, 1, "{again:?}");
+    assert_eq!(again.added, 0, "{again:?}");
+    assert_eq!(again.unchanged, first.added - 1, "{again:?}");
+    assert!(gone.is_dir(), "the stack is back on the disk");
+    // And a third run carries everything.
+    let third = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(third.restored, 0, "{third:?}");
+    assert_eq!(third.unchanged, first.added, "{third:?}");
+}
+
+fn walkdir_like(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p.clone());
+            }
+            out.push(p);
+        }
+    }
+    out
+}

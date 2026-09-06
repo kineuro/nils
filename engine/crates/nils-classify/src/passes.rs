@@ -257,6 +257,7 @@ fn run_one(
                     ),
                     Param::from("open"),
                     Param::from(now.as_str()),
+                    Param::Int(job_id),
                 ]);
                 ran.review_items += 1;
             }
@@ -323,7 +324,15 @@ fn run_one(
                 store.insert(
                     &Insert::new(
                         table("review_item"),
-                        &["kind", "scope", "ref", "evidence", "status", "created_at"],
+                        &[
+                            "kind",
+                            "scope",
+                            "ref",
+                            "evidence",
+                            "status",
+                            "created_at",
+                            "job_id",
+                        ],
                     ),
                     &reviews,
                 )?;
