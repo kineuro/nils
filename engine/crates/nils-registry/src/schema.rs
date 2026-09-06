@@ -781,6 +781,12 @@ fn build_registry() -> Vec<Table> {
                 col("author_version", Type::Text),
                 col("why", Type::Text),
                 req("decided_at", Type::Timestamp),
+                // Wave 4a §10.2: a staged decision is written but not in
+                // force until committed; the epoch at staging is the drift
+                // signature a commit checks.
+                col("staged_at", Type::Timestamp),
+                col("committed_at", Type::Timestamp),
+                col("epoch_staged", Type::Int),
                 // A decision a later person withdrew stays, and stops
                 // applying: nothing about a human's judgement is deleted.
                 col("withdrawn_at", Type::Timestamp),
@@ -1138,9 +1144,36 @@ fn build_registry() -> Vec<Table> {
                 // its own home and its own count.
                 col("accepted_by", Type::Text),
                 col("accepted_at", Type::Timestamp),
+                // Wave 4a §10.2: the run that asked, and for a grouped
+                // question how many members it has and what groups them.
+                col("job_id", Type::Int),
+                col("members", Type::Int),
+                col("group_key", Type::Text),
+                // The decision that closed or staged it, so a commit or a
+                // withdrawal finds its items by a number and not by
+                // matching JSON text, which the two backends spell apart.
+                col("decision_id", Type::Int),
             ],
         )
-        .index(&["status", "kind"]),
+        .index(&["status", "kind"])
+        .index(&["job_id"])
+        .index(&["decision_id"]),
+        // Wave 4a §10.2: one question about a rule is one item with n
+        // members, not n items. Each member is a stack with the evidence
+        // the question was raised on, and a member decided one at a time
+        // says when.
+        Table::new(
+            "review_member",
+            vec![
+                col("id", Type::Id),
+                req("item_id", Type::Int),
+                req("stack_id", Type::Int),
+                col("evidence", Type::Json),
+                col("decided_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["item_id", "stack_id"])
+        .index(&["stack_id"]),
     ]
 }
 

@@ -104,6 +104,9 @@ pub struct Classified {
     /// The number that matters: a pack that flags everything has failed even
     /// if it agrees with v0 (§8.2).
     pub review_items: i64,
+    /// Wave 4a §10.2: the items those questions collapsed into, one per
+    /// (kind, value, tier). This is the length of the queue a person reads.
+    pub review_groups: i64,
     pub seconds: f64,
     pub peak_rss: Option<u64>,
     pub cancelled: bool,
@@ -125,6 +128,7 @@ impl Classified {
             passes: Vec::new(),
             by_tier: std::collections::BTreeMap::new(),
             review_items: 0,
+            review_groups: 0,
             seconds: 0.0,
             peak_rss: None,
             cancelled: false,
@@ -173,9 +177,10 @@ impl fmt::Display for Classified {
         }
         writeln!(
             f,
-            "  review items     {:>12}   {:.1}% of the stacks",
+            "  review items     {:>12}   {:.1}% of the stacks, as {} question(s)",
             self.review_items,
-            100.0 * self.review_share()
+            100.0 * self.review_share(),
+            self.review_groups
         )?;
         let mut weakest: Vec<(&String, &i64)> = self
             .by_tier

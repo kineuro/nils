@@ -2282,15 +2282,22 @@ fn contracts() -> std::path::PathBuf {
 /// describes, property for property.
 #[test]
 fn a_review_item_the_cli_prints_is_the_one_the_contract_describes() {
-    let text = std::fs::read_to_string(contracts().join("review-item/v1/review-item.schema.json"))
+    let current: u32 = std::fs::read_to_string(contracts().join("review-item/VERSION"))
+        .unwrap()
+        .trim()
+        .parse()
         .unwrap();
+    let text = std::fs::read_to_string(
+        contracts().join(format!("review-item/v{current}/review-item.schema.json")),
+    )
+    .unwrap();
     let schema: serde_json::Value = serde_json::from_str(&text).expect("the schema is JSON");
     let version: u32 = std::fs::read_to_string(contracts().join("review-item/VERSION"))
         .unwrap()
         .trim()
         .parse()
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, current);
     let properties = schema["properties"].as_object().unwrap();
     let required: Vec<&str> = schema["required"]
         .as_array()
@@ -3339,4 +3346,196 @@ fn the_principal_is_user_at_node_and_every_act_is_audited() {
             serde_json::from_str(&run(&["audit", "list", "--json", "--limit", "1"])).unwrap();
         assert_eq!(latest[0]["principal"], "bo@ward-3", "{latest}");
     }
+}
+
+#[test]
+fn nils_review_apply_is_one_verb_over_groups_stages_commits_and_withdraws() {
+    // Wave 4a section 10.2 at the command line: the classifier's questions
+    // are grouped, one row decides a group, a member can be decided alone,
+    // a staged decision waits for a commit, and a withdrawal reopens.
+    let home = home();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    // Two studies of one patient, the same series description in each, so
+    // the same question is asked about two stacks and grouped once.
+    let dir = TempDir::new("cli-spine");
+    for (study, sop) in [("1.2.3.A", "1.2.3.A.1.1"), ("1.2.3.B", "1.2.3.B.1.1")] {
+        let mut e = patient("P1", None);
+        e.push(synth::text(
+            dicom_dictionary_std::tags::SERIES_DESCRIPTION,
+            dicom_core::VR::LO,
+            "t1 mprage",
+        ));
+        dir.file(&format!("{study}/{sop}"), &mr_of(study, sop, e));
+    }
+    let run = |args: &[&str]| {
+        let out = nils()
+            .args(registry)
+            .args(args)
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}: {}\n{}",
+            args.join(" "),
+            stderr(&out),
+            stdout(&out)
+        );
+        stdout(&out)
+    };
+    run(&[
+        "digest",
+        "--name",
+        "a",
+        "--no-private",
+        dir.path().to_str().unwrap(),
+    ]);
+    run(&["fingerprint"]);
+    let classified: serde_json::Value = serde_json::from_str(&run(&[
+        "classify",
+        "--review-below",
+        "1.0",
+        "--json",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let items = classified["review_items"].as_i64().unwrap();
+    let groups = classified["review_groups"].as_i64().unwrap();
+    assert!(groups > 0 && groups < items, "{classified}");
+
+    // The listing reads groups with their members.
+    let listed: serde_json::Value =
+        serde_json::from_str(&run(&["review", "list", "--status", "open", "--json"])).unwrap();
+    let base = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "base:low_confidence")
+        .unwrap()
+        .clone();
+    assert_eq!(base["scope"], "group", "{base}");
+    let members = base["members"].as_i64().unwrap();
+    assert!(members >= 2, "{base}");
+    let base_id = base["id"].as_i64().unwrap();
+    let text = run(&["review", "list", "--status", "open"]);
+    assert!(text.contains("stack(s): base ="), "{text}");
+    let shown = run(&["review", "show", &base_id.to_string()]);
+    assert!(
+        shown.contains(&format!("members    {members} stack(s), 0 decided")),
+        "{shown}"
+    );
+
+    // One member decided alone: the item stays open with one fewer to go.
+    let first_member: i64 = shown
+        .lines()
+        .find(|l| l.contains("members    "))
+        .and_then(|l| l.split(": ").nth(1))
+        .and_then(|ids| ids.split(',').next())
+        .and_then(|id| id.trim().parse().ok())
+        .unwrap();
+    let said = run(&[
+        "review",
+        "apply",
+        &base_id.to_string(),
+        "--member",
+        &first_member.to_string(),
+        "--value",
+        "T2w",
+    ]);
+    assert!(
+        said.contains(&format!("decided base = T2w at stack {first_member}")),
+        "{said}"
+    );
+    let shown = run(&["review", "show", &base_id.to_string()]);
+    assert!(
+        shown.contains(&format!("{members} stack(s), 1 decided")),
+        "{shown}"
+    );
+
+    // The rest of the group, staged: one row, the item staged, not in force.
+    let staged: serde_json::Value = serde_json::from_str(&run(&[
+        "review",
+        "apply",
+        &base_id.to_string(),
+        "--value",
+        "T2w",
+        "--stage",
+        "--json",
+    ]))
+    .unwrap();
+    assert_eq!(staged["scope"], "group", "{staged}");
+    assert_eq!(staged["staged"], true, "{staged}");
+    let decision = staged["decision"].as_i64().unwrap();
+    let item: serde_json::Value =
+        serde_json::from_str(&run(&["review", "show", &base_id.to_string(), "--json"])).unwrap();
+    assert_eq!(item["status"], "staged", "{item}");
+    run(&["classify", "--pack-dir", packs.to_str().unwrap()]);
+    {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        let in_force = store
+            .query(
+                "SELECT COUNT(*) FROM classification_axis WHERE axis = 'base' AND tier = 'decision'",
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(in_force, 1, "only the member's own decision is in force");
+    }
+    // The registry moved on (that run), so the commit needs --anyway.
+    let out = nils()
+        .args(registry)
+        .args(["review", "commit", &decision.to_string()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("moved on"), "{}", stderr(&out));
+    let said = run(&["review", "commit", &decision.to_string(), "--anyway"]);
+    assert!(
+        said.contains("committed 1 decision(s), 1 item(s) accepted"),
+        "{said}"
+    );
+    run(&["classify", "--pack-dir", packs.to_str().unwrap()]);
+    {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        let in_force = store
+            .query(
+                "SELECT COUNT(*) FROM classification_axis WHERE axis = 'base' AND tier = 'decision' AND value = 'T2w'",
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(in_force, members, "the group decision reaches every member");
+    }
+    // Withdrawn: the item is open again, the decision out of force.
+    let said = run(&["review", "withdraw", &decision.to_string()]);
+    assert!(
+        said.contains(&format!(
+            "withdrew decision {decision}; 1 item(s) open again"
+        )),
+        "{said}"
+    );
+    let item: serde_json::Value =
+        serde_json::from_str(&run(&["review", "show", &base_id.to_string(), "--json"])).unwrap();
+    assert_eq!(item["status"], "open", "{item}");
+    let out = nils()
+        .args(registry)
+        .args(["review", "commit", "--all"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("nothing is staged"),
+        "{}",
+        stderr(&out)
+    );
+    // The audit log has every act.
+    let audited = run(&["audit", "list", "--action", "decision"]);
+    assert!(audited.lines().count() >= 4, "{audited}");
 }

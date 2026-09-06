@@ -764,6 +764,62 @@ One spine serves all three (C5, C15):
 
 `nils review apply` is the one verb, and the doors expose the same queue.
 
+**Measured first (slice 13, 2026-09-06).** One classification per threshold,
+in a copy of each registry, on the work host; `--review-below` overrides
+every axis at once, so `body_part`, which the pack decides at 0.65, floods
+above it. A group is one (kind, value, tier).
+
+| corpus | stacks | threshold | items | stacks asked | groups |
+|---|---|---|---|---|---|
+| nmosd | 2,484 | the pack's (0.70, body_part 0.65) | 3, all `ingest.quarantine` | 0 | 1 |
+| nmosd | 2,484 | 0.75 | 2,528 | 2,433 | 4 |
+| nmosd | 2,484 | 0.85 | 7,286 | 2,475 | 16 |
+| nmosd | 2,484 | 0.95 | 10,791 | 2,483 | 34 |
+| mixed | 4,120 | the pack's | 77 | 45 | 9 |
+| mixed | 4,120 | 0.75 | 1,822 | 1,553 | 23 |
+| mixed | 4,120 | 0.85 | 7,114 | 3,024 | 45 |
+| mixed | 4,120 | 0.95 | 10,725 | 3,076 | 108 |
+
+The largest groups at 0.75 on nmosd are body_part brain by keywords
+(2,140), body_part spine by keywords (293) and base T1w by physics (92); at
+the pack's thresholds on the mixed corpus they are the votes on base T1w
+(30) and technique FLASH (25), base PDw by physics (9) and body_part spine
+by physics (4). The number that decided the shape: at every threshold the
+queue is tens of questions, not thousands of items. 10,791 items on nmosd
+at 0.95 are 34 questions; 10,725 on the mixed corpus are 108.
+
+**As built (slice 13, 2026-09-06).** The spine is `nils_registry::review`,
+with migration 24. **Grouped items:** after a classification run the
+per-stack axis questions it raised (they carry the run's `job_id` now)
+collapse into one `review_item` of scope `group` per (kind, value, tier),
+`members` counted and `group_key` naming the three, with a `review_member`
+row per stack holding the evidence the question was raised on; the run's
+report says `review_items` (the members) and `review_groups` (the queue a
+person reads). A re-classification supersedes the open grouped questions
+its stacks belonged to and asks again as new items (C15). **Bulk
+decisions:** `nils review apply <item> --value V | --nothing` on a grouped
+item writes one `decision` row of scope `group` whose `ref` is the item,
+marks every member decided and closes the item; `--member <stack>` decides
+one member alone, at `--scope stack | series | subject | origin` from that
+stack, and the item closes when its last member is decided. `decide` is the
+same verb under Wave 2's name. **Staged versions with a commit:** `--stage`
+writes the decision with `staged_at` and the epoch it was staged at and
+leaves it out of force, the item in status `staged`; `nils review commit
+<id> | --all` sets `committed_at` and accepts the items, refused when the
+epoch moved since staging unless `--anyway` (v0's drift signature);
+`nils review withdraw <id>` takes a decision out of force, staged or
+committed, and reopens the items it closed; nothing is deleted. Items
+point at their decision by `decision_id`, because the two backends spell
+JSON apart. **Precedence with a rank:** person 3, agent 2, model 1
+(`review::rank`); the classifier reads only decisions in force (not
+withdrawn, and committed, where a decision written without staging is
+committed as written), and of every decision naming a stack at any scope
+the highest rank wins, then the narrowest scope (stack, group, series,
+subject, origin); on one key a lower rank does not override a higher one
+and is refused with who decided. Every apply, commit and withdrawal is an
+audit row and moves the epoch. The review-item contract is at version 2
+for the grouped shape.
+
 ## 11. The doors
 
 ### 11.1 `nils serve`

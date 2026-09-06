@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 23;
+pub const SCHEMA_VERSION: i64 = 24;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +146,29 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 23,
         apply: the_registry_keeps_an_audit_log,
     },
+    Migration {
+        version: 24,
+        apply: the_review_spine,
+    },
 ];
+
+/// Wave 4a §10.2: grouped items with members, and staged decisions.
+fn the_review_spine(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["review_member"])?;
+    add_columns(
+        store,
+        "review_item",
+        &["job_id", "members", "group_key", "decision_id"],
+    )?;
+    add_columns(
+        store,
+        "decision",
+        &["staged_at", "committed_at", "epoch_staged"],
+    )
+}
 
 /// Wave 4a §9.2: the audit log as a table, and the acknowledgement on a
 /// review item, which is its own home and not a decision.
