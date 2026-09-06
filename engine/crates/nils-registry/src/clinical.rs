@@ -369,6 +369,105 @@ pub fn diseases(store: &mut Store) -> Result<Vec<(i64, Disease)>, Error> {
     Ok(out)
 }
 
+/// The kind of observation named, by name, folded on case.
+pub fn kind_named(store: &mut Store, name: &str) -> Result<Option<Kind>, Error> {
+    Ok(observation_types(store)?
+        .into_iter()
+        .find(|k| k.name.eq_ignore_ascii_case(name.trim())))
+}
+
+/// Month zero per subject, by code, for a scheme anchored on a kind of
+/// event (Wave 4a §7.3): the earliest event of that kind the subject has,
+/// among those not superseded. A subject with none is absent, and the
+/// resolver treats it as it treats an `explicit` subject with no row.
+pub fn anchor_events(
+    store: &mut Store,
+    kind: i64,
+) -> Result<std::collections::HashMap<String, crate::day::Day>, Error> {
+    let d = store.dialect();
+    let event_t = table("event");
+    let date = d.text_of_qualified(Some("e"), event_t.column("event_date").expect("event_date"));
+    let sql = format!(
+        "SELECT su.code, MIN({date}) FROM {} e JOIN {} su ON su.id = e.subject_id \
+         WHERE e.observation_type_id = {} AND e.superseded_by IS NULL GROUP BY su.code",
+        store.qualified("event"),
+        store.qualified("subject"),
+        d.param(1, Type::Int)
+    );
+    let mut out = std::collections::HashMap::new();
+    for r in store.query(&sql, &[Param::Int(kind)])? {
+        if let Some(day) = r
+            .opt_text(1)?
+            .and_then(|t| crate::day::Day::parse(&t.replace('-', "")))
+        {
+            out.insert(r.text(0)?.to_string(), day);
+        }
+    }
+    Ok(out)
+}
+
+/// The event of a kind nearest to a day (Wave 4a §7.3): the one temporal
+/// function the engine needs beyond the anchor, which the release and the
+/// gate's bar both use. The general windows are the question wave's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Nearest {
+    pub event_id: i64,
+    pub date: crate::day::Day,
+    /// Days from the day asked about to the event: negative when the event
+    /// came before it.
+    pub offset_days: i64,
+    pub value: Option<String>,
+    pub number: Option<f64>,
+}
+
+/// The nearest event of `kind` to `day` for one subject, or none when the
+/// subject has no event of that kind. **The tie rule**: of two events the
+/// same distance away, the earlier one, because an observation made before
+/// a scan describes the state the scan saw and one made after may describe
+/// what the scan changed.
+pub fn nearest(
+    store: &mut Store,
+    subject: i64,
+    kind: i64,
+    day: crate::day::Day,
+) -> Result<Option<Nearest>, Error> {
+    let d = store.dialect();
+    let event_t = table("event");
+    let date = d.text_of_qualified(Some("e"), event_t.column("event_date").expect("event_date"));
+    let sql = format!(
+        "SELECT e.id, {date}, e.value, e.number FROM {} e \
+         WHERE e.subject_id = {} AND e.observation_type_id = {} AND e.superseded_by IS NULL",
+        store.qualified("event"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int)
+    );
+    let mut best: Option<Nearest> = None;
+    for r in store.query(&sql, &[Param::Int(subject), Param::Int(kind)])? {
+        let Some(date) = crate::day::Day::parse(&r.text(1)?.replace('-', "")) else {
+            continue;
+        };
+        let offset = day.days_to(date);
+        let candidate = Nearest {
+            event_id: r.int(0)?,
+            date,
+            offset_days: offset,
+            value: r.opt_text(2)?.map(str::to_string),
+            number: r.opt_double(3)?,
+        };
+        let closer = match &best {
+            None => true,
+            Some(b) => {
+                offset.abs() < b.offset_days.abs()
+                    || (offset.abs() == b.offset_days.abs() && date < b.date)
+            }
+        };
+        if closer {
+            best = Some(candidate);
+        }
+    }
+    Ok(best)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

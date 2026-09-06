@@ -3386,12 +3386,26 @@ fn session_list(home: &Home, args: SessionListArgs) -> Result<(), Exit> {
         Some(path) => read_anchors(path)?,
         None => BTreeMap::new(),
     };
-    if scheme.anchor == session::Anchor::Event {
-        return Err(usage(
-            "anchor `event` needs the clinical layer, which Wave 4 brings; until then use \
-             `first_session`, `source_label` or `explicit` with --anchors",
-        ));
-    }
+    // Wave 4a §7.3: a scheme anchored on a kind of event takes month zero
+    // from the clinical layer, the earliest event of that kind per subject.
+    let event_anchors: BTreeMap<String, Day> = match (scheme.anchor, &scheme.event) {
+        (session::Anchor::Event, Some(kind_name)) => {
+            let mut registry = open(home)?;
+            let kind = nils_registry::clinical::kind_named(registry.store(), kind_name)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| {
+                    usage(format!(
+                        "session.event names {kind_name}, which is not an observation kind the \
+                         registry holds; load the vocabulary, or name one of its kinds"
+                    ))
+                })?;
+            nils_registry::clinical::anchor_events(registry.store(), kind.id)
+                .map_err(|e| fail(e.to_string()))?
+                .into_iter()
+                .collect()
+        }
+        _ => BTreeMap::new(),
+    };
     if scheme.anchor == session::Anchor::Explicit && anchors.is_empty() {
         return Err(usage(
             "anchor `explicit` needs --anchors FILE, a CSV of `code,date`",
@@ -3426,8 +3440,9 @@ fn session_list(home: &Home, args: SessionListArgs) -> Result<(), Exit> {
         let anchor = match scheme.anchor {
             session::Anchor::FirstSession => studies.iter().map(|s| s.day).min(),
             session::Anchor::Explicit => anchors.get(code).copied(),
+            session::Anchor::Event => event_anchors.get(code).copied(),
             // Resolved from the labels inside the resolver, and refused above.
-            session::Anchor::SourceLabel | session::Anchor::Event => None,
+            session::Anchor::SourceLabel => None,
         };
         for s in session::sessions(studies, anchor, &scheme) {
             n_sessions += 1;
