@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +134,35 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 20,
         apply: an_axis_value_is_a_row,
     },
+    Migration {
+        version: 21,
+        apply: the_registry_holds_the_clinical_layer,
+    },
 ];
+
+/// Wave 4a §7.1: the clinical layer in the one registry: cohorts and their
+/// members, the vocabulary of diseases and observation kinds, a subject's
+/// diseases, the events, and the subject's demographics.
+fn the_registry_holds_the_clinical_layer(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(
+        store,
+        kind,
+        &[
+            "cohort",
+            "cohort_member",
+            "disease",
+            "disease_type",
+            "observation_type",
+            "subject_disease",
+            "subject_disease_type",
+            "event",
+        ],
+    )?;
+    add_columns(store, "subject", &["deceased_at"])
+}
 
 /// Wave 4a §6.1, fault 4: a multi-valued axis stops being a comma-joined
 /// string. The table is rebuilt because its unique key changes from

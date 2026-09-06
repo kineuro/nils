@@ -15,6 +15,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+pub mod clinical;
 pub mod day;
 pub mod dialect;
 pub mod home;

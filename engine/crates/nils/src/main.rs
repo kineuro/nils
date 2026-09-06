@@ -104,6 +104,9 @@ enum Command {
     /// recorded against the release (§11)
     #[command(subcommand)]
     Handover(HandoverCommand),
+    /// The clinical layer: the vocabulary of diseases and observation kinds (Wave 4a section 7.1)
+    #[command(subcommand)]
+    Clinical(ClinicalCommand),
     /// Which stack stands for each session's role, with the evidence that chose it (§10)
     Pick {
         #[command(subcommand)]
@@ -260,6 +263,34 @@ struct PrivateArgs {
     /// Machine-readable output
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum ClinicalCommand {
+    /// The vocabulary: the diseases, their types, and the kinds of observation
+    #[command(subcommand)]
+    Vocabulary(VocabularyCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum VocabularyCommand {
+    /// Load a vocabulary file into the registry, by name: what exists is
+    /// updated, what is new is added, nothing is removed
+    Load {
+        /// The vocabulary file; by default `clinical/vocabulary.yml` in the pack directory
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// Where the packs are; $NILS_PACK_DIR, else `packs/` in the registry home
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What the registry holds
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -737,6 +768,7 @@ fn main() -> ExitCode {
         Command::Private(args) => private_survey(&home, args),
         Command::Release(args) => release(&home, *args),
         Command::Handover(command) => handover_command(&home, command),
+        Command::Clinical(command) => clinical_command(&home, command),
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
@@ -2627,6 +2659,12 @@ fn custody(home: &Home, json: bool, markdown: bool) -> Result<(), Exit> {
     let open_items = count_of(store, "review_item", " WHERE status = 'open'")?;
     let jobs = count_of(store, "job", "")?;
     let batches = count_of(store, "ingest_batch", "")?;
+    let cohorts = count_of(store, "cohort", "")?;
+    let members = count_of(store, "cohort_member", " WHERE left_at IS NULL")?;
+    let diseases = count_of(store, "disease", "")?;
+    let kinds = count_of(store, "observation_type", "")?;
+    let events = count_of(store, "event", " WHERE superseded_by IS NULL")?;
+    let with_birth_date = count_of(store, "subject", " WHERE birth_date IS NOT NULL")?;
     let schema = store.schema().map(str::to_string);
     let linkage_holdings = linkage::holdings(&mut registry.open_linkage()?)?;
 
@@ -2776,6 +2814,24 @@ fn custody(home: &Home, json: bool, markdown: bool) -> Result<(), Exit> {
                 "change": ["nils fingerprint", "nils classify", "nils review decide <id> --value <v>"],
                 "export": ["nils explain <stack> --json"],
                 "delete": "with the registry",
+            },
+        }),
+        serde_json::json!({
+            "store": "clinical layer",
+            "what": "what v0 kept in a second database, in the one registry (Wave 4a section 7.1): cohorts and their members, the vocabulary of diseases and observation kinds, each subject's diseases, the events, and the subject's demographics",
+            "where": where_db(REGISTRY_DB, &registry_schema),
+            "files": if sqlite { db_files(REGISTRY_DB) } else { Vec::new() },
+            "holds": [
+                "quasi-identifying: birth dates, sex, dates of death, the dates of diagnoses, onsets, treatments and every observation",
+                "clinical: diagnoses and their types, the scales and their values, the treatments",
+            ],
+            "counts": { "cohorts": cohorts, "members": members, "diseases": diseases, "observation_types": kinds, "events": events, "subjects_with_birth_date": with_birth_date },
+            "kept": "for ever; a correction supersedes the old row and the old row stays (section 13.2)",
+            "commands": {
+                "read": ["nils clinical vocabulary list", "nils custody"],
+                "change": ["nils clinical vocabulary load"],
+                "export": ["nils release"],
+                "delete": delete_db(REGISTRY_DB, &registry_schema),
             },
         }),
         serde_json::json!({
@@ -4363,6 +4419,114 @@ fn yaml_text(s: &str) -> String {
         s.to_string()
     } else {
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+// The clinical layer (Wave 4a §7.1)
+// --------------------------------------------------------------------------
+
+fn clinical_command(home: &Home, command: ClinicalCommand) -> Result<(), Exit> {
+    match command {
+        ClinicalCommand::Vocabulary(VocabularyCommand::Load {
+            file,
+            pack_dir: dir,
+            json,
+        }) => {
+            let path = match file {
+                Some(f) => f,
+                None => pack_dir(home, dir)?.join("clinical").join("vocabulary.yml"),
+            };
+            let text =
+                fs::read_to_string(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+            let vocabulary = nils_registry::clinical::Vocabulary::parse(&text)
+                .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+            let mut registry = open(home)?;
+            let loaded = nils_registry::clinical::load(registry.store(), &vocabulary)
+                .map_err(|e| fail(e.to_string()))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "file": path.display().to_string(),
+                        "diseases": {"added": loaded.diseases_added, "updated": loaded.diseases_updated},
+                        "disease_types": {"added": loaded.disease_types_added, "updated": loaded.disease_types_updated},
+                        "observation_types": {"added": loaded.observation_types_added, "updated": loaded.observation_types_updated},
+                        "changed": loaded.changed(),
+                    }))
+                    .map_err(|e| fail(e.to_string()))?
+                );
+                return Ok(());
+            }
+            println!(
+                "vocabulary {}: diseases {} added, {} updated; disease types {} added, {} updated; observation types {} added, {} updated{}",
+                path.display(),
+                loaded.diseases_added,
+                loaded.diseases_updated,
+                loaded.disease_types_added,
+                loaded.disease_types_updated,
+                loaded.observation_types_added,
+                loaded.observation_types_updated,
+                match loaded.changed() {
+                    0 => "; nothing changed",
+                    _ => "",
+                }
+            );
+            Ok(())
+        }
+        ClinicalCommand::Vocabulary(VocabularyCommand::List { json }) => {
+            let mut registry = open(home)?;
+            let diseases = nils_registry::clinical::diseases(registry.store())
+                .map_err(|e| fail(e.to_string()))?;
+            let kinds = nils_registry::clinical::observation_types(registry.store())
+                .map_err(|e| fail(e.to_string()))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "diseases": diseases.iter().map(|(id, d)| serde_json::json!({
+                            "id": id, "name": d.name, "code": d.code, "description": d.description,
+                            "types": d.types.iter().map(|t| serde_json::json!({
+                                "name": t.name, "description": t.description,
+                            })).collect::<Vec<_>>(),
+                        })).collect::<Vec<_>>(),
+                        "observation_types": kinds.iter().map(|k| serde_json::json!({
+                            "id": k.id, "name": k.name, "category": k.category,
+                            "value_type": k.value_type, "unit": k.unit, "primary": k.primary,
+                        })).collect::<Vec<_>>(),
+                    }))
+                    .map_err(|e| fail(e.to_string()))?
+                );
+                return Ok(());
+            }
+            println!(
+                "{} disease(s), {} observation kind(s)",
+                diseases.len(),
+                kinds.len()
+            );
+            for (_, d) in &diseases {
+                println!(
+                    "  {:24} {:8} {}",
+                    d.name,
+                    d.code.as_deref().unwrap_or(""),
+                    d.types
+                        .iter()
+                        .map(|t| t.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            for k in &kinds {
+                println!(
+                    "  {:24} {:20} {:8} {}{}",
+                    k.name,
+                    k.category,
+                    k.value_type.as_deref().unwrap_or("date"),
+                    k.unit.as_deref().unwrap_or(""),
+                    if k.primary { "  (primary)" } else { "" }
+                );
+            }
+            Ok(())
+        }
     }
 }
 
