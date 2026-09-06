@@ -382,8 +382,163 @@ fn the_event_stream_is_display_plumbing() {
     server.finish();
 }
 
+/// Wave 4a §11.2: the `oidc` mode. The engine validates the token against
+/// the issuer's keys and audience, maps groups to roles, makes the subject
+/// the audit principal, and keeps no user table beyond a cache of claims.
 #[test]
-fn oidc_is_the_next_slice_and_says_so() {
+fn under_oidc_the_subject_is_the_principal_and_groups_are_roles() {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/oidc");
+    let jwks = fixtures.join("jwks.json");
+    let pem = std::fs::read(fixtures.join("signing-key.pem")).unwrap();
+    let key = EncodingKey::from_rsa_pem(&pem).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let token = |sub: &str, groups: &[&str], aud: &str, exp: u64, kid: Option<&str>| -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = kid.map(String::from);
+        let claims = serde_json::json!({
+            "iss": "https://id.example.org/application/o/nils/",
+            "aud": aud,
+            "sub": sub,
+            "exp": exp,
+            "iat": now,
+            "groups": groups,
+        });
+        encode(&header, &claims, &key).unwrap()
+    };
+    let home = registry();
+    let server = Server::start(
+        &home,
+        10,
+        &[
+            "--auth",
+            "oidc",
+            "--oidc-issuer",
+            "https://id.example.org/application/o/nils/",
+            "--oidc-audience",
+            "nils",
+            "--oidc-jwks",
+            jwks.to_str().unwrap(),
+            "--role",
+            "neuro-reviewers=reviewer",
+            "--role",
+            "neuro-ops=operator",
+        ],
+        &[],
+    );
+    // No token, a token for another audience, an expired one: 401.
+    let (status, doc) = server.request("GET", "/api/capabilities", None, None);
+    assert_eq!(status, 401, "{doc}");
+    let other = token("anna", &[], "someone-else", now + 600, Some("test-2026"));
+    let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&other));
+    assert_eq!(status, 401, "{doc}");
+    let stale = token("anna", &[], "nils", now - 600, Some("test-2026"));
+    let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&stale));
+    assert_eq!(status, 401, "{doc}");
+
+    // A reader: the subject at the issuer's node, the reader role only, and
+    // a door that asks for more says so with 403.
+    let reader = token("anna", &["students"], "nils", now + 600, Some("test-2026"));
+    let (status, caps) = server.request("GET", "/api/capabilities", None, Some(&reader));
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(caps["auth"], "oidc", "{caps}");
+    assert_eq!(caps["principal"], "anna@id.example.org", "{caps}");
+    assert_eq!(caps["roles"], serde_json::json!(["reader"]), "{caps}");
+    let (status, doc) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["fingerprint"]}"#),
+        Some(&reader),
+    );
+    assert_eq!(status, 403, "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("operator"), "{doc}");
+    let (status, listed) = server.request("GET", "/api/review?status=open", None, Some(&reader));
+    assert_eq!(status, 200, "{listed}");
+
+    // A reviewer decides, and the audit row carries the subject.
+    let reviewer = token(
+        "bo",
+        &["neuro-reviewers"],
+        "nils",
+        now + 600,
+        Some("test-2026"),
+    );
+    let id = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "base:low_confidence")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let (status, applied) = server.request(
+        "POST",
+        &format!("/api/review/{id}/apply"),
+        Some(r#"{"value": "T2w"}"#),
+        Some(&reviewer),
+    );
+    assert_eq!(status, 200, "{applied}");
+    // An operator reads the audit? No: that is the admin's; an operator
+    // queues work. A role implies the ones below it, so the operator
+    // reads and decides too.
+    let operator = token(
+        "cy",
+        &["neuro-ops", "students"],
+        "nils",
+        now + 600,
+        Some("test-2026"),
+    );
+    let (status, caps) = server.request("GET", "/api/capabilities", None, Some(&operator));
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(
+        caps["roles"],
+        serde_json::json!(["reader", "reviewer", "operator"]),
+        "{caps}"
+    );
+    let (status, doc) = server.request(
+        "GET",
+        "/api/audit?action=decision&limit=1",
+        None,
+        Some(&operator),
+    );
+    assert_eq!(status, 403, "{doc}");
+    let (status, queued) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["fingerprint"]}"#),
+        Some(&operator),
+    );
+    assert_eq!(status, 202, "{queued}");
+    server.finish();
+    // The audit row of the decision names the subject at the issuer's node.
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let who = store
+        .query(
+            "SELECT principal FROM audit WHERE action = 'decision' ORDER BY id DESC LIMIT 1",
+            &[],
+        )
+        .unwrap()[0]
+        .text(0)
+        .unwrap()
+        .to_string();
+    assert_eq!(who, "bo@id.example.org");
+    let queued_by = store
+        .query(
+            "SELECT args FROM job WHERE state = 'queued' ORDER BY id DESC LIMIT 1",
+            &[],
+        )
+        .unwrap()[0]
+        .text(0)
+        .unwrap()
+        .to_string();
+    assert!(queued_by.contains("cy@id.example.org"), "{queued_by}");
+}
+
+#[test]
+fn oidc_refuses_a_misconfiguration_before_it_listens() {
     let home = registry();
     let out = nils()
         .arg("--registry")
@@ -392,5 +547,5 @@ fn oidc_is_the_next_slice_and_says_so() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("slice 15"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--oidc-issuer"));
 }

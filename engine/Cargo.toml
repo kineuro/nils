@@ -45,6 +45,7 @@ libc = "0.2"
 lru = "0.18"
 nix = { version = "0.31", features = ["signal"] }
 tiny_http = "0.12"
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 postgres = "0.19"
 regex = "1.13"
 rusqlite = { version = "0.40", features = ["bundled"] }

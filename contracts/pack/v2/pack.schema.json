@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/pack/v1/pack.schema.json",
+  "title": "NILS pack manifest",
+  "description": "The pack.yml of a modality pack: what the pack is, and which files hold its parsers, flags, axes, rules, passes, picks, private lists, dictionary and BIDS mapping. Every file list is relative to the pack directory. Version 2 adds the optional fields key.",
+  "type": "object",
+  "required": [
+    "pack",
+    "version",
+    "contract",
+    "modality"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "pack": {
+      "type": "string",
+      "description": "The pack's name, which is also its directory's name.",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "version": {
+      "type": "string",
+      "description": "The pack's own version, semantic.",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "contract": {
+      "type": "integer",
+      "description": "The pack contract this manifest was written for. An engine implementing a lower one refuses the pack.",
+      "minimum": 1
+    },
+    "modality": {
+      "type": "string",
+      "description": "The DICOM modality the pack judges (MR, CT, PT).",
+      "pattern": "^[A-Z]{2,3}$"
+    },
+    "parsers": {
+      "$ref": "#/$defs/files",
+      "description": "Parser files: a parser tokenises a text field and names predicates over its tokens."
+    },
+    "flags": {
+      "$ref": "#/$defs/files",
+      "description": "Flag files: named boolean expressions over the fingerprint, the parsers and other flags."
+    },
+    "normalize": {
+      "$ref": "#/$defs/files",
+      "description": "Normalizer files: the text the pack derives for itself from the fingerprint's fields, published as fields of the pack."
+    },
+    "axes": {
+      "$ref": "#/$defs/files",
+      "description": "Axis files, in the order the axes are decided; an axis may read one declared before it."
+    },
+    "rules": {
+      "$ref": "#/$defs/files",
+      "description": "Rule sets written longhand, after the axes they decide."
+    },
+    "order": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The order the rule sets run in, by name; a set not named here never runs and is refused."
+    },
+    "passes": {
+      "$ref": "#/$defs/files",
+      "description": "Pass files: the phases that read more than one stack."
+    },
+    "picks": {
+      "$ref": "#/$defs/files",
+      "description": "Pick files: which stack stands for a session's role."
+    },
+    "private": {
+      "$ref": "#/$defs/files",
+      "description": "Private element files: the ingest list the digest reads, the release list a release keeps, and the vendor coverage."
+    },
+    "dictionary": {
+      "$ref": "#/$defs/files",
+      "description": "Private dictionary files, tab-separated: creator, group, offset, VR, VM, name."
+    },
+    "bids": {
+      "$ref": "#/$defs/files",
+      "description": "BIDS mapping files: which of the pack's values means which BIDS suffix, datatype and entity."
+    },
+    "review": {
+      "type": "object",
+      "description": "When a person is asked about an axis.",
+      "additionalProperties": false,
+      "properties": {
+        "low_confidence": {
+          "description": "The confidence below which an axis is asked about: one number for every axis, or a map with a default and per-axis overrides.",
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          ]
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The axes whose absence is itself a question."
+        },
+        "silent_when": {
+          "type": "object",
+          "description": "A condition under which nobody is asked about a stack at all."
+        }
+      }
+    },
+    "buckets": {
+      "type": "object",
+      "description": "The named lists a site may amend through an overlay, and nothing else.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "fields": {
+      "type": "object",
+      "description": "Wave 4a section 11.2 (C27): the visibility the pack puts on a catalogue field, by field name. local is this node only (free text, paths, exact dates, identifiers); federated is on the allowlist a peer may read; sensitive is never released and never read by a peer. Read by nothing in this wave; the catalog of the question wave and the federation of Wave 8 read it.",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "visibility"
+        ],
+        "properties": {
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "local",
+              "federated",
+              "sensitive"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "$defs": {
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    }
+  }
+}

@@ -332,10 +332,29 @@ struct ServeArgs {
     /// Address to listen on; port 0 picks a free one and prints it
     #[arg(long, default_value = "127.0.0.1:8437", value_name = "ADDR")]
     bind: String,
-    /// How a caller is known: `off` (the local user, laptop mode) or
-    /// `token` (a bearer token names the caller; see --token)
-    #[arg(long, default_value = "off", value_name = "off|token")]
+    /// How a caller is known: `off` (the local user, laptop mode), `token`
+    /// (a bearer token names the caller; see --token) or `oidc` (the
+    /// engine validates the issuer's token and maps its groups to roles;
+    /// see --oidc-issuer, --oidc-audience, --oidc-jwks, --role)
+    #[arg(long, default_value = "off", value_name = "off|token|oidc")]
     auth: String,
+    /// The OIDC issuer, as the token's `iss` claim spells it
+    #[arg(long, value_name = "URL")]
+    oidc_issuer: Option<String>,
+    /// The audience a token must name (`aud`)
+    #[arg(long, value_name = "AUD")]
+    oidc_audience: Option<String>,
+    /// The issuer's JWKS document, as a file the deployment keeps current
+    #[arg(long, value_name = "FILE")]
+    oidc_jwks: Option<PathBuf>,
+    /// The claim that carries the groups
+    #[arg(long, default_value = "groups", value_name = "CLAIM")]
+    oidc_groups_claim: String,
+    /// A group and the role it grants, as `GROUP=reader|reviewer|operator|admin`;
+    /// repeatable. A role implies the ones below it; a caller with no
+    /// mapped group is a reader
+    #[arg(long, value_name = "GROUP=ROLE")]
+    role: Vec<String>,
     /// A token and who it names, as `TOKEN=user@node`; repeatable. Or set
     /// NILS_TOKENS to a comma-separated list of the same
     #[arg(long, value_name = "TOKEN=PRINCIPAL")]
@@ -1521,6 +1540,7 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                     "pack": pack.name,
                     "version": pack.version.to_string(),
                     "contract": pack.contract,
+                    "fields": pack.fields.iter().map(|(f, v)| (f.clone(), serde_json::Value::from(v.name()))).collect::<serde_json::Map<_, _>>(),
                     "modality": pack.modality,
                     "parsers": pack.parsers.iter().map(|p| serde_json::json!({
                         "name": p.name, "predicates": p.preds.len()
@@ -1583,6 +1603,23 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                 );
                 for c in &pack.private_coverage {
                     println!("          {:20} covers {c}", "");
+                }
+                if !pack.fields.is_empty() {
+                    // Wave 4a §11.2 (C27): read by nothing yet, said here so
+                    // a pack author sees what the pack declares.
+                    let mut by: std::collections::BTreeMap<&str, Vec<&str>> =
+                        std::collections::BTreeMap::new();
+                    for (field, v) in &pack.fields {
+                        by.entry(v.name()).or_default().push(field.as_str());
+                    }
+                    for (visibility, fields) in by {
+                        println!(
+                            "  fields  {:20} {:3} {visibility}: {}",
+                            "",
+                            fields.len(),
+                            fields.join(", ")
+                        );
+                    }
                 }
                 for a in &pack.axes {
                     let asked = if pack.review.asks_when_missing(&a.name) {

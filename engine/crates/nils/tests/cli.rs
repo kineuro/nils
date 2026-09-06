@@ -1624,7 +1624,7 @@ fn pack_list_and_show_read_the_pack_directory() {
     let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(shown["modality"], "MR");
     assert_eq!(shown["flags"], 145);
-    assert_eq!(shown["contract"], 1);
+    assert_eq!(shown["contract"], 2, "Wave 4a slice 15: the fields key");
     assert!(
         shown["buckets"]["diffusion_tokens"]
             .as_array()
