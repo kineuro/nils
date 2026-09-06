@@ -120,10 +120,13 @@ in the tree now" is a lookup, "what did version 4 do" is a query on the log,
 and "what was in version 3" is a replay of the log backwards, which is exact and
 rare. Rows per dataset: ~518k total, whatever the number of versions.
 
-**The diff is computed in SQL.** This version's per-stack state is written to
-the table and the five outcomes (unchanged, moved, rewritten, added, removed)
-are a join against the previous state, not two maps in memory. Memory becomes
-independent of the number of files.
+**The diff is computed in SQL.** This version's per-stack plan is written to
+a table (`release_plan`, one subject at a time, emptied when the version
+closes) and the five outcomes (unchanged, moved, rewritten, added, removed)
+are a paged join of the plan against the current state, not two maps in
+memory. A stack's instances are read only when the stack is written. Memory
+becomes a function of the largest subject and of one page of stacks, and not
+of the number of files.
 
 ### 4.3 What is lost, and what replaces it
 
@@ -133,8 +136,17 @@ names the stack rather than the file; a per-file check is a recomputation. The
 handover's own record already carries a checksum per archive, which is the
 right place to spend bytes on verification.
 
-`release_file` is dropped, or kept as an opt-in a deployment enables when it
-wants a per-file manifest and can afford it. The default is dropped.
+`release_file` is dropped, with no opt-in. The reason is not the bytes: a
+per-file manifest is a second description of the tree, kept beside the state
+that already describes it, and two descriptions disagree. What the state knows
+is enough to find every file again: a DICOM stack owns its directory and its
+files are its instances, a converted stack is its stem plus its extensions,
+and the dataset's own files sit at the levels no stack occupies. The handover
+reads its file list from exactly that, so what it packs is what the release
+recorded and not what happens to be in the directory. A registry made before
+this folds its manifest into the state on upgrade (migration 18), summing the
+bytes it knew and leaving the digest empty, since a digest the old shape held
+per file cannot be made into one per stack without reading the tree.
 
 ### 4.4 Measured, not asserted
 
@@ -142,6 +154,31 @@ The slice lands with a benchmark of the release and its re-run at 150,000 and
 1,000,000 files, today's design against the new one, and the numbers go in the
 pull request and in §12's budget bar. Nima asked for exactly this: test which
 is more efficient rather than assume.
+
+**Measured, 2026-09-06**, on the baseline host, synthetic corpora from the
+`corpus` example (seeds 1 and 2, 2 KB of pixels a file), the descriptive
+layout, one process per release, peak resident set of that process alone,
+with `engine/benches/release-manifest.py`, which is how the numbers are made
+again. The
+digest is the same code in both columns and peaks at 600 MB at either size,
+which is Wave 1's budget and not this slice's.
+
+| | files | first version | re-run, nothing changed | registry after v1, after v2 |
+|---|---|---|---|---|
+| Wave 3 | 150,000 | 176 MB, 18.6 s | 209 MB, 0.9 s | 110 MB, 137 MB |
+| **slice 1** | 150,000 | **84 MB**, 17.7 s | **68 MB**, 0.5 s | **85 MB, 85 MB** |
+| Wave 3 | 1,000,000 | 765 MB, 135 s | 977 MB, 6.2 s | 740 MB, 918 MB |
+| **slice 1** | 1,000,000 | **172 MB**, 121 s | **84 MB**, 3.9 s | **567 MB, 567 MB** |
+
+The registry no longer grows with a version that changed nothing: Wave 3 added
+27 MB per version at 150,000 files and 178 MB at 1,000,000, and the new shape
+adds a plan that is emptied and a log that is empty. The re-run's memory is
+flat. The first version's grows from 84 MB to 172 MB over a 6.7 times larger
+corpus, against 176 MB to 765 MB before; the store's SQLite page cache alone is
+capped at 64 MB, and nothing in the release holds a row per file. The BIDS
+layout at 150,000 files (81,124 written, the rest routed away by the synthetic
+corpus's classification) measures the same way: 85 MB and 75 MB against 146 MB
+and 161 MB, registry 86 MB flat against 103 MB then 119 MB.
 
 ## 5. Private elements
 
@@ -540,7 +577,8 @@ being built.
 2. **The 484 orphaned private elements** of the mix: a property of a vendor's
    export, of an anonymiser that removed creators and not blocks, or of the
    reader. Answered by `nils private` reporting orphans by group (slice 2).
-3. **Whether `release_file` survives as an opt-in** or is simply dropped
-   (slice 1; the default is dropped).
+3. ~~**Whether `release_file` survives as an opt-in** or is simply dropped.~~
+   Dropped, no opt-in, slice 1 (§4.3): a second description of the tree is
+   one more thing to disagree with the first.
 4. **The names of the two apps** (17 §8), which this wave does not need but
    `capabilities` will report.

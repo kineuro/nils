@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +122,93 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 17,
         apply: a_release_can_be_handed_over,
     },
+    Migration {
+        version: 18,
+        apply: a_release_is_a_current_state_and_a_log,
+    },
 ];
+
+/// Wave 4a §4: the release's bookkeeping moves from a row per stack per
+/// version and a row per file per version to a current state per stack and a
+/// change log.
+///
+/// `release_stack` is rebuilt, because its key changes from the version to the
+/// dataset: for every `(name, root)` a `dataset` row is made, and of the rows a
+/// stack had across versions the newest survives, marked with the version that
+/// wrote it. `release_file` is dropped; its per-file digests are folded into
+/// nothing, because a digest of digests cannot be computed in SQL, so a
+/// migrated stack carries an empty digest until a version rewrites it, and a
+/// handover treats an empty digest as "not recorded". Bytes and counts are
+/// kept, because those can be summed.
+fn a_release_is_a_current_state_and_a_log(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["dataset", "release_plan"])?;
+    add_columns(store, "release", &["dataset_id"])?;
+    if !table_exists(store, "release_stack")? {
+        return add_tables(store, kind, &["release_stack"]);
+    }
+    if column_exists(store, "release_stack", "dataset_id")? {
+        return Ok(());
+    }
+    let release = store.qualified("release");
+    let dataset = store.qualified("dataset");
+    let d = store.dialect();
+    let now = d.text_of(
+        schema::table("release")
+            .column("started_at")
+            .expect("release.started_at is a column"),
+    );
+    // A dataset per distinct name and root the releases have used.
+    store.batch(&format!(
+        "INSERT INTO {dataset} (name, root, created_at) \
+         SELECT r.name, r.root, MIN({now}) FROM {release} r \
+         GROUP BY r.name, r.root"
+    ))?;
+    store.batch(&format!(
+        "UPDATE {release} SET dataset_id = (SELECT d.id FROM {dataset} d \
+           WHERE d.name = {release}.name AND d.root = {release}.root) \
+         WHERE dataset_id IS NULL"
+    ))?;
+
+    let dialect = store.dialect();
+    let schema_name = store.schema().map(str::to_string);
+    let mut rebuilt = schema::table("release_stack").clone();
+    rebuilt.name = "release_stack_rebuilt";
+    store.batch(&dialect.create_table(schema_name.as_deref(), &rebuilt))?;
+    let old = store.qualified("release_stack");
+    let new = store.qualified("release_stack_rebuilt");
+    // The newest row per (dataset, stack), with the bytes summed from the
+    // manifest while it still exists and an empty digest.
+    let files = match table_exists(store, "release_file")? {
+        true => format!(
+            "COALESCE((SELECT SUM(f.bytes) FROM {} f WHERE f.release_id = s.release_id \
+               AND f.stack_id = s.stack_id), 0)",
+            store.qualified("release_file")
+        ),
+        false => "0".to_string(),
+    };
+    store.batch(&format!(
+        "INSERT INTO {new} (dataset_id, stack_id, release_id, content, dir, stem, route, \
+                            files, bytes, digest, extensions) \
+         SELECT r.dataset_id, s.stack_id, s.release_id, s.content, s.dir, s.stem, \
+                COALESCE(s.route, 'raw'), s.files, {files}, '', NULL \
+         FROM {old} s JOIN {release} r ON r.id = s.release_id \
+         WHERE s.release_id = (SELECT MAX(s2.release_id) FROM {old} s2 \
+                               JOIN {release} r2 ON r2.id = s2.release_id \
+                               WHERE r2.dataset_id = r.dataset_id AND s2.stack_id = s.stack_id)"
+    ))?;
+    store.batch(&format!("DROP TABLE {old}"))?;
+    store.batch(&format!("ALTER TABLE {new} RENAME TO release_stack"))?;
+    for ix in dialect.create_indexes(schema_name.as_deref(), schema::table("release_stack")) {
+        store.batch(&ix)?;
+    }
+    if table_exists(store, "release_file")? {
+        store.batch(&format!("DROP TABLE {}", store.qualified("release_file")))?;
+    }
+    Ok(())
+}
 
 /// Wave 3 §11: how a dataset physically left, as part of the release record.
 fn a_release_can_be_handed_over(store: &mut Store, kind: Kind) -> Result<(), Error> {
@@ -161,12 +247,14 @@ fn a_release_has_a_layout(store: &mut Store, kind: Kind) -> Result<(), Error> {
     );
     store.execute(&sql, &[])?;
 
-    if column_exists(store, "release_file", "stack_id")? {
+    // A registry made after migration 18 has no manifest to rebuild, and one
+    // made between 16 and 18 has rebuilt it already.
+    if !table_exists(store, "release_file")? || column_exists(store, "release_file", "stack_id")? {
         return Ok(());
     }
     let dialect = store.dialect();
     let schema = store.schema().map(str::to_string);
-    let mut rebuilt = schema::table("release_file").clone();
+    let mut rebuilt = schema::historical("release_file").clone();
     rebuilt.name = "release_file_rebuilt";
     store.batch(&dialect.create_table(schema.as_deref(), &rebuilt))?;
     let old = store.qualified("release_file");
@@ -184,7 +272,7 @@ fn a_release_has_a_layout(store: &mut Store, kind: Kind) -> Result<(), Error> {
     ))?;
     store.batch(&format!("DROP TABLE {old}"))?;
     store.batch(&format!("ALTER TABLE {new} RENAME TO release_file"))?;
-    for ix in dialect.create_indexes(schema.as_deref(), schema::table("release_file")) {
+    for ix in dialect.create_indexes(schema.as_deref(), schema::historical("release_file")) {
         store.batch(&ix)?;
     }
     Ok(())
@@ -262,7 +350,9 @@ fn create_release(store: &mut Store, kind: Kind) -> Result<(), Error> {
     if kind != Kind::Registry {
         return Ok(());
     }
-    add_tables(store, kind, &["release", "release_file"])
+    // `release_file` was created here too, until migration 18 folded it into
+    // `release_stack`; a registry that skips straight past has nothing to fold.
+    add_tables(store, kind, &["release"])
 }
 
 /// Wave 3 §10: which stack stands for a session's role, with the evidence and

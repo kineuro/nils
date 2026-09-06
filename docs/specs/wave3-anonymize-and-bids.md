@@ -1263,7 +1263,10 @@ against it would be a bar against being correct.
    or in the report with a reason, and the counts reconcile to the selection.
 5. **The descriptive layout names everything.**
 6. **One stack per session and role**, ties reported.
-7. **Every file is traceable** through `release_file` to the stack it is of,
+7. **Every file is traceable** through `release_file` to the stack it is of
+   (since Wave 4a slice 1, through `release_stack`, which holds one current
+   state per stack and no row per file; a DICOM stack's files are its
+   instances, a converted stack's are its stem and its extensions),
    and to the instance where the file is one instance written out, and every
    value it carries to the rule, pass, person or model that decided it, with no
    value whose author the tree cannot name (§10.1). The two-step is not a

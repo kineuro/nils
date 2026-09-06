@@ -254,8 +254,6 @@ impl From<StoreError> for Error {
 struct Instance {
     id: i64,
     stack: i64,
-    subject: i64,
-    code: String,
     study: i64,
     path: String,
     /// What the walker of Wave 1 recorded about the source file. A re-run
@@ -265,50 +263,74 @@ struct Instance {
     mtime: i64,
 }
 
-/// What one stack's release is: where it goes, what decides its bytes, and
-/// what became of it since the last version (§8.6).
+/// What one stack's release is, once the plan and the state have been joined
+/// (Wave 4a §4): where it goes, what decides its bytes, and what became of it.
 struct Job {
     stack: i64,
     place: Place,
     /// Where it goes when the converter refuses it, which is the same place
     /// the planner would give it had it been routed to `sourcedata` in the
-    /// first place. Computed here so a fallback and a plan cannot disagree,
-    /// which is what made every re-run move them.
+    /// first place. Computed by the planner so a fallback and a plan cannot
+    /// disagree, which is what made every re-run move them.
     fallback: Place,
     /// Which of §9.3's routes it took. In the descriptive layout there is one.
     route: String,
-    /// The BIDS stem, when the tree is BIDS and the standard named it.
     content: String,
     change: crate::version::Change,
-    /// Where the last version put it, when there was one.
-    was: Option<String>,
+    /// What the state said, when the stack was there.
+    was: Option<State>,
     code: String,
     offset: crate::dates::Offset,
+    /// Read only when the stack is written: a planned stack carries no
+    /// instances, which is what keeps a version's memory a function of stacks
+    /// and not of files.
     instances: Vec<Instance>,
 }
 
-/// What the version before this one wrote.
-struct Previous {
+/// The current state of one stack of a dataset, as `release_stack` holds it.
+#[derive(Debug, Clone)]
+struct State {
+    content: String,
+    place: Place,
+    route: String,
+    files: i64,
+    bytes: i64,
+    digest: String,
+    /// A converted stack's files are its stem plus these; a DICOM stack owns
+    /// its directory.
+    extensions: Vec<String>,
+}
+
+impl State {
+    /// The files this state describes, as far as the state knows them.
+    fn files(&self) -> Files {
+        match &self.place.stem {
+            Some(stem) => Files::Named(
+                self.extensions
+                    .iter()
+                    .map(|e| format!("{}/{stem}{e}", self.place.dir))
+                    .collect(),
+            ),
+            None => Files::Directory(self.place.dir.clone()),
+        }
+    }
+}
+
+/// What a stack's files are on disk: a directory it owns, or named files.
+enum Files {
+    Directory(String),
+    Named(Vec<String>),
+}
+
+/// What one version knows about the version before it.
+struct Earlier {
     id: i64,
     version: String,
-    /// Per stack, what it wrote, where, and by which route: the state this
-    /// version compares against.
-    stacks: HashMap<i64, (crate::version::Was, String)>,
-    /// Per stack, the files it wrote. Carried forward unchanged, so that every
-    /// version's manifest is the whole tree rather than only the part of it
-    /// this run touched (§11).
-    ///
-    /// By stack and not by instance, because a converted file is not one
-    /// instance written out: a NIfTI is a whole stack, and its sidecar,
-    /// `.bval` and `.bvec` are the stack's too.
-    files: HashMap<i64, Vec<Wrote>>,
 }
 
 /// One file a version wrote.
 #[derive(Debug, Clone)]
 struct Wrote {
-    /// The instance, when the file is one instance written out.
-    instance: Option<i64>,
     path: String,
     digest: String,
     bytes: i64,
@@ -353,18 +375,19 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         }
     }
 
-    let instances = select(registry.store(), &settings.selection)?;
     // §9.6, before a byte is written: the root has to be writable and there
     // has to be room. A release that discovers a full disk after 400 GB has
     // written 400 GB for nothing, and what it reports is the operating
     // system's word for it rather than what to do about it.
-    preflight(settings.root, &instances)?;
+    let wanted = selection_bytes(registry.store(), &settings.selection)?;
+    preflight(settings.root, wanted)?;
     let days = study_days(registry.store())?;
     let pixels = pixel_verdicts(registry.store())?;
     let named = places(registry.store(), &days, settings.scheme, settings.pack)?;
-    // The version this run is worked out against, read before anything is
-    // written, and the version this run will be.
-    let earlier = previous(registry.store(), settings.name, settings.root)?;
+    // The dataset this is a version of, and the version before it, read before
+    // anything is written.
+    let dataset = dataset_of(registry.store(), settings.name, settings.root)?;
+    let earlier = newest_version(registry.store(), dataset)?;
     let version = crate::version::next(today(), earlier.as_ref().map(|p| p.version.as_str()));
 
     let mut placements: BTreeMap<String, String> = BTreeMap::new();
@@ -397,6 +420,7 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         registry.store(),
         settings,
         &version,
+        dataset,
         earlier.as_ref(),
         &report.placements,
     )?;
@@ -417,17 +441,6 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         .join(",");
     let pack = format!("{}@{}", settings.pack.name, settings.pack.version);
 
-    // Which studies are one occasion, per subject, so a file lands in the
-    // session it belongs to rather than in a directory named by its date.
-    let mut by_subject: BTreeMap<i64, Vec<Instance>> = BTreeMap::new();
-    for i in instances {
-        by_subject.entry(i.subject).or_default().push(i);
-    }
-    // The people are counted once the jobs are known, below: the people in the
-    // version, not the people the selection query returned. The two differ the
-    // moment a narrowing happens after the query, which a session, a held
-    // stack and a stack routed nowhere all are.
-
     // §9.4: the time each stack was acquired, under the date policy, for the
     // standard's own columns. Computed once, before anything is written.
     let acq_times = match settings.layout {
@@ -435,15 +448,25 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         Layout::Descriptive => HashMap::new(),
     };
 
-    // What each stack is, where it goes and what became of it, worked out for
-    // the whole release before a single file is touched. Nothing here reads or
-    // writes a byte of the tree: the decision is what makes a re-run cheap, so
-    // it is taken from the registry alone.
-    let mut jobs: Vec<Job> = Vec::new();
+    // ---------------------------------------------------------------- plan
+    //
+    // What each stack is and where it goes, worked out **one subject at a
+    // time** and written to `release_plan` as it is decided. Nothing here reads
+    // or writes a byte of the tree, and nothing here holds more than one
+    // subject's instances: the plan is what makes a re-run cheap, so it is
+    // taken from the registry alone, and its memory is a function of the
+    // largest subject and not of the archive (Wave 4a §4).
     let mut held: std::collections::HashSet<i64> = std::collections::HashSet::new();
     // What went nowhere, with the reason (§9.3).
     let mut absent: Vec<(i64, String, String)> = Vec::new();
-    for (subject, mine) in by_subject {
+    let mut planned: Vec<Vec<Param>> = Vec::new();
+    let mut people: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut stacks_planned = 0i64;
+    for (subject, code) in selected_subjects(registry.store(), &settings.selection)? {
+        let mine = select_subject(registry.store(), &settings.selection, subject)?;
+        if mine.is_empty() {
+            continue;
+        }
         let labels = session_labels(&mine, &days, settings.scheme);
         let offset = match settings.policy.dates {
             crate::dates::Policy::Shift => {
@@ -453,7 +476,6 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
             }
             _ => crate::dates::Offset(0),
         };
-        let code = mine.first().map(|i| i.code.clone()).unwrap_or_default();
         let mut grouped: BTreeMap<i64, Vec<Instance>> = BTreeMap::new();
         for i in mine {
             grouped.entry(i.stack).or_default().push(i);
@@ -537,141 +559,172 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                     .map(|i| (i.id, i.size, i.mtime))
                     .collect::<Vec<_>>(),
             );
-            let was = earlier.as_ref().and_then(|p| p.stacks.get(&stack));
+            let place = place_of(&route, settings, &code, &label, &folder, &stem, placed);
+            let fallback = place_of(
+                &crate::bids::place::Route::SourceData,
+                settings,
+                &code,
+                &label,
+                &folder,
+                &stem,
+                placed,
+            );
+            people.insert(code.clone());
+            stacks_planned += 1;
+            planned.push(vec![
+                Param::Int(report.release_id),
+                Param::Int(stack),
+                Param::from(content),
+                Param::from(place.dir),
+                match place.stem {
+                    Some(stem) => Param::from(stem),
+                    None => Param::Null,
+                },
+                Param::from(route.name()),
+                Param::from(fallback.dir),
+                match fallback.stem {
+                    Some(stem) => Param::from(stem),
+                    None => Param::Null,
+                },
+                Param::from(code.as_str()),
+                Param::from(label),
+                Param::Int(offset.0),
+            ]);
+            if planned.len() >= PLAN_BATCH {
+                write_plan(registry.store(), &planned)?;
+                planned.clear();
+            }
+        }
+    }
+    write_plan(registry.store(), &planned)?;
+    planned.clear();
+    report.stacks = stacks_planned;
+    report.subjects = people.len() as i64;
+
+    // ---------------------------------------------------------------- diff
+    //
+    // The five outcomes of §8.6, as a join of the plan against the state,
+    // paged, so that what is held here is one row per planned stack and never
+    // a row per file.
+    let mut jobs: Vec<Job> = Vec::new();
+    let mut after = 0i64;
+    loop {
+        let page = plan_page(registry.store(), dataset, report.release_id, after)?;
+        if page.is_empty() {
+            break;
+        }
+        for (planned, was) in page {
+            after = planned.stack;
+            let mut route = planned.route.clone();
+            let mut place = planned.place.clone();
             // A conversion the converter refused last time will refuse it
             // again, because nothing it depends on has changed: the converter
             // is in the content digest and so is everything about the stack.
-            // So the fallback is **planned** rather than retried, and the stack
-            // is left alone. Without this, every re-run rewrites every stack
-            // that ever fell back, which is the incremental promise broken for
-            // exactly the stacks that cost the most.
-            let fell_back = was.is_some_and(|(w, r)| w.content == content && r == "sourcedata");
-            let route = match fell_back && route.name() != "sourcedata" {
-                true => crate::bids::place::Route::SourceData,
-                false => route,
-            };
-            *report.routes.entry(route.name().to_string()).or_insert(0) += 1;
-            let place = place_of(&route, settings, &code, &label, &folder, &stem, placed);
+            // So the fallback is **planned** rather than retried, and the
+            // stack is left alone. Without this, every re-run rewrites every
+            // stack that ever fell back, which is the incremental promise
+            // broken for exactly the stacks that cost the most.
+            let fell_back = was
+                .as_ref()
+                .is_some_and(|w| w.content == planned.content && w.route == "sourcedata");
+            if fell_back && route != "sourcedata" {
+                route = "sourcedata".to_string();
+                place = planned.fallback.clone();
+            }
+            *report.routes.entry(route.clone()).or_insert(0) += 1;
             let key = place.key();
-            let mut change = crate::version::compare(was.map(|(w, _)| w), &content, &key);
+            let mut change = crate::version::compare(
+                was.as_ref()
+                    .map(|w| crate::version::Was {
+                        content: w.content.clone(),
+                        dir: w.place.key(),
+                    })
+                    .as_ref(),
+                &planned.content,
+                &key,
+            );
             // A route that changed changed the bytes: a stack converted last
-            // time and written as DICOM this time is not the same file under a
-            // new name.
+            // time and written as DICOM this time is not the same file under
+            // a new name.
             if change == crate::version::Change::Moved
-                && was.is_some_and(|(_, r)| *r != route.name())
+                && was.as_ref().is_some_and(|w| w.route != route)
             {
                 change = crate::version::Change::Rewritten;
             }
             // A stack whose files the last version did not write is not one
             // this version may carry forward, whatever the digest says: the
-            // digest describes the decision and the manifest describes the
-            // tree, and only the manifest knows a file was refused.
+            // digest describes the decision and the state describes the tree,
+            // and only the state knows a file was refused.
             let carried = !change.is_work() || change == crate::version::Change::Moved;
-            let wrote = earlier.as_ref().and_then(|p| p.files.get(&stack));
-            let complete = match settings.layout {
-                Layout::Descriptive => wrote.is_some_and(|f| f.len() == instances.len()),
-                Layout::Bids => wrote.is_some_and(|f| !f.is_empty()),
-            };
-            if carried && !complete {
+            if carried && !was.as_ref().is_some_and(|w| w.files > 0) {
                 change = crate::version::Change::Rewritten;
             }
             jobs.push(Job {
-                stack,
-                fallback: place_of(
-                    &crate::bids::place::Route::SourceData,
-                    settings,
-                    &code,
-                    &label,
-                    &folder,
-                    &stem,
-                    placed,
-                ),
+                stack: planned.stack,
                 place,
-                route: route.name().to_string(),
-                content,
+                fallback: planned.fallback,
+                route,
+                content: planned.content,
                 change,
-                was: was.map(|(w, _)| w.dir.clone()),
-                code: code.clone(),
-                offset,
-                instances,
+                was,
+                code: planned.code,
+                offset: planned.offset,
+                instances: Vec::new(),
             });
         }
     }
-    report.stacks = jobs.len() as i64;
-    let mut people: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for job in &jobs {
-        people.insert(job.code.as_str());
-    }
-    report.subjects = people.len() as i64;
+    // What the state holds and this version does not.
+    let gone = gone_stacks(registry.store(), dataset, report.release_id)?;
 
-    // What the last version wrote and this one does not.
-    let here: std::collections::HashSet<i64> = jobs.iter().map(|j| j.stack).collect();
-    let mut gone: Vec<(i64, String, Vec<Wrote>)> = match &earlier {
-        Some(p) => p
-            .stacks
-            .iter()
-            .filter(|(stack, _)| !here.contains(stack))
-            .map(|(stack, (was, _))| {
-                (
-                    *stack,
-                    was.dir.clone(),
-                    p.files.get(stack).cloned().unwrap_or_default(),
-                )
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    gone.sort_by_key(|(stack, _, _)| *stack);
-
+    // ---------------------------------------------------------------- apply
+    //
     // Everything that leaves goes first, so that a name a move is about to
     // take is free by the time the move happens.
-    for (_, _, files) in &gone {
-        drop_files(settings.root, files);
+    for (_, state) in &gone {
+        drop_files(settings.root, &state.files());
     }
     for job in &jobs {
         if job.change == crate::version::Change::Rewritten
-            && let Some(files) = earlier.as_ref().and_then(|p| p.files.get(&job.stack))
+            && let Some(was) = &job.was
         {
-            drop_files(settings.root, files);
+            drop_files(settings.root, &was.files());
         }
     }
-    let moved = move_them(settings.root, &jobs, earlier.as_ref());
+    let moved = move_them(settings.root, &jobs);
 
     // And only now is anything written.
-    let mut files: Vec<Vec<Param>> = Vec::new();
-    let mut moves: Vec<Vec<Param>> = Vec::new();
     let mut rows: Vec<Vec<Param>> = Vec::new();
+    let mut moves: Vec<Vec<Param>> = Vec::new();
     let mut scans: BTreeMap<(String, String), Vec<crate::bids::dataset::Scan>> = BTreeMap::new();
     for job in &mut jobs {
         // A move whose source is not where the last version left it is not a
         // move. Somebody emptied the tree, and the stack is written again.
         if job.change == crate::version::Change::Moved && !moved.contains(&job.stack) {
             job.change = crate::version::Change::Rewritten;
+            if let Some(was) = &job.was {
+                drop_files(settings.root, &was.files());
+            }
         }
-        let mut mine: Vec<Wrote> = Vec::new();
-        match job.change {
+        let state: State = match job.change {
             crate::version::Change::Unchanged | crate::version::Change::Moved => {
                 // The bytes are the ones the last version wrote, and the
                 // digest with them: nothing was read, so nothing is recomputed.
-                let was = job.was.clone().unwrap_or_default();
-                let key = job.place.key();
-                for w in earlier
-                    .as_ref()
-                    .and_then(|p| p.files.get(&job.stack))
-                    .into_iter()
-                    .flatten()
-                {
-                    report.bytes += w.bytes;
-                    mine.push(Wrote {
-                        path: match job.change {
-                            crate::version::Change::Moved => rebase(&w.path, &was, &key),
-                            _ => w.path.clone(),
-                        },
-                        ..w.clone()
-                    });
+                let was = job.was.clone().unwrap_or_else(|| State {
+                    content: job.content.clone(),
+                    place: job.place.clone(),
+                    route: job.route.clone(),
+                    files: 0,
+                    bytes: 0,
+                    digest: String::new(),
+                    extensions: Vec::new(),
+                });
+                State {
+                    place: job.place.clone(),
+                    ..was
                 }
             }
             _ => {
+                job.instances = instances_of(registry.store(), job.stack)?;
                 let code = job.code.clone();
                 let plan = Plan {
                     policy: settings.policy,
@@ -688,15 +741,15 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                     }
                     Layout::Bids => write_bids(job, &plan, settings, &mut report),
                 };
+                let mut wrote: Vec<Wrote> = Vec::new();
                 for w in written {
                     match w {
                         Ok(w) => {
                             report.written += 1;
-                            report.bytes += w.wrote.bytes;
                             for ((tag, action), n) in &w.applied.changes {
                                 *report.changes.entry(format!("{tag} {action}")).or_insert(0) += n;
                             }
-                            mine.push(w.wrote);
+                            wrote.push(w.wrote);
                         }
                         Err(why) => {
                             // By the reason and never by the path: a report
@@ -707,20 +760,30 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                         }
                     }
                 }
+                job.instances.clear();
+                roll_up(job, &wrote)
             }
-        }
-        report.files += mine.len() as i64;
+        };
+        report.files += state.files;
+        report.bytes += state.bytes;
         rows.push(vec![
-            Param::Int(report.release_id),
+            Param::Int(dataset),
             Param::Int(job.stack),
-            Param::from(job.content.as_str()),
-            Param::from(job.place.dir.as_str()),
-            match &job.place.stem {
+            Param::Int(report.release_id),
+            Param::from(state.content.as_str()),
+            Param::from(state.place.dir.as_str()),
+            match &state.place.stem {
                 Some(stem) => Param::from(stem.as_str()),
                 None => Param::Null,
             },
-            Param::from(job.route.as_str()),
-            Param::Int(mine.len() as i64),
+            Param::from(state.route.as_str()),
+            Param::Int(state.files),
+            Param::Int(state.bytes),
+            Param::from(state.digest.as_str()),
+            match state.extensions.is_empty() {
+                true => Param::Null,
+                false => Param::from(state.extensions.join(",")),
+            },
         ]);
         match job.change {
             crate::version::Change::Unchanged => report.unchanged += 1,
@@ -735,97 +798,64 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                 Param::Int(job.stack),
                 Param::from(job.change.name()),
                 match &job.was {
-                    Some(was) => Param::from(was.as_str()),
+                    Some(was) => Param::from(was.place.key()),
                     None => Param::Null,
                 },
-                Param::from(job.place.key()),
+                Param::from(state.place.key()),
             ]);
         }
-        // §9.4: the time in the standard's own slot, per file, so anything
+        // §9.4: the time in the standard's own slot, per image, so anything
         // joining on a date reads a column instead of parsing a directory name.
-        if settings.layout == Layout::Bids {
+        if settings.layout == Layout::Bids
+            && let Some(stem) = &state.place.stem
+            && let Some(image) = state
+                .extensions
+                .iter()
+                .find(|e| *e == ".nii.gz" || *e == ".nii")
+        {
             let prefix = format!("sub-{}/", job.code);
-            for w in &mine {
-                // The images, and not the sidecars that describe them: a
-                // `_scans.tsv` lists the data files, and a row per `.json`,
-                // `.bval` and `.bvec` is three rows saying the same time.
-                let is_image = w.path.ends_with(".nii") || w.path.ends_with(".nii.gz");
-                if is_image
-                    && let Some(rest) = w.path.strip_prefix(&prefix)
-                    && let Some((session, file)) = rest.split_once('/')
-                    && let Some(label) = session.strip_prefix("ses-")
-                {
-                    scans
-                        .entry((job.code.clone(), label.to_string()))
-                        .or_default()
-                        .push(crate::bids::dataset::Scan {
-                            filename: file.to_string(),
-                            acq_time: acq_times
-                                .get(&job.stack)
-                                .and_then(|t| under_policy(t, settings, job.offset)),
-                        });
-                }
+            let path = format!("{}/{stem}{image}", state.place.dir);
+            if let Some(rest) = path.strip_prefix(&prefix)
+                && let Some((session, file)) = rest.split_once('/')
+                && let Some(label) = session.strip_prefix("ses-")
+            {
+                scans
+                    .entry((job.code.clone(), label.to_string()))
+                    .or_default()
+                    .push(crate::bids::dataset::Scan {
+                        filename: file.to_string(),
+                        acq_time: acq_times
+                            .get(&job.stack)
+                            .and_then(|t| under_policy(t, settings, job.offset)),
+                    });
             }
         }
-        for w in mine {
-            files.push(vec![
-                Param::Int(report.release_id),
-                Param::Int(job.stack),
-                match w.instance {
-                    Some(i) => Param::Int(i),
-                    None => Param::Null,
-                },
-                Param::from(w.path),
-                Param::from(w.digest),
-                Param::Int(w.bytes),
-            ]);
+        if rows.len() >= PLAN_BATCH {
+            upsert_state(registry.store(), &rows)?;
+            rows.clear();
         }
     }
-    for (stack, was, files) in &gone {
+    upsert_state(registry.store(), &rows)?;
+    for (stack, state) in &gone {
         report.removed += 1;
-        let _ = files;
         moves.push(vec![
             Param::Int(report.release_id),
             Param::Int(*stack),
             Param::from(crate::version::Change::Removed.name()),
-            Param::from(was.as_str()),
+            Param::from(state.place.key()),
             Param::Null,
         ]);
     }
+    forget_stacks(registry.store(), dataset, &gone)?;
 
     // §9.5. The files that make the tree a dataset rather than a pile of
     // correctly named images. v0 writes none of them.
     if settings.layout == Layout::Bids {
-        write_dataset(settings, &report, &scans, &jobs).map_err(Error::Io)?;
+        let mut codes: Vec<String> = people.into_iter().collect();
+        codes.sort();
+        write_dataset(settings, &report, &scans, &codes).map_err(Error::Io)?;
     }
 
-    write_rows(
-        registry.store(),
-        "release_file",
-        &[
-            "release_id",
-            "stack_id",
-            "instance_id",
-            "path",
-            "digest",
-            "bytes",
-        ],
-        &files,
-    )?;
-    write_rows(
-        registry.store(),
-        "release_stack",
-        &[
-            "release_id",
-            "stack_id",
-            "content",
-            "dir",
-            "stem",
-            "route",
-            "files",
-        ],
-        &rows,
-    )?;
     write_rows(
         registry.store(),
         "release_move",
@@ -857,9 +887,256 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
     // occasion and not of a stack, and one answer settles every functional
     // stack of it.
     ask_about_tasks(registry.store(), &report, &absent, settings)?;
+    forget_plan(registry.store(), report.release_id)?;
     close_row(registry.store(), &report)?;
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
+}
+
+/// How many plan rows and state rows are written at once.
+const PLAN_BATCH: usize = 2_000;
+
+/// One row of the plan, as read back joined to the state.
+struct Planned {
+    stack: i64,
+    content: String,
+    place: Place,
+    fallback: Place,
+    route: String,
+    code: String,
+    offset: crate::dates::Offset,
+}
+
+fn write_plan(store: &mut Store, rows: &[Vec<Param>]) -> Result<(), Error> {
+    write_rows(
+        store,
+        "release_plan",
+        &[
+            "release_id",
+            "stack_id",
+            "content",
+            "dir",
+            "stem",
+            "route",
+            "fallback_dir",
+            "fallback_stem",
+            "code",
+            "label",
+            "offset_days",
+        ],
+        rows,
+    )
+}
+
+/// One page of the plan, joined to the state, after a stack id.
+///
+/// Paged so that a version holds one page of stacks at a time while it
+/// decides, and never the archive.
+fn plan_page(
+    store: &mut Store,
+    dataset: i64,
+    release: i64,
+    after: i64,
+) -> Result<Vec<(Planned, Option<State>)>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT p.stack_id, p.content, p.dir, p.stem, p.route, p.fallback_dir, p.fallback_stem, \
+                p.code, p.label, p.offset_days, \
+                s.content, s.dir, s.stem, s.route, s.files, s.bytes, s.digest, s.extensions \
+         FROM {} p LEFT JOIN {} s ON s.dataset_id = {} AND s.stack_id = p.stack_id \
+         WHERE p.release_id = {} AND p.stack_id > {} \
+         ORDER BY p.stack_id LIMIT {}",
+        store.qualified("release_plan"),
+        store.qualified("release_stack"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int),
+        d.param(3, Type::Int),
+        PLAN_BATCH,
+    );
+    let mut out = Vec::new();
+    for r in store.query(
+        &sql,
+        &[Param::Int(dataset), Param::Int(release), Param::Int(after)],
+    )? {
+        let planned = Planned {
+            stack: r.int(0)?,
+            content: r.text(1)?.to_string(),
+            place: Place {
+                dir: r.text(2)?.to_string(),
+                stem: r.opt_text(3)?.map(str::to_string),
+            },
+            route: r.text(4)?.to_string(),
+            fallback: Place {
+                dir: r.text(5)?.to_string(),
+                stem: r.opt_text(6)?.map(str::to_string),
+            },
+            code: r.text(7)?.to_string(),
+            offset: crate::dates::Offset(r.int(9)?),
+        };
+        let was = match r.opt_text(10)? {
+            None => None,
+            Some(content) => Some(State {
+                content: content.to_string(),
+                place: Place {
+                    dir: r.text(11)?.to_string(),
+                    stem: r.opt_text(12)?.map(str::to_string),
+                },
+                route: r.text(13)?.to_string(),
+                files: r.int(14)?,
+                bytes: r.int(15)?,
+                digest: r.text(16)?.to_string(),
+                extensions: r
+                    .opt_text(17)?
+                    .map(|e| e.split(',').map(str::to_string).collect())
+                    .unwrap_or_default(),
+            }),
+        };
+        out.push((planned, was));
+    }
+    Ok(out)
+}
+
+/// The stacks the state holds and the plan does not.
+fn gone_stacks(store: &mut Store, dataset: i64, release: i64) -> Result<Vec<(i64, State)>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT s.stack_id, s.content, s.dir, s.stem, s.route, s.files, s.bytes, s.digest, \
+                s.extensions \
+         FROM {} s WHERE s.dataset_id = {} AND NOT EXISTS \
+           (SELECT 1 FROM {} p WHERE p.release_id = {} AND p.stack_id = s.stack_id) \
+         ORDER BY s.stack_id",
+        store.qualified("release_stack"),
+        d.param(1, Type::Int),
+        store.qualified("release_plan"),
+        d.param(2, Type::Int),
+    );
+    let mut out = Vec::new();
+    for r in store.query(&sql, &[Param::Int(dataset), Param::Int(release)])? {
+        out.push((
+            r.int(0)?,
+            State {
+                content: r.text(1)?.to_string(),
+                place: Place {
+                    dir: r.text(2)?.to_string(),
+                    stem: r.opt_text(3)?.map(str::to_string),
+                },
+                route: r.text(4)?.to_string(),
+                files: r.int(5)?,
+                bytes: r.int(6)?,
+                digest: r.text(7)?.to_string(),
+                extensions: r
+                    .opt_text(8)?
+                    .map(|e| e.split(',').map(str::to_string).collect())
+                    .unwrap_or_default(),
+            },
+        ));
+    }
+    Ok(out)
+}
+
+/// Write the state: a new stack is inserted, a known one is overwritten.
+fn upsert_state(store: &mut Store, rows: &[Vec<Param>]) -> Result<(), Error> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let columns = [
+        "dataset_id",
+        "stack_id",
+        "release_id",
+        "content",
+        "dir",
+        "stem",
+        "route",
+        "files",
+        "bytes",
+        "digest",
+        "extensions",
+    ];
+    store.begin()?;
+    let result = store.insert(
+        &Insert::new(table("release_stack"), &columns).on_conflict(
+            nils_registry::dialect::Conflict::Update {
+                target: &["dataset_id", "stack_id"],
+                set: &columns[2..],
+            },
+        ),
+        rows,
+    );
+    match result {
+        Ok(_) => {
+            store.commit()?;
+            Ok(())
+        }
+        Err(e) => {
+            store.rollback().ok();
+            Err(Error::Store(e))
+        }
+    }
+}
+
+fn forget_stacks(store: &mut Store, dataset: i64, gone: &[(i64, State)]) -> Result<(), Error> {
+    for chunk in gone.chunks(500) {
+        let ids = chunk
+            .iter()
+            .map(|(id, _)| id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "DELETE FROM {} WHERE dataset_id = {} AND stack_id IN ({ids})",
+            store.qualified("release_stack"),
+            store.dialect().param(1, Type::Int),
+        );
+        store.execute(&sql, &[Param::Int(dataset)])?;
+    }
+    Ok(())
+}
+
+fn forget_plan(store: &mut Store, release: i64) -> Result<(), Error> {
+    let sql = format!(
+        "DELETE FROM {} WHERE release_id = {}",
+        store.qualified("release_plan"),
+        store.dialect().param(1, Type::Int),
+    );
+    store.execute(&sql, &[Param::Int(release)])?;
+    Ok(())
+}
+
+/// What a version knows about one stack once it has written it.
+///
+/// One digest over the files' digests, sorted by path, so that the same files
+/// give the same roll-up whatever order they were written in.
+fn roll_up(job: &Job, wrote: &[Wrote]) -> State {
+    use blake2::Digest;
+    let mut sorted: Vec<&Wrote> = wrote.iter().collect();
+    sorted.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut h = blake2::Blake2s256::new();
+    for w in &sorted {
+        h.update(w.digest.as_bytes());
+        h.update(b"\n");
+    }
+    let mut extensions: Vec<String> = Vec::new();
+    if let Some(stem) = &job.place.stem {
+        let prefix = format!("{}/{stem}", job.place.dir);
+        for w in &sorted {
+            if let Some(ext) = w.path.strip_prefix(&prefix)
+                && !extensions.iter().any(|e| e == ext)
+            {
+                extensions.push(ext.to_string());
+            }
+        }
+    }
+    State {
+        content: job.content.clone(),
+        place: job.place.clone(),
+        route: job.route.clone(),
+        files: wrote.len() as i64,
+        bytes: wrote.iter().map(|w| w.bytes).sum(),
+        digest: match wrote.is_empty() {
+            true => String::new(),
+            false => hex::encode(h.finalize()),
+        },
+        extensions,
+    }
 }
 
 /// The files that make a tree a dataset (§9.4 and §9.5).
@@ -870,7 +1147,7 @@ fn write_dataset(
     settings: &Settings,
     report: &Report,
     scans: &BTreeMap<(String, String), Vec<crate::bids::dataset::Scan>>,
-    jobs: &[Job],
+    codes: &[String],
 ) -> Result<(), std::io::Error> {
     use crate::bids::dataset;
     let root = settings.root;
@@ -899,10 +1176,7 @@ fn write_dataset(
 
     // One row per subject the release wrote, and nothing about them that the
     // policy did not let out.
-    let mut subjects: Vec<String> = jobs.iter().map(|j| j.code.clone()).collect();
-    subjects.sort();
-    subjects.dedup();
-    let rows: Vec<dataset::Participant> = subjects
+    let rows: Vec<dataset::Participant> = codes
         .iter()
         .map(|id| dataset::Participant {
             id: id.clone(),
@@ -1177,7 +1451,7 @@ fn under_policy(
 /// generous is the point: a release refused for want of room somebody has is a
 /// nuisance, and one that fills a filesystem at three in the morning is an
 /// incident.
-fn preflight(root: &Path, instances: &[Instance]) -> Result<(), Error> {
+fn preflight(root: &Path, wanted: i64) -> Result<(), Error> {
     std::fs::create_dir_all(root)
         .map_err(|e| Error::Refused(format!("{} cannot be written into ({e})", root.display())))?;
     // A file, because a directory that cannot be written into is a permission
@@ -1187,7 +1461,6 @@ fn preflight(root: &Path, instances: &[Instance]) -> Result<(), Error> {
         .map_err(|e| Error::Refused(format!("{} is not writable ({e})", root.display())))?;
     std::fs::remove_file(&probe).ok();
 
-    let wanted: i64 = instances.iter().map(|i| i.size).sum();
     let Some(free) = free_bytes(root) else {
         return Ok(());
     };
@@ -1265,110 +1538,62 @@ fn subject_policy(settings: &Settings, code: &str, offset: crate::dates::Offset)
     )
 }
 
-/// The newest finished release of this dataset into this root.
-///
-/// The root has to match. A release of the same name into a different
-/// directory is a different tree, and comparing against a state that describes
-/// some other directory would leave every unchanged file simply missing.
-///
-/// Ordered by id and not by the version, because `2026.09.05.10` sorts before
-/// `2026.09.05.9` and the tenth version of a day is not the second.
-fn previous(store: &mut Store, name: &str, root: &Path) -> Result<Option<Previous>, Error> {
+/// The dataset a name and a root are a version of, made on first sight.
+fn dataset_of(store: &mut Store, name: &str, root: &Path) -> Result<i64, Error> {
     let d = store.dialect();
     let sql = format!(
-        "SELECT id, version FROM {} WHERE name = {} AND root = {} AND finished_at IS NOT NULL \
-         ORDER BY id DESC LIMIT 1",
-        store.qualified("release"),
+        "SELECT id FROM {} WHERE name = {} AND root = {}",
+        store.qualified("dataset"),
         d.param(1, Type::Text),
         d.param(2, Type::Text),
     );
     let params = [Param::from(name), Param::from(root.display().to_string())];
-    let Some(row) = store.query_opt(&sql, &params)? else {
+    if let Some(r) = store.query_opt(&sql, &params)? {
+        return Ok(r.int(0)?);
+    }
+    let written = store.insert(
+        &Insert::new(table("dataset"), &["name", "root", "created_at"]).returning(&["id"]),
+        &[vec![
+            Param::from(name),
+            Param::from(root.display().to_string()),
+            Param::from(now_iso()),
+        ]],
+    )?;
+    Ok(written.first().map(|r| r.int(0)).transpose()?.unwrap_or(0))
+}
+
+/// The newest finished version of a dataset, by id and not by the version
+/// string, because `2026.09.05.10` sorts before `2026.09.05.9` and the tenth
+/// version of a day is not the second.
+fn newest_version(store: &mut Store, dataset: i64) -> Result<Option<Earlier>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id, version FROM {} WHERE dataset_id = {} AND finished_at IS NOT NULL \
+         ORDER BY id DESC LIMIT 1",
+        store.qualified("release"),
+        d.param(1, Type::Int),
+    );
+    let Some(r) = store.query_opt(&sql, &[Param::Int(dataset)])? else {
         return Ok(None);
     };
-    let (id, version) = (row.int(0)?, row.text(1)?.to_string());
-
-    let d = store.dialect();
-    let sql = format!(
-        "SELECT stack_id, content, dir, stem, route FROM {} WHERE release_id = {}",
-        store.qualified("release_stack"),
-        d.param(1, Type::Int),
-    );
-    let mut stacks = HashMap::new();
-    for r in store.query(&sql, &[Param::Int(id)])? {
-        let dir = r.text(2)?.to_string();
-        // The place, which is the directory and, where the layout has one, the
-        // stem the stack's files share.
-        let place = match r.opt_text(3)? {
-            Some(stem) => format!("{dir}/{stem}"),
-            None => dir,
-        };
-        stacks.insert(
-            r.int(0)?,
-            (
-                crate::version::Was {
-                    content: r.text(1)?.to_string(),
-                    dir: place,
-                },
-                r.opt_text(4)?.unwrap_or("raw").to_string(),
-            ),
-        );
-    }
-
-    let d = store.dialect();
-    let sql = format!(
-        "SELECT stack_id, instance_id, path, digest, bytes FROM {} WHERE release_id = {} \
-         ORDER BY id",
-        store.qualified("release_file"),
-        d.param(1, Type::Int),
-    );
-    let mut files: HashMap<i64, Vec<Wrote>> = HashMap::new();
-    for r in store.query(&sql, &[Param::Int(id)])? {
-        files.entry(r.int(0)?).or_default().push(Wrote {
-            instance: r.opt_int(1)?,
-            path: r.text(2)?.to_string(),
-            digest: r.text(3)?.to_string(),
-            bytes: r.int(4)?,
-        });
-    }
-    Ok(Some(Previous {
-        id,
-        version,
-        stacks,
-        files,
+    Ok(Some(Earlier {
+        id: r.int(0)?,
+        version: r.text(1)?.to_string(),
     }))
 }
 
-/// A file's path under a new place.
-///
-/// The place is a prefix of every file of a stack, so a move is a prefix
-/// swap and the same arithmetic serves both layouts: `dir/00000123.dcm` under a
-/// new directory, and `.../sub-x_ses-1_T1w.nii.gz` under a new stem.
-fn rebase(path: &str, was: &str, now: &str) -> String {
-    match path.strip_prefix(was) {
-        Some(rest) => format!("{now}{rest}"),
-        // A path the old place is not a prefix of is not a file of this stack,
-        // which can only mean the manifest and the state disagree. Keeping it
-        // where it is loses nothing that was not already lost.
-        None => path.to_string(),
-    }
-}
-
-/// Rename every moved stack's directory, and say which arrived.
+/// Rename every moved stack's files, and say which arrived.
 ///
 /// In two phases, through a staging directory, because two stacks can swap
 /// names between versions: a disambiguating suffix moves when a sibling
 /// appears or leaves, and renaming one onto the other in place would lose a
-/// tree.
-fn move_them(
-    root: &Path,
-    jobs: &[Job],
-    earlier: Option<&Previous>,
-) -> std::collections::HashSet<i64> {
+/// tree. A DICOM stack owns its directory and moves as one; a converted stack
+/// is its named files and moves file by file.
+fn move_them(root: &Path, jobs: &[Job]) -> std::collections::HashSet<i64> {
     let mut arrived = std::collections::HashSet::new();
     let moving: Vec<&Job> = jobs
         .iter()
-        .filter(|j| j.change == crate::version::Change::Moved)
+        .filter(|j| j.change == crate::version::Change::Moved && j.was.is_some())
         .collect();
     if moving.is_empty() {
         return arrived;
@@ -1377,71 +1602,95 @@ fn move_them(
     if std::fs::create_dir_all(&staging).is_err() {
         return arrived;
     }
-    let files_of = |job: &Job| -> Vec<Wrote> {
-        earlier
-            .and_then(|p| p.files.get(&job.stack))
-            .cloned()
-            .unwrap_or_default()
-    };
-    let mut staged: Vec<(&Job, Vec<(PathBuf, String)>)> = Vec::new();
+    let mut staged: Vec<(&Job, Vec<Leg>)> = Vec::new();
     for job in &moving {
         let Some(was) = &job.was else { continue };
+        let pairs: Vec<(PathBuf, PathBuf)> = match (was.files(), &job.place.stem) {
+            (Files::Directory(dir), _) => vec![(root.join(dir), root.join(&job.place.dir))],
+            (Files::Named(paths), Some(stem)) => {
+                let old = format!(
+                    "{}/{}",
+                    was.place.dir,
+                    was.place.stem.clone().unwrap_or_default()
+                );
+                paths
+                    .iter()
+                    .map(|p| {
+                        let ext = p.strip_prefix(&old).unwrap_or("");
+                        (
+                            root.join(p),
+                            root.join(format!("{}/{stem}{ext}", job.place.dir)),
+                        )
+                    })
+                    .collect()
+            }
+            (Files::Named(_), None) => Vec::new(),
+        };
         let mut mine = Vec::new();
-        let mut whole = true;
-        for (n, w) in files_of(job).iter().enumerate() {
-            let from = root.join(&w.path);
-            let to = staging.join(format!("{}-{n}", job.stack));
-            match std::fs::rename(&from, &to) {
-                Ok(()) => mine.push((to, rebase(&w.path, was, &job.place.key()))),
+        let mut whole = !pairs.is_empty();
+        for (n, (from, to)) in pairs.into_iter().enumerate() {
+            let park = staging.join(format!("{}-{n}", job.stack));
+            match std::fs::rename(&from, &park) {
+                Ok(()) => mine.push((from, park, to)),
                 Err(_) => whole = false,
             }
         }
-        // Half a move is not a move: the files that did reach the staging area
-        // are left there and the stack is written from scratch, because a tree
-        // holding some of a stack under each of two names is worse than one
-        // holding it under neither.
-        match whole && !mine.is_empty() {
+        // Half a move is not a move: what did reach the staging area is put
+        // back, and the stack is written from scratch, because a tree holding
+        // some of a stack under each of two names is worse than one holding
+        // it under neither.
+        match whole {
             true => staged.push((job, mine)),
             false => {
-                for (path, _) in mine {
-                    std::fs::remove_file(path).ok();
+                for (from, park, _) in mine {
+                    std::fs::rename(&park, &from).ok();
                 }
             }
         }
     }
     for (job, mine) in staged {
         let mut whole = true;
-        for (from, to) in &mine {
-            let target = root.join(to);
-            if let Some(parent) = target.parent()
+        for (_, park, to) in &mine {
+            if let Some(parent) = to.parent()
                 && std::fs::create_dir_all(parent).is_err()
             {
                 whole = false;
                 continue;
             }
-            if std::fs::rename(from, &target).is_err() {
+            if std::fs::rename(park, to).is_err() {
                 whole = false;
             }
         }
         if whole {
             arrived.insert(job.stack);
         }
-    }
-    for job in &moving {
-        for w in files_of(job) {
-            prune(root, root.join(&w.path).parent());
+        for (from, _, _) in &mine {
+            prune(root, from.parent());
         }
     }
     std::fs::remove_dir_all(&staging).ok();
     arrived
 }
 
+/// One file's journey through a move: where it was, where it waits, where
+/// it goes.
+type Leg = (PathBuf, PathBuf, PathBuf);
+
 /// Remove a stack's files, and any directory they leave empty.
-fn drop_files(root: &Path, files: &[Wrote]) {
-    for w in files {
-        let full = root.join(&w.path);
-        std::fs::remove_file(&full).ok();
-        prune(root, full.parent());
+fn drop_files(root: &Path, files: &Files) {
+    match files {
+        Files::Directory(dir) => {
+            let full = root.join(dir);
+            std::fs::remove_dir_all(&full).ok();
+            prune(root, full.parent());
+        }
+        Files::Named(paths) => {
+            for p in paths {
+                let full = root.join(p);
+                std::fs::remove_file(&full).ok();
+                prune(root, full.parent());
+            }
+        }
     }
 }
 
@@ -1464,8 +1713,9 @@ fn prune(root: &Path, from: Option<&Path>) {
     }
 }
 
-/// Every instance the selection names, with what the writer needs.
-fn select(store: &mut Store, selection: &Selection) -> Result<Vec<Instance>, Error> {
+/// The `WHERE` of a selection over the joined tables `i`, `k`, `se`, `su`,
+/// `sf`, `so`, shared by the three readers below so they cannot disagree.
+fn selection_where(store: &mut Store, selection: &Selection) -> String {
     let mut wheres: Vec<String> = Vec::new();
     if !selection.subjects.is_empty() {
         wheres.push(format!(
@@ -1495,11 +1745,6 @@ fn select(store: &mut Store, selection: &Selection) -> Result<Vec<Instance>, Err
     let axis = store.qualified("classification_axis");
     // A stack the pack ruled out is not written, and saying so as a default
     // rather than as a flag is what keeps a release from carrying screenshots.
-    let dispositions = if selection.dispositions.is_empty() {
-        vec!["excluded".to_string()]
-    } else {
-        selection.dispositions.clone()
-    };
     if selection.dispositions.is_empty() {
         wheres.push(format!(
             "NOT EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = k.id AND a.axis = 'disposition' \
@@ -1509,7 +1754,8 @@ fn select(store: &mut Store, selection: &Selection) -> Result<Vec<Instance>, Err
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = k.id AND a.axis = 'disposition' \
              AND a.value IN ({}))",
-            dispositions
+            selection
+                .dispositions
                 .iter()
                 .map(|d| format!("'{}'", d.replace('\'', "''")))
                 .collect::<Vec<_>>()
@@ -1542,35 +1788,103 @@ fn select(store: &mut Store, selection: &Selection) -> Result<Vec<Instance>, Err
             store.qualified("pick"),
         ));
     }
-    let filter = if wheres.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", wheres.join(" AND "))
-    };
-    let sql = format!(
-        // The stored path is relative to the batch root it was walked from,
-        // which is what makes a registry portable; the root is on `source`.
-        "SELECT i.id, k.id, se.subject_id, su.code, se.study_id, so.root, sf.path, \
-          sf.size, sf.mtime_ns \
-         FROM {instance} i \
+    match wheres.is_empty() {
+        true => String::new(),
+        false => format!(" AND {}", wheres.join(" AND ")),
+    }
+}
+
+/// The joined tables every selection reader walks.
+fn selection_from(store: &mut Store) -> String {
+    format!(
+        "FROM {instance} i \
          JOIN {stack} k ON k.id = i.stack_id \
          JOIN {series} se ON se.id = i.series_id \
          JOIN {subject} su ON su.id = se.subject_id \
          JOIN {source_file} sf ON sf.instance_id = i.id \
-         JOIN {source} so ON so.id = sf.source_id{filter} \
-         ORDER BY se.subject_id, se.study_id, k.id, i.id",
+         JOIN {source} so ON so.id = sf.source_id",
         instance = store.qualified("instance"),
         stack = store.qualified("stack"),
         series = store.qualified("series"),
         subject = store.qualified("subject"),
         source_file = store.qualified("source_file"),
         source = store.qualified("source"),
+    )
+}
+
+/// The subjects the selection reaches, in a fixed order.
+fn selected_subjects(
+    store: &mut Store,
+    selection: &Selection,
+) -> Result<Vec<(i64, String)>, Error> {
+    let from = selection_from(store);
+    let filter = selection_where(store, selection);
+    let sql = format!(
+        "SELECT DISTINCT se.subject_id, su.code {from} WHERE 1 = 1{filter} ORDER BY se.subject_id"
     );
     let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
     for r in store.query(&sql, &[])? {
+        out.push((r.int(0)?, r.text(1)?.to_string()));
+    }
+    Ok(out)
+}
+
+/// How much source the selection is, for the preflight.
+fn selection_bytes(store: &mut Store, selection: &Selection) -> Result<i64, Error> {
+    let from = selection_from(store);
+    let filter = selection_where(store, selection);
+    // Cast, because a sum of bigints is a numeric on Postgres and the store
+    // reads a numeric only as text.
+    let sql =
+        format!("SELECT CAST(COALESCE(SUM(sf.size), 0) AS BIGINT) {from} WHERE 1 = 1{filter}");
+    Ok(store
+        .query_opt(&sql, &[])?
+        .map(|r| r.int(0))
+        .transpose()?
+        .unwrap_or(0))
+}
+
+/// One subject's instances, with what the planner needs.
+///
+/// One subject at a time, so that the plan's memory is a function of the
+/// largest subject and not of the archive.
+fn select_subject(
+    store: &mut Store,
+    selection: &Selection,
+    subject: i64,
+) -> Result<Vec<Instance>, Error> {
+    let from = selection_from(store);
+    let filter = selection_where(store, selection);
+    let sql = format!(
+        // The stored path is relative to the batch root it was walked from,
+        // which is what makes a registry portable; the root is on `source`.
+        "SELECT i.id, k.id, se.study_id, so.root, sf.path, \
+                sf.size, sf.mtime_ns \
+         {from} WHERE se.subject_id = {}{filter} \
+         ORDER BY se.study_id, k.id, i.id",
+        store.dialect().param(1, Type::Int),
+    );
+    rows_to_instances(store.query(&sql, &[Param::Int(subject)])?)
+}
+
+/// One stack's instances, read only when the stack is written.
+fn instances_of(store: &mut Store, stack: i64) -> Result<Vec<Instance>, Error> {
+    let from = selection_from(store);
+    let sql = format!(
+        "SELECT i.id, k.id, se.study_id, so.root, sf.path, \
+                sf.size, sf.mtime_ns \
+         {from} WHERE k.id = {} ORDER BY i.id",
+        store.dialect().param(1, Type::Int),
+    );
+    rows_to_instances(store.query(&sql, &[Param::Int(stack)])?)
+}
+
+fn rows_to_instances(rows: Vec<nils_registry::store::Row>) -> Result<Vec<Instance>, Error> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for r in rows {
         let id = r.int(0)?;
-        // An instance may sit under more than one path (§ Wave 1's duplicate
+        // An instance may sit under more than one path (Wave 1's duplicate
         // handling); one copy of it is written.
         if !seen.insert(id) {
             continue;
@@ -1578,12 +1892,10 @@ fn select(store: &mut Store, selection: &Selection) -> Result<Vec<Instance>, Err
         out.push(Instance {
             id,
             stack: r.int(1)?,
-            subject: r.int(2)?,
-            code: r.text(3)?.to_string(),
-            study: r.int(4)?,
-            path: Path::new(r.text(5)?).join(r.text(6)?).display().to_string(),
-            size: r.int(7)?,
-            mtime: r.int(8)?,
+            study: r.int(2)?,
+            path: Path::new(r.text(3)?).join(r.text(4)?).display().to_string(),
+            size: r.int(5)?,
+            mtime: r.int(6)?,
         });
     }
     Ok(out)
@@ -1684,7 +1996,6 @@ fn write_one(instance: &Instance, plan: &Plan, root: &Path, dir: &str) -> Result
 
     Ok(Written {
         wrote: Wrote {
-            instance: Some(instance.id),
             path: relative.display().to_string(),
             digest,
             bytes: bytes.len() as i64,
@@ -1767,7 +2078,6 @@ fn write_bids(
                 match std::fs::read(root.join(&path)) {
                     Ok(bytes) => out.push(Ok(Written {
                         wrote: Wrote {
-                            instance: None,
                             path,
                             digest: hex::encode(digest_of(&bytes)),
                             bytes: bytes.len() as i64,
@@ -1921,7 +2231,8 @@ fn open_row(
     store: &mut Store,
     settings: &Settings,
     version: &str,
-    earlier: Option<&Previous>,
+    dataset: i64,
+    earlier: Option<&Earlier>,
     placements: &BTreeMap<String, String>,
 ) -> Result<i64, Error> {
     let categories: Vec<&str> = settings.categories.iter().map(|c| c.name()).collect();
@@ -1930,6 +2241,7 @@ fn open_row(
             table("release"),
             &[
                 "name",
+                "dataset_id",
                 "version",
                 "previous_id",
                 "root",
@@ -1956,6 +2268,7 @@ fn open_row(
         .returning(&["id"]),
         &[vec![
             Param::from(settings.name),
+            Param::Int(dataset),
             Param::from(version),
             match earlier {
                 Some(p) => Param::Int(p.id),
@@ -2492,6 +2805,22 @@ mod tests {
     use super::*;
     use nils_dicom::synth::TempDir;
 
+    fn state(place: Place, extensions: &[&str]) -> State {
+        let files = match extensions.is_empty() {
+            true => 1,
+            false => extensions.len() as i64,
+        };
+        State {
+            content: "same".to_string(),
+            place,
+            route: "raw".to_string(),
+            files,
+            bytes: files,
+            digest: "d".to_string(),
+            extensions: extensions.iter().map(|e| e.to_string()).collect(),
+        }
+    }
+
     fn job(stack: i64, was: &str, dir: &str) -> Job {
         Job {
             stack,
@@ -2500,29 +2829,10 @@ mod tests {
             route: "raw".to_string(),
             content: "same".to_string(),
             change: crate::version::Change::Moved,
-            was: Some(was.to_string()),
+            was: Some(state(Place::dir(was.to_string()), &[])),
             code: "x".to_string(),
             offset: crate::dates::Offset(0),
             instances: Vec::new(),
-        }
-    }
-
-    /// What the last version wrote, as the manifest holds it.
-    fn wrote(paths: &[(i64, &str)]) -> Previous {
-        let mut files: HashMap<i64, Vec<Wrote>> = HashMap::new();
-        for (stack, path) in paths {
-            files.entry(*stack).or_default().push(Wrote {
-                instance: Some(1),
-                path: path.to_string(),
-                digest: "d".to_string(),
-                bytes: 1,
-            });
-        }
-        Previous {
-            id: 1,
-            version: "2026.01.01.1".to_string(),
-            stacks: HashMap::new(),
-            files,
         }
     }
 
@@ -2549,11 +2859,7 @@ mod tests {
             job(1, "sub-x/ses-1/anat/T1w_1", "sub-x/ses-1/anat/T1w_2"),
             job(2, "sub-x/ses-1/anat/T1w_2", "sub-x/ses-1/anat/T1w_1"),
         ];
-        let earlier = wrote(&[
-            (1, "sub-x/ses-1/anat/T1w_1/00000001.dcm"),
-            (2, "sub-x/ses-1/anat/T1w_2/00000002.dcm"),
-        ]);
-        let arrived = move_them(root, &jobs, Some(&earlier));
+        let arrived = move_them(root, &jobs);
         assert_eq!(arrived.len(), 2);
         assert_eq!(
             read(root, "sub-x/ses-1/anat/T1w_2/00000001.dcm").as_deref(),
@@ -2571,25 +2877,22 @@ mod tests {
     fn a_bids_move_renames_the_files_and_not_a_directory() {
         // The two layouts differ in exactly this: in BIDS stacks share `anat/`
         // and are told apart by their names, so a move is a rename of files
-        // inside one directory.
+        // inside one directory, and the state knows the files by their
+        // extensions rather than by a manifest.
         let dir = TempDir::new("move-bids");
         let root = dir.path();
         write(root, "sub-x/ses-1/anat/sub-x_ses-1_T1w.nii.gz");
         write(root, "sub-x/ses-1/anat/sub-x_ses-1_T1w.json");
-        let mut j = job(1, "sub-x/ses-1/anat/sub-x_ses-1_T1w", "sub-x/ses-1/anat");
+        let mut j = job(1, "sub-x/ses-1/anat", "sub-x/ses-1/anat");
+        j.was = Some(state(
+            Place::file("sub-x/ses-1/anat".into(), "sub-x_ses-1_T1w".into()),
+            &[".nii.gz", ".json"],
+        ));
         j.place = Place::file(
             "sub-x/ses-1/anat".to_string(),
-            "sub-x/ses-1/anat/sub-x_ses-1_acq-Spine_T1w"
-                .rsplit_once('/')
-                .unwrap()
-                .1
-                .to_string(),
+            "sub-x_ses-1_acq-Spine_T1w".to_string(),
         );
-        let earlier = wrote(&[
-            (1, "sub-x/ses-1/anat/sub-x_ses-1_T1w.nii.gz"),
-            (1, "sub-x/ses-1/anat/sub-x_ses-1_T1w.json"),
-        ]);
-        assert_eq!(move_them(root, &[j], Some(&earlier)).len(), 1);
+        assert_eq!(move_them(root, &[j]).len(), 1);
         assert!(
             root.join("sub-x/ses-1/anat/sub-x_ses-1_acq-Spine_T1w.nii.gz")
                 .exists()
@@ -2611,24 +2914,37 @@ mod tests {
         // caller does by reading what did not arrive.
         let dir = TempDir::new("move-gone");
         let jobs = vec![job(1, "sub-x/ses-1/anat/T1w", "sub-x/ses-1/anat/SC_T1w")];
-        let earlier = wrote(&[(1, "sub-x/ses-1/anat/T1w/00000001.dcm")]);
-        assert!(move_them(dir.path(), &jobs, Some(&earlier)).is_empty());
+        assert!(move_them(dir.path(), &jobs).is_empty());
     }
 
     #[test]
     fn half_a_move_is_not_a_move() {
         // A tree holding some of a stack under each of two names is worse than
-        // one holding it under neither, so the stack is written from scratch.
+        // one holding it under neither, so the stack is written from scratch
+        // and what did move is put back first.
         let dir = TempDir::new("move-half");
         let root = dir.path();
-        write(root, "sub-x/ses-1/anat/T1w/00000001.dcm");
-        let jobs = vec![job(1, "sub-x/ses-1/anat/T1w", "sub-x/ses-1/anat/SC_T1w")];
-        let earlier = wrote(&[
-            (1, "sub-x/ses-1/anat/T1w/00000001.dcm"),
-            (1, "sub-x/ses-1/anat/T1w/00000002.dcm"),
-        ]);
-        assert!(move_them(root, &jobs, Some(&earlier)).is_empty());
-        assert!(!root.join("sub-x/ses-1/anat/SC_T1w").exists());
+        write(root, "sub-x/ses-1/anat/sub-x_ses-1_T1w.nii.gz");
+        let mut j = job(1, "sub-x/ses-1/anat", "sub-x/ses-1/anat");
+        j.was = Some(state(
+            Place::file("sub-x/ses-1/anat".into(), "sub-x_ses-1_T1w".into()),
+            &[".nii.gz", ".json"],
+        ));
+        j.place = Place::file(
+            "sub-x/ses-1/anat".into(),
+            "sub-x_ses-1_acq-Spine_T1w".into(),
+        );
+        assert!(move_them(root, &[j]).is_empty());
+        assert!(
+            !root
+                .join("sub-x/ses-1/anat/sub-x_ses-1_acq-Spine_T1w.nii.gz")
+                .exists()
+        );
+        assert!(
+            root.join("sub-x/ses-1/anat/sub-x_ses-1_T1w.nii.gz")
+                .exists(),
+            "what did move was put back"
+        );
     }
 
     #[test]
@@ -2639,13 +2955,7 @@ mod tests {
         let root = dir.path();
         write(root, "sub-x/ses-1/anat/T1w/00000001.dcm");
         write(root, "sub-y/ses-1/anat/T1w/00000002.dcm");
-        drop_files(
-            root,
-            &wrote(&[(1, "sub-x/ses-1/anat/T1w/00000001.dcm")])
-                .files
-                .remove(&1)
-                .unwrap(),
-        );
+        drop_files(root, &Files::Directory("sub-x/ses-1/anat/T1w".into()));
         assert!(!root.join("sub-x").exists());
         assert!(root.join("sub-y/ses-1/anat/T1w").exists(), "and only that");
         assert!(root.exists());
@@ -2657,35 +2967,37 @@ mod tests {
         let root = dir.path();
         write(root, "sub-x/ses-1/anat/T1w/00000001.dcm");
         write(root, "sub-x/ses-1/anat/T2w/00000002.dcm");
-        drop_files(
-            root,
-            &wrote(&[(1, "sub-x/ses-1/anat/T1w/00000001.dcm")])
-                .files
-                .remove(&1)
-                .unwrap(),
-        );
+        drop_files(root, &Files::Directory("sub-x/ses-1/anat/T1w".into()));
         assert!(root.join("sub-x/ses-1/anat/T2w").exists());
+        // And a converted stack's files, by name, leaving its siblings.
+        write(root, "sub-x/ses-1/anat/sub-x_ses-1_T1w.nii.gz");
+        write(root, "sub-x/ses-1/anat/sub-x_ses-1_T1w.json");
+        write(root, "sub-x/ses-1/anat/sub-x_ses-1_T2w.nii.gz");
+        let s = state(
+            Place::file("sub-x/ses-1/anat".into(), "sub-x_ses-1_T1w".into()),
+            &[".nii.gz", ".json"],
+        );
+        drop_files(root, &s.files());
+        assert!(!root.join("sub-x/ses-1/anat/sub-x_ses-1_T1w.json").exists());
+        assert!(
+            root.join("sub-x/ses-1/anat/sub-x_ses-1_T2w.nii.gz")
+                .exists()
+        );
     }
 
     #[test]
-    fn a_place_is_a_prefix_of_every_file_of_the_stack() {
-        // Which is what lets one piece of arithmetic serve both layouts.
-        assert_eq!(
-            rebase(
-                "sub-x/ses-1/anat/T1w/00000001.dcm",
-                "sub-x/ses-1/anat/T1w",
-                "sub-x/ses-1/anat/SC_T1w"
-            ),
-            "sub-x/ses-1/anat/SC_T1w/00000001.dcm"
-        );
-        assert_eq!(
-            rebase(
-                "sub-x/ses-1/anat/sub-x_ses-1_T1w.nii.gz",
-                "sub-x/ses-1/anat/sub-x_ses-1_T1w",
-                "sub-x/ses-1/anat/sub-x_ses-1_acq-Spine_T1w"
-            ),
-            "sub-x/ses-1/anat/sub-x_ses-1_acq-Spine_T1w.nii.gz"
-        );
+    fn a_state_knows_its_files_without_a_manifest() {
+        // The whole of Wave 4a §4's saving: a DICOM stack owns a directory,
+        // a converted stack is its stem plus its extensions, and neither needs
+        // a row per file to be found again.
+        assert!(matches!(
+            state(Place::dir("a/b".into()), &[]).files(),
+            Files::Directory(d) if d == "a/b"
+        ));
+        assert!(matches!(
+            state(Place::file("a/b".into(), "c".into()), &[".nii.gz", ".json"]).files(),
+            Files::Named(v) if v == vec!["a/b/c.nii.gz".to_string(), "a/b/c.json".to_string()]
+        ));
         assert_eq!(Place::dir("a/b".into()).key(), "a/b");
         assert_eq!(Place::file("a/b".into(), "c".into()).key(), "a/b/c");
     }
