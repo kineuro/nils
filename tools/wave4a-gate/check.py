@@ -129,8 +129,10 @@ def bar_release(work: Path) -> list[str]:
         if wrote:
             bad.append(f"{name}: the re-run wrote {wrote} file(s)")
         print(f"       {name}: {first.get('files')} file(s) for {first.get('subjects')} subject(s); again wrote nothing; clinical {first.get('clinical')}")
-        if name == "bids" and not (first.get("clinical") or {}).get("nearest EDSS"):
-            bad.append("bids: no EDSS reached the tree")
+        if name == "bids":
+            nearest = {k: v for k, v in (first.get("clinical") or {}).items() if k.startswith("nearest ")}
+            if not any(nearest.values()):
+                bad.append("bids: no observation reached the tree; name the kinds the cohort has with --observation")
     return bad
 
 

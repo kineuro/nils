@@ -8,6 +8,15 @@
 #
 #     tools/wave4a-gate/cohort.sh --nils BIN --source DIR --csv DIR --maps DIR \
 #         --packs DIR --work DIR [--v0-counts FILE] [--workers N] [--release-subjects N]
+#         [--resume-at release|door] [--observation KIND ...]
+#
+# `--resume-at release` keeps the registry and the imports of an existing
+# work directory and runs the releases, the handover, the door and the bars
+# again; `--resume-at door` keeps the releases too. `--observation KIND`
+# names the observation kinds the BIDS tree carries (Wave 4a section 7.4),
+# EDSS by default; a cohort whose clinical file has no EDSS names what it
+# has. With `--release-subjects N` the N subjects released are the first
+# members that carry an event of one of those kinds.
 #
 # `--release-subjects N` releases the first N members of the cohort rather
 # than all of them, for a host whose disk cannot write the whole cohort in an
@@ -23,7 +32,9 @@
 # and asserts the bars.
 set -euo pipefail
 
-nils=""; source=""; csv=""; maps=""; packs=""; work=""; v0counts=""; workers=16; release_subjects=0
+nils=""; source=""; csv=""; maps=""; packs=""; work=""; v0counts=""; workers=16; release_subjects=0; resume_at=""
+observations=()
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --nils) nils="$2"; shift 2 ;;
@@ -35,22 +46,31 @@ while [[ $# -gt 0 ]]; do
     --v0-counts) v0counts="$2"; shift 2 ;;
     --workers) workers="$2"; shift 2 ;;
     --release-subjects) release_subjects="$2"; shift 2 ;;
+    --resume-at) resume_at="$2"; shift 2 ;;
+    --observation) observations+=("$2"); shift 2 ;;
     *) echo "cohort.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 for v in nils source csv maps packs work; do
   if [[ -z "${!v}" ]]; then echo "cohort.sh: --$v is required" >&2; exit 2; fi
 done
-if [[ -e "$work" ]]; then
+if [[ -z "$resume_at" && -e "$work" ]]; then
   echo "cohort.sh: $work already exists; a gate run never writes into another run's directory" >&2
   exit 2
 fi
+if [[ -n "$resume_at" && "$resume_at" != "door" && "$resume_at" != "release" ]]; then
+  echo "cohort.sh: --resume-at takes release or door" >&2
+  exit 2
+fi
+[[ ${#observations[@]} -eq 0 ]] && observations=(EDSS)
+obs=()
+for o in "${observations[@]}"; do obs+=(--observation "$o"); done
 mkdir -p "$work"
 export NILS_REGISTRY="$work/home"
 export NILS_PACK_DIR="$packs"
 mkdir -p "$NILS_REGISTRY"
 budget="$work/budget.tsv"
-printf 'step\tseconds\n' > "$budget"
+[[ -z "$resume_at" ]] && printf 'step\tseconds\n' > "$budget"
 step() {
   # step NAME command...: run it, time it, record it.
   local name="$1"; shift
@@ -61,6 +81,7 @@ step() {
 }
 [[ -n "$v0counts" ]] && cp "$v0counts" "$work/v0-counts.json"
 
+if [[ -z "$resume_at" ]]; then
 head -c 32 /dev/urandom > "$work/key.bin"
 "$nils" key add gate --from-file "$work/key.bin" >/dev/null
 "$nils" init --key gate --backend sqlite >/dev/null
@@ -89,16 +110,34 @@ step import-events import events "$maps/events.yml" "$csv/events.csv"
 # --- bar 8: the queue a person reads
 "$nils" review list --status open --json > "$work/review-open.json"
 
-# --- bars 2 and 6: both layouts, the clinical export, a re-run that writes nothing
-# What is released: the cohort, or its first N members.
+fi
+
+# What is released: the cohort, or its first N members that carry an event
+# of one of the observation kinds named, so the clinical export has
+# something to carry.
 "$nils" select --cohort nmosd --json > "$work/select-cohort.json"
 sel=(--cohort nmosd)
 door_selection='"cohorts": ["nmosd"]'
 if [[ "$release_subjects" -gt 0 ]]; then
-  mapfile -t chosen < <(python3 - "$work/select-cohort.json" "$release_subjects" <<'PY'
-import json, sys
+  mapfile -t chosen < <(python3 - "$work/select-cohort.json" "$release_subjects" "$work/home/registry.db" "${observations[@]}" <<'PY'
+import json, sqlite3, sys
 doc = json.load(open(sys.argv[1]))
-for code in doc["selection"]["subjects"][: int(sys.argv[2])]:
+n = int(sys.argv[2])
+codes = doc["selection"]["subjects"]
+try:
+    c = sqlite3.connect(sys.argv[3])
+    kinds = [k.lower() for k in sys.argv[4:]]
+    with_events = set()
+    for code, cnt in c.execute(
+        "SELECT su.code, COUNT(e.id) FROM subject su JOIN event e ON e.subject_id = su.id "
+        "JOIN observation_type ot ON ot.id = e.observation_type_id WHERE LOWER(ot.name) IN (%s) "
+        "GROUP BY su.code" % ",".join("?" * len(kinds)), kinds):
+        if cnt:
+            with_events.add(code)
+    ordered = [c for c in codes if c in with_events] + [c for c in codes if c not in with_events]
+except Exception:
+    ordered = codes
+for code in ordered[:n]:
     print(code)
 PY
 )
@@ -107,15 +146,19 @@ PY
   door_selection="\"subjects\": [$(printf '"%s",' "${chosen[@]}" | sed 's/,$//')]"
   echo "gate: releasing ${#chosen[@]} of the cohort's subjects" >&2
 fi
+
+if [[ "$resume_at" != "door" ]]; then
+# --- bars 2 and 6: both layouts, the clinical export, a re-run that writes nothing
+rm -rf "$work/desc" "$work/bids" "$work/ship"
 step release-descriptive "$nils" release --out "$work/desc" --name cohort-desc --layout descriptive \
   --on-unknown write "${sel[@]}" --json > "$work/desc.json"
 step release-descriptive-again "$nils" release --out "$work/desc" --name cohort-desc --layout descriptive \
   --on-unknown write "${sel[@]}" --json > "$work/desc-again.json"
 if command -v dcm2niix >/dev/null; then
   step release-bids "$nils" release --out "$work/bids" --name cohort-bids --layout bids \
-    --on-unknown write --observation EDSS "${sel[@]}" --json > "$work/bids.json"
+    --on-unknown write "${obs[@]}" "${sel[@]}" --json > "$work/bids.json"
   step release-bids-again "$nils" release --out "$work/bids" --name cohort-bids --layout bids \
-    --on-unknown write --observation EDSS "${sel[@]}" --json > "$work/bids-again.json"
+    --on-unknown write "${obs[@]}" "${sel[@]}" --json > "$work/bids-again.json"
 else
   echo "gate: dcm2niix is not installed here; the BIDS half is skipped" >&2
 fi
@@ -129,21 +172,22 @@ else
   echo "gate: 7z is not installed here; the handover is skipped" >&2
 fi
 
+fi
+rm -rf "$work/door-desc"
+
 # --- bar 9: a second process through the door does what the command line did
 "$nils" status --json > "$work/status.json"
 "$nils" custody --json > "$work/custody.json"
 "$nils" select --cohort nmosd --json > "$work/select.json"
-door() {
-  # door N: serve N requests on a free port, in the background; prints the port.
-  "$nils" serve --bind 127.0.0.1:0 --requests "$1" > "$work/serve.out" 2> "$work/serve.err" &
-  serve_pid=$!
-  for _ in $(seq 1 50); do
-    if [[ -s "$work/serve.out" ]]; then break; fi
-    sleep 0.2
-  done
-  awk 'NR == 1 {print $3}' "$work/serve.out" | cut -d: -f2
-}
-port="$(door 7)"
+# Seven requests on a free port, in the background, the port read from the
+# first line the server prints.
+"$nils" serve --bind 127.0.0.1:0 --requests 7 > "$work/serve.out" 2> "$work/serve.err" &
+serve_pid=$!
+for _ in $(seq 1 50); do
+  if [[ -s "$work/serve.out" ]]; then break; fi
+  sleep 0.2
+done
+port="$(awk 'NR == 1 {print $3}' "$work/serve.out" | cut -d: -f2)"
 url="http://127.0.0.1:$port/api"
 curl -s "$url/capabilities" > "$work/door-capabilities.json"
 curl -s "$url/status" > "$work/door-status.json"
