@@ -97,13 +97,13 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 
 | | |
 |---|---|
-| what | every run and purge: its arguments, host and pid, progress, counts and outcome |
+| what | every verb that runs longer than a second, and the queue (Wave 4a section 9.1): its command line and arguments, host and pid, heartbeat, progress, counts and outcome |
 | where | rows of job and ingest_batch in the registry |
-| holds | quasi-identifying: the root path in a run's arguments<br>technical: the counts, the host name, the pid, the times, the outcome |
+| holds | quasi-identifying: the root path in a run's arguments and command line<br>technical: the counts, the host name, the pid, the times, the outcome |
 | kept | until deleted with the registry |
-| read | `nils status [--batch <id>]` |
-| change | no command |
-| export | `nils status --json`<br>`nils status --batch <id> --json` |
+| read | `nils status [--batch <id>]`<br>`nils jobs list [--all]`<br>`nils jobs show <id>` |
+| change | `nils jobs cancel <id>`<br>`nils jobs enqueue -- <command>`<br>`nils jobs work`<br>`nils jobs resume <id>` |
+| export | `nils status --json`<br>`nils status --batch <id> --json`<br>`nils jobs list --all --json` |
 | delete | with the registry |
 
 ## logs

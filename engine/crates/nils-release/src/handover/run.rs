@@ -96,7 +96,31 @@ struct Version {
 }
 
 /// Pack a release into archives, and record what was sent.
+/// A handover is a job (Wave 4a §9.1), like the release it ships.
 pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error> {
+    use nils_registry::job;
+    let job_id = job::claim(
+        registry.store(),
+        &job::Claim {
+            kind: "handover",
+            name: settings.release,
+            args: serde_json::json!({ "out": settings.out.display().to_string() }),
+        },
+    )
+    .map_err(|e| match e {
+        job::Error::Store(e) => Error::Store(e),
+        other => Error::Refused(other.to_string()),
+    })?;
+    let result = run_handover(registry, settings);
+    let (state, error) = match &result {
+        Ok(_) => (job::State::Done, None),
+        Err(e) => (job::State::Failed, Some(e.to_string())),
+    };
+    let _ = job::finish(registry.store(), job_id, state, error.as_deref());
+    result
+}
+
+fn run_handover(registry: &mut Registry, settings: &Settings) -> Result<Report, Error> {
     let started = std::time::Instant::now();
     let found = newest(registry.store(), settings.release)?;
     let Some(found) = found else {

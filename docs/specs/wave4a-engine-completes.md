@@ -673,6 +673,32 @@ resumes; a job is resumable because nothing is in flight (principle 4). The
 doors of §11 answer 202 with this job's id, and nothing else, for anything
 heavy.
 
+**As built (slice 11, 2026-09-06).** The one model is `nils_registry::job`:
+`claim` (per kind: a fresh running job of the same kind refuses, a stale
+one of any kind is failed on the way, a job of this host whose process is
+gone is over however fresh its last beat; the claim records the process's
+command line under `args.argv`), `beat` (the heartbeat with the progress
+record beside it, returning whether a cancel was asked meanwhile), `finish`,
+`request_cancel` (a running job becomes `cancelling` and stops at its next
+heartbeat the way the first signal stops it, so what is written stays
+written; a queued one is cancelled outright), `list`, `show`, and the
+queue: `enqueue` (a command line as a row in state `queued`, its kind the
+verb), `next_queued`, `take`. The digest's and the classifier's claim paths
+are gone; the digest, fingerprint, classify, pick, release, handover,
+clinical import (apply, not preview) and linkage purge all claim through
+it, and the release's, the handover's, the pick's and the import's rows are
+new. `nils jobs list [--all] | show <id> | cancel <id> | resume <id> |
+enqueue [--name] -- <command> | work [--once] [--every]`. A worker is a
+job of kind `worker`; it takes the oldest queued row, runs the command
+line in its own registry as a child process with `NILS_JOB_ID` set, and
+the verb's claim **adopts** that row instead of making a second one, so a
+queued job is one row from the queue to the outcome and the id a door
+answers 202 with is the id whose progress is read; the worker writes the
+outcome only when the verb did not. A resume runs the recorded command
+line again as a child process, which is enough because every verb resumes
+by design (nothing is in flight). The pool of §13's default belongs to
+`nils serve` (slice 14).
+
 ### 9.2 The principal and the audit log
 
 Today `actor` is a string read from the environment. It becomes a principal on

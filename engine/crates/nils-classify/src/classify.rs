@@ -796,7 +796,7 @@ fn run(
             }
         }
 
-        crate::job::beat(store, job_id)?;
+        crate::job::beat(store, job_id, cancel)?;
         after = last;
         if rows.len() < window {
             break;
@@ -987,7 +987,7 @@ fn dispose(
             }
         }
 
-        crate::job::beat(store, job_id)?;
+        crate::job::beat(store, job_id, cancel)?;
         after = last;
         if rows.len() < window {
             break;

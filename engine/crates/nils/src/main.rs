@@ -80,6 +80,11 @@ enum Command {
     },
     /// The registry: its metadata, the running jobs, the last batches
     Status(StatusArgs),
+    /// The jobs: every verb that runs longer than a second is one, with a
+    /// heartbeat and its progress; list, show, cancel, resume, queue and
+    /// work them (Wave 4a section 9.1)
+    #[command(subcommand)]
+    Jobs(JobsCommand),
     /// What private elements an archive carries, by creator, so an allowlist
     /// is chosen from the data rather than from a chair (§8.4)
     Private(PrivateArgs),
@@ -311,6 +316,50 @@ struct SelectArgs {
     /// Machine-readable output
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum JobsCommand {
+    /// The jobs not over, newest first; --all for the finished ones too
+    List {
+        #[arg(long)]
+        all: bool,
+        /// How many to show
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One job: its state, its progress, its error, its command line
+    Show {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ask a running job to stop at its next heartbeat, or drop a queued one
+    Cancel { id: i64 },
+    /// Run a finished, failed or cancelled job again, from the command line
+    /// it recorded; every verb resumes, because nothing is in flight
+    Resume { id: i64 },
+    /// Put a nils command line on the queue, to be run by a worker in its
+    /// turn: `nils jobs enqueue -- digest /data --name x`
+    Enqueue {
+        /// A name for the queued job
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// The command line, without the leading `nils`
+        #[arg(trailing_var_arg = true, required = true, value_name = "ARGS")]
+        command: Vec<String>,
+    },
+    /// Run queued jobs, oldest first, one at a time; stops when the queue
+    /// is empty with --once, else waits for more
+    Work {
+        #[arg(long)]
+        once: bool,
+        /// Seconds between looks at an empty queue
+        #[arg(long, default_value = "5")]
+        every: u64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -851,6 +900,7 @@ fn main() -> ExitCode {
         Command::Handover(command) => handover_command(&home, command),
         Command::Clinical(command) => clinical_command(&home, command),
         Command::Select(args) => select_preview(&home, args),
+        Command::Jobs(command) => jobs_command(&home, command),
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
@@ -2117,34 +2167,25 @@ fn purge(
         "identities": purged.identities,
         "linkages": purged.linkages,
     });
-    let host = nils_digest::digest::hostname();
-    registry.store().insert(
-        &Insert::new(
-            table("job"),
-            &[
-                "kind",
-                "name",
-                "args",
-                "state",
-                "pid",
-                "host",
-                "started_at",
-                "heartbeat_at",
-                "finished_at",
-            ],
-        ),
-        &[vec![
-            Param::from("linkage-purge"),
-            Param::from(target.as_str()),
-            Param::from(args.to_string()),
-            Param::from("done"),
-            Param::from(i64::from(std::process::id())),
-            Param::from(host.as_str()),
-            Param::from(now.as_str()),
-            Param::from(now.as_str()),
-            Param::from(now.as_str()),
-        ]],
-    )?;
+    // Recorded as a job, done (Wave 4a section 9.1): what it removed is in
+    // the args, and never what the identifiers were.
+    let _ = now;
+    let job_id = nils_registry::job::claim(
+        registry.store(),
+        &nils_registry::job::Claim {
+            kind: "linkage-purge",
+            name: target.as_str(),
+            args,
+        },
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    nils_registry::job::finish(
+        registry.store(),
+        job_id,
+        nils_registry::job::State::Done,
+        None,
+    )
+    .map_err(|e| fail(e.to_string()))?;
     println!(
         "purged {} identifier(s) and {} linkage(s) of {target}; the read audit and the registry's subjects stay, and a file parsed again files its identifier again (an unchanged file does not)",
         purged.identities, purged.linkages
@@ -2918,16 +2959,16 @@ fn custody(home: &Home, json: bool, markdown: bool) -> Result<(), Exit> {
         }),
         serde_json::json!({
             "store": "job records",
-            "what": "every run and purge: its arguments, host and pid, progress, counts and outcome",
+            "what": "every verb that runs longer than a second, and the queue (Wave 4a section 9.1): its command line and arguments, host and pid, heartbeat, progress, counts and outcome",
             "where": "rows of job and ingest_batch in the registry",
             "files": [],
-            "holds": ["quasi-identifying: the root path in a run's arguments", "technical: the counts, the host name, the pid, the times, the outcome"],
+            "holds": ["quasi-identifying: the root path in a run's arguments and command line", "technical: the counts, the host name, the pid, the times, the outcome"],
             "counts": { "jobs": jobs, "batches": batches },
             "kept": "until deleted with the registry",
             "commands": {
-                "read": ["nils status [--batch <id>]"],
-                "change": [],
-                "export": ["nils status --json", "nils status --batch <id> --json"],
+                "read": ["nils status [--batch <id>]", "nils jobs list [--all]", "nils jobs show <id>"],
+                "change": ["nils jobs cancel <id>", "nils jobs enqueue -- <command>", "nils jobs work", "nils jobs resume <id>"],
+                "export": ["nils status --json", "nils status --batch <id> --json", "nils jobs list --all --json"],
                 "delete": "with the registry",
             },
         }),
@@ -4127,6 +4168,213 @@ fn resolve_or_refuse(
         return Err(usage(lines.join("\n")));
     }
     Ok(resolved)
+}
+
+/// `nils jobs`: the one job model at the command line (Wave 4a section 9.1).
+fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
+    use nils_registry::job::{self, State};
+    let mut registry = open(home)?;
+    let store = registry.store();
+    let err = |e: job::Error| fail(e.to_string());
+    match command {
+        JobsCommand::List { all, limit, json } => {
+            let jobs = job::list(store, all, limit).map_err(err)?;
+            if json {
+                let doc: Vec<serde_json::Value> = jobs.iter().map(job::Job::as_json).collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&doc).map_err(|e| fail(e.to_string()))?
+                );
+                return Ok(());
+            }
+            if jobs.is_empty() {
+                println!(
+                    "{}",
+                    if all {
+                        "no jobs"
+                    } else {
+                        "no job is queued or running; --all lists the finished ones"
+                    }
+                );
+                return Ok(());
+            }
+            println!(
+                "  {:>6}  {:<16} {:<11} {:<20} {:<20} name",
+                "id", "kind", "state", "started", "last heard"
+            );
+            for j in &jobs {
+                println!(
+                    "  {:>6}  {:<16} {:<11} {:<20} {:<20} {}",
+                    j.id,
+                    j.kind,
+                    j.state.name(),
+                    &j.started_at[..j.started_at.len().min(19)],
+                    j.heartbeat_at
+                        .as_deref()
+                        .map(|t| &t[..t.len().min(19)])
+                        .unwrap_or(""),
+                    j.name.as_deref().unwrap_or("")
+                );
+            }
+            Ok(())
+        }
+        JobsCommand::Show { id, json } => {
+            let Some(j) = job::show(store, id).map_err(err)? else {
+                return Err(usage(format!("no job {id}")));
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&j.as_json()).map_err(|e| fail(e.to_string()))?
+                );
+                return Ok(());
+            }
+            println!("job {}  {}  {}", j.id, j.kind, j.state.name());
+            if let Some(n) = &j.name {
+                println!("  name        {n}");
+            }
+            println!("  started     {}", j.started_at);
+            if let Some(t) = &j.heartbeat_at {
+                println!("  last heard  {t}");
+            }
+            if let Some(t) = &j.finished_at {
+                println!("  finished    {t}");
+            }
+            if let (Some(p), Some(h)) = (j.pid, &j.host) {
+                println!("  process     {p} on {h}");
+            }
+            if let Some(e) = &j.error {
+                println!("  error       {e}");
+            }
+            if let Some(p) = &j.progress {
+                println!("  progress    {p}");
+            }
+            if let Some(argv) = j.argv() {
+                println!(
+                    "  command     nils {}",
+                    argv.iter().skip(1).cloned().collect::<Vec<_>>().join(" ")
+                );
+            }
+            Ok(())
+        }
+        JobsCommand::Cancel { id } => match job::request_cancel(store, id).map_err(err)? {
+            None => Err(usage(format!("no job {id}"))),
+            Some(State::Cancelling) => {
+                println!("job {id} is asked to stop; it does at its next heartbeat");
+                Ok(())
+            }
+            Some(State::Cancelled) => {
+                println!("job {id} was queued and is cancelled");
+                Ok(())
+            }
+            Some(other) => {
+                println!("job {id} is {}; nothing to cancel", other.name());
+                Ok(())
+            }
+        },
+        JobsCommand::Resume { id } => {
+            let Some(j) = job::show(store, id).map_err(err)? else {
+                return Err(usage(format!("no job {id}")));
+            };
+            if !j.state.is_over() {
+                return Err(usage(format!(
+                    "job {id} is {}; a job resumes once it is over",
+                    j.state.name()
+                )));
+            }
+            let Some(argv) = j.argv().filter(|a| a.len() > 1) else {
+                return Err(usage(format!(
+                    "job {id} recorded no command line; it was made before this binary or by a door"
+                )));
+            };
+            println!("running again: nils {}", argv[1..].join(" "));
+            let status = std::process::Command::new(
+                std::env::current_exe().map_err(|e| fail(e.to_string()))?,
+            )
+            .args(&argv[1..])
+            .status()
+            .map_err(|e| fail(format!("could not run the job again: {e}")))?;
+            match status.code() {
+                Some(0) => Ok(()),
+                Some(c) => Err(Exit {
+                    code: u8::try_from(c).unwrap_or(FAILED),
+                    message: String::new(),
+                }),
+                None => Err(fail("the job was stopped by a signal")),
+            }
+        }
+        JobsCommand::Enqueue { name, command } => {
+            let id = job::enqueue(store, &command, name.as_deref()).map_err(err)?;
+            println!("queued job {id}: nils {}", command.join(" "));
+            Ok(())
+        }
+        JobsCommand::Work { once, every } => {
+            let worker = job::claim(
+                store,
+                &job::Claim {
+                    kind: "worker",
+                    name: "queue",
+                    args: serde_json::json!({ "once": once }),
+                },
+            )
+            .map_err(|e| match e {
+                job::Error::Busy { .. } => Exit {
+                    code: BUSY,
+                    message: e.to_string(),
+                },
+                other => fail(other.to_string()),
+            })?;
+            let cancel = stop_on_signal()?;
+            let mut ran = 0usize;
+            let outcome = loop {
+                if cancel.stop() {
+                    break Ok(());
+                }
+                if job::beat(store, worker, Some(&serde_json::json!({ "ran": ran })))
+                    .map_err(err)?
+                    == job::Asked::Cancel
+                {
+                    break Ok(());
+                }
+                let Some(next) = job::next_queued(store).map_err(err)? else {
+                    if once {
+                        break Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(every.max(1)));
+                    continue;
+                };
+                if !job::take(store, next.id).map_err(err)? {
+                    continue;
+                }
+                let argv = next.argv().unwrap_or_default();
+                println!("job {}: nils {}", next.id, argv.join(" "));
+                // The queued command line names no registry; the worker's
+                // is the one it runs in.
+                let status = std::process::Command::new(
+                    std::env::current_exe().map_err(|e| fail(e.to_string()))?,
+                )
+                .arg("--registry")
+                .arg(home.dir())
+                .args(&argv)
+                .env(job::ADOPT_VAR, next.id.to_string())
+                .status();
+                // The verb adopted the row and finished it itself; the
+                // worker writes the outcome only when the verb did not.
+                let (state, error) = match status {
+                    Ok(s) if s.success() => (State::Done, None),
+                    Ok(s) => (State::Failed, Some(format!("exit status {s}"))),
+                    Err(e) => (State::Failed, Some(e.to_string())),
+                };
+                let now_state = job::show(store, next.id).map_err(err)?.map(|j| j.state);
+                if now_state.is_some_and(|s| !s.is_over()) || state == State::Failed {
+                    job::finish(store, next.id, state, error.as_deref()).map_err(err)?;
+                }
+                ran += 1;
+            };
+            let _ = job::finish(store, worker, State::Done, None);
+            outcome
+        }
+    }
 }
 
 /// `nils select`: what a selection reaches, without releasing it.

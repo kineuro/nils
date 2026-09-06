@@ -13,12 +13,11 @@ use std::fmt;
 use std::time::Instant;
 
 use nils_digest::Cancel;
-use nils_digest::cancel::process_alive;
 use nils_digest::rss::peak_rss;
 use nils_registry::dialect::Conflict;
+use nils_registry::job;
 use nils_registry::schema::{Column, table};
 use nils_registry::store::{Insert, Param, Store};
-use nils_registry::time::{now_iso, now_secs, secs_of};
 use nils_registry::{HomeError, Registry};
 
 use crate::dwi;
@@ -114,103 +113,24 @@ impl From<nils_registry::store::Error> for Error {
     }
 }
 
-fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "unknown".into())
-}
-
-/// Take the registry, failing a stale job and refusing a live one, then insert
-/// this run's job row. The same rule the digest uses (Wave 1 §10): a job of
-/// this host whose process is gone left no one to beat its heart.
+/// Claim the kind through the one job model (Wave 4a §9.1) and record this
+/// run. The same rule the digest uses (Wave 1 §10): a fresh job of this
+/// kind refuses, a stale one is taken over.
 pub fn claim_for(registry: &mut Registry, settings: &Settings, kind: &str) -> Result<i64, Error> {
     registry.refresh_meta()?;
-    let now = now_iso();
-    let host = hostname();
-    let pid = i64::from(std::process::id());
-    let job_t = table("job");
-    let store = registry.store();
-    let dialect = store.dialect();
-    let stamp = |name: &str| {
-        dialect.text_of_qualified(
-            None,
-            job_t
-                .column(name)
-                .unwrap_or_else(|| panic!("job.{name} is not a column")),
-        )
-    };
-    // The two timestamps are read as text: Postgres hands a timestamp back in
-    // a type the store does not read, and this select only ever sees a row
-    // when another job is running, which is exactly when it must not fail.
-    let sql = format!(
-        "SELECT id, {}, {}, pid, host FROM {} WHERE state = 'running'",
-        stamp("heartbeat_at"),
-        stamp("started_at"),
-        store.qualified("job")
-    );
-    for j in store.query(&sql, &[])? {
-        let id = j.int(0)?;
-        let last = j
-            .opt_text(1)?
-            .or(j.opt_text(2)?)
-            .unwrap_or_default()
-            .to_string();
-        let its_pid = j.opt_int(3)?;
-        let its_host = j.opt_text(4)?.unwrap_or_default();
-        let gone = its_host == host && its_pid.is_some_and(|p| process_alive(p) == Some(false));
-        let fresh = secs_of(&last).is_some_and(|s| now_secs().saturating_sub(s) < FRESH_SECS);
-        if fresh && !gone {
-            return Err(Error::Busy {
-                job_id: id,
-                since: last,
-            });
-        }
-        store.update_by_id(
-            job_t,
-            &[
-                ("state", Param::from("failed")),
-                ("finished_at", Param::from(now.as_str())),
-                ("error", Param::from("stale: no heartbeat")),
-            ],
-            "id",
-            id,
-        )?;
-    }
-    let rows = store.insert(
-        &Insert::new(
-            job_t,
-            &[
-                "kind",
-                "name",
-                "args",
-                "state",
-                "pid",
-                "host",
-                "started_at",
-                "heartbeat_at",
-            ],
-        )
-        .returning(&["id"]),
-        &[vec![
-            Param::from(kind),
-            Param::from(settings.name.as_str()),
-            Param::from(settings.config().to_string()),
-            Param::from("running"),
-            Param::Int(pid),
-            Param::from(host.as_str()),
-            Param::from(now.as_str()),
-            Param::from(now.as_str()),
-        ]],
-    )?;
-    Ok(rows
-        .first()
-        .ok_or_else(|| {
-            Error::Store(nils_registry::store::Error::Message(
-                "the job row was not written back".into(),
-            ))
-        })?
-        .int(0)?)
+    job::claim(
+        registry.store(),
+        &job::Claim {
+            kind,
+            name: settings.name.as_str(),
+            args: settings.config(),
+        },
+    )
+    .map_err(|e| match e {
+        job::Error::Busy { job_id, since, .. } => Error::Busy { job_id, since },
+        job::Error::Store(e) => Error::Store(e),
+        job::Error::Message(m) => Error::Store(nils_registry::store::Error::Message(m)),
+    })
 }
 
 pub fn finish(
@@ -219,27 +139,29 @@ pub fn finish(
     state: &str,
     error: Option<&str>,
 ) -> Result<(), Error> {
-    let now = now_iso();
-    let mut set: Vec<(&str, Param)> = vec![
-        ("state", Param::from(state)),
-        ("finished_at", Param::from(now.as_str())),
-    ];
-    if let Some(e) = error {
-        set.push(("error", Param::from(e)));
+    let state = job::State::parse(state).ok_or_else(|| {
+        Error::Store(nils_registry::store::Error::Message(format!(
+            "no job state {state}"
+        )))
+    })?;
+    job::finish(store, job_id, state, error).map_err(store_error)
+}
+
+/// The heartbeat, and the cancel a person asked for through `nils jobs
+/// cancel`, which stops the run the way a signal would.
+pub fn beat(store: &mut Store, job_id: i64, cancel: &Cancel) -> Result<(), Error> {
+    if job::beat(store, job_id, None).map_err(store_error)? == job::Asked::Cancel && !cancel.stop()
+    {
+        cancel.request();
     }
-    store.update_by_id(table("job"), &set, "id", job_id)?;
     Ok(())
 }
 
-pub fn beat(store: &mut Store, job_id: i64) -> Result<(), Error> {
-    let now = now_iso();
-    store.update_by_id(
-        table("job"),
-        &[("heartbeat_at", Param::from(now.as_str()))],
-        "id",
-        job_id,
-    )?;
-    Ok(())
+fn store_error(e: job::Error) -> Error {
+    match e {
+        job::Error::Store(e) => Error::Store(e),
+        other => Error::Store(nils_registry::store::Error::Message(other.to_string())),
+    }
 }
 
 /// Derive and store the fingerprint of every stack in scope.
@@ -404,7 +326,7 @@ fn run(
             }
         }
 
-        beat(store, job_id)?;
+        beat(store, job_id, cancel)?;
         after = last;
         if rows.len() < window {
             break;
