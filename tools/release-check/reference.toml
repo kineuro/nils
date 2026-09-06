@@ -62,3 +62,12 @@ files = [
   "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax2DGRE_echo-2_T1w.nii.gz",
   "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax3DMPRAGE_ce-contrast_T1w.nii.gz",
 ]
+
+[private]
+# Wave 4a section 5: the diffusion series carries a Siemens block. The pack's
+# release list names the b value and the directionality, so they leave; the
+# coil string is ingested into the registry and never released. The gate reads
+# the released tree with `nils private`, which counts shapes and never values,
+# and asserts that nothing it finds is outside the release list.
+kept = ["0019xx0C SIEMENS MR HEADER", "0019xx0D SIEMENS MR HEADER"]
+dropped = ["0051xx0F SIEMENS MR HEADER"]

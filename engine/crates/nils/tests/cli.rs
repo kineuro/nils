@@ -1871,9 +1871,11 @@ fn a_release_is_versioned_and_a_re_run_writes_nothing() {
     assert!(text.contains("stacks left alone"), "{text}");
 }
 
-/// A tree whose files carry a Siemens block: a b value that varies and a
-/// creator element, so a survey has something to suggest and a digest
-/// something to ingest (Wave 4a section 5).
+/// A tree whose files carry a Siemens block: a b value that varies, a
+/// gradient mode that does not, and a field of view that changes per file
+/// (which no real acquisition does), so a survey has something to name, a
+/// digest something to ingest, and the measurement a per-image value to
+/// call out (Wave 4a section 5).
 fn private_tree() -> TempDir {
     let dir = TempDir::new("cli-private");
     for i in 1..=4 {
@@ -1898,6 +1900,16 @@ fn private_tree() -> TempDir {
             dicom_core::Tag(0x0019, 0x100F),
             dicom_core::VR::SH,
             "Fast",
+        ));
+        e.push(synth::text(
+            dicom_core::Tag(0x0051, 0x0010),
+            dicom_core::VR::LO,
+            "SIEMENS MR HEADER",
+        ));
+        e.push(synth::text(
+            dicom_core::Tag(0x0051, 0x100C),
+            dicom_core::VR::SH,
+            &format!("FoV {}*{}", 200 + i, 200 + i),
         ));
         dir.file(
             &format!("a/{i}"),
@@ -1961,13 +1973,13 @@ fn nils_private_names_what_it_finds_and_suggests_what_varies() {
     assert!(text.contains("named by mri@"), "{text}");
     assert!(text.contains("B_value"), "the dictionary names it: {text}");
     assert!(
-        text.contains("[ingested as siemens_b_value]"),
-        "and the pack reads it already: {text}"
+        text.contains("[ingested as siemens_gradient_mode]"),
+        "and the pack reads the gradient mode already: {text}"
     );
 
     // The suggestion is what varies and is not read yet: the gradient mode
-    // here is a constant, so nothing is suggested from four files that agree
-    // on it, and the b value is already ingested.
+    // here is a constant, and four values are not enough variety to reach
+    // the cap, so nothing is suggested from four files.
     let suggested = nils()
         .args(registry)
         .args(["private", "--suggest", "--pack-dir"])
@@ -1981,7 +1993,7 @@ fn nils_private_names_what_it_finds_and_suggests_what_varies() {
     assert!(text.contains("private:\n  ingest:\n"), "{text}");
     assert!(
         !text.contains("0x0C"),
-        "an ingested element is not suggested again: {text}"
+        "nothing varied enough to suggest: {text}"
     );
 
     // The JSON carries the name and what it is ingested as.
@@ -1999,22 +2011,30 @@ fn nils_private_names_what_it_finds_and_suggests_what_varies() {
         Some(true),
         "{v}"
     );
-    let b = v["elements"]
-        .as_array()
-        .unwrap()
+    let elements = v["elements"].as_array().unwrap();
+    let b = elements
         .iter()
-        .find(|e| e["element"] == "0C")
+        .find(|e| e["element"] == "0C" && e["group"] == "0019")
         .expect("the b value");
     assert_eq!(b["name"], "B_value", "{b}");
-    assert_eq!(b["ingested_as"], "siemens_b_value", "{b}");
+    assert!(
+        b["ingested_as"].is_null(),
+        "per image, so not ingested: {b}"
+    );
+    let mode = elements
+        .iter()
+        .find(|e| e["element"] == "0F" && e["group"] == "0019")
+        .expect("the gradient mode");
+    assert_eq!(mode["name"], "GradientMode", "{mode}");
+    assert_eq!(mode["ingested_as"], "siemens_gradient_mode", "{mode}");
 }
 
 #[test]
 fn nils_private_measured_reads_what_the_digests_kept_per_series() {
     // Wave 4a section 5.3, the second half of the method: a survey says what
     // varies across an archive, and only a digest can say whether it varies
-    // inside a series. Four files of one series with four b values: varied
-    // within the one series that holds it, four distinct values.
+    // inside a series. Four files of one series with four fields of view:
+    // varied within the one series that holds it.
     let home = home();
     let dir = private_tree();
     let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
@@ -2037,20 +2057,21 @@ fn nils_private_measured_reads_what_the_digests_kept_per_series() {
     assert!(measured.status.success(), "{}", stderr(&measured));
     let text = stdout(&measured);
     assert!(text.contains("1 series, 1 with private elements"), "{text}");
-    assert!(text.contains("0019xx0C SIEMENS MR HEADER"), "{text}");
+    assert!(text.contains("0051xx0C SIEMENS MR HEADER"), "{text}");
     assert!(text.contains("per image, not a parameter"), "{text}");
-    assert!(
-        text.contains("[B_value]"),
-        "the dictionary names it: {text}"
-    );
-    assert!(text.contains("ingested as siemens_b_value"), "{text}");
-    // The gradient mode is one value across the four files: a constant.
+    assert!(text.contains("ingested as siemens_fov_text"), "{text}");
+    // The gradient mode is one value across the four files: a constant, and
+    // the dictionary names it.
     assert!(text.contains("0019xx0F SIEMENS MR HEADER"), "{text}");
     assert!(
         text.contains("a constant of the scanner or the site"),
         "{text}"
     );
-    assert!(!text.contains("Fast"), "shapes, never values: {text}");
+    assert!(text.contains("[GradientMode]"), "{text}");
+    assert!(
+        !text.contains("Fast") && !text.contains("FoV 20"),
+        "shapes, never values: {text}"
+    );
 
     let json = nils()
         .args(registry)
@@ -2060,18 +2081,19 @@ fn nils_private_measured_reads_what_the_digests_kept_per_series() {
         .unwrap();
     assert!(json.status.success(), "{}", stderr(&json));
     let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    let b = v["elements"]
+    let fov = v["elements"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|e| e["address"] == "0019xx0C SIEMENS MR HEADER")
-        .expect("the b value");
-    assert_eq!(b["series"], 1, "{b}");
-    assert_eq!(b["varied_within"], 1, "{b}");
+        .find(|e| e["address"] == "0051xx0C SIEMENS MR HEADER")
+        .expect("the field of view");
+    assert_eq!(fov["series"], 1, "{fov}");
+    assert_eq!(fov["varied_within"], 1, "{fov}");
     assert_eq!(
-        b["distinct_across"], 1,
-        "one series, so one value counted across: {b}"
+        fov["distinct_across"], 1,
+        "one series, so one value counted across: {fov}"
     );
+    assert_eq!(fov["ingested_as"], "siemens_fov_text", "{fov}");
 
     // Without --measured a ROOT is required.
     let none = nils().args(registry).args(["private"]).output().unwrap();

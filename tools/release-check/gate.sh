@@ -31,6 +31,7 @@ engine="$root/engine"
 packs="$root/packs"
 
 nils="${NILS:-$engine/target/release/nils}"
+export NILS="$nils"
 if [[ ! -x "$nils" ]]; then
   echo "gate: building nils" >&2
   (cd "$engine" && cargo build --release -p nils --example-free 2>/dev/null || cargo build --release -p nils)
