@@ -11,8 +11,10 @@
 # new one is added, and nothing is ever removed by a load, because an event
 # already recorded against a kind must keep its kind. A load is idempotent.
 #
-# Carried from NILS v0 0.5.3's seed, which is where the fifteen observation
-# kinds and the eight diseases with their subtypes were accumulated.
+# Carried from NILS v0 0.5.3's seed, which is where the observation kinds
+# and the eight diseases with their subtypes were accumulated: fifteen in the
+# seed, and a sixteenth, the delivery, that its archive recorded 283 of
+# without the seed ever naming it.
 
 vocabulary:
   diseases:
@@ -76,6 +78,7 @@ vocabulary:
     - {name: Diagnosis, category: Assessment, description: The official diagnosis, on its date}
     - {name: Disease Onset, category: Assessment, description: When symptoms first appeared}
     - {name: SP Transition, category: Assessment, description: The transition to secondary progression, on its date}
+    - {name: Pregnancy Delivery, category: Clinical Event, description: A delivery, on its date}
     - {name: MRI Scan, category: Imaging, description: An MRI study performed}
     - {name: CT Scan, category: Imaging, description: A CT study performed}
     - {name: PET Scan, category: Imaging, description: A PET study performed}

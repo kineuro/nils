@@ -496,7 +496,8 @@ from the files since Wave 1, so the subject gains only `deceased_at`; the
 importer fills the two where the files are silent and a disagreement is a
 review item (§13.3). The vocabulary is pack data in `packs/clinical/
 vocabulary.yml`, carried from v0's seed (eight diseases with seventeen types,
-fifteen observation kinds, EDSS the primary one), and `nils clinical
+sixteen observation kinds counting the delivery its archive recorded without
+the seed naming it, EDSS the primary one), and `nils clinical
 vocabulary load` upserts it by name: what exists is updated, what is new is
 added, and nothing is ever removed by a load, because an event already
 recorded against a kind must keep its kind; a second load says it changed

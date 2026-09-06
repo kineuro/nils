@@ -2382,7 +2382,7 @@ fn the_clinical_vocabulary_loads_from_the_pack_and_a_second_load_changes_nothing
     let v: serde_json::Value = serde_json::from_slice(&loaded.stdout).unwrap();
     assert_eq!(v["diseases"]["added"], 8, "{v}");
     assert_eq!(v["disease_types"]["added"], 17, "{v}");
-    assert_eq!(v["observation_types"]["added"], 15, "{v}");
+    assert_eq!(v["observation_types"]["added"], 16, "{v}");
 
     let again = nils()
         .args(registry)
@@ -2426,7 +2426,7 @@ fn the_clinical_vocabulary_loads_from_the_pack_and_a_second_load_changes_nothing
         .output()
         .unwrap();
     assert!(
-        stdout(&text).contains("8 disease(s), 15 observation kind(s)"),
+        stdout(&text).contains("8 disease(s), 16 observation kind(s)"),
         "{}",
         stdout(&text)
     );
@@ -2447,7 +2447,7 @@ fn the_clinical_vocabulary_loads_from_the_pack_and_a_second_load_changes_nothing
         .find(|s| s["store"] == "clinical layer")
         .expect("the clinical layer has an owner in the custody table");
     assert_eq!(clinical["counts"]["diseases"], 8, "{clinical}");
-    assert_eq!(clinical["counts"]["observation_types"], 15, "{clinical}");
+    assert_eq!(clinical["counts"]["observation_types"], 16, "{clinical}");
     assert_eq!(clinical["counts"]["events"], 0, "{clinical}");
 }
 
