@@ -1,29 +1,213 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# The private elements a release keeps
-# (`docs/specs/wave3-anonymize-and-bids.md`, section 8.4).
+# The private elements the digest reads, and the ones a release keeps
+# (`docs/specs/wave3-anonymize-and-bids.md`, section 8.4;
+# `docs/specs/wave4a-engine-completes.md`, section 5).
 #
-# Private elements are dropped by default. A private element is by definition
-# one whose meaning the standard does not fix: some carry a diffusion
-# direction and some carry the operator's name, and nothing in the file says
-# which. So the list below is the exception rather than the rule, and every
-# entry says what it carries so a reader can judge it.
+# A private element is by definition one whose meaning the standard does not
+# fix: some carry a diffusion direction and some carry the operator's name,
+# and nothing in the file says which. So there are two lists at one grain,
+# because reading an element into the registry and letting it leave in a
+# release are different risks:
 #
-# v0 removes 119 named standard tags and touches no private element at all, so
-# every vendor block leaves the building. Siemens CSA headers alone have
-# carried the patient name, the operator and the institution in shipping
-# firmware.
+#   ingest   broad: read at digest time into `series_private`, keyed by
+#            address, and published as a field of this pack under `name`, so
+#            a rule reads a vendor's parameter the way it reads a standard
+#            one. The registry is the private thing.
+#   release  narrow: what may survive de-identification, by name and never
+#            by block. Siemens CSA headers have carried the patient name, the
+#            operator and the institution in shipping firmware.
 #
-# Addressed by the creator that reserves the block rather than by position,
-# because the block moves from file to file: (0019,0010) in one and
-# (0019,0011) in the next, with the elements at 10xx and 11xx. v0's reader
-# takes the fixed slot and reads whatever is there.
+# Both address a creator and an offset, never a block's position, because
+# the block a creator reserves moves from file to file: (0019,0010) in one
+# and (0019,0011) in the next, with the elements at 10xx and 11xx.
 #
-# These six are the ones Wave 1 reads and Wave 3 section 6 derives from: a
-# release that dropped them would export diffusion nobody can use.
+# The ingest list is measured, not chosen from a chair: `nils private` was
+# run over 40,000 files of each of three cohorts (an MS cohort on legacy
+# scanners, nmosd, and a multi-vendor mix), and an entry is here because it
+# varied per acquisition, was printable and was short in those surveys, or
+# because Wave 1 already reads it. `nils private --suggest` is the repeatable
+# way to grow it. The names come from `private-dictionary.tsv` where the
+# dictionary has them and from the vendor's documentation where it does not.
+#
+# v0 removes 119 named standard tags and touches no private element at all,
+# so every vendor block leaves the building and no classifier ever reads one.
 
 private:
-  keep:
+  # Which vendors the lists were measured on. Coverage is the honest measure
+  # of readiness, and a pack that handles one vendor silently drops the next
+  # vendor's information.
+  coverage:
+    - Siemens MR (VA to XA, three cohorts)
+    - GE MR (one cohort, GEMS_ACQU_01 and GEMS_PARM_01)
+    - Philips MR (one cohort, Imaging DD 001)
+
+  ingest:
+    # --- Siemens, group 0019: the per-image acquisition parameters
+    - creator: SIEMENS MR HEADER
+      group: 0x0019
+      element: 0x0B
+      name: siemens_slice_measurement_duration
+      kind: timing
+      why: varies per acquisition in all three surveyed cohorts; the time one slice took
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0019
+      element: 0x0C
+      name: siemens_b_value
+      kind: diffusion
+      why: the b value of this image, which Wave 1 reads and Wave 3 derives the shell from
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0019
+      element: 0x0D
+      name: siemens_diffusion_directionality
+      kind: diffusion
+      why: whether this image is directional, isotropic or neither
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0019
+      element: 0x0E
+      name: siemens_diffusion_gradient_direction
+      kind: diffusion
+      why: the gradient direction, as three cosines
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0019
+      element: 0x0F
+      name: siemens_gradient_mode
+      kind: parameter
+      why: varies per acquisition in the surveys; the gradient mode the sequence was run under
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0019
+      element: 0x14
+      name: siemens_table_position
+      kind: geometry
+      why: varies per acquisition in all three surveyed cohorts; the table position relative to the first image, which separates the stations of a multi-station spine
+
+    # --- Siemens, group 0051: the reconstruction parameters the console
+    # prints on the image. The dictionary does not name four of them; the
+    # names below are what the console shows and what converters read them
+    # as, and every one varied per acquisition in all three surveyed cohorts.
+    - creator: SIEMENS MR HEADER
+      group: 0x0051
+      element: 0x0A
+      name: siemens_acquisition_time_text
+      kind: timing
+      why: "varies per acquisition in all three surveyed cohorts; the acquisition duration as the console prints it (TA 04:12)"
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0051
+      element: 0x0B
+      name: siemens_acquisition_matrix_text
+      kind: geometry
+      why: the acquisition matrix as text, with the phase direction marked, which the standard matrix element loses
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0051
+      element: 0x0C
+      name: siemens_fov_text
+      kind: geometry
+      why: "varies per acquisition in all three surveyed cohorts; the field of view as the console prints it (FoV 230*230)"
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0051
+      element: 0x0D
+      name: siemens_slice_position_text
+      kind: geometry
+      why: "varies per acquisition in all three surveyed cohorts; the slice position as the console prints it (SP A12.3)"
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0051
+      element: 0x0E
+      name: siemens_orientation_text
+      kind: geometry
+      why: the slice orientation as the console prints it (Tra, Sag, Cor, or a tilt such as Tra>Cor), read by converters as the orientation of record
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0051
+      element: 0x0F
+      name: siemens_coil_string
+      kind: parameter
+      why: which coil elements were on, which tells a head-neck acquisition from a head one when the text is silent
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0051
+      element: 0x11
+      name: siemens_pat_mode_text
+      kind: reconstruction
+      why: the parallel imaging mode and factor as text (p2, p3), which the naming grammar's acceleration token reads
+
+    - creator: SIEMENS MR HEADER
+      group: 0x0051
+      element: 0x13
+      name: siemens_positive_pcs_directions
+      kind: geometry
+      why: the sign convention of the patient coordinate system, which the phase-encoding direction is read against
+
+    # --- GE
+    - creator: GEMS_PARM_01
+      group: 0x0043
+      element: 0x39
+      name: ge_diffusion_values
+      kind: diffusion
+      why: the b value, first of four values, which Wave 1 reads and Wave 3 derives the shell from
+
+    - creator: GEMS_ACQU_01
+      group: 0x0019
+      element: 0xE0
+      name: ge_diffusion_directions
+      kind: diffusion
+      why: the number of diffusion directions on release 10 and above, which the dictionary names and the surveys carry per acquisition
+
+    # --- Philips
+    - creator: Philips Imaging DD 001
+      group: 0x2001
+      element: 0x03
+      name: philips_b_factor
+      kind: diffusion
+      why: the b value, with a sentinel above 1e37 for a volume that is not diffusion weighted
+
+    - creator: Philips Imaging DD 001
+      group: 0x2001
+      element: 0x04
+      name: philips_diffusion_direction
+      kind: diffusion
+      why: the diffusion direction as the scanner names it
+
+    - creator: Philips Imaging DD 001
+      group: 0x2001
+      element: 0x13
+      name: philips_epi_factor
+      kind: parameter
+      why: the echo-planar factor, which tells a single-shot readout from a segmented one
+
+    - creator: Philips Imaging DD 001
+      group: 0x2001
+      element: 0x14
+      name: philips_number_of_echoes
+      kind: parameter
+      why: how many echoes the series holds, which the standard echo numbers carry per image and not per series
+
+    - creator: Philips Imaging DD 001
+      group: 0x2001
+      element: 0x20
+      name: philips_scanning_technique
+      kind: parameter
+      why: the scanning technique as the scanner names it (T1TFE, SE, TSE), the Philips counterpart of Siemens' sequence name
+
+    - creator: Philips Imaging DD 001
+      group: 0x2001
+      element: 0x21
+      name: philips_spir
+      kind: parameter
+      why: whether spectral fat suppression was on, which the text says inconsistently and the flag says exactly
+
+  # What a release keeps. These six are the ones Wave 1 reads and Wave 3
+  # section 6 derives from: a release that dropped them would export
+  # diffusion nobody can use. Everything else, ingested or not, is dropped.
+  release:
     - creator: SIEMENS MR HEADER
       group: 0x0019
       element: 0x0C

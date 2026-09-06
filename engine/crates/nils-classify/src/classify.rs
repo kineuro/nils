@@ -116,14 +116,29 @@ fn select(store: &Store, modality: Option<&str>, ids: bool) -> String {
             dialect.text_of_qualified(Some("f"), column)
         }))
         .collect();
+    // The series' private elements ride along as the last column (Wave 4a
+    // §5.2): beside the fingerprint and not in it, because which elements
+    // are read is pack data, and read here rather than copied per stack.
+    let sp = table("series_private");
+    let cols: Vec<String> = cols
+        .into_iter()
+        .chain(std::iter::once(dialect.text_of_qualified(
+            Some("sp"),
+            sp.column("elements").expect("series_private.elements"),
+        )))
+        .collect();
+    let private_join = format!(
+        " LEFT JOIN {} AS sp ON sp.series_id = f.series_id",
+        store.qualified("series_private")
+    );
     let joins = if ids {
         format!(
-            " JOIN {} AS k ON k.id = f.stack_id JOIN {} AS r ON r.id = k.series_id",
+            " JOIN {} AS k ON k.id = f.stack_id JOIN {} AS r ON r.id = k.series_id{private_join}",
             store.qualified("stack"),
             store.qualified("series"),
         )
     } else {
-        String::new()
+        private_join
     };
     let filter = match modality {
         Some(m) => format!(" AND f.modality = '{}'", m.replace('\'', "''")),
@@ -153,8 +168,9 @@ pub(crate) fn cell_text(c: &nils_registry::store::Cell) -> Option<String> {
     }
 }
 
-/// One fingerprint row as the pack sees it.
-fn to_stack(r: &Row, with_ids: bool) -> Result<(Ids, Stack), Error> {
+/// One fingerprint row as the pack sees it, and the series' private
+/// elements beside it, one text per entry of the pack's ingest list.
+fn to_stack(r: &Row, with_ids: bool, pack: &Pack) -> Result<(Ids, Stack, Vec<String>), Error> {
     let first = if with_ids { 3 } else { 1 };
     let mut s = Stack::new();
     for (i, (field, _)) in FIELDS.iter().enumerate() {
@@ -167,7 +183,24 @@ fn to_stack(r: &Row, with_ids: bool) -> Result<(Ids, Stack), Error> {
         series: if with_ids { r.int(1)? } else { 0 },
         subject: if with_ids { r.int(2)? } else { 0 },
     };
-    Ok((ids, s))
+    let private = private_values(pack, cell_text(r.get(first + FIELDS.len())).as_deref());
+    Ok((ids, s, private))
+}
+
+/// The pack's ingested fields, in the pack's order, from the JSON object the
+/// digest stored under each element's address (Wave 4a §5.2). Empty where
+/// the series has no such element.
+pub(crate) fn private_values(pack: &Pack, elements: Option<&str>) -> Vec<String> {
+    if pack.ingest.is_empty() {
+        return Vec::new();
+    }
+    let map: std::collections::HashMap<String, String> = elements
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or_default();
+    pack.ingest
+        .iter()
+        .map(|i| map.get(&i.address()).cloned().unwrap_or_default())
+        .collect()
 }
 
 /// The decisions in force, by scope and axis. A stack's own decision wins over
@@ -413,7 +446,7 @@ fn run(
         let mut reviews: Vec<Vec<Param>> = Vec::new();
 
         for r in &rows {
-            let (ids, stack) = to_stack(r, with_ids)?;
+            let (ids, stack, private) = to_stack(r, with_ids, pack)?;
             let stack_id = ids.stack;
             // The decisions that overrode a rule for this stack, with who made
             // each: written as evidence after the rules' own (§10.1).
@@ -428,7 +461,7 @@ fn run(
                 report.no_pack += 1;
                 continue;
             }
-            let verdict = Evaluated::new(pack, &stack).classify();
+            let verdict = Evaluated::with_private(pack, &stack, private).classify();
             let mut raised = 0i64;
 
             for a in &verdict.axes {
@@ -854,14 +887,14 @@ fn dispose(
         let mut axes: Vec<Vec<Param>> = Vec::new();
         let mut evidence: Vec<Vec<Param>> = Vec::new();
         for r in &rows {
-            let (ids, stack) = to_stack(r, false)?;
+            let (ids, stack, private) = to_stack(r, false, pack)?;
             let modality =
                 stack.text(nils_pack::stack::field_index("modality").expect("modality is a field"));
             if modality != pack.modality {
                 continue;
             }
             let seed = decided.get(&ids.stack).unwrap_or(&empty);
-            let verdict = Evaluated::new(pack, &stack).dispose(seed);
+            let verdict = Evaluated::with_private(pack, &stack, private).dispose(seed);
             for a in &verdict.axes {
                 let value = a.stored();
                 axes.push(vec![

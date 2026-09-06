@@ -70,11 +70,14 @@ passes:
 picks:
   - picks/main.yml
 
-# The private elements a release keeps (Wave 3 section 8.4). Everything not
-# named here is dropped, which is the safe answer and the one a pack has to
-# change deliberately.
+# The private elements the digest reads and the ones a release keeps (Wave 3
+# section 8.4, Wave 4a section 5). Everything not named in the release list
+# is dropped, which is the safe answer and the one a pack has to change
+# deliberately. The dictionary gives an element its vendor's name and VR.
 private:
   - private.yml
+dictionary:
+  - private-dictionary.tsv
 
 # How this pack's vocabulary maps onto BIDS (Wave 3 section 9.2). The standard
 # itself is the engine's; this is only which of our values means `T1w`.

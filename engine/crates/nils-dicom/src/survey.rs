@@ -55,6 +55,10 @@ pub struct Survey {
     /// Private elements in a block no creator reserved, which cannot be
     /// addressed by name and so can never be kept.
     pub orphans: u64,
+    /// The same, by group, so that where they come from can be understood: a
+    /// vendor's export that reserves no creator looks different from an
+    /// anonymiser that removed the creators and left the blocks.
+    pub orphans_by_group: BTreeMap<u16, u64>,
 }
 
 /// How many distinct values are counted before an element is called varied.
@@ -91,6 +95,7 @@ impl Survey {
             let slot = element >> 8;
             let Some(creator) = creators.get(&(group, slot)) else {
                 self.orphans += 1;
+                *self.orphans_by_group.entry(group).or_insert(0) += 1;
                 continue;
             };
             let bytes = e.value().to_bytes().map(|b| b.to_vec()).unwrap_or_default();
@@ -135,6 +140,9 @@ impl Survey {
         self.files += other.files;
         self.with_private += other.with_private;
         self.orphans += other.orphans;
+        for (group, n) in other.orphans_by_group {
+            *self.orphans_by_group.entry(group).or_insert(0) += n;
+        }
         for (key, seen) in other.elements {
             let mine = self.elements.entry(key).or_default();
             let first = mine.files == 0;
@@ -218,7 +226,44 @@ pub struct Row {
     pub varied: bool,
 }
 
+/// The longest value a suggested entry may have: a parameter is short, and
+/// a value longer than this is a header, a table or a blob.
+pub const SUGGEST_MAX_BYTES: usize = 32;
+
 impl Row {
+    /// Whether a survey would suggest ingesting it (Wave 4a §5.3): it varies
+    /// per acquisition, every value is printable, and it is short. A
+    /// constant across an archive is a property of the scanner or the site
+    /// and not worth the risk; a blob is not a parameter.
+    pub fn suggested(&self) -> bool {
+        self.varied && self.printable && self.longest <= SUGGEST_MAX_BYTES
+    }
+
+    /// The field name a suggestion is published under: the creator's words,
+    /// then the offset, as lower case letters, digits and underscores.
+    pub fn field_name(&self) -> String {
+        let mut out = String::new();
+        let mut last_underscore = true;
+        for c in self.creator.chars() {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                out.push(c);
+                last_underscore = false;
+            } else if !last_underscore {
+                out.push('_');
+                last_underscore = true;
+            }
+        }
+        if !out.starts_with(|c: char| c.is_ascii_lowercase()) {
+            out.insert_str(0, "creator_");
+        }
+        if !last_underscore {
+            out.push('_');
+        }
+        out.push_str(&format!("{:04x}xx{:02x}", self.group, self.element));
+        out
+    }
+
     /// How the allowlist would address it, which is what a pack entry needs.
     pub fn address(&self) -> String {
         format!(
@@ -350,6 +395,49 @@ mod tests {
         let varying = rows.iter().find(|r| r.element == 0x02).unwrap();
         assert_eq!(constant.distinct, 1);
         assert_eq!(varying.distinct, 10);
+    }
+
+    #[test]
+    fn a_suggestion_is_what_varies_and_is_printable_and_short() {
+        // The rule that grows the ingest list without a chair.
+        let row = |varied, printable, longest| Row {
+            creator: "SIEMENS MR HEADER".into(),
+            group: 0x0051,
+            element: 0x0C,
+            files: 10,
+            vrs: "SH".into(),
+            shortest: 4,
+            longest,
+            printable,
+            distinct: 10,
+            varied,
+        };
+        assert!(row(true, true, 12).suggested());
+        assert!(
+            !row(false, true, 12).suggested(),
+            "a constant is the scanner's"
+        );
+        assert!(
+            !row(true, false, 12).suggested(),
+            "a blob is not a parameter"
+        );
+        assert!(!row(true, true, 4096).suggested(), "and neither is a table");
+        assert_eq!(
+            row(true, true, 12).field_name(),
+            "siemens_mr_header_0051xx0c"
+        );
+    }
+
+    #[test]
+    fn orphans_are_counted_by_group_so_their_cause_can_be_seen() {
+        let mut s = Survey::default();
+        s.add(&object(&[
+            (0x0019, 0x1099, VR::LO, "orphaned"),
+            (0x0029, 0x1099, VR::LO, "orphaned too"),
+            (0x0029, 0x1098, VR::LO, "and again"),
+        ]));
+        assert_eq!(s.orphans, 3);
+        assert_eq!(s.orphans_by_group.get(&0x0029), Some(&2));
     }
 
     #[test]

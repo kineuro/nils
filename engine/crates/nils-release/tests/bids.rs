@@ -143,7 +143,7 @@ fn settings<'a>(
         categories: categories::Category::every(),
         selection: Selection::default(),
         scheme,
-        private: &pack().private,
+        private: &pack().release,
         on_unknown: nils_release::burned::OnUnknown::Write,
         actor: "a test",
         key: KEY,

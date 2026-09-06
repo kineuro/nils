@@ -117,6 +117,21 @@ struct SeriesEntry {
     /// The series row's hashes, then the detail row's.
     hashes: Box<[u32]>,
     kept: Kept,
+    /// The private elements the series holds (Wave 4a §5.2), read once from
+    /// its row and kept with it. Absent on a series no file of this run
+    /// brought a private element for, which with no pack is every series.
+    private: Option<Box<PrivateState>>,
+}
+
+/// What `series_private` holds for one series, as the writer decides it
+/// (Wave 4a §5.2): the value under each address, the addresses two files
+/// disagreed on, whether the row has been read, whether it needs writing.
+#[derive(Default)]
+struct PrivateState {
+    values: BTreeMap<String, String>,
+    varied: std::collections::BTreeSet<String>,
+    loaded: bool,
+    dirty: bool,
 }
 
 /// How one parsed file was filed.
@@ -169,6 +184,9 @@ pub struct Writer<'a> {
     study_fields: Fields,
     /// The series row alone, as the `series` table holds it.
     series_fields: Fields,
+    /// The address of each slot of a file's ingested private elements, in
+    /// the order the files were extracted with (Wave 4a §5.2).
+    ingest: Vec<String>,
     /// The series row and the detail row, per modality.
     series_detail: HashMap<String, Fields>,
     /// The writer's own diagnostics, for the report.
@@ -230,6 +248,7 @@ impl<'a> Writer<'a> {
             subject_fields: Fields::subject(),
             study_fields: Fields::study(),
             series_fields: Fields::of(&[Level::Series]),
+            ingest: Vec::new(),
             series_detail: HashMap::new(),
             counts: Counts::default(),
             written: Written {
@@ -245,6 +264,13 @@ impl<'a> Writer<'a> {
     }
 
     /// The run's stop token, and the scripted stop of a test if there is one.
+    /// The private elements the files were extracted with, in order, so the
+    /// writer knows the address of each slot (Wave 4a §5.2).
+    pub fn with_ingest(mut self, ingest: &[nils_dicom::private::Ingest]) -> Writer<'a> {
+        self.ingest = ingest.iter().map(|i| i.address()).collect();
+        self
+    }
+
     pub fn cancelled_by(mut self, cancel: Cancel, script: Option<Scripted>) -> Writer<'a> {
         self.cancel = cancel;
         self.script = script;
@@ -833,6 +859,7 @@ impl<'a> Writer<'a> {
                         level: detail_level(&x.modality),
                         hashes: p.hashes.series.clone(),
                         kept: Kept::default(),
+                        private: None,
                     },
                 );
                 if let Some(level) = detail_level(&x.modality) {
@@ -902,8 +929,158 @@ impl<'a> Writer<'a> {
                 x,
             )?;
         }
+        if !self.ingest.is_empty() {
+            self.merge_private(parsed, &ids)?;
+        }
         self.note(tally, diags);
         Ok(ids)
+    }
+
+    /// Fold each file's ingested private elements into its series' row
+    /// (Wave 4a §5.2), under the rule the catalogue's columns follow: a value
+    /// the row lacks is filled by the first file that has one, and where two
+    /// files disagree the smaller in text order stays and the address is
+    /// listed as varied. The row is the same however the walk and the
+    /// workers ordered the instances, and a reader can see that the series
+    /// was not of one mind.
+    fn merge_private(&mut self, parsed: &[&ParsedFile], ids: &[i64]) -> Result<(), HomeError> {
+        // The rows to read first: series cached from the registry whose
+        // private state this run has not seen, and that a file of this batch
+        // brings a value for. One select for the batch.
+        let mut need: Vec<(String, i64)> = Vec::new();
+        for (p, &id) in parsed.iter().zip(ids) {
+            if p.extracted.private.iter().all(Option::is_none) {
+                continue;
+            }
+            let entry = self
+                .series
+                .get_mut(&p.extracted.series_uid)
+                .ok_or_else(|| missing_row("series"))?;
+            if entry.private.as_ref().is_none_or(|st| !st.loaded) {
+                need.push((p.extracted.series_uid.clone(), id));
+            }
+        }
+        need.sort();
+        need.dedup();
+        if !need.is_empty() {
+            self.load_private(&need)?;
+        }
+        let mut touched: Vec<String> = Vec::new();
+        for p in parsed {
+            let x = &p.extracted;
+            if x.private.iter().all(Option::is_none) {
+                continue;
+            }
+            let entry = self
+                .series
+                .get_mut(&x.series_uid)
+                .ok_or_else(|| missing_row("series"))?;
+            let state = entry.private.get_or_insert_with(Default::default);
+            state.loaded = true;
+            for (i, value) in x.private.iter().enumerate() {
+                let Some(v) = value else { continue };
+                let key = &self.ingest[i];
+                match state.values.get(key) {
+                    None => {
+                        state.values.insert(key.clone(), v.clone());
+                        state.dirty = true;
+                    }
+                    Some(old) if old == v => {}
+                    Some(old) => {
+                        if v < old {
+                            state.values.insert(key.clone(), v.clone());
+                        }
+                        state.varied.insert(key.clone());
+                        state.dirty = true;
+                    }
+                }
+            }
+            if state.dirty && !touched.contains(&x.series_uid) {
+                touched.push(x.series_uid.clone());
+            }
+        }
+        let mut rows: Vec<Vec<Param>> = Vec::new();
+        for uid in &touched {
+            let Some(entry) = self.series.get_mut(uid) else {
+                continue;
+            };
+            let Some(state) = entry.private.as_mut() else {
+                continue;
+            };
+            if !state.dirty {
+                continue;
+            }
+            state.dirty = false;
+            rows.push(vec![
+                Param::Int(entry.id),
+                Param::from(serde_json::to_string(&state.values).unwrap_or_else(|_| "{}".into())),
+                match state.varied.is_empty() {
+                    true => Param::Null,
+                    false => {
+                        Param::from(state.varied.iter().cloned().collect::<Vec<_>>().join(","))
+                    }
+                },
+            ]);
+        }
+        if !rows.is_empty() {
+            let spec = Insert::new(
+                table("series_private"),
+                &["series_id", "elements", "varied"],
+            )
+            .on_conflict(Conflict::Update {
+                target: &["series_id"],
+                set: &["elements", "varied"],
+            });
+            self.registry.store().insert(&spec, &rows)?;
+        }
+        Ok(())
+    }
+
+    /// Read the `series_private` rows of the series named, into their cached
+    /// entries; a series with no row is marked read all the same, so it is
+    /// not asked for again.
+    fn load_private(&mut self, need: &[(String, i64)]) -> Result<(), HomeError> {
+        let t = table("series_private");
+        let cols = [
+            t.column("series_id").expect("series_private.series_id"),
+            t.column("elements").expect("series_private.elements"),
+            t.column("varied").expect("series_private.varied"),
+        ];
+        let ids: Vec<i64> = need.iter().map(|(_, id)| *id).collect();
+        let rows = self
+            .registry
+            .store()
+            .select_by_ids(t, &cols, "series_id", &ids)?;
+        let mut found: HashMap<i64, PrivateState> = HashMap::new();
+        for r in &rows {
+            let id = r.int(0)?;
+            let values: BTreeMap<String, String> =
+                serde_json::from_str(r.text(1)?).unwrap_or_default();
+            let varied = r
+                .opt_text(2)?
+                .map(|v| v.split(',').map(str::to_string).collect())
+                .unwrap_or_default();
+            found.insert(
+                id,
+                PrivateState {
+                    values,
+                    varied,
+                    loaded: true,
+                    dirty: false,
+                },
+            );
+        }
+        for (uid, id) in need {
+            let Some(entry) = self.series.get_mut(uid) else {
+                continue;
+            };
+            let state = found.remove(id).unwrap_or(PrivateState {
+                loaded: true,
+                ..Default::default()
+            });
+            entry.private = Some(Box::new(state));
+        }
+        Ok(())
     }
 
     /// Read the series rows the batch met that the cache did not hold, with
@@ -978,6 +1155,7 @@ impl<'a> Writer<'a> {
                     level: b.level,
                     hashes: b.hashes.into_boxed_slice(),
                     kept: Kept::default(),
+                    private: None,
                 },
             );
         }

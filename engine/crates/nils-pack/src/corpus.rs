@@ -20,6 +20,10 @@ use crate::yaml::{self, File};
 pub struct Case {
     pub name: String,
     pub stack: Stack,
+    /// Stack keys that are not fingerprint fields, kept by name until the
+    /// pack is at hand: an ingested private element is a field of the pack
+    /// and not of the fingerprint, so a case sets it by the pack's name.
+    pub private: Vec<(String, String)>,
     /// Flags asserted by name, each with the value the author expects.
     pub flags: Vec<(String, bool)>,
     /// Axes asserted by name, each with what the row should store.
@@ -47,7 +51,20 @@ pub fn run(pack: &Pack, cases: &[(std::path::PathBuf, Case)], what: &str) -> R<(
     let mut failures: Vec<String> = Vec::new();
     let mut asserted = 0;
     for (file, case) in cases {
-        let e = Evaluated::new(pack, &case.stack);
+        let mut private = vec![String::new(); pack.ingest.len()];
+        for (k, v) in &case.private {
+            match pack.ingest.iter().position(|i| i.name == *k) {
+                Some(i) => private[i] = v.clone(),
+                None => {
+                    return Err(Error::at(
+                        format!("cases.{}.stack.{k}", case.name),
+                        format!("no field named {k}"),
+                    )
+                    .in_file(file, None));
+                }
+            }
+        }
+        let e = Evaluated::with_private(pack, &case.stack, private);
         for (flag, want) in &case.flags {
             asserted += 1;
             let Some(got) = e.flag(flag) else {
@@ -162,6 +179,7 @@ pub fn cases_of(f: &File, v: &serde_json::Value) -> R<Vec<(std::path::PathBuf, C
         let m = f.blame(yaml::obj(c, &at))?;
         let name = f.blame(yaml::text(yaml::get(m, "name", &at)?, &at))?;
         let mut stack = Stack::new();
+        let mut private = Vec::new();
         for (k, v) in f.blame(yaml::obj(yaml::get(m, "stack", &at)?, &at))? {
             let where_ = format!("{at}.stack.{k}");
             let value = match v {
@@ -178,6 +196,17 @@ pub fn cases_of(f: &File, v: &serde_json::Value) -> R<Vec<(std::path::PathBuf, C
                 }
                 other => other,
             };
+            // A key the fingerprint does not have may be a field of the pack
+            // (an ingested private element); it is resolved when the pack is
+            // at hand, and refused there if it is nothing.
+            if crate::stack::field_index(k).is_none() {
+                let text = match &value {
+                    Value::Text(t) => t.unwrap_or("").to_string(),
+                    Value::Num(n) => n.map(|x| x.to_string()).unwrap_or_default(),
+                };
+                private.push((k.clone(), text));
+                continue;
+            }
             stack
                 .set(k, value)
                 .map_err(|e| Error::at(&where_, e).in_file(&f.path, Some(&f.source)))?;
@@ -212,6 +241,7 @@ pub fn cases_of(f: &File, v: &serde_json::Value) -> R<Vec<(std::path::PathBuf, C
             Case {
                 name,
                 stack,
+                private,
                 flags,
                 axes,
             },

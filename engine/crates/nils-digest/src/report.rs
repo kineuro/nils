@@ -357,6 +357,14 @@ pub struct Setup {
     pub files: String,
     pub workers: usize,
     pub walk_threads: usize,
+    /// Which private elements were read, and from which pack: `none` when
+    /// no pack was given (Wave 4a §5.2).
+    #[serde(default = "no_private")]
+    pub private: String,
+}
+
+fn no_private() -> String {
+    "none".to_string()
 }
 
 /// What the writer did (§9.1): the rows of a run that was not a dry run.
@@ -612,6 +620,7 @@ impl fmt::Display for Report {
             Some(b) => writeln!(f, "   peak RSS {}", human_bytes(b))?,
             None => writeln!(f)?,
         }
+        writeln!(f, "  private elements {}", s.private)?;
 
         if let Some(w) = &self.written {
             writeln!(f, "written")?;
@@ -762,6 +771,7 @@ mod tests {
             files: "all".into(),
             workers: 2,
             walk_threads: 1,
+            private: "none".into(),
         };
         let report = Report::new(setup, &a, 2.0, Some(1 << 30));
         assert_eq!(report.class("parse_error"), 2);

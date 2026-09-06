@@ -371,6 +371,25 @@ fn build_registry() -> Vec<Table> {
         detail("series_mr", Level::SeriesMr),
         detail("series_ct", Level::SeriesCt),
         detail("series_pet", Level::SeriesPet),
+        // Wave 4a §5.2: the private elements a pack asked the digest to read,
+        // per series, as one JSON object keyed by each element's address
+        // (`0019xx0C SIEMENS MR HEADER`). A series and not a column per
+        // element, because which elements are read is pack data and changes
+        // without the schema changing; a series and not an instance, because
+        // an element worth reading is a parameter of the acquisition, and the
+        // writer's rule for a field two files disagree on applies (the
+        // smaller value in text order stays, and the address is listed under
+        // `varied` so a reader knows the series was not of one mind).
+        Table::new(
+            "series_private",
+            vec![
+                col("id", Type::Id),
+                req("series_id", Type::Int),
+                req("elements", Type::Json),
+                col("varied", Type::Text),
+            ],
+        )
+        .unique(&["series_id"]),
         Table::new(
             "stack",
             with_catalogue(

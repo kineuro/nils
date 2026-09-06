@@ -70,10 +70,21 @@ pub struct Pack {
     /// declares none picks nothing, which is what every pack before Wave 3
     /// does.
     pub picks: Vec<crate::pick::Model>,
+    /// Wave 4a §5.2: the private elements the digest reads into the
+    /// registry, each published as a field of this pack under its `name`, so
+    /// a rule reads a vendor's parameter the way it reads a standard one.
+    pub ingest: Vec<crate::private::Ingest>,
     /// §8.4: the private elements a release keeps. A pack that declares none
     /// keeps none, which is the safe answer and the one a pack has to change
-    /// deliberately.
-    pub private: Vec<crate::private::Allowed>,
+    /// deliberately. Narrow where `ingest` is broad: the registry is the
+    /// private thing, and a release is not.
+    pub release: Vec<crate::private::Allowed>,
+    /// Wave 4a §5.3: the private dictionary, as pack data, so an element
+    /// has its vendor's name and a VR.
+    pub dictionary: crate::private::Dictionary,
+    /// Wave 4a §5.3: which vendors the private lists were measured on,
+    /// stated rather than implied by a count of entries.
+    pub private_coverage: Vec<String>,
     /// §9.2: how this pack's vocabulary maps onto BIDS. A pack that declares
     /// none cannot be released in the BIDS layout, and says so rather than
     /// writing a tree of stacks it could not name.
@@ -232,11 +243,53 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         }
     }
 
-    // --- text the pack derives for itself. First, because a parser, a flag
+    // --- the private dictionary and the two private lists (Wave 4a §5).
+    // Before anything else, because an ingested element is a field of the
+    // pack and a normalizer, a flag or a rule may name it.
+    // The dictionary is tab-separated, not YAML: ten thousand lines of one
+    // shape read faster and diff better as a table.
+    let mut dictionary = crate::private::Dictionary::default();
+    if let Some(v) = m.get("dictionary") {
+        for name in manifest.blame(yaml::texts(v, "dictionary"))? {
+            let path = dir.join(&name);
+            let text = std::fs::read_to_string(&path).map_err(|e| {
+                Error::at("dictionary", format!("{}: {e}", path.display()))
+                    .in_file(&manifest.path, Some(&manifest.source))
+            })?;
+            let d = crate::private::Dictionary::parse(&text)
+                .map_err(|e| Error::at("dictionary", e).in_file(&path, None))?;
+            dictionary.extend(d);
+        }
+    }
+    let mut ingest: Vec<crate::private::Ingest> = Vec::new();
+    let mut release: Vec<crate::private::Allowed> = Vec::new();
+    let mut private_coverage: Vec<String> = Vec::new();
+    for f in files_of(m, &manifest, dir, "private")? {
+        load_private(
+            &f,
+            &dictionary,
+            &mut ingest,
+            &mut release,
+            &mut private_coverage,
+        )?;
+    }
+
+    // --- text the pack derives for itself. Early, because a parser, a flag
     // or an axis may read it, and it reads only the fingerprint.
     let mut derived: Vec<Normalizer> = Vec::new();
     for f in files_of(m, &manifest, dir, "normalize")? {
-        derived.push(load_normalizer(&f)?);
+        let n = load_normalizer(&f)?;
+        if ingest.iter().any(|i| i.name == n.into) {
+            return Err(Error::at(
+                "into",
+                format!(
+                    "{} is already a field: a private element is ingested under that name",
+                    n.into
+                ),
+            )
+            .in_file(&f.path, Some(&f.source)));
+        }
+        derived.push(n);
     }
 
     // --- parsers
@@ -314,6 +367,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             for (n, e) in preds {
                 let mut sc = Scope {
                     derived: &derived,
+                    ingest: &ingest,
                     // Parsers and flags are read before any axis is decided,
                     // so an axis atom in one has nothing to name.
                     axes: &[],
@@ -360,6 +414,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         let f = &flag_files[*which];
         let mut sc = Scope {
             derived: &derived,
+            ingest: &ingest,
             axes: &[],
             parsers: &parsers,
             parser_ix: &parser_ix,
@@ -383,6 +438,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             axes.len(),
             &axes,
             &derived,
+            &ingest,
             &flag_ix,
             &parsers,
             &parser_ix,
@@ -409,6 +465,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             &f,
             &axes,
             &derived,
+            &ingest,
             &flag_ix,
             &parsers,
             &parser_ix,
@@ -444,45 +501,6 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             }
         }
         rule_sets.sort_by_key(|r| want.iter().position(|n| *n == r.name).unwrap_or(usize::MAX));
-    }
-
-    // §8.4. Declared here because which vendor element carries a gradient is
-    // knowledge about scanners, and it changes without the engine changing.
-    let mut private = Vec::new();
-    for f in files_of(m, &manifest, dir, "private")? {
-        let top = f.blame(yaml::obj(&f.value, "private"))?;
-        let pm = f.blame(yaml::obj(yaml::get(top, "private", "private")?, "private"))?;
-        let list = yaml::get(pm, "keep", "private")?
-            .as_array()
-            .ok_or_else(|| {
-                Error::at("private.keep", "is a list").in_file(&f.path, Some(&f.source))
-            })?;
-        for (i, item) in list.iter().enumerate() {
-            let at = format!("private.keep[{i}]");
-            let im = f.blame(yaml::obj(item, &at))?;
-            let group = f.blame(number_16(yaml::get(im, "group", &at)?, &at))?;
-            if group % 2 == 0 {
-                return Err(Error::at(
-                    &at,
-                    format!("{group:#06X} is not a private group; those are odd"),
-                )
-                .in_file(&f.path, Some(&f.source)));
-            }
-            let element = f.blame(number_16(yaml::get(im, "element", &at)?, &at))?;
-            if element > 0xFF {
-                return Err(Error::at(
-                    &at,
-                    "an element is the offset within the block, so it is one byte",
-                )
-                .in_file(&f.path, Some(&f.source)));
-            }
-            private.push(crate::private::Allowed {
-                creator: f.blame(yaml::text(yaml::get(im, "creator", &at)?, &at))?,
-                group,
-                element: element as u8,
-                why: f.blame(yaml::text(yaml::get(im, "why", &at)?, &at))?,
-            });
-        }
     }
 
     // §9.2. The pack's half of BIDS: which of its values means `T1w`. The
@@ -539,6 +557,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
     {
         let mut sc = Scope {
             derived: &derived,
+            ingest: &ingest,
             axes: &axes,
             parsers: &parsers,
             parser_ix: &parser_ix,
@@ -580,7 +599,10 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         axes,
         rule_sets,
         picks,
-        private,
+        ingest,
+        release,
+        dictionary,
+        private_coverage,
         bids,
         passes,
         name,
@@ -610,11 +632,135 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
 /// A field a pack may name: one the fingerprint carries, or one the pack
 /// derives for itself. A derived field sits past the end of the fingerprint's
 /// own, which is how the evaluator tells them apart.
-fn resolve_field(derived: &[Normalizer], name: &str) -> Option<usize> {
+fn resolve_field(
+    derived: &[Normalizer],
+    ingest: &[crate::private::Ingest],
+    name: &str,
+) -> Option<usize> {
     if let Some(i) = derived.iter().position(|d| d.into == name) {
         return Some(crate::stack::FIELDS.len() + i);
     }
+    if let Some(j) = ingest.iter().position(|i| i.name == name) {
+        return Some(crate::stack::FIELDS.len() + derived.len() + j);
+    }
     field_index(name)
+}
+
+/// The two private lists and the coverage statement of one `private` file
+/// (Wave 4a §5.2, §5.3).
+fn load_private(
+    f: &File,
+    dictionary: &crate::private::Dictionary,
+    ingest: &mut Vec<crate::private::Ingest>,
+    release: &mut Vec<crate::private::Allowed>,
+    coverage: &mut Vec<String>,
+) -> R<()> {
+    let top = f.blame(yaml::obj(&f.value, "private"))?;
+    let pm = f.blame(yaml::obj(yaml::get(top, "private", "private")?, "private"))?;
+    if pm.contains_key("keep") {
+        return Err(Error::at(
+            "private.keep",
+            "is `release` since Wave 4a §5.2, and `ingest` is the list the digest reads",
+        )
+        .in_file(&f.path, Some(&f.source)));
+    }
+    if let Some(c) = pm.get("coverage") {
+        coverage.extend(f.blame(yaml::texts(c, "private.coverage"))?);
+    }
+    // One address, checked the same way for both lists.
+    let address = |im: &serde_json::Map<String, Value>, at: &str| -> R<(String, u16, u8)> {
+        let group = f.blame(number_16(yaml::get(im, "group", at)?, at))?;
+        if group % 2 == 0 {
+            return Err(Error::at(
+                at,
+                format!("{group:#06X} is not a private group; those are odd"),
+            )
+            .in_file(&f.path, Some(&f.source)));
+        }
+        let element = f.blame(number_16(yaml::get(im, "element", at)?, at))?;
+        if element > 0xFF {
+            return Err(Error::at(
+                at,
+                "an element is the offset within the block, so it is one byte",
+            )
+            .in_file(&f.path, Some(&f.source)));
+        }
+        let creator = f.blame(yaml::text(yaml::get(im, "creator", at)?, at))?;
+        Ok((creator, group, element as u8))
+    };
+    if let Some(list) = pm.get("ingest") {
+        let list = list.as_array().ok_or_else(|| {
+            Error::at("private.ingest", "is a list").in_file(&f.path, Some(&f.source))
+        })?;
+        for (i, item) in list.iter().enumerate() {
+            let at = format!("private.ingest[{i}]");
+            let im = f.blame(yaml::obj(item, &at))?;
+            let (creator, group, element) = address(im, &at)?;
+            let name = f.blame(yaml::text(yaml::get(im, "name", &at)?, &at))?;
+            let shaped = name.starts_with(|c: char| c.is_ascii_lowercase())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if !shaped {
+                return Err(Error::at(
+                    format!("{at}.name"),
+                    format!(
+                        "{name} is not a field name; those are lower case letters, digits and underscores"
+                    ),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+            if field_index(&name).is_some() {
+                return Err(Error::at(
+                    format!("{at}.name"),
+                    format!("{name} is a field of the fingerprint already"),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+            if ingest.iter().any(|x| x.name == name) {
+                return Err(
+                    Error::at(format!("{at}.name"), format!("{name} is declared twice"))
+                        .in_file(&f.path, Some(&f.source)),
+                );
+            }
+            let entry = dictionary.lookup(&creator, group, element);
+            let vr = match im.get("vr") {
+                Some(v) => Some(f.blame(yaml::text(v, &format!("{at}.vr")))?),
+                None => entry.map(|e| e.vr.clone()).filter(|v| v != "UN"),
+            };
+            let kind = match im.get("kind") {
+                Some(v) => Some(f.blame(yaml::text(v, &format!("{at}.kind")))?),
+                None => None,
+            };
+            ingest.push(crate::private::Ingest {
+                creator,
+                group,
+                element,
+                name,
+                vr,
+                dictionary_name: entry.map(|e| e.name.clone()),
+                kind,
+                why: f.blame(yaml::text(yaml::get(im, "why", &at)?, &at))?,
+            });
+        }
+    }
+    if let Some(list) = pm.get("release") {
+        let list = list.as_array().ok_or_else(|| {
+            Error::at("private.release", "is a list").in_file(&f.path, Some(&f.source))
+        })?;
+        for (i, item) in list.iter().enumerate() {
+            let at = format!("private.release[{i}]");
+            let im = f.blame(yaml::obj(item, &at))?;
+            let (creator, group, element) = address(im, &at)?;
+            release.push(crate::private::Allowed {
+                creator,
+                group,
+                element,
+                why: f.blame(yaml::text(yaml::get(im, "why", &at)?, &at))?,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The files a manifest key names, relative to the pack directory.
@@ -835,6 +981,8 @@ fn topological(deps: &[HashSet<usize>], names: &[String]) -> R<Vec<usize>> {
 struct Scope<'a> {
     /// The text the pack derives, which a field or text atom may name.
     derived: &'a [Normalizer],
+    /// The private elements the pack ingests, fields past the derived ones.
+    ingest: &'a [crate::private::Ingest],
     /// The axes declared before this point. An atom may only name one of
     /// them, which is also what guarantees it has been decided by the time
     /// this expression runs.
@@ -996,7 +1144,7 @@ fn list(v: &Value, at: &str, sc: &mut Scope) -> R<Vec<Expr>> {
 fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<Expr> {
     if let Some(f) = m.get("field") {
         let name = yaml::text(f, at)?;
-        let ix = resolve_field(sc.derived, &name)
+        let ix = resolve_field(sc.derived, sc.ingest, &name)
             .ok_or_else(|| Error::at(at, format!("no field named {name}")))?;
         let mut out: Vec<Expr> = Vec::new();
         for (k, v) in m {
@@ -1010,7 +1158,7 @@ fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<
                     // Against another of the stack's own numbers.
                     Value::Object(mm) if mm.contains_key("field") => {
                         let other = yaml::text(&mm["field"], at)?;
-                        let oi = resolve_field(sc.derived, &other)
+                        let oi = resolve_field(sc.derived, sc.ingest, &other)
                             .ok_or_else(|| Error::at(at, format!("no field named {other}")))?;
                         Cmp::Field(op, oi)
                     }
@@ -1049,7 +1197,7 @@ fn multi_key(m: &serde_json::Map<String, Value>, at: &str, sc: &mut Scope) -> R<
     };
     if let Some((key, default_case)) = text_key {
         let name = yaml::text(&m[key], at)?;
-        let ix = resolve_field(sc.derived, &name)
+        let ix = resolve_field(sc.derived, sc.ingest, &name)
             .ok_or_else(|| Error::at(at, format!("no field named {name}")))?;
         let case = match m.get("case") {
             Some(c) => Case::parse(&yaml::text(c, at)?)
@@ -1213,6 +1361,7 @@ fn load_axis(
     axis_index: usize,
     axes: &[Axis],
     derived: &[Normalizer],
+    ingest: &[crate::private::Ingest],
     flag_ix: &HashMap<String, usize>,
     parsers: &[ParserDef],
     parser_ix: &HashMap<String, usize>,
@@ -1253,7 +1402,7 @@ fn load_axis(
         Some(v) => f.blame(yaml::text(v, "search"))?,
         None => "text_all".to_string(),
     };
-    let search = resolve_field(derived, &search_field).ok_or_else(|| {
+    let search = resolve_field(derived, ingest, &search_field).ok_or_else(|| {
         Error::at("search", format!("no field named {search_field}"))
             .in_file(&f.path, Some(&f.source))
     })?;
@@ -1454,6 +1603,7 @@ fn load_axis(
             Some(r) => {
                 let mut sc = Scope {
                     derived,
+                    ingest,
                     axes,
                     parsers,
                     parser_ix,
@@ -1500,6 +1650,7 @@ fn load_axis(
             })?;
             let mut sc = Scope {
                 derived,
+                ingest,
                 axes,
                 parsers,
                 parser_ix,
@@ -1728,6 +1879,7 @@ fn load_rule_set(
     f: &File,
     axes: &[Axis],
     derived: &[Normalizer],
+    ingest: &[crate::private::Ingest],
     flag_ix: &HashMap<String, usize>,
     parsers: &[ParserDef],
     parser_ix: &HashMap<String, usize>,
@@ -1793,6 +1945,7 @@ fn load_rule_set(
     let compile_here = |body: &Value, at: &str, regexes: &mut Vec<Regex>| -> R<Expr> {
         let mut sc = Scope {
             derived,
+            ingest,
             axes,
             parsers,
             parser_ix,
@@ -1922,7 +2075,7 @@ fn load_rule_set(
                     Some(x) => f.blame(yaml::text(x, &cat))?,
                     None => "search_text".to_string(),
                 };
-                let field = resolve_field(derived, &field_name).ok_or_else(|| {
+                let field = resolve_field(derived, ingest, &field_name).ok_or_else(|| {
                     Error::at(&cat, format!("no field named {field_name}"))
                         .in_file(&f.path, Some(&f.source))
                 })?;
@@ -2366,6 +2519,11 @@ fn load_pass(
     let mut compile_here = |body: &Value, at: &str, regexes: &mut Vec<Regex>| -> R<Expr> {
         let mut sc = Scope {
             derived,
+            // A pass reads the reference corpus, which carries the
+            // fingerprint's fields and none of the ingested private elements,
+            // so a pass naming one is refused as no field rather than read
+            // as empty.
+            ingest: &[],
             axes,
             parsers: &no_parsers,
             parser_ix: &no_parser_ix,
@@ -2399,7 +2557,7 @@ fn load_pass(
             let path = format!("{at}.reference.filter.{k}");
             let what = match axes.iter().position(|a| a.name == *k) {
                 Some(i) => What::Axis(i),
-                None => match resolve_field(derived, k) {
+                None => match resolve_field(derived, &[], k) {
                     Some(i) => What::Field(i),
                     None => {
                         return Err(Error::at(
@@ -2523,7 +2681,7 @@ fn load_vote(
     for (n, spec) in f.blame(yaml::obj(yaml::get(m, "key", at)?, "key"))? {
         let path = format!("{at}.key.{n}");
         let s = f.blame(yaml::obj(spec, &path))?;
-        let field = resolve_field(derived, n)
+        let field = resolve_field(derived, &[], n)
             .ok_or_else(|| Error::at(&path, format!("no field named {n}")))
             .map_err(|e| e.in_file(&f.path, Some(&f.source)))?;
         let half_even = match s.get("rounding") {
@@ -2716,7 +2874,7 @@ fn load_vote(
         yaml::get(subject, "text", &path)?,
         &format!("{path}.subject.text"),
     ))?;
-    let subject_field = resolve_field(derived, &sf)
+    let subject_field = resolve_field(derived, &[], &sf)
         .ok_or_else(|| Error::at(&path, format!("no field named {sf}")))
         .map_err(|e| e.in_file(&f.path, Some(&f.source)))?;
     let subject_case = match subject.get("case") {

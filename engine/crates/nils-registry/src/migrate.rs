@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +126,21 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 18,
         apply: a_release_is_a_current_state_and_a_log,
     },
+    Migration {
+        version: 19,
+        apply: a_series_carries_its_private_elements,
+    },
 ];
+
+/// Wave 4a §5.2: the private elements a pack names are read at digest time
+/// and kept per series, keyed by address, so that a classifier can read a
+/// vendor's parameter the way it reads a standard one.
+fn a_series_carries_its_private_elements(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["series_private"])
+}
 
 /// Wave 4a §4: the release's bookkeeping moves from a row per stack per
 /// version and a row per file per version to a current state per stack and a
