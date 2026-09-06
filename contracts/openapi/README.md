@@ -14,6 +14,7 @@ directory beside the old one, which stays.
 | version | document | since |
 |---|---|---|
 | 0 | [`v0/openapi.yaml`](v0/openapi.yaml) | Wave 4a: the document exists and is empty until `nils serve` fills it (Wave 4a §11) |
+| 1 | [`v1/openapi.yaml`](v1/openapi.yaml) | Wave 4a slice 14, 2026-09-06: `nils serve`, the nineteen doors the command line has (capabilities, status, custody, audit, jobs, releases, handovers, select, review, decisions, events) |
 
 Version 0 is deliberately empty: a skeleton that a test reads, so that the
 first route lands in a file that is already checked in, already versioned and

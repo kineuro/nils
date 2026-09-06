@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
+
+mod serve;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::day::Day;
 use nils_registry::home::{
@@ -89,6 +91,9 @@ enum Command {
     /// policy (Wave 4a section 9.2)
     #[command(subcommand)]
     Audit(AuditCommand),
+    /// The one door: the HTTP API over this registry, one route per
+    /// operation, jobs for anything heavy (Wave 4a section 11)
+    Serve(ServeArgs),
     /// What private elements an archive carries, by creator, so an allowlist
     /// is chosen from the data rather than from a chair (§8.4)
     Private(PrivateArgs),
@@ -320,6 +325,30 @@ struct SelectArgs {
     /// Machine-readable output
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ServeArgs {
+    /// Address to listen on; port 0 picks a free one and prints it
+    #[arg(long, default_value = "127.0.0.1:8437", value_name = "ADDR")]
+    bind: String,
+    /// How a caller is known: `off` (the local user, laptop mode) or
+    /// `token` (a bearer token names the caller; see --token)
+    #[arg(long, default_value = "off", value_name = "off|token")]
+    auth: String,
+    /// A token and who it names, as `TOKEN=user@node`; repeatable. Or set
+    /// NILS_TOKENS to a comma-separated list of the same
+    #[arg(long, value_name = "TOKEN=PRINCIPAL")]
+    token: Vec<String>,
+    /// Request handlers, each with a registry connection of its own
+    #[arg(long, default_value = "4", value_name = "N")]
+    workers: usize,
+    /// The pack directory the doors read packs from
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<PathBuf>,
+    /// Stop after serving this many requests (for tests)
+    #[arg(long, hide = true)]
+    requests: Option<usize>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -962,6 +991,7 @@ fn main() -> ExitCode {
         Command::Clinical(command) => clinical_command(&home, command),
         Command::Select(args) => select_preview(&home, args),
         Command::Jobs(command) => jobs_command(&home, command),
+        Command::Serve(args) => serve::serve(&home, args),
         Command::Audit(AuditCommand::List {
             principal,
             action,
@@ -1855,6 +1885,31 @@ fn status(home: &Home, args: StatusArgs) -> Result<(), Exit> {
     if let Some(id) = args.batch {
         return batch_report(&mut registry, id, args.json);
     }
+    let doc = status_doc(home, &mut registry)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        return Ok(());
+    }
+    let config = registry.config().clone();
+    let meta = registry.meta().clone();
+    let (jobs, others, batches) = (
+        doc["jobs"].as_array().cloned().unwrap_or_default(),
+        doc["other_jobs"].as_array().cloned().unwrap_or_default(),
+        doc["batches"].as_array().cloned().unwrap_or_default(),
+    );
+    status_print(
+        home,
+        &config,
+        &meta,
+        &jobs,
+        &others,
+        &batches,
+        doc["registry"]["schema"].as_str(),
+    )
+}
+
+/// The status document (`nils status --json`, `GET /api/status`).
+fn status_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value, Exit> {
     let meta = registry.meta().clone();
     let config = registry.config().clone();
     let store = registry.store();
@@ -1961,16 +2016,23 @@ fn status(home: &Home, args: StatusArgs) -> Result<(), Exit> {
         "other_jobs": others,
         "batches": batches,
     });
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
-        return Ok(());
-    }
+    Ok(doc)
+}
 
+fn status_print(
+    home: &Home,
+    config: &nils_registry::home::Config,
+    meta: &nils_registry::home::Meta,
+    jobs: &[serde_json::Value],
+    others: &[serde_json::Value],
+    batches: &[serde_json::Value],
+    schema: Option<&str>,
+) -> Result<(), Exit> {
     println!(
         "nils status   registry {}   backend {}{}",
         home.dir().display(),
         config.backend.name(),
-        match store.schema() {
+        match schema {
             Some(s) => format!("   schema {s}"),
             None => String::new(),
         }
@@ -1994,7 +2056,7 @@ fn status(home: &Home, args: StatusArgs) -> Result<(), Exit> {
     if jobs.is_empty() {
         println!("  none");
     }
-    for j in &jobs {
+    for j in jobs {
         println!(
             "  job {}   {} {}   pid {} on {}   started {}   heartbeat {}",
             j["id"],
@@ -2009,7 +2071,7 @@ fn status(home: &Home, args: StatusArgs) -> Result<(), Exit> {
     if !others.is_empty() {
         println!("other jobs (last {})", others.len());
     }
-    for j in &others {
+    for j in others {
         println!(
             "  job {}   {} {}   {} on {}   finished {}   {}",
             j["id"],
@@ -2030,7 +2092,7 @@ fn status(home: &Home, args: StatusArgs) -> Result<(), Exit> {
             "id", "state", "name", "started", "finished", "epoch", "seen", "parsed", "ingested"
         );
     }
-    for b in &batches {
+    for b in batches {
         println!(
             "  {:>5}  {:<9} {:<28} {:<21} {:<21} {:>6} {:>10} {:>10} {:>10}",
             n_i64(&b["id"]),
@@ -2590,6 +2652,17 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
 /// human-authored values. Its own home, its own count.
 fn review_accept(registry: &mut Registry, id: i64, why: Option<String>) -> Result<(), Exit> {
     let who = actor();
+    review_accept_as(registry, id, why, &who)
+}
+
+/// The acknowledgement by a named principal, which is how the door does it.
+fn review_accept_as(
+    registry: &mut Registry,
+    id: i64,
+    why: Option<String>,
+    who: &str,
+) -> Result<(), Exit> {
+    let who = who.to_string();
     let now = nils_registry::time::now_iso();
     let store = registry.store();
     let d = store.dialect();
@@ -2751,6 +2824,20 @@ fn about(item: &serde_json::Value) -> String {
 /// the documentation carries, with this home's paths and counts.
 fn custody(home: &Home, json: bool, markdown: bool) -> Result<(), Exit> {
     let mut registry = open(home)?;
+    let doc = custody_doc(home, &mut registry)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        return Ok(());
+    }
+    if markdown {
+        print!("{}", custody_markdown(&doc));
+        return Ok(());
+    }
+    custody_print(&doc)
+}
+
+/// The custody document (`nils custody --json`, `GET /api/custody`).
+fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value, Exit> {
     let config = registry.config().clone();
     let meta = registry.meta().clone();
     let keys = registry.keys();
@@ -3004,18 +3091,14 @@ fn custody(home: &Home, json: bool, markdown: bool) -> Result<(), Exit> {
         "registry_id": meta.registry_id,
         "stores": stores,
     });
-    if json {
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
-        return Ok(());
-    }
-    if markdown {
-        print!("{}", custody_markdown(&doc));
-        return Ok(());
-    }
+    Ok(doc)
+}
+
+fn custody_print(doc: &serde_json::Value) -> Result<(), Exit> {
     println!(
         "nils custody   registry {}   backend {}",
-        dir.display(),
-        config.backend.name()
+        doc["home"].as_str().unwrap_or(""),
+        doc["backend"].as_str().unwrap_or("")
     );
     println!("every store this registry keeps; nothing is retained that is not listed here");
     for st in doc["stores"].as_array().unwrap() {
@@ -4374,7 +4457,7 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             }
         }
         JobsCommand::Enqueue { name, command } => {
-            let id = job::enqueue(store, &command, name.as_deref()).map_err(err)?;
+            let id = job::enqueue(store, &command, name.as_deref(), Some(&actor())).map_err(err)?;
             println!("queued job {id}: nils {}", command.join(" "));
             Ok(())
         }
@@ -4427,6 +4510,7 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                 .arg(home.dir())
                 .args(&argv)
                 .env(job::ADOPT_VAR, next.id.to_string())
+                .env("NILS_PRINCIPAL", next.principal().unwrap_or(&actor()))
                 .status();
                 // The verb adopted the row and finished it itself; the
                 // worker writes the outcome only when the verb did not.
@@ -5744,6 +5828,41 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     }
     println!("  {:.1} s", report.seconds);
     Ok(())
+}
+
+/// The releases the registry holds, newest first (`GET /api/releases`).
+fn releases_doc(registry: &mut Registry, limit: usize) -> Result<serde_json::Value, Exit> {
+    let store = registry.store();
+    let started = text_of(store, "release", "started_at");
+    let sql = format!(
+        "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
+         added, removed, layout, actor FROM {} ORDER BY id DESC LIMIT {}",
+        store.qualified("release"),
+        limit.max(1)
+    );
+    let rows: Vec<serde_json::Value> = store
+        .query(&sql, &[])?
+        .iter()
+        .map(|r| {
+            Ok(serde_json::json!({
+                "id": r.int(0)?,
+                "name": r.text(1)?,
+                "version": r.text(2)?,
+                "root": r.text(3)?,
+                "started_at": r.opt_text(4)?,
+                "files": r.opt_int(5)?,
+                "subjects": r.opt_int(6)?,
+                "unchanged": r.opt_int(7)?,
+                "moved": r.opt_int(8)?,
+                "rewritten": r.opt_int(9)?,
+                "added": r.opt_int(10)?,
+                "removed": r.opt_int(11)?,
+                "layout": r.opt_text(12)?,
+                "actor": r.opt_text(13)?,
+            }))
+        })
+        .collect::<Result<_, nils_registry::Error>>()?;
+    Ok(serde_json::json!({ "count": rows.len(), "releases": rows }))
 }
 
 /// One row of the version history.

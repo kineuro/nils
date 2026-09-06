@@ -393,6 +393,11 @@ pub struct Job {
 }
 
 impl Job {
+    /// Who queued the job, if the queue recorded it.
+    pub fn principal(&self) -> Option<&str> {
+        self.args["principal"].as_str()
+    }
+
     /// The command line the job was started with, if the claim recorded it.
     pub fn argv(&self) -> Option<Vec<String>> {
         self.args["argv"].as_array().map(|a| {
@@ -488,14 +493,20 @@ pub fn show(store: &mut Store, job_id: i64) -> Result<Option<Job>, Error> {
 /// Put a command line on the queue, to be run by a worker in its turn. The
 /// kind is the verb, so that `nils jobs list` reads the same for a queued
 /// digest and a running one.
-pub fn enqueue(store: &mut Store, argv: &[String], name: Option<&str>) -> Result<i64, Error> {
+pub fn enqueue(
+    store: &mut Store,
+    argv: &[String],
+    name: Option<&str>,
+    principal: Option<&str>,
+) -> Result<i64, Error> {
     let Some(verb) = argv.first() else {
         return Err(Error::Message(
             "nothing to queue: the command line is empty".into(),
         ));
     };
     let now = now_iso();
-    let args = serde_json::json!({ "argv": argv });
+    // Wave 4a §9.2: who asked, carried to the verb the worker runs.
+    let args = serde_json::json!({ "argv": argv, "principal": principal });
     let rows = store.insert(
         &Insert::new(
             table("job"),
