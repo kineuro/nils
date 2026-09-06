@@ -148,7 +148,7 @@ enum Command {
 #[derive(Debug, Args)]
 struct ReleaseArgs {
     /// Where the tree is written
-    #[arg(long, value_name = "DIR", required_unless_present = "history")]
+    #[arg(long, value_name = "DIR", required_unless_present_any = ["history", "withdraw"])]
     out: Option<PathBuf>,
     /// What every version of this dataset did, and write nothing (§8.6)
     #[arg(long)]
@@ -249,6 +249,13 @@ struct ReleaseArgs {
     pack: String,
     #[arg(long, value_name = "DIR")]
     pack_dir: Option<PathBuf>,
+    /// Withdraw a version of this name with --why, instead of releasing: a
+    /// release is never removed, only withdrawn (Wave 4a section 13.1)
+    #[arg(long, value_name = "VERSION", requires = "why")]
+    withdraw: Option<String>,
+    /// Why a version is withdrawn
+    #[arg(long, value_name = "TEXT")]
+    why: Option<String>,
     /// An observation kind whose nearest value each session carries in its
     /// sessions.tsv (Wave 4a §7.4). Repeatable; the default is the
     /// vocabulary's primary kinds
@@ -422,6 +429,12 @@ enum JobsCommand {
         /// The command line, without the leading `nils`
         #[arg(trailing_var_arg = true, required = true, value_name = "ARGS")]
         command: Vec<String>,
+    },
+    /// Delete finished jobs older than the retention, a year by default
+    /// (Wave 4a section 13.1); a running or queued job is never pruned
+    Prune {
+        #[arg(long, default_value = "365", value_name = "DAYS")]
+        keep_days: u32,
     },
     /// Run queued jobs, oldest first, one at a time; stops when the queue
     /// is empty with --once, else waits for more
@@ -2968,6 +2981,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let stores = vec![
         serde_json::json!({
             "store": "configuration",
+            "owner": "the registry's operator",
             "what": "nils.toml: the backend, the Postgres dsn if written there, the schema, the key store path",
             "where": home.config_path().display().to_string(),
             "files": [file_entry(&home.config_path())],
@@ -2978,6 +2992,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         }),
         serde_json::json!({
             "store": "registry",
+            "owner": "the registry's operator, for the research group that owns the archive",
             "what": "the pseudonymous catalogue: subjects, studies, series, stacks, instances, source files, diagnostics, review items, jobs and batches",
             "where": where_db(REGISTRY_DB, &registry_schema),
             "files": if sqlite { db_files(REGISTRY_DB) } else { Vec::new() },
@@ -2996,6 +3011,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         }),
         serde_json::json!({
             "store": "linkage store",
+            "owner": "the registry's operator; the identifiers are the clinic's",
             "what": "the identifiers behind the codes, encrypted under the registry's key; the linkages between subjects; the audit of every read",
             "where": where_db(LINKAGE_DB, &linkage_schema),
             "files": if sqlite { db_files(LINKAGE_DB) } else { Vec::new() },
@@ -3019,6 +3035,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         }),
         serde_json::json!({
             "store": "key store",
+            "owner": "the registry's operator",
             "what": format!("the pseudonym key ({} for this registry) and any other key added", meta.pseudonym_key),
             "where": format!("{}, mode 700, one file per key, mode 600", keys.dir().display()),
             "files": key_files(&keys, &key_list),
@@ -3034,6 +3051,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         }),
         serde_json::json!({
             "store": "quarantine list",
+            "owner": "the registry's operator",
             "what": "the files a digest refused, each with its class and detail, and one review item per batch and class",
             "where": "rows of source_file (status quarantined) and review_item (kind ingest.quarantine) in the registry",
             "files": [],
@@ -3049,6 +3067,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         }),
         serde_json::json!({
             "store": "classifications",
+            "owner": "the pack's author for the rules, the reviewers for the decisions",
             "what": "what a pack decided about each stack, one row per axis, with the evidence that made it and any decision a person recorded",
             "where": "rows of stack_fingerprint, classification, classification_axis, classification_evidence and decision in the registry",
             "files": [],
@@ -3064,6 +3083,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         }),
         serde_json::json!({
             "store": "clinical layer",
+            "owner": "the research group that owns the cohort",
             "what": "what v0 kept in a second database, in the one registry (Wave 4a section 7.1): cohorts and their members, the vocabulary of diseases and observation kinds, each subject's diseases, the events, and the subject's demographics",
             "where": where_db(REGISTRY_DB, &registry_schema),
             "files": if sqlite { db_files(REGISTRY_DB) } else { Vec::new() },
@@ -3082,27 +3102,29 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         }),
         serde_json::json!({
             "store": "job records",
+            "owner": "the registry's operator",
             "what": "every verb that runs longer than a second, and the queue (Wave 4a section 9.1): its command line and arguments, host and pid, heartbeat, progress, counts and outcome",
             "where": "rows of job and ingest_batch in the registry",
             "files": [],
             "holds": ["quasi-identifying: the root path in a run's arguments and command line", "technical: the counts, the host name, the pid, the times, the outcome"],
             "counts": { "jobs": jobs, "batches": batches },
-            "kept": "until deleted with the registry",
+            "kept": "one year of finished jobs (Wave 4a section 13.1); a running or queued one until it is over",
             "commands": {
                 "read": ["nils status [--batch <id>]", "nils jobs list [--all]", "nils jobs show <id>"],
                 "change": ["nils jobs cancel <id>", "nils jobs enqueue -- <command>", "nils jobs work", "nils jobs resume <id>"],
                 "export": ["nils status --json", "nils status --batch <id> --json", "nils jobs list --all --json"],
-                "delete": "with the registry",
+                "delete": "nils jobs prune [--keep-days <n>]",
             },
         }),
         serde_json::json!({
             "store": "audit log",
+            "owner": "the registry's operator; read by whoever answers for the archive",
             "what": "who did what, to which scope, when, under which policy (Wave 4a section 9.2): every decision, acknowledgement, import, vocabulary load, linkage change, release and handover, as the principal user@node",
             "where": "rows of audit in the registry",
             "files": [],
             "holds": ["quasi-identifying: the principal, a release's root path", "technical: the action, the scope's ids and counts, the policy, the time; never an identifier"],
             "counts": { "rows": audit_rows },
-            "kept": "until deleted with the registry",
+            "kept": "for ever (Wave 4a section 13.1); nobody deletes an audit row",
             "commands": {
                 "read": ["nils audit list [--principal <who>] [--action <action>] [--since <stamp>]"],
                 "change": [],
@@ -3112,6 +3134,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         }),
         serde_json::json!({
             "store": "logs",
+            "owner": "the registry's operator",
             "what": "none: progress is printed to stderr and not stored; the counts of a run are its batch record",
             "where": "nowhere",
             "files": [],
@@ -3179,6 +3202,7 @@ fn custody_print(doc: &serde_json::Value) -> Result<(), Exit> {
                 .collect();
             println!("  now       {}", parts.join(", "));
         }
+        println!("  owner     {}", s(&st["owner"]));
         println!("  kept      {}", s(&st["kept"]));
         let c = &st["commands"];
         for (label, key) in [("read", "read"), ("change", "change"), ("export", "export")] {
@@ -3258,6 +3282,7 @@ fn custody_markdown(doc: &serde_json::Value) -> String {
                 holds.join("<br>")
             }
         );
+        let _ = writeln!(page, "| owner | {} |", cell(s(&st["owner"])));
         let _ = writeln!(page, "| kept | {} |", cell(s(&st["kept"])));
         let c = &st["commands"];
         for key in ["read", "change", "export"] {
@@ -4493,6 +4518,17 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                 None => Err(fail("the job was stopped by a signal")),
             }
         }
+        JobsCommand::Prune { keep_days } => {
+            let gone = job::prune(store, keep_days).map_err(err)?;
+            audit(
+                &mut registry,
+                nils_registry::audit::Action::JobsPrune,
+                serde_json::json!({ "pruned": gone, "keep_days": keep_days }),
+                None,
+            )?;
+            println!("pruned {gone} finished job(s) older than {keep_days} day(s)");
+            Ok(())
+        }
         JobsCommand::Enqueue { name, command } => {
             let id = job::enqueue(store, &command, name.as_deref(), Some(&actor())).map_err(err)?;
             println!("queued job {id}: nils {}", command.join(" "));
@@ -5596,6 +5632,12 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     if args.history {
         return history(home, &args);
     }
+    if let Some(version) = &args.withdraw {
+        let name = args.name.as_deref().ok_or_else(|| {
+            usage("--withdraw needs --name, the release to withdraw a version of")
+        })?;
+        return release_withdraw(home, name, version, args.why.as_deref().unwrap_or(""));
+    }
     let out = args.out.clone().expect("--out, or --history");
     let dates_policy = dates::Policy::parse(&args.dates).ok_or_else(|| {
         usage(format!(
@@ -5867,13 +5909,66 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     Ok(())
 }
 
+/// `nils release --withdraw VERSION --why TEXT` (Wave 4a section 13.1): the
+/// row stays, marked withdrawn by whom and why; the tree on disk is the
+/// operator's to remove, and the handovers that shipped it stay recorded.
+fn release_withdraw(home: &Home, name: &str, version: &str, why: &str) -> Result<(), Exit> {
+    if why.trim().is_empty() {
+        return Err(usage("--withdraw needs --why: a withdrawal has a reason"));
+    }
+    let who = actor();
+    let mut registry = open(home)?;
+    let store = registry.store();
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id, withdrawn_at IS NOT NULL FROM {} WHERE name = {} AND version = {}",
+        store.qualified("release"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text)
+    );
+    let Some(row) = store.query_opt(&sql, &[Param::from(name), Param::from(version)])? else {
+        return Err(usage(format!(
+            "no release {name} version {version}; --history lists them"
+        )));
+    };
+    let id = row.int(0)?;
+    if row.int(1)? != 0 {
+        return Err(fail(format!(
+            "release {name} version {version} is already withdrawn"
+        )));
+    }
+    let now = nils_registry::time::now_iso();
+    store.update_by_id(
+        table("release"),
+        &[
+            ("withdrawn_at", Param::from(now.as_str())),
+            ("withdrawn_by", Param::from(who.as_str())),
+            ("withdrawn_why", Param::from(why)),
+        ],
+        "id",
+        id,
+    )?;
+    audit(
+        &mut registry,
+        nils_registry::audit::Action::ReleaseWithdraw,
+        serde_json::json!({ "release": name, "version": version, "id": id }),
+        Some(serde_json::json!({ "why": why })),
+    )?;
+    println!(
+        "withdrew release {name} version {version} ({why}); the row stays, and the tree on disk is yours to remove"
+    );
+    Ok(())
+}
+
 /// The releases the registry holds, newest first (`GET /api/releases`).
 fn releases_doc(registry: &mut Registry, limit: usize) -> Result<serde_json::Value, Exit> {
     let store = registry.store();
     let started = text_of(store, "release", "started_at");
+    let withdrawn = text_of(store, "release", "withdrawn_at");
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
-         added, removed, layout, actor FROM {} ORDER BY id DESC LIMIT {}",
+         added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why FROM {} \
+         ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
     );
@@ -5896,6 +5991,9 @@ fn releases_doc(registry: &mut Registry, limit: usize) -> Result<serde_json::Val
                 "removed": r.opt_int(11)?,
                 "layout": r.opt_text(12)?,
                 "actor": r.opt_text(13)?,
+                "withdrawn_at": r.opt_text(14)?,
+                "withdrawn_by": r.opt_text(15)?,
+                "withdrawn_why": r.opt_text(16)?,
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;

@@ -9,6 +9,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | what | nils.toml: the backend, the Postgres dsn if written there, the schema, the key store path |
 | where | `<home>/nils.toml` |
 | holds | technical<br>secret: a password in the dsn, when one is written there instead of NILS_DSN |
+| owner | the registry's operator |
 | kept | until removed |
 | read | `nils status` |
 | change | edit the file |
@@ -22,6 +23,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | what | the pseudonymous catalogue: subjects, studies, series, stacks, instances, source files, diagnostics, review items, jobs and batches |
 | where | `<home>/registry.db`, mode 600 (SQLite keeps registry.db-wal and registry.db-shm beside it while a connection is open) |
 | holds | quasi-identifying: birth dates, sex, study dates and times, station and institution names, descriptions and comments, source paths<br>technical: everything else the catalogue declares |
+| owner | the registry's operator, for the research group that owns the archive |
 | kept | until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows |
 | read | `nils status [--batch <id>]`<br>`nils quarantine list`<br>`nils review list` |
 | change | `nils digest <root>` |
@@ -35,6 +37,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | what | the identifiers behind the codes, encrypted under the registry's key; the linkages between subjects; the audit of every read |
 | where | `<home>/linkage.db`, mode 600 (SQLite keeps linkage.db-wal and linkage.db-shm beside it while a connection is open) |
 | holds | identifying: the identifiers (encrypted) and their keyed lookups<br>technical: the linkages, the id types, the read audit (actor, time, why, identity id) |
+| owner | the registry's operator; the identifiers are the clinic's |
 | kept | until purged; a purged identifier is filed again only when its file is parsed again (changed, or new), not by a digest that finds the file unchanged |
 | read | `nils linkage show <code> [--why <text>]` (every read is audited) |
 | change | `nils digest <root>`<br>`nils linkage import <csv>`<br>`nils linkage link \| unlink`<br>`nils linkage id-type add` |
@@ -48,6 +51,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | what | the pseudonym key (k for this registry) and any other key added |
 | where | `<home>/keys`, mode 700, one file per key, mode 600 |
 | holds | secret: the key bytes; whoever holds the registry's key can derive its codes and read its linkage store |
+| owner | the registry's operator |
 | kept | until removed; the key the registry names cannot be removed while it names it |
 | read | `nils key list` (names, lengths and fingerprints, never the bytes) |
 | change | `nils key add <name>` |
@@ -61,6 +65,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | what | the files a digest refused, each with its class and detail, and one review item per batch and class |
 | where | rows of source_file (status quarantined) and review_item (kind ingest.quarantine) in the registry |
 | holds | quasi-identifying: the file paths<br>technical: the class, the detail, the counts |
+| owner | the registry's operator |
 | kept | a file's row until the file changes or a run reads it again with --retry-quarantine; the review items until decided (review apply is Wave 4's) |
 | read | `nils quarantine list [--batch <id>] [--class <c>]`<br>`nils review list [--kind ingest.quarantine]`<br>`nils review show <id>` |
 | change | `nils digest <root> --retry-quarantine` |
@@ -74,6 +79,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | what | what a pack decided about each stack, one row per axis, with the evidence that made it and any decision a person recorded |
 | where | rows of stack_fingerprint, classification, classification_axis, classification_evidence and decision in the registry |
 | holds | technical: the fields a pack reads, the axes, the tiers and confidences, the rule that fired<br>a person's words: the why on a decision |
+| owner | the pack's author for the rules, the reviewers for the decisions |
 | kept | until the next run of that job replaces it; a decision until withdrawn, and a withdrawn one for good |
 | read | `nils explain <stack>`<br>`nils review list`<br>`nils pack show <name>` |
 | change | `nils fingerprint`<br>`nils classify`<br>`nils review decide <id> --value <v>` |
@@ -87,6 +93,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | what | what v0 kept in a second database, in the one registry (Wave 4a section 7.1): cohorts and their members, the vocabulary of diseases and observation kinds, each subject's diseases, the events, and the subject's demographics |
 | where | `<home>/registry.db`, mode 600 (SQLite keeps registry.db-wal and registry.db-shm beside it while a connection is open) |
 | holds | quasi-identifying: birth dates, sex, dates of death, the dates of diagnoses, onsets, treatments and every observation<br>clinical: diagnoses and their types, the scales and their values, the treatments |
+| owner | the research group that owns the cohort |
 | kept | for ever; a correction supersedes the old row and the old row stays (section 13.2) |
 | read | `nils clinical vocabulary list`<br>`nils custody` |
 | change | `nils clinical vocabulary load` |
@@ -100,11 +107,12 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | what | every verb that runs longer than a second, and the queue (Wave 4a section 9.1): its command line and arguments, host and pid, heartbeat, progress, counts and outcome |
 | where | rows of job and ingest_batch in the registry |
 | holds | quasi-identifying: the root path in a run's arguments and command line<br>technical: the counts, the host name, the pid, the times, the outcome |
-| kept | until deleted with the registry |
+| owner | the registry's operator |
+| kept | one year of finished jobs (Wave 4a section 13.1); a running or queued one until it is over |
 | read | `nils status [--batch <id>]`<br>`nils jobs list [--all]`<br>`nils jobs show <id>` |
 | change | `nils jobs cancel <id>`<br>`nils jobs enqueue -- <command>`<br>`nils jobs work`<br>`nils jobs resume <id>` |
 | export | `nils status --json`<br>`nils status --batch <id> --json`<br>`nils jobs list --all --json` |
-| delete | with the registry |
+| delete | `nils jobs prune [--keep-days <n>]` |
 
 ## audit log
 
@@ -113,7 +121,8 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | what | who did what, to which scope, when, under which policy (Wave 4a section 9.2): every decision, acknowledgement, import, vocabulary load, linkage change, release and handover, as the principal user@node |
 | where | rows of audit in the registry |
 | holds | quasi-identifying: the principal, a release's root path<br>technical: the action, the scope's ids and counts, the policy, the time; never an identifier |
-| kept | until deleted with the registry |
+| owner | the registry's operator; read by whoever answers for the archive |
+| kept | for ever (Wave 4a section 13.1); nobody deletes an audit row |
 | read | `nils audit list [--principal <who>] [--action <action>] [--since <stamp>]` |
 | change | no command |
 | export | `nils audit list --json` |
@@ -126,6 +135,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | what | none: progress is printed to stderr and not stored; the counts of a run are its batch record |
 | where | nowhere |
 | holds | nothing |
+| owner | the registry's operator |
 | kept | not kept |
 | read | no command |
 | change | no command |

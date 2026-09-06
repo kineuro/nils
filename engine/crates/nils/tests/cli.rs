@@ -3543,3 +3543,157 @@ fn nils_review_apply_is_one_verb_over_groups_stages_commits_and_withdraws() {
     let audited = run(&["audit", "list", "--action", "decision"]);
     assert!(audited.lines().count() >= 4, "{audited}");
 }
+
+#[test]
+fn a_release_is_withdrawn_with_a_reason_and_finished_jobs_are_pruned_by_age() {
+    // Wave 4a section 13.1: a release is never removed, only withdrawn, with
+    // a reason and by a principal; the job log keeps a year of finished jobs
+    // and `nils jobs prune` deletes the older ones, never a running or a
+    // queued one.
+    let home = home();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = tree();
+    let out = TempDir::new("cli-withdraw");
+    let run = |args: &[&str]| {
+        let out = nils()
+            .args(registry)
+            .args(args)
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}: {}\n{}",
+            args.join(" "),
+            stderr(&out),
+            stdout(&out)
+        );
+        stdout(&out)
+    };
+    run(&[
+        "digest",
+        "--name",
+        "a",
+        "--no-private",
+        dir.path().to_str().unwrap(),
+    ]);
+    run(&[
+        "release",
+        "--name",
+        "r",
+        "--on-unknown",
+        "write",
+        "--layout",
+        "descriptive",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+        "--out",
+        out.path().to_str().unwrap(),
+    ]);
+    let version = {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .query("SELECT version FROM release WHERE name = 'r'", &[])
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string()
+    };
+    // Without a reason: refused before anything is written.
+    let refused = nils()
+        .args(registry)
+        .args(["release", "--name", "r", "--withdraw", &version])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
+    let said = run(&[
+        "release",
+        "--name",
+        "r",
+        "--withdraw",
+        &version,
+        "--why",
+        "a subject asked to be left out",
+    ]);
+    assert!(said.contains("withdrew release r version"), "{said}");
+    // Twice is refused; the row stays and says who and why.
+    let again = nils()
+        .args(registry)
+        .args([
+            "release",
+            "--name",
+            "r",
+            "--withdraw",
+            &version,
+            "--why",
+            "x",
+        ])
+        .output()
+        .unwrap();
+    assert!(!again.status.success());
+    assert!(
+        stderr(&again).contains("already withdrawn"),
+        "{}",
+        stderr(&again)
+    );
+    {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        let row = &store
+            .query(
+                "SELECT withdrawn_by, withdrawn_why FROM release WHERE name = 'r'",
+                &[],
+            )
+            .unwrap()[0];
+        assert_eq!(row.opt_text(0).unwrap(), Some("anna@ward-3"));
+        assert_eq!(
+            row.opt_text(1).unwrap(),
+            Some("a subject asked to be left out")
+        );
+    }
+    let audited = run(&["audit", "list", "--action", "release.withdraw"]);
+    assert!(audited.contains("anna@ward-3"), "{audited}");
+
+    // The job log: the digest and the release are finished jobs; aged past
+    // the retention they go, a queued one stays.
+    run(&["jobs", "enqueue", "--", "fingerprint"]);
+    {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .execute(
+                "UPDATE job SET finished_at = '2020-01-01T00:00:00Z' WHERE state = 'done'",
+                &[],
+            )
+            .unwrap();
+    }
+    let pruned = run(&["jobs", "prune"]);
+    assert!(pruned.starts_with("pruned 2 finished job(s)"), "{pruned}");
+    let left: serde_json::Value =
+        serde_json::from_str(&run(&["jobs", "list", "--all", "--json"])).unwrap();
+    let kinds: Vec<String> = left
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| {
+            format!(
+                "{}:{}",
+                j["kind"].as_str().unwrap(),
+                j["state"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert!(
+        kinds.contains(&"fingerprint:queued".to_string()),
+        "{kinds:?}"
+    );
+    assert!(!kinds.iter().any(|k| k == "digest:done"), "{kinds:?}");
+    // The prune is audited too, and moved no epoch.
+    let audited = run(&["audit", "list", "--action", "jobs.prune", "--json"]);
+    let doc: serde_json::Value = serde_json::from_str(&audited).unwrap();
+    assert_eq!(doc[0]["scope"]["pruned"], 2, "{doc}");
+    assert_eq!(doc[0]["epoch"], serde_json::Value::Null, "{doc}");
+}

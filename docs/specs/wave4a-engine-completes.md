@@ -934,6 +934,79 @@ its clinical file imported, because there is no migration:
     a retention (§13.1).
 11. **The budget**, measured on the baseline host and gated in CI.
 
+**As built (slice 16, 2026-09-06).** The gate runs in three places, and the
+scripts are `tools/release-check/gate.sh` (the reference corpus, in CI on
+every push), `tools/wave4a-gate/cohort.sh` with `check.py` (a real cohort on
+the private host that holds its archive and its clinical files; every path is
+an argument, and the outputs are counts and timings) and
+`tools/wave4a-gate/budget.sh` (the baseline host, from the archive over NFS).
+What proves each bar:
+
+1. `cohort.sh` builds the registry from the raw tree with `nils digest` and
+   the clinical layer with the one importer, and `check.py` holds the
+   subject, study and series counts to the ones read out of v0's database
+   for the same cohort, a difference allowed only with a named cause in the
+   counts file. The cohort, on its archive host, 2026-09-06: 497,150
+   files seen, 493,708 parsed, 3,442 refused by name (3,309 of a SOP class
+   the engine does not read, 3,177 of them secondary captures; 124 not
+   DICOM; 9 without a study UID); 44 subjects, 82 studies, 2,165 series,
+   2,534 stacks, in 737 s at 675 files a second on the busiest host we
+   have, at 1,002 MB peak. Against v0's 43 subjects, 203 studies and 3,599
+   series the three differences have their causes named in the counts
+   file and were measured in Wave 1: the studies and series of 17 subjects
+   who are also in other cohorts sit under the other cohorts' roots
+   (128,880 instances, excused by name), the 82 studies and 2,165 series
+   here are the 82 and 2,165 both sides hold, and the one subject more is
+   the folder Wave 1 moved aside on the tank (10,820 instances, a name
+   shaped like a code that matches no identifier), still under the archive
+   host's own root; the baseline host, reading the tank, counts 43.
+2. Slice 1's measurement, §4.4: the release's bookkeeping at 150,000 and
+   1,000,000 files in both layouts, flat, and a re-run writing nothing; the
+   reference gate's bar 9 and the cohort gate's re-runs keep it so.
+3. Slices 2 and 3, §5.5 and §5.6: the pack's private elements read on the
+   three surveyed vendors, and the reference gate's bar 8b, which reads the
+   released tree with `nils private` and finds nothing the pack did not
+   name.
+4. Slice 4, §6.1: the CLI suite runs a full round on Postgres, and the
+   store's Postgres text decoder is what a raw date projection would have to
+   get past.
+5. Slice 4, §6.1: one row per axis value, and the role match is `IN`.
+6. Slice 9, §7.4: the reference gate's bar 10 compares each session's EDSS
+   with the registry's own nearest under keep and shift.
+7. Slice 7, §7.2: the cohort gate runs the cohort, membership, demographics,
+   disease and event files through the one importer, and the second apply
+   changes nothing. The cohort's four files and the cohort row: 1
+   cohort, 43 members, demographics for 43 rows (11 added, 3 already equal,
+   36 with nothing to import, none refused otherwise), 40 diagnoses, 298
+   events, each applied and each second apply changing nothing (every row
+   skipped as already held).
+8. Slice 13, §10.1: at the pack's thresholds the cohort asks nothing but the
+   quarantine, and the mixed corpus asks 77 items in 9 groups; the cohort
+   gate counts the open queue after its classification. The cohort at the pack's thresholds: 2,534 stacks
+   classified, 0 questions raised, 3 open items, all of them the digest's
+   quarantine notes.
+9. Slice 14 and 15, §11: the reference gate's bar 9b drives status, custody,
+   selection, the review queue and a release through `nils serve` and holds
+   the door's answers to the command line's, the release queued through the
+   door and run by a worker writing the tree the command line wrote; the
+   cohort gate does the same on the cohort; the door's tests do it in every
+   auth mode.
+10. Every store the custody table lists carries an `owner` and a `kept`
+    (§13.1): the job log keeps a year of finished jobs and `nils jobs prune`
+    is its deleter, the audit log is kept for ever, and a release is never
+    removed, only withdrawn with a reason by `nils release --withdraw VERSION
+    --why TEXT` (migration 25), which the audit records.
+11. `budget.sh` on the baseline host: the digest's rate held to a floor of
+    500 files a second and its peak memory to a cap of 8 GB, the second pass
+    over the unchanged tree, and the release's re-run writing nothing; CI
+    holds the synthetic benchmark to Wave 1's baseline on every push.
+    The baseline host (8 vCPU, 64 GB, the archive over
+   NFS), 2026-09-06: 486,326 files digested in 78 s at 6,246 files a second
+   and 892 MB peak; the second pass over the unchanged tree 4 s; the
+   fingerprint 1 s; the classification under a second; the descriptive
+   release of 482,888 files for 43 subjects 482 s; its re-run 1 s and
+   nothing written. Every bar.
+
 ## 13. Defaults settled in this spec
 
 Written here so that the wave does not stop to ask, and for Nima to strike.

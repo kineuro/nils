@@ -31,6 +31,8 @@ pub enum Action {
     LinkageReveal,
     Release,
     Handover,
+    ReleaseWithdraw,
+    JobsPrune,
 }
 
 impl Action {
@@ -47,13 +49,18 @@ impl Action {
             Action::LinkageReveal => "linkage.reveal",
             Action::Release => "release",
             Action::Handover => "handover",
+            Action::ReleaseWithdraw => "release.withdraw",
+            Action::JobsPrune => "jobs.prune",
         }
     }
 
     /// Whether the act changes a judgement, which is when the epoch
     /// advances (§13.5). An acknowledgement and a reveal change none.
     pub fn changes_judgement(self) -> bool {
-        !matches!(self, Action::ReviewAccept | Action::LinkageReveal)
+        !matches!(
+            self,
+            Action::ReviewAccept | Action::LinkageReveal | Action::JobsPrune
+        )
     }
 }
 

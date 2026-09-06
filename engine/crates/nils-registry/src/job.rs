@@ -527,6 +527,25 @@ pub fn enqueue(
         .map_err(Error::Store)
 }
 
+/// Wave 4a §13.1: the job log keeps a year of finished jobs. Delete the
+/// ones over, done or failed or cancelled, and say how many went. A
+/// running or queued job is never pruned.
+pub fn prune(store: &mut Store, keep_days: u32) -> Result<u64, Error> {
+    let cutoff = now_secs().saturating_sub(u64::from(keep_days) * 86_400);
+    let day = crate::day::Day::from_unix(cutoff as i64)
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| "1970-01-01".to_string());
+    let stamp = format!("{day}T00:00:00Z");
+    let d = store.dialect();
+    let sql = format!(
+        "DELETE FROM {} WHERE state IN ('done', 'failed', 'cancelled') AND finished_at IS NOT NULL \
+         AND finished_at < {}",
+        store.qualified("job"),
+        d.param(1, Type::Timestamp)
+    );
+    Ok(store.execute(&sql, &[Param::from(stamp.as_str())])?)
+}
+
 /// The oldest queued job, if any.
 pub fn next_queued(store: &mut Store) -> Result<Option<Job>, Error> {
     let sql = format!(
