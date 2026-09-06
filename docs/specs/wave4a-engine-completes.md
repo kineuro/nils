@@ -157,7 +157,9 @@ is more efficient rather than assume.
 
 **Measured, 2026-09-06**, on the baseline host, synthetic corpora from the
 `corpus` example (seeds 1 and 2, 2 KB of pixels a file), the descriptive
-layout, one process per release, peak resident set of that process alone. The
+layout, one process per release, peak resident set of that process alone,
+with `engine/benches/release-manifest.py`, which is how the numbers are made
+again. The
 digest is the same code in both columns and peaks at 600 MB at either size,
 which is Wave 1's budget and not this slice's.
 
