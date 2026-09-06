@@ -252,6 +252,9 @@ pub(crate) fn private_values(pack: &Pack, elements: Option<&str>) -> Vec<String>
 /// call about the site is overridden where somebody looked closer.
 pub struct Decisions {
     by_stack: HashMap<(i64, String), Decided>,
+    /// Wave 4a §10.2: a decision on a grouped item reaches each member,
+    /// keyed here by the member's stack; a stack's own decision still wins.
+    by_group: HashMap<(i64, String), Decided>,
     by_series: HashMap<(i64, String), Decided>,
     by_subject: HashMap<(i64, String), Decided>,
     /// Keyed by the lowercase `field=value` the decision names.
@@ -308,18 +311,43 @@ const ORIGIN: &[(&str, &str)] = &[
 ];
 
 impl Decisions {
+    /// The decisions in force: not withdrawn, and committed (a decision
+    /// written without staging is committed as it is written; one that is
+    /// staged waits). Where two hold the same key, the higher rank wins
+    /// (C15: a person over an agent over a model) and among equals the
+    /// later one, which is the order they are read in.
     fn load(store: &mut Store) -> Result<Decisions, Error> {
         let sql = format!(
-            "SELECT scope, ref, axis, value, actor, author_kind, author_version FROM {} \
-             WHERE withdrawn_at IS NULL",
+            "SELECT scope, ref, axis, value, actor, author_kind, author_version, id FROM {} \
+             WHERE withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL) \
+             ORDER BY id",
             store.qualified("decision")
         );
         let mut d = Decisions {
             by_stack: HashMap::new(),
+            by_group: HashMap::new(),
             by_series: HashMap::new(),
             by_subject: HashMap::new(),
             by_origin: HashMap::new(),
         };
+        fn keep(map: &mut HashMap<(i64, String), Decided>, key: (i64, String), value: Decided) {
+            let rank = nils_registry::review::rank(&value.author.kind);
+            match map.get(&key) {
+                Some(held) if nils_registry::review::rank(&held.author.kind) > rank => {}
+                _ => {
+                    map.insert(key, value);
+                }
+            }
+        }
+        // Group decisions reach their members: read the membership once.
+        let members_sql = format!(
+            "SELECT item_id, stack_id FROM {}",
+            store.qualified("review_member")
+        );
+        let mut members_of: HashMap<i64, Vec<i64>> = HashMap::new();
+        for r in store.query(&members_sql, &[])? {
+            members_of.entry(r.int(0)?).or_default().push(r.int(1)?);
+        }
         for r in store.query(&sql, &[])? {
             let scope = r.text(0)?;
             let reference = r.text(1)?.to_string();
@@ -337,13 +365,18 @@ impl Decisions {
             let id = || reference.parse::<i64>().unwrap_or(0);
             match scope {
                 "stack" => {
-                    d.by_stack.insert((id(), axis), value);
+                    keep(&mut d.by_stack, (id(), axis), value);
+                }
+                "group" => {
+                    for stack in members_of.get(&id()).into_iter().flatten() {
+                        keep(&mut d.by_group, (*stack, axis.clone()), value.clone());
+                    }
                 }
                 "series" => {
-                    d.by_series.insert((id(), axis), value);
+                    keep(&mut d.by_series, (id(), axis), value);
                 }
                 "subject" => {
-                    d.by_subject.insert((id(), axis), value);
+                    keep(&mut d.by_subject, (id(), axis), value);
                 }
                 "origin" => {
                     d.by_origin.insert((reference.to_lowercase(), axis), value);
@@ -363,40 +396,55 @@ impl Decisions {
 
     fn any(&self) -> bool {
         !self.by_stack.is_empty()
+            || !self.by_group.is_empty()
             || !self.by_series.is_empty()
             || !self.by_subject.is_empty()
             || !self.by_origin.is_empty()
     }
 
     /// The decision in force on this axis of this stack, narrowest first.
+    /// The decision that governs one axis of one stack: of every decision
+    /// that names the stack at any scope, the highest rank wins (C15: a
+    /// person's call about a scanner beats an agent's about the stack), and
+    /// among equals the narrowest scope, which is where somebody looked
+    /// closest.
     fn for_stack(&self, ids: Ids, stack: &Stack, axis: &str) -> Option<&Decided> {
         let key = |id: i64| (id, axis.to_string());
+        // (rank, narrowness, the decision)
+        let mut candidates: Vec<(u8, u8, &Decided)> = Vec::new();
+        let rank = |d: &Decided| nils_registry::review::rank(&d.author.kind);
         if let Some(v) = self.by_stack.get(&key(ids.stack)) {
-            return Some(v);
+            candidates.push((rank(v), 4, v));
+        }
+        if let Some(v) = self.by_group.get(&key(ids.stack)) {
+            candidates.push((rank(v), 3, v));
         }
         if let Some(v) = self.by_series.get(&key(ids.series)) {
-            return Some(v);
+            candidates.push((rank(v), 2, v));
         }
         if let Some(v) = self.by_subject.get(&key(ids.subject)) {
-            return Some(v);
+            candidates.push((rank(v), 1, v));
         }
-        if self.by_origin.is_empty() {
-            return None;
-        }
-        for (name, field) in ORIGIN {
-            let Some(index) = nils_pack::stack::field_index(field) else {
-                continue;
-            };
-            let value = stack.text(index);
-            if value.is_empty() {
-                continue;
+        if !self.by_origin.is_empty() {
+            for (name, field) in ORIGIN {
+                let Some(index) = nils_pack::stack::field_index(field) else {
+                    continue;
+                };
+                let value = stack.text(index);
+                if value.is_empty() {
+                    continue;
+                }
+                let reference = format!("{name}={}", value.to_lowercase());
+                if let Some(v) = self.by_origin.get(&(reference, axis.to_string())) {
+                    candidates.push((rank(v), 0, v));
+                    break;
+                }
             }
-            let reference = format!("{name}={}", value.to_lowercase());
-            if let Some(v) = self.by_origin.get(&(reference, axis.to_string())) {
-                return Some(v);
-            }
         }
-        None
+        candidates
+            .into_iter()
+            .max_by_key(|(r, n, _)| (*r, *n))
+            .map(|(_, _, d)| d)
     }
 }
 
@@ -409,7 +457,18 @@ pub fn classify(
 ) -> Result<crate::report::Classified, Error> {
     let started = Instant::now();
     let job_id = crate::job::claim_for(registry, settings, "classify")?;
-    let result = run(registry, pack, settings, cancel, job_id, started);
+    let mut result = run(registry, pack, settings, cancel, job_id, started);
+    // Wave 4a §10.2: one question about a rule is one item with n members.
+    if let Ok(report) = &mut result {
+        match nils_registry::review::group_run(registry.store(), job_id) {
+            Ok(grouped) => report.review_groups = grouped.items,
+            Err(e) => {
+                result = Err(Error::Store(nils_registry::store::Error::Message(
+                    e.to_string(),
+                )));
+            }
+        }
+    }
     let store = registry.store();
     match &result {
         Ok(report) => {
@@ -530,6 +589,7 @@ fn run(
                             ),
                             Param::from("open"),
                             Param::from(now.as_str()),
+                            Param::Int(job_id),
                         ]);
                         raised += 1;
                     }
@@ -584,6 +644,7 @@ fn run(
                         ),
                         Param::from("open"),
                         Param::from(now.as_str()),
+                        Param::Int(job_id),
                     ]);
                     raised += 1;
                 }
@@ -707,6 +768,22 @@ fn run(
                             .map(|id| Param::from(serde_json::json!({"stack_id": id}).to_string()))
                             .collect();
                         store.execute(&sql, &params)?;
+                        // Wave 4a §10.2, C15: a re-classification emits new
+                        // items and never overwrites; an earlier grouped
+                        // question one of these stacks belongs to is
+                        // superseded, and this run asks again.
+                        let grouped = format!(
+                            "UPDATE {} SET status = 'superseded' WHERE status = 'open' AND scope = 'group' \
+                             AND id IN (SELECT item_id FROM {} WHERE stack_id IN ({}))",
+                            store.qualified("review_item"),
+                            store.qualified("review_member"),
+                            chunk
+                                .iter()
+                                .map(i64::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        store.execute(&grouped, &[])?;
                     }
                 }
                 for t in [axis_t, ev_t] {
@@ -780,7 +857,15 @@ fn run(
                     store.insert(
                         &Insert::new(
                             review_t,
-                            &["kind", "scope", "ref", "evidence", "status", "created_at"],
+                            &[
+                                "kind",
+                                "scope",
+                                "ref",
+                                "evidence",
+                                "status",
+                                "created_at",
+                                "job_id",
+                            ],
                         ),
                         &reviews,
                     )?;

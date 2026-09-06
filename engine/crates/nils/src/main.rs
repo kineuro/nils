@@ -679,8 +679,30 @@ enum ReviewCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Answer one review item: record the person's decision and close it
+    /// Apply a decision to one item: to a whole grouped question as one
+    /// row with the group's scope, or to one member with --member, reaching
+    /// as wide as --scope says; --stage writes it without putting it in
+    /// force until `review commit` (Wave 4a section 10.2). The one verb
+    Apply(DecideArgs),
+    /// The same as `apply`, under the name Wave 2 gave it
     Decide(DecideArgs),
+    /// Put staged decisions in force: one by id, or every one with --all.
+    /// Refused when the registry moved on since they were staged, unless
+    /// --anyway
+    Commit {
+        /// The decision to commit
+        id: Option<i64>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        anyway: bool,
+    },
+    /// Withdraw a decision, staged or committed: it stops being in force,
+    /// the items it closed open again, and nothing is deleted
+    Withdraw {
+        /// The decision to withdraw
+        id: i64,
+    },
     /// Acknowledge one review item: the machine was right and you checked.
     /// Not a decision, and not counted as one (Wave 4a section 13.4)
     Accept {
@@ -696,14 +718,21 @@ enum ReviewCommand {
 struct DecideArgs {
     /// The review item to answer
     id: i64,
-    /// How far the answer reaches: this stack, or everything of its series,
-    /// its subject, or the machine that made it
+    /// For a grouped question, one member (a stack id) to decide on its
+    /// own; without it the decision is one row for the whole group
+    #[arg(long, value_name = "STACK")]
+    member: Option<i64>,
+    /// How far a member's answer reaches: this stack, or everything of its
+    /// series, its subject, or the machine that made it
     #[arg(
         long,
         default_value = "stack",
         value_name = "stack|series|subject|origin"
     )]
     scope: String,
+    /// Write the decision without putting it in force; `review commit` does
+    #[arg(long)]
+    stage: bool,
     /// What the axis is, in the person's judgement
     #[arg(long, value_name = "VALUE", conflicts_with = "nothing")]
     value: Option<String>,
@@ -2372,7 +2401,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
     let store = registry.store();
     let d = store.dialect();
     let columns = format!(
-        "id, kind, scope, status, actor, {}, {}, {}, {}, {}",
+        "id, kind, scope, status, actor, {}, {}, {}, {}, {}, members, group_key, accepted_by",
         text_of(store, "review_item", "created_at"),
         text_of(store, "review_item", "decided_at"),
         text_of(store, "review_item", "ref"),
@@ -2396,6 +2425,9 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             "ref": json(7)?,
             "evidence": json(8)?,
             "decision": json(9)?,
+            "members": r.opt_int(10)?,
+            "group_key": r.opt_text(11)?,
+            "accepted_by": r.opt_text(12)?,
         }))
     };
     match command {
@@ -2458,9 +2490,30 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             }
             Ok(())
         }
-        ReviewCommand::Decide(args) => {
+        ReviewCommand::Apply(args) | ReviewCommand::Decide(args) => {
             drop(columns);
             review_decide(&mut registry, args)
+        }
+        ReviewCommand::Commit { id, all, anyway } => {
+            drop(columns);
+            if id.is_none() && !all {
+                return Err(usage("name a decision to commit, or --all"));
+            }
+            let done = nils_registry::review::commit(&mut registry, id, anyway, &actor())
+                .map_err(|e| fail(e.to_string()))?;
+            println!(
+                "committed {} decision(s), {} item(s) accepted",
+                done.decisions.len(),
+                done.items
+            );
+            Ok(())
+        }
+        ReviewCommand::Withdraw { id } => {
+            drop(columns);
+            let reopened = nils_registry::review::withdraw(&mut registry, id, &actor())
+                .map_err(|e| fail(e.to_string()))?;
+            println!("withdrew decision {id}; {reopened} item(s) open again");
+            Ok(())
         }
         ReviewCommand::Accept { id, why } => {
             drop(columns);
@@ -2493,6 +2546,23 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             println!("  created    {}", s(&item["created_at"]));
             println!("  ref        {}", item["ref"]);
             println!("  evidence   {}", item["evidence"]);
+            if s(&item["scope"]) == "group" {
+                let members =
+                    nils_registry::review::members(store, id).map_err(|e| fail(e.to_string()))?;
+                let decided = members.iter().filter(|m| m.decided_at.is_some()).count();
+                println!(
+                    "  members    {} stack(s), {} decided: {}{}",
+                    members.len(),
+                    decided,
+                    members
+                        .iter()
+                        .take(20)
+                        .map(|m| m.stack_id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if members.len() > 20 { ", ..." } else { "" }
+                );
+            }
             if !item["decided_at"].is_null() {
                 println!(
                     "  decided    {} by {}   {}",
@@ -2564,6 +2634,7 @@ fn review_accept(registry: &mut Registry, id: i64, why: Option<String>) -> Resul
 fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> {
     let DecideArgs {
         id,
+        member,
         scope,
         value,
         nothing,
@@ -2571,293 +2642,47 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
         author_kind,
         model_version,
         why,
+        stage,
         json,
     } = args;
-    // §10.1: a person, an agent or a model, and for a model which one. The
-    // reason is measured: 4,692 body parts in the live v0 archive are an image
-    // model's predictions, committed through its QC into the classifier's own
-    // column with nothing to mark them, and discoverable only because v0's
-    // keyword classifier happens to disagree with almost every one of them.
-    if !["person", "agent", "model"].contains(&author_kind.as_str()) {
-        return Err(usage(format!(
-            "--as is person, agent or model, not {author_kind}"
-        )));
-    }
-    if author_kind == "model" && model_version.is_none() {
-        return Err(usage(
-            "a model's answer records which model: give --model-version",
-        ));
-    }
-    if author_kind != "model" && model_version.is_some() {
-        return Err(usage("--model-version belongs to --as model"));
-    }
     if value.is_none() && !nothing {
         return Err(usage(
-            "say what the axis is: --value <v>, or --nothing when it has none",
+            "say what the axis is (--value) or that it has no value here (--nothing)",
         ));
     }
-    let store = registry.store();
-    let d = store.dialect();
-    let sql = format!(
-        "SELECT kind, scope, status, {}, {} FROM {} WHERE id = {}",
-        text_of(store, "review_item", "ref"),
-        text_of(store, "review_item", "evidence"),
-        store.qualified("review_item"),
-        d.param(1, Type::Int)
-    );
-    let row = store
-        .query_opt(&sql, &[Param::Int(id)])?
-        .ok_or_else(|| fail(format!("no review item {id}")))?;
-    let kind = row.text(0)?.to_string();
-    let status = row.text(2)?.to_string();
-    let json_of = |i: usize| -> serde_json::Value {
-        row.opt_text(i)
-            .ok()
-            .flatten()
-            .and_then(|t| serde_json::from_str(t).ok())
-            .unwrap_or(serde_json::Value::Null)
-    };
-    let reference = json_of(3);
-    let evidence = json_of(4);
-
-    // Only the classifier's questions are about an axis. A quarantine or an
-    // identity collision is answered by `review apply`, which is Wave 4's.
-    let axis = evidence["axis"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| {
-            fail(format!(
-                "review item {id} is a {kind}, which is not a question about an axis"
-            ))
-        })?;
-    let stack = match &reference["stack_id"] {
-        serde_json::Value::Number(n) => n.as_i64().unwrap_or(0),
-        _ => return Err(fail(format!("review item {id} names no stack"))),
-    };
-    if status != "open" {
-        return Err(fail(format!(
-            "review item {id} is already {status}; decide the axis again with a new run"
-        )));
-    }
-
-    // How far the answer reaches. A person answers about one stack and may
-    // mean the whole series, the whole subject or the scanner: the wider call
-    // is written at that scope, and a narrower one still overrides it later.
-    let (scope, subject) = match scope.as_str() {
-        "stack" => ("stack".to_string(), stack.to_string()),
-        "series" | "subject" => {
-            let column = if scope == "series" {
-                "k.series_id"
-            } else {
-                "r.subject_id"
-            };
-            let sql = format!(
-                "SELECT {column} FROM {} AS k JOIN {} AS r ON r.id = k.series_id WHERE k.id = {}",
-                store.qualified("stack"),
-                store.qualified("series"),
-                d.param(1, Type::Int)
-            );
-            let found = store
-                .query_opt(&sql, &[Param::Int(stack)])?
-                .ok_or_else(|| fail(format!("stack {stack} is not in the registry")))?;
-            (scope.to_string(), found.int(0)?.to_string())
-        }
-        "origin" => {
-            let sql = format!(
-                "SELECT manufacturer FROM {} WHERE stack_id = {}",
-                store.qualified("stack_fingerprint"),
-                d.param(1, Type::Int)
-            );
-            let made_by = store
-                .query_opt(&sql, &[Param::Int(stack)])?
-                .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
-                .filter(|m| !m.is_empty())
-                .ok_or_else(|| {
-                    fail(format!(
-                        "stack {stack} names no manufacturer, so there is no origin to decide about"
-                    ))
-                })?;
-            (
-                "origin".to_string(),
-                format!("manufacturer={}", made_by.to_lowercase()),
-            )
-        }
-        other => {
-            return Err(usage(format!(
-                "{other} is not a scope: stack, series, subject or origin"
-            )));
-        }
-    };
-
     // A named actor is a principal too: a bare name is a user on this host.
     let who = actor
         .as_deref()
         .and_then(nils_registry::principal::Principal::parse)
         .map(|p| p.to_string())
         .unwrap_or_else(self::actor);
-    let now = nils_registry::time::now_iso();
-    let answer = serde_json::json!({
-        "axis": axis,
-        "value": value,
-        "actor": who,
-        "author_kind": author_kind,
-        "model_version": model_version,
-        "why": why,
-    });
-
-    store.begin()?;
-    let write = (|| -> Result<(), nils_registry::store::Error> {
-        let withdraw = format!(
-            "UPDATE {} SET withdrawn_at = {} WHERE scope = {} AND ref = {} AND axis = {} AND withdrawn_at IS NULL",
-            store.qualified("decision"),
-            d.param(1, Type::Timestamp),
-            d.param(2, Type::Text),
-            d.param(3, Type::Text),
-            d.param(4, Type::Text),
-        );
-        store.execute(
-            &withdraw,
-            &[
-                Param::from(now.as_str()),
-                Param::from(scope.as_str()),
-                Param::from(subject.as_str()),
-                Param::from(axis.as_str()),
-            ],
-        )?;
-        store.insert(
-            &Insert::new(
-                table("decision"),
-                &[
-                    "scope",
-                    "ref",
-                    "axis",
-                    "value",
-                    "actor",
-                    "author_kind",
-                    "author_version",
-                    "why",
-                    "decided_at",
-                ],
-            ),
-            &[vec![
-                Param::from(scope.as_str()),
-                Param::from(subject.as_str()),
-                Param::from(axis.as_str()),
-                match &value {
-                    Some(v) => Param::from(v.as_str()),
-                    None => Param::Null,
-                },
-                Param::from(who.as_str()),
-                Param::from(author_kind.as_str()),
-                match &model_version {
-                    Some(v) => Param::from(v.as_str()),
-                    None => Param::Null,
-                },
-                match &why {
-                    Some(w) => Param::from(w.as_str()),
-                    None => Param::Null,
-                },
-                Param::from(now.as_str()),
-            ]],
-        )?;
-        Ok(())
-    })();
-    match write {
-        Ok(()) => {}
-        Err(e) => {
-            store.rollback().ok();
-            return Err(fail(e.to_string()));
-        }
-    }
-
-    // Every open question about this axis on this stack is answered by the
-    // one decision, not just the item that happened to be quoted. The items
-    // are matched here rather than in SQL because a JSON column compares as
-    // JSON on one backend and as text on the other.
-    let same = format!(
-        "SELECT id, {} FROM {} WHERE status = 'open' AND scope = 'stack' AND kind LIKE {}",
-        text_of(store, "review_item", "ref"),
-        store.qualified("review_item"),
-        d.param(1, Type::Text),
-    );
-    let mut closing: Vec<i64> = Vec::new();
-    let found = store.query(&same, &[Param::from(format!("{axis}:%"))]);
-    let found = match found {
-        Ok(rows) => rows,
-        Err(e) => {
-            store.rollback().ok();
-            return Err(fail(e.to_string()));
-        }
-    };
-    for r in &found {
-        let its: serde_json::Value = r
-            .opt_text(1)
-            .ok()
-            .flatten()
-            .and_then(|t| serde_json::from_str(t).ok())
-            .unwrap_or(serde_json::Value::Null);
-        if its == reference {
-            closing.push(r.int(0).unwrap_or(0));
-        }
-    }
-    let write = (|| -> Result<(), nils_registry::store::Error> {
-        for item in &closing {
-            let close = format!(
-                "UPDATE {} SET status = 'accepted', decided_at = {}, actor = {}, decision = {} WHERE id = {}",
-                store.qualified("review_item"),
-                d.param(1, Type::Timestamp),
-                d.param(2, Type::Text),
-                d.param(3, Type::Json),
-                d.param(4, Type::Int),
-            );
-            store.execute(
-                &close,
-                &[
-                    Param::from(now.as_str()),
-                    Param::from(who.as_str()),
-                    Param::from(answer.to_string()),
-                    Param::Int(*item),
-                ],
-            )?;
-        }
-        Ok(())
-    })();
-    match write {
-        Ok(()) => store.commit()?,
-        Err(e) => {
-            store.rollback().ok();
-            return Err(fail(e.to_string()));
-        }
-    }
-    // Wave 4a section 9.2: the audit row, and the epoch with it (13.5).
-    nils_registry::audit::record(
+    let applied = nils_registry::review::apply(
         registry,
-        &nils_registry::audit::Entry {
-            principal: &who,
-            action: nils_registry::audit::Action::Decision,
-            scope: serde_json::json!({
-                "review_item": id, "scope": scope, "ref": subject, "axis": axis,
-                "closed": closing.len(),
-            }),
-            policy: None,
-            job_id: None,
-            details: Some(serde_json::json!({
-                "value": value, "author_kind": author_kind,
-                "model_version": model_version, "why": why,
-            })),
+        &nils_registry::review::Apply {
+            item: id,
+            member,
+            scope: &scope,
+            value: value.as_deref(),
+            author: nils_registry::review::Author {
+                who: &who,
+                kind: &author_kind,
+                version: model_version.as_deref(),
+            },
+            stage,
+            why: why.as_deref(),
         },
     )
-    .map_err(|e| fail(e.to_string()))?;
+    .map_err(|e| match e {
+        nils_registry::review::Error::Refused(m) => usage(m),
+        other => fail(other.to_string()),
+    })?;
     let store = registry.store();
-
+    let open_sql = format!(
+        "SELECT COUNT(*) FROM {} WHERE status = 'open'",
+        store.qualified("review_item")
+    );
     let open = store
-        .query(
-            &format!(
-                "SELECT COUNT(*) FROM {} WHERE status = 'open'",
-                store.qualified("review_item")
-            ),
-            &[],
-        )?
+        .query(&open_sql, &[])?
         .first()
         .and_then(|r| r.int(0).ok())
         .unwrap_or(0);
@@ -2865,26 +2690,35 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "item": id, "scope": scope, "axis": axis,
-                "value": value, "actor": who, "why": why,
-                "decided_at": now, "open_review_items": open,
+                "review_item": id, "decision": applied.decision, "axis": applied.axis,
+                "value": value, "scope": applied.scope, "ref": applied.reference,
+                "closed": applied.closed, "members": applied.members,
+                "staged": applied.staged, "actor": who, "open_review_items": open,
             }))
             .unwrap_or_default()
         );
-    } else {
-        let said = match &value {
-            Some(v) => v.clone(),
-            None => "nothing".to_string(),
-        };
-        println!("review item {id}   {axis} = {said}   by {who}");
-        println!("  the classifier reads this on every later run");
-        println!("  {open} review item(s) still open");
+        return Ok(());
     }
+    println!(
+        "{} {} = {} at {} {} by {}{}; {} item(s) {}, {} open",
+        if applied.staged { "staged" } else { "decided" },
+        applied.axis,
+        value.as_deref().unwrap_or("nothing"),
+        applied.scope,
+        applied.reference,
+        who,
+        if applied.members > 0 {
+            format!(", {} member(s)", applied.members)
+        } else {
+            String::new()
+        },
+        applied.closed.len(),
+        if applied.staged { "staged" } else { "closed" },
+        open
+    );
     Ok(())
 }
 
-/// One line on what a review item is about, from its `ref` and evidence:
-/// counts and codes, never an identifier.
 fn about(item: &serde_json::Value) -> String {
     let r = &item["ref"];
     let e = &item["evidence"];
@@ -2901,6 +2735,13 @@ fn about(item: &serde_json::Value) -> String {
             s(&e["id_type"]),
             s(&e["reason"]),
             e["batch_id"]
+        ),
+        _ if s(&item["scope"]) == "group" => format!(
+            "{} stack(s): {} = {} ({})",
+            item["members"],
+            s(&e["axis"]),
+            s(&e["value"]),
+            s(&e["tier"])
         ),
         _ => r.to_string(),
     }

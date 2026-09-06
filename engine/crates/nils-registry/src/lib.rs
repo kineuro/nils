@@ -27,6 +27,7 @@ pub mod linkage;
 pub mod migrate;
 pub mod principal;
 pub mod pseudonym;
+pub mod review;
 pub mod schema;
 pub mod session;
 pub mod store;

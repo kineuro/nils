@@ -21,6 +21,7 @@ the contract; adding or removing a property of the item is.
 | version | schema | since |
 |---|---|---|
 | 1 | [`v1/review-item.schema.json`](v1/review-item.schema.json) | Wave 1 (the table); written down in Wave 4a |
+| 2 | [`v2/review-item.schema.json`](v2/review-item.schema.json) | Wave 4a slice 13, 2026-09-06: `scope` gains `group`, `status` gains `accepted`, `rejected`, `superseded` and `staged`, and the item gains `members`, `group_key` and `accepted_by` |
 
 ## The kinds so far
 

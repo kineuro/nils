@@ -565,3 +565,295 @@ fn a_model_s_answer_does_not_read_like_a_rule_s() {
         assert_eq!(authored, 1, "{name}");
     }
 }
+
+/// Wave 4a §10.2, on both backends: one question about a rule is one item
+/// with n members; a decision on it is one row with the group's scope and
+/// reaches every member on the next run; a staged decision is not in
+/// force until committed, and a commit is refused when the registry moved
+/// on; a withdrawal reopens what the decision closed; a person's decision
+/// is not overridden by an agent's.
+#[test]
+fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
+    use nils_registry::review::{self, Apply, Author};
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        // Two stacks of one series description, so the same question is
+        // asked twice and grouped once.
+        let dir = TempDir::new("classify-spine");
+        for (n, sop) in [("1", "A.1.1"), ("2", "A.2.1")] {
+            let mut e = synth::minimal_mr("A", &format!("A.{n}"), sop);
+            e.push(elem(tags::PATIENT_ID, VR::LO, "P1"));
+            e.push(elem(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+            dir.file(
+                &format!("s{n}/1"),
+                &synth::part10(&MetaFields::mr(sop), &e, true),
+            );
+        }
+        let mut reg = prepare(&lab, &dir);
+        let settings = nils_classify::job::Settings {
+            review_below: Some(1.0),
+            ..Default::default()
+        };
+        let first =
+            nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert_eq!(first.written, 2, "{name}");
+        assert!(first.review_items >= 2, "{name}: {first:?}");
+        assert!(
+            first.review_groups < first.review_items,
+            "{name}: grouped: {} question(s) for {} item(s)",
+            first.review_groups,
+            first.review_items
+        );
+        // Every open classifier question is a group now, with its members.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE status = 'open' AND scope = 'stack' AND kind LIKE '%:%'"
+            ),
+            0,
+            "{name}: no per-stack rows are left"
+        );
+        let groups = rows(
+            &mut reg,
+            "SELECT id, kind, members FROM {review_item} WHERE status = 'open' AND scope = 'group' AND kind = 'base:low_confidence'",
+        );
+        assert_eq!(groups.len(), 1, "{name}: one question about base");
+        let group = groups[0].int(0).unwrap();
+        assert_eq!(groups[0].int(2).unwrap(), 2, "{name}: with two members");
+        let members = review::members(reg.store(), group).unwrap();
+        assert_eq!(members.len(), 2, "{name}");
+        assert!(members.iter().all(|m| m.decided_at.is_none()), "{name}");
+
+        // One decision for the group: one row, scope group, and both stacks
+        // read T2w on the next run.
+        let applied = review::apply(
+            &mut reg,
+            &Apply {
+                item: group,
+                member: None,
+                scope: "stack",
+                value: Some("T2w"),
+                author: Author {
+                    who: "anna@ward-3",
+                    kind: "person",
+                    version: None,
+                },
+                stage: false,
+                why: Some("checked both"),
+            },
+        )
+        .unwrap();
+        assert_eq!(applied.scope, "group", "{name}");
+        assert_eq!(applied.members, 2, "{name}");
+        assert_eq!(applied.closed, vec![group], "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {decision} WHERE scope = 'group'"
+            ),
+            1,
+            "{name}: one row"
+        );
+        nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        let bases = rows(
+            &mut reg,
+            "SELECT value, tier FROM {classification_axis} WHERE axis = 'base' ORDER BY stack_id",
+        );
+        assert_eq!(bases.len(), 2, "{name}");
+        for b in &bases {
+            assert_eq!(
+                b.text(0).unwrap(),
+                "T2w",
+                "{name}: the group decision reaches each member"
+            );
+            assert_eq!(b.text(1).unwrap(), "decision", "{name}");
+        }
+        // The answered item stays accepted; the run asked its new questions
+        // as new items (C15), among them the disagreement with the rule.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE scope = 'group' AND kind = 'base:decision' AND status = 'open'"
+            ),
+            1,
+            "{name}"
+        );
+
+        // C15 across scopes: an agent's call about one member, narrower
+        // than the person's about the group, does not win. It is written
+        // (a different key), and the next run still reads the person's.
+        let disagreement = rows(
+            &mut reg,
+            "SELECT id FROM {review_item} WHERE status = 'open' AND scope = 'group' AND kind = 'base:decision'",
+        )[0]
+        .int(0)
+        .unwrap();
+        let stack_1 = review::members(reg.store(), disagreement).unwrap()[0].stack_id;
+        review::apply(
+            &mut reg,
+            &Apply {
+                item: disagreement,
+                member: Some(stack_1),
+                scope: "stack",
+                value: Some("PDw"),
+                author: Author {
+                    who: "bot@ward-3",
+                    kind: "agent",
+                    version: None,
+                },
+                stage: false,
+                why: None,
+            },
+        )
+        .unwrap();
+        nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert!(
+            rows(
+                &mut reg,
+                "SELECT value FROM {classification_axis} WHERE axis = 'base'"
+            )
+            .iter()
+            .all(|r| r.text(0).unwrap() == "T2w"),
+            "{name}: the person's group decision outranks the agent's narrower one"
+        );
+        // C15 on one key: once a person decided the stack itself, an agent
+        // is refused on that key.
+        let open_disagreement = rows(
+            &mut reg,
+            "SELECT id FROM {review_item} WHERE status = 'open' AND scope = 'group' AND kind = 'base:decision'",
+        )[0]
+        .int(0)
+        .unwrap();
+        review::apply(
+            &mut reg,
+            &Apply {
+                item: open_disagreement,
+                member: Some(stack_1),
+                scope: "stack",
+                value: Some("T2w"),
+                author: Author {
+                    who: "anna@ward-3",
+                    kind: "person",
+                    version: None,
+                },
+                stage: false,
+                why: None,
+            },
+        )
+        .unwrap();
+        nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        let open_disagreement = rows(
+            &mut reg,
+            "SELECT id FROM {review_item} WHERE status = 'open' AND scope = 'group' AND kind = 'base:decision'",
+        )[0]
+        .int(0)
+        .unwrap();
+        let refused = review::apply(
+            &mut reg,
+            &Apply {
+                item: open_disagreement,
+                member: Some(stack_1),
+                scope: "stack",
+                value: Some("PDw"),
+                author: Author {
+                    who: "bot@ward-3",
+                    kind: "agent",
+                    version: None,
+                },
+                stage: false,
+                why: None,
+            },
+        );
+        assert!(
+            matches!(&refused, Err(review::Error::Refused(m)) if m.contains("C15")),
+            "{name}: {refused:?}"
+        );
+
+        // A staged decision on another question is written but not in
+        // force; the registry moves on (a run), so the commit is refused
+        // until --anyway; committed, it is in force.
+        let technique = rows(
+            &mut reg,
+            "SELECT id FROM {review_item} WHERE status = 'open' AND scope = 'group' AND kind = 'technique:low_confidence'",
+        );
+        assert_eq!(technique.len(), 1, "{name}");
+        let technique = technique[0].int(0).unwrap();
+        let staged = review::apply(
+            &mut reg,
+            &Apply {
+                item: technique,
+                member: None,
+                scope: "stack",
+                value: Some("FLAIR"),
+                author: Author {
+                    who: "anna@ward-3",
+                    kind: "person",
+                    version: None,
+                },
+                stage: true,
+                why: None,
+            },
+        )
+        .unwrap();
+        assert!(staged.staged, "{name}");
+        assert_eq!(
+            rows(
+                &mut reg,
+                "SELECT status FROM {review_item} WHERE id = {technique_id}"
+                    .replace("{technique_id}", &technique.to_string())
+                    .as_str()
+            )[0]
+            .text(0)
+            .unwrap(),
+            "staged",
+            "{name}"
+        );
+        nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert!(
+            rows(
+                &mut reg,
+                "SELECT tier FROM {classification_axis} WHERE axis = 'technique'"
+            )
+            .iter()
+            .all(|r| r.text(0).unwrap() != "decision"),
+            "{name}: staged is not in force"
+        );
+        let drift = review::commit(&mut reg, Some(staged.decision), false, "anna@ward-3");
+        assert!(
+            matches!(&drift, Err(review::Error::Refused(m)) if m.contains("moved on")),
+            "{name}: {drift:?}"
+        );
+        let committed =
+            review::commit(&mut reg, Some(staged.decision), true, "anna@ward-3").unwrap();
+        assert_eq!(committed.decisions, vec![staged.decision], "{name}");
+        nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert!(
+            rows(
+                &mut reg,
+                "SELECT value, tier FROM {classification_axis} WHERE axis = 'technique'"
+            )
+            .iter()
+            .all(|r| r.text(0).unwrap() == "FLAIR" && r.text(1).unwrap() == "decision"),
+            "{name}: committed is in force"
+        );
+
+        // Withdrawn: the rule's answer is back, and the question is open again.
+        let reopened = review::withdraw(&mut reg, staged.decision, "anna@ward-3").unwrap();
+        assert!(reopened >= 1, "{name}: {reopened}");
+        nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert!(
+            rows(
+                &mut reg,
+                "SELECT tier FROM {classification_axis} WHERE axis = 'technique'"
+            )
+            .iter()
+            .all(|r| r.text(0).unwrap() != "decision"),
+            "{name}: withdrawn is not in force"
+        );
+        assert!(
+            review::withdraw(&mut reg, staged.decision, "anna@ward-3").is_err(),
+            "{name}: twice is refused"
+        );
+    }
+}
