@@ -353,7 +353,36 @@ struct Wrote {
 }
 
 /// Run one release.
+/// A release is a job (Wave 4a §9.1): claimed before anything is read,
+/// finished with what happened, refused while another release is fresh.
 pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error> {
+    use nils_registry::job;
+    let job_id = job::claim(
+        registry.store(),
+        &job::Claim {
+            kind: "release",
+            name: settings.name,
+            args: serde_json::json!({
+                "layout": settings.layout.name(),
+                "root": settings.root.display().to_string(),
+                "selection": settings.selection.as_json(),
+            }),
+        },
+    )
+    .map_err(|e| match e {
+        job::Error::Store(e) => Error::Store(e),
+        other => Error::Refused(other.to_string()),
+    })?;
+    let result = run_release(registry, settings);
+    let (state, error) = match &result {
+        Ok(_) => (job::State::Done, None),
+        Err(e) => (job::State::Failed, Some(e.to_string())),
+    };
+    let _ = job::finish(registry.store(), job_id, state, error.as_deref());
+    result
+}
+
+fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, Error> {
     let started = std::time::Instant::now();
     // §4.3, before anything is read: a release that shifts dates and preserves
     // UIDs has shifted nothing, and a warning is read after the tree exists.

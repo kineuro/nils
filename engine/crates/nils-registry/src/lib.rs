@@ -20,6 +20,7 @@ pub mod day;
 pub mod dialect;
 pub mod home;
 pub mod import;
+pub mod job;
 pub mod keys;
 pub mod linkage;
 pub mod migrate;

@@ -1052,3 +1052,163 @@ fn the_earliest_event_anchors_and_the_nearest_event_is_found_with_its_tie_rule()
         );
     }
 }
+
+/// Wave 4a §9.1: the one job model, on both backends. A claim holds its
+/// kind and no other, a stale job of any kind is taken over, a cancel
+/// asked from outside is seen at the heartbeat, and the queue is rows.
+#[test]
+fn one_job_model_claims_per_kind_takes_over_stale_and_queues() {
+    use nils_registry::job::{self, Asked, Claim, State};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let digest = job::claim(
+            &mut store,
+            &Claim {
+                kind: "digest",
+                name: "a",
+                args: serde_json::json!({"workers": 2}),
+            },
+        )
+        .unwrap();
+        // The same kind refuses while the first is fresh.
+        let again = job::claim(
+            &mut store,
+            &Claim {
+                kind: "digest",
+                name: "b",
+                args: serde_json::json!({}),
+            },
+        );
+        assert!(
+            matches!(again, Err(job::Error::Busy { job_id, .. }) if job_id == digest),
+            "{name}: {again:?}"
+        );
+        // Another kind runs beside it: per-kind claims.
+        let classify = job::claim(
+            &mut store,
+            &Claim {
+                kind: "classify",
+                name: "c",
+                args: serde_json::json!({}),
+            },
+        )
+        .unwrap();
+        assert_ne!(classify, digest, "{name}");
+        // The claim recorded the command line, which is what a resume runs.
+        let shown = job::show(&mut store, digest).unwrap().unwrap();
+        assert_eq!(shown.state, State::Running, "{name}");
+        assert!(shown.argv().is_some_and(|a| !a.is_empty()), "{name}");
+        assert_eq!(shown.args["workers"], 2, "{name}");
+
+        // A heartbeat with progress, and nothing asked yet.
+        let asked = job::beat(&mut store, digest, Some(&serde_json::json!({"seen": 10}))).unwrap();
+        assert_eq!(asked, Asked::Nothing, "{name}");
+        assert_eq!(
+            job::show(&mut store, digest).unwrap().unwrap().progress,
+            Some(serde_json::json!({"seen": 10})),
+            "{name}"
+        );
+        // A cancel from outside: the state says so, the next beat sees it.
+        assert_eq!(
+            job::request_cancel(&mut store, digest).unwrap(),
+            Some(State::Cancelling),
+            "{name}"
+        );
+        assert_eq!(
+            job::beat(&mut store, digest, None).unwrap(),
+            Asked::Cancel,
+            "{name}"
+        );
+        job::finish(&mut store, digest, State::Cancelled, None).unwrap();
+        assert_eq!(
+            job::show(&mut store, digest).unwrap().unwrap().state,
+            State::Cancelled,
+            "{name}"
+        );
+        // Cancelling an over job changes nothing; a missing one is None.
+        assert_eq!(
+            job::request_cancel(&mut store, digest).unwrap(),
+            Some(State::Cancelled),
+            "{name}"
+        );
+        assert_eq!(
+            job::request_cancel(&mut store, 999_999).unwrap(),
+            None,
+            "{name}"
+        );
+
+        // A stale job of another kind is taken over by any claim: age the
+        // classify job's heartbeat past the freshness window.
+        store
+            .execute(
+                &format!(
+                    "UPDATE {} SET heartbeat_at = '2020-01-01T00:00:00Z', started_at = '2020-01-01T00:00:00Z', pid = NULL WHERE id = {classify}",
+                    store.qualified("job")
+                ),
+                &[],
+            )
+            .unwrap();
+        let release = job::claim(
+            &mut store,
+            &Claim {
+                kind: "release",
+                name: "r",
+                args: serde_json::json!({}),
+            },
+        )
+        .unwrap();
+        let taken = job::show(&mut store, classify).unwrap().unwrap();
+        assert_eq!(taken.state, State::Failed, "{name}");
+        assert!(
+            taken.error.as_deref().unwrap_or("").contains("stale"),
+            "{name}: {:?}",
+            taken.error
+        );
+        job::finish(&mut store, release, State::Done, None).unwrap();
+
+        // The queue: rows, oldest first, taken once.
+        let q1 = job::enqueue(
+            &mut store,
+            &["digest".to_string(), "/x".to_string()],
+            Some("first"),
+        )
+        .unwrap();
+        let q2 = job::enqueue(&mut store, &["classify".to_string()], None).unwrap();
+        let next = job::next_queued(&mut store).unwrap().unwrap();
+        assert_eq!(next.id, q1, "{name}");
+        assert_eq!(next.kind, "digest", "{name}");
+        assert_eq!(
+            next.argv(),
+            Some(vec!["digest".to_string(), "/x".to_string()]),
+            "{name}"
+        );
+        assert!(job::take(&mut store, q1).unwrap(), "{name}");
+        assert!(!job::take(&mut store, q1).unwrap(), "{name}: taken once");
+        assert_eq!(
+            job::show(&mut store, q1).unwrap().unwrap().state,
+            State::Running,
+            "{name}"
+        );
+        // A queued job cancelled outright.
+        assert_eq!(
+            job::request_cancel(&mut store, q2).unwrap(),
+            Some(State::Cancelled),
+            "{name}"
+        );
+        assert!(job::next_queued(&mut store).unwrap().is_none(), "{name}");
+        job::finish(&mut store, q1, State::Done, None).unwrap();
+
+        // The listing: nothing open now; everything with `all`.
+        assert!(
+            job::list(&mut store, false, 50).unwrap().is_empty(),
+            "{name}"
+        );
+        let all = job::list(&mut store, true, 50).unwrap();
+        assert_eq!(all.len(), 5, "{name}: {all:?}");
+        assert!(
+            all.windows(2).all(|w| w[0].id > w[1].id),
+            "{name}: newest first"
+        );
+        assert!(job::enqueue(&mut store, &[], None).is_err(), "{name}");
+    }
+}

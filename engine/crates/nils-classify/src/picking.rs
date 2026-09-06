@@ -60,7 +60,29 @@ struct Row {
 }
 
 /// Run every pick the pack declares.
+/// A pick is a job (Wave 4a §9.1).
 pub fn run(
+    registry: &mut Registry,
+    pack: &Pack,
+    scheme: &Scheme,
+    subject: Option<&str>,
+    actor: &str,
+) -> Result<Picked, Error> {
+    let settings = crate::job::Settings {
+        name: subject.unwrap_or("all").to_string(),
+        ..crate::job::Settings::default()
+    };
+    let job_id = crate::job::claim_for(registry, &settings, "pick")?;
+    let result = run_pick(registry, pack, scheme, subject, actor);
+    let (state, error) = match &result {
+        Ok(_) => ("done", None),
+        Err(e) => ("failed", Some(e.to_string())),
+    };
+    let _ = crate::job::finish(registry.store(), job_id, state, error.as_deref());
+    result
+}
+
+fn run_pick(
     registry: &mut Registry,
     pack: &Pack,
     scheme: &Scheme,

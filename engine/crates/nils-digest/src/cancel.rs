@@ -192,23 +192,7 @@ fn raise(_signal: Signal, _cancel: &Cancel) {}
 /// Whether the process `pid` is alive on this host: no such process means
 /// it is gone; a process that exists but cannot be signalled (another user's)
 /// counts as alive. Only unix can tell; elsewhere nothing is known.
-#[cfg(unix)]
-pub fn process_alive(pid: i64) -> Option<bool> {
-    let pid = i32::try_from(pid).ok()?;
-    if pid <= 0 {
-        return None;
-    }
-    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
-        Ok(()) => Some(true),
-        Err(nix::errno::Errno::ESRCH) => Some(false),
-        Err(_) => Some(true),
-    }
-}
-
-#[cfg(not(unix))]
-pub fn process_alive(_pid: i64) -> Option<bool> {
-    None
-}
+pub use nils_registry::job::process_alive;
 
 #[cfg(test)]
 mod tests {

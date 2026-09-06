@@ -21,13 +21,14 @@ use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender, select};
 use nils_registry::dialect::Conflict;
+use nils_registry::job;
 use nils_registry::schema::{Type, table};
 use nils_registry::store::{Insert, Param, Store};
-use nils_registry::time::{now_iso, now_secs, secs_of};
+use nils_registry::time::now_iso;
 use nils_registry::{HomeError, Registry};
 
 use crate::batch::{Batch, Batcher, Item, ParsedFile, RowHashes, Task};
-use crate::cancel::{Cancel, Cancelled, Scripted, process_alive};
+use crate::cancel::{Cancel, Cancelled, Scripted};
 use crate::knobs::Settings;
 use crate::progress::{PROGRESS_EVERY, Progress};
 use crate::report::{Counts, Report, Setup, Written};
@@ -161,36 +162,14 @@ fn run(
 }
 
 /// The host as the job records it.
-pub fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|h| !h.trim().is_empty())
-        .or_else(|| {
-            std::fs::read_to_string("/etc/hostname")
-                .ok()
-                .map(|h| h.trim().to_string())
-                .filter(|h| !h.is_empty())
-        })
-        .unwrap_or_else(|| "unknown".into())
-}
+pub use nils_registry::job::hostname;
 
-/// A column read back as text on either backend.
-fn text_of(store: &Store, table_name: &str, column: &str) -> String {
-    let t = table(table_name);
-    let c = t
-        .column(column)
-        .unwrap_or_else(|| panic!("{table_name}.{column} is not a column"));
-    store.dialect().text_of(c)
-}
-
-/// Refuse a fresh running job, take over a stale one or one of this host
-/// whose process is gone, then record this job, its source and its batch in
-/// one transaction (§10).
+/// Claim the registry through the one job model (Wave 4a §9.1): a fresh
+/// digest refuses this one, a stale job is taken over, and this run is
+/// recorded. Then its source and its batch, in one transaction (§10).
 fn start_job(registry: &mut Registry, settings: &Settings) -> Result<Run, DigestError> {
     registry.refresh_meta()?;
     let now = now_iso();
-    let host = hostname();
-    let pid = i64::from(std::process::id());
     let root = settings.root.display().to_string();
     let root_canonical = std::fs::canonicalize(&settings.root)
         .map_err(|error| DigestError::Root {
@@ -202,77 +181,35 @@ fn start_job(registry: &mut Registry, settings: &Settings) -> Result<Run, Digest
     let backend = registry.store().backend().name();
     let bulk = registry.store().bulk_path().map(|b| b.name());
     let store = registry.store();
-    let job_t = table("job");
-    let sql = format!(
-        "SELECT id, {}, {}, pid, host FROM {} WHERE state = 'running'",
-        text_of(store, "job", "heartbeat_at"),
-        text_of(store, "job", "started_at"),
-        store.qualified("job")
-    );
-    for j in store.query(&sql, &[])? {
-        let id = j.int(0)?;
-        let last = j
-            .opt_text(1)?
-            .or(j.opt_text(2)?)
-            .unwrap_or_default()
-            .to_string();
-        let its_pid = j.opt_int(3)?;
-        let its_host = j.opt_text(4)?.unwrap_or_default();
-        // A job of this host whose process is gone left no one to beat its
-        // heart: it is over, however fresh the last beat.
-        let gone = its_host == host && its_pid.is_some_and(|p| process_alive(p) == Some(false));
-        let fresh = secs_of(&last).is_some_and(|s| now_secs().saturating_sub(s) < FRESH_SECS);
-        if fresh && !gone {
-            return Err(DigestError::Busy {
-                job_id: id,
-                since: last,
-            });
+    let job_id = match job::claim(
+        store,
+        &job::Claim {
+            kind: "digest",
+            name: settings.name.as_str(),
+            args: settings.config(),
+        },
+    ) {
+        Ok(id) => id,
+        Err(job::Error::Busy { job_id, since, .. }) => {
+            return Err(DigestError::Busy { job_id, since });
         }
-        let error = match its_pid {
-            Some(p) if gone => format!("process {p} is gone; no heartbeat since {last}"),
-            _ => format!("stale: no heartbeat since {last}"),
-        };
-        store.update_by_id(
-            job_t,
-            &[
-                ("state", Param::from("failed")),
-                ("finished_at", Param::from(now.as_str())),
-                ("error", Param::from(error)),
-            ],
-            "id",
-            id,
-        )?;
-        fail_batches(store, &now, "job_id", id)?;
-    }
+        Err(job::Error::Store(e)) => return Err(e.into()),
+        Err(job::Error::Message(m)) => return Err(DigestError::Message(m)),
+    };
+    // A batch a stale job left running is failed with the job (§9.3).
+    let d = store.dialect();
+    let orphaned = format!(
+        "UPDATE {batch} SET state = 'failed', finished_at = {}, \
+         reparse_from = (SELECT MAX(f.seen_at) FROM {files} AS f WHERE f.batch_id = ingest_batch.id) \
+         WHERE state = 'running' AND job_id IN (SELECT id FROM {job} WHERE state = 'failed')",
+        d.param(1, Type::Timestamp),
+        batch = store.qualified("ingest_batch"),
+        files = store.qualified("source_file"),
+        job = store.qualified("job"),
+    );
+    store.execute(&orphaned, &[Param::from(now.as_str())])?;
     store.begin()?;
     let result = (|| -> Result<Run, DigestError> {
-        let job = store.insert(
-            &Insert::new(
-                job_t,
-                &[
-                    "kind",
-                    "name",
-                    "args",
-                    "state",
-                    "pid",
-                    "host",
-                    "started_at",
-                    "heartbeat_at",
-                ],
-            )
-            .returning(&["id"]),
-            &[vec![
-                Param::from("digest"),
-                Param::from(settings.name.as_str()),
-                Param::from(settings.config().to_string()),
-                Param::from("running"),
-                Param::Int(pid),
-                Param::from(host.as_str()),
-                Param::from(now.as_str()),
-                Param::from(now.as_str()),
-            ]],
-        )?;
-        let job_id = job.first().ok_or_else(no_id)?.int(0)?;
         let source_t = table("source");
         let inserted = store.insert(
             &Insert::new(source_t, &["root", "root_canonical", "first_seen_at"])
@@ -337,6 +274,7 @@ fn start_job(registry: &mut Registry, settings: &Settings) -> Result<Run, Digest
         }
         Err(e) => {
             let _ = store.rollback();
+            let _ = job::finish(store, job_id, job::State::Failed, Some(&e.to_string()));
             Err(e)
         }
     }
@@ -374,16 +312,7 @@ fn mark_failed(registry: &mut Registry, run: &Run, error: &str) {
     let now = now_iso();
     let store = registry.store();
     let _ = store.rollback();
-    let _ = store.update_by_id(
-        table("job"),
-        &[
-            ("state", Param::from("failed")),
-            ("finished_at", Param::from(now.as_str())),
-            ("error", Param::from(error)),
-        ],
-        "id",
-        run.job_id,
-    );
+    let _ = job::finish(store, run.job_id, job::State::Failed, Some(error));
     let _ = fail_batches(store, &now, "id", run.batch_id);
 }
 

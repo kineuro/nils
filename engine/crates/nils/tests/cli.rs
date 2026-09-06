@@ -2961,3 +2961,163 @@ fn nils_select_shows_a_cohort_before_it_leaves_and_a_release_refuses_what_did_no
         "nothing was written"
     );
 }
+
+#[test]
+fn nils_jobs_lists_shows_cancels_queues_works_and_resumes() {
+    // Wave 4a section 9.1 at the command line: every verb is a job with a
+    // heartbeat; the queue is rows a worker runs in its turn; a finished
+    // job runs again from the command line it recorded.
+    let home = home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = tree();
+    let run = |args: &[&str]| {
+        let out = nils().args(registry).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}: {}\n{}",
+            args.join(" "),
+            stderr(&out),
+            stdout(&out)
+        );
+        stdout(&out)
+    };
+    assert!(run(&["jobs", "list"]).contains("no job is queued or running"));
+
+    // A digest is a job, done, with its command line.
+    run(&[
+        "digest",
+        "--name",
+        "a",
+        "--no-private",
+        dir.path().to_str().unwrap(),
+    ]);
+    let listed = run(&["jobs", "list", "--all"]);
+    assert!(listed.contains("digest"), "{listed}");
+    assert!(listed.contains("done"), "{listed}");
+    let doc: serde_json::Value =
+        serde_json::from_str(&run(&["jobs", "list", "--all", "--json"])).unwrap();
+    let digest_id = doc[0]["id"].as_i64().unwrap();
+    assert_eq!(doc[0]["kind"], "digest", "{doc}");
+    assert_eq!(doc[0]["state"], "done", "{doc}");
+    let shown = run(&["jobs", "show", &digest_id.to_string()]);
+    assert!(shown.contains("command     nils --registry"), "{shown}");
+    assert!(shown.contains("digest --name a"), "{shown}");
+    assert!(shown.contains("progress"), "{shown}");
+
+    // Queued, listed as queued, cancelled, gone from the queue.
+    let queued = run(&[
+        "jobs",
+        "enqueue",
+        "--name",
+        "later",
+        "--",
+        "fingerprint",
+        "--name",
+        "later",
+    ]);
+    assert!(queued.starts_with("queued job "), "{queued}");
+    let listed = run(&["jobs", "list"]);
+    assert!(
+        listed.contains("queued") && listed.contains("later"),
+        "{listed}"
+    );
+    let doc: serde_json::Value = serde_json::from_str(&run(&["jobs", "list", "--json"])).unwrap();
+    let q = doc[0]["id"].as_i64().unwrap();
+    assert_eq!(doc[0]["kind"], "fingerprint", "{doc}");
+    let cancelled = run(&["jobs", "cancel", &q.to_string()]);
+    assert!(cancelled.contains("cancelled"), "{cancelled}");
+    assert!(run(&["jobs", "list"]).contains("no job is queued or running"));
+
+    // Queued again, and a worker runs it, once: the fingerprint's own job
+    // row is written by the verb, the queued row ends done.
+    run(&[
+        "jobs",
+        "enqueue",
+        "--",
+        "fingerprint",
+        "--name",
+        "queued-run",
+    ]);
+    let worked = run(&["jobs", "work", "--once"]);
+    assert!(worked.contains("nils fingerprint"), "{worked}");
+    let doc: serde_json::Value =
+        serde_json::from_str(&run(&["jobs", "list", "--all", "--json"])).unwrap();
+    let kinds: Vec<(String, String)> = doc
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| {
+            (
+                j["kind"].as_str().unwrap().to_string(),
+                j["state"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        kinds.contains(&("worker".to_string(), "done".to_string())),
+        "{kinds:?}"
+    );
+    // One row from the queue to the outcome: the verb adopted the queued
+    // row, so its progress and its command line are on the id the queue
+    // gave out.
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|(k, s)| k == "fingerprint" && s == "done")
+            .count(),
+        1,
+        "{kinds:?}"
+    );
+    let adopted = doc
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["kind"] == "fingerprint" && j["state"] == "done")
+        .unwrap();
+    assert!(adopted["args"]["argv"].is_array(), "{adopted}");
+    assert!(adopted["heartbeat_at"].is_string(), "{adopted}");
+    // A queued command that fails ends failed with the exit status.
+    run(&["jobs", "enqueue", "--", "explain", "999999"]);
+    let worked = run(&["jobs", "work", "--once"]);
+    assert!(worked.contains("nils explain"), "{worked}");
+    let doc: serde_json::Value =
+        serde_json::from_str(&run(&["jobs", "list", "--all", "--json"])).unwrap();
+    let failed = doc
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["kind"] == "explain")
+        .unwrap();
+    assert_eq!(failed["state"], "failed", "{failed}");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("exit status"),
+        "{failed}"
+    );
+
+    // Resume: the digest runs again from its recorded command line, and
+    // finds nothing changed.
+    let resumed = run(&["jobs", "resume", &digest_id.to_string()]);
+    assert!(
+        resumed.contains("running again: nils --registry"),
+        "{resumed}"
+    );
+    assert!(resumed.contains("digest --name a"), "{resumed}");
+    assert!(resumed.contains("unchanged"), "{resumed}");
+    // A job that is not over does not resume; a job that is not there is a
+    // usage error.
+    let out = nils()
+        .args(registry)
+        .args(["jobs", "resume", "999999"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let out = nils()
+        .args(registry)
+        .args(["jobs", "show", "999999"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}

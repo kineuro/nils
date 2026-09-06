@@ -1645,15 +1645,13 @@ impl<'a> Writer<'a> {
         json["batch_id"] = self.batch_id.into();
         json["epoch"] = self.written.epoch.into();
         json["writes"] = self.written.writes.into();
-        self.registry.store().update_by_id(
-            table("job"),
-            &[
-                ("heartbeat_at", Param::from(now_iso())),
-                ("progress", Param::from(json.to_string())),
-            ],
-            "id",
-            job_id,
-        )?;
+        // Wave 4a §9.1: a cancel asked through `nils jobs cancel` arrives
+        // here, and stops the run the way the first signal does.
+        let asked = nils_registry::job::beat(self.registry.store(), job_id, Some(&json))
+            .map_err(|e| HomeError::Store(nils_registry::store::Error::Message(e.to_string())))?;
+        if asked == nils_registry::job::Asked::Cancel && !self.cancel.stop() {
+            self.cancel.request();
+        }
         self.last_heartbeat = Instant::now();
         Ok(())
     }

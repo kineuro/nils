@@ -565,7 +565,26 @@ pub fn apply(
     csv: &str,
     actor: &str,
 ) -> Result<Report, Error> {
-    run(registry, mapping, csv, actor, true)
+    // An apply is a job (Wave 4a §9.1); a preview is not, it writes nothing.
+    let job_id = crate::job::claim(
+        registry.store(),
+        &crate::job::Claim {
+            kind: "clinical-import",
+            name: mapping.target.name(),
+            args: serde_json::json!({ "source": mapping.source, "actor": actor }),
+        },
+    )
+    .map_err(|e| match e {
+        crate::job::Error::Store(e) => Error::Store(e),
+        other => Error::Mapping(other.to_string()),
+    })?;
+    let result = run(registry, mapping, csv, actor, true);
+    let (state, error) = match &result {
+        Ok(_) => (crate::job::State::Done, None),
+        Err(e) => (crate::job::State::Failed, Some(e.to_string())),
+    };
+    let _ = crate::job::finish(registry.store(), job_id, state, error.as_deref());
+    result
 }
 
 /// One row, parsed: the subject's key as written, the reference names, and
