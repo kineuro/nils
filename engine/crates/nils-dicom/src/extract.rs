@@ -25,6 +25,7 @@ use crate::catalogue::{
 };
 use crate::charset::Charset;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
+use crate::private::{Ingest, read_ingest};
 use crate::read::{Form, Header, ReadFailure, read};
 use crate::refusal::{QuarantineClass, Refusal};
 use crate::value::{Conversion, Converter, Value, convert};
@@ -148,6 +149,10 @@ pub struct Extracted {
     /// look there. The strings are kept only long enough to be read for a
     /// date; nothing stores them.
     pub private_text: Vec<String>,
+    /// The private elements the pack asked for, as text, one slot per entry
+    /// of the ingest list the file was extracted with (Wave 4a §5.2). Kept
+    /// per series by the digest, under each element's address.
+    pub private: Vec<Option<String>>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -163,16 +168,21 @@ impl Extracted {
     }
 }
 
-/// Read and extract the file at `path`, with the default identity fields.
+/// Read and extract the file at `path`, with the default identity fields and
+/// no private elements asked for.
 pub fn extract(path: &Path) -> Result<Extracted, Refusal> {
-    extract_with(path, &IdentityFields::default())
+    extract_with(path, &IdentityFields::default(), &[])
 }
 
 /// Read and extract the file at `path`, reading the identity fields of a
-/// rule.
-pub fn extract_with(path: &Path, fields: &IdentityFields) -> Result<Extracted, Refusal> {
+/// rule and the private elements of an ingest list.
+pub fn extract_with(
+    path: &Path,
+    fields: &IdentityFields,
+    ingest: &[Ingest],
+) -> Result<Extracted, Refusal> {
     let header = read(path).map_err(refusal_of)?;
-    extract_header(header, fields)
+    extract_header(header, fields, ingest)
 }
 
 /// The quarantine class of a read failure.
@@ -220,7 +230,11 @@ fn private_text_of(dataset: &InMemDicomObject) -> Vec<String> {
 }
 
 /// Extract from a header already read.
-pub fn extract_header(header: Header, fields: &IdentityFields) -> Result<Extracted, Refusal> {
+pub fn extract_header(
+    header: Header,
+    fields: &IdentityFields,
+    ingest: &[Ingest],
+) -> Result<Extracted, Refusal> {
     let Header {
         form,
         meta,
@@ -361,6 +375,7 @@ pub fn extract_header(header: Header, fields: &IdentityFields) -> Result<Extract
 
     let private_text = private_text_of(&dataset);
 
+    let private = read_ingest(&dataset, ingest, &charset);
     Ok(Extracted {
         form,
         transfer_syntax,
@@ -373,6 +388,7 @@ pub fn extract_header(header: Header, fields: &IdentityFields) -> Result<Extract
         values,
         identity,
         private_text,
+        private,
         diagnostics,
     })
 }
@@ -557,7 +573,7 @@ mod tests {
 
     /// Extract with the default identity fields.
     fn extract_header(header: Header) -> Result<Extracted, Refusal> {
-        super::extract_header(header, &IdentityFields::default())
+        super::extract_header(header, &IdentityFields::default(), &[])
     }
 
     fn mr(elems: Vec<Elem>) -> Vec<Elem> {
@@ -876,6 +892,7 @@ mod tests {
                 synth::text(tags::PATIENT_NAME, VR::PN, "Doe^Jane"),
             ])),
             &fields,
+            &[],
         )
         .unwrap();
         assert_eq!(

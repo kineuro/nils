@@ -238,6 +238,17 @@ struct PrivateArgs {
     /// How many files to read at once
     #[arg(long, default_value_t = 8, value_name = "N")]
     workers: usize,
+    /// The pack whose dictionary names the elements and whose ingest list
+    /// says which are read already (Wave 4a section 5.3)
+    #[arg(long, default_value = "mri", value_name = "PACK")]
+    pack: String,
+    /// Where the packs are; $NILS_PACK_DIR, else `packs/` in the registry home
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<PathBuf>,
+    /// Print the elements worth ingesting as pack entries, under the rule
+    /// that an element varies per acquisition, is printable and is short
+    #[arg(long)]
+    suggest: bool,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -590,6 +601,16 @@ struct DigestArgs {
     /// A YAML file with the identity rule (§7.3); PatientID, then StudyInstanceUID, by default
     #[arg(long, value_name = "FILE")]
     identity_rule: Option<PathBuf>,
+    /// The pack whose ingest list says which private elements are read into
+    /// the registry (Wave 4a section 5.2)
+    #[arg(long, default_value = "mri", value_name = "PACK")]
+    pack: String,
+    /// Where the packs are; $NILS_PACK_DIR, else `packs/` in the registry home
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<PathBuf>,
+    /// Read no private element at all, whatever the pack says
+    #[arg(long)]
+    no_private: bool,
     /// Read the quarantined files again
     #[arg(long)]
     retry_quarantine: bool,
@@ -705,7 +726,7 @@ fn main() -> ExitCode {
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
-        Command::Private(args) => private_survey(args),
+        Command::Private(args) => private_survey(&home, args),
         Command::Release(args) => release(&home, *args),
         Command::Handover(command) => handover_command(&home, command),
         Command::Pick { command } => pick_command(&home, command),
@@ -1252,6 +1273,18 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                     "buckets": pack.buckets,
                     "cases": pack.cases,
                     "overlay": pack.overlay,
+                    "private": serde_json::json!({
+                        "coverage": pack.private_coverage,
+                        "ingest": pack.ingest.iter().map(|i| serde_json::json!({
+                            "name": i.name, "address": i.text(), "vr": i.vr,
+                            "dictionary_name": i.dictionary_name, "kind": i.kind,
+                        })).collect::<Vec<_>>(),
+                        "release": pack.release.iter().map(|a| a.text()).collect::<Vec<_>>(),
+                        "dictionary": {
+                            "creators": pack.dictionary.creators(),
+                            "elements": pack.dictionary.len(),
+                        },
+                    }),
                 });
                 println!(
                     "{}",
@@ -1270,6 +1303,17 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                 }
                 println!("  flags   {:20} {:3}", "", pack.flags.len());
                 println!("  cases   {:20} {:3}", "", pack.cases);
+                println!(
+                    "  private {:20} {:3} ingested, {} kept on release, dictionary of {} elements from {} creators",
+                    "",
+                    pack.ingest.len(),
+                    pack.release.len(),
+                    pack.dictionary.len(),
+                    pack.dictionary.creators()
+                );
+                for c in &pack.private_coverage {
+                    println!("          {:20} covers {c}", "");
+                }
                 for a in &pack.axes {
                     let asked = if pack.review.asks_when_missing(&a.name) {
                         ", asked when missing"
@@ -1434,6 +1478,47 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
             .map_err(|e| usage(format!("--identity-rule {}: {e}", path.display())))?;
         rule.source = Some(path.display().to_string());
         settings.identity = rule;
+    }
+    // Wave 4a §5.2: the private elements the pack asks for are read at
+    // digest time. A pack that cannot be found is not an error unless one was
+    // asked for by name or by directory, because a digest has never needed a
+    // pack; the report says what was read either way.
+    if !args.no_private {
+        let asked = args.pack_dir.is_some() || args.pack != "mri";
+        match pack_dir(home, args.pack_dir.clone()) {
+            Ok(dir) => {
+                let found = packs_in(&dir)?
+                    .into_iter()
+                    .find(|p| p.file_name().is_some_and(|f| f == args.pack.as_str()));
+                match found {
+                    Some(found) => {
+                        let pack =
+                            nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
+                        settings.ingest = pack
+                            .ingest
+                            .iter()
+                            .map(|i| nils_dicom::private::Ingest {
+                                creator: i.creator.clone(),
+                                group: i.group,
+                                element: i.element,
+                                vr: i.vr.clone(),
+                            })
+                            .collect();
+                        settings.ingest_from = Some(pack.id());
+                    }
+                    None if asked => {
+                        return Err(fail(format!(
+                            "no pack named {} in {}",
+                            args.pack,
+                            dir.display()
+                        )));
+                    }
+                    None => {}
+                }
+            }
+            Err(e) if asked => return Err(e),
+            Err(_) => {}
+        }
     }
 
     if args.describe {
@@ -3894,9 +3979,82 @@ fn session_pair(text: &str) -> Result<(String, String), Exit> {
 /// carry it, how long it is, whether it is printable and how much it varies.
 /// Enough to judge whether an element is worth keeping, and safe to carry out
 /// of a private host, which a survey that quoted values would not be.
-fn private_survey(args: PrivateArgs) -> Result<(), Exit> {
+fn private_survey(home: &Home, args: PrivateArgs) -> Result<(), Exit> {
+    // The pack, when there is one: its dictionary names what the survey
+    // found, and its ingest list says what is read already. A survey with
+    // no pack at hand still counts, it just cannot name.
+    let pack = match pack_dir(home, args.pack_dir.clone()) {
+        Ok(dir) => packs_in(&dir)?
+            .into_iter()
+            .find(|p| p.file_name().is_some_and(|f| f == args.pack.as_str()))
+            .map(|found| nils_pack::load(&found, None).map_err(|e| fail(e.to_string())))
+            .transpose()?,
+        Err(e) if args.pack_dir.is_some() => return Err(e),
+        Err(_) => None,
+    };
     let survey = nils_dicom::survey::walk(&args.root, args.files, args.workers);
     let rows = survey.rows();
+    let name_of = |r: &nils_dicom::survey::Row| -> Option<String> {
+        pack.as_ref()
+            .and_then(|p| p.dictionary.lookup(&r.creator, r.group, r.element))
+            .map(|e| e.name.clone())
+    };
+    let ingested = |r: &nils_dicom::survey::Row| -> Option<String> {
+        pack.as_ref().and_then(|p| {
+            p.ingest
+                .iter()
+                .find(|i| {
+                    i.group == r.group
+                        && i.element == r.element
+                        && i.creator.trim().eq_ignore_ascii_case(r.creator.trim())
+                })
+                .map(|i| i.name.clone())
+        })
+    };
+
+    if args.suggest {
+        // Pack entries, under the rule of §5.3, for what the pack does not
+        // read yet. Copied into a pack's `private.yml` by a person, who
+        // writes the `why`: a survey can say that an element varies, and
+        // only a person can say what it is.
+        let mut out = String::new();
+        out.push_str("# Suggested by `nils private --suggest` (Wave 4a section 5.3): every\n");
+        out.push_str("# element that varied per acquisition, was printable and was short in\n");
+        out.push_str(&format!(
+            "# a survey of {} file(s). Each `why` is to be written by a person.\n",
+            survey.files
+        ));
+        out.push_str("private:\n  ingest:\n");
+        let mut n = 0;
+        for r in &rows {
+            if !r.suggested() || ingested(r).is_some() {
+                continue;
+            }
+            n += 1;
+            out.push_str(&format!("    - creator: {}\n", yaml_text(&r.creator)));
+            out.push_str(&format!("      group: 0x{:04X}\n", r.group));
+            out.push_str(&format!("      element: 0x{:02X}\n", r.element));
+            out.push_str(&format!("      name: {}\n", r.field_name()));
+            match name_of(r) {
+                Some(name) => out.push_str(&format!(
+                    "      why: \"varies per acquisition in {} of {} files; the dictionary calls it {}\"\n",
+                    r.files,
+                    survey.files,
+                    name.replace('"', "'")
+                )),
+                None => out.push_str(&format!(
+                    "      why: \"varies per acquisition in {} of {} files; the dictionary has no name for it\"\n",
+                    r.files, survey.files
+                )),
+            }
+        }
+        if n == 0 {
+            out.push_str("    []\n");
+        }
+        print!("{out}");
+        return Ok(());
+    }
+
     if args.json {
         let out: Vec<serde_json::Value> = rows
             .iter()
@@ -3906,6 +4064,8 @@ fn private_survey(args: PrivateArgs) -> Result<(), Exit> {
                     "group": format!("{:04X}", r.group),
                     "element": format!("{:02X}", r.element),
                     "address": r.address(),
+                    "name": name_of(r),
+                    "ingested_as": ingested(r),
                     "files": r.files,
                     "vr": r.vrs,
                     "shortest": r.shortest,
@@ -3913,6 +4073,7 @@ fn private_survey(args: PrivateArgs) -> Result<(), Exit> {
                     "printable": r.printable,
                     "distinct": r.distinct,
                     "varied": r.varied,
+                    "suggested": r.suggested(),
                 })
             })
             .collect();
@@ -3922,6 +4083,10 @@ fn private_survey(args: PrivateArgs) -> Result<(), Exit> {
                 "files": survey.files,
                 "with_private": survey.with_private,
                 "orphans": survey.orphans,
+                "orphans_by_group": survey.orphans_by_group.iter()
+                    .map(|(g, n)| (format!("{g:04X}"), *n))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+                "pack": pack.as_ref().map(|p| p.id()),
                 "elements": out,
             }))
             .map_err(|e| fail(e.to_string()))?
@@ -3930,18 +4095,27 @@ fn private_survey(args: PrivateArgs) -> Result<(), Exit> {
     }
 
     println!(
-        "{} file(s) read, {} with private elements, {} distinct element(s)",
+        "{} file(s) read, {} with private elements, {} distinct element(s){}",
         survey.files,
         survey.with_private,
-        rows.len()
+        rows.len(),
+        match &pack {
+            Some(p) => format!(", named by {}", p.id()),
+            None => ", no pack at hand to name them".to_string(),
+        }
     );
     if survey.orphans > 0 {
         // Nothing can be done with these, and saying so is the point: an
         // element in a block no creator reserved cannot be addressed by name.
         println!(
-            "  {} private element(s) in a block no creator reserved, which no allowlist can keep",
+            "  {} private element(s) in a block no creator reserved, which no allowlist can keep:",
             survey.orphans
         );
+        let mut groups: Vec<(&u16, &u64)> = survey.orphans_by_group.iter().collect();
+        groups.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (g, n) in groups.iter().take(12) {
+            println!("    group {g:04X}  {n}");
+        }
     }
     let mut creator = String::new();
     for r in &rows {
@@ -3953,7 +4127,7 @@ fn private_survey(args: PrivateArgs) -> Result<(), Exit> {
         // keeping: one value across an archive is a property of the scanner,
         // and one per file is a property of the acquisition.
         println!(
-            "  ({:04X},xx{:02X})  {:>8} files  {:<6}  {:>4}-{:<6} bytes  {}  {}",
+            "  ({:04X},xx{:02X})  {:>8} files  {:<6}  {:>4}-{:<6} bytes  {}  {:<10} {}{}",
             r.group,
             r.element,
             r.files,
@@ -3968,10 +4142,29 @@ fn private_survey(args: PrivateArgs) -> Result<(), Exit> {
                 (true, _) => "varies".to_string(),
                 (false, 1) => "one value".to_string(),
                 (false, n) => format!("{n} values"),
+            },
+            name_of(r).unwrap_or_default(),
+            match ingested(r) {
+                Some(field) => format!("  [ingested as {field}]"),
+                None if r.suggested() => "  [suggested]".to_string(),
+                None => String::new(),
             }
         );
     }
     Ok(())
+}
+
+/// A YAML scalar for a creator string, quoted when it needs to be.
+fn yaml_text(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '_' || c == '.')
+        && !s.starts_with(' ')
+        && !s.ends_with(' ')
+    {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
 }
 
 // The handover (Wave 3 §11)
@@ -4371,7 +4564,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         // §8.4: dropped by default, and back only by name. The pack declares
         // the list, because which vendor element carries a gradient is
         // knowledge about scanners.
-        private: &pack.private,
+        private: &pack.release,
         on_unknown,
         actor: &actor(),
         key: &key,

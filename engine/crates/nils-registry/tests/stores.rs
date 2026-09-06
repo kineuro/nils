@@ -674,7 +674,7 @@ fn migration_18_folds_the_versions_into_one_current_state_per_stack() {
     );
 
     let applied = migrate::migrate(&mut store, Kind::Registry).unwrap();
-    assert_eq!(applied, vec![18]);
+    assert!(applied.contains(&18), "{applied:?}");
 
     // One dataset, which both versions are versions of.
     let datasets = store

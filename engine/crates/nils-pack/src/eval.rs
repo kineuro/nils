@@ -27,10 +27,22 @@ pub struct Evaluated<'a> {
     decided: std::cell::RefCell<Vec<Vec<String>>>,
     /// The text the pack derives for itself, computed once per stack.
     derived: Vec<String>,
+    /// The private elements the pack ingests, aligned with `pack.ingest`,
+    /// empty where the series has none (Wave 4a §5.2). Handed in by whoever
+    /// has the row, because they sit beside the fingerprint and not in it.
+    private: Vec<String>,
 }
 
 impl<'a> Evaluated<'a> {
+    /// Evaluate with no private elements at hand: every ingested field reads
+    /// as absent.
     pub fn new(pack: &'a Pack, stack: &'a Stack) -> Evaluated<'a> {
+        Evaluated::with_private(pack, stack, Vec::new())
+    }
+
+    /// Evaluate with the series' private elements, one text per entry of
+    /// `pack.ingest` in order; a shorter vector reads as absent past its end.
+    pub fn with_private(pack: &'a Pack, stack: &'a Stack, private: Vec<String>) -> Evaluated<'a> {
         let mut raws = Vec::with_capacity(pack.parsers.len());
         let mut tokens = Vec::with_capacity(pack.parsers.len());
         for p in &pack.parsers {
@@ -68,6 +80,7 @@ impl<'a> Evaluated<'a> {
             preds: Vec::with_capacity(pack.parsers.len()),
             flags: vec![false; pack.flags.len()],
             decided: std::cell::RefCell::new((0..pack.axes.len()).map(|_| Vec::new()).collect()),
+            private,
         };
         // Predicates, parser by parser, in file order. `preds` grows as it
         // goes, so a predicate may name an earlier one; a forward reference
@@ -117,6 +130,19 @@ impl<'a> Evaluated<'a> {
     }
 }
 
+impl Evaluated<'_> {
+    /// A field past the fingerprint's own: the pack's derived text first,
+    /// then its ingested private elements, in the order the loader numbered
+    /// them. `None` for a field of the fingerprint itself.
+    fn extra(&self, field: usize) -> Option<&str> {
+        let i = field.checked_sub(crate::stack::FIELDS.len())?;
+        match i.checked_sub(self.derived.len()) {
+            None => Some(self.derived[i].as_str()),
+            Some(j) => Some(self.private.get(j).map_or("", String::as_str)),
+        }
+    }
+}
+
 impl Ctx for Evaluated<'_> {
     fn pred(&self, parser: usize, pred: usize) -> bool {
         self.preds
@@ -135,20 +161,20 @@ impl Ctx for Evaluated<'_> {
         self.flags[flag]
     }
     fn num(&self, field: usize) -> Option<f64> {
-        match field.checked_sub(crate::stack::FIELDS.len()) {
-            Some(i) => self.derived.get(i).and_then(|t| t.trim().parse().ok()),
+        match self.extra(field) {
+            Some(t) => t.trim().parse().ok(),
             None => self.stack.num(field),
         }
     }
     fn present(&self, field: usize) -> bool {
-        match field.checked_sub(crate::stack::FIELDS.len()) {
-            Some(i) => self.derived.get(i).is_some_and(|t| !t.is_empty()),
+        match self.extra(field) {
+            Some(t) => !t.is_empty(),
             None => self.stack.present(field),
         }
     }
     fn text(&self, field: usize) -> &str {
-        match field.checked_sub(crate::stack::FIELDS.len()) {
-            Some(i) => self.derived.get(i).map_or("", String::as_str),
+        match self.extra(field) {
+            Some(t) => t,
             None => self.stack.text(field),
         }
     }

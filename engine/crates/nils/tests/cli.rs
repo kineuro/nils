@@ -1870,3 +1870,141 @@ fn a_release_is_versioned_and_a_re_run_writes_nothing() {
     assert!(text.contains("stacks new"), "{text}");
     assert!(text.contains("stacks left alone"), "{text}");
 }
+
+/// A tree whose files carry a Siemens block: a b value that varies and a
+/// creator element, so a survey has something to suggest and a digest
+/// something to ingest (Wave 4a section 5).
+fn private_tree() -> TempDir {
+    let dir = TempDir::new("cli-private");
+    for i in 1..=4 {
+        let sop = format!("1.2.3.A.1.{i}");
+        let mut e = synth::minimal_mr("1.2.3.A", "1.2.3.A.1", &sop);
+        e.push(synth::text(
+            dicom_dictionary_std::tags::PATIENT_ID,
+            dicom_core::VR::LO,
+            "P1",
+        ));
+        e.push(synth::text(
+            dicom_core::Tag(0x0019, 0x0010),
+            dicom_core::VR::LO,
+            "SIEMENS MR HEADER",
+        ));
+        e.push(synth::text(
+            dicom_core::Tag(0x0019, 0x100C),
+            dicom_core::VR::IS,
+            &(i * 500).to_string(),
+        ));
+        e.push(synth::text(
+            dicom_core::Tag(0x0019, 0x100F),
+            dicom_core::VR::SH,
+            "Fast",
+        ));
+        dir.file(
+            &format!("a/{i}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    dir
+}
+
+#[test]
+fn a_digest_reads_the_pack_s_private_elements_and_says_so() {
+    let home = home();
+    let dir = private_tree();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+
+    // Without a pack at hand the digest reads none, and says so.
+    let none = nils()
+        .args(registry)
+        .args(["digest", "--name", "none", "--no-private"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(none.status.success(), "{}", stderr(&none));
+    assert!(
+        stdout(&none).contains("private elements none"),
+        "{}",
+        stdout(&none)
+    );
+
+    // With the pack, its ingest list is read, and the report names the pack.
+    let read = nils()
+        .args(registry)
+        .args(["digest", "--name", "again", "--restart", "--pack-dir"])
+        .arg(&packs)
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(read.status.success(), "{}", stderr(&read));
+    let text = stdout(&read);
+    assert!(text.contains("element(s) from mri@"), "{text}");
+    assert!(!text.contains("private elements none"), "{text}");
+}
+
+#[test]
+fn nils_private_names_what_it_finds_and_suggests_what_varies() {
+    let home = home();
+    let dir = private_tree();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+
+    let named = nils()
+        .args(registry)
+        .args(["private", "--pack-dir"])
+        .arg(&packs)
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(named.status.success(), "{}", stderr(&named));
+    let text = stdout(&named);
+    assert!(text.contains("named by mri@"), "{text}");
+    assert!(text.contains("B_value"), "the dictionary names it: {text}");
+    assert!(
+        text.contains("[ingested as siemens_b_value]"),
+        "and the pack reads it already: {text}"
+    );
+
+    // The suggestion is what varies and is not read yet: the gradient mode
+    // here is a constant, so nothing is suggested from four files that agree
+    // on it, and the b value is already ingested.
+    let suggested = nils()
+        .args(registry)
+        .args(["private", "--suggest", "--pack-dir"])
+        .arg(&packs)
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(suggested.status.success(), "{}", stderr(&suggested));
+    let text = stdout(&suggested);
+    assert!(text.starts_with("# Suggested by"), "{text}");
+    assert!(text.contains("private:\n  ingest:\n"), "{text}");
+    assert!(
+        !text.contains("0x0C"),
+        "an ingested element is not suggested again: {text}"
+    );
+
+    // The JSON carries the name and what it is ingested as.
+    let json = nils()
+        .args(registry)
+        .args(["private", "--json", "--pack-dir"])
+        .arg(&packs)
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(json.status.success(), "{}", stderr(&json));
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        v["pack"].as_str().map(|p| p.starts_with("mri@")),
+        Some(true),
+        "{v}"
+    );
+    let b = v["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["element"] == "0C")
+        .expect("the b value");
+    assert_eq!(b["name"], "B_value", "{b}");
+    assert_eq!(b["ingested_as"], "siemens_b_value", "{b}");
+}

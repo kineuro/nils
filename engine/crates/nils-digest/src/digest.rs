@@ -414,6 +414,7 @@ fn execute(
                 r.batch_id,
                 Some(r.job_id),
             )?
+            .with_ingest(&settings.ingest)
             .cancelled_by(cancel.clone(), script),
         ),
         _ => None,
@@ -458,9 +459,10 @@ fn execute(
                 let tx = batch_tx.clone();
                 let rows = settings.batch_rows;
                 let rule = &settings.identity;
+                let ingest = &settings.ingest;
                 let progress = &progress;
                 s.spawn(move || {
-                    let counts = parse_all(&rx, &tx, rows, rule, progress, cancel);
+                    let counts = parse_all(&rx, &tx, rows, rule, ingest, progress, cancel);
                     drop(tx);
                     counts
                 })
@@ -549,6 +551,7 @@ fn execute(
         files: settings.filter.to_string(),
         workers,
         walk_threads: settings.walk_threads.max(1),
+        private: settings.value_of("private"),
     };
     let elapsed = start.elapsed().as_secs_f64();
     match (registry, run, written) {
@@ -692,6 +695,7 @@ fn parse_all(
     tx: &Sender<Batch>,
     rows: usize,
     rule: &Rule,
+    ingest: &[nils_dicom::private::Ingest],
     progress: &Progress,
     cancel: &Cancel,
 ) -> Counts {
@@ -709,7 +713,7 @@ fn parse_all(
                 size,
                 mtime_ns,
                 prior,
-            } => match nils_dicom::extract_with(&path, rule.fields()) {
+            } => match nils_dicom::extract_with(&path, rule.fields(), ingest) {
                 Ok(mut x) => {
                     let ident = rule.apply(&mut x, &rel);
                     counts.probe_identity(ident.probe.as_deref());

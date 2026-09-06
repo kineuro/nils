@@ -103,6 +103,13 @@ pub static KNOBS: &[Knob] = &[
         note: "the batch's label",
         settable_since: 2,
     },
+    Knob {
+        name: "private",
+        kind: "a pack's ingest list",
+        default: "none",
+        note: "the private elements read into series_private, by creator and offset",
+        settable_since: 4,
+    },
 ];
 
 /// The slice this build implements; knobs with a later `settable_since` hold
@@ -127,6 +134,11 @@ pub struct Settings {
     pub restart: bool,
     pub dry_run: bool,
     pub json: bool,
+    /// The private elements a pack asks the digest to read into
+    /// `series_private` (Wave 4a §5.2), and which pack asked. None until a
+    /// pack is given: the digest reads no private element on its own.
+    pub ingest: Vec<nils_dicom::private::Ingest>,
+    pub ingest_from: Option<String>,
 }
 
 impl Settings {
@@ -147,6 +159,8 @@ impl Settings {
             restart: false,
             dry_run: false,
             json: false,
+            ingest: Vec::new(),
+            ingest_from: None,
         }
     }
 
@@ -163,6 +177,10 @@ impl Settings {
             "charset_fallback" => "iso-8859-1".into(),
             "retry_quarantine" => self.retry_quarantine.to_string(),
             "name" => self.name.clone(),
+            "private" => match &self.ingest_from {
+                Some(pack) => format!("{} element(s) from {pack}", self.ingest.len()),
+                None => "none".to_string(),
+            },
             _ => String::new(),
         }
     }
@@ -183,6 +201,10 @@ impl Settings {
             "retry_quarantine": self.retry_quarantine,
             "name": self.name,
             "restart": self.restart,
+            "private": {
+                "pack": self.ingest_from,
+                "elements": self.ingest.iter().map(|i| i.address()).collect::<Vec<_>>(),
+            },
             "version": env!("CARGO_PKG_VERSION"),
         })
     }

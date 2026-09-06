@@ -419,3 +419,133 @@ rules:
     let e = refusal(&d);
     assert!(e.contains("a rule set decides one phase"), "{e}");
 }
+
+const PRIVATE: &str = "\
+private:
+  coverage: [a test vendor]
+  ingest:
+    - creator: A VENDOR
+      group: 0x0019
+      element: 0x0C
+      name: vendor_b_value
+      why: a test
+  release:
+    - creator: A VENDOR
+      group: 0x0019
+      element: 0x0C
+      why: a test
+";
+
+/// The manifest of `good()` with a private file and a dictionary beside it.
+fn with_private() -> Dir {
+    let d = good();
+    d.file(
+        "pack.yml",
+        "\
+pack: t
+version: 1.0.0
+contract: 1
+modality: MR
+parsers: [parsers.yml]
+flags: [flags.yml]
+private: [private.yml]
+dictionary: [dictionary.tsv]
+",
+    )
+    .file("private.yml", PRIVATE)
+    .file("dictionary.tsv", "A VENDOR\t0019\t0C\tIS\t1\tB value\n");
+    d
+}
+
+#[test]
+fn an_ingested_element_is_a_field_with_the_dictionary_s_vr_and_name() {
+    // Wave 4a section 5.2: the two lists, and the dictionary naming the entry.
+    let d = with_private();
+    let pack = nils_pack::load(d.path(), None).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(pack.ingest.len(), 1);
+    assert_eq!(pack.ingest[0].name, "vendor_b_value");
+    assert_eq!(pack.ingest[0].vr.as_deref(), Some("IS"));
+    assert_eq!(pack.ingest[0].dictionary_name.as_deref(), Some("B value"));
+    assert_eq!(pack.ingest[0].address(), "0019xx0C A VENDOR");
+    assert_eq!(pack.release.len(), 1);
+    assert_eq!(pack.private_coverage, vec!["a test vendor".to_string()]);
+    assert_eq!(pack.dictionary.len(), 1);
+}
+
+#[test]
+fn a_flag_and_a_case_may_name_an_ingested_element() {
+    // The whole point: a rule reads the vendor's parameter the way it reads
+    // a standard field, and a corpus case sets it by the pack's name.
+    let d = with_private();
+    d.file(
+        "flags.yml",
+        "\
+flags:
+  is_original: image_type.is_original
+  is_diffusion: {field: vendor_b_value, gt: 0}
+",
+    )
+    .file(
+        "corpus/cases.yml",
+        "\
+cases:
+  - name: a b value above zero is diffusion
+    stack: {image_type: 'ORIGINAL\\\\PRIMARY', vendor_b_value: '1000'}
+    flags: {is_diffusion: true}
+  - name: and none is not
+    stack: {image_type: 'ORIGINAL\\\\PRIMARY'}
+    flags: {is_diffusion: false}
+",
+    );
+    let pack = nils_pack::load(d.path(), None).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(pack.cases, 2);
+}
+
+#[test]
+fn the_old_keep_list_is_refused_by_its_new_name() {
+    let d = with_private();
+    d.file(
+        "private.yml",
+        "private:\n  keep:\n    - {creator: A VENDOR, group: 0x0019, element: 0x0C, why: old}\n",
+    );
+    let e = refusal(&d);
+    assert!(e.contains("private.keep"), "{e}");
+    assert!(e.contains("release"), "{e}");
+}
+
+#[test]
+fn an_ingested_name_that_is_already_a_field_is_refused() {
+    // Shadowing the fingerprint's own field would make a rule read the
+    // vendor's value where every other pack reads the standard's.
+    let d = with_private();
+    d.file(
+        "private.yml",
+        "private:\n  ingest:\n    - {creator: A VENDOR, group: 0x0019, element: 0x0C, name: echo_time, why: no}\n",
+    );
+    let e = refusal(&d);
+    assert!(
+        e.contains("echo_time is a field of the fingerprint already"),
+        "{e}"
+    );
+    d.file(
+        "private.yml",
+        "private:\n  ingest:\n    - {creator: A VENDOR, group: 0x0019, element: 0x0C, name: twice, why: a}\n    - {creator: A VENDOR, group: 0x0019, element: 0x0D, name: twice, why: b}\n",
+    );
+    let e = refusal(&d);
+    assert!(e.contains("twice is declared twice"), "{e}");
+    d.file(
+        "private.yml",
+        "private:\n  ingest:\n    - {creator: A VENDOR, group: 0x0019, element: 0x0C, name: 'Not A Name', why: a}\n",
+    );
+    let e = refusal(&d);
+    assert!(e.contains("is not a field name"), "{e}");
+}
+
+#[test]
+fn a_dictionary_line_that_is_wrong_is_refused_with_its_number() {
+    let d = with_private();
+    d.file("dictionary.tsv", "A VENDOR\t0019\t0C\tIS\n");
+    let e = refusal(&d);
+    assert!(e.contains("dictionary.tsv"), "{e}");
+    assert!(e.contains("line 1"), "{e}");
+}
