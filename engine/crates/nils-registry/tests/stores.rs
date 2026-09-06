@@ -1171,9 +1171,10 @@ fn one_job_model_claims_per_kind_takes_over_stale_and_queues() {
             &mut store,
             &["digest".to_string(), "/x".to_string()],
             Some("first"),
+            None,
         )
         .unwrap();
-        let q2 = job::enqueue(&mut store, &["classify".to_string()], None).unwrap();
+        let q2 = job::enqueue(&mut store, &["classify".to_string()], None, None).unwrap();
         let next = job::next_queued(&mut store).unwrap().unwrap();
         assert_eq!(next.id, q1, "{name}");
         assert_eq!(next.kind, "digest", "{name}");
@@ -1209,7 +1210,7 @@ fn one_job_model_claims_per_kind_takes_over_stale_and_queues() {
             all.windows(2).all(|w| w[0].id > w[1].id),
             "{name}: newest first"
         );
-        assert!(job::enqueue(&mut store, &[], None).is_err(), "{name}");
+        assert!(job::enqueue(&mut store, &[], None, None).is_err(), "{name}");
     }
 }
 

@@ -2372,10 +2372,14 @@ fn the_openapi_contract_is_a_versioned_skeleton() {
         std::fs::read_to_string(contracts().join(format!("openapi/v{version}/openapi.yaml")))
             .unwrap();
     assert!(text.contains("openapi: 3.1.0"), "{text}");
-    assert!(
-        text.contains("paths: {}"),
-        "empty until the door exists: {text}"
-    );
+    // Version 0 was the empty skeleton; from version 1 the document names
+    // the doors, the capabilities door first among them.
+    if version == 0 {
+        assert!(text.contains("paths: {}"), "{text}");
+    } else {
+        assert!(text.contains("  /api/capabilities:"), "{text}");
+        assert!(!text.contains("paths: {}"), "{text}");
+    }
     assert!(text.contains(&format!("version: \"{version}\"")), "{text}");
 }
 

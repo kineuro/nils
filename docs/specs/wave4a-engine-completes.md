@@ -837,6 +837,34 @@ The store is blocking and stays so in this wave; the server runs it behind a
 pool (§13.6). Whether it goes async is a question for the wave that builds a
 compiler on it.
 
+**As built (slice 14, 2026-09-06).** `nils serve [--bind ADDR] [--auth
+off|token] [--token TOKEN=user@node ...] [--workers N] [--pack-dir DIR]`,
+in the binary's `serve` module on a small synchronous HTTP server; the
+store stays blocking and the pool is one registry connection per handler
+thread, a request handled by whichever thread receives it. Nineteen doors
+under `/api`, the OpenAPI contract at version 1 naming each: `GET
+capabilities` (the engine version; the contract versions, read from the
+checked-in `VERSION` files at build time so the door and the document
+cannot drift; the loaded packs with versions; the registry id, epoch and
+schema version; the auth mode; the caller's principal; the node; the list
+of doors), `GET status`, `GET custody`, `GET audit`, `GET jobs`, `POST
+jobs` (a command line for a worker, the verb one of digest, fingerprint,
+classify, pick, release, handover; 202 with the job's id; the caller's
+principal rides on the queued row and the worker hands it to the verb as
+`NILS_PRINCIPAL`), `GET jobs/{id}`, `POST jobs/{id}/cancel`, `GET
+releases`, `POST releases` and `POST handovers` (queued command lines,
+202), `POST select` (the bounded synchronous path: the resolution and what
+it reaches), `GET review`, `GET review/{id}` (with the members), `POST
+review/{id}/apply`, `POST review/{id}/accept`, `POST decisions/{id}/commit`,
+`POST decisions/{id}/withdraw`, and `GET events` (server-sent events with
+the open jobs and the epoch every second, for display only). Errors are
+`{"error"}` with 400, 401, 404, 409 (a refusal: a job of the kind running,
+a higher rank holding, the registry moved on) or 500. `off` records the
+local user as the principal; `token` takes `Authorization: Bearer` and the
+token names the principal; `oidc` is slice 15's and says so. The status,
+custody and releases documents are built by functions the command line and
+the door share. Tested as a second process would use it, over plain HTTP.
+
 ### 11.2 Three modes
 
 `off`, `token`, `oidc` (D8). Groups map to roles; the engine stores no
