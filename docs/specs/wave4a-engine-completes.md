@@ -120,10 +120,13 @@ in the tree now" is a lookup, "what did version 4 do" is a query on the log,
 and "what was in version 3" is a replay of the log backwards, which is exact and
 rare. Rows per dataset: ~518k total, whatever the number of versions.
 
-**The diff is computed in SQL.** This version's per-stack state is written to
-the table and the five outcomes (unchanged, moved, rewritten, added, removed)
-are a join against the previous state, not two maps in memory. Memory becomes
-independent of the number of files.
+**The diff is computed in SQL.** This version's per-stack plan is written to
+a table (`release_plan`, one subject at a time, emptied when the version
+closes) and the five outcomes (unchanged, moved, rewritten, added, removed)
+are a paged join of the plan against the current state, not two maps in
+memory. A stack's instances are read only when the stack is written. Memory
+becomes a function of the largest subject and of one page of stacks, and not
+of the number of files.
 
 ### 4.3 What is lost, and what replaces it
 
@@ -133,8 +136,17 @@ names the stack rather than the file; a per-file check is a recomputation. The
 handover's own record already carries a checksum per archive, which is the
 right place to spend bytes on verification.
 
-`release_file` is dropped, or kept as an opt-in a deployment enables when it
-wants a per-file manifest and can afford it. The default is dropped.
+`release_file` is dropped, with no opt-in. The reason is not the bytes: a
+per-file manifest is a second description of the tree, kept beside the state
+that already describes it, and two descriptions disagree. What the state knows
+is enough to find every file again: a DICOM stack owns its directory and its
+files are its instances, a converted stack is its stem plus its extensions,
+and the dataset's own files sit at the levels no stack occupies. The handover
+reads its file list from exactly that, so what it packs is what the release
+recorded and not what happens to be in the directory. A registry made before
+this folds its manifest into the state on upgrade (migration 18), summing the
+bytes it knew and leaving the digest empty, since a digest the old shape held
+per file cannot be made into one per stack without reading the tree.
 
 ### 4.4 Measured, not asserted
 
@@ -540,7 +552,8 @@ being built.
 2. **The 484 orphaned private elements** of the mix: a property of a vendor's
    export, of an anonymiser that removed creators and not blocks, or of the
    reader. Answered by `nils private` reporting orphans by group (slice 2).
-3. **Whether `release_file` survives as an opt-in** or is simply dropped
-   (slice 1; the default is dropped).
+3. ~~**Whether `release_file` survives as an opt-in** or is simply dropped.~~
+   Dropped, no opt-in, slice 1 (§4.3): a second description of the tree is
+   one more thing to disagree with the first.
 4. **The names of the two apps** (17 §8), which this wave does not need but
    `capabilities` will report.

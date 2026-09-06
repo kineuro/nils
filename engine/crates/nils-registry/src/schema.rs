@@ -57,7 +57,7 @@ pub struct Column {
     pub catalogue: bool,
 }
 
-const fn col(name: &'static str, ty: Type) -> Column {
+pub(crate) const fn col(name: &'static str, ty: Type) -> Column {
     Column {
         name,
         ty,
@@ -66,7 +66,7 @@ const fn col(name: &'static str, ty: Type) -> Column {
     }
 }
 
-const fn req(name: &'static str, ty: Type) -> Column {
+pub(crate) const fn req(name: &'static str, ty: Type) -> Column {
     Column {
         name,
         ty,
@@ -168,6 +168,40 @@ pub fn table(name: &str) -> &'static Table {
         .chain(linkage_tables())
         .find(|t| t.name == name)
         .unwrap_or_else(|| panic!("no table named {name}"))
+}
+
+/// A table a migration created and a later migration dropped, kept in the
+/// shape the dropping migration expects, so that the upgrade path still runs
+/// on a registry that has it. Never created for a fresh registry.
+pub fn historical(name: &str) -> &'static Table {
+    static HISTORICAL: OnceLock<Vec<Table>> = OnceLock::new();
+    HISTORICAL
+        .get_or_init(build_historical)
+        .iter()
+        .find(|t| t.name == name)
+        .unwrap_or_else(|| panic!("no historical table named {name}"))
+}
+
+fn build_historical() -> Vec<Table> {
+    vec![
+        // Wave 3 §9's manifest, a row per file per version: created by
+        // migration 11, rebuilt by 16 to know its stack, folded into
+        // `release_stack` and dropped by 18 (Wave 4a §4).
+        Table::new(
+            "release_file",
+            vec![
+                col("id", Type::Id),
+                req("release_id", Type::Int),
+                req("stack_id", Type::Int),
+                col("instance_id", Type::Int),
+                req("path", Type::Text),
+                req("digest", Type::Text),
+                req("bytes", Type::Int),
+            ],
+        )
+        .index(&["release_id"])
+        .index(&["instance_id"]),
+    ]
 }
 
 fn build_registry() -> Vec<Table> {
@@ -635,6 +669,19 @@ fn build_registry() -> Vec<Table> {
         // column anywhere: an audit that records what was removed is a copy of
         // the identifiers, in the registry, in clear. What a release removed is
         // recoverable from the originals by someone entitled to read them.
+        // Wave 4a §4: a dataset is a name released into a root, and it is what
+        // a version is a version of. Running the same name into the same root
+        // makes the next version of the same tree (§8.6).
+        Table::new(
+            "dataset",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("root", Type::Text),
+                req("created_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["name", "root"]),
         Table::new(
             "release",
             vec![
@@ -642,6 +689,8 @@ fn build_registry() -> Vec<Table> {
                 // The dataset. Running the same name again makes the next
                 // version of the same tree (§8.6).
                 req("name", Type::Text),
+                // And the row that says so, since Wave 4a §4.
+                col("dataset_id", Type::Int),
                 // `YYYY.MM.DD.N`: it sorts by component, reads as the day it
                 // was made, and N separates two runs on one day.
                 req("version", Type::Text),
@@ -684,19 +733,29 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["name"]),
-        // What a version knows about each stack it wrote, which is what the
-        // next version compares against.
+        // The **current state** of each stack of a dataset: one row per
+        // stack, updated in place, whatever the number of versions (Wave 4a
+        // §4). The history is `release_move`. "What is in the tree now" is a
+        // lookup; "what did version 4 do" is a query on the log; "what was in
+        // version 3" is a replay of the log backwards, exact and rare.
         //
-        // The digest covers everything that decides the file's **bytes** and
-        // deliberately not where it goes: keeping the place out of it is what
-        // lets a move be seen as a move rather than as a rewrite, and a name is
-        // a rendering of the decided axes, none of which touches a byte.
+        // Wave 3 wrote a row per stack per version and a row per file per
+        // version, measured at 1.4 KB of memory and of disk per file, which is
+        // tens of gigabytes at the archive's size for every version.
+        //
+        // The content digest covers everything that decides the file's
+        // **bytes** and deliberately not where it goes: keeping the place out
+        // of it is what lets a move be seen as a move rather than as a
+        // rewrite, and a name is a rendering of the decided axes, none of which
+        // touches a byte.
         Table::new(
             "release_stack",
             vec![
                 col("id", Type::Id),
-                req("release_id", Type::Int),
+                req("dataset_id", Type::Int),
                 req("stack_id", Type::Int),
+                // The version that last changed this row.
+                req("release_id", Type::Int),
                 req("content", Type::Text),
                 // Where it went. A directory in the descriptive layout, where
                 // a stack owns one; a directory and a file stem in BIDS, where
@@ -708,11 +767,41 @@ fn build_registry() -> Vec<Table> {
                 // Which of §9.3's routes it took, so a tree can be asked what
                 // it holds and what it left out.
                 req("route", Type::Text),
+                // What was written: how many files, how many bytes, and one
+                // digest over the files' digests, which is what a handover
+                // verifies at (Wave 4a §4.3). A converted stack's files are
+                // its stem plus these extensions; a DICOM stack owns its
+                // directory and its files are its instances.
                 req("files", Type::Int),
+                req("bytes", Type::Int),
+                req("digest", Type::Text),
+                col("extensions", Type::Text),
             ],
         )
-        .unique(&["release_id", "stack_id"])
+        .unique(&["dataset_id", "stack_id"])
         .index(&["release_id"]),
+        // Where this version means to put each stack, written as the plan is
+        // made and read back joined to the state, so that the five outcomes of
+        // §8.6 are a join in the database and not two maps in memory. Emptied
+        // when the version closes.
+        Table::new(
+            "release_plan",
+            vec![
+                col("id", Type::Id),
+                req("release_id", Type::Int),
+                req("stack_id", Type::Int),
+                req("content", Type::Text),
+                req("dir", Type::Text),
+                col("stem", Type::Text),
+                req("route", Type::Text),
+                req("fallback_dir", Type::Text),
+                col("fallback_stem", Type::Text),
+                req("code", Type::Text),
+                req("label", Type::Text),
+                req("offset_days", Type::Int),
+            ],
+        )
+        .unique(&["release_id", "stack_id"]),
         // Wave 3 §11: how a dataset physically left. The archive set is part
         // of the release record, so "what did we send them, and is it still
         // intact" is a query rather than a folder somebody remembers.
@@ -817,30 +906,6 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["release_id"]),
-        // Every file a version wrote, which is the manifest a handover
-        // verifies (§11) and the state a re-run carries forward (§8.6).
-        //
-        // `instance_id` is null for a file that is not one instance written
-        // out: a NIfTI is a whole stack, and its sidecar, `.bval` and `.bvec`
-        // are the stack's too. `stack_id` is always there, because that is
-        // what a version compares.
-        Table::new(
-            "release_file",
-            vec![
-                col("id", Type::Id),
-                req("release_id", Type::Int),
-                req("stack_id", Type::Int),
-                col("instance_id", Type::Int),
-                // Where it landed, under the release's root.
-                req("path", Type::Text),
-                // What was written, so a handover can be verified without
-                // reading the file back (§11).
-                req("digest", Type::Text),
-                req("bytes", Type::Int),
-            ],
-        )
-        .index(&["release_id"])
-        .index(&["instance_id"]),
         // §8.5: what a release changed, by tag and action and count. No old
         // value: an audit that records what was removed is a copy of the
         // identifiers, in the registry, in clear.

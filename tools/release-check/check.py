@@ -252,20 +252,26 @@ def bar_picks(work: Path, db: sqlite3.Connection) -> list[str]:
 
 def bar_traceable(work: Path, db: sqlite3.Connection) -> list[str]:
     bad = []
+    # The state is per stack (Wave 4a section 4): every stack a dataset holds
+    # is a stack the registry has, in a version the registry has.
     orphan = db.execute(
-        """SELECT COUNT(*) FROM release_file f
-           LEFT JOIN stack k ON k.id = f.stack_id WHERE k.id IS NULL"""
+        """SELECT COUNT(*) FROM release_stack s
+           LEFT JOIN stack k ON k.id = s.stack_id WHERE k.id IS NULL"""
     ).fetchone()[0]
     if orphan:
-        bad.append(f"{orphan} released file(s) name a stack the registry does not have")
-    # And where the file is one instance written out, the instance is real.
+        bad.append(f"{orphan} released stack(s) the registry does not have")
     orphan = db.execute(
-        """SELECT COUNT(*) FROM release_file f
-           LEFT JOIN instance i ON i.id = f.instance_id
-           WHERE f.instance_id IS NOT NULL AND i.id IS NULL"""
+        """SELECT COUNT(*) FROM release_stack s
+           LEFT JOIN release r ON r.id = s.release_id WHERE r.id IS NULL"""
     ).fetchone()[0]
     if orphan:
-        bad.append(f"{orphan} released file(s) name an instance the registry does not have")
+        bad.append(f"{orphan} released stack(s) name a version the registry does not have")
+    # And the state describes the tree: a stack with files has a digest.
+    blank = db.execute(
+        "SELECT COUNT(*) FROM release_stack WHERE files > 0 AND digest = ''"
+    ).fetchone()[0]
+    if blank:
+        bad.append(f"{blank} released stack(s) with files and no digest")
     # Every decided axis says who decided it (section 10.1).
     unattributed = db.execute(
         """SELECT COUNT(*) FROM classification_axis a

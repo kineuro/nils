@@ -90,6 +90,7 @@ impl From<nils_registry::store::Error> for Error {
 /// The version of a release that a handover packs, with its root.
 struct Version {
     id: i64,
+    dataset: i64,
     version: String,
     root: String,
 }
@@ -104,25 +105,16 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
             settings.release
         )));
     };
-    let files = files_of(registry.store(), found.id)?;
-    if files.is_empty() {
-        return Err(Error::Refused(format!(
-            "version {} of {} wrote no files",
-            found.version, settings.release
-        )));
-    }
-
     // The tree as the release recorded it, and the tree as it is now. A file
     // the record names and the disk does not is reported rather than skipped:
     // a handover of a tree somebody edited is not a handover of the release.
     let root = PathBuf::from(&found.root);
-    let mut present: Vec<(String, i64)> = Vec::new();
-    let mut missing = 0i64;
-    for (path, bytes) in &files {
-        match root.join(path).is_file() {
-            true => present.push((path.clone(), *bytes)),
-            false => missing += 1,
-        }
+    let (present, missing) = files_of(registry.store(), found.dataset, &root)?;
+    if present.is_empty() && missing == 0 {
+        return Err(Error::Refused(format!(
+            "version {} of {} wrote no files",
+            found.version, settings.release
+        )));
     }
 
     let members = plan::members(&present);
@@ -319,7 +311,7 @@ pub fn verify(
 fn newest(store: &mut Store, name: &str) -> Result<Option<Version>, Error> {
     let d = store.dialect();
     let sql = format!(
-        "SELECT id, version, root FROM {} WHERE name = {} AND finished_at IS NOT NULL \
+        "SELECT id, dataset_id, version, root FROM {} WHERE name = {} AND finished_at IS NOT NULL \
          ORDER BY id DESC LIMIT 1",
         store.qualified("release"),
         d.param(1, Type::Text),
@@ -329,24 +321,126 @@ fn newest(store: &mut Store, name: &str) -> Result<Option<Version>, Error> {
     };
     Ok(Some(Version {
         id: r.int(0)?,
-        version: r.text(1)?.to_string(),
-        root: r.text(2)?.to_string(),
+        dataset: r.int(1)?,
+        version: r.text(2)?.to_string(),
+        root: r.text(3)?.to_string(),
     }))
 }
 
-/// Every file the version wrote, from the manifest rather than from a scan.
-fn files_of(store: &mut Store, release: i64) -> Result<Vec<(String, i64)>, Error> {
+/// Every file of the version, from the state rather than from a scan of the
+/// tree (Wave 4a §4).
+///
+/// A stack's files are what `release_stack` says they are: a converted stack
+/// is its stem plus its extensions, a DICOM stack is the directory it owns.
+/// The dataset's own files, `dataset_description.json`, `participants.tsv`
+/// and the `_scans.tsv` beside each session, sit at the levels no stack ever
+/// occupies, so they are the files found there. A file the state names and
+/// the disk does not have is counted rather than skipped; a file the disk has
+/// and the state does not name is not part of the release and is not packed.
+fn files_of(
+    store: &mut Store,
+    dataset: i64,
+    root: &Path,
+) -> Result<(Vec<(String, i64)>, i64), Error> {
     let d = store.dialect();
     let sql = format!(
-        "SELECT path, bytes FROM {} WHERE release_id = {} ORDER BY path",
-        store.qualified("release_file"),
+        "SELECT dir, stem, files, extensions FROM {} WHERE dataset_id = {} ORDER BY dir, stem",
+        store.qualified("release_stack"),
         d.param(1, Type::Int),
     );
-    let mut out = Vec::new();
-    for r in store.query(&sql, &[Param::Int(release)])? {
-        out.push((r.text(0)?.to_string(), r.int(1)?));
+    let mut present: Vec<(String, i64)> = Vec::new();
+    let mut missing = 0i64;
+    let mut owned: Vec<String> = Vec::new();
+    for r in store.query(&sql, &[Param::Int(dataset)])? {
+        let dir = r.text(0)?.to_string();
+        let files = r.int(2)?;
+        match r.opt_text(1)? {
+            Some(stem) => {
+                let extensions = r.opt_text(3)?.unwrap_or("").to_string();
+                for ext in extensions.split(',').filter(|e| !e.is_empty()) {
+                    let path = format!("{dir}/{stem}{ext}");
+                    match std::fs::metadata(root.join(&path)) {
+                        Ok(m) if m.is_file() => present.push((path, m.len() as i64)),
+                        _ => missing += 1,
+                    }
+                }
+            }
+            None => {
+                let before = present.len();
+                walk(root, &root.join(&dir), &mut present);
+                let found = (present.len() - before) as i64;
+                if found < files {
+                    missing += files - found;
+                }
+                owned.push(format!("{dir}/"));
+            }
+        }
     }
-    Ok(out)
+    // The dataset's own files: at the root, beside a subject, beside a
+    // session. Never inside a stack, and never a hidden file.
+    let named: std::collections::HashSet<String> = present.iter().map(|(p, _)| p.clone()).collect();
+    let mut level: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = level.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if relative.starts_with('.') || relative.contains("/.") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                if depth < 2
+                    && !owned
+                        .iter()
+                        .any(|o| relative.starts_with(o.trim_end_matches('/')))
+                {
+                    level.push((path, depth + 1));
+                }
+            } else if meta.is_file()
+                && !named.contains(&relative)
+                && !owned.iter().any(|o| relative.starts_with(o.as_str()))
+            {
+                present.push((relative, meta.len() as i64));
+            }
+        }
+    }
+    present.sort();
+    present.dedup();
+    Ok((present, missing))
+}
+
+/// Every file under a directory, relative to the root.
+fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, i64)>) {
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                pending.push(path);
+            } else if meta.is_file()
+                && let Ok(relative) = path.strip_prefix(root)
+            {
+                out.push((
+                    relative.to_string_lossy().replace('\\', "/"),
+                    meta.len() as i64,
+                ));
+            }
+        }
+    }
 }
 
 /// The subject behind each code, so an archive names people the registry knows

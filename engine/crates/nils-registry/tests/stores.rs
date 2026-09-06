@@ -609,95 +609,147 @@ fn the_linkage_store_files_looks_up_and_imports_on_both_backends() {
     }
 }
 
-/// Wave 3 §9: `release_file` is rebuilt by migration 16, so the upgrade path
-/// is the one thing about it a fresh registry cannot prove.
+/// Wave 4a §4: migration 18 folds a row per stack per version and a row per
+/// file per version into one current state per stack, so the upgrade path is
+/// the one thing about it a fresh registry cannot prove.
 ///
-/// A registry made before it has a `release_file` whose `instance_id` is NOT
-/// NULL and which has no `stack_id`, and no `ALTER` relaxes a NOT NULL on both
-/// backends. So the migration creates the new shape, copies through the join
-/// that says which stack a file's instance belongs to, and renames.
+/// A registry made before it has two versions of one stack; after it there is
+/// one row, the newest, with the bytes the manifest knew, and no manifest.
 #[test]
-fn migration_16_rebuilds_the_release_manifest_and_keeps_its_rows() {
+fn migration_18_folds_the_versions_into_one_current_state_per_stack() {
     use nils_registry::schema;
 
-    let dir = TempDir::new("rebuild");
+    let dir = TempDir::new("fold");
     let path = dir.path().join("registry.db");
     let mut store = Store::open_sqlite(&path).unwrap();
     migrate::migrate(&mut store, Kind::Registry).unwrap();
 
-    // Put `release_file` back into the shape migration 15 left it in, and the
-    // version with it, which is what a registry made last week looks like.
+    // Put the release's bookkeeping back into the shape migration 17 left it
+    // in, which is what a registry made last week looks like.
+    let release = "(name, version, root, policy, selection, categories, session_scheme, \
+                    layout, placements, pack, pack_version, actor, started_at, finished_at, \
+                    files, subjects, unchanged, moved, rewritten, added, removed)";
     store
-        .batch(
-            "DROP TABLE release_file;
+        .batch(&format!(
+            "DROP TABLE release_plan;
+             DROP TABLE dataset;
+             DROP TABLE release_stack;
+             ALTER TABLE release DROP COLUMN dataset_id;
+             CREATE TABLE release_stack (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               release_id INTEGER NOT NULL,
+               stack_id INTEGER NOT NULL,
+               content TEXT NOT NULL,
+               dir TEXT NOT NULL,
+               stem TEXT,
+               route TEXT NOT NULL,
+               files INTEGER NOT NULL);
              CREATE TABLE release_file (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                release_id INTEGER NOT NULL,
-               instance_id INTEGER NOT NULL,
+               stack_id INTEGER NOT NULL,
+               instance_id INTEGER,
                path TEXT NOT NULL,
                digest TEXT NOT NULL,
                bytes INTEGER NOT NULL);
-             UPDATE registry_meta SET value = '15' WHERE key = 'schema_version';
-             INSERT INTO stack (id, series_id, stack_index, stack_key, modality, orientation, \
-                                n_instances, first_batch_id)
-               VALUES (7, 1, 0, 'k', 'MR', 'Ax', 1, 1);
-             INSERT INTO instance (id, sop_instance_uid, series_id, stack_id, first_batch_id)
-               VALUES (3, '1.2.3.4', 1, 7, 1);
-             INSERT INTO release_file (release_id, instance_id, path, digest, bytes)
-               VALUES (1, 3, 'sub-x/ses-1/anat/T1w/00000003.dcm', 'abc', 42)",
-        )
+             UPDATE registry_meta SET value = '17' WHERE key = 'schema_version';
+             INSERT INTO release {release} VALUES
+               ('c', '2026.09.01.1', '/r', '{{}}', '{{}}', 'c', 's', 'descriptive', '{{}}', \
+                'mri', '1', 'a', '2026-09-01T10:00:00', '2026-09-01T10:01:00', 2, 1, 0, 0, 0, 1, 0),
+               ('c', '2026.09.02.1', '/r', '{{}}', '{{}}', 'c', 's', 'descriptive', '{{}}', \
+                'mri', '1', 'a', '2026-09-02T10:00:00', '2026-09-02T10:01:00', 2, 1, 0, 1, 0, 0, 0);
+             INSERT INTO release_stack (release_id, stack_id, content, dir, stem, route, files) VALUES
+               (1, 7, 'same', 'sub-x/ses-1/anat/T1w', NULL, 'raw', 2),
+               (2, 7, 'same', 'sub-x/ses-1/anat/SC_T1w', NULL, 'raw', 2);
+             INSERT INTO release_file (release_id, stack_id, instance_id, path, digest, bytes) VALUES
+               (1, 7, 3, 'sub-x/ses-1/anat/T1w/00000003.dcm', 'a', 40),
+               (1, 7, 4, 'sub-x/ses-1/anat/T1w/00000004.dcm', 'b', 2),
+               (2, 7, 3, 'sub-x/ses-1/anat/SC_T1w/00000003.dcm', 'a', 40),
+               (2, 7, 4, 'sub-x/ses-1/anat/SC_T1w/00000004.dcm', 'b', 2)"
+        ))
         .unwrap();
     assert_eq!(
         migrate::standing(&mut store, Kind::Registry).unwrap(),
-        Standing::Behind(15)
+        Standing::Behind(17)
     );
 
-    // Which is what opening it behind a newer binary does: every migration
-    // after its version, 16 among them.
     let applied = migrate::migrate(&mut store, Kind::Registry).unwrap();
-    assert!(applied.contains(&16), "{applied:?}");
+    assert_eq!(applied, vec![18]);
 
+    // One dataset, which both versions are versions of.
+    let datasets = store
+        .query("SELECT id, name, root FROM dataset", &[])
+        .unwrap();
+    assert_eq!(datasets.len(), 1);
+    assert_eq!(datasets[0].text(1).unwrap(), "c");
+    assert_eq!(datasets[0].text(2).unwrap(), "/r");
+    let dataset = datasets[0].int(0).unwrap();
+    let rows = store
+        .query("SELECT dataset_id FROM release ORDER BY id", &[])
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.int(0).unwrap() == dataset));
+
+    // One current state for the stack: the newest version's place, the
+    // manifest's bytes, and no digest, since a digest the old shape held per
+    // file cannot be made into one per stack without reading the tree.
     let rows = store
         .query(
-            "SELECT stack_id, instance_id, path, bytes FROM release_file",
+            "SELECT dataset_id, stack_id, release_id, dir, route, files, bytes, digest \
+             FROM release_stack",
             &[],
         )
         .unwrap();
-    assert_eq!(rows.len(), 1, "the row survived");
-    assert_eq!(rows[0].int(0).unwrap(), 7, "and gained the stack it is of");
-    assert_eq!(rows[0].int(1).unwrap(), 3);
-    assert_eq!(rows[0].int(3).unwrap(), 42);
+    assert_eq!(rows.len(), 1, "two versions of one stack are one state");
+    let r = &rows[0];
+    assert_eq!(r.int(0).unwrap(), dataset);
+    assert_eq!(r.int(1).unwrap(), 7);
+    assert_eq!(r.int(2).unwrap(), 2, "the newest version's");
+    assert_eq!(r.text(3).unwrap(), "sub-x/ses-1/anat/SC_T1w");
+    assert_eq!(r.text(4).unwrap(), "raw");
+    assert_eq!(r.int(5).unwrap(), 2);
+    assert_eq!(r.int(6).unwrap(), 42, "the bytes the manifest knew");
+    assert_eq!(r.text(7).unwrap(), "");
 
-    // And the new shape takes a file that is not one instance written out: a
-    // NIfTI is a whole stack, and its sidecar is the stack's too.
-    store
-        .insert(
-            &Insert::new(
-                schema::table("release_file"),
-                &[
-                    "release_id",
-                    "stack_id",
-                    "instance_id",
-                    "path",
-                    "digest",
-                    "bytes",
-                ],
-            ),
-            &[vec![
-                Param::Int(1),
-                Param::Int(7),
-                Param::Null,
-                Param::from("sub-x/ses-1/anat/sub-x_ses-1_T1w.nii.gz"),
-                Param::from("def"),
-                Param::Int(9),
-            ]],
-        )
-        .unwrap();
-    let rows = store
-        .query(
-            "SELECT COUNT(*) FROM release_file WHERE instance_id IS NULL",
-            &[],
-        )
-        .unwrap();
-    assert_eq!(rows[0].int(0).unwrap(), 1);
+    // The manifest is gone with it.
+    assert!(
+        store
+            .query_opt(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'release_file'",
+                &[],
+            )
+            .unwrap()
+            .is_none()
+    );
+
+    // And the new shape holds one row per stack of a dataset, whatever the
+    // number of versions: a second row for the same stack is refused.
+    let again = store.insert(
+        &Insert::new(
+            schema::table("release_stack"),
+            &[
+                "dataset_id",
+                "stack_id",
+                "release_id",
+                "content",
+                "dir",
+                "route",
+                "files",
+                "bytes",
+                "digest",
+            ],
+        ),
+        &[vec![
+            Param::Int(dataset),
+            Param::Int(7),
+            Param::Int(3),
+            Param::from("other"),
+            Param::from("sub-x/ses-1/anat/T1w"),
+            Param::from("raw"),
+            Param::Int(2),
+            Param::Int(42),
+            Param::from("d"),
+        ]],
+    );
+    assert!(again.is_err(), "one state per stack");
 }
