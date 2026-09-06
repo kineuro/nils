@@ -50,8 +50,16 @@ fn every_manifest_key_the_loader_reads_is_on_the_schema() {
         "bids",
         "review",
         "buckets",
+        "fields",
     ];
-    let text = std::fs::read_to_string(contracts().join("pack/v1/pack.schema.json")).unwrap();
+    let version: u32 = std::fs::read_to_string(contracts().join("pack/VERSION"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let text =
+        std::fs::read_to_string(contracts().join(format!("pack/v{version}/pack.schema.json")))
+            .unwrap();
     let schema: serde_json::Value = serde_json::from_str(&text).expect("the schema is JSON");
     let properties = schema["properties"].as_object().expect("properties");
     for key in READ {
@@ -91,13 +99,22 @@ fn the_mri_pack_s_manifest_keeps_to_the_contract() {
     // The shipped pack's manifest, key by key, against the schema's
     // properties and required keys, without a validator: a key the schema
     // does not know is a contract violation.
-    let text = std::fs::read_to_string(contracts().join("pack/v1/pack.schema.json")).unwrap();
-    let schema: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let properties = schema["properties"].as_object().unwrap();
     let manifest = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri/pack.yml"),
     )
     .unwrap();
+    // Against the version the pack declares, which is what the loader holds
+    // it to.
+    let declared: u32 = manifest
+        .lines()
+        .find_map(|l| l.strip_prefix("contract:"))
+        .and_then(|v| v.trim().parse().ok())
+        .expect("the pack declares its contract");
+    let text =
+        std::fs::read_to_string(contracts().join(format!("pack/v{declared}/pack.schema.json")))
+            .unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let properties = schema["properties"].as_object().unwrap();
     let mut keys = Vec::new();
     for line in manifest.lines() {
         if line.starts_with('#') || line.starts_with(' ') || line.trim().is_empty() {

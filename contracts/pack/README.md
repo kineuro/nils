@@ -22,6 +22,7 @@ and gets a version; nothing is amended in place.
 | version | schema | since |
 |---|---|---|
 | 1 | [`v1/pack.schema.json`](v1/pack.schema.json) | Wave 2 (the manifest as the loader reads it); written down in Wave 4a |
+| 2 | [`v2/pack.schema.json`](v2/pack.schema.json) | Wave 4a slice 15, 2026-09-06: the optional `fields` key, a visibility (`local`, `federated`, `sensitive`) the pack puts on a catalogue field (C27) |
 
 The engine's own copy of the version is `nils_pack::CONTRACT`; a test keeps
 the two the same and keeps every manifest key the loader reads on the schema.

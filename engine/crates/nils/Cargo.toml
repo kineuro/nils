@@ -25,8 +25,10 @@ nils-release.workspace = true
 clap.workspace = true
 csv.workspace = true
 regex.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tiny_http.workspace = true
+jsonwebtoken.workspace = true
 ctrlc.workspace = true
 
 [dev-dependencies]

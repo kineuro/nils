@@ -30,14 +30,100 @@ const OPENAPI_VERSION: &str = include_str!("../../../../contracts/openapi/VERSIO
 const REVIEW_ITEM_VERSION: &str = include_str!("../../../../contracts/review-item/VERSION");
 const PACK_CONTRACT_VERSION: &str = include_str!("../../../../contracts/pack/VERSION");
 
+/// What a caller may do (Wave 4a §11.2): groups map to roles, and a door
+/// asks for one. `reader` reads and previews; `reviewer` decides;
+/// `operator` queues work and cancels it; `admin` reads the audit log and
+/// the custody. Under `off` and `token` every caller holds every role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Role {
+    Reader,
+    Reviewer,
+    Operator,
+    Admin,
+}
+
+impl Role {
+    fn parse(text: &str) -> Option<Role> {
+        Some(match text {
+            "reader" => Role::Reader,
+            "reviewer" => Role::Reviewer,
+            "operator" => Role::Operator,
+            "admin" => Role::Admin,
+            _ => return None,
+        })
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Role::Reader => "reader",
+            Role::Reviewer => "reviewer",
+            Role::Operator => "operator",
+            Role::Admin => "admin",
+        }
+    }
+}
+
+/// The claims an OIDC token carries that the engine reads.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct Claims {
+    sub: String,
+    exp: u64,
+    #[serde(default)]
+    groups: Vec<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    preferred_username: Option<String>,
+    #[serde(flatten)]
+    rest: HashMap<String, serde_json::Value>,
+}
+
+/// The `oidc` mode (D8): the engine validates the token against the
+/// issuer's keys and its audience, maps groups to roles, and keeps no user
+/// table beyond a cache of claims for the token's lifetime.
+struct Oidc {
+    issuer: String,
+    audience: String,
+    /// The issuer's host, which is the node half of the principal.
+    node: String,
+    keys: Vec<(
+        Option<String>,
+        jsonwebtoken::DecodingKey,
+        jsonwebtoken::Algorithm,
+    )>,
+    groups_claim: String,
+    /// group -> role
+    roles: HashMap<String, Role>,
+    /// token -> (principal, roles, expiry as unix seconds)
+    cache: std::sync::Mutex<ClaimsCache>,
+}
+
+/// What the engine keeps of a token it verified, until the token expires.
+type ClaimsCache = HashMap<String, (String, Vec<Role>, u64)>;
+
 /// Who a request is from.
-#[derive(Debug, Clone)]
 enum Auth {
     /// The local user, as the command line would record it.
     Off,
     /// A bearer token names the caller.
     Token(HashMap<String, String>),
+    /// An OIDC token names the caller, and its groups say what they may do.
+    Oidc(Box<Oidc>),
 }
+
+/// A caller: who, and with which roles.
+struct Caller {
+    principal: String,
+    roles: Vec<Role>,
+}
+
+impl Caller {
+    fn can(&self, role: Role) -> bool {
+        self.roles.contains(&role)
+    }
+}
+
+const EVERY_ROLE: [Role; 4] = [Role::Reader, Role::Reviewer, Role::Operator, Role::Admin];
 
 impl Auth {
     fn parse(args: &ServeArgs) -> Result<Auth, Exit> {
@@ -73,8 +159,79 @@ impl Auth {
                 }
                 Ok(Auth::Token(tokens))
             }
-            "oidc" => Err(usage("--auth oidc is slice 15's; off and token exist")),
-            other => Err(usage(format!("--auth is off or token, not {other}"))),
+            "oidc" => {
+                let issuer = args
+                    .oidc_issuer
+                    .clone()
+                    .ok_or_else(|| usage("--auth oidc needs --oidc-issuer URL"))?;
+                let audience = args
+                    .oidc_audience
+                    .clone()
+                    .ok_or_else(|| usage("--auth oidc needs --oidc-audience"))?;
+                let jwks_path = args.oidc_jwks.clone().ok_or_else(|| {
+                    usage("--auth oidc needs --oidc-jwks FILE, the issuer's JWKS document")
+                })?;
+                let text = std::fs::read_to_string(&jwks_path)
+                    .map_err(|e| fail(format!("{}: {e}", jwks_path.display())))?;
+                let set: jsonwebtoken::jwk::JwkSet = serde_json::from_str(&text).map_err(|e| {
+                    usage(format!("{}: not a JWKS document: {e}", jwks_path.display()))
+                })?;
+                let mut keys = Vec::new();
+                for jwk in &set.keys {
+                    let Ok(key) = jsonwebtoken::DecodingKey::from_jwk(jwk) else {
+                        continue;
+                    };
+                    let algorithm = match &jwk.algorithm {
+                        jsonwebtoken::jwk::AlgorithmParameters::RSA(_) => {
+                            jsonwebtoken::Algorithm::RS256
+                        }
+                        jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(_) => {
+                            jsonwebtoken::Algorithm::ES256
+                        }
+                        jsonwebtoken::jwk::AlgorithmParameters::OctetKeyPair(_) => {
+                            jsonwebtoken::Algorithm::EdDSA
+                        }
+                        // A shared secret is not OIDC: the engine holds no secrets.
+                        _ => continue,
+                    };
+                    keys.push((jwk.common.key_id.clone(), key, algorithm));
+                }
+                if keys.is_empty() {
+                    return Err(usage(format!(
+                        "{}: no RSA, EC or EdDSA key to verify with",
+                        jwks_path.display()
+                    )));
+                }
+                let mut roles = HashMap::new();
+                for r in &args.role {
+                    let Some((group, role)) = r.split_once('=') else {
+                        return Err(usage(format!("{r} is not GROUP=ROLE")));
+                    };
+                    let Some(role) = Role::parse(role.trim()) else {
+                        return Err(usage(format!(
+                            "{role} is not a role: reader, reviewer, operator or admin"
+                        )));
+                    };
+                    roles.insert(group.trim().to_string(), role);
+                }
+                let node = issuer
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .unwrap_or("issuer")
+                    .to_string();
+                Ok(Auth::Oidc(Box::new(Oidc {
+                    issuer,
+                    audience,
+                    node,
+                    keys,
+                    groups_claim: args.oidc_groups_claim.clone(),
+                    roles,
+                    cache: std::sync::Mutex::new(HashMap::new()),
+                })))
+            }
+            other => Err(usage(format!("--auth is off, token or oidc, not {other}"))),
         }
     }
 
@@ -82,27 +239,121 @@ impl Auth {
         match self {
             Auth::Off => "off",
             Auth::Token(_) => "token",
+            Auth::Oidc(_) => "oidc",
         }
     }
 
-    /// The principal of a request, or why not.
-    fn principal(&self, request: &Request) -> Result<String, Reply> {
+    /// The caller of a request, or why not.
+    fn caller(&self, request: &Request) -> Result<Caller, Reply> {
+        let bearer = || -> Result<String, Reply> {
+            let header = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .map(|h| h.value.as_str().to_string());
+            let Some(value) = header else {
+                return Err(Reply::error(401, "a bearer token is required"));
+            };
+            Ok(value
+                .strip_prefix("Bearer ")
+                .unwrap_or("")
+                .trim()
+                .to_string())
+        };
         match self {
-            Auth::Off => Ok(crate::actor()),
+            Auth::Off => Ok(Caller {
+                principal: crate::actor(),
+                roles: EVERY_ROLE.to_vec(),
+            }),
             Auth::Token(tokens) => {
-                let header = request
-                    .headers()
-                    .iter()
-                    .find(|h| h.field.equiv("Authorization"))
-                    .map(|h| h.value.as_str().to_string());
-                let Some(value) = header else {
-                    return Err(Reply::error(401, "a bearer token is required"));
-                };
-                let token = value.strip_prefix("Bearer ").unwrap_or("").trim();
-                match tokens.get(token) {
-                    Some(p) => Ok(p.clone()),
+                let token = bearer()?;
+                match tokens.get(&token) {
+                    Some(p) => Ok(Caller {
+                        principal: p.clone(),
+                        roles: EVERY_ROLE.to_vec(),
+                    }),
                     None => Err(Reply::error(401, "the token names nobody")),
                 }
+            }
+            Auth::Oidc(oidc) => {
+                let token = bearer()?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if let Ok(cache) = oidc.cache.lock()
+                    && let Some((principal, roles, exp)) = cache.get(&token)
+                    && *exp > now
+                {
+                    return Ok(Caller {
+                        principal: principal.clone(),
+                        roles: roles.clone(),
+                    });
+                }
+                let header = jsonwebtoken::decode_header(&token)
+                    .map_err(|e| Reply::error(401, format!("not a token: {e}")))?;
+                let mut last = String::from("no key of the issuer verifies it");
+                let mut claims: Option<Claims> = None;
+                for (kid, key, algorithm) in &oidc.keys {
+                    if let (Some(k), Some(h)) = (kid, &header.kid)
+                        && k != h
+                    {
+                        continue;
+                    }
+                    let mut validation = jsonwebtoken::Validation::new(*algorithm);
+                    validation.set_issuer(&[oidc.issuer.as_str()]);
+                    validation.set_audience(&[oidc.audience.as_str()]);
+                    validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+                    match jsonwebtoken::decode::<Claims>(&token, key, &validation) {
+                        Ok(data) => {
+                            claims = Some(data.claims);
+                            break;
+                        }
+                        Err(e) => last = e.to_string(),
+                    }
+                }
+                let Some(claims) = claims else {
+                    return Err(Reply::error(401, format!("the token is refused: {last}")));
+                };
+                // The groups: the standard claim, or the one the deployment names.
+                let groups: Vec<String> = if oidc.groups_claim == "groups" {
+                    claims.groups.clone()
+                } else {
+                    claims
+                        .rest
+                        .get(&oidc.groups_claim)
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|g| g.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let mut roles: Vec<Role> = groups
+                    .iter()
+                    .filter_map(|g| oidc.roles.get(g).copied())
+                    .collect();
+                roles.sort();
+                roles.dedup();
+                // A role implies the ones below it: an operator reads.
+                if let Some(top) = roles.iter().max().copied() {
+                    roles = EVERY_ROLE.iter().copied().filter(|r| *r <= top).collect();
+                }
+                if roles.is_empty() {
+                    roles.push(Role::Reader);
+                }
+                let _ = (&claims.email, &claims.preferred_username);
+                // The audit principal is the subject (§11.2), at the issuer's node.
+                let principal = format!("{}@{}", claims.sub, oidc.node);
+                if let Ok(mut cache) = oidc.cache.lock() {
+                    cache.retain(|_, (_, _, exp)| *exp > now);
+                    cache.insert(
+                        token.clone(),
+                        (principal.clone(), roles.clone(), claims.exp),
+                    );
+                }
+                Ok(Caller { principal, roles })
             }
         }
     }
@@ -253,8 +504,8 @@ fn handle(doors: &Doors, registry: &mut Registry, mut request: Request) {
         events(doors, registry, request);
         return;
     }
-    let reply = match doors.auth.principal(&request) {
-        Ok(principal) => route(doors, registry, &principal, &method, path, &query, &body),
+    let reply = match doors.auth.caller(&request) {
+        Ok(caller) => route(doors, registry, &caller, &method, path, &query, &body),
         Err(reply) => reply,
     };
     let _ = respond(request, reply);
@@ -274,13 +525,13 @@ fn segments(path: &str) -> Vec<&str> {
 fn route(
     doors: &Doors,
     registry: &mut Registry,
-    principal: &str,
+    caller: &Caller,
     method: &Method,
     path: &str,
     query: &HashMap<String, String>,
     body: &str,
 ) -> Reply {
-    match routed(doors, registry, principal, method, path, query, body) {
+    match routed(doors, registry, caller, method, path, query, body) {
         Ok(r) => r,
         Err(r) => r,
     }
@@ -289,15 +540,42 @@ fn route(
 fn routed(
     doors: &Doors,
     registry: &mut Registry,
-    principal: &str,
+    caller: &Caller,
     method: &Method,
     path: &str,
     query: &HashMap<String, String>,
     body: &str,
 ) -> Result<Reply, Reply> {
+    let principal = caller.principal.as_str();
     let segs = segments(path);
     let get = *method == Method::Get;
     let post = *method == Method::Post;
+    // Which role a door asks for (§11.2). A door not named here asks for
+    // reader, which every caller holds.
+    let needs = match (method.as_str(), segs.as_slice()) {
+        ("GET", ["api", "audit"]) | ("GET", ["api", "custody"]) => Role::Admin,
+        ("POST", ["api", "jobs"])
+        | ("POST", ["api", "jobs", _, "cancel"])
+        | ("POST", ["api", "releases"])
+        | ("POST", ["api", "handovers"]) => Role::Operator,
+        ("POST", ["api", "review", _, _]) | ("POST", ["api", "decisions", _, _]) => Role::Reviewer,
+        _ => Role::Reader,
+    };
+    if !caller.can(needs) {
+        return Err(Reply::error(
+            403,
+            format!(
+                "{path} asks for the {} role; {principal} holds {}",
+                needs.name(),
+                caller
+                    .roles
+                    .iter()
+                    .map(|r| r.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
     let id_at = |i: usize| -> Result<i64, Reply> {
         segs.get(i)
             .and_then(|s| s.parse::<i64>().ok())
@@ -308,7 +586,7 @@ fn routed(
         .and_then(|l| l.parse::<usize>().ok())
         .unwrap_or(50);
     match segs.as_slice() {
-        ["api", "capabilities"] if get => Ok(Reply::ok(capabilities(doors, registry, principal))),
+        ["api", "capabilities"] if get => Ok(Reply::ok(capabilities(doors, registry, caller))),
         ["api", "status"] if get => Ok(Reply::ok(crate::status_doc(&doors.home, registry)?)),
         ["api", "custody"] if get => Ok(Reply::ok(crate::custody_doc(&doors.home, registry)?)),
         ["api", "audit"] if get => {
@@ -634,7 +912,7 @@ fn review_err(e: nils_registry::review::Error) -> Reply {
     }
 }
 
-fn capabilities(doors: &Doors, registry: &mut Registry, principal: &str) -> serde_json::Value {
+fn capabilities(doors: &Doors, registry: &mut Registry, caller: &Caller) -> serde_json::Value {
     let meta = registry.meta().clone();
     let packs: Vec<serde_json::Value> = doors
         .pack_dir
@@ -655,7 +933,8 @@ fn capabilities(doors: &Doors, registry: &mut Registry, principal: &str) -> serd
         "packs": packs,
         "registry": { "id": meta.registry_id, "epoch": meta.epoch, "schema_version": meta.schema_version },
         "auth": doors.auth.name(),
-        "principal": principal,
+        "principal": caller.principal,
+        "roles": caller.roles.iter().map(|r| r.name()).collect::<Vec<_>>(),
         "node": doors.node,
         "uptime_seconds": doors.started.elapsed().as_secs(),
         "doors": [
@@ -726,7 +1005,7 @@ fn review_list(
 /// `GET /api/events`: server-sent events with the open jobs, every second,
 /// until the client goes away. Display plumbing only.
 fn events(doors: &Doors, registry: &mut Registry, request: Request) {
-    if let Err(reply) = doors.auth.principal(&request) {
+    if let Err(reply) = doors.auth.caller(&request) {
         let _ = respond(request, reply);
         return;
     }

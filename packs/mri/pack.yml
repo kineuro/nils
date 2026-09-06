@@ -10,7 +10,7 @@
 
 pack: mri
 version: 0.1.0
-contract: 1
+contract: 2
 modality: MR
 
 parsers:
@@ -83,6 +83,25 @@ dictionary:
 # itself is the engine's; this is only which of our values means `T1w`.
 bids:
   - bids.yml
+
+# What a field may be shown to (Wave 4a section 11.2, C27): local is this
+# node only, federated is on the allowlist a peer may read, sensitive is
+# never released and never read by a peer. Read by nothing in this wave; the
+# catalog of the question wave and the federation of Wave 8 read it. The
+# defaults the record names are local for free text, paths, exact dates and
+# identifiers, so those are written down here first.
+fields:
+  series_description: {visibility: local}
+  protocol_name: {visibility: local}
+  study_description: {visibility: local}
+  study_date: {visibility: local}
+  station_name: {visibility: local}
+  institution_name: {visibility: local}
+  patient_comments: {visibility: sensitive}
+  magnetic_field_strength: {visibility: federated}
+  manufacturer: {visibility: federated}
+  manufacturer_model_name: {visibility: federated}
+  modality: {visibility: federated}
 
 # When a person is asked about an axis (spec section 8.2). v0 asks about 84
 # percent of its stacks, mostly because no keyword matched rather than because

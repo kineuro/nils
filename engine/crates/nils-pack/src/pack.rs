@@ -31,8 +31,40 @@ use crate::version::Version;
 use crate::yaml::{self, File};
 
 /// The pack contract this engine implements. A pack declaring a higher one is
-/// refused rather than half-understood.
-pub const CONTRACT: u32 = 1;
+/// refused rather than half-understood. Version 2 (Wave 4a §11.2, C27) adds
+/// the optional `fields` key: a visibility on a catalogue field.
+pub const CONTRACT: u32 = 2;
+
+/// What a field may be shown to (Wave 4a §11.2, C27): `local` (this node
+/// only: free text, paths, exact dates, identifiers), `federated` (on the
+/// allowlist a peer may read) or `sensitive` (never released, never read
+/// by a peer). Declared by the pack, read by nothing in this wave; the
+/// catalog of the question wave and the federation of Wave 8 read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Local,
+    Federated,
+    Sensitive,
+}
+
+impl Visibility {
+    pub fn parse(text: &str) -> Option<Visibility> {
+        Some(match text {
+            "local" => Visibility::Local,
+            "federated" => Visibility::Federated,
+            "sensitive" => Visibility::Sensitive,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Visibility::Local => "local",
+            Visibility::Federated => "federated",
+            Visibility::Sensitive => "sensitive",
+        }
+    }
+}
 
 pub struct ParserDef {
     pub name: String,
@@ -79,6 +111,9 @@ pub struct Pack {
     /// deliberately. Narrow where `ingest` is broad: the registry is the
     /// private thing, and a release is not.
     pub release: Vec<crate::private::Allowed>,
+    /// Wave 4a §11.2 (C27): the visibility the pack puts on a field, by
+    /// field name. Read by nothing yet.
+    pub fields: BTreeMap<String, Visibility>,
     /// Wave 4a §5.3: the private dictionary, as pack data, so an element
     /// has its vendor's name and a VR.
     pub dictionary: crate::private::Dictionary,
@@ -240,6 +275,30 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         }
         if let Some(v) = rm.get("missing") {
             review.missing = manifest.blame(yaml::texts(v, "review.missing"))?;
+        }
+    }
+
+    // --- the visibility of fields (Wave 4a §11.2, C27): an attribute the
+    // pack may put on a catalogue field, read by nothing in this wave.
+    let mut fields: BTreeMap<String, Visibility> = BTreeMap::new();
+    if let Some(v) = m.get("fields") {
+        let fm = manifest.blame(yaml::obj(v, "fields"))?;
+        for (field, spec) in fm {
+            let at = format!("fields.{field}");
+            let sm = manifest.blame(yaml::obj(spec, &at))?;
+            let vis = sm
+                .get("visibility")
+                .map(|v| manifest.blame(yaml::text(v, &format!("{at}.visibility"))))
+                .transpose()?
+                .unwrap_or_default();
+            let Some(vis) = Visibility::parse(&vis) else {
+                return Err(Error::at(
+                    &at,
+                    format!("visibility is local, federated or sensitive, not {vis:?}"),
+                )
+                .in_file(&manifest.path, Some(&manifest.source)));
+            };
+            fields.insert(field.clone(), vis);
         }
     }
 
@@ -602,6 +661,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         ingest,
         release,
         dictionary,
+        fields,
         private_coverage,
         bids,
         passes,

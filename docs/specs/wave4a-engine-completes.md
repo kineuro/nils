@@ -874,6 +874,39 @@ cost nothing now ride here (C26, C27, C30, C33): the principal's `user@node`
 shape, the epoch in capabilities, and `local`, `federated` and `sensitive` as an
 attribute the pack may put on a field, read by nothing yet.
 
+**As built (slice 15, 2026-09-06).** The three modes are `nils serve
+--auth off | token | oidc`. `off` records the local user; `token` names the
+caller by a bearer token. `oidc` takes `--oidc-issuer URL`, `--oidc-audience
+AUD` and `--oidc-jwks FILE` (the issuer's JWKS document as a file the
+deployment keeps current; a shared-secret key in it is ignored, because the
+engine holds no secrets), validates every bearer token's signature (RSA, EC
+or EdDSA, by `kid` where the token names one) against the issuer and the
+audience and requires `exp`, `iss`, `aud` and `sub`, and maps the groups
+claim (`--oidc-groups-claim`, `groups` by default) to roles through `--role
+GROUP=reader|reviewer|operator|admin`. A reader reads and previews; a
+reviewer applies, accepts, commits and withdraws; an operator queues work
+and cancels it; an admin reads the audit log and the custody; a role
+implies the ones below it, a caller with no mapped group is a reader, and
+a door beyond the caller's role answers 403 naming the role it asks for.
+Under `off` and `token` every caller holds every role. The audit principal
+in `oidc` mode is the subject at the issuer's host, `sub@issuer`, and it
+rides on a queued job to the verb the worker runs. The engine stores no
+password, mints no session and owns no user table: the only state is an
+in-memory cache of a token's principal, roles and expiry, dropped when the
+token expires. The capabilities report the auth mode and the caller's
+roles. The riders (C26, C27, C30, C33): the principal's `user@node` shape
+and the registry epoch in the capabilities were built in slices 12 and
+14; this slice adds the pack's `fields` key, an optional visibility
+(`local`, `federated`, `sensitive`) the pack puts on a catalogue field,
+which is the pack contract's version 2 (`nils_pack::CONTRACT` = 2, the
+MRI pack declares it and names its free text, paths, exact dates and
+station as `local`, the patient comments as `sensitive`, and the vendor,
+model, field strength and modality as `federated`); the loader reads it,
+`nils pack show` prints it, and nothing else reads it yet. Traefik
+forward-auth in front of the engine still works with `token` for the app
+and `oidc` for a client that carries the issuer's token; the OAuth
+resource metadata of C22 belongs to the assistant wave with MCP.
+
 ## 12. The gate
 
 On the reference corpus, and on a real cohort re-digested from its archive with
