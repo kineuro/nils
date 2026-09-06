@@ -131,6 +131,7 @@ fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) ->
         places: nils_release::bids::place::Options::default(),
         converter: None,
         compress: true,
+        observations: &[],
         authors: &[],
     }
 }

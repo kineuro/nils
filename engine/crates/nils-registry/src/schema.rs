@@ -468,6 +468,9 @@ fn build_registry() -> Vec<Table> {
                 col("min_value", Type::Double),
                 col("max_value", Type::Double),
                 req("is_primary", Type::Int),
+                // Wave 4a §7.4: a kind the pack marks sensitive is never
+                // released, by name or by default.
+                col("is_sensitive", Type::Int),
                 col("description", Type::Text),
             ],
         )

@@ -71,3 +71,23 @@ files = [
 # and asserts that nothing it finds is outside the release list.
 kept = ["0019xx0C SIEMENS MR HEADER", "0019xx0D SIEMENS MR HEADER"]
 dropped = ["0051xx0F SIEMENS MR HEADER"]
+
+[clinical]
+# Wave 4a section 7.4: what the clinical layer put in the BIDS tree. The
+# subject's sex and birth date come from the reference files themselves; the
+# two EDSS scores are the gate's, five days before the first session and five
+# days after the second, so each session's nearest value is its own and the
+# signed distance tells the two apart. The date column is checked against the
+# registry by the bar, not listed here, because under the shift it moves.
+sex = "F"
+age = 42
+
+[clinical.sessions.20220115]
+age = 42
+edss = "3.5"
+edss_days = -5
+
+[clinical.sessions.20220715]
+age = 42
+edss = "4"
+edss_days = 5

@@ -859,21 +859,28 @@ fn a_vocabulary_loads_by_name_and_a_second_load_changes_nothing() {
     for (name, _guard, mut store) in stores() {
         migrate::migrate(&mut store, Kind::Registry).unwrap();
         let v = Vocabulary::parse(
-            "vocabulary:\n  diseases:\n    - name: MS\n      code: G35\n      types: [{name: RRMS}, {name: SPMS}]\n  observation_types:\n    - {name: EDSS, category: scale, value_type: numeric, unit: points, min: 0, max: 10, primary: true}\n    - {name: Diagnosis, category: assessment}\n",
+            "vocabulary:\n  diseases:\n    - name: MS\n      code: G35\n      types: [{name: RRMS}, {name: SPMS}]\n  observation_types:\n    - {name: EDSS, category: scale, value_type: numeric, unit: points, min: 0, max: 10, primary: true}\n    - {name: Diagnosis, category: assessment}\n    - {name: Delivery, category: event, sensitive: true}\n",
         )
         .unwrap();
         let first = clinical::load(&mut store, &v).unwrap();
         assert_eq!(first.diseases_added, 1, "{name}");
         assert_eq!(first.disease_types_added, 2, "{name}");
-        assert_eq!(first.observation_types_added, 2, "{name}");
+        assert_eq!(first.observation_types_added, 3, "{name}");
         let again = clinical::load(&mut store, &v).unwrap();
         assert_eq!(again.changed(), 0, "{name}: idempotent");
 
         let kinds = clinical::observation_types(&mut store).unwrap();
-        assert_eq!(kinds.len(), 2, "{name}");
+        assert_eq!(kinds.len(), 3, "{name}");
         let edss = kinds.iter().find(|k| k.name == "EDSS").unwrap();
         assert!(edss.primary, "{name}");
+        assert!(!edss.sensitive, "{name}");
         assert_eq!(edss.unit.as_deref(), Some("points"), "{name}");
+        // §7.4: the mark survives the load and is read back with the kind.
+        let delivery = clinical::kind_named(&mut store, "delivery")
+            .unwrap()
+            .unwrap();
+        assert!(delivery.sensitive, "{name}");
+        assert!(!delivery.primary, "{name}");
         let diseases = clinical::diseases(&mut store).unwrap();
         assert_eq!(diseases[0].1.types.len(), 2, "{name}");
 
@@ -894,7 +901,28 @@ fn a_vocabulary_loads_by_name_and_a_second_load_changes_nothing() {
         );
         assert_eq!(
             clinical::observation_types(&mut store).unwrap().len(),
-            2,
+            3,
+            "{name}"
+        );
+        // Marking a kind sensitive is an update, and unmarking one is too.
+        let marked = Vocabulary::parse(
+            "vocabulary:\n  observation_types:\n    - {name: Diagnosis, category: assessment, sensitive: true}\n    - {name: Delivery, category: event}\n",
+        )
+        .unwrap();
+        let fourth = clinical::load(&mut store, &marked).unwrap();
+        assert_eq!(fourth.observation_types_updated, 2, "{name}");
+        assert!(
+            clinical::kind_named(&mut store, "Diagnosis")
+                .unwrap()
+                .unwrap()
+                .sensitive,
+            "{name}"
+        );
+        assert!(
+            !clinical::kind_named(&mut store, "Delivery")
+                .unwrap()
+                .unwrap()
+                .sensitive,
             "{name}"
         );
     }

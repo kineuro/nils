@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sqlite3
+from datetime import date
 import sys
 import tomllib
 from pathlib import Path
@@ -437,15 +438,21 @@ def bar_increment(work: Path) -> list[str]:
 
 
 def bar_dates(work: Path, db: sqlite3.Connection) -> list[str]:
-    """Section 9.4, which is the coupling of 2.1 broken.
+    """Section 9.4, which is the coupling of 2.1 broken, and Wave 4a
+    section 7.4, which is the join itself.
 
-    The join itself is Wave 4's, because v1 has no clinical layer yet. What is
-    checked here is the mechanism it needs: the time in the standard's own
-    column is the registry's, under the policy the release ran under.
+    First the mechanism: the time in the standard's own column is the
+    registry's, under the policy the release ran under. Then the join: each
+    session's row in `_sessions.tsv` carries the nearest EDSS the registry
+    holds, with its signed distance in days, and the participant row the sex
+    and the age; and in the shifted tree the observation's date moved with
+    the scan, so the distance between the two columns is still the
+    registry's.
     """
     if not (work / "bids").is_dir():
         return []
     bad = []
+    bad += clinical_join(work, db)
     days = {
         row[0]: row[1]
         for row in db.execute(
@@ -464,6 +471,99 @@ def bar_dates(work: Path, db: sqlite3.Connection) -> list[str]:
             day = acq_time.split("T")[0].replace("-", "")
             if day not in wanted:
                 bad.append(f"{path}: {day} is not a study date the registry holds")
+    return bad
+
+
+def tsv(path: Path) -> list[dict[str, str]]:
+    lines = path.read_text().splitlines()
+    if not lines:
+        return []
+    header = lines[0].split("\t")
+    return [dict(zip(header, line.split("\t"))) for line in lines[1:]]
+
+
+def nearest_edss(db: sqlite3.Connection, day: str) -> tuple[str, int, str] | None:
+    """The registry's own answer: the EDSS nearest `day` (YYYY-MM-DD), the
+    earlier of two equidistant, as (value, signed days, date)."""
+    rows = db.execute(
+        "SELECT e.event_date, e.number FROM event e"
+        " JOIN observation_type o ON o.id = e.observation_type_id"
+        " WHERE o.name = 'EDSS' AND e.superseded_by IS NULL"
+    ).fetchall()
+    if not rows:
+        return None
+    at = date.fromisoformat(day)
+    best = None
+    for event_date, number in rows:
+        d = date.fromisoformat(str(event_date)[:10])
+        offset = (d - at).days
+        key = (abs(offset), d)
+        if best is None or key < best[0]:
+            best = (key, number, offset, d.isoformat())
+    _, number, offset, when = best
+    value = str(int(number)) if float(number).is_integer() else str(number)
+    return value, offset, when
+
+
+def clinical_join(work: Path, db: sqlite3.Connection) -> list[str]:
+    """Wave 4a section 7.4, against the reference's expectations and the
+    registry's own nearest."""
+    bad = []
+    expected = tomllib.loads((HERE / "reference.toml").read_text()).get("clinical")
+    if not expected:
+        return ["reference.toml has no [clinical] section"]
+    rows = tsv(work / "bids" / "participants.tsv")
+    if len(rows) != 1:
+        bad.append(f"participants.tsv: {len(rows)} rows, one subject expected")
+    for row in rows:
+        if row.get("sex") != expected["sex"]:
+            bad.append(f"participants.tsv: sex {row.get('sex')!r}, {expected['sex']!r} expected")
+        if row.get("age") != str(expected["age"]):
+            bad.append(f"participants.tsv: age {row.get('age')!r}, {expected['age']} expected")
+    sessions = [p for p in files_under(work / "bids") if p.endswith("_sessions.tsv")]
+    if len(sessions) != 1:
+        bad.append(f"bids: {len(sessions)} sessions files, one expected")
+    for path in sessions:
+        for row in tsv(work / "bids" / path):
+            label = row["session_id"].removeprefix("ses-")
+            want = expected["sessions"].get(label)
+            if want is None:
+                bad.append(f"{path}: {row['session_id']} is not a session the reference expects")
+                continue
+            for column in ("age", "edss", "edss_days"):
+                if row.get(column) != str(want[column]):
+                    bad.append(
+                        f"{path}: {row['session_id']} {column} {row.get(column)!r}, {want[column]} expected"
+                    )
+            near = nearest_edss(db, row["acq_time"][:10])
+            if near is None:
+                bad.append(f"{path}: the registry holds no EDSS")
+                continue
+            value, offset, when = near
+            if (row.get("edss"), row.get("edss_days"), row.get("edss_date")) != (value, str(offset), when):
+                bad.append(
+                    f"{path}: {row['session_id']} carries EDSS {row.get('edss')} at {row.get('edss_days')} days"
+                    f" on {row.get('edss_date')}; the registry's nearest is {value} at {offset} on {when}"
+                )
+    # The shifted tree: the date moved with the scan, and the distance held.
+    shifted = work / "bids-shifted"
+    if shifted.is_dir():
+        unshifted = {r[2] for r in (nearest_edss(db, "2022-01-15"), nearest_edss(db, "2022-07-15")) if r}
+        for path in [p for p in files_under(shifted) if p.endswith("_sessions.tsv")]:
+            for row in tsv(shifted / path):
+                scan = date.fromisoformat(row["acq_time"][:10])
+                edss_date = row.get("edss_date", "")
+                if edss_date in ("", "n/a"):
+                    bad.append(f"shifted {path}: {row['session_id']} has no EDSS date under shift")
+                    continue
+                held = (date.fromisoformat(edss_date) - scan).days
+                if str(held) != row.get("edss_days"):
+                    bad.append(
+                        f"shifted {path}: {row['session_id']} EDSS date is {held} days from the scan,"
+                        f" the row says {row.get('edss_days')}"
+                    )
+                if edss_date in unshifted:
+                    bad.append(f"shifted {path}: {row['session_id']} EDSS date {edss_date} did not move")
     return bad
 
 

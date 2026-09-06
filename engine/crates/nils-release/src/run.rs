@@ -126,6 +126,9 @@ pub struct Report {
     /// v0 carries a hard-coded list of vendors instead, so a stack it could
     /// have converted is skipped and one it cannot is a failure.
     pub unconvertible: BTreeMap<String, i64>,
+    /// Wave 4a §7.4: what the clinical export wrote, counted: subjects with
+    /// a sex, with an age, sessions with an age, observations by kind.
+    pub clinical: BTreeMap<String, i64>,
     pub seconds: f64,
 }
 
@@ -218,6 +221,10 @@ pub struct Settings<'a> {
     /// BIDS layout and unused by the descriptive one.
     pub converter: Option<&'a crate::bids::convert::Converter>,
     /// Whether the NIfTI is gzipped.
+    /// Wave 4a §7.4: the kinds of observation whose nearest value each
+    /// session carries in `_sessions.tsv`, by name; empty means the
+    /// vocabulary's primary kinds.
+    pub observations: &'a [String],
     pub compress: bool,
     /// Whose dataset it is (§9.5). Empty means the actor who ran the release,
     /// which is the honest default and not a claim about authorship.
@@ -375,6 +382,11 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         }
     }
 
+    // Wave 4a §7.4, before anything is planned: the observation kinds the
+    // release names must exist and must not be sensitive, whatever the
+    // layout.
+    observation_kinds(registry.store(), settings)?;
+
     // §9.6, before a byte is written: the root has to be writable and there
     // has to be room. A release that discovers a full disk after 400 GB has
     // written 400 GB for nothing, and what it reports is the operating
@@ -461,6 +473,11 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
     let mut absent: Vec<(i64, String, String)> = Vec::new();
     let mut planned: Vec<Vec<Param>> = Vec::new();
     let mut people: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Wave 4a §7.4: each subject's id, and each session's earliest study day
+    // and the subject's offset, for the clinical export.
+    let mut subjects_seen: BTreeMap<String, i64> = BTreeMap::new();
+    let mut sessions_seen: BTreeMap<(String, String), (i64, Day, crate::dates::Offset)> =
+        BTreeMap::new();
     let mut stacks_planned = 0i64;
     for (subject, code) in selected_subjects(registry.store(), &settings.selection)? {
         let mine = select_subject(registry.store(), &settings.selection, subject)?;
@@ -570,6 +587,17 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                 placed,
             );
             people.insert(code.clone());
+            subjects_seen.insert(code.clone(), subject);
+            if let Some(day) = days.get(&study).copied() {
+                sessions_seen
+                    .entry((code.clone(), label.clone()))
+                    .and_modify(|(_, d, _)| {
+                        if day < *d {
+                            *d = day;
+                        }
+                    })
+                    .or_insert((subject, day, offset));
+            }
             stacks_planned += 1;
             planned.push(vec![
                 Param::Int(report.release_id),
@@ -853,7 +881,14 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
     if settings.layout == Layout::Bids {
         let mut codes: Vec<String> = people.into_iter().collect();
         codes.sort();
-        write_dataset(settings, &report, &scans, &codes).map_err(Error::Io)?;
+        let clinical = clinical_rows(
+            registry.store(),
+            settings,
+            &subjects_seen,
+            &sessions_seen,
+            &mut report,
+        )?;
+        write_dataset(settings, &report, &scans, &codes, &clinical).map_err(Error::Io)?;
     }
 
     write_rows(
@@ -1143,11 +1178,186 @@ fn roll_up(job: &Job, wrote: &[Wrote]) -> State {
 ///
 /// v0 writes none of them, which is why its tree is not a dataset rather than
 /// an invalid one.
+/// What the clinical layer lets into the tree (Wave 4a §7.4), under the
+/// policy: per subject the sex and the age at the first session, per session
+/// the age and the nearest observation of each kind the release names.
+struct Clinical {
+    participants: BTreeMap<String, BTreeMap<String, String>>,
+    sessions: BTreeMap<(String, String), BTreeMap<String, String>>,
+}
+
+/// Wave 4a §7.4. An age is computed before the birth date goes (Wave 3
+/// §8.3) and is written under every policy, because a number of years is
+/// not a date; an observation's date moves with the subject's offset under
+/// `shift` and is not written at all under `year`; the signed distance in
+/// days from the session to the observation is written under every policy,
+/// because it is what a join on the nearest value needs and it names no day.
+fn clinical_rows(
+    store: &mut Store,
+    settings: &Settings,
+    subjects: &BTreeMap<String, i64>,
+    sessions: &BTreeMap<(String, String), (i64, Day, crate::dates::Offset)>,
+    report: &mut Report,
+) -> Result<Clinical, Error> {
+    use nils_registry::clinical;
+    let mut out = Clinical {
+        participants: BTreeMap::new(),
+        sessions: BTreeMap::new(),
+    };
+    let kinds = observation_kinds(store, settings)?;
+    // Each subject's demographics, in one read.
+    let mut demographics: HashMap<i64, (Option<Day>, Option<String>)> = HashMap::new();
+    if !subjects.is_empty() {
+        let t = table("subject");
+        let born = store
+            .dialect()
+            .text_of(t.column("birth_date").expect("subject.birth_date"));
+        let sql = format!(
+            "SELECT id, {born}, sex FROM {} WHERE id IN ({})",
+            store.qualified("subject"),
+            subjects
+                .values()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for r in store.query(&sql, &[])? {
+            demographics.insert(
+                r.int(0)?,
+                (
+                    r.opt_text(1)?.and_then(|t| Day::parse(&t.replace('-', ""))),
+                    r.opt_text(2)?.map(str::to_string),
+                ),
+            );
+        }
+    }
+    // The first session per subject, for the age at entry.
+    let mut first: BTreeMap<String, Day> = BTreeMap::new();
+    for ((code, _), (_, day, _)) in sessions {
+        first
+            .entry(code.clone())
+            .and_modify(|f| {
+                if *day < *f {
+                    *f = *day;
+                }
+            })
+            .or_insert(*day);
+    }
+    for (code, id) in subjects {
+        let mut row = BTreeMap::new();
+        if let Some((born, sex)) = demographics.get(id) {
+            if let Some(sex) = sex
+                && !sex.is_empty()
+            {
+                row.insert("sex".to_string(), sex.clone());
+                *report.clinical.entry("sex".to_string()).or_insert(0) += 1;
+            }
+            if let (Some(born), Some(at)) = (born, first.get(code))
+                && let Some(age) = crate::dates::age_years(*born, *at)
+            {
+                row.insert("age".to_string(), age.to_string());
+                *report.clinical.entry("age".to_string()).or_insert(0) += 1;
+            }
+        }
+        out.participants.insert(code.clone(), row);
+    }
+    for ((code, label), (subject, day, offset)) in sessions {
+        let mut row = BTreeMap::new();
+        if let Some((Some(born), _)) = demographics.get(subject)
+            && let Some(age) = crate::dates::age_years(*born, *day)
+        {
+            row.insert("age".to_string(), age.to_string());
+            *report
+                .clinical
+                .entry("session age".to_string())
+                .or_insert(0) += 1;
+        }
+        for kind in &kinds {
+            let Some(near) = clinical::nearest(store, *subject, kind.id, *day)? else {
+                continue;
+            };
+            let column = column_of(&kind.name);
+            let value = match (near.number, &near.value) {
+                (Some(n), _) => format!("{n}"),
+                (None, Some(v)) => v.clone(),
+                (None, None) => "yes".to_string(),
+            };
+            row.insert(column.clone(), value);
+            row.insert(format!("{column}_days"), near.offset_days.to_string());
+            match settings.policy.dates {
+                crate::dates::Policy::Year => {}
+                policy => {
+                    let when = crate::dates::apply(policy, *offset, near.date);
+                    row.insert(format!("{column}_date"), when.to_string());
+                }
+            }
+            *report
+                .clinical
+                .entry(format!("nearest {}", kind.name))
+                .or_insert(0) += 1;
+        }
+        out.sessions.insert((code.clone(), label.clone()), row);
+    }
+    Ok(out)
+}
+
+/// The kinds the release names, or the vocabulary's primary ones (Wave 4a
+/// §7.4). A kind the pack marks sensitive is refused by name and left out
+/// by default; a name the registry does not hold is refused, before
+/// anything is planned, whatever the layout.
+fn observation_kinds(
+    store: &mut Store,
+    settings: &Settings,
+) -> Result<Vec<nils_registry::clinical::Kind>, Error> {
+    use nils_registry::clinical;
+    if settings.observations.is_empty() {
+        return Ok(clinical::observation_types(store)?
+            .into_iter()
+            .filter(|k| k.primary && !k.sensitive)
+            .collect());
+    }
+    let mut found = Vec::new();
+    for name in settings.observations {
+        match clinical::kind_named(store, name)? {
+            Some(k) if k.sensitive => {
+                return Err(Error::Refused(format!(
+                    "--observation {name}: the pack marks that kind sensitive, and a release never writes one (§7.4)"
+                )));
+            }
+            Some(k) => found.push(k),
+            None => {
+                return Err(Error::Refused(format!(
+                    "--observation {name} names no observation kind the registry holds"
+                )));
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// An observation kind's name as a column: lower case, one underscore for
+/// each run of anything that is not a letter or a digit.
+fn column_of(name: &str) -> String {
+    let mut out = String::new();
+    let mut gap = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            gap = false;
+        } else if !gap && !out.is_empty() {
+            out.push('_');
+            gap = true;
+        }
+    }
+    out.trim_end_matches('_').to_string()
+}
+
 fn write_dataset(
     settings: &Settings,
     report: &Report,
     scans: &BTreeMap<(String, String), Vec<crate::bids::dataset::Scan>>,
     codes: &[String],
+    clinical: &Clinical,
 ) -> Result<(), std::io::Error> {
     use crate::bids::dataset;
     let root = settings.root;
@@ -1180,7 +1390,7 @@ fn write_dataset(
         .iter()
         .map(|id| dataset::Participant {
             id: id.clone(),
-            extra: BTreeMap::new(),
+            extra: clinical.participants.get(id).cloned().unwrap_or_default(),
         })
         .collect();
     std::fs::write(root.join("participants.tsv"), dataset::participants(&rows))?;
@@ -1194,6 +1404,11 @@ fn write_dataset(
         by_subject.entry(code).or_default().push(dataset::Session {
             label: label.clone(),
             acq_time: earliest,
+            extra: clinical
+                .sessions
+                .get(&(code.clone(), label.clone()))
+                .cloned()
+                .unwrap_or_default(),
         });
         let dir = root.join(format!("sub-{code}/ses-{label}"));
         std::fs::create_dir_all(&dir)?;
@@ -3038,6 +3253,7 @@ mod tests {
             places: crate::bids::place::Options::default(),
             converter: None,
             compress: true,
+            observations: &[],
             authors: &[],
         };
         let when = (day, Some("031415".to_string()));

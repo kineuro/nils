@@ -2704,3 +2704,70 @@ fn a_scheme_anchored_on_a_diagnosis_takes_month_zero_from_the_clinical_layer() {
     assert!(!out.status.success());
     assert!(stderr(&out).contains("Wobble"), "{}", stderr(&out));
 }
+
+#[test]
+fn a_release_refuses_an_observation_it_cannot_write_before_it_plans() {
+    // Wave 4a §7.4, at the command line: a kind the registry does not hold
+    // and a kind the pack marks sensitive are both refused up front,
+    // whatever the layout, and nothing is written.
+    let home = home();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = tree();
+    let out = TempDir::new("cli-observation");
+    let run = |args: &[&str]| {
+        let out = nils().args(registry).args(args).output().unwrap();
+        assert!(out.status.success(), "{}: {}", args.join(" "), stderr(&out));
+        stdout(&out)
+    };
+    run(&[
+        "digest",
+        "--name",
+        "a",
+        "--no-private",
+        dir.path().to_str().unwrap(),
+    ]);
+    run(&[
+        "clinical",
+        "vocabulary",
+        "load",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+    ]);
+    let listed = run(&["clinical", "vocabulary", "list"]);
+    assert!(listed.contains("Pregnancy Delivery"), "{listed}");
+    assert!(listed.contains("(sensitive)"), "{listed}");
+    for (kind, why) in [
+        ("Nope", "names no observation kind"),
+        ("Pregnancy Delivery", "sensitive"),
+    ] {
+        let refused = nils()
+            .args(registry)
+            .args([
+                "release",
+                "--name",
+                "obs",
+                "--on-unknown",
+                "write",
+                "--layout",
+                "descriptive",
+                "--pack-dir",
+                packs.to_str().unwrap(),
+                "--observation",
+                kind,
+                "--out",
+                out.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(!refused.status.success(), "{kind} was accepted");
+        let text = stderr(&refused);
+        assert!(text.contains(why), "{kind}: {text}");
+        assert!(
+            std::fs::read_dir(out.path())
+                .map(|d| d.count() == 0)
+                .unwrap_or(true),
+            "{kind}: nothing was written"
+        );
+    }
+}
