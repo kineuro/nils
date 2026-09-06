@@ -106,6 +106,19 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | export | `nils status --json`<br>`nils status --batch <id> --json`<br>`nils jobs list --all --json` |
 | delete | with the registry |
 
+## audit log
+
+| | |
+|---|---|
+| what | who did what, to which scope, when, under which policy (Wave 4a section 9.2): every decision, acknowledgement, import, vocabulary load, linkage change, release and handover, as the principal user@node |
+| where | rows of audit in the registry |
+| holds | quasi-identifying: the principal, a release's root path<br>technical: the action, the scope's ids and counts, the policy, the time; never an identifier |
+| kept | until deleted with the registry |
+| read | `nils audit list [--principal <who>] [--action <action>] [--since <stamp>]` |
+| change | no command |
+| export | `nils audit list --json` |
+| delete | with the registry |
+
 ## logs
 
 | | |

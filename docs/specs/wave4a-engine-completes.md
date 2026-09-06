@@ -713,6 +713,30 @@ checked" does not write a `decision` row, because that would inflate the count
 of human-authored values; it sets `review_item.accepted_by` and `accepted_at`,
 which is its own home and its own count.
 
+**As built (slice 12, 2026-09-06).** The principal is
+`nils_registry::principal::Principal { user, node }`, shown as `user@node`:
+at the command line the operating system's user on this host, or
+`NILS_PRINCIPAL` when a door sets it; a bare name given to `--actor` is a
+user on this host. Every `actor` the command line writes (decisions, picks,
+releases, handovers, clinical imports, linkage reveal, link, unlink, purge)
+is that string now. The audit log is the `audit` table (migration 23): `at`,
+`principal`, `action` (dotted where a verb has several acts: `decision`,
+`review.accept`, `clinical.import`, `vocabulary.load`, `linkage.import`,
+`linkage.link`, `linkage.unlink`, `linkage.purge`, `linkage.reveal`,
+`release`, `handover`), `scope` (ids, names, counts; never an identifier),
+`policy` (a release's), `job_id`, `epoch` and `details`. `audit::record`
+writes the row and advances the epoch for every act that changes a
+judgement (§13.5), which an acknowledgement and a reveal do not; the row
+carries the epoch it made. The release, the handover and the clinical
+import write theirs in the engine beside their job; the command line writes
+the rest. `nils audit list [--principal] [--action] [--since] [--limit]
+[--json]` reads them, newest first, an action given with a trailing dot
+matching every act under it. `nils review accept <id> [--why]` is the
+acknowledgement: `status` becomes `accepted`, `accepted_by` and
+`accepted_at` are set, no `decision` row is written and the epoch does not
+move; a second acknowledgement is refused. The custody page lists the audit
+log as a store of its own.
+
 ## 10. The review spine
 
 ### 10.1 Measure first

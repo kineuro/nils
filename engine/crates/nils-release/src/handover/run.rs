@@ -117,6 +117,24 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         Err(e) => (job::State::Failed, Some(e.to_string())),
     };
     let _ = job::finish(registry.store(), job_id, state, error.as_deref());
+    // Wave 4a §9.2: the audit row.
+    if result.is_ok() {
+        nils_registry::audit::record(
+            registry,
+            &nils_registry::audit::Entry {
+                principal: settings.actor,
+                action: nils_registry::audit::Action::Handover,
+                scope: serde_json::json!({
+                    "release": settings.release,
+                    "out": settings.out.display().to_string(),
+                }),
+                policy: None,
+                job_id: Some(job_id),
+                details: None,
+            },
+        )
+        .map_err(Error::Store)?;
+    }
     result
 }
 

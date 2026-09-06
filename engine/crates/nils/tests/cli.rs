@@ -603,7 +603,7 @@ fn import_digest_show_and_link_go_round() {
         "{text}"
     );
     assert!(text.contains("the clinic renamed P1 to P2"), "{text}");
-    assert!(text.contains("   by tester at "), "{text}");
+    assert!(text.contains("   by tester@"), "{text}");
     assert!(text.trim_end().ends_with("   open"), "{text}");
     let out = run(&["linkage", "show", &p2]);
     assert!(
@@ -624,7 +624,7 @@ fn import_digest_show_and_link_go_round() {
     let out = run(&["linkage", "show", "legacy-0001"]);
     let text = stdout(&out);
     assert!(text.contains("   reversed "), "{text}");
-    assert!(text.contains(" by tester\n"), "{text}");
+    assert!(text.contains(" by tester@"), "{text}");
     let out = run(&["linkage", "link", "legacy-0001", "nope", "--evidence", "x"]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
 }
@@ -1187,6 +1187,7 @@ fn custody_quarantine_review_and_purge_go_round() {
             "classifications",
             "clinical layer",
             "job records",
+            "audit log",
             "logs"
         ]
     );
@@ -1427,7 +1428,13 @@ fn custody_quarantine_review_and_purge_go_round() {
     assert_eq!(purges[0]["name"], "every subject");
     assert_eq!(purges[0]["state"], "done");
     assert_eq!(purges[0]["args"]["identities"], 3);
-    assert_eq!(purges[0]["args"]["actor"], "tester");
+    // Wave 4a section 9.2: the actor is a principal, user@node.
+    assert!(
+        purges[0]["args"]["actor"]
+            .as_str()
+            .is_some_and(|a| a.starts_with("tester@")),
+        "{doc}"
+    );
     assert_eq!(purges[1]["name"], format!("subject {p2}"));
     assert_eq!(purges[1]["args"]["linkages"], 1);
     let out = run(&["status"]);
@@ -3120,4 +3127,216 @@ fn nils_jobs_lists_shows_cancels_queues_works_and_resumes() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn the_principal_is_user_at_node_and_every_act_is_audited() {
+    // Wave 4a section 9.2 at the command line: a decision is written by a
+    // principal of the shape user@node and audited with the epoch moved; an
+    // acknowledgement sets its own columns, writes no decision and moves no
+    // epoch; the vocabulary load and the linkage acts are audited too, and
+    // `nils audit list` reads them by principal and by action.
+    let home = home();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = private_tree();
+    let run = |args: &[&str]| {
+        let out = nils()
+            .args(registry)
+            .args(args)
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}: {}\n{}",
+            args.join(" "),
+            stderr(&out),
+            stdout(&out)
+        );
+        stdout(&out)
+    };
+    run(&[
+        "digest",
+        "--name",
+        "a",
+        "--no-private",
+        dir.path().to_str().unwrap(),
+    ]);
+    run(&["fingerprint"]);
+    run(&[
+        "classify",
+        "--review-below",
+        "1.0",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+    ]);
+    run(&[
+        "clinical",
+        "vocabulary",
+        "load",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+    ]);
+    let epoch = |home: &TempDir| -> i64 {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .query("SELECT value FROM registry_meta WHERE key = 'epoch'", &[])
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    // Two open questions about an axis, from the classifier.
+    let items: serde_json::Value =
+        serde_json::from_str(&run(&["review", "list", "--status", "open", "--json"])).unwrap();
+    // The one about `base` first, then the other axes' questions.
+    let mut open: Vec<i64> = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| {
+            i["kind"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with(":low_confidence")
+        })
+        .filter_map(|i| i["id"].as_i64())
+        .collect();
+    let base = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "base:low_confidence")
+        .and_then(|i| i["id"].as_i64())
+        .unwrap();
+    open.retain(|id| *id != base);
+    open.insert(0, base);
+    assert!(open.len() >= 3, "{items}");
+
+    // A decision, by the principal.
+    let e0 = epoch(&home);
+    run(&[
+        "review",
+        "decide",
+        &open[0].to_string(),
+        "--value",
+        "T1w",
+        "--why",
+        "checked the images",
+    ]);
+    assert_eq!(epoch(&home), e0 + 1, "a decision moves the epoch");
+    let decided: serde_json::Value =
+        serde_json::from_str(&run(&["audit", "list", "--json"])).unwrap();
+    assert_eq!(decided[0]["action"], "decision", "{decided}");
+    assert_eq!(decided[0]["principal"], "anna@ward-3", "{decided}");
+    assert_eq!(decided[0]["scope"]["review_item"], open[0], "{decided}");
+    assert_eq!(
+        decided[0]["details"]["why"], "checked the images",
+        "{decided}"
+    );
+    assert_eq!(decided[0]["epoch"], e0 + 1, "{decided}");
+    {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        let who = store
+            .query("SELECT actor FROM decision ORDER BY id DESC LIMIT 1", &[])
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string();
+        assert_eq!(who, "anna@ward-3");
+    }
+
+    // An acknowledgement: its own columns, no decision row, no epoch.
+    let e1 = epoch(&home);
+    let decisions_before = {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store.query("SELECT COUNT(*) FROM decision", &[]).unwrap()[0]
+            .int(0)
+            .unwrap()
+    };
+    let said = run(&[
+        "review",
+        "accept",
+        &open[1].to_string(),
+        "--why",
+        "looked right",
+    ]);
+    assert!(said.contains("acknowledged by anna@ward-3"), "{said}");
+    assert!(said.contains("no decision was written"), "{said}");
+    assert_eq!(epoch(&home), e1, "an acknowledgement moves no epoch");
+    {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        let row = &store
+            .query(
+                &format!(
+                    "SELECT status, accepted_by, decision FROM review_item WHERE id = {}",
+                    open[1]
+                ),
+                &[],
+            )
+            .unwrap()[0];
+        assert_eq!(row.text(0).unwrap(), "accepted");
+        assert_eq!(row.opt_text(1).unwrap(), Some("anna@ward-3"));
+        assert_eq!(row.opt_text(2).unwrap(), None, "no decision on the item");
+        let decisions_after = store.query("SELECT COUNT(*) FROM decision", &[]).unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(decisions_after, decisions_before, "no decision row");
+    }
+    // Twice is refused.
+    let out = nils()
+        .args(registry)
+        .args(["review", "accept", &open[1].to_string()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("already accepted"),
+        "{}",
+        stderr(&out)
+    );
+
+    // The listing, filtered.
+    let by_anna = run(&["audit", "list", "--principal", "anna@ward-3"]);
+    assert!(
+        by_anna.contains("decision") && by_anna.contains("review.accept"),
+        "{by_anna}"
+    );
+    assert!(by_anna.contains("vocabulary.load"), "{by_anna}");
+    let accepts: serde_json::Value = serde_json::from_str(&run(&[
+        "audit",
+        "list",
+        "--action",
+        "review.accept",
+        "--json",
+    ]))
+    .unwrap();
+    assert_eq!(accepts.as_array().unwrap().len(), 1, "{accepts}");
+    assert_eq!(accepts[0]["details"]["why"], "looked right", "{accepts}");
+    assert_eq!(accepts[0]["epoch"], serde_json::Value::Null, "{accepts}");
+    let nobody = run(&["audit", "list", "--principal", "nobody@nowhere"]);
+    assert!(nobody.contains("no audit rows"), "{nobody}");
+
+    // A named actor on a decision is a principal too: a bare name is a
+    // user on this host.
+    {
+        run(&[
+            "review",
+            "decide",
+            &open[2].to_string(),
+            "--nothing",
+            "--actor",
+            "bo",
+        ]);
+        let latest: serde_json::Value =
+            serde_json::from_str(&run(&["audit", "list", "--json", "--limit", "1"])).unwrap();
+        assert_eq!(latest[0]["principal"], "bo@ward-3", "{latest}");
+    }
 }

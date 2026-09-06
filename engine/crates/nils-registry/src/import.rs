@@ -584,6 +584,30 @@ pub fn apply(
         Err(e) => (crate::job::State::Failed, Some(e.to_string())),
     };
     let _ = crate::job::finish(registry.store(), job_id, state, error.as_deref());
+    // Wave 4a §9.2: the audit row, with the counts and never a value.
+    if let Ok(report) = &result {
+        crate::audit::record(
+            registry,
+            &crate::audit::Entry {
+                principal: actor,
+                action: crate::audit::Action::ClinicalImport,
+                scope: serde_json::json!({
+                    "target": report.target,
+                    "source": mapping.source,
+                    "rows": report.rows,
+                    "added": report.added,
+                    "updated": report.updated,
+                    "skipped": report.skipped,
+                    "superseded": report.superseded,
+                    "reviewed": report.reviewed,
+                }),
+                policy: None,
+                job_id: Some(job_id),
+                details: None,
+            },
+        )
+        .map_err(Error::Store)?;
+    }
     result
 }
 

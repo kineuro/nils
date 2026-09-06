@@ -229,6 +229,24 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .unique(&["name"]),
+        // Wave 4a §9.2: the audit log that is a table. Who did what, to
+        // which scope, when, under which policy; never an identifier.
+        Table::new(
+            "audit",
+            vec![
+                col("id", Type::Id),
+                req("at", Type::Timestamp),
+                req("principal", Type::Text),
+                req("action", Type::Text),
+                req("scope", Type::Json),
+                col("policy", Type::Json),
+                col("job_id", Type::Int),
+                col("epoch", Type::Int),
+                col("details", Type::Json),
+            ],
+        )
+        .index(&["principal"])
+        .index(&["action"]),
         Table::new(
             "job",
             vec![
@@ -1115,6 +1133,11 @@ fn build_registry() -> Vec<Table> {
                 req("created_at", Type::Timestamp),
                 col("decided_at", Type::Timestamp),
                 col("decision", Type::Json),
+                // Wave 4a §9.2 and §13.4: "the machine was right and I
+                // checked" is an acknowledgement, not a decision. It has
+                // its own home and its own count.
+                col("accepted_by", Type::Text),
+                col("accepted_at", Type::Timestamp),
             ],
         )
         .index(&["status", "kind"]),

@@ -85,6 +85,10 @@ enum Command {
     /// work them (Wave 4a section 9.1)
     #[command(subcommand)]
     Jobs(JobsCommand),
+    /// The audit log: who did what, to which scope, when, under which
+    /// policy (Wave 4a section 9.2)
+    #[command(subcommand)]
+    Audit(AuditCommand),
     /// What private elements an archive carries, by creator, so an allowlist
     /// is chosen from the data rather than from a chair (§8.4)
     Private(PrivateArgs),
@@ -316,6 +320,26 @@ struct SelectArgs {
     /// Machine-readable output
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuditCommand {
+    /// The rows, newest first
+    List {
+        /// Only this principal, as `user@node`
+        #[arg(long, value_name = "WHO")]
+        principal: Option<String>,
+        /// Only this action, or every action under a dotted prefix (`linkage.`)
+        #[arg(long, value_name = "ACTION")]
+        action: Option<String>,
+        /// From this time on, as an ISO stamp
+        #[arg(long, value_name = "STAMP")]
+        since: Option<String>,
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -657,6 +681,14 @@ enum ReviewCommand {
     },
     /// Answer one review item: record the person's decision and close it
     Decide(DecideArgs),
+    /// Acknowledge one review item: the machine was right and you checked.
+    /// Not a decision, and not counted as one (Wave 4a section 13.4)
+    Accept {
+        id: i64,
+        /// A word on what was checked
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
+    },
 }
 
 /// `nils review decide` (Wave 2 §8.3).
@@ -901,6 +933,13 @@ fn main() -> ExitCode {
         Command::Clinical(command) => clinical_command(&home, command),
         Command::Select(args) => select_preview(&home, args),
         Command::Jobs(command) => jobs_command(&home, command),
+        Command::Audit(AuditCommand::List {
+            principal,
+            action,
+            since,
+            limit,
+            json,
+        }) => audit_list(&home, principal, action, since, limit, json),
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
@@ -2006,12 +2045,31 @@ fn batch_report(registry: &mut Registry, id: i64, json: bool) -> Result<(), Exit
 }
 
 /// Who runs the command, for the audit and the linkage rows: the OS user.
+/// Who is acting: the principal, `user@node` (Wave 4a section 9.2, C30).
 fn actor() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .ok()
-        .filter(|u| !u.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+    nils_registry::principal::Principal::current().to_string()
+}
+
+/// One audit row (Wave 4a section 9.2), as the command line writes it.
+fn audit(
+    registry: &mut Registry,
+    action: nils_registry::audit::Action,
+    scope: serde_json::Value,
+    details: Option<serde_json::Value>,
+) -> Result<(), Exit> {
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: &actor(),
+            action,
+            scope,
+            policy: None,
+            job_id: None,
+            details,
+        },
+    )
+    .map(|_| ())
+    .map_err(|e| fail(e.to_string()))
 }
 
 fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
@@ -2041,6 +2099,12 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
             let subject = subject_of(&mut registry, &code)?;
             let keys = Subkeys::derive(&registry.pseudonym_key()?);
             let shown = linkage::reveal(&mut store, &keys, subject, &actor(), why.as_deref())?;
+            audit(
+                &mut registry,
+                nils_registry::audit::Action::LinkageReveal,
+                serde_json::json!({ "subject": subject, "identifiers": shown.len() }),
+                why.as_ref().map(|w| serde_json::json!({ "why": w })),
+            )?;
             println!("subject {code} (id {subject})");
             if shown.is_empty() {
                 println!("  no identifiers");
@@ -2094,11 +2158,23 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
             let subject_a = subject_of(&mut registry, &a)?;
             let subject_b = subject_of(&mut registry, &b)?;
             let id = linkage::link(&mut store, subject_a, subject_b, &evidence, &actor())?;
+            audit(
+                &mut registry,
+                nils_registry::audit::Action::LinkageLink,
+                serde_json::json!({ "linkage": id, "a": subject_a, "b": subject_b }),
+                Some(serde_json::json!({ "evidence": evidence })),
+            )?;
             println!("linked {b} to {a} (linkage {id})");
             Ok(())
         }
         LinkageCommand::Unlink { id } => {
             if linkage::unlink(&mut store, id, &actor())? {
+                audit(
+                    &mut registry,
+                    nils_registry::audit::Action::LinkageUnlink,
+                    serde_json::json!({ "linkage": id }),
+                    None,
+                )?;
                 println!("reversed linkage {id}");
                 Ok(())
             } else {
@@ -2186,6 +2262,15 @@ fn purge(
         None,
     )
     .map_err(|e| fail(e.to_string()))?;
+    audit(
+        registry,
+        nils_registry::audit::Action::LinkagePurge,
+        serde_json::json!({
+            "subject": subject, "all": all,
+            "identities": purged.identities, "linkages": purged.linkages,
+        }),
+        Some(serde_json::json!({ "job": job_id })),
+    )?;
     println!(
         "purged {} identifier(s) and {} linkage(s) of {target}; the read audit and the registry's subjects stay, and a file parsed again files its identifier again (an unchanged file does not)",
         purged.identities, purged.linkages
@@ -2377,6 +2462,10 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             drop(columns);
             review_decide(&mut registry, args)
         }
+        ReviewCommand::Accept { id, why } => {
+            drop(columns);
+            review_accept(&mut registry, id, why)
+        }
         ReviewCommand::Show { id, json } => {
             let sql = format!(
                 "SELECT {columns} FROM {} WHERE id = {}",
@@ -2425,6 +2514,53 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
 /// so the queue shrinks by exactly what was answered. A decision that
 /// replaces an earlier one on the same axis withdraws it rather than
 /// overwriting it: nothing a person said is deleted.
+/// `nils review accept` (Wave 4a section 9.2 and 13.4): "the machine was
+/// right and I checked" sets `accepted_by` and `accepted_at` on the item
+/// and writes no decision row, because that would inflate the count of
+/// human-authored values. Its own home, its own count.
+fn review_accept(registry: &mut Registry, id: i64, why: Option<String>) -> Result<(), Exit> {
+    let who = actor();
+    let now = nils_registry::time::now_iso();
+    let store = registry.store();
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT status, kind FROM {} WHERE id = {}",
+        store.qualified("review_item"),
+        d.param(1, Type::Int)
+    );
+    let Some(row) = store.query_opt(&sql, &[Param::Int(id)])? else {
+        return Err(usage(format!("no review item {id}")));
+    };
+    let status = row.text(0)?.to_string();
+    let kind = row.text(1)?.to_string();
+    if status != "open" {
+        return Err(fail(format!("review item {id} is already {status}")));
+    }
+    let close = format!(
+        "UPDATE {} SET status = 'accepted', accepted_by = {}, accepted_at = {} WHERE id = {}",
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Timestamp),
+        d.param(3, Type::Int),
+    );
+    store.execute(
+        &close,
+        &[
+            Param::from(who.as_str()),
+            Param::from(now.as_str()),
+            Param::Int(id),
+        ],
+    )?;
+    audit(
+        registry,
+        nils_registry::audit::Action::ReviewAccept,
+        serde_json::json!({ "review_item": id, "kind": kind }),
+        why.as_ref().map(|w| serde_json::json!({ "why": w })),
+    )?;
+    println!("review item {id} acknowledged by {who}; no decision was written");
+    Ok(())
+}
+
 fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> {
     let DecideArgs {
         id,
@@ -2553,11 +2689,12 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
         }
     };
 
-    let who = actor.unwrap_or_else(|| {
-        std::env::var("USER")
-            .or_else(|_| std::env::var("USERNAME"))
-            .unwrap_or_else(|_| "a person".to_string())
-    });
+    // A named actor is a principal too: a bare name is a user on this host.
+    let who = actor
+        .as_deref()
+        .and_then(nils_registry::principal::Principal::parse)
+        .map(|p| p.to_string())
+        .unwrap_or_else(self::actor);
     let now = nils_registry::time::now_iso();
     let answer = serde_json::json!({
         "axis": axis,
@@ -2692,6 +2829,26 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
             return Err(fail(e.to_string()));
         }
     }
+    // Wave 4a section 9.2: the audit row, and the epoch with it (13.5).
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: &who,
+            action: nils_registry::audit::Action::Decision,
+            scope: serde_json::json!({
+                "review_item": id, "scope": scope, "ref": subject, "axis": axis,
+                "closed": closing.len(),
+            }),
+            policy: None,
+            job_id: None,
+            details: Some(serde_json::json!({
+                "value": value, "author_kind": author_kind,
+                "model_version": model_version, "why": why,
+            })),
+        },
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    let store = registry.store();
 
     let open = store
         .query(
@@ -2783,6 +2940,7 @@ fn custody(home: &Home, json: bool, markdown: bool) -> Result<(), Exit> {
     let jobs = count_of(store, "job", "")?;
     let batches = count_of(store, "ingest_batch", "")?;
     let cohorts = count_of(store, "cohort", "")?;
+    let audit_rows = count_of(store, "audit", "")?;
     let members = count_of(store, "cohort_member", " WHERE left_at IS NULL")?;
     let diseases = count_of(store, "disease", "")?;
     let kinds = count_of(store, "observation_type", "")?;
@@ -2969,6 +3127,21 @@ fn custody(home: &Home, json: bool, markdown: bool) -> Result<(), Exit> {
                 "read": ["nils status [--batch <id>]", "nils jobs list [--all]", "nils jobs show <id>"],
                 "change": ["nils jobs cancel <id>", "nils jobs enqueue -- <command>", "nils jobs work", "nils jobs resume <id>"],
                 "export": ["nils status --json", "nils status --batch <id> --json", "nils jobs list --all --json"],
+                "delete": "with the registry",
+            },
+        }),
+        serde_json::json!({
+            "store": "audit log",
+            "what": "who did what, to which scope, when, under which policy (Wave 4a section 9.2): every decision, acknowledgement, import, vocabulary load, linkage change, release and handover, as the principal user@node",
+            "where": "rows of audit in the registry",
+            "files": [],
+            "holds": ["quasi-identifying: the principal, a release's root path", "technical: the action, the scope's ids and counts, the policy, the time; never an identifier"],
+            "counts": { "rows": audit_rows },
+            "kept": "until deleted with the registry",
+            "commands": {
+                "read": ["nils audit list [--principal <who>] [--action <action>] [--since <stamp>]"],
+                "change": [],
+                "export": ["nils audit list --json"],
                 "delete": "with the registry",
             },
         }),
@@ -3276,6 +3449,18 @@ fn import(registry: &mut Registry, store: &mut Store, args: ImportArgs) -> Resul
     let keys = Subkeys::derive(&registry.pseudonym_key()?);
     match linkage::import(registry.store(), store, &keys, &args.id_type, &rows) {
         Ok(report) => {
+            audit(
+                registry,
+                nils_registry::audit::Action::LinkageImport,
+                serde_json::json!({
+                    "id_type": args.id_type, "rows": report.rows,
+                    "subjects_created": report.subjects_created,
+                    "identities_added": report.identities_added,
+                    "unchanged": report.unchanged,
+                    "second_identifiers": report.second_identifiers,
+                }),
+                None,
+            )?;
             println!(
                 "imported {} row(s) as {}: {} subject(s) created, {} identifier(s) filed, {} already filed{}",
                 report.rows,
@@ -4170,6 +4355,50 @@ fn resolve_or_refuse(
     Ok(resolved)
 }
 
+/// `nils audit list` (Wave 4a section 9.2).
+fn audit_list(
+    home: &Home,
+    principal: Option<String>,
+    action: Option<String>,
+    since: Option<String>,
+    limit: usize,
+    json: bool,
+) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let rows = nils_registry::audit::list(
+        registry.store(),
+        &nils_registry::audit::Filter {
+            principal,
+            action,
+            since,
+            limit,
+        },
+    )?;
+    if json {
+        let doc: Vec<serde_json::Value> = rows.iter().map(|r| r.as_json()).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&doc).map_err(|e| fail(e.to_string()))?
+        );
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("no audit rows");
+        return Ok(());
+    }
+    for r in &rows {
+        println!(
+            "  {:>6}  {:<20} {:<24} {:<18} {}",
+            r.id,
+            &r.at[..r.at.len().min(19)],
+            r.principal,
+            r.action,
+            r.scope
+        );
+    }
+    Ok(())
+}
+
 /// `nils jobs`: the one job model at the command line (Wave 4a section 9.1).
 fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
     use nils_registry::job::{self, State};
@@ -4935,6 +5164,17 @@ fn clinical_command(home: &Home, command: ClinicalCommand) -> Result<(), Exit> {
             let mut registry = open(home)?;
             let loaded = nils_registry::clinical::load(registry.store(), &vocabulary)
                 .map_err(|e| fail(e.to_string()))?;
+            audit(
+                &mut registry,
+                nils_registry::audit::Action::VocabularyLoad,
+                serde_json::json!({
+                    "file": path.display().to_string(),
+                    "diseases": {"added": loaded.diseases_added, "updated": loaded.diseases_updated},
+                    "disease_types": {"added": loaded.disease_types_added, "updated": loaded.disease_types_updated},
+                    "observation_types": {"added": loaded.observation_types_added, "updated": loaded.observation_types_updated},
+                }),
+                None,
+            )?;
             if json {
                 println!(
                     "{}",

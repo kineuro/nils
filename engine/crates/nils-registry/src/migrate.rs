@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 23;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +142,21 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 22,
         apply: a_kind_can_be_marked_sensitive,
     },
+    Migration {
+        version: 23,
+        apply: the_registry_keeps_an_audit_log,
+    },
 ];
+
+/// Wave 4a §9.2: the audit log as a table, and the acknowledgement on a
+/// review item, which is its own home and not a decision.
+fn the_registry_keeps_an_audit_log(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["audit"])?;
+    add_columns(store, "review_item", &["accepted_by", "accepted_at"])
+}
 
 /// Wave 4a §7.4: the pack marks an observation kind sensitive, and the
 /// release never writes one, named or not.
