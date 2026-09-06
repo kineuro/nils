@@ -2829,8 +2829,8 @@ fn custody(home: &Home, json: bool, markdown: bool) -> Result<(), Exit> {
             "kept": "for ever; a correction supersedes the old row and the old row stays (section 13.2)",
             "commands": {
                 "read": ["nils clinical vocabulary list", "nils custody"],
-                "change": ["nils clinical vocabulary load", "the importer (section 7.2)"],
-                "export": ["nils release, under its date policy (section 7.4)"],
+                "change": ["nils clinical vocabulary load"],
+                "export": ["nils release"],
                 "delete": delete_db(REGISTRY_DB, &registry_schema),
             },
         }),
