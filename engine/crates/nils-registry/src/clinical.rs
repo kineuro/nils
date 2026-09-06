@@ -59,6 +59,9 @@ pub struct ObservationType {
     /// The scale a release names by default (§7.4).
     #[serde(default)]
     pub primary: bool,
+    /// Never released, by name or by default (§7.4).
+    #[serde(default)]
+    pub sensitive: bool,
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -252,8 +255,8 @@ pub fn load(store: &mut Store, v: &Vocabulary) -> Result<Loaded, Error> {
     // --- observation types
     let obs_t = table("observation_type");
     let obs_by_name = format!(
-        "SELECT id, category, value_type, unit, min_value, max_value, is_primary, description \
-         FROM {} WHERE name = {}",
+        "SELECT id, category, value_type, unit, min_value, max_value, is_primary, description, \
+         is_sensitive FROM {} WHERE name = {}",
         store.qualified("observation_type"),
         d.param(1, Type::Text)
     );
@@ -265,6 +268,7 @@ pub fn load(store: &mut Store, v: &Vocabulary) -> Result<Loaded, Error> {
         "max_value",
         "is_primary",
         "description",
+        "is_sensitive",
     ];
     for o in &v.observation_types {
         let values = |o: &ObservationType| -> Vec<Param> {
@@ -276,6 +280,7 @@ pub fn load(store: &mut Store, v: &Vocabulary) -> Result<Loaded, Error> {
                 num(o.max),
                 Param::Int(i64::from(o.primary)),
                 opt(&o.description),
+                Param::Int(i64::from(o.sensitive)),
             ]
         };
         match store.query_opt(&obs_by_name, &[Param::from(o.name.as_str())])? {
@@ -286,7 +291,8 @@ pub fn load(store: &mut Store, v: &Vocabulary) -> Result<Loaded, Error> {
                     && r.opt_double(4)? == o.min
                     && r.opt_double(5)? == o.max
                     && r.int(6)? == i64::from(o.primary)
-                    && r.opt_text(7)?.map(str::to_string) == o.description;
+                    && r.opt_text(7)?.map(str::to_string) == o.description
+                    && r.opt_int(8)?.unwrap_or(0) == i64::from(o.sensitive);
                 if !same {
                     let vals = values(o);
                     let set: Vec<(&str, Param)> = columns.iter().copied().zip(vals).collect();
@@ -316,12 +322,14 @@ pub struct Kind {
     pub value_type: Option<String>,
     pub unit: Option<String>,
     pub primary: bool,
+    /// Never released (§7.4).
+    pub sensitive: bool,
 }
 
 /// The observation kinds the registry holds, by name.
 pub fn observation_types(store: &mut Store) -> Result<Vec<Kind>, Error> {
     let sql = format!(
-        "SELECT id, name, category, value_type, unit, is_primary FROM {} ORDER BY name",
+        "SELECT id, name, category, value_type, unit, is_primary, is_sensitive FROM {} ORDER BY name",
         store.qualified("observation_type")
     );
     let mut out = Vec::new();
@@ -333,6 +341,7 @@ pub fn observation_types(store: &mut Store) -> Result<Vec<Kind>, Error> {
             value_type: r.opt_text(3)?.map(str::to_string),
             unit: r.opt_text(4)?.map(str::to_string),
             primary: r.int(5)? != 0,
+            sensitive: r.opt_int(6)?.unwrap_or(0) != 0,
         });
     }
     Ok(out)

@@ -152,6 +152,7 @@ fn settings<'a>(
         places,
         converter,
         compress: true,
+        observations: &[],
         authors: &[],
     }
 }
@@ -519,4 +520,215 @@ fn a_conversion_the_converter_refuses_is_planned_as_refused_next_time() {
     assert_eq!(second.rewritten, 0);
     assert_eq!(second.moved, 0, "and nothing moved either");
     assert_eq!(second.unchanged, first.added + first.rewritten);
+}
+
+#[test]
+fn the_tree_carries_the_clinical_layer_under_the_policy() {
+    // Wave 4a §7.4. participants.tsv carries the sex and the age at the
+    // first session; each sessions.tsv the age at the session and the
+    // nearest observation of each kind the release names, with its distance
+    // in days and, under a policy that keeps or shifts dates, its date.
+    // Under `year` the date is not written at all, and under `shift` it
+    // moves with the subject's offset, so the interval to the scan holds.
+    use nils_registry::clinical::{self, Vocabulary};
+    use nils_registry::schema;
+    use nils_registry::store::{Insert, Param};
+    use nils_release::dates;
+    let Some(converter) = converter() else { return };
+    let source = tree();
+    let home_dir = TempDir::new("bids-home");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    {
+        let store = reg.store();
+        let v = Vocabulary::parse(
+            "vocabulary:\n  observation_types:\n    - {name: EDSS, category: scale, value_type: numeric, primary: true}\n    - {name: Relapse, category: event}\n    - {name: Delivery, category: event, primary: true, sensitive: true}\n",
+        )
+        .unwrap();
+        clinical::load(store, &v).unwrap();
+        let edss = clinical::kind_named(store, "EDSS").unwrap().unwrap().id;
+        let relapse = clinical::kind_named(store, "Relapse").unwrap().unwrap().id;
+        let subject = store
+            .query(
+                &format!(
+                    "SELECT id FROM {} ORDER BY id LIMIT 1",
+                    store.qualified("subject")
+                ),
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {} SET birth_date = '1980-01-01', sex = 'F' WHERE id = {subject}",
+                    store.qualified("subject"),
+                ),
+                &[],
+            )
+            .unwrap();
+        // EDSS 3.5 five days before the scan (2022-01-15), 4.0 six weeks
+        // after: the nearest is the earlier one. A relapse a year before.
+        for (kind, date, number) in [
+            (edss, "2022-01-10", Some(3.5)),
+            (edss, "2022-02-26", Some(4.0)),
+            (relapse, "2021-01-15", None),
+        ] {
+            store
+                .insert(
+                    &Insert::new(
+                        schema::table("event"),
+                        &[
+                            "subject_id",
+                            "observation_type_id",
+                            "event_date",
+                            "number",
+                            "created_at",
+                        ],
+                    ),
+                    &[vec![
+                        Param::Int(subject),
+                        Param::Int(kind),
+                        Param::from(date),
+                        number.map_or(Param::Null, Param::Double),
+                        Param::from("2026-09-06T00:00:00Z"),
+                    ]],
+                )
+                .unwrap();
+        }
+    }
+    // A date-labelled scheme is refused with shifted dates (Wave 3 §4.3), so
+    // the shifted and year trees label their sessions by ordinal.
+    let by_date = SessionScheme::default();
+    let ordinal = SessionScheme {
+        naming: nils_registry::session::Naming::Ordinal,
+        ..SessionScheme::default()
+    };
+    let kinds = ["EDSS".to_string(), "Relapse".to_string()];
+    for policy_dates in [
+        dates::Policy::Keep,
+        dates::Policy::Shift,
+        dates::Policy::Year,
+    ] {
+        let scheme = match policy_dates {
+            dates::Policy::Keep => &by_date,
+            _ => &ordinal,
+        };
+        let out = TempDir::new("bids-clinical");
+        let policy = Policy {
+            dates: policy_dates,
+            ..Policy::default()
+        };
+        let mut settings = settings(
+            out.path(),
+            &policy,
+            scheme,
+            Options::default(),
+            Some(&converter),
+        );
+        settings.observations = &kinds;
+        let report = run::run(&mut reg, &settings).unwrap();
+        let written = files_under(out.path());
+        let participants = std::fs::read_to_string(out.path().join("participants.tsv")).unwrap();
+        let mut lines = participants.lines();
+        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let values: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let cell = |name: &str| -> Option<&str> {
+            header.iter().position(|h| *h == name).map(|i| values[i])
+        };
+        assert_eq!(cell("sex"), Some("F"), "{policy_dates:?}: {participants}");
+        assert_eq!(cell("age"), Some("42"), "{policy_dates:?}: {participants}");
+        let sessions = written
+            .iter()
+            .find(|f| f.ends_with("_sessions.tsv"))
+            .unwrap_or_else(|| panic!("{policy_dates:?}: {written:?}"));
+        let text = std::fs::read_to_string(out.path().join(sessions)).unwrap();
+        let mut lines = text.lines();
+        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let values: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let cell = |name: &str| -> Option<&str> {
+            header.iter().position(|h| *h == name).map(|i| values[i])
+        };
+        assert_eq!(cell("age"), Some("42"), "{policy_dates:?}: {text}");
+        assert_eq!(cell("edss"), Some("3.5"), "{policy_dates:?}: {text}");
+        assert_eq!(cell("edss_days"), Some("-5"), "{policy_dates:?}: {text}");
+        assert_eq!(cell("relapse"), Some("yes"), "{policy_dates:?}: {text}");
+        assert_eq!(
+            cell("relapse_days"),
+            Some("-365"),
+            "{policy_dates:?}: {text}"
+        );
+        match policy_dates {
+            dates::Policy::Keep => {
+                assert_eq!(cell("edss_date"), Some("2022-01-10"), "{text}");
+                assert_eq!(cell("relapse_date"), Some("2021-01-15"), "{text}");
+            }
+            dates::Policy::Shift => {
+                // The scan moved by the offset, and so did the observation.
+                let scan = cell("acq_time").unwrap();
+                let scan_day = nils_registry::day::Day::parse(&scan[..10]).unwrap();
+                let edss_day = nils_registry::day::Day::parse(cell("edss_date").unwrap()).unwrap();
+                assert_eq!(edss_day.to_days() - scan_day.to_days(), -5, "{text}");
+                assert_ne!(cell("edss_date"), Some("2022-01-10"), "shifted: {text}");
+            }
+            dates::Policy::Year => {
+                assert_eq!(cell("edss_date"), None, "no date under year: {text}");
+                assert_eq!(cell("relapse_date"), None, "{text}");
+            }
+        }
+        // The sensitive kind is not a column, and naming it is refused.
+        assert!(
+            !header.iter().any(|h| h.starts_with("delivery")),
+            "{policy_dates:?}: {text}"
+        );
+        assert_eq!(
+            report.clinical.get("sex"),
+            Some(&1),
+            "{:?}",
+            report.clinical
+        );
+        assert_eq!(
+            report.clinical.get("nearest EDSS"),
+            Some(&1),
+            "{:?}",
+            report.clinical
+        );
+    }
+}
+
+#[test]
+fn a_sensitive_kind_is_refused_by_name_and_left_out_by_default() {
+    // Wave 4a §7.4: the pack marks a kind sensitive, and no release writes
+    // it. Named, the release refuses before it plans anything, whatever the
+    // layout; unnamed, the default list of primary kinds leaves it out (the
+    // tree half of that is in the test above).
+    use nils_registry::clinical::{self, Vocabulary};
+    let source = tree();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-sensitive");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let v = Vocabulary::parse(
+        "vocabulary:\n  observation_types:\n    - {name: Delivery, category: event, primary: true, sensitive: true}\n",
+    )
+    .unwrap();
+    clinical::load(reg.store(), &v).unwrap();
+    assert!(
+        clinical::kind_named(reg.store(), "delivery")
+            .unwrap()
+            .unwrap()
+            .sensitive
+    );
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let kinds = ["Delivery".to_string()];
+    let mut settings = settings(out.path(), &policy, &scheme, Options::default(), None);
+    settings.layout = Layout::Descriptive;
+    settings.observations = &kinds;
+    let e = run::run(&mut reg, &settings).unwrap_err().to_string();
+    assert!(e.contains("sensitive"), "{e}");
+    assert!(files_under(out.path()).is_empty(), "nothing was written");
+    let unknown = ["Nope".to_string()];
+    settings.observations = &unknown;
+    let e = run::run(&mut reg, &settings).unwrap_err().to_string();
+    assert!(e.contains("names no observation kind"), "{e}");
 }

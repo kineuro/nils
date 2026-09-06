@@ -31,6 +31,9 @@ pub struct Session {
     pub label: String,
     /// The session's time, in the standard's own column, under the policy.
     pub acq_time: Option<String>,
+    /// Wave 4a §7.4: the age at the session and the nearest observation of
+    /// each kind the release names, under the policy, as extra columns.
+    pub extra: BTreeMap<String, String>,
 }
 
 /// One row of a `_scans.tsv`.
@@ -151,9 +154,25 @@ pub fn participants(rows: &[Participant]) -> String {
 
 /// `sub-<label>_sessions.tsv` (§9.4).
 pub fn sessions(rows: &[Session]) -> String {
-    let mut out = String::from("session_id\tacq_time\n");
+    let mut columns: Vec<String> = Vec::new();
     for r in rows {
-        let _ = writeln!(out, "ses-{}\t{}", r.label, cell(r.acq_time.as_deref()));
+        for k in r.extra.keys() {
+            if !columns.contains(k) {
+                columns.push(k.clone());
+            }
+        }
+    }
+    let mut out = String::from("session_id\tacq_time");
+    for c in &columns {
+        let _ = write!(out, "\t{c}");
+    }
+    out.push('\n');
+    for r in rows {
+        let _ = write!(out, "ses-{}\t{}", r.label, cell(r.acq_time.as_deref()));
+        for c in &columns {
+            let _ = write!(out, "\t{}", cell(r.extra.get(c).map(String::as_str)));
+        }
+        out.push('\n');
     }
     out
 }
@@ -304,10 +323,12 @@ mod tests {
             Session {
                 label: "M00".into(),
                 acq_time: Some("2022-01-15T03:14:15".into()),
+                extra: BTreeMap::new(),
             },
             Session {
                 label: "M06".into(),
                 acq_time: None,
+                extra: BTreeMap::new(),
             },
         ]);
         assert_eq!(

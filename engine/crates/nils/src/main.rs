@@ -223,6 +223,11 @@ struct ReleaseArgs {
     pack: String,
     #[arg(long, value_name = "DIR")]
     pack_dir: Option<PathBuf>,
+    /// An observation kind whose nearest value each session carries in its
+    /// sessions.tsv (Wave 4a §7.4). Repeatable; the default is the
+    /// vocabulary's primary kinds
+    #[arg(long, value_name = "KIND")]
+    observation: Vec<String>,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -4527,6 +4532,7 @@ fn clinical_command(home: &Home, command: ClinicalCommand) -> Result<(), Exit> {
                         "observation_types": kinds.iter().map(|k| serde_json::json!({
                             "id": k.id, "name": k.name, "category": k.category,
                             "value_type": k.value_type, "unit": k.unit, "primary": k.primary,
+                            "sensitive": k.sensitive,
                         })).collect::<Vec<_>>(),
                     }))
                     .map_err(|e| fail(e.to_string()))?
@@ -4557,7 +4563,12 @@ fn clinical_command(home: &Home, command: ClinicalCommand) -> Result<(), Exit> {
                     k.category,
                     k.value_type.as_deref().unwrap_or("date"),
                     k.unit.as_deref().unwrap_or(""),
-                    if k.primary { "  (primary)" } else { "" }
+                    match (k.primary, k.sensitive) {
+                        (true, true) => "  (primary, sensitive)",
+                        (true, false) => "  (primary)",
+                        (false, true) => "  (sensitive)",
+                        (false, false) => "",
+                    }
                 );
             }
             Ok(())
@@ -5063,6 +5074,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         converter: converter.as_ref(),
         compress: !args.no_compress,
         authors: &args.author,
+        observations: &args.observation,
     };
     let report = run::run(&mut registry, &settings).map_err(|e| match e {
         run::Error::Refused(m) => usage(m),
@@ -5160,6 +5172,10 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         }
         for (why, n) in &report.unconvertible {
             println!("      {n:>10}   written as DICOM instead: {why}");
+        }
+        // Wave 4a §7.4: what the clinical layer put in the tree, counted.
+        for (what, n) in &report.clinical {
+            println!("      {n:>10}   clinical: {what}");
         }
         for (what, choice) in &report.placements {
             println!("  {what:<16} {choice}");

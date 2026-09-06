@@ -58,6 +58,34 @@ echo "gate: digest, fingerprint, classify"
 "$nils" classify --json > "$work/classify.json"
 "$nils" pick run --json > "$work/pick.json" 2>/dev/null || true
 
+echo "gate: the clinical layer (Wave 4a section 7)"
+# The vocabulary is pack data, and the EDSS file names the subject by the
+# code the registry gave it, which is what the clinic's export would carry
+# after the linkage step. Two scores, five days before the first session and
+# five days after the second, so that each session has one nearest value and
+# the two are told apart.
+"$nils" clinical vocabulary load --json > "$work/vocabulary.json"
+code="$(python3 -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT code FROM subject ORDER BY id LIMIT 1").fetchone()[0])' "$NILS_REGISTRY/registry.db")"
+cat > "$work/edss.csv" <<CSV
+code,visit_date,edss
+$code,2022-01-10,3.5
+$code,2022-07-20,4.0
+CSV
+cat > "$work/edss.yml" <<'YML'
+import:
+  target: event
+  subject: {column: code, by: code}
+  observation_type: EDSS
+  source: the gate's EDSS file
+  columns:
+    event_date: {column: visit_date, parser: date, format: "%Y-%m-%d"}
+    value: {column: edss, parser: float}
+  key: [event_date]
+  on_existing: skip
+YML
+"$nils" clinical import --mapping "$work/edss.yml" --file "$work/edss.csv" --apply --json \
+  > "$work/edss-import.json"
+
 echo "gate: the descriptive layout"
 /usr/bin/time -v "$nils" release --out "$work/descriptive" --name gate-descriptive \
   --layout descriptive --json > "$work/descriptive.json" 2> "$work/descriptive.time"
@@ -73,6 +101,14 @@ if [[ -n "$converter" ]]; then
     --json > "$work/bids.json" 2> "$work/bids.time"
   "$nils" release --out "$work/bids" --name gate-bids --layout bids \
     --json > "$work/bids-again.json"
+  echo "gate: a shifted BIDS tree, for the clinical join under the shift"
+  cat > "$work/ordinal.yml" <<'YML'
+session:
+  window_days: 0
+  naming: ordinal
+YML
+  "$nils" release --out "$work/bids-shifted" --name gate-bids-shifted --layout bids \
+    --dates shift --scheme "$work/ordinal.yml" --json > "$work/bids-shifted.json"
 else
   echo "gate: dcm2niix is not installed; the BIDS bars are skipped" >&2
 fi

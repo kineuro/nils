@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +138,20 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 21,
         apply: the_registry_holds_the_clinical_layer,
     },
+    Migration {
+        version: 22,
+        apply: a_kind_can_be_marked_sensitive,
+    },
 ];
+
+/// Wave 4a §7.4: the pack marks an observation kind sensitive, and the
+/// release never writes one, named or not.
+fn a_kind_can_be_marked_sensitive(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "observation_type", &["is_sensitive"])
+}
 
 /// Wave 4a §7.1: the clinical layer in the one registry: cohorts and their
 /// members, the vocabulary of diseases and observation kinds, a subject's

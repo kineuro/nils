@@ -597,6 +597,28 @@ the pack marks sensitive never reaches the tree.
 This closes **Wave 3's deferred bar 10**: the EDSS nearest each scan is the
 same computed from the registry and from the tree, under every date policy.
 
+**As built (slice 9, 2026-09-06).** `participants.tsv` carries `age` (whole
+years at the subject's first session in the release) and `sex`; each
+`_sessions.tsv` carries `age` at the session and, for every kind the release
+names, three columns from the kind's name in lower case with underscores:
+`<kind>` (the number, else the value, else `yes` for a kind that is a date
+and nothing else), `<kind>_days` (the signed distance in days from the
+session's earliest study day to the observation, written under every policy
+because it names no day), and `<kind>_date` (under `keep` the date; under
+`shift` the date moved by the subject's offset, so the distance holds; under
+`year` not written at all). The nearest is `clinical::nearest`, the earlier
+of two equidistant. Kinds come from `--observation KIND`, repeatable, or by
+default the vocabulary's primary kinds. Sensitivity is a mark on the kind
+in the vocabulary (`sensitive: true`; the delivery carries it): a sensitive
+kind is refused by name and left out of the default, before anything is
+planned and whatever the layout, and so is a name the registry does not
+hold. Migration 22 adds `observation_type.is_sensitive`. The release report
+counts what it wrote (`sex`, `age`, `session age`, `nearest <kind>`). The
+gate loads the vocabulary, imports two EDSS scores by subject code, releases
+a shifted BIDS tree beside the kept one, and bar 10 now compares each
+session's row with the registry's own nearest and checks that the shifted
+tree's date moved while its distance held.
+
 ## 8. Selection
 
 Exactly R5, and no more:

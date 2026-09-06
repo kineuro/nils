@@ -110,6 +110,7 @@ fn released(home_dir: &TempDir, source: &TempDir, out: &Path) -> (Home, Registry
         places: nils_release::bids::place::Options::default(),
         converter: None,
         compress: true,
+        observations: &[],
         authors: &[],
     };
     let report = run::run(&mut reg, &settings).unwrap();
