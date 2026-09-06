@@ -155,6 +155,29 @@ The slice lands with a benchmark of the release and its re-run at 150,000 and
 pull request and in §12's budget bar. Nima asked for exactly this: test which
 is more efficient rather than assume.
 
+**Measured, 2026-09-06**, on the baseline host, synthetic corpora from the
+`corpus` example (seeds 1 and 2, 2 KB of pixels a file), the descriptive
+layout, one process per release, peak resident set of that process alone. The
+digest is the same code in both columns and peaks at 600 MB at either size,
+which is Wave 1's budget and not this slice's.
+
+| | files | first version | re-run, nothing changed | registry after v1, after v2 |
+|---|---|---|---|---|
+| Wave 3 | 150,000 | 176 MB, 18.6 s | 209 MB, 0.9 s | 110 MB, 137 MB |
+| **slice 1** | 150,000 | **84 MB**, 17.7 s | **68 MB**, 0.5 s | **85 MB, 85 MB** |
+| Wave 3 | 1,000,000 | 765 MB, 135 s | 977 MB, 6.2 s | 740 MB, 918 MB |
+| **slice 1** | 1,000,000 | **172 MB**, 121 s | **84 MB**, 3.9 s | **567 MB, 567 MB** |
+
+The registry no longer grows with a version that changed nothing: Wave 3 added
+27 MB per version at 150,000 files and 178 MB at 1,000,000, and the new shape
+adds a plan that is emptied and a log that is empty. The re-run's memory is
+flat. The first version's grows from 84 MB to 172 MB over a 6.7 times larger
+corpus, against 176 MB to 765 MB before; the store's SQLite page cache alone is
+capped at 64 MB, and nothing in the release holds a row per file. The BIDS
+layout at 150,000 files (81,124 written, the rest routed away by the synthetic
+corpus's classification) measures the same way: 85 MB and 75 MB against 146 MB
+and 161 MB, registry 86 MB flat against 103 MB then 119 MB.
+
 ## 5. Private elements
 
 ### 5.1 What the archives carry
