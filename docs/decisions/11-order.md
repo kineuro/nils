@@ -543,11 +543,21 @@ under the registry and a miscompilation is a property of the compiler. Pinned
 forward; the suite passes unchanged.
 
 **Wave 3 — anonymize and BIDS.** Strategies, audit, `dcm2niix` orchestration,
-naming/collision rules, `nils anonymize` and `nils bids`. *Gate:* BIDS validator
+naming/collision rules, and the release. *Gate:* BIDS validator
 clean on hand-verified reference selections, with the main acquisition per session
 and contrast taken from the registry (C8, D16). v0 exports are compared for
 information only: they are not valid BIDS (classification-derived filenames, three
 open naming bugs), so "byte-identical against v0" is not the bar.
+
+**One verb, not two** (changed 2026-09-05, slice 7). This line said `nils
+anonymize` and `nils bids`, after v0's two exporters. v0's own runner says the
+two callers "run the same underlying engine ... the two callers only differ in
+scope, output root, and pipeline coupling", and all three differences are gone in
+v1: digest replaced the cohort pipeline, a cohort is a membership fact rather
+than a pipeline instance, and the root is an argument. So there is one verb,
+`nils release`, and the layout is a flag: `--layout descriptive|bids`. The two
+layouts are two renderings of one set of facts (§9), and neither is a fallback
+for the other.
 
 **Spec written 2026-09-04, open for ratification as PR #23**
 (`docs/specs/wave3-anonymize-and-bids.md`), after reading v0's `anonymize/`,
@@ -584,6 +594,79 @@ what frees the directory name. Second, **defacing is a pipeline**, like every
 transform of pixels, and plugs into the descriptor seam v0 already has; NILS
 holds the registry and produces the dataset. Wave 3 owns no pixel transform.
 
+**Nima's five points, 2026-09-05**, made before the BIDS layout was written and
+after nine slices had landed. Four are options the layout has to carry: current
+`dcm2niix` as a stated prerequisite; a localizer that can go in `anat` under a
+correct name, or in its own directory beside the intents, or be dropped; the
+vendor's synthetic contrast likewise placeable; and the "is this functional
+data" decision taken **per study**, on the ground that exporting BIDS usually
+means subsetting a cohort into a new one and proceeding.
+
+The fifth is a mechanism, and it changed the order of work. **A BIDS tree has to
+be versioned, and a re-run has to pay only for what changed.** His case is the
+ordinary one: we improve a rule, QC corrects a body part to spinal cord, a MEGRE
+turns out to be something else, `FLASH` reads better as a plain `GRE`, and each
+of those touches a handful of stacks out of an archive. v0 re-exports everything
+or nothing, so the cost of improving a rule is a full re-export and the record of
+what the improvement did is the difference between two trees nobody kept.
+
+So a release has a name and a version, `YYYY.MM.DD.N`, and it lands **before**
+the BIDS layout rather than after it: it is proved against the descriptive
+layout, which already works, and the BIDS layout is exactly the work that gives
+a deployment many new reasons to re-run. Two things are compared per stack, a
+content digest over what decides the file's bytes and, separately, the place it
+goes, and keeping them apart is the whole mechanism: a name is a rendering of
+the decided axes and none of them touches a byte, so a corrected body part is a
+**rename** and not a rewrite. Measured on a 4,000-file synthetic corpus, a QC
+correction to two stacks wrote nothing at all and the files kept the moment the
+first version wrote them.
+
+**Wave 3 closed 2026-09-05.** All thirteen items merged (PRs #25 to #44):
+identity from the path, the study-date repair, the session scheme, the four
+fingerprint fields, the disposition, roles and picks, `nils release`, private
+blocks and burned-in, the descriptive layout, versioning, the BIDS layout, the
+handover, and the gate.
+
+The gate (§12) runs in CI on its own synthetic corpus, from a tree of DICOM to
+an encrypted archive: the names against the standard, the counts reconciling,
+one pick per session and role, every file traceable, nothing the source carried
+appearing in anything released, a second run writing nothing, the time in the
+standard's own column, the handover verifying, and the budget printed. It found
+three real faults on its first run, all in code that had tests and passed them,
+each a disagreement between two things that were separately right: a
+`post_contrast` that never reached a filename because the axis stores `1` and
+the release compared it to `yes`; an orientation that never reached an `acq-`
+label because the pack's tokens were the rendered abbreviations and the column
+holds the word; and the provenance axis's default in every `acq-` label saying
+nothing. **That is what a gate is for, and it is the argument for one per
+wave.**
+
+Three things the wave found that this record should carry, because they are
+about the plan and not about the code:
+
+* **The clinical join cannot be gated here.** §12's tenth bar asks that the EDSS
+  nearest each scan be the same computed from the registry and from the tree.
+  v1 has no clinical layer yet: `metadata_imports` is Wave 4's, and the registry
+  has no events table. What Wave 3 owns is the **mechanism**, which is testable
+  now: the acquisition time in `_scans.tsv` and `_sessions.tsv` equals the
+  registry's under every date policy, which is the coupling of §2.1 broken. The
+  join itself moves to Wave 4's gate, where the data it joins to exists.
+* **The release is linear in files held in memory.** Measured on a 150,000-file
+  synthetic corpus: 196 MB for a first version, 232 MB for the next, because a
+  re-run holds the previous version's manifest and both hold the rows they are
+  writing. That is comfortable at this size and not at 37.5M instances, and
+  principle 5 makes the small machine the design target. The fix is to stream
+  the manifest rather than accumulate it and to compare per stack by query; it
+  is a slice after the wave, and the wave's gate carries the measurement so the
+  limit is stated rather than discovered.
+* **The export half of "no container runtime" now has a prerequisite.** A BIDS
+  release converts with `dcm2niix`, which is a binary a deployment installs. It
+  is not a container runtime and not a change to "the binary never decodes pixel
+  data", but the promise is worth stating exactly: digest, classify and a
+  descriptive release need nothing but `nils`; a BIDS release needs a converter,
+  and refuses to start without one rather than discovering it halfway through an
+  archive.
+
 Two things grew from the reading. **Roles and picks are in**, smallest form,
 because 82.5 percent of live sessions holding a T1w hold more than one and the
 worst holds 462. And **Wave 1 §4.4 under-specified the session scheme**: v0's has
@@ -592,6 +675,17 @@ four collision policies with merge as the argued default, and an answer for a
 session that fits no schedule; under a diagnosis anchor 9.9 percent of sessions
 precede their anchor and for a quarter of those subjects label order runs
 backwards against date order. Wave 3 carries all of it.
+
+**Wave 4 — reframed 2026-09-06 into 4a, 4b and 4c; see
+[17-wave4-reframed.md](17-wave4-reframed.md), which supersedes this paragraph and
+absorbs Wave 5.** In one line: 4a is the engine completing (versioning at stack
+grain, private tags ingested, the faults, the clinical layer, simple selection,
+jobs, the principal, review, the doors, the gate; no migration, R4); 4b is the
+question (the AST and its executor in the engine, the catalog, handles, the
+notebook app), opened by a talk and a research phase; 4c is the assistant (the
+agent service, providers, specialised agents, knobs, MCP wherever the talk puts
+it), opened likewise. Query before agent, so the engine and the question work
+with no AI at all. What follows is the paragraph as it stood.
 
 **Wave 4 — server and contracts.** The thin server: jobs, API, semantic catalog,
 AST execution, selections, review items, auth modes, MCP, events
@@ -610,6 +704,9 @@ projections on result handles, the `federation.*` review kinds, `user@node`
 principals and peer-key verification (C26 to C30). No daemon yet; the contract
 test proves a projection suppresses and a `local` field never validates for a
 federated principal.
+
+**Wave 5 — absorbed into Wave 4b (17-wave4-reframed.md, 2026-09-06).** The
+paragraph stands as the description of 4b's gate.
 
 **Wave 5 — nils-query MVP.** Notebook, saved selections, send-to. *Gate:* a real
 study's cohort defined as a selection and exported end to end without a hand-written

@@ -250,7 +250,10 @@ This is the **handover** mechanism: how a dataset physically leaves. v1 has
 nothing for it and no wave owns it. It belongs with Wave 3's release or with
 Bifrost.
 
-**Status: missing, and unassigned.**
+**Status: assigned to Wave 3 (§11), 2026-09-05.** It is the last step of a
+release: a release that cannot be handed over is not finished. What v1 adds is
+that the archive set is part of the release record, so "what did we send them,
+and is it still intact" is a query rather than a folder someone remembers.
 
 ## 9. `metadata_imports` — the clinical layer
 
@@ -282,15 +285,19 @@ clinical timeline stay.
 
 ## 11. What this audit changes
 
-Four things that are not in any wave's plan today:
+Four things that were in no wave's plan when this was written. **All four are
+now Wave 3's**, which is what the audit was for; the first three are merged and
+the fourth is its §11.
 
 1. **Identity from the path** (§1.1). Blocks digesting the legacy MS data.
-   Wave 1 code, not Wave 3.
+   Wave 1 code, not Wave 3. **Done**: Wave 3 slice 1, PRs #25 and #26.
 2. **Study date repair** (§3), including from UIDs, and the rule that a study
-   with no date cannot be sorted. Wave 1 or 2 code, not Wave 3.
+   with no date cannot be sorted. Wave 1 or 2 code, not Wave 3. **Done**: slice
+   2, PRs #27 and #28, as a weighted vote over ten sources.
 3. **The session scheme is under-specified** (§5). Wave 1 §4.4 is weaker than
-   v0's `timeline/`.
-4. **`compress` is an unowned capability** (§8).
+   v0's `timeline/`. **Done**: slice 3, PR #29, carried whole from v0's
+   `timeline/` with three departures and a fifth anchor kind.
+4. **`compress` is an unowned capability** (§8). **Owned**: Wave 3 §11.
 
 And two that change Wave 3's content rather than its scope: the pick already
 exists as tuned data (§6.1), and UID policy and date policy are one question
