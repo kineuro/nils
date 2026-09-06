@@ -7,7 +7,12 @@
 # argument, and the outputs are counts and timings, never a value.
 #
 #     tools/wave4a-gate/cohort.sh --nils BIN --source DIR --csv DIR --maps DIR \
-#         --packs DIR --work DIR [--v0-counts FILE] [--workers N]
+#         --packs DIR --work DIR [--v0-counts FILE] [--workers N] [--release-subjects N]
+#
+# `--release-subjects N` releases the first N members of the cohort rather
+# than all of them, for a host whose disk cannot write the whole cohort in an
+# afternoon; the registry, the imports and the queue are still the whole
+# cohort, and the release bars are proved on what is released.
 #
 # What it builds, in order: a registry from raw (bar 1), the clinical layer
 # through the one importer, twice (bar 7), the classification and its review
@@ -18,7 +23,7 @@
 # and asserts the bars.
 set -euo pipefail
 
-nils=""; source=""; csv=""; maps=""; packs=""; work=""; v0counts=""; workers=16
+nils=""; source=""; csv=""; maps=""; packs=""; work=""; v0counts=""; workers=16; release_subjects=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --nils) nils="$2"; shift 2 ;;
@@ -29,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --work) work="$2"; shift 2 ;;
     --v0-counts) v0counts="$2"; shift 2 ;;
     --workers) workers="$2"; shift 2 ;;
+    --release-subjects) release_subjects="$2"; shift 2 ;;
     *) echo "cohort.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -84,15 +90,32 @@ step import-events import events "$maps/events.yml" "$csv/events.csv"
 "$nils" review list --status open --json > "$work/review-open.json"
 
 # --- bars 2 and 6: both layouts, the clinical export, a re-run that writes nothing
+# What is released: the cohort, or its first N members.
+"$nils" select --cohort nmosd --json > "$work/select-cohort.json"
+sel=(--cohort nmosd)
+door_selection='"cohorts": ["nmosd"]'
+if [[ "$release_subjects" -gt 0 ]]; then
+  mapfile -t chosen < <(python3 - "$work/select-cohort.json" "$release_subjects" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+for code in doc["selection"]["subjects"][: int(sys.argv[2])]:
+    print(code)
+PY
+)
+  sel=()
+  for code in "${chosen[@]}"; do sel+=(--subject "$code"); done
+  door_selection="\"subjects\": [$(printf '"%s",' "${chosen[@]}" | sed 's/,$//')]"
+  echo "gate: releasing ${#chosen[@]} of the cohort's subjects" >&2
+fi
 step release-descriptive "$nils" release --out "$work/desc" --name cohort-desc --layout descriptive \
-  --on-unknown write --json > "$work/desc.json"
+  --on-unknown write "${sel[@]}" --json > "$work/desc.json"
 step release-descriptive-again "$nils" release --out "$work/desc" --name cohort-desc --layout descriptive \
-  --on-unknown write --json > "$work/desc-again.json"
+  --on-unknown write "${sel[@]}" --json > "$work/desc-again.json"
 if command -v dcm2niix >/dev/null; then
   step release-bids "$nils" release --out "$work/bids" --name cohort-bids --layout bids \
-    --on-unknown write --observation EDSS --json > "$work/bids.json"
+    --on-unknown write --observation EDSS "${sel[@]}" --json > "$work/bids.json"
   step release-bids-again "$nils" release --out "$work/bids" --name cohort-bids --layout bids \
-    --on-unknown write --observation EDSS --json > "$work/bids-again.json"
+    --on-unknown write --observation EDSS "${sel[@]}" --json > "$work/bids-again.json"
 else
   echo "gate: dcm2niix is not installed here; the BIDS half is skipped" >&2
 fi
@@ -129,7 +152,7 @@ curl -s -X POST -H 'Content-Type: application/json' -d '{"cohorts": ["nmosd"]}' 
 curl -s "$url/review?status=open" > "$work/door-review.json"
 curl -s "$url/releases" > "$work/door-releases.json"
 curl -s -X POST -H 'Content-Type: application/json' \
-  -d "{\"name\": \"cohort-door\", \"out\": \"$work/door-desc\", \"layout\": \"descriptive\", \"on_unknown\": \"write\", \"cohorts\": [\"nmosd\"]}" \
+  -d "{\"name\": \"cohort-door\", \"out\": \"$work/door-desc\", \"layout\": \"descriptive\", \"on_unknown\": \"write\", $door_selection}" \
   "$url/releases" > "$work/door-release-queued.json"
 wait "$serve_pid" || true
 step door-release "$nils" jobs work --once
