@@ -21,11 +21,14 @@ dicom-dictionary-std.workspace = true
 dicom-object.workspace = true
 dicom-transfer-syntax-registry.workspace = true
 hex.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# The free-space preflight asks statvfs, which Windows does not have; there a
+# release gets the operating system's error at the moment it runs out, which is
+# what every release got before the preflight existed.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 nils-classify.workspace = true
