@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# EDSS scores, one per row, the subject named by the hospital's number.
+import:
+  target: event
+  subject: {column: hospital_no, by: identifier, id_type: hospital}
+  observation_type: EDSS
+  source: the clinic's EDSS file
+  columns:
+    event_date: {column: visit_date, parser: date, format: "%Y-%m-%d"}
+    value: {column: edss, parser: float}
+    notes: {column: comment}
+  key: [event_date]
+  on_existing: skip

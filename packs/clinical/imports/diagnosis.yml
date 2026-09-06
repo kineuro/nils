@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# A diagnosis with its dates. The onset and the diagnosis become events of
+# their kinds, made if absent, and the disease row points at them.
+import:
+  target: subject_disease
+  subject: {column: code}
+  disease: Multiple Sclerosis
+  columns:
+    onset_date: {column: onset, parser: date, format: "%Y-%m-%d"}
+    diagnosis_date: {column: diagnosed, parser: date, format: "%Y-%m-%d"}
+    family_history: {column: family}

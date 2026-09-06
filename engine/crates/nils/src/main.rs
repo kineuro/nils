@@ -270,6 +270,25 @@ enum ClinicalCommand {
     /// The vocabulary: the diseases, their types, and the kinds of observation
     #[command(subcommand)]
     Vocabulary(VocabularyCommand),
+    /// Import a CSV under a mapping: preview what would change, then apply
+    /// under your name (Wave 4a section 7.2)
+    Import(ClinicalImportArgs),
+}
+
+#[derive(Debug, Args)]
+struct ClinicalImportArgs {
+    /// The mapping: the target, how a row names its subject, the columns and
+    /// their parsers, the key, and what to do with a row that exists
+    #[arg(long, value_name = "FILE")]
+    mapping: PathBuf,
+    /// The CSV to import
+    #[arg(long, value_name = "FILE")]
+    file: PathBuf,
+    /// Write; without it the import is a preview that changes nothing
+    #[arg(long)]
+    apply: bool,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -4427,6 +4446,7 @@ fn yaml_text(s: &str) -> String {
 
 fn clinical_command(home: &Home, command: ClinicalCommand) -> Result<(), Exit> {
     match command {
+        ClinicalCommand::Import(args) => clinical_import(home, args),
         ClinicalCommand::Vocabulary(VocabularyCommand::Load {
             file,
             pack_dir: dir,
@@ -4528,6 +4548,97 @@ fn clinical_command(home: &Home, command: ClinicalCommand) -> Result<(), Exit> {
             Ok(())
         }
     }
+}
+
+/// One declarative importer (§7.2): a mapping and a file, previewed and then
+/// applied under a principal, idempotent on the key the mapping names.
+fn clinical_import(home: &Home, args: ClinicalImportArgs) -> Result<(), Exit> {
+    let mapping_text = fs::read_to_string(&args.mapping)
+        .map_err(|e| usage(format!("--mapping {}: {e}", args.mapping.display())))?;
+    let mapping = nils_registry::import::Mapping::parse(&mapping_text)
+        .map_err(|e| usage(format!("--mapping {}: {e}", args.mapping.display())))?;
+    let csv_text = fs::read_to_string(&args.file)
+        .map_err(|e| usage(format!("--file {}: {e}", args.file.display())))?;
+    let mut registry = open(home)?;
+    let who = actor();
+    let report = match args.apply {
+        true => nils_registry::import::apply(&mut registry, &mapping, &csv_text, &who),
+        false => nils_registry::import::preview(&mut registry, &mapping, &csv_text, &who),
+    }
+    .map_err(|e| fail(e.to_string()))?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "target": report.target,
+                "applied": report.applied,
+                "rows": report.rows,
+                "added": report.added,
+                "skipped": report.skipped,
+                "updated": report.updated,
+                "superseded": report.superseded,
+                "reviewed": report.reviewed,
+                "refused": report.refused,
+                "changes": report.changes(),
+                "samples": report.samples.iter().map(|o| serde_json::json!({
+                    "row": o.row,
+                    "subject": o.subject,
+                    "verdict": o.verdict.name(),
+                    "detail": match &o.verdict {
+                        nils_registry::import::Verdict::Refused(why) => Some(why.clone()),
+                        nils_registry::import::Verdict::Reviewed { field } => Some(field.clone()),
+                        _ => None,
+                    },
+                })).collect::<Vec<_>>(),
+            }))
+            .map_err(|e| fail(e.to_string()))?
+        );
+        return Ok(());
+    }
+    println!(
+        "{} {} rows into {}: {} added, {} skipped, {} updated, {} superseded, {} for review, {} refused{}",
+        match report.applied {
+            true => "applied",
+            false => "would apply",
+        },
+        report.rows,
+        report.target,
+        report.added,
+        report.skipped,
+        report.updated,
+        report.superseded,
+        report.reviewed,
+        report.refused_total(),
+        match (report.applied, report.changes()) {
+            (true, 0) => "; nothing changed",
+            (false, 0) => "; nothing would change",
+            _ => "",
+        }
+    );
+    for (why, n) in &report.refused {
+        println!("  refused {n}: {why}");
+    }
+    if !report.applied {
+        for o in &report.samples {
+            println!(
+                "  row {:>5}  {:<12} {}{}",
+                o.row,
+                o.subject.as_deref().unwrap_or("-"),
+                o.verdict.name(),
+                match &o.verdict {
+                    nils_registry::import::Verdict::Refused(why) => format!(": {why}"),
+                    nils_registry::import::Verdict::Reviewed { field } =>
+                        format!(": {field} disagrees with the registry"),
+                    _ => String::new(),
+                }
+            );
+        }
+        if report.samples.len() < report.rows {
+            println!("  ... and {} more", report.rows - report.samples.len());
+        }
+        println!("  (a preview; add --apply to write under {who})");
+    }
+    Ok(())
 }
 
 // The handover (Wave 3 §11)

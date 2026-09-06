@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# A cohort is a membership fact: a name, an owner, a description.
+import:
+  target: cohort
+  columns:
+    name: {column: cohort}
+    owner: {value: the research group}
+    description: {column: about}

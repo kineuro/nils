@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Who is in a cohort: one subject per row, the cohort named once.
+import:
+  target: cohort_member
+  subject: {column: code}
+  cohort: nmosd

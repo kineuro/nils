@@ -522,6 +522,28 @@ by file, and when a later file disagrees with what the registry holds, the
 conflict becomes a review item and the registry's value stands until a person
 decides. That is what the spine is for (D7).
 
+**As built (slice 7).** `nils clinical import --mapping FILE --file CSV
+[--apply]`, one importer for six targets: `event`, `subject`, `cohort`,
+`cohort_member`, `subject_disease` and `subject_disease_type`, which are v0's
+thirteen import shapes less the four that are vocabulary (loaded by §7.1's
+verb) and the identifiers (Wave 1's linkage import). A mapping names the
+target, how a row names its subject (by the registry's code, or by an
+identifier through the linkage store, which is the way that works without
+the key that made the codes), the reference the target needs as a constant
+or a column, the columns with their parsers, the key, and what to do with a
+row that exists. A date is read under a declared format and never guessed;
+v0 accepted twelve formats, three of which cannot be told apart on most days
+of the month. A preview reads every row and writes nothing; an apply writes
+in one transaction under the caller's name; a row whose key exists is
+skipped, updated or superseded as the mapping says, and a re-run under the
+default changes nothing. A demographics row fills a blank, skips an equal
+value, and raises `subject.demographics` on a different one, the registry's
+value standing (§13.3). A diagnosis row's onset and diagnosis dates become
+events of their kinds, made if absent, so the dates are where every other
+date is and `Anchor::Event` can find them. Refusals are counted by reason,
+not listed by row, so a file with a thousand bad dates is one line. The
+example mappings and the format are in `packs/clinical/imports/`.
+
 ### 7.3 `Anchor::Event`, and the nearest event
 
 Wave 3 §5 carried the session scheme whole and declared the clinical anchor

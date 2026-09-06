@@ -2450,3 +2450,126 @@ fn the_clinical_vocabulary_loads_from_the_pack_and_a_second_load_changes_nothing
     assert_eq!(clinical["counts"]["observation_types"], 15, "{clinical}");
     assert_eq!(clinical["counts"]["events"], 0, "{clinical}");
 }
+
+/// Wave 4a §7.2: one declarative importer at the command line. A preview
+/// writes nothing and shows every row's outcome; an apply writes under the
+/// caller's name; a re-run changes nothing.
+#[test]
+fn nils_clinical_import_previews_then_applies_and_a_rerun_changes_nothing() {
+    let home = home();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    // A subject to import against: one file, digested.
+    let dir = TempDir::new("cli-import");
+    let mut e = synth::minimal_mr("1.2.3.A", "1.2.3.A.1", "1.2.3.A.1.1");
+    e.push(synth::text(
+        dicom_dictionary_std::tags::PATIENT_ID,
+        dicom_core::VR::LO,
+        "P1",
+    ));
+    dir.file(
+        "a/1",
+        &synth::part10(&MetaFields::mr("1.2.3.A.1.1"), &e, true),
+    );
+    let done = nils()
+        .args(registry)
+        .args(["digest", "--name", "i", "--no-private"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", stderr(&done));
+    let loaded = nils()
+        .args(registry)
+        .args(["clinical", "vocabulary", "load", "--pack-dir"])
+        .arg(&packs)
+        .output()
+        .unwrap();
+    assert!(loaded.status.success(), "{}", stderr(&loaded));
+
+    // The subject's code, from the registry.
+    let code = {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .query("SELECT code FROM subject LIMIT 1", &[])
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string()
+    };
+    let mapping = home.path().join("edss.yml");
+    std::fs::write(
+        &mapping,
+        "import:\n  target: event\n  subject: {column: code}\n  observation_type: EDSS\n  columns:\n    event_date: {column: date, parser: date, format: '%Y-%m-%d'}\n    value: {column: edss, parser: float}\n",
+    )
+    .unwrap();
+    let file = home.path().join("edss.csv");
+    std::fs::write(
+        &file,
+        format!("code,date,edss\n{code},2022-01-15,2.5\nnobody,2022-01-15,1\n"),
+    )
+    .unwrap();
+
+    let preview = nils()
+        .args(registry)
+        .args(["clinical", "import", "--mapping"])
+        .arg(&mapping)
+        .arg("--file")
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(preview.status.success(), "{}", stderr(&preview));
+    let text = stdout(&preview);
+    assert!(
+        text.contains("would apply 2 rows into event: 1 added"),
+        "{text}"
+    );
+    assert!(text.contains("1 refused"), "{text}");
+    assert!(
+        text.contains("a subject the registry does not know"),
+        "{text}"
+    );
+    assert!(text.contains("a preview; add --apply"), "{text}");
+
+    let apply = nils()
+        .args(registry)
+        .args(["clinical", "import", "--apply", "--json", "--mapping"])
+        .arg(&mapping)
+        .arg("--file")
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(apply.status.success(), "{}", stderr(&apply));
+    let v: serde_json::Value = serde_json::from_slice(&apply.stdout).unwrap();
+    assert_eq!(v["applied"], true, "{v}");
+    assert_eq!(v["added"], 1, "{v}");
+    assert_eq!(v["changes"], 1, "{v}");
+
+    let again = nils()
+        .args(registry)
+        .args(["clinical", "import", "--apply", "--mapping"])
+        .arg(&mapping)
+        .arg("--file")
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(again.status.success(), "{}", stderr(&again));
+    let text = stdout(&again);
+    assert!(text.contains("1 skipped"), "{text}");
+    assert!(text.contains("nothing changed"), "{text}");
+
+    // The custody table counts the event.
+    let custody = nils()
+        .args(registry)
+        .args(["custody", "--json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&custody.stdout).unwrap();
+    let clinical = v["stores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["store"] == "clinical layer")
+        .unwrap();
+    assert_eq!(clinical["counts"]["events"], 1, "{clinical}");
+}

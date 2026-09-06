@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The course of a disease (RRMS, SPMS), assigned on a date.
+import:
+  target: subject_disease_type
+  subject: {column: code}
+  disease: Multiple Sclerosis
+  disease_type: {column: course}
+  columns:
+    assigned_on: {column: since, parser: date, format: "%Y-%m-%d"}
