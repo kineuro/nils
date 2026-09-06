@@ -2008,3 +2008,72 @@ fn nils_private_names_what_it_finds_and_suggests_what_varies() {
     assert_eq!(b["name"], "B_value", "{b}");
     assert_eq!(b["ingested_as"], "siemens_b_value", "{b}");
 }
+
+#[test]
+fn nils_private_measured_reads_what_the_digests_kept_per_series() {
+    // Wave 4a section 5.3, the second half of the method: a survey says what
+    // varies across an archive, and only a digest can say whether it varies
+    // inside a series. Four files of one series with four b values: varied
+    // within the one series that holds it, four distinct values.
+    let home = home();
+    let dir = private_tree();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let done = nils()
+        .args(registry)
+        .args(["digest", "--name", "m", "--pack-dir"])
+        .arg(&packs)
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", stderr(&done));
+
+    let measured = nils()
+        .args(registry)
+        .args(["private", "--measured", "--pack-dir"])
+        .arg(&packs)
+        .output()
+        .unwrap();
+    assert!(measured.status.success(), "{}", stderr(&measured));
+    let text = stdout(&measured);
+    assert!(text.contains("1 series, 1 with private elements"), "{text}");
+    assert!(text.contains("0019xx0C SIEMENS MR HEADER"), "{text}");
+    assert!(text.contains("per image, not a parameter"), "{text}");
+    assert!(
+        text.contains("[B_value]"),
+        "the dictionary names it: {text}"
+    );
+    assert!(text.contains("ingested as siemens_b_value"), "{text}");
+    // The gradient mode is one value across the four files: a constant.
+    assert!(text.contains("0019xx0F SIEMENS MR HEADER"), "{text}");
+    assert!(
+        text.contains("a constant of the scanner or the site"),
+        "{text}"
+    );
+    assert!(!text.contains("Fast"), "shapes, never values: {text}");
+
+    let json = nils()
+        .args(registry)
+        .args(["private", "--measured", "--json", "--pack-dir"])
+        .arg(&packs)
+        .output()
+        .unwrap();
+    assert!(json.status.success(), "{}", stderr(&json));
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let b = v["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["address"] == "0019xx0C SIEMENS MR HEADER")
+        .expect("the b value");
+    assert_eq!(b["series"], 1, "{b}");
+    assert_eq!(b["varied_within"], 1, "{b}");
+    assert_eq!(
+        b["distinct_across"], 1,
+        "one series, so one value counted across: {b}"
+    );
+
+    // Without --measured a ROOT is required.
+    let none = nils().args(registry).args(["private"]).output().unwrap();
+    assert!(!none.status.success());
+}
