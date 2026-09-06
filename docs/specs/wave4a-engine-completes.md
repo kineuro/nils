@@ -545,6 +545,21 @@ date is and `Anchor::Event` can find them. Refusals are counted by reason,
 not listed by row, so a file with a thousand bad dates is one line. The
 example mappings and the format are in `packs/clinical/imports/`.
 
+**Proved on the real rows.** On the v0 host, read-only against v0's clinical
+database, the nmosd cohort's rows were exported keyed by the cohort's own
+identifier, the cohort's raw DICOM was digested into a scratch registry with
+the same binary (493,708 files, 44 subjects, 82 studies), and every file went
+through the importer, previewed, applied, and applied again: the cohort (1),
+its members (43 of 43), the diagnoses (40 of 40), the demographics (14 fields
+of the 7 subjects v0 holds them for, the 3 that disagreed by spelling settled
+by the standard's letter), and the events (298 of 298: 135 scans, 98 heights,
+65 weights). The second apply of each changed nothing. The first run found
+two faults, both fixed with a test: a key field the row did not carry was
+compared with `= NULL`, which is never true, so every event without a time
+was added again; and v0 stores a sex as a word where the scanner wrote a
+letter. Nothing left the host, and the scratch registry and the exported
+files were deleted afterwards.
+
 ### 7.3 `Anchor::Event`, and the nearest event
 
 Wave 3 §5 carried the session scheme whole and declared the clinical anchor
