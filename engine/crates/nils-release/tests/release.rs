@@ -895,3 +895,54 @@ fn a_release_looks_before_it_writes() {
         .to_string();
     assert!(e.contains("cannot be written into"), "{e}");
 }
+
+#[test]
+fn a_role_is_matched_by_equality_against_a_row_per_value() {
+    // Wave 4a §6.1, fault 4: a stack that is both a t1w and a flair holds two
+    // role rows, and `--role flair` finds it by equality, where a joined
+    // string needed four patterns and a role named `t1` would have matched
+    // `t1w` by accident.
+    let source = tree();
+    let home_dir = TempDir::new("release-home-roles");
+    let out = TempDir::new("release-out-roles");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    classified(&mut reg, &source);
+    let one = {
+        let store = reg.store();
+        let table = store.qualified("classification_axis");
+        store
+            .execute(&format!("DELETE FROM {table} WHERE axis = 'role'"), &[])
+            .unwrap();
+        let first = store
+            .query(
+                &format!("SELECT MIN(id) FROM {}", store.qualified("stack")),
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        for role in ["t1w", "flair"] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {table} (stack_id, axis, value, confidence, tier) \
+                         VALUES ({first}, 'role', '{role}', 1.0, 'decided')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        first
+    };
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let mut s = settings(out.path(), &policy, &scheme);
+    s.selection.roles = vec!["flair".to_string()];
+    let flair = run::run(&mut reg, &s).unwrap();
+    assert_eq!(flair.stacks, 1, "{flair:?}");
+    let mut s = settings(out.path(), &policy, &scheme);
+    s.selection.roles = vec!["t1".to_string()];
+    let t1 = run::run(&mut reg, &s).unwrap();
+    assert_eq!(t1.stacks, 0, "a role is a value, not a prefix: {t1:?}");
+    let _ = one;
+}

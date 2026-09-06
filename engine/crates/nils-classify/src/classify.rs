@@ -153,6 +153,45 @@ fn select(store: &Store, modality: Option<&str>, ids: bool) -> String {
     )
 }
 
+/// The rows of one axis of one stack (Wave 4a §6.1, fault 4): one per
+/// value, or one with no value when the axis was decided to nothing, so that
+/// a reader matches a value by equality and never by a pattern over a joined
+/// string.
+pub(crate) fn axis_rows(
+    stack: i64,
+    axis: &str,
+    stored: &str,
+    confidence: f64,
+    tier: &str,
+) -> Vec<Vec<Param>> {
+    let values: Vec<&str> = stored
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .collect();
+    if values.is_empty() {
+        return vec![vec![
+            Param::Int(stack),
+            Param::from(axis),
+            Param::Null,
+            Param::Double(confidence),
+            Param::from(tier),
+        ]];
+    }
+    values
+        .into_iter()
+        .map(|v| {
+            vec![
+                Param::Int(stack),
+                Param::from(axis),
+                Param::from(v),
+                Param::Double(confidence),
+                Param::from(tier),
+            ]
+        })
+        .collect()
+}
+
 /// A cell as the text a pack reads. The fingerprint's columns are typed and a
 /// pack's fields are named, so this is where a double becomes the string a
 /// substring test can look at and a number can still be parsed back.
@@ -512,17 +551,7 @@ fn run(
                     .by_tier
                     .entry(format!("{}:{}", a.axis, tier))
                     .or_insert(0) += 1;
-                axes.push(vec![
-                    Param::Int(stack_id),
-                    Param::from(a.axis.as_str()),
-                    if value.is_empty() {
-                        Param::Null
-                    } else {
-                        Param::from(value.as_str())
-                    },
-                    Param::Double(a.confidence),
-                    Param::from(tier.as_str()),
-                ]);
+                axes.extend(axis_rows(stack_id, &a.axis, &value, a.confidence, &tier));
                 // What a person is asked about, and where the number comes
                 // from: the pack declares it per axis, because what counts as
                 // a weak answer is knowledge about the domain and not about
@@ -586,17 +615,7 @@ fn run(
                         .by_tier
                         .entry(format!("{}:decision", a.name))
                         .or_insert(0) += 1;
-                    axes.push(vec![
-                        Param::Int(stack_id),
-                        Param::from(a.name.as_str()),
-                        if value.is_empty() {
-                            Param::Null
-                        } else {
-                            Param::from(value.as_str())
-                        },
-                        Param::Double(1.0),
-                        Param::from("decision"),
-                    ]);
+                    axes.extend(axis_rows(stack_id, &a.name, &value, 1.0, "decision"));
                     authored.push((a.name.clone(), value, d.clone()));
                 }
             }
@@ -877,10 +896,11 @@ fn dispose(
             if value.is_empty() {
                 continue;
             }
+            // One row per value, so a multi-valued axis arrives as rows.
             decided
                 .entry(r.int(0)?)
-                .or_insert_with(|| vec![Vec::new(); pack.axes.len()])[a] =
-                value.split(',').map(|v| v.trim().to_string()).collect();
+                .or_insert_with(|| vec![Vec::new(); pack.axes.len()])[a]
+                .push(value.trim().to_string());
         }
 
         let empty: Vec<Vec<String>> = vec![Vec::new(); pack.axes.len()];
@@ -897,17 +917,7 @@ fn dispose(
             let verdict = Evaluated::with_private(pack, &stack, private).dispose(seed);
             for a in &verdict.axes {
                 let value = a.stored();
-                axes.push(vec![
-                    Param::Int(ids.stack),
-                    Param::from(a.axis.as_str()),
-                    if value.is_empty() {
-                        Param::Null
-                    } else {
-                        Param::from(value.as_str())
-                    },
-                    Param::Double(a.confidence),
-                    Param::from(a.tier.as_str()),
-                ]);
+                axes.extend(axis_rows(ids.stack, &a.axis, &value, a.confidence, &a.tier));
             }
             for e in &verdict.evidence {
                 evidence.push(vec![
@@ -1010,5 +1020,22 @@ mod tests {
         for (name, column) in FIELDS {
             assert!(t.column(column).is_some(), "{name} reads {column}");
         }
+    }
+}
+
+#[cfg(test)]
+mod axis_row_tests {
+    use super::*;
+
+    #[test]
+    fn an_axis_is_one_row_per_value_and_one_row_when_it_has_none() {
+        // Wave 4a §6.1, fault 4.
+        let rows = axis_rows(7, "role", "t1w, flair,", 0.9, "keywords");
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(&rows[0][2], Param::Text(t) if t == "t1w"));
+        assert!(matches!(&rows[1][2], Param::Text(t) if t == "flair"));
+        let none = axis_rows(7, "modifier", "", 0.0, "default");
+        assert_eq!(none.len(), 1);
+        assert!(matches!(none[0][2], Param::Null));
     }
 }

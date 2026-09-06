@@ -2099,3 +2099,168 @@ fn nils_private_measured_reads_what_the_digests_kept_per_series() {
     let none = nils().args(registry).args(["private"]).output().unwrap();
     assert!(!none.status.success());
 }
+
+/// Wave 4a §6.1, fault 2: the CLI suite gains a Postgres half. One round of
+/// the verbs the server will run, on the backend it will run on: init,
+/// digest, fingerprint, classify, explain, session (with an anchor file,
+/// which is fault 1's raw date projection), pick, review, custody, status,
+/// release and the private survey. Runs only where a test DSN is set.
+#[test]
+fn the_cli_runs_a_round_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        return;
+    };
+    let schema = "nils_cli_round";
+    let drop = |dsn: &str| {
+        let mut store = nils_registry::Store::connect_postgres(dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop(&dsn);
+    let home = TempDir::new("cli-pg-home");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let key = nils()
+        .args(registry)
+        .args(["key", "add", "k"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"nils-cli-postgres-key\n")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(key.status.success(), "{}", stderr(&key));
+    let init = nils()
+        .args(registry)
+        .args([
+            "init",
+            "--backend",
+            "postgres",
+            "--dsn",
+            &dsn,
+            "--schema",
+            schema,
+            "--key",
+            "k",
+            "--display-length",
+            "10",
+        ])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{}", stderr(&init));
+
+    // A dated tree, so there is a session to list and to anchor.
+    let dir = TempDir::new("cli-pg-tree");
+    for (study, series, sop, date) in [
+        ("1.2.3.A", "1.2.3.A.1", "1.2.3.A.1.1", "20220115"),
+        ("1.2.3.A", "1.2.3.A.1", "1.2.3.A.1.2", "20220115"),
+        ("1.2.3.B", "1.2.3.B.1", "1.2.3.B.1.1", "20220715"),
+    ] {
+        let mut e = synth::minimal_mr(study, series, sop);
+        e.push(synth::text(
+            dicom_dictionary_std::tags::PATIENT_ID,
+            dicom_core::VR::LO,
+            "P1",
+        ));
+        e.push(synth::text(
+            dicom_dictionary_std::tags::STUDY_DATE,
+            dicom_core::VR::DA,
+            date,
+        ));
+        e.push(synth::text(
+            dicom_dictionary_std::tags::SERIES_DESCRIPTION,
+            dicom_core::VR::LO,
+            "t1_mprage_sag",
+        ));
+        dir.file(
+            &format!("{study}/{sop}"),
+            &synth::part10(&MetaFields::mr(sop), &e, true),
+        );
+    }
+    let run = |args: &[&str]| {
+        let out = nils().args(registry).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}: {}\n{}",
+            args.join(" "),
+            stderr(&out),
+            stdout(&out)
+        );
+        stdout(&out)
+    };
+    run(&[
+        "digest",
+        "--name",
+        "pg",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+        dir.path().to_str().unwrap(),
+    ]);
+    run(&["fingerprint"]);
+    let classified = run(&["classify", "--pack-dir", packs.to_str().unwrap()]);
+    assert!(classified.contains("read"), "{classified}");
+    let status = run(&["status", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(v["registry"]["backend"], "postgres", "{v}");
+
+    // The sessions, and with an anchor file: fault 1's projection of a date.
+    let sessions = run(&["session", "list", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&sessions).unwrap();
+    assert_eq!(v["sessions"], 2, "{v}");
+    let row = &v["rows"][0];
+    let code = row["code"]
+        .as_str()
+        .or(row["subject"].as_str())
+        .map(str::to_string)
+        .unwrap_or_default();
+    assert!(!code.is_empty(), "{v}");
+    let anchors = home.path().join("anchors.csv");
+    std::fs::write(&anchors, format!("code,date\n{code},2020-01-01\n")).unwrap();
+    let anchored = run(&[
+        "session",
+        "list",
+        "--json",
+        "--anchors",
+        anchors.to_str().unwrap(),
+    ]);
+    assert!(anchored.contains(&code), "{anchored}");
+
+    run(&["pick", "run", "--pack-dir", packs.to_str().unwrap()]);
+    run(&["pick", "list", "--json"]);
+    run(&["review", "list", "--json"]);
+    let custody = run(&["custody", "--json"]);
+    assert!(custody.contains("postgres"), "{custody}");
+    let out = TempDir::new("cli-pg-release");
+    let released = run(&[
+        "release",
+        "--name",
+        "pg",
+        "--on-unknown",
+        "write",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+        "--out",
+        out.path().to_str().unwrap(),
+    ]);
+    assert!(released.contains("version 20"), "{released}");
+    run(&[
+        "private",
+        "--measured",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+    ]);
+    drop(&dsn);
+}

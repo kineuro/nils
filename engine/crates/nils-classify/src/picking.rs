@@ -175,11 +175,21 @@ fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<
         let Some(value) = r.opt_text(2)? else {
             continue;
         };
+        // One row per value (Wave 4a §6.1): a role arrives as rows, and an
+        // axis a pick reads is joined back into the text the model matches
+        // a token against.
         if axis == "role" {
-            rows[i].roles = value.split(',').map(|v| v.trim().to_string()).collect();
+            rows[i].roles.push(value.trim().to_string());
         }
         if reads.iter().any(|n| n == axis) {
-            rows[i].values.insert(axis.to_string(), value.to_string());
+            rows[i]
+                .values
+                .entry(axis.to_string())
+                .and_modify(|v| {
+                    v.push(',');
+                    v.push_str(value);
+                })
+                .or_insert_with(|| value.to_string());
         }
     }
     rows.retain(|r| !r.roles.is_empty());

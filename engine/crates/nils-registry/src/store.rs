@@ -954,6 +954,19 @@ fn pg_row(row: &postgres::Row) -> Result<Row, Error> {
             PgType::TEXT | PgType::VARCHAR | PgType::BPCHAR | PgType::NAME | PgType::UNKNOWN => row
                 .try_get::<_, Option<String>>(i)?
                 .map_or(Cell::Null, Cell::Text),
+            // Wave 4a §6.1, fault 3: a date, a time, a timestamp or a JSON
+            // column selected raw is read as the text `Dialect::text_of`
+            // would have rendered, so that a projection that forgot the cast
+            // reads the same on both backends instead of failing the first
+            // time a row of that shape exists.
+            PgType::DATE
+            | PgType::TIME
+            | PgType::TIMESTAMP
+            | PgType::TIMESTAMPTZ
+            | PgType::JSON
+            | PgType::JSONB => row
+                .try_get::<_, Option<PgText>>(i)?
+                .map_or(Cell::Null, |t| Cell::Text(t.0)),
             _ => {
                 return Err(Error::Message(format!(
                     "column {} has type {ty}, which the store reads only as text",
@@ -966,9 +979,131 @@ fn pg_row(row: &postgres::Row) -> Result<Row, Error> {
     Ok(Row(cells))
 }
 
+/// A date, a time, a timestamp or a JSON value read off the wire as the text
+/// the dialect's casts render: `YYYY-MM-DD`, `HH:MM:SS.ffffff`,
+/// `YYYY-MM-DDTHH:MM:SSZ`, and the JSON text itself.
+struct PgText(String);
+
+impl<'a> postgres::types::FromSql<'a> for PgText {
+    fn from_sql(
+        ty: &PgType,
+        raw: &'a [u8],
+    ) -> Result<PgText, Box<dyn std::error::Error + Sync + Send>> {
+        let be_i32 = |b: &[u8]| -> Result<i32, Box<dyn std::error::Error + Sync + Send>> {
+            Ok(i32::from_be_bytes(
+                b.get(0..4)
+                    .and_then(|x| x.try_into().ok())
+                    .ok_or("a 4-byte value")?,
+            ))
+        };
+        let be_i64 = |b: &[u8]| -> Result<i64, Box<dyn std::error::Error + Sync + Send>> {
+            Ok(i64::from_be_bytes(
+                b.get(0..8)
+                    .and_then(|x| x.try_into().ok())
+                    .ok_or("an 8-byte value")?,
+            ))
+        };
+        let text = match *ty {
+            // Days since 2000-01-01.
+            PgType::DATE => {
+                let (y, m, d) = civil_from_days(i64::from(be_i32(raw)?) + DAYS_TO_2000);
+                format!("{y:04}-{m:02}-{d:02}")
+            }
+            // Microseconds since midnight.
+            PgType::TIME => {
+                let us = be_i64(raw)?;
+                let (h, mi, s, f) = clock_of(us.rem_euclid(86_400_000_000));
+                format!("{h:02}:{mi:02}:{s:02}.{f:06}")
+            }
+            // Microseconds since 2000-01-01 00:00:00, UTC for the tz form and
+            // taken as UTC for the naive one, which is how the store writes it.
+            PgType::TIMESTAMP | PgType::TIMESTAMPTZ => {
+                let us = be_i64(raw)?;
+                let days = us.div_euclid(86_400_000_000);
+                let (y, m, d) = civil_from_days(days + DAYS_TO_2000);
+                let (h, mi, s, _) = clock_of(us.rem_euclid(86_400_000_000));
+                format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+            }
+            // JSONB carries a version byte first.
+            PgType::JSONB => String::from_utf8(raw.get(1..).unwrap_or_default().to_vec())?,
+            PgType::JSON => String::from_utf8(raw.to_vec())?,
+            _ => return Err(format!("{ty} is not a type the store reads as text").into()),
+        };
+        Ok(PgText(text))
+    }
+
+    fn accepts(ty: &PgType) -> bool {
+        matches!(
+            *ty,
+            PgType::DATE
+                | PgType::TIME
+                | PgType::TIMESTAMP
+                | PgType::TIMESTAMPTZ
+                | PgType::JSON
+                | PgType::JSONB
+        )
+    }
+}
+
+/// Days from 1970-01-01 to 2000-01-01, Postgres's epoch.
+const DAYS_TO_2000: i64 = 10_957;
+
+/// The civil date of a count of days since 1970-01-01.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    // Howard Hinnant's algorithm, as `day.rs` uses.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Hours, minutes, seconds and microseconds of a count of microseconds
+/// since midnight.
+fn clock_of(us: i64) -> (i64, i64, i64, i64) {
+    (
+        us / 3_600_000_000,
+        (us / 60_000_000) % 60,
+        (us / 1_000_000) % 60,
+        us % 1_000_000,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn postgres_dates_and_times_read_as_the_dialect_renders_them() {
+        // Fault 3 of Wave 4a §6.1 as a unit: the wire form of each type, as
+        // the text the cast would have made of it.
+        use postgres::types::FromSql;
+        let date = PgText::from_sql(&PgType::DATE, &0i32.to_be_bytes()).unwrap();
+        assert_eq!(date.0, "2000-01-01");
+        let date = PgText::from_sql(&PgType::DATE, &9_745i32.to_be_bytes()).unwrap();
+        assert_eq!(date.0, "2026-09-06");
+        let date = PgText::from_sql(&PgType::DATE, &(-1i32).to_be_bytes()).unwrap();
+        assert_eq!(date.0, "1999-12-31");
+        let time = PgText::from_sql(&PgType::TIME, &12_345_678_901i64.to_be_bytes()).unwrap();
+        assert_eq!(time.0, "03:25:45.678901");
+        let ts = PgText::from_sql(
+            &PgType::TIMESTAMPTZ,
+            &(9_745i64 * 86_400_000_000 + 15 * 3_600_000_000 + 20 * 60_000_000).to_be_bytes(),
+        )
+        .unwrap();
+        assert_eq!(ts.0, "2026-09-06T15:20:00Z");
+        let ts = PgText::from_sql(&PgType::TIMESTAMP, &(-1_000_000i64).to_be_bytes()).unwrap();
+        assert_eq!(ts.0, "1999-12-31T23:59:59Z");
+        let j = PgText::from_sql(&PgType::JSONB, b"\x01{\"a\":1}").unwrap();
+        assert_eq!(j.0, "{\"a\":1}");
+        let j = PgText::from_sql(&PgType::JSON, b"[1]").unwrap();
+        assert_eq!(j.0, "[1]");
+    }
 
     #[test]
     fn params_render_for_copy() {

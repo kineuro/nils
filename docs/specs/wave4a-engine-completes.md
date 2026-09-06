@@ -406,6 +406,26 @@ tests and passes them:
    written with an empty extras map. Named here; fixed in §7.4 when there are
    values to write.
 
+**As built (slice 4).** Faults 1 and 3 are one fix, and it is structural
+rather than a discipline: the Postgres store reads a `date`, `time`,
+`timestamp`, `timestamptz`, `json` or `jsonb` column selected raw as the text
+`Dialect::text_of` would have rendered (`YYYY-MM-DD`, `HH:MM:SS.ffffff`,
+`YYYY-MM-DDTHH:MM:SSZ`, the JSON itself), decoded off the wire, so a
+projection that forgets the cast reads the same on both backends instead of
+failing the first time a row of that shape exists. The casts stay where they
+are and stay right; forgetting one stops being a fault. A both-backend test
+selects the four shapes raw, and the session verb's anchor projection, fault
+1's site, is exercised on Postgres unchanged. Fault 2: the CLI suite has a
+Postgres half, one round of the verbs the server will run (init, digest,
+fingerprint, classify, status, session with an anchor file, pick, review,
+custody, release, the private survey) on that backend, gated on the test DSN
+like every other suite's. Fault 4: `classification_axis` holds one row per
+value, its key is `(stack_id, axis, value)`, migration 20 splits what was
+joined, and every reader reads rows: the release matches a role by equality,
+a pick reads its roles as rows, the passes and the naming grammar join the
+rows back into the one string they were written to read. Fault 5 waits for
+§7.4, as it says.
+
 ### 6.2 `contracts/`
 
 The directory holds a licence and a README. Three contracts are overdue:

@@ -753,3 +753,99 @@ fn migration_18_folds_the_versions_into_one_current_state_per_stack() {
     );
     assert!(again.is_err(), "one state per stack");
 }
+
+/// Wave 4a §6.1, fault 3: a date, a time, a timestamp or a JSON column
+/// selected raw reads as the same text on both backends. The cast the
+/// dialect renders stays right; forgetting it stops being a failure that
+/// waits for the first row of that shape.
+#[test]
+fn a_raw_projection_of_a_date_a_time_a_timestamp_and_json_reads_as_text() {
+    for (name, _guard, mut store) in stores() {
+        let (date, time, ts, json) = match store {
+            Store::Sqlite(_) => ("TEXT", "TEXT", "TEXT", "TEXT"),
+            Store::Postgres { .. } => ("DATE", "TIME", "TIMESTAMPTZ", "JSONB"),
+        };
+        store
+            .batch(&format!(
+                "DROP TABLE IF EXISTS raw_shapes; \
+                 CREATE TABLE raw_shapes (d {date}, t {time}, ts {ts}, j {json}); \
+                 INSERT INTO raw_shapes (d, t, ts, j) VALUES \
+                   ('2026-09-06', '03:25:45.678901', '2026-09-06T15:20:00Z', '{{\"a\": 1}}')"
+            ))
+            .unwrap();
+        let rows = store
+            .query("SELECT d, t, ts, j FROM raw_shapes", &[])
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{name}");
+        let r = &rows[0];
+        assert_eq!(r.text(0).unwrap(), "2026-09-06", "{name}");
+        assert_eq!(r.text(1).unwrap(), "03:25:45.678901", "{name}");
+        assert_eq!(r.text(2).unwrap(), "2026-09-06T15:20:00Z", "{name}");
+        let j: serde_json::Value = serde_json::from_str(r.text(3).unwrap()).unwrap();
+        assert_eq!(j["a"], 1, "{name}");
+        store.batch("DROP TABLE raw_shapes").unwrap();
+    }
+}
+
+/// Wave 4a §6.1, fault 4: migration 20 splits a comma-joined axis value into
+/// a row per value, and the new key lets two rows of one axis stand.
+#[test]
+fn migration_20_makes_an_axis_value_a_row() {
+    let dir = TempDir::new("axis-rows");
+    let path = dir.path().join("registry.db");
+    let mut store = Store::open_sqlite(&path).unwrap();
+    migrate::migrate(&mut store, Kind::Registry).unwrap();
+    store
+        .batch(
+            "DROP TABLE classification_axis;
+             CREATE TABLE classification_axis (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               stack_id INTEGER NOT NULL,
+               axis TEXT NOT NULL,
+               value TEXT,
+               confidence REAL NOT NULL,
+               tier TEXT NOT NULL);
+             CREATE UNIQUE INDEX ux_old ON classification_axis (stack_id, axis);
+             UPDATE registry_meta SET value = '19' WHERE key = 'schema_version';
+             INSERT INTO classification_axis (stack_id, axis, value, confidence, tier) VALUES
+               (7, 'role', 't1w,flair', 0.9, 'keywords'),
+               (7, 'base', 'T1w', 0.95, 'exclusive'),
+               (7, 'modifier', NULL, 0.0, 'default')",
+        )
+        .unwrap();
+    let applied = migrate::migrate(&mut store, Kind::Registry).unwrap();
+    assert!(applied.contains(&20), "{applied:?}");
+    let rows = store
+        .query(
+            "SELECT axis, value FROM classification_axis WHERE stack_id = 7 ORDER BY axis, value",
+            &[],
+        )
+        .unwrap();
+    let got: Vec<(String, Option<String>)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.text(0).unwrap().to_string(),
+                r.opt_text(1).unwrap().map(str::to_string),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("base".to_string(), Some("T1w".to_string())),
+            ("modifier".to_string(), None),
+            ("role".to_string(), Some("flair".to_string())),
+            ("role".to_string(), Some("t1w".to_string())),
+        ]
+    );
+    // The same value twice for one axis is refused; a third value is not.
+    assert!(
+        store
+            .batch("INSERT INTO classification_axis (stack_id, axis, value, confidence, tier) VALUES (7, 'role', 't1w', 0.9, 'keywords')")
+            .is_err()
+    );
+    store
+        .batch("INSERT INTO classification_axis (stack_id, axis, value, confidence, tier) VALUES (7, 'role', 'swi', 0.9, 'keywords')")
+        .unwrap();
+}
