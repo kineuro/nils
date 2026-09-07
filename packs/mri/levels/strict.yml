@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+level: strict
+description: The axes and the acquisition type exact, resolution rounded to 0.1 mm, timing to the millisecond and the degree.
+exact:
+  - base
+  - technique
+  - modifier
+  - construct
+  - provenance
+  - post_contrast
+  - body_part
+  - acquisition_type
+  - magnetic_field_strength
+rounded:
+  slice_thickness: 0.1
+  pixel_spacing_row: 0.1
+  pixel_spacing_col: 0.1
+  repetition_time: 1
+  echo_time: 1
+  inversion_time: 1
+  flip_angle: 1

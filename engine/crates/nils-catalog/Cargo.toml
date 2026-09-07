@@ -1,0 +1,26 @@
+[package]
+name = "nils-catalog"
+description = "The catalog of NILS: the engine's only schema knowledge, with the policy of who may see what"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+nils-ask.workspace = true
+nils-dicom.workspace = true
+nils-pack.workspace = true
+nils-registry.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+nils-synth.workspace = true
+
+[lints]
+workspace = true

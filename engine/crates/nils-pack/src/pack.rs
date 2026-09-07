@@ -33,7 +33,7 @@ use crate::yaml::{self, File};
 /// The pack contract this engine implements. A pack declaring a higher one is
 /// refused rather than half-understood. Version 2 (Wave 4a §11.2, C27) adds
 /// the optional `fields` key: a visibility on a catalogue field.
-pub const CONTRACT: u32 = 2;
+pub const CONTRACT: u32 = 3;
 
 /// What a field may be shown to (Wave 4a §11.2, C27): `local` (this node
 /// only: free text, paths, exact dates, identifiers), `federated` (on the
@@ -96,6 +96,9 @@ pub struct Pack {
     pub derived: Vec<Normalizer>,
     /// The axes this pack decides, in declaration order.
     pub axes: Vec<Axis>,
+    /// Wave 4b §6: the comparability levels, what "the same acquisition"
+    /// means at each named level.
+    pub levels: Vec<crate::level::Level>,
     /// The rule sets, in the order they run.
     pub rule_sets: Vec<RuleSet>,
     /// §10: how one stack per session and role is chosen. A pack that
@@ -518,6 +521,20 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         }
     }
 
+    // --- the comparability levels (Wave 4b §6), after the axes they name
+    let axis_names: Vec<String> = axes.iter().map(|a| a.name.clone()).collect();
+    let mut levels: Vec<crate::level::Level> = Vec::new();
+    for f in files_of(m, &manifest, dir, "levels")? {
+        let level = crate::level::load(&f, &axis_names)?;
+        if levels.iter().any(|l| l.name == level.name) {
+            return Err(
+                Error::at(format!("level {}", level.name), "is declared twice")
+                    .in_file(&f.path, Some(&f.source)),
+            );
+        }
+        levels.push(level);
+    }
+
     // --- rule sets written longhand, after the axes they decide
     for f in files_of(m, &manifest, dir, "rules")? {
         let set = load_rule_set(
@@ -656,6 +673,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
     let mut pack = Pack {
         derived,
         axes,
+        levels,
         rule_sets,
         picks,
         ingest,
