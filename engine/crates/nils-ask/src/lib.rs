@@ -7,6 +7,8 @@
 //! slices.
 
 pub mod ast;
+pub mod compile;
+pub mod exec;
 pub mod hash;
 pub mod repair;
 pub mod schema;

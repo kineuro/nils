@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nils_ask::ast::Grain;
-use nils_ask::validate::{Class, DerivedInfo, FieldInfo, KindInfo, Names, Scope};
+use nils_ask::validate::{Class, ColumnRef, DerivedInfo, FieldInfo, KindInfo, Names, Scope};
 use nils_dicom::catalogue::{self, Level as CatalogueLevel, Sensitivity};
 use nils_pack::pack::{Pack, Visibility};
 use nils_registry::clinical;
@@ -109,6 +109,9 @@ pub struct Field {
     /// Where the record came from: `catalogue`, `registry`, `fingerprint`,
     /// `session`, `clinical`.
     pub provenance: &'static str,
+    /// The table and column the field reads (§11).
+    pub table: String,
+    pub column: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -265,18 +268,38 @@ fn fixed_fields() -> Vec<Field> {
              dated: bool,
              federated: bool,
              provenance: &'static str,
-             description: &str| Field {
-        level: level.into(),
-        path: path.into(),
-        type_: ty.into(),
-        class,
-        dated,
-        federated,
-        description: description.into(),
-        caveats: None,
-        ai_context: None,
-        curated: false,
-        provenance,
+             description: &str| {
+        let (table, column): (&str, &str) = match (level, path) {
+            ("cohort", _) => ("cohort", path),
+            ("subject", _) => ("subject", path),
+            ("session", _) => ("session_cache", path),
+            ("study", _) => ("study", path),
+            ("series", _) => ("series", path),
+            ("stack", "id" | "stack_index" | "orientation" | "n_instances") => ("stack", path),
+            ("stack", "day") => ("study", "day"),
+            ("stack", _) => ("stack_fingerprint", path),
+            ("instance", _) => ("instance", path),
+            ("event", "kind") => ("observation_type", "name"),
+            ("event", "date") => ("event", "event_date"),
+            ("event", "precision") => ("event", "event_date_precision"),
+            ("event", _) => ("event", path),
+            _ => ("", path),
+        };
+        Field {
+            level: level.into(),
+            path: path.into(),
+            type_: ty.into(),
+            class,
+            dated,
+            federated,
+            description: description.into(),
+            caveats: None,
+            ai_context: None,
+            curated: false,
+            provenance,
+            table: table.into(),
+            column: column.into(),
+        }
     };
     vec![
         f(
@@ -1089,6 +1112,12 @@ impl Catalog {
                 }
                 other => other.name(),
             };
+            let table = match level {
+                CatalogueLevel::SeriesMr => "series_mr",
+                CatalogueLevel::SeriesCt => "series_ct",
+                CatalogueLevel::SeriesPet => "series_pet",
+                other => other.name(),
+            };
             for (_, f) in catalogue::fields_of(level) {
                 let class = class_of(f.class);
                 if class == Class::Identifying {
@@ -1107,6 +1136,8 @@ impl Catalog {
                     ai_context: None,
                     curated: false,
                     provenance: "catalogue",
+                    table: table.into(),
+                    column: f.column.into(),
                 });
             }
         }
@@ -1550,6 +1581,20 @@ impl Names for Catalog {
                 grain: d.grain,
                 params: d.params.iter().map(|(k, _)| k.clone()).collect(),
             })
+    }
+
+    fn column(&self, level: &str, path: &str) -> Option<ColumnRef> {
+        let f = self.fields.get(&(level.to_string(), path.to_string()))?;
+        if f.table.is_empty() {
+            return None;
+        }
+        let ci = (f.table == "stack_fingerprint" && f.column.starts_with("text_"))
+            .then(|| format!("{}_ci", f.column));
+        Some(ColumnRef {
+            table: f.table.clone(),
+            column: f.column.clone(),
+            ci,
+        })
     }
 }
 

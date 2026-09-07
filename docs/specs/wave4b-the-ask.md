@@ -1160,6 +1160,56 @@ the pack's visibility directly; they move onto this crate when the federated
 merge (Wave 5) needs one policy in one place, and `has_values` is not
 computed yet.
 
+**As built (slice 5, the compiler, 2026-09-07).** `nils_ask::compile` turns a
+desugared, validated ask into one statement per backend: the sets in
+topological order as CTEs (`MATERIALIZED` when read more than once), each
+set a layered subselect in the order of rule 5, the answer a final SELECT
+with keyset paging and a limit. Every grain has one base relation with fixed
+aliases (a stack's joins its series, study, subject, fingerprint, the MR
+detail row and its session under the document's window and scheme digest),
+and every CTE projects the same spine: the key, the subject, the day and its
+precision, the carried ancestor keys, the bindings as `b_*`, and the fields
+its own clauses and its readers' aggregates name as `f_*`, so a layer above
+never touches a base table. `from` a set, a role (the stacks a stored pick
+chose), a handle or an uploaded list; `of` through the cohort edge (open
+intervals only) or the ancestor key; `algebra` as EXISTS, NOT EXISTS and
+UNION over the common bindings; `group` as GROUP BY with `_rows`,
+`_subjects` and its aggregates, arithmetic over them in layers above;
+`has` as a correlated count, a binding under `as`, a predicate under `min`
+and `max`; `pick` as three window layers (`ROW_NUMBER`, `RANK`, the count
+over the partition, then `pick.tied` from the ranks, then the cut), ordering
+by projected columns and ending on the integer key; the comparisons of
+§5.3 against a coarse date, forgiving unless `strict`, with the interval's
+last day as a hook. The dialect layer is one struct: H1 to H5, H7, H8, H10,
+H11 and the four closures (NULLS LAST as a CASE on SQLite, `->>` as text,
+`contains` and `starts_with` on the `_ci` companion, the integer key last in
+every ORDER BY); H6 is retired by the written spacing; H9 is the executor's.
+Two things the fixture taught before a line was right: a parameter read
+twice (`age_at` reads each date twice, a coarse `=` reads each side twice)
+binds twice, since SQLite's placeholders are positional, and an integer or
+double parameter is cast on Postgres, since the driver sends an int8 that a
+placeholder beside an int4 expression would refuse. `nils_ask::exec::run`
+opens the read transaction (`PRAGMA query_only` on SQLite, `READ ONLY` on
+Postgres), sets `statement_timeout` inside it on Postgres and arms a
+watchdog on SQLite's interrupt handle, streams rows through
+`query_stream` on a one-shot statement, cuts at the row and byte caps
+(flagging `truncated`, which forfeits the hash), and hashes a complete
+answer with BLAKE2b over the rows in the answer's order through one
+renderer: integers as digits, doubles at nine decimals with trailing zeros
+trimmed (the two engines sum an average in different orders and disagree in
+the last bit), dates as text, subject codes digested. Fixture A's rows that
+this slice owns run on both backends with agreeing hashes: the rounded
+group key and the projected rounded value, AVG and COUNT projected, a key
+list over 600 keys, a sorted list, `contains` with a lowercase pattern
+against uppercase rows, a pick whose tie falls to the key, a NULL in the
+field a pick orders by, the coarse date under every comparison of §5.3
+with `part` and `days_between`, the cohort edge with `age_at`, a capped
+answer marked truncated and paged to the end by key. The rows that need
+`near`, the sequences, `->>` on a JSON field and the derived fields come
+with slice 6, and the tuple `distinct` refusal with the validator's next
+pass. The SELECT-only database role is the door's, in slice 9; every run
+here is already inside a read transaction that refuses a write.
+
 
 Ordering constraints, before the table. Nothing is written before the record
 carries the amendments (slice 0). The two `stack_fingerprint` indexes, the
