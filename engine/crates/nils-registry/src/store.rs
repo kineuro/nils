@@ -996,9 +996,11 @@ impl Store {
             // another column set still fits
             let all: Vec<&Column> = spec.table.data_columns().collect();
             client.batch_execute(&Dialect::Postgres.create_temp(spec.table, &all))?;
-        } else {
-            client.batch_execute(&format!("TRUNCATE {}", Dialect::temp_name(spec.table)))?;
         }
+        // Emptied every time, and not only when the table was known: the
+        // table is `IF NOT EXISTS`, and a table forgotten on a rollback may
+        // still hold the rows of a copy that ran outside the transaction.
+        client.batch_execute(&format!("TRUNCATE {}", Dialect::temp_name(spec.table)))?;
         let mut text = Vec::with_capacity(rows.len() * 64);
         for row in rows {
             debug_assert_eq!(row.len(), spec.columns.len());
