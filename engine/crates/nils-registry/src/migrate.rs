@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 25;
+pub const SCHEMA_VERSION: i64 = 30;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,7 +154,249 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 25,
         apply: a_release_may_be_withdrawn,
     },
+    Migration {
+        version: 26,
+        apply: a_stack_is_found_by_study_and_by_subject,
+    },
+    Migration {
+        version: 27,
+        apply: a_date_knows_its_precision,
+    },
+    Migration {
+        version: 28,
+        apply: a_membership_is_an_interval,
+    },
+    Migration {
+        version: 29,
+        apply: a_session_has_a_key,
+    },
+    Migration {
+        version: 30,
+        apply: a_question_leaves_a_handle,
+    },
 ];
+
+/// Wave 4b §11.3 and §11.4: the case folded companions of the fingerprint's
+/// eight text columns and the two numbers of the spacing string, filled for
+/// the rows a fingerprint job already wrote, and the two indexes without
+/// which a session-to-stack set is not measurable at the reference scale.
+fn a_stack_is_found_by_study_and_by_subject(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    const CI: &[(&str, &str)] = &[
+        ("text_series_description", "text_series_description_ci"),
+        ("text_protocol_name", "text_protocol_name_ci"),
+        ("text_sequence_name", "text_sequence_name_ci"),
+        ("text_body_part", "text_body_part_ci"),
+        ("text_series_comments", "text_series_comments_ci"),
+        ("text_image_comments", "text_image_comments_ci"),
+        ("text_all", "text_all_ci"),
+        ("text_contrast", "text_contrast_ci"),
+    ];
+    let fresh = !column_exists(store, "stack_fingerprint", "text_all_ci")?;
+    let mut columns: Vec<&str> = CI.iter().map(|(_, ci)| *ci).collect();
+    columns.extend(["pixel_spacing_row", "pixel_spacing_col"]);
+    add_columns(store, "stack_fingerprint", &columns)?;
+    add_indexes(store, "stack_fingerprint")?;
+    if !fresh || !table_exists(store, "stack_fingerprint")? {
+        return Ok(());
+    }
+    // The fill, in Rust and not in SQL, because SQLite's LOWER folds ASCII
+    // only and the writer folds Unicode: a row filled here must read the
+    // same as a row the next fingerprint job writes.
+    let t = schema::table("stack_fingerprint");
+    let sources: Vec<&str> = CI.iter().map(|(raw, _)| *raw).collect();
+    let select = format!(
+        "SELECT id, {}, pixel_spacing FROM {} WHERE id > ? AND id <= ? ORDER BY id",
+        sources.join(", "),
+        store.qualified("stack_fingerprint")
+    );
+    let select = match store.dialect() {
+        crate::dialect::Dialect::Sqlite => select,
+        crate::dialect::Dialect::Postgres => select.replacen('?', "$1", 1).replacen('?', "$2", 1),
+    };
+    let top = store
+        .query_opt(
+            &format!(
+                "SELECT MAX(id) FROM {}",
+                store.qualified("stack_fingerprint")
+            ),
+            &[],
+        )?
+        .and_then(|r| r.opt_int(0).ok().flatten())
+        .unwrap_or(0);
+    let mut low = 0i64;
+    const WINDOW: i64 = 5_000;
+    while low < top {
+        let high = low + WINDOW;
+        let rows = store.query(&select, &[Param::Int(low), Param::Int(high)])?;
+        for r in &rows {
+            let id = r.int(0)?;
+            let mut sets: Vec<(&str, Param)> = Vec::with_capacity(CI.len() + 2);
+            for (i, (_, ci)) in CI.iter().enumerate() {
+                sets.push((
+                    *ci,
+                    match r.opt_text(i + 1)? {
+                        Some(v) => Param::from(v.to_lowercase()),
+                        None => Param::Null,
+                    },
+                ));
+            }
+            let spacing = r.opt_text(CI.len() + 1)?.unwrap_or("");
+            let mut it = spacing.split('\\');
+            let row_sp: Option<f64> = it.next().and_then(|v| v.trim().parse().ok());
+            let col_sp: Option<f64> = it.next().and_then(|v| v.trim().parse().ok());
+            sets.push((
+                "pixel_spacing_row",
+                row_sp.map_or(Param::Null, Param::Double),
+            ));
+            sets.push((
+                "pixel_spacing_col",
+                col_sp.map_or(Param::Null, Param::Double),
+            ));
+            store.update_by_id(t, &sets, "id", id)?;
+        }
+        low = high;
+    }
+    Ok(())
+}
+
+/// Wave 4b §5.2: every stored date carries its precision, row by row. What
+/// is there reads as `day`; a kind's declared precision comes with the next
+/// vocabulary load, which is where the year rule for a placeholder date is
+/// applied (`clinical::load`).
+fn a_date_knows_its_precision(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "observation_type", &["precision"])?;
+    add_columns(store, "event", &["event_date_precision"])?;
+    add_columns(store, "subject_disease_type", &["assigned_on_precision"])?;
+    if table_exists(store, "event")? {
+        store.execute(
+            &format!(
+                "UPDATE {} SET event_date_precision = 'day' WHERE event_date_precision IS NULL",
+                store.qualified("event")
+            ),
+            &[],
+        )?;
+    }
+    if table_exists(store, "subject_disease_type")? {
+        store.execute(
+            &format!(
+                "UPDATE {} SET assigned_on_precision = 'day' WHERE assigned_on IS NOT NULL AND assigned_on_precision IS NULL",
+                store.qualified("subject_disease_type")
+            ),
+            &[],
+        )?;
+    }
+    Ok(())
+}
+
+/// Wave 4b §8.1: a membership is an interval in a log, not a row per pair.
+/// The unique key gains `joined_at`, which no `ALTER` does on both
+/// backends, so the table is rebuilt and its rows copied.
+fn a_membership_is_an_interval(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    if !table_exists(store, "cohort_member")? {
+        return add_tables(store, kind, &["cohort_member"]);
+    }
+    if column_exists(store, "cohort_member", "source")? {
+        return Ok(());
+    }
+    let dialect = store.dialect();
+    let schema_name = store.schema().map(str::to_string);
+    let old = store.qualified("cohort_member");
+    let mut rebuilt = schema::table("cohort_member").clone();
+    rebuilt.name = "cohort_member_rebuilt";
+    store.batch(&dialect.create_table(schema_name.as_deref(), &rebuilt))?;
+    let new = store.qualified("cohort_member_rebuilt");
+    store.batch(&format!(
+        "INSERT INTO {new} (cohort_id, subject_id, joined_at, left_at, notes, source) \
+         SELECT cohort_id, subject_id, joined_at, left_at, notes, 'import' FROM {old} ORDER BY id"
+    ))?;
+    store.batch(&format!("DROP TABLE {old}"))?;
+    store.batch(&format!("ALTER TABLE {new} RENAME TO cohort_member"))?;
+    for ix in dialect.create_indexes(schema_name.as_deref(), schema::table("cohort_member")) {
+        store.batch(&ix)?;
+    }
+    Ok(())
+}
+
+/// Wave 4b §7: the session cache and its labels, the scheme's digest, and
+/// the digest a pick was made under. Digests of the schemes already kept
+/// are computed here; a pick names its scheme's digest by that name.
+fn a_session_has_a_key(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(
+        store,
+        kind,
+        &["session_cache", "session_cache_study", "session_label"],
+    )?;
+    add_columns(store, "session_scheme", &["digest"])?;
+    add_columns(store, "pick", &["scheme_digest"])?;
+    if !table_exists(store, "session_scheme")? {
+        return Ok(());
+    }
+    let t = schema::table("session_scheme");
+    let definition = store
+        .dialect()
+        .text_of(t.column("definition").expect("definition"));
+    let rows = store.query(
+        &format!(
+            "SELECT id, {definition} FROM {} WHERE digest IS NULL",
+            store.qualified("session_scheme")
+        ),
+        &[],
+    )?;
+    for r in &rows {
+        let id = r.int(0)?;
+        let scheme = crate::session::Scheme::from_json(r.text(1)?)
+            .map_err(|e| Error::Message(format!("session_scheme {id} will not parse: {e}")))?;
+        store.update_by_id(t, &[("digest", Param::from(scheme.digest()))], "id", id)?;
+    }
+    if table_exists(store, "pick")? {
+        store.execute(
+            &format!(
+                "UPDATE {pick} SET scheme_digest = (SELECT s.digest FROM {scheme} s WHERE s.name = {pick}.scheme) \
+                 WHERE scheme_digest IS NULL",
+                pick = store.qualified("pick"),
+                scheme = store.qualified("session_scheme")
+            ),
+            &[],
+        )?;
+    }
+    Ok(())
+}
+
+/// Wave 4b §8: what a question leaves behind: the handle, its members and
+/// pages, an uploaded list by reference, the saved ask with its versions,
+/// the curation of the catalog, and the identifier read audit.
+fn a_question_leaves_a_handle(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(
+        store,
+        kind,
+        &[
+            "handle",
+            "handle_member",
+            "handle_page",
+            "values_source",
+            "values_member",
+            "selection",
+            "selection_version",
+            "catalog_curation",
+            "handle_read_audit",
+        ],
+    )
+}
 
 /// Wave 4a §13.1: a release is the history of what left and is never
 /// removed; it may be withdrawn, with a reason.
@@ -731,6 +973,19 @@ fn add_tables(store: &mut Store, kind: Kind, names: &[&str]) -> Result<(), Error
         for ix in dialect.create_indexes(schema.as_deref(), t) {
             store.batch(&ix)?;
         }
+    }
+    Ok(())
+}
+
+/// Create a table's declared indexes that are not there yet.
+fn add_indexes(store: &mut Store, table: &str) -> Result<(), Error> {
+    if !table_exists(store, table)? {
+        return Ok(());
+    }
+    let dialect = store.dialect();
+    let schema = store.schema().map(str::to_string);
+    for ix in dialect.create_indexes(schema.as_deref(), schema::table(table)) {
+        store.batch(&ix)?;
     }
     Ok(())
 }

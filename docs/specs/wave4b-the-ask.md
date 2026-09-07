@@ -1015,6 +1015,56 @@ Retention for a store is never shorter than for the object that cites it.
 
 ## 15. Order of work
 
+**As built (slice 1, schema and store, 2026-09-07).** Migrations 26 to 30
+(`SCHEMA_VERSION` 30), each a Rust function over the declaration as every
+wave's are: the fingerprint's eight `text_*_ci` companions and
+`pixel_spacing_row/col`, filled in Rust for rows a fingerprint job already
+wrote because SQLite's `LOWER` folds ASCII only, plus the two indexes; the
+precision columns (`observation_type.precision`, `event.event_date_precision`,
+`subject_disease_type.assigned_on_precision`), existing rows reading `day`;
+`cohort_member` rebuilt as the interval log with its provenance columns;
+`session_cache`, `session_cache_study` and `session_label`, `session_scheme.digest`
+computed for the schemes kept and `pick.scheme_digest` filled by name; and
+`handle`, `handle_member`, `handle_page`, `values_source`, `values_member`,
+`selection`, `selection_version`, `catalog_curation` and `handle_read_audit`.
+Two things differ from the text above. The identifier read audit is
+`handle_read_audit`, because the linkage store already owns a table named
+`read_audit` for a reveal. And the year rule for a placeholder date is applied
+by the vocabulary load and not by the migration: a kind declares `precision`
+in the vocabulary (`SP Transition` is `year`), and each load re-reads a `day`
+row of that kind on the placeholder day (1 January for a year, the first for a
+month) at the kind's precision, idempotently; the importer writes the kind's
+precision on every event it adds. The store gained `query_with_header`,
+`query_stream`, `begin_read`/`end_read` (`PRAGMA query_only` on SQLite,
+`BEGIN READ ONLY` on Postgres) and `cancel_handle`; a write refused inside the
+read transaction aborts it on Postgres, so the bulk path forgets its temporary
+tables on rollback. `Action` gained the five acts of §8.1.
+
+**As built (slice 1, the synthetic registry, 2026-09-07).** `nils-synth` is a
+crate with one function, `build(registry, plan)`, and a verb, `nils synth
+--seed N --subjects N [--manifest FILE]`, into an initialised, empty registry
+on either backend, in one transaction, advancing the epoch. The dice are
+SplitMix64 written out, so the same seed is the same registry on every
+platform and the two backends' manifests compare equal. The first
+twenty-four subjects are the yardstick's planted cases: thirteen positives
+(two with a second study on one day, one with a session before the
+transition that must not count, one whose two MPRAGE timings alternate so it
+is comparable at `loose` and `strict` but not at `exact`) and eleven
+negatives with one defect each, every case naming the set of the layered
+reading it falls out of (`converted`, `followups`, `good`, `comparable`, or
+`precision` for the transition known to its year). The background plants the
+rest of §13.1: courses with and without an intermediate one, a fifth of the
+transitions known to the year, a transition event at `year` precision beside
+every SPMS row, EDSS and SDMT at random distances, one subject-day in seven
+carrying two studies, five acquisition kits (the 0.5 mm pair; two MPRAGE
+timings alternating; an MPRAGE and a plain GRE alternating; 1.0 mm; no
+FLAIR), a scanner reformat and a localizer on every study so the standing
+disposition predicate has something to exclude, and two cohorts with a
+twentieth of one's members left. Instances are not written; nothing in the
+gate reads the instance grain yet. The manifest carries the counts and the
+cases, and the gate's fixtures are checked against it.
+
+
 Ordering constraints, before the table. Nothing is written before the record
 carries the amendments (slice 0). The two `stack_fingerprint` indexes, the
 store's stream and header, and the `text_*_ci` columns come before any fixture,

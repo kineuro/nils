@@ -134,6 +134,8 @@ enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// A synthetic registry, made up by design and deterministic from a seed, into an empty registry (docs/specs/wave4b-the-ask.md, section 13.1)
+    Synth(SynthArgs),
     /// Every store this registry keeps: where, what it holds, how long, and the command that changes it
     Custody {
         /// Machine-readable output
@@ -143,6 +145,19 @@ enum Command {
         #[arg(long)]
         markdown: bool,
     },
+}
+
+#[derive(Debug, Args)]
+struct SynthArgs {
+    /// The seed; the same seed builds the same registry on either backend
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+    /// Subjects in all; the first twenty-four are the yardstick's planted cases
+    #[arg(long, default_value_t = 240)]
+    subjects: usize,
+    /// Write the manifest of what was planted to this file instead of stdout
+    #[arg(long)]
+    manifest: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -1033,6 +1048,7 @@ fn main() -> ExitCode {
         }) => audit_list(&home, principal, action, since, limit, json),
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
+        Command::Synth(args) => synth(&home, args),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
     };
     match outcome {
@@ -2886,6 +2902,35 @@ fn custody(home: &Home, json: bool, markdown: bool) -> Result<(), Exit> {
     custody_print(&doc)
 }
 
+/// `nils synth`: the synthetic registry of Wave 4b §13.1, into an empty
+/// registry, with the manifest of what was planted.
+fn synth(home: &Home, args: SynthArgs) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let plan = nils_synth::Plan {
+        seed: args.seed,
+        subjects: args.subjects,
+    };
+    let manifest = nils_synth::build(&mut registry, &plan)?;
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| fail(format!("the manifest will not serialize: {e}")))?;
+    match args.manifest {
+        Some(path) => {
+            std::fs::write(&path, format!("{json}\n"))
+                .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+            eprintln!(
+                "synthetic registry built: {} subjects, {} studies, {} stacks, {} events; the manifest is at {}",
+                manifest.counts.subjects,
+                manifest.counts.studies,
+                manifest.counts.stacks,
+                manifest.counts.events,
+                path.display()
+            );
+        }
+        None => println!("{json}"),
+    }
+    Ok(())
+}
+
 /// The custody document (`nils custody --json`, `GET /api/custody`).
 fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value, Exit> {
     let config = registry.config().clone();
@@ -2924,6 +2969,14 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let kinds = count_of(store, "observation_type", "")?;
     let events = count_of(store, "event", " WHERE superseded_by IS NULL")?;
     let with_birth_date = count_of(store, "subject", " WHERE birth_date IS NOT NULL")?;
+    let sessions_cached = count_of(store, "session_cache", "")?;
+    let handles = count_of(store, "handle", " WHERE withdrawn_at IS NULL")?;
+    let handle_rows = count_of(store, "handle_member", "")?;
+    let selections = count_of(store, "selection", "")?;
+    let selection_versions = count_of(store, "selection_version", "")?;
+    let values_sources = count_of(store, "values_source", "")?;
+    let curated = count_of(store, "catalog_curation", "")?;
+    let identifier_reads = count_of(store, "handle_read_audit", "")?;
     let schema = store.schema().map(str::to_string);
     let linkage_holdings = linkage::holdings(&mut registry.open_linkage()?)?;
 
@@ -3129,6 +3182,70 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
                 "read": ["nils audit list [--principal <who>] [--action <action>] [--since <stamp>]"],
                 "change": [],
                 "export": ["nils audit list --json"],
+                "delete": "with the registry",
+            },
+        }),
+        serde_json::json!({
+            "store": "session cache",
+            "owner": "the registry's operator",
+            "what": "each subject's sessions under each window, built by the one resolver over the subject's whole timeline (Wave 4b section 7), with the labels a scheme gives them beside the identity",
+            "where": "rows of session_cache, session_cache_study and session_label in the registry",
+            "files": [],
+            "holds": ["quasi-identifying: the first and last study day of each session", "technical: the surrogate id, the window, the timeline digest, the labels"],
+            "counts": { "sessions": sessions_cached },
+            "kept": "no retention: rebuildable, and dropped on rebuild (Wave 4b section 14.1)",
+            "commands": {
+                "read": ["nils session list"],
+                "change": [],
+                "export": [],
+                "delete": "with the registry, or by the next rebuild",
+            },
+        }),
+        serde_json::json!({
+            "store": "questions and their answers",
+            "owner": "the research group that asks; the data controller sets the retention",
+            "what": "a saved question (a selection) with its immutable versions, the handle a question left behind with the keys it named and the pages it was read by, and an uploaded identifier list by reference (Wave 4b section 8)",
+            "where": "rows of selection, selection_version, handle, handle_member, handle_page, values_source and values_member in the registry",
+            "files": [],
+            "holds": ["quasi-identifying: the subject keys a handle named, the dates and ages its pages carry", "technical: the question itself, its hash, its provenance (who, when, node, pack, epoch, scheme)"],
+            "counts": { "selections": selections, "selection_versions": selection_versions, "handles": handles, "handle_rows": handle_rows, "values_sources": values_sources },
+            "kept": "a handle's rows 90 days after its last read, longer while a release, a selection, a job or a cohort names it, then only its metadata, hash and question; a saved question for ever (Wave 4b section 14.1)",
+            "commands": {
+                "read": ["nils custody"],
+                "change": [],
+                "export": [],
+                "delete": "with the registry",
+            },
+        }),
+        serde_json::json!({
+            "store": "catalog curation",
+            "owner": "the research group",
+            "what": "what a person wrote about a catalog path: a description, a caveat, guidance for an assistant, a visibility or a class, keyed by the path so a re-sync never overwrites it (Wave 4b section 9)",
+            "where": "rows of catalog_curation in the registry",
+            "files": [],
+            "holds": ["technical: prose about fields and kinds; never a subject's data"],
+            "counts": { "paths": curated },
+            "kept": "for ever (Wave 4b section 14.1)",
+            "commands": {
+                "read": ["nils custody"],
+                "change": [],
+                "export": [],
+                "delete": "with the registry",
+            },
+        }),
+        serde_json::json!({
+            "store": "identifier read audit",
+            "owner": "the registry's operator; read by whoever answers for the archive",
+            "what": "who projected identifiers through which handle, when, which columns and how many rows, at every role (Wave 4b section 9)",
+            "where": "rows of handle_read_audit in the registry",
+            "files": [],
+            "holds": ["quasi-identifying: the principal", "technical: the handle, the columns, the row count, the epoch, the time; never an identifier"],
+            "counts": { "rows": identifier_reads },
+            "kept": "for ever, like the rest of the audit (Wave 4b section 14.1)",
+            "commands": {
+                "read": ["nils custody"],
+                "change": [],
+                "export": [],
                 "delete": "with the registry",
             },
         }),
@@ -3548,12 +3665,13 @@ fn scheme_command(home: &Home, command: SchemeCommand) -> Result<(), Exit> {
                 store
                     .execute(
                         &format!(
-                            "UPDATE {} SET definition = {}, note = {}, created_at = {} WHERE name = {}",
+                            "UPDATE {} SET definition = {}, note = {}, created_at = {}, digest = {} WHERE name = {}",
                             store.qualified("session_scheme"),
                             store.dialect().param(1, Type::Json),
                             store.dialect().param(2, Type::Text),
                             store.dialect().param(3, Type::Timestamp),
                             store.dialect().param(4, Type::Text),
+                            store.dialect().param(5, Type::Text),
                         ),
                         &[
                             Param::Text(json),
@@ -3562,6 +3680,7 @@ fn scheme_command(home: &Home, command: SchemeCommand) -> Result<(), Exit> {
                                 None => Param::Null,
                             },
                             Param::Text(nils_registry::time::now_iso()),
+                            Param::Text(scheme.digest()),
                             Param::Text(name.clone()),
                         ],
                     )
@@ -3573,7 +3692,7 @@ fn scheme_command(home: &Home, command: SchemeCommand) -> Result<(), Exit> {
                 .insert(
                     &Insert::new(
                         table("session_scheme"),
-                        &["name", "definition", "created_at", "note"],
+                        &["name", "definition", "created_at", "note", "digest"],
                     ),
                     &[vec![
                         Param::Text(name.clone()),
@@ -3583,6 +3702,7 @@ fn scheme_command(home: &Home, command: SchemeCommand) -> Result<(), Exit> {
                             Some(n) => Param::Text(n.clone()),
                             None => Param::Null,
                         },
+                        Param::Text(scheme.digest()),
                     ]],
                 )
                 .map_err(|e| fail(e.to_string()))?;

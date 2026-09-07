@@ -1188,6 +1188,10 @@ fn custody_quarantine_review_and_purge_go_round() {
             "clinical layer",
             "job records",
             "audit log",
+            "session cache",
+            "questions and their answers",
+            "catalog curation",
+            "identifier read audit",
             "logs"
         ]
     );

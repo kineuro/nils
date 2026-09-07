@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Write as _};
 
+use postgres::fallible_iterator::FallibleIterator;
 use postgres::types::{IsNull, ToSql, Type as PgType, to_sql_checked};
 use rusqlite::types::{ToSqlOutput, ValueRef};
 
@@ -475,7 +476,18 @@ impl Store {
     }
 
     pub fn rollback(&mut self) -> Result<(), Error> {
-        self.batch("ROLLBACK")
+        let done = self.batch("ROLLBACK");
+        self.forget_temps();
+        done
+    }
+
+    /// A temporary table made inside a transaction that rolled back is gone
+    /// with it, so the bulk path must make it again; `create_temp` is
+    /// `IF NOT EXISTS`, so forgetting one that survived costs nothing.
+    fn forget_temps(&mut self) {
+        if let Store::Postgres { temps, .. } = self {
+            temps.clear();
+        }
     }
 
     /// Run one statement, return the rows it affected.
@@ -520,6 +532,115 @@ impl Store {
     /// The first row, if any.
     pub fn query_opt(&mut self, sql: &str, params: &[Param]) -> Result<Option<Row>, Error> {
         Ok(self.query(sql, params)?.into_iter().next())
+    }
+
+    /// Wave 4b §11.4: one query, its column names beside its rows, which is
+    /// what a result handle needs; `Row` stays positional for everything
+    /// else.
+    pub fn query_with_header(
+        &mut self,
+        sql: &str,
+        params: &[Param],
+    ) -> Result<(Vec<String>, Vec<Row>), Error> {
+        match self {
+            Store::Sqlite(c) => {
+                let mut stmt = c.prepare_cached(sql)?;
+                let names: Vec<String> =
+                    stmt.column_names().iter().map(|n| n.to_string()).collect();
+                let mut rows = stmt.query(rusqlite::params_from_iter(params.iter()))?;
+                let mut out = Vec::new();
+                while let Some(row) = rows.next()? {
+                    out.push(sqlite_row(row)?);
+                }
+                Ok((names, out))
+            }
+            Store::Postgres {
+                client, statements, ..
+            } => {
+                let stmt = prepared(client, statements, sql)?;
+                let names: Vec<String> = stmt
+                    .columns()
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect();
+                let args: Vec<&(dyn ToSql + Sync)> = params.iter().map(Param::pg).collect();
+                let rows = client
+                    .query(&stmt, &args)?
+                    .iter()
+                    .map(pg_row)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((names, rows))
+            }
+        }
+    }
+
+    /// Wave 4b §11.4: rows one at a time, so that a cap can stop a scan
+    /// instead of trimming rows already in memory. `each` says whether to go
+    /// on; the count returned is the rows handed over. The statement is
+    /// prepared on its own and never cached, because `prepared()` is an
+    /// unbounded map and an ad hoc question is a shape generator.
+    pub fn query_stream(
+        &mut self,
+        sql: &str,
+        params: &[Param],
+        mut each: impl FnMut(Row) -> Result<bool, Error>,
+    ) -> Result<u64, Error> {
+        let mut n = 0u64;
+        match self {
+            Store::Sqlite(c) => {
+                let mut stmt = c.prepare(sql)?;
+                let mut rows = stmt.query(rusqlite::params_from_iter(params.iter()))?;
+                while let Some(row) = rows.next()? {
+                    n += 1;
+                    if !each(sqlite_row(row)?)? {
+                        break;
+                    }
+                }
+            }
+            Store::Postgres { client, .. } => {
+                let stmt = client.prepare(sql)?;
+                let args: Vec<&(dyn ToSql + Sync)> = params.iter().map(Param::pg).collect();
+                let mut it = client.query_raw(&stmt, args)?;
+                while let Some(row) = it.next()? {
+                    n += 1;
+                    if !each(pg_row(&row)?)? {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    /// Wave 4b §7 and §11.4: a read transaction the ask door runs inside,
+    /// so that a statement timeout has something to attach to on Postgres
+    /// and the door cannot write by mistake on either backend. Ended by
+    /// `end_read`.
+    pub fn begin_read(&mut self) -> Result<(), Error> {
+        match self {
+            Store::Sqlite(_) => self.batch("PRAGMA query_only = 1; BEGIN"),
+            Store::Postgres { .. } => self.batch("BEGIN READ ONLY"),
+        }
+    }
+
+    pub fn end_read(&mut self) -> Result<(), Error> {
+        let done = match self {
+            Store::Sqlite(_) => self.batch("COMMIT; PRAGMA query_only = 0"),
+            Store::Postgres { .. } => self.batch("COMMIT"),
+        };
+        // a write refused inside the transaction aborted it on Postgres, and
+        // `COMMIT` of an aborted transaction is a rollback
+        self.forget_temps();
+        done
+    }
+
+    /// Wave 4b §11.2, H9: what a watchdog thread holds to stop the statement
+    /// this connection is running.
+    pub fn cancel_handle(&self) -> Cancel {
+        match self {
+            Store::Sqlite(c) => Cancel::Sqlite(c.get_interrupt_handle()),
+            Store::Postgres { client, .. } => Cancel::Postgres(client.cancel_token()),
+        }
     }
 
     /// Rows of `table` whose text `key` column is one of `keys`, the listed
@@ -875,9 +996,11 @@ impl Store {
             // another column set still fits
             let all: Vec<&Column> = spec.table.data_columns().collect();
             client.batch_execute(&Dialect::Postgres.create_temp(spec.table, &all))?;
-        } else {
-            client.batch_execute(&format!("TRUNCATE {}", Dialect::temp_name(spec.table)))?;
         }
+        // Emptied every time, and not only when the table was known: the
+        // table is `IF NOT EXISTS`, and a table forgotten on a rollback may
+        // still hold the rows of a copy that ran outside the transaction.
+        client.batch_execute(&format!("TRUNCATE {}", Dialect::temp_name(spec.table)))?;
         let mut text = Vec::with_capacity(rows.len() * 64);
         for row in rows {
             debug_assert_eq!(row.len(), spec.columns.len());
@@ -901,6 +1024,26 @@ impl Store {
         );
         let stmt = prepared(client, statements, &merge)?;
         client.query(&stmt, &[])?.iter().map(pg_row).collect()
+    }
+}
+
+/// A handle on a running statement, held by another thread (Wave 4b §11.2,
+/// H9): an interrupt on SQLite, a cancel token on Postgres. Held by move,
+/// because SQLite's handle does not clone.
+pub enum Cancel {
+    Sqlite(rusqlite::InterruptHandle),
+    Postgres(postgres::CancelToken),
+}
+
+impl Cancel {
+    pub fn cancel(&self) -> Result<(), Error> {
+        match self {
+            Cancel::Sqlite(h) => {
+                h.interrupt();
+                Ok(())
+            }
+            Cancel::Postgres(t) => Ok(t.cancel_query(postgres::NoTls)?),
+        }
     }
 }
 

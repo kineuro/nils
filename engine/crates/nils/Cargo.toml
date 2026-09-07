@@ -21,6 +21,7 @@ nils-pack.workspace = true
 nils-digest.workspace = true
 nils-registry.workspace = true
 nils-release.workspace = true
+nils-synth.workspace = true
 
 clap.workspace = true
 csv.workspace = true

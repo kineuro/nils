@@ -38,7 +38,7 @@ pub use keys::{KeyError, KeyStore};
 pub use linkage::Subkeys;
 pub use migrate::SCHEMA_VERSION;
 pub use pseudonym::Scheme;
-pub use store::{BulkPath, Error, Insert, Param, Row, Store};
+pub use store::{BulkPath, Cancel, Error, Insert, Param, Row, Store};
 
 /// The two database backends a registry can live in (§4.1): SQLite for a laptop
 /// or a single host, Postgres for a shared server. `nils init --backend` takes

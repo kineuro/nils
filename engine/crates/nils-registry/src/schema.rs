@@ -226,6 +226,11 @@ fn build_registry() -> Vec<Table> {
                 req("definition", Type::Json),
                 req("created_at", Type::Timestamp),
                 col("note", Type::Text),
+                // Wave 4b §7: the definition's digest, so that a pick, a
+                // label and a handle name the scheme they were made under by
+                // content and not only by a name whose definition can be
+                // replaced.
+                col("digest", Type::Text),
             ],
         )
         .unique(&["name"]),
@@ -435,6 +440,11 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .unique(&["name"]),
+        // Wave 4b §8.1: an interval log, not a row per pair. A subject may
+        // join, leave and join again; at most one interval per pair is open,
+        // which the writer keeps, and the row that opened an interval says
+        // what opened it: an import, a promotion (with the handle, its epoch,
+        // scheme digest and bound parameters), or a hand with a reason.
         Table::new(
             "cohort_member",
             vec![
@@ -444,10 +454,22 @@ fn build_registry() -> Vec<Table> {
                 req("joined_at", Type::Timestamp),
                 col("left_at", Type::Timestamp),
                 col("notes", Type::Text),
+                col("actor", Type::Text),
+                // `import`, `promotion`, `manual`
+                col("source", Type::Text),
+                col("handle_id", Type::Int),
+                col("epoch", Type::Int),
+                col("scheme_digest", Type::Text),
+                col("params", Type::Json),
+                col("ask_hash", Type::Text),
+                col("selection_version", Type::Int),
+                col("reason", Type::Text),
+                col("left_by", Type::Text),
             ],
         )
-        .unique(&["cohort_id", "subject_id"])
-        .index(&["subject_id"]),
+        .unique(&["cohort_id", "subject_id", "joined_at"])
+        .index(&["subject_id"])
+        .index(&["cohort_id", "left_at"]),
         // The vocabulary: diseases and their types, and the kinds of
         // observation. Pack data, loaded by `nils clinical vocabulary load`,
         // because which scales a clinic records is knowledge about the
@@ -490,6 +512,10 @@ fn build_registry() -> Vec<Table> {
                 // released, by name or by default.
                 col("is_sensitive", Type::Int),
                 col("description", Type::Text),
+                // Wave 4b §5.2: the precision a source records this kind at
+                // (`day`, `month`, `year`), the default an import applies
+                // when the row has nothing finer.
+                col("precision", Type::Text),
             ],
         )
         .unique(&["name"]),
@@ -516,6 +542,7 @@ fn build_registry() -> Vec<Table> {
                 req("subject_disease_id", Type::Int),
                 req("disease_type_id", Type::Int),
                 col("assigned_on", Type::Date),
+                col("assigned_on_precision", Type::Text),
                 col("transition_event_id", Type::Int),
                 col("notes", Type::Text),
                 req("created_at", Type::Timestamp),
@@ -537,6 +564,10 @@ fn build_registry() -> Vec<Table> {
                 req("subject_id", Type::Int),
                 req("observation_type_id", Type::Int),
                 req("event_date", Type::Date),
+                // Wave 4b §5.2: `day`, `month` or `year`; a coarse date
+                // denotes the interval it names and a comparison against it
+                // is forgiving unless the clause is strict.
+                col("event_date_precision", Type::Text),
                 col("event_time", Type::Time),
                 col("value", Type::Text),
                 col("number", Type::Double),
@@ -615,6 +646,19 @@ fn build_registry() -> Vec<Table> {
                 col("text_image_comments", Type::Text),
                 col("text_all", Type::Text),
                 col("text_contrast", Type::Text),
+                // Wave 4b §11.3: the same eight, folded and lower-cased
+                // (NFKC plus Unicode lowercase), so that `contains` and
+                // `starts_with` compare the same way on both backends
+                // instead of SQLite's ASCII LIKE against Postgres's exact
+                // one. A pack never reads these; the compiler does.
+                col("text_series_description_ci", Type::Text),
+                col("text_protocol_name_ci", Type::Text),
+                col("text_sequence_name_ci", Type::Text),
+                col("text_body_part_ci", Type::Text),
+                col("text_series_comments_ci", Type::Text),
+                col("text_image_comments_ci", Type::Text),
+                col("text_all_ci", Type::Text),
+                col("text_contrast_ci", Type::Text),
                 // the multi-valued fields as read; a parser tokenizes them
                 col("image_type", Type::Text),
                 col("scanning_sequence", Type::Text),
@@ -652,6 +696,10 @@ fn build_registry() -> Vec<Table> {
                 col("rows", Type::Int),
                 col("columns", Type::Int),
                 col("pixel_spacing", Type::Text),
+                // Wave 4b §11.2, H6: the two numbers of the raw spacing
+                // string, written by the fingerprint so no query splits text.
+                col("pixel_spacing_row", Type::Double),
+                col("pixel_spacing_col", Type::Double),
                 col("fov_x", Type::Double),
                 col("fov_y", Type::Double),
                 col("aspect_ratio", Type::Double),
@@ -688,7 +736,11 @@ fn build_registry() -> Vec<Table> {
         )
         .unique(&["stack_id"])
         .index(&["series_id"])
-        .index(&["modality"]),
+        .index(&["modality"])
+        // Wave 4b §11.4: a session-to-stack or subject-to-stack set is not
+        // measurable at the reference scale without these.
+        .index(&["study_id"])
+        .index(&["subject_id"]),
         // What a pack decided, and what made it decide
         // (`docs/specs/wave2-fingerprint-and-classify.md`, §8).
         //
@@ -812,6 +864,10 @@ fn build_registry() -> Vec<Table> {
                 // the scheme it was made under and the day it names.
                 req("session_day", Type::Date),
                 req("scheme", Type::Text),
+                // Wave 4b §7: the digest of the scheme's definition when the
+                // pick was made, so a `picked` predicate can tell a renamed
+                // scheme from a redefined one.
+                col("scheme_digest", Type::Text),
                 col("score", Type::Double),
                 // How far ahead of the next candidate, as a fraction. Zero is
                 // a tie, and a tie is reported rather than settled by row
@@ -1179,6 +1235,203 @@ fn build_registry() -> Vec<Table> {
         )
         .unique(&["item_id", "stack_id"])
         .index(&["stack_id"]),
+        // Wave 4b §7: the session cache. Identity is a function of the
+        // window alone and is keyed by it; the labels a scheme gives sit
+        // beside it keyed by the scheme's digest, so a label tweak never
+        // rebuilds identity. The key is a surrogate: `first` moves when a
+        // study date is repaired or a late study arrives, and a stored pick
+        // keyed on a day that no longer opens a session would vanish.
+        Table::new(
+            "session_cache",
+            vec![
+                col("id", Type::Id),
+                req("subject_id", Type::Int),
+                req("window_days", Type::Int),
+                req("timeline_digest", Type::Text),
+                req("first", Type::Date),
+                req("last", Type::Date),
+                req("n_studies", Type::Int),
+                req("epoch", Type::Int),
+                req("built_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["subject_id", "window_days", "first"])
+        .index(&["subject_id", "window_days"]),
+        Table::new(
+            "session_cache_study",
+            vec![
+                col("id", Type::Id),
+                req("session_id", Type::Int),
+                req("study_id", Type::Int),
+                req("window_days", Type::Int),
+            ],
+        )
+        .unique(&["study_id", "window_days"])
+        .index(&["session_id"]),
+        Table::new(
+            "session_label",
+            vec![
+                col("id", Type::Id),
+                req("session_id", Type::Int),
+                req("scheme_digest", Type::Text),
+                col("label", Type::Text),
+                col("months", Type::Int),
+                col("nominal", Type::Int),
+                col("offset_months", Type::Double),
+                req("flagged", Type::Int),
+                col("reason", Type::Text),
+            ],
+        )
+        .unique(&["session_id", "scheme_digest"]),
+        // Wave 4b §8.4: a result handle, the rows it named for a stated
+        // window, and the pages it was read by. The desugared ask is stored
+        // with it, because a handle may not be named without one.
+        Table::new(
+            "handle",
+            vec![
+                col("id", Type::Id),
+                col("name", Type::Text),
+                req("grain", Type::Text),
+                req("columns", Type::Json),
+                req("row_count", Type::Int),
+                col("content_hash", Type::Text),
+                req("ast_version", Type::Int),
+                req("ask", Type::Json),
+                col("params", Type::Json),
+                col("selection_versions", Type::Json),
+                req("principal", Type::Text),
+                req("created_at", Type::Timestamp),
+                req("node", Type::Text),
+                col("pack_version", Type::Text),
+                req("epoch", Type::Int),
+                col("scheme_digest", Type::Text),
+                req("disclosure", Type::Text),
+                col("suppression", Type::Json),
+                req("truncated", Type::Int),
+                col("values_unresolved", Type::Json),
+                col("last_read_at", Type::Timestamp),
+                col("rows_dropped_at", Type::Timestamp),
+                col("withdrawn_at", Type::Timestamp),
+                col("withdrawn_by", Type::Text),
+                col("withdrawn_why", Type::Text),
+            ],
+        )
+        .unique(&["name"]),
+        Table::new(
+            "handle_member",
+            vec![
+                col("id", Type::Id),
+                req("handle_id", Type::Int),
+                req("position", Type::Int),
+                req("key", Type::Int),
+                col("subject_id", Type::Int),
+            ],
+        )
+        .unique(&["handle_id", "position"])
+        .index(&["handle_id", "key"]),
+        Table::new(
+            "handle_page",
+            vec![
+                col("id", Type::Id),
+                req("handle_id", Type::Int),
+                req("page", Type::Int),
+                req("rows", Type::Json),
+            ],
+        )
+        .unique(&["handle_id", "page"]),
+        // Wave 4b §4.3 (C41): an uploaded identifier list goes by reference.
+        // The upload's rows die on resolution; what stays is the source,
+        // its digest and the resolved keys. No identifier is ever here.
+        Table::new(
+            "values_source",
+            vec![
+                col("id", Type::Id),
+                req("upload_id", Type::Text),
+                req("namespace", Type::Text),
+                req("digest", Type::Text),
+                req("n", Type::Int),
+                req("unresolved", Type::Int),
+                req("principal", Type::Text),
+                req("created_at", Type::Timestamp),
+                col("handle_id", Type::Int),
+            ],
+        )
+        .unique(&["upload_id"]),
+        Table::new(
+            "values_member",
+            vec![
+                col("id", Type::Id),
+                req("source_id", Type::Int),
+                req("position", Type::Int),
+                col("subject_id", Type::Int),
+            ],
+        )
+        .unique(&["source_id", "position"])
+        .index(&["subject_id"]),
+        // Wave 4b §8.2: a saved ask is a selection, a question with a
+        // version log. A version is immutable; an edit makes the next one.
+        Table::new(
+            "selection",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("owner", Type::Text),
+                req("created_at", Type::Timestamp),
+                req("current_version", Type::Int),
+                col("cohort_id", Type::Int),
+                col("description", Type::Text),
+            ],
+        )
+        .unique(&["name"]),
+        Table::new(
+            "selection_version",
+            vec![
+                col("id", Type::Id),
+                req("selection_id", Type::Int),
+                req("version", Type::Int),
+                req("ask", Type::Json),
+                req("hash", Type::Text),
+                req("created_at", Type::Timestamp),
+                req("actor", Type::Text),
+                col("note", Type::Text),
+            ],
+        )
+        .unique(&["selection_id", "version"]),
+        // Wave 4b §9: what a person wrote about a catalog path, keyed by the
+        // path so that a re-sync never overwrites it.
+        Table::new(
+            "catalog_curation",
+            vec![
+                col("id", Type::Id),
+                req("path", Type::Text),
+                col("description", Type::Text),
+                col("caveats", Type::Text),
+                col("ai_context", Type::Text),
+                col("visibility", Type::Text),
+                col("class", Type::Text),
+                req("updated_at", Type::Timestamp),
+                req("actor", Type::Text),
+            ],
+        )
+        .unique(&["path"]),
+        // Wave 4b §9: who projected identifiers through which handle, at
+        // every role, because knowing costs one row. Not `read_audit`: the
+        // linkage store owns that name for a reveal.
+        Table::new(
+            "handle_read_audit",
+            vec![
+                col("id", Type::Id),
+                req("principal", Type::Text),
+                req("handle_id", Type::Int),
+                req("read_at", Type::Timestamp),
+                req("columns", Type::Json),
+                req("rows", Type::Int),
+                col("purpose", Type::Text),
+                req("epoch", Type::Int),
+            ],
+        )
+        .index(&["handle_id"])
+        .index(&["principal"]),
     ]
 }
 

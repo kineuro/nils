@@ -108,6 +108,14 @@ pub const WRITTEN: &[&str] = &[
     "text_image_comments",
     "text_all",
     "text_contrast",
+    "text_series_description_ci",
+    "text_protocol_name_ci",
+    "text_sequence_name_ci",
+    "text_body_part_ci",
+    "text_series_comments_ci",
+    "text_image_comments_ci",
+    "text_all_ci",
+    "text_contrast_ci",
     "image_type",
     "scanning_sequence",
     "sequence_variant",
@@ -136,6 +144,8 @@ pub const WRITTEN: &[&str] = &[
     "rows",
     "columns",
     "pixel_spacing",
+    "pixel_spacing_row",
+    "pixel_spacing_col",
     "fov_x",
     "fov_y",
     "aspect_ratio",
@@ -308,6 +318,17 @@ fn text_of(r: &Row, stack: usize, series: usize) -> Result<Option<String>, Error
     })
 }
 
+/// The two numbers of the raw spacing string, row spacing first, as DICOM
+/// writes them (Wave 4b §11.2, H6): written beside the string so that no
+/// query ever splits text.
+fn spacing(first: &First) -> (Option<f64>, Option<f64>) {
+    let spacing = first.pixel_spacing.as_deref().unwrap_or("");
+    let mut it = spacing.split('\\');
+    let row_sp: Option<f64> = it.next().and_then(|v| v.trim().parse().ok());
+    let col_sp: Option<f64> = it.next().and_then(|v| v.trim().parse().ok());
+    (row_sp, col_sp)
+}
+
 /// v0's FOV: the column spacing times the columns, the row spacing times the
 /// rows, each rounded to two places, and the ratio of the larger to the
 /// smaller rounded to three (`sort/fingerprint.py`).
@@ -384,6 +405,18 @@ pub fn derive(
     );
 
     let (fov_x, fov_y, aspect) = fov(first);
+    let (spacing_row, spacing_col) = spacing(first);
+
+    // Wave 4b §11.3: the case folded companions of the eight text columns.
+    let ci = |v: &Option<String>| v.as_deref().map(str::to_lowercase);
+    let ci_description = ci(&f_description);
+    let ci_protocol = ci(&f_protocol);
+    let ci_sequence = ci(&f_sequence);
+    let ci_body_part = ci(&f_body_part);
+    let ci_series_comments = ci(&f_series_comments);
+    let ci_image_comments = ci(&f_image_comments);
+    let ci_all = ci(&text_all);
+    let ci_contrast = ci(&text_contrast);
 
     // §6. Each is a pure function of this stack's own row, so a stack derives
     // the same way whichever window it lands in, and each is written beside
@@ -427,6 +460,14 @@ pub fn derive(
         opt(f_image_comments),
         opt(text_all),
         opt(text_contrast),
+        opt(ci_description),
+        opt(ci_protocol),
+        opt(ci_sequence),
+        opt(ci_body_part),
+        opt(ci_series_comments),
+        opt(ci_image_comments),
+        opt(ci_all),
+        opt(ci_contrast),
         opt(image_type.clone()),       // image_type
         opt(text(r, S + 9)?),          // scanning_sequence
         opt(text(r, S + 10)?),         // sequence_variant
@@ -462,6 +503,8 @@ pub fn derive(
         int(first.rows),
         int(first.columns),
         opt(first.pixel_spacing.clone()),
+        num(spacing_row),
+        num(spacing_col),
         num(fov_x),
         num(fov_y),
         num(aspect),
