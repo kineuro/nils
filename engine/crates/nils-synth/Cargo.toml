@@ -1,0 +1,23 @@
+[package]
+name = "nils-synth"
+description = "The synthetic registry of NILS: made up by design, deterministic from a seed, never a sample of an archive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+nils-registry.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+nils-dicom.workspace = true
+
+[lints]
+workspace = true

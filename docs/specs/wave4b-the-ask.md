@@ -1038,8 +1038,31 @@ precision on every event it adds. The store gained `query_with_header`,
 `query_stream`, `begin_read`/`end_read` (`PRAGMA query_only` on SQLite,
 `BEGIN READ ONLY` on Postgres) and `cancel_handle`; a write refused inside the
 read transaction aborts it on Postgres, so the bulk path forgets its temporary
-tables on rollback. `Action` gained the five acts of §8.1. The synthetic
-registry is the second half of the slice.
+tables on rollback. `Action` gained the five acts of §8.1.
+
+**As built (slice 1, the synthetic registry, 2026-09-07).** `nils-synth` is a
+crate with one function, `build(registry, plan)`, and a verb, `nils synth
+--seed N --subjects N [--manifest FILE]`, into an initialised, empty registry
+on either backend, in one transaction, advancing the epoch. The dice are
+SplitMix64 written out, so the same seed is the same registry on every
+platform and the two backends' manifests compare equal. The first
+twenty-four subjects are the yardstick's planted cases: thirteen positives
+(two with a second study on one day, one with a session before the
+transition that must not count, one whose two MPRAGE timings alternate so it
+is comparable at `loose` and `strict` but not at `exact`) and eleven
+negatives with one defect each, every case naming the set of the layered
+reading it falls out of (`converted`, `followups`, `good`, `comparable`, or
+`precision` for the transition known to its year). The background plants the
+rest of §13.1: courses with and without an intermediate one, a fifth of the
+transitions known to the year, a transition event at `year` precision beside
+every SPMS row, EDSS and SDMT at random distances, one subject-day in seven
+carrying two studies, five acquisition kits (the 0.5 mm pair; two MPRAGE
+timings alternating; an MPRAGE and a plain GRE alternating; 1.0 mm; no
+FLAIR), a scanner reformat and a localizer on every study so the standing
+disposition predicate has something to exclude, and two cohorts with a
+twentieth of one's members left. Instances are not written; nothing in the
+gate reads the instance grain yet. The manifest carries the counts and the
+cases, and the gate's fixtures are checked against it.
 
 
 Ordering constraints, before the table. Nothing is written before the record

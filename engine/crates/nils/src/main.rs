@@ -134,6 +134,8 @@ enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// A synthetic registry, made up by design and deterministic from a seed, into an empty registry (docs/specs/wave4b-the-ask.md, section 13.1)
+    Synth(SynthArgs),
     /// Every store this registry keeps: where, what it holds, how long, and the command that changes it
     Custody {
         /// Machine-readable output
@@ -143,6 +145,19 @@ enum Command {
         #[arg(long)]
         markdown: bool,
     },
+}
+
+#[derive(Debug, Args)]
+struct SynthArgs {
+    /// The seed; the same seed builds the same registry on either backend
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+    /// Subjects in all; the first twenty-four are the yardstick's planted cases
+    #[arg(long, default_value_t = 240)]
+    subjects: usize,
+    /// Write the manifest of what was planted to this file instead of stdout
+    #[arg(long)]
+    manifest: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -1033,6 +1048,7 @@ fn main() -> ExitCode {
         }) => audit_list(&home, principal, action, since, limit, json),
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
+        Command::Synth(args) => synth(&home, args),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
     };
     match outcome {
@@ -2884,6 +2900,35 @@ fn custody(home: &Home, json: bool, markdown: bool) -> Result<(), Exit> {
         return Ok(());
     }
     custody_print(&doc)
+}
+
+/// `nils synth`: the synthetic registry of Wave 4b §13.1, into an empty
+/// registry, with the manifest of what was planted.
+fn synth(home: &Home, args: SynthArgs) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let plan = nils_synth::Plan {
+        seed: args.seed,
+        subjects: args.subjects,
+    };
+    let manifest = nils_synth::build(&mut registry, &plan)?;
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| fail(format!("the manifest will not serialize: {e}")))?;
+    match args.manifest {
+        Some(path) => {
+            std::fs::write(&path, format!("{json}\n"))
+                .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+            eprintln!(
+                "synthetic registry built: {} subjects, {} studies, {} stacks, {} events; the manifest is at {}",
+                manifest.counts.subjects,
+                manifest.counts.studies,
+                manifest.counts.stacks,
+                manifest.counts.events,
+                path.display()
+            );
+        }
+        None => println!("{json}"),
+    }
+    Ok(())
 }
 
 /// The custody document (`nils custody --json`, `GET /api/custody`).
