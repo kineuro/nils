@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# From docs/specs/wave4b-the-ask.md, the appendices; the gate's fixtures.
+ast_version: 1
+name: sessions holding both roles at high field
+scheme: default
+params:
+  cohorts:   {type: list,   value: [cohort_a, cohort_b]}
+  tesla:     {type: number, value: 7.0}
+  tesla_tol: {type: number, value: 0.25}
+sets:
+  scope:   {grain: cohort,  where: [["in", {}, ["field", {}, "name"], ["param", {}, "cohorts"]]]}
+  people:  {grain: subject, of: scope}
+  visits:  {grain: session, of: people}
+  flair:
+    grain: stack
+    of: visits
+    where:
+      - ["=",   {}, ["axis", {}, "base"], "T2w"]
+      - ["has", {}, ["axis", {}, "modifier"], "FLAIR"]
+      - ["=",   {}, ["derived", {}, "acquisition_type"], "3D"]
+      - ["~=",  {tol: ["param", {}, "tesla_tol"]},
+                ["derived", {}, "field_strength"], ["param", {}, "tesla"]]
+  mp2rage:
+    grain: stack
+    of: visits
+    where:
+      - ["=",  {}, ["axis", {}, "technique"], "MP2RAGE"]
+      - ["~=", {tol: ["param", {}, "tesla_tol"]},
+               ["derived", {}, "field_strength"], ["param", {}, "tesla"]]
+  both:
+    grain: session
+    from: visits
+    has:
+      - {set: flair,   min: 1}
+      - {set: mp2rage, min: 1}
+keep: [both]
+out: {set: both, level: count}

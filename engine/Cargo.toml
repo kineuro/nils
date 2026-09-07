@@ -27,6 +27,7 @@ nils-pack = { path = "crates/nils-pack" }
 nils-release = { path = "crates/nils-release" }
 nils-synth = { path = "crates/nils-synth" }
 nils-session = { path = "crates/nils-session" }
+nils-ask = { path = "crates/nils-ask" }
 
 blake2 = "0.11"
 bytes = "1"
@@ -51,6 +52,7 @@ jsonwebtoken = { version = "11", default-features = false, features = ["rust_cry
 postgres = "0.19"
 regex = "1.13"
 rusqlite = { version = "0.40", features = ["bundled"] }
+schemars = { version = "1.2", features = ["preserve_order"] }
 serde = { version = "1.0", features = ["derive"] }
 serde-saphyr = "1.2"
 serde_json = { version = "1.0", features = ["preserve_order"] }

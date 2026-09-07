@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# From docs/specs/wave4b-the-ask.md, the appendices; the gate's fixtures.
+ast_version: 1
+name: session pairs four to five years apart with scores
+scheme: default
+params:
+  cohort:      {type: cohort, value: cohort_a}
+  gap:         {type: window, value: {from: 4, to: 5, unit: year}}
+  score_reach: {type: window, value: {from: -366, to: 366, unit: day}}
+sets:
+  scope:  {grain: cohort,  where: [["=", {}, ["field", {}, "name"], ["param", {}, "cohort"]]]}
+  people: {grain: subject, of: scope}
+  edss:   {grain: event,   where: [["=", {}, ["field", {}, "kind"], "EDSS"]]}
+  scored:
+    grain: session
+    of: people
+    near: [{as: score, set: edss, window: ["param", {}, "score_reach"],
+            policy: nearest, tie: earlier}]
+  paired:
+    grain: session
+    from: scored
+    near:
+      - as: later
+        set: scored
+        window: ["param", {}, "gap"]
+        policy: best
+        order: [[["+", {}, ["abs", {}, ["field", {}, "score.offset_days"]],
+                          ["abs", {}, ["field", {}, "later.score.offset_days"]]], asc],
+                [["field", {}, "later.first"], asc]]
+    bind:
+      distance: ["+", {}, ["abs", {}, ["field", {}, "score.offset_days"]],
+                          ["abs", {}, ["field", {}, "later.score.offset_days"]]]
+      gap_days: ["days_between", {}, ["field", {}, "later.first"], ["field", {}, "first"]]
+    pick: {per: subject, n: 1, ties: report,
+           by: [[["field", {}, "distance"], asc], [["field", {}, "first"], asc]]}
+keep: [paired]
+out:
+  set: paired
+  level: record
+  columns:
+    - ["field", {}, "subject.code"]
+    - ["field", {}, "first"]
+    - ["field", {}, "later.first"]
+    - ["field", {}, "gap_days"]
+    - ["field", {}, "score.number"]
+    - ["field", {}, "later.score.number"]
+    - ["field", {}, "pick.tied"]
+  order: [[["field", {}, "subject.code"], asc]]

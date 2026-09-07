@@ -1,0 +1,24 @@
+[package]
+name = "nils-ask"
+description = "The ask of NILS: the question as a document, its desugar, its validation, its schemas and its hash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+nils-registry.workspace = true
+
+blake2.workspace = true
+hex.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde-saphyr.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

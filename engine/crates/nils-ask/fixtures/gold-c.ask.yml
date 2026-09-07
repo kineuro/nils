@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# From docs/specs/wave4b-the-ask.md, the appendices; the gate's fixtures.
+ast_version: 1
+name: per-cohort demographics
+scheme: default
+params:
+  cohorts: {type: list, value: [cohort_a, cohort_b, cohort_c]}
+  as_of:   {type: date, value: "2026-01-01"}
+sets:
+  scope:  {grain: cohort,  where: [["in", {}, ["field", {}, "name"], ["param", {}, "cohorts"]]]}
+  people:
+    grain: subject
+    of: scope
+    bind:
+      age:    ["age_at", {}, ["field", {}, "birth_date"], ["param", {}, "as_of"]]
+      female: ["case",   {}, ["=", {}, ["field", {}, "sex"], "F"], 1, 0]
+  by_cohort:
+    grain: group
+    group: {of: people, by: [["field", {}, "cohort.id"]]}
+    bind:
+      n_female:   ["sum", {set: people}, ["field", {}, "female"]]
+      mean_age:   ["avg", {set: people}, ["field", {}, "age"]]
+      min_age:    ["min", {set: people}, ["field", {}, "age"]]
+      max_age:    ["max", {set: people}, ["field", {}, "age"]]
+      pct_female: ["/",   {}, ["field", {}, "n_female"], ["field", {}, "_subjects"]]
+keep: [by_cohort]
+out:
+  set: by_cohort
+  level: aggregate
+  columns:
+    - ["field", {}, "cohort.id"]
+    - ["field", {}, "_subjects"]
+    - ["field", {}, "n_female"]
+    - ["field", {}, "pct_female"]
+    - ["field", {}, "mean_age"]
+    - ["field", {}, "min_age"]
+    - ["field", {}, "max_age"]
+  measures:
+    - {share:  {of: "_subjects", over: people}}   # this cohort's share of the whole scope
+    - {stddev: {of: age}}
+  order: [[["field", {}, "cohort.id"], asc]]

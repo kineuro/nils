@@ -1090,6 +1090,41 @@ movement rate on a real ingest (§16), and any threshold; the whole-archive
 read is the rebuild's unit of work and it is measured by the gate's timing
 run.
 
+**As built (slice 3, the ask, 2026-09-07).** `nils-ask` holds the types of
+§4.5 as Rust with serde and schemars derives, the clause as a custom
+`[op, {opts}, ...args]` array with the options map mandatory, bindings in the
+order written, and the source forms of `from`. `desugar` runs in a fixed
+order and only adds: an older `ast_version` is upgraded, `pipeline` becomes
+sets chained by `from`, a structural parameter (window, rounding, level) is
+inlined where it is read and its declaration stays, `every` becomes a hidden
+`except` set with `max: 0` plus `min: 1` on the universe, `pairs` a hidden
+clone with `near best`, and `same` a hidden group set keyed by the set's key
+and the `by` tuple with `<as>.largest` and `<as>.groups` bound on the set;
+hidden sets are `<set>__<what>`. `change` and `share` stay as clause ops of
+the core with their meaning fixed in §4.3; the compiler emits them. The
+content hash is BLAKE2b over the canonical JSON of the core with `name` and
+every parameter's value removed, so a value never changes the hash and a
+declaration, a window, a level or `strict` does. Validation reaches the
+catalog through the `Names` trait, which slice 4 implements over a registry;
+it walks the sets in topological order, resolves every path through the
+set's own fields, its bindings, a partner's `as`, the `of` ancestor, a
+carried level (`subject.birth_date`, `cohort.id`) and a `change` pair's four
+fields, and produces seventeen of the nineteen codes with a
+`sets.<name>.<slot>[i]` path and a next call; `truncated` and
+`stale_options` are run time and come with slices 8 and 9. Three codes are
+warnings that leave a document valid: `selection_outdated`,
+`binding_dropped` (a union keeps the common bindings) and `not_releasable`
+(a kept group or event set is a table to read, never a release, which the
+gold C fixture itself does). A bare `selection:<name>` is pinned to its
+current version by `pin_selections` before the hash is taken. Repair
+inserts a missing options map, wraps a lone clause or relation in its list,
+gives an order term without a direction `asc`, and maps operator and unit
+aliases; it never touches a value. The generated schema carries a description
+on every node; the tightened one closes every struct with
+`additionalProperties: false` and lists the op table on the clause's first
+slot, and its digest is what `capabilities.ask` will carry. The four
+documents of the appendices are the crate's fixtures.
+
 
 Ordering constraints, before the table. Nothing is written before the record
 carries the amendments (slice 0). The two `stack_fingerprint` indexes, the
