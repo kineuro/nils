@@ -13,7 +13,8 @@ day (D2: Rust, [02](02-engine.md)), and Wave 1 opened with its spec in
 the public repository ([11](11-order.md), `docs/specs/wave1-parse-and-digest.md`
 in `kineuro/nils`). Open on evidence only: the baseline measurement and the
 pack-format prototype (approved work), and on other people: Amsterdam's cluster and
-Vienna's answers. The name is NILS (D31, 2026-09-02).
+Vienna's answers. The name is NILS (D31, 2026-09-02). Wave 4b opened 2026-09-07
+([18](18-wave4b-the-ask.md)).
 
 This directory is the public copy of the record, which is kept in the private
 repository `kineuro/nils-design` and copied here after a scrub pass
@@ -51,6 +52,8 @@ listed in [SCRUB.md](SCRUB.md). Nothing that was left out changes a decision.
 | [14-federation.md](14-federation.md) | The 2026-09-02 federation design: engines as nodes, optional and node-addable, disclosure levels at the door, compute travels and data stays, the cluster question; amendments C26-C34, decisions D25-D29 |
 | [15-ratification.md](15-ratification.md) | The 2026-09-02 ratification sheet: every open item of 12, 13 and 14, the license and the repository restart, each with a recommended verdict; every verdict recorded the same day (sections 7 to 10), the four items Nima raised in section 8, the repository as built (section 11) |
 | [16-v0-capability-audit.md](16-v0-capability-audit.md) | Every package of v0's engine backend walked, capability by capability, against v1's status: done, partial, missing, dropped or planned. Written 2026-09-04 after the Wave 3 draft proved to rest on a partial reading. Names four capabilities no wave owns, the largest being identity from the path and study-date repair, which together block digesting the legacy MS data |
+| [17-wave4-reframed.md](17-wave4-reframed.md) | The 2026-09-06 reframing of Wave 4 into three waves: the engine completes (4a), the question (4b), the assistant (4c); Nima's rulings R1 to R8 |
+| [18-wave4b-the-ask.md](18-wave4b-the-ask.md) | The 2026-09-07 record of the Wave 4b study: nine rulings D32 to D40, amendments C39 to C42, Nima's eighteen answers, and the C17/C18 clause walk |
 
 ## Decision register
 
@@ -67,9 +70,9 @@ docs carry it in place.
 |---|---|---|---|
 | D1 | The engine is complete alone; every other app is optional, and absence degrades features silently, never errors | 00, 01 | holds; C13 (`off` binds loopback); C37 (every knob is a contract, 15 §8); D25 (the node daemon is one more optional app, in the same binary) |
 | D2 | The engine's volume path is a compiled Rust core shipped as a single static binary; ML stays in optional Python sidecars | 02 | decided 2026-09-02: Rust, on the C1 spike's evidence (02, 15 §7); prior-art premise corrected |
-| D3 | One schema, two storage backends: embedded (SQLite + DuckDB) for standalone, Postgres for the multi-user server | 02 | holds |
+| D3 | One schema, two storage backends: embedded SQLite for standalone, Postgres for the multi-user server | 02 | amended 2026-09-07: DuckDB struck (18 §3) |
 | D4 | The registry is subject-centric and global; "cohort" splits into ingest batch (provenance) and saved selection (membership) | 03 | holds, strengthened; C2, C3, C32 (identity node-local; registry epoch); C36 (the KI registry keeps v0's subject-code scheme and key), D30 (the clinical timeline is core) |
-| D5 | The query AST executes in the engine — one governed query door for UI, agent, and CLI alike | 05, 06 | holds; C4, C16, C17, C18, C20, C22, C27, C28; D20, D27 (a peer's request is the same door, answered as a projection) |
+| D5 | The query AST executes in the engine — one governed query door for UI, agent, and CLI alike | 05, 06 | holds; C4, C16, C17, C18, C20, C22, C27, C28; D20, D27 (a peer's request is the same door, answered as a projection); D32 to D40 (18, 2026-09-07) |
 | D6 | Performance is a budgeted requirement: a 30M-instance digest must fit 8 cores / 64 GB, enforced by a scaled CI benchmark | 02 | principle holds, numbers unanchored; C6 accepted 2026-09-02 |
 | D7 | Every automated judgement emits a review item with evidence into one queue; humans and agents consume the same queue under per-type policies | 05 | holds as spine; C5, C7, C15, C21, C25, C29, D14, D15, D22, D28 |
 | D8 | Authentication is delegated (OIDC, Authentik in our deployment) with `off` and `token` modes; NILS never mints identities again | 05 | holds; C13, C22 (OAuth resource metadata on the MCP endpoint), C30 (node keys, peer claims, no fourth mode) |
@@ -84,7 +87,7 @@ docs carry it in place.
 | D17 | The walker groups by DICOM tags only, records every path, quarantines refusals as a listed output | 02, 12 §5 | |
 | D18 | Rootless container runtime by default; the Docker socket is an opt-in | 09, 12 §5 | C9 |
 | D19 | The deployment glue disappears; `nilsctl` is not ported | 10, 12 §5 | R9 |
-| D20 | Grain and denominators are explicit in the AST | 05, 13 §5.2 | C18 (staged) |
+| D20 | Grain and denominators are explicit in the AST | 05, 13 §5.2, 18 §3 | C18 (staged, then walked 2026-09-07); C39, C40 |
 | D21 | Roles and picks are registry facts; the main acquisition is the default role set | 03, 05, 13 §5.3 | C19 |
 | D22 | Results are first-class objects | 05, 13 §5.5 | C21 |
 | D23 | The harness is replaceable and the contract is the product | 08, 13 §5.8 | C23; six-week pilot |
@@ -96,6 +99,15 @@ docs carry it in place.
 | D29 | Compute travels, data stays | 09, 14 §3.5 | C30, C31 (the executor waits for Amsterdam) |
 | D30 | The clinical timeline is core registry | 03, 15 §8 | C35 |
 | D31 | The name stays NILS; the federation is not named (Yggdrasil withdrawn) | 10, 14 §7, 15 §10 | |
+| D32 | The ask is a graph of named sets at one grain each | 18 §2 | C39 to C42 |
+| D33 | Time is a window with a unit, a policy and a tie rule; dates carry precision; forgiving by default | 18 §2 | Q2, Q3 |
+| D34 | Sessions are a rebuildable cache with a surrogate key | 18 §2 | |
+| D35 | One canonical membership as an interval log, one way promotion, bounded handles, versioned selections | 18 §2 | Q5, Q6, Q7, Q11, Q14 |
+| D36 | The engine serves the affordances and `apply` returns a handle | 18 §2 | Q1 (the funnel) |
+| D37 | One AST, one SQL text per backend; the two backend fixture is the contract; DuckDB struck | 18 §2 | Q18 |
+| D38 | `nils-session`, `nils-catalog`, `nils-ask`, `nils-synth`; the app edits and never executes; the MCP door in the engine | 18 §2 | Q10, Q17 |
+| D39 | Identity is external, optional and admitted per app; a roleless token is refused | 18 §2 | Q8, Q9 |
+| D40 | The gate is N fixtures with a row oracle and three outcomes on a synthetic registry | 18 §2 | Q12, Q13 |
 
 D13 to D19 were proposed by the review ([12](12-review-devils-advocate.md)
 §5), D20 to D24 by the query and agent study
@@ -106,7 +118,7 @@ amended by C35 and C36. Ratified with them: the license (10), the repository res
 R1 to R9 and the freeze F1 (15 §5), the six-week agent pilot and the 90-day
 transcript default (15 §1), and D27's defaults of k = 5 and 10. Two questions for
 Vienna and Amsterdam are listed in 14 §7 and gate nothing before Wave 7. D31, the
-name, was decided by Nima later the same day (15 §10). Next ids: C39 and D32.
+name, was decided by Nima later the same day (15 §10). Next ids: C43 and D41.
 
 ## Where this came from
 

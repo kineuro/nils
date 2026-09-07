@@ -66,6 +66,12 @@ Every ingest batch and classification run advances the registry's **epoch**, a
 monotonic counter reported by `GET /api/capabilities` and stamped on result handles
 (C26), so "as of" is a number and a peer's answer is reproducible.
 
+**Amended 2026-09-07 ([18](18-wave4b-the-ask.md) §3).** The epoch advances on any
+write that changes a judgement, the Wave 4a wording: an ingest batch, a classification
+run, a decision, an import, a release, and from Wave 4b a cohort act (`cohort.create`,
+`cohort.member.add`, `cohort.member.remove`, `cohort.promote`) and `selection.save`. A
+handle re-read after any of these reports a different epoch.
+
 ## Clinical timeline
 
 The event/disease/observation model (events keyed by subject+type+date, diseases,
