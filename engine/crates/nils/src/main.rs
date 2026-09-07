@@ -25,6 +25,7 @@ use clap::{Args, Parser, Subcommand};
 
 mod ask_cli;
 mod ask_doors;
+mod door_client;
 mod serve;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::day::Day;

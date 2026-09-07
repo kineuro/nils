@@ -1435,6 +1435,35 @@ on the private host and set the numbers of §11.5, which stay provisional
 until then. Deferred to slice 10 and 12: the 26 shapes of the traffic as
 a timing suite, the CSV export off a handle, and the gate.
 
+**As built (slice 10, the command line, 2026-09-07).** `nils ask` is the
+non-interactive runner of §12.3 in the same binary: `run`, `validate`,
+`explain`, `options`, `diagnose`, `describe`, `handles` (list, show,
+export, prune) and `selections` (save, list, show), beside slice 9's
+`promote` and `time`. Every verb builds one JSON document and prints it
+through one renderer, so a call reads alike whichever side answered, and
+`--json` prints the document itself. `--pack-dir DIR` answers from this
+registry, in process; `--server URL` asks a running engine through the
+doors, with `--token` or `NILS_TOKEN`. The client is
+`crates/nils/src/door_client.rs`: one HTTP/1.1 request per call over the
+standard library, no runtime and no TLS stack, reading the body by the
+content length the engine now always sends. TLS belongs to whatever sits
+in front of the engine, so an `https` URL is refused by name and the
+command line speaks to a local port or a tunnel; that is a named,
+deliberate limit, not an omission. A listing and a prune stay on the node,
+because they read the registry rather than a door: `handles list`,
+`handles prune` and `selections list` have no `--server`. `handles export`
+writes CSV from the handle's stored pages, so a handle exports with no
+compiler, no statement and no database driver; it takes `--out FILE` or
+standard output. Bar 7 holds and is a test: the same document produces the
+same content hash standalone and against the server, and `explain`,
+`describe` and `validate` print the same text either way. A refused
+document prints every issue with its path and the call that settles it,
+and exits 2. What the tests taught: a server bounded by `--requests N`
+hangs the run that waits for it when a verb makes one request fewer than
+the count, so the command line's own tests stop the engine instead of
+counting its requests. Deferred: `gate` is slice 12's, and the MCP door
+slice 11's.
+
 
 Ordering constraints, before the table. Nothing is written before the record
 carries the amendments (slice 0). The two `stack_fingerprint` indexes, the
