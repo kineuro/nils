@@ -165,6 +165,8 @@ struct Protocol {
     spacing: f64,
     thickness: f64,
     instances: i64,
+    /// The scanner's field strength in tesla.
+    field: f64,
 }
 
 const MPRAGE_05: Protocol = Protocol {
@@ -183,6 +185,7 @@ const MPRAGE_05: Protocol = Protocol {
     spacing: 0.5,
     thickness: 0.5,
     instances: 352,
+    field: 3.0,
 };
 
 /// Differs from `MPRAGE_05` at the exact level only: the timing moved by a
@@ -194,15 +197,11 @@ const MPRAGE_05_NEAR: Protocol = Protocol {
     ..MPRAGE_05
 };
 
-/// Differs from `MPRAGE_05` at every level: no inversion, a plain gradient
-/// echo, however close the resolution sits.
-const GRE_05: Protocol = Protocol {
-    description: "t1_gre_3d_iso_0.5",
-    technique: "GRE",
-    repetition_time: 25.0,
-    echo_time: 4.0,
-    inversion_time: None,
-    flip_angle: 15.0,
+/// Differs from `MPRAGE_05` at every level: the same protocol on a 1.5 T
+/// scanner, and the field strength is exact at every level of the pack.
+const MPRAGE_05_15T: Protocol = Protocol {
+    description: "t1_mprage_sag_iso_0.5_15t",
+    field: 1.5,
     ..MPRAGE_05
 };
 
@@ -211,6 +210,7 @@ const MPRAGE_10: Protocol = Protocol {
     spacing: 1.0,
     thickness: 1.0,
     instances: 176,
+    field: 3.0,
     ..MPRAGE_05
 };
 
@@ -230,6 +230,7 @@ const FLAIR_05: Protocol = Protocol {
     spacing: 0.5,
     thickness: 0.5,
     instances: 352,
+    field: 3.0,
 };
 
 const FLAIR_10: Protocol = Protocol {
@@ -237,6 +238,7 @@ const FLAIR_10: Protocol = Protocol {
     spacing: 1.0,
     thickness: 1.0,
     instances: 176,
+    field: 3.0,
     ..FLAIR_05
 };
 
@@ -256,6 +258,7 @@ const T2_TSE_2D: Protocol = Protocol {
     spacing: 0.5,
     thickness: 3.0,
     instances: 44,
+    field: 3.0,
 };
 
 /// A scanner reformat of the MPRAGE: a stack a question about acquisitions
@@ -266,6 +269,7 @@ const MPR_AX: Protocol = Protocol {
     disposition: "scanner_derived",
     orientation: "Axial",
     instances: 176,
+    field: 3.0,
     ..MPRAGE_05
 };
 
@@ -285,6 +289,7 @@ const LOCALIZER: Protocol = Protocol {
     spacing: 1.0,
     thickness: 5.0,
     instances: 9,
+    field: 3.0,
 };
 
 /// What a site scans at every session.
@@ -295,8 +300,8 @@ enum Kit {
     /// The MPRAGE alternates between two timings: comparable at `loose` and
     /// `strict`, not at `exact`.
     AlternateExact,
-    /// The T1 alternates between an MPRAGE and a plain GRE: comparable at no
-    /// level.
+    /// The MPRAGE alternates between a 3 T and a 1.5 T scanner: comparable
+    /// at no level.
     AlternateLoose,
     /// 1.0 mm.
     Low,
@@ -319,7 +324,7 @@ impl Kit {
                 if session.is_multiple_of(2) {
                     MPRAGE_05
                 } else {
-                    GRE_05
+                    MPRAGE_05_15T
                 }
             }
             Kit::Low => MPRAGE_10,
@@ -546,7 +551,7 @@ fn person(i: usize, rng: &mut Rng) -> Person {
             p.case = case(
                 &p.code,
                 "comparable",
-                "an MPRAGE and a plain GRE alternating: comparable at no level",
+                "an MPRAGE at 3 T and at 1.5 T alternating: comparable at no level",
             );
             p
         }
@@ -1286,7 +1291,7 @@ fn write(
                             Param::Double(proto.echo_time),
                             opt_f(proto.inversion_time),
                             Param::Double(proto.flip_angle),
-                            Param::Double(3.0),
+                            Param::Double(proto.field),
                         ]],
                     )?;
                     let stack = one_id(
@@ -1332,7 +1337,7 @@ fn write(
                             Param::Double(proto.repetition_time),
                             opt_f(proto.inversion_time),
                             Param::Double(proto.flip_angle),
-                            Param::Double(3.0),
+                            Param::Double(proto.field),
                             Param::Double(proto.thickness),
                             Param::Double(proto.thickness),
                             text(proto.acquisition_type),
@@ -1349,8 +1354,8 @@ fn write(
                             text("SYNTHETIC"),
                             text("Model S"),
                             text("SYN1"),
-                            Param::Double(3.0),
-                            Param::Double(3.0),
+                            Param::Double(proto.field),
+                            Param::Double(proto.field),
                             text("T"),
                             text(proto.acquisition_type),
                             text("measured"),

@@ -45,6 +45,15 @@ pub struct DerivedInfo {
     pub params: Vec<String>,
 }
 
+/// A comparability level's members, for the signature (§6): what compares
+/// exactly (axes, the acquisition type, physics to the digit) and what
+/// rounds to a step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LevelSpec {
+    pub exact: Vec<String>,
+    pub rounded: Vec<(String, f64)>,
+}
+
 /// Where a field lives, for the compiler (§11): the table and column, and
 /// the case folded companion of a text column when it has one (§11.3).
 #[derive(Debug, Clone, PartialEq)]
@@ -77,6 +86,11 @@ pub trait Names {
     /// columns (a fixture) answers none, and compiling refuses the field.
     fn column(&self, level: &str, path: &str) -> Option<ColumnRef> {
         let _ = (level, path);
+        None
+    }
+    /// A comparability level's members, for the compiler.
+    fn level_spec(&self, name: &str) -> Option<LevelSpec> {
+        let _ = name;
         None
     }
 }
@@ -212,6 +226,7 @@ const PREDICATES: &[&str] = &[
     "and",
     "or",
     "not",
+    "picked",
 ];
 const FUNCTIONS: &[&str] = &[
     "abs",

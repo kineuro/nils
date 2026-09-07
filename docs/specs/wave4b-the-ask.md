@@ -1057,7 +1057,7 @@ rest of §13.1: courses with and without an intermediate one, a fifth of the
 transitions known to the year, a transition event at `year` precision beside
 every SPMS row, EDSS and SDMT at random distances, one subject-day in seven
 carrying two studies, five acquisition kits (the 0.5 mm pair; two MPRAGE
-timings alternating; an MPRAGE and a plain GRE alternating; 1.0 mm; no
+timings alternating; an MPRAGE at 3 T and at 1.5 T alternating; 1.0 mm; no
 FLAIR), a scanner reformat and a localizer on every study so the standing
 disposition predicate has something to exclude, and two cohorts with a
 twentieth of one's members left. Instances are not written; nothing in the
@@ -1209,6 +1209,59 @@ answer marked truncated and paged to the end by key. The rows that need
 with slice 6, and the tuple `distinct` refusal with the validator's next
 pass. The SELECT-only database role is the door's, in slice 9; every run
 here is already inside a read transaction that refuses a write.
+
+**As built (slice 6, the relations, 2026-09-07).** Every set's frame now
+records everything the set exposes by name, each name a column of its CTE,
+so a reader, a partner or a group reads it by column and never by path: a
+`from` source carries its bindings, partners and pick columns along, `of`
+carries the ancestor's bindings under `<ancestor>.<binding>`, and the fields
+other sets read through an aggregate, a group or a partner are found to a
+fixed point before any set compiles, so a partner's partner
+(`later.score.number`) is one carried column. `near` is three layers: a
+LEFT JOIN of the partner's CTE on the subject and the window, with
+`ROW_NUMBER` over the policy's order ending on the partner's key, `RANK` and
+`COUNT` over the anchor row; then `<as>.tied` from the ranks; then the cut
+at rank one, dropping anchors without a partner unless `optional`. The
+window is literal days at compile (the parameter desugared), read as
+interval overlap by default and containment under `strict`; the offset is
+the signed distance to the nearest edge of the partner's interval, zero
+inside it; `nearest` orders by the absolute offset then the day under the
+tie rule, `first` and `last` by the day, `best` by the declared order over
+the anchor's terms and the partner's under `as`, `any` by the day. `attach`
+is a LEFT JOIN of the picked set on this grain's key, inner unless
+`optional`. `change` is a window over the subject's course rows (or an event
+kind's rows): `LAG` for adjacency or a running `MAX` for any earlier row,
+the first qualifying row per subject joined on the subject and exposed as
+`<b>`, `<b>.from_date`, `<b>.to_date`, `<b>.precision` and `<b>.gap_days`.
+`share` divides a binding by the distinct subjects (or rows) of the named
+set; `ordinal`, `prev` and `next` are window functions ordered by the day,
+the precision finer first, then the key; `picked` is an EXISTS over the
+pick's stacks asserting the role, no withdrawal and the document's scheme
+digest. The derived fields read the columns they need, added to the set's
+projection: `acquisition_type` coalesces the filled and the read value,
+`voxel` is the greatest of the spacings and the named third, `voxel_min`,
+`voxel_max`, `resolution`, `study_day`, `course` (the latest course row),
+and `signature {level}`, which deviates from §6's "several columns": it is
+one text column, the level's exact axes as their sorted values, the
+acquisition type and the field strength as read, every rounded physics
+number as an integer at its step, joined with a bar, since a group key and
+an equality read one column and the pack's level file names the members.
+Two things the yardstick taught: SQLite's placeholders are numbered now
+(`?N`), because a layer wraps the one below it and an outer expression's
+placeholder sits before an inner one in the text while it binds after it
+(slice 5's care with binding order held only inside one layer); and the
+synthetic registry's loose alternation is now an MPRAGE at 3 T against the
+same at 1.5 T, since a plain GRE never enters a set that asks for the MPRAGE
+technique and so fell out at `good`, not at `comparable`, the stage it was
+planted to exercise. The gate's three fixtures run on both backends with
+agreeing hashes: the yardstick returns exactly the planted positives
+(fourteen, the exact-only and the year-precision cases among them), every
+planted negative falls out where the manifest says, the year-precision case
+leaves under `strict` and the exact-only case under `level: exact`; gold B
+returns one pair per subject through `near best` and `pick per: subject`
+with both scores carried; gold C returns its seven columns over the two
+cohorts with no value list in the document. `measures` stays with slice 7;
+the `pair` grain stays reserved.
 
 
 Ordering constraints, before the table. Nothing is written before the record
