@@ -1263,6 +1263,68 @@ with both scores carried; gold C returns its seven columns over the two
 cohorts with no value list in the document. `measures` stays with slice 7;
 the `pair` grain stays reserved.
 
+**As built (slice 7, handles and custody, 2026-09-07).** `nils_ask::run`
+is the pipeline end to end and the one function the CLI and the doors
+call: prepare (desugar, pin, validate, hash), inline the selections,
+re-evaluate a drifted handle, compile, execute, the post pass, the
+identifiers, the handle, the kept sets. A selection source is inlined
+before compile: the stored, desugared ask's sets, parameters and uploads
+join the document under a `<name>__v<version>__` prefix with every
+reference renamed, the reading set's source becomes the stored answer set,
+and the hash was taken before the inlining, over the pinned name and
+version, so two people saving the same text a week apart hash alike unless
+the referenced question moved. `nils_ask::handle` saves the row of §8.4
+(the columns with the type each showed, the count, the content hash, the
+desugared ask with the parameters as bound and the selection versions
+pinned, the provenance, the disclosure as the scope's, the values
+unresolved by upload as counts and positions, never a value), the keys as
+`handle_member` when the answer names them, and the rows as `handle_page`
+at the page size, every double at nine decimals so a page reads alike on
+both backends. A named handle refuses to save without its ask (bar 6); an
+unnamed one may. `keep` runs each kept set once more at record level with
+no columns and saves it as a handle of keys named `<answer name>/<set>`.
+`prune` drops the rows of every handle unread for ninety days unless a
+cohort was promoted from it or a stored selection reads it (a release or a
+job naming a handle is a later wave's column); `withdraw` drops the rows
+with a reason and keeps the record. `from: handle:<id>` joins the stored
+keys when the handle's epoch is the current one or `pin` is set; otherwise
+the stored ask is re-evaluated into a fresh transient handle, the document
+reads that one, and a `drift` note (keys added, keys removed, `expired`
+when the rows were already dropped) rides on the outcome; a pinned read of
+an expired handle is refused. `nils_ask::values::upload` resolves a list
+through the linkage store (the seeded `patient-id` and any type it holds)
+and keeps only the shape: the upload id, a digest, the count and one
+member per position with the subject or none; the values themselves reach
+no table. `nils_ask::selection` saves a version (a judgement changing act,
+so the epoch advances), refuses a cohort's name unless the selection is
+that cohort's own source ask, and `nils_ask::promote` opens intervals
+from a complete subject grain handle recording the handle, its epoch,
+scheme digest and parameters, the ask hash and the selection version whose
+hash it is, writes the cohort onto that selection, appends on
+re-promotion, and reports `source_moved` when the selection has a newer
+version than the promoted one; a parameter's value is not part of the
+hash, so only a structural edit moves a source. The post pass is Rust over
+the rows: `share {of, over}` adds a column, the value over the distinct
+subjects of the named set (one count query per set); `stddev`, `median`
+and `percentile {of, p}` are scalars over the answer, or, when the answer
+is a group and the column is the child's, one column per group computed
+from the child's rows read with the group's by tuple (gold C's `stddev
+{of: age}` is per cohort); a truncated answer has no measures.
+`out.identifiers` is refused unless the door says the role may project
+raw, and then each namespace is one column decrypted per subject through
+the linkage store, which writes its own read audit, plus one
+`handle_read_audit` row (who, which handle, which columns, how many rows,
+the epoch); the handle's pages hold the answer before the identifiers.
+The custody document spells out each store's retention of §14.1 and names
+`nils ask handles prune` as the deleter. The leak test of bar 5 runs on
+both backends: five subjects get an identifier in the linkage store, six
+are uploaded, the list is run, saved as a selection, read through it,
+explained, and projected with the role; then every text cell of every
+table of the registry, the handle pages and both explain texts are read,
+and the identifier appears in none. Deferred: the disclosure projection
+and suppression beyond the scope's classes, and a handle's session ids
+for a `pin` that replays from rows, both with the doors of slice 9.
+
 
 Ordering constraints, before the table. Nothing is written before the record
 carries the amendments (slice 0). The two `stack_fingerprint` indexes, the

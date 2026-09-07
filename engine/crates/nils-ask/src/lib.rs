@@ -9,11 +9,17 @@
 pub mod ast;
 pub mod compile;
 pub mod exec;
+pub mod handle;
 pub mod hash;
+pub mod measure;
+pub mod promote;
 pub mod repair;
+pub mod run;
 pub mod schema;
+pub mod selection;
 pub mod sugar;
 pub mod validate;
+pub mod values;
 
 pub use ast::{Ask, Clause, Grain, Set, Src};
 pub use hash::content_hash;
