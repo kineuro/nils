@@ -89,6 +89,32 @@ jobs:
       - name: test on SQLite and Postgres 16
         working-directory: engine
         run: cargo test --workspace --locked
+      # Wave 4b §13: the gate is a node local job with its fixtures, its
+      # canonicals and its outcomes in the repository. It runs on a registry
+      # the generator writes, on both backends, and the canonicals are the
+      # same file for each: the two agreeing is the run agreeing with it.
+      - name: the ask gate on SQLite
+        working-directory: engine
+        run: |
+          nils() { cargo run --quiet --locked -p nils -- "$@"; }
+          printf 'the gate of continuous integration\n' | nils --registry /tmp/gate-sqlite key add k
+          nils --registry /tmp/gate-sqlite init --key k
+          nils --registry /tmp/gate-sqlite synth --seed 11 --subjects 48 > /dev/null
+          nils --registry /tmp/gate-sqlite session rebuild > /dev/null
+          nils --registry /tmp/gate-sqlite ask gate --pack-dir ../packs
+        env:
+          NILS_DSN: ""
+      - name: the ask gate on Postgres 16
+        working-directory: engine
+        run: |
+          nils() { cargo run --quiet --locked -p nils -- "$@"; }
+          printf 'the gate of continuous integration\n' | nils --registry /tmp/gate-pg key add k
+          nils --registry /tmp/gate-pg init --key k --backend postgres --schema gate
+          nils --registry /tmp/gate-pg synth --seed 11 --subjects 48 > /dev/null
+          nils --registry /tmp/gate-pg session rebuild > /dev/null
+          nils --registry /tmp/gate-pg ask gate --pack-dir ../packs
+        env:
+          NILS_DSN: postgres://nils:nils@localhost:5432/nils_test
 
   # The v0 compare tool (§12.1) over a synthetic corpus the release binaries
   # write and digest: a projected v0 export with injected divergences must land

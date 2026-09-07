@@ -27,6 +27,7 @@ nils-ask.workspace = true
 nils-catalog.workspace = true
 
 clap.workspace = true
+serde-saphyr.workspace = true
 csv.workspace = true
 regex.workspace = true
 serde.workspace = true

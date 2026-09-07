@@ -1,0 +1,25 @@
+{
+  "ast_version": 1,
+  "name": "contains with a lowercase pattern against uppercase rows",
+  "sets": {
+    "t": {
+      "grain": "stack",
+      "where": [
+        [
+          "contains",
+          {},
+          [
+            "field",
+            {},
+            "text_series_description"
+          ],
+          "MPRAGE"
+        ]
+      ]
+    }
+  },
+  "out": {
+    "set": "t",
+    "level": "count"
+  }
+}

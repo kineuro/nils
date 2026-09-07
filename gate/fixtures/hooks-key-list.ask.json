@@ -1,0 +1,19 @@
+{
+  "ast_version": 1,
+  "name": "A key list over six hundred keys",
+  "values": {
+    "listed": {
+      "upload": "gate-600"
+    }
+  },
+  "sets": {
+    "a": {
+      "grain": "subject",
+      "from": "values:listed"
+    }
+  },
+  "out": {
+    "set": "a",
+    "level": "count"
+  }
+}

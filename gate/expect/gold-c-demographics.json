@@ -1,0 +1,51 @@
+{
+  "name": "gold-c-demographics",
+  "question": "Per cohort demographics with no value list in the document",
+  "hash": "05dc66a29c5d375129f7b1ac861ea69f3708e31927f0efc63db0a3ccca3ce361",
+  "columns": [
+    "_key",
+    "_subject",
+    "cohort.id",
+    "_subjects",
+    "n_female",
+    "pct_female",
+    "mean_age",
+    "min_age",
+    "max_age",
+    "stddev.age",
+    "share._subjects"
+  ],
+  "row_count": 2,
+  "rows": [
+    [
+      "1",
+      "",
+      "1",
+      "38",
+      "31",
+      "0.815789474",
+      "58.470588235",
+      "35",
+      "72",
+      "7.97877808",
+      "0.88372093"
+    ],
+    [
+      "2",
+      "",
+      "2",
+      "12",
+      "9",
+      "0.75",
+      "49.8",
+      "35",
+      "72",
+      "11.513470372",
+      "0.279069767"
+    ]
+  ],
+  "funnel": {
+    "people": 43,
+    "scope": 2
+  }
+}

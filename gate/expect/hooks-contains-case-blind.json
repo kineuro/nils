@@ -1,0 +1,19 @@
+{
+  "name": "hooks-contains-case-blind",
+  "question": "contains with a lowercase pattern against uppercase rows",
+  "hash": "d0c7368e4f622cf4edda6c5d5ccb546a4d48c4d9091e1dce3ac40b655f49a8e0",
+  "columns": [
+    "rows",
+    "subjects"
+  ],
+  "row_count": 1,
+  "rows": [
+    [
+      "344",
+      "48"
+    ]
+  ],
+  "funnel": {
+    "t": 48
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "gold-a-signatures",
+  "question": "Comparable acquisitions by signature at a level",
+  "hash": "fcfe0bdf87113984fe6d4f961b5f3f8c11e6e3fd4b383ac95f37cd8a62a4faf7",
+  "columns": [
+    "rows",
+    "subjects"
+  ],
+  "row_count": 1,
+  "rows": [
+    [
+      "175",
+      "41"
+    ]
+  ],
+  "funnel": {
+    "both": 41,
+    "flair": 41,
+    "mp2rage": 43,
+    "people": 43,
+    "scope": 2,
+    "visits": 43
+  }
+}

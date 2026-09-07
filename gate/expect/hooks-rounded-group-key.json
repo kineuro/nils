@@ -1,0 +1,32 @@
+{
+  "name": "hooks-rounded-group-key",
+  "question": "A rounded group key and a projected rounded value",
+  "hash": "0846146d80fc40cfca657a20aa9bd95dc4db1116c35acb88650eb19546514087",
+  "columns": [
+    "_key",
+    "_subject",
+    "te",
+    "n",
+    "shown"
+  ],
+  "row_count": 2,
+  "rows": [
+    [
+      "1",
+      "",
+      "30",
+      "344",
+      "2300"
+    ],
+    [
+      "2",
+      "",
+      "40",
+      "183",
+      "8.6"
+    ]
+  ],
+  "funnel": {
+    "t": 48
+  }
+}

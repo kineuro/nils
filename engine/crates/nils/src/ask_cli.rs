@@ -60,6 +60,27 @@ pub(crate) enum AskCommand {
     Promote(AskPromoteArgs),
     /// Time the fixtures on this registry, for the caps of section 11.5
     Time(AskTimeArgs),
+    /// The gate (Wave 4b section 13): every fixture of the repository
+    /// against its canonical, on this registry's backend
+    Gate(AskGateArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AskGateArgs {
+    /// The pack directory
+    #[arg(long, value_name = "DIR")]
+    pack_dir: PathBuf,
+    /// The pack, by name in the pack directory
+    #[arg(long, default_value = "mri")]
+    pack: String,
+    /// The gate's own directory; the repository's when absent
+    #[arg(long, value_name = "DIR")]
+    gate: Option<PathBuf>,
+    /// Take the canonicals from this run instead of checking against them
+    #[arg(long)]
+    write: bool,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -298,7 +319,7 @@ fn principal() -> String {
         .unwrap_or_else(actor)
 }
 
-fn load_pack(dir: &std::path::Path, name: &str) -> Result<nils_pack::Pack, Exit> {
+pub(crate) fn load_pack(dir: &std::path::Path, name: &str) -> Result<nils_pack::Pack, Exit> {
     nils_pack::load(&dir.join(name), None)
         .map_err(|e| usage(format!("the pack {name} in {}: {e}", dir.display())))
 }
@@ -335,6 +356,14 @@ pub(crate) fn ask_command(home: &Home, cmd: AskCommand) -> Result<(), Exit> {
         AskCommand::Selections { command } => selections(home, command),
         AskCommand::Promote(args) => ask_promote(home, args),
         AskCommand::Time(args) => ask_time(home, args),
+        AskCommand::Gate(args) => crate::gate::gate(
+            home,
+            args.pack_dir,
+            &args.pack,
+            args.gate,
+            args.write,
+            args.json,
+        ),
     }
 }
 

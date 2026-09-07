@@ -1,0 +1,22 @@
+{
+  "name": "hooks-age-at-cohort-edge",
+  "question": "An ask at the cohort edge with age and the count level",
+  "hash": "23815ad8d4eb986524ce7b5044aaab7a9b57c04a02a9928f7b5ebee6614f9ff5",
+  "columns": [
+    "rows",
+    "subjects"
+  ],
+  "row_count": 1,
+  "rows": [
+    [
+      "29",
+      "29"
+    ]
+  ],
+  "funnel": {
+    "active": 29,
+    "people": 29,
+    "scope": 1,
+    "visits": 29
+  }
+}

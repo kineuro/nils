@@ -1,0 +1,205 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The gate of Wave 4b (docs/specs/wave4b-the-ask.md, section 13): the
+# fixtures, what each is for, and the outcome it is allowed to have. It
+# runs as `nils ask gate` on a registry `nils synth` built, on SQLite and
+# on Postgres, and CI runs it on both.
+#
+# An outcome is one of three (D40), and there is no fourth:
+#   passes            the fixture runs and its rows match the canonical
+#   deferred          the question needs a clause this wave staged, named here
+#   out_of_language   the question is one section 14's limits names
+# A fixture that fails for any other reason fails the gate.
+gate:
+  # The registry the canonicals were taken on. The generator is code plus a
+  # seed, never a checked-in dataset (section 13.1).
+  plan: {seed: 11, subjects: 48}
+  # Every row of every canonical is rendered by the engine's own renderer:
+  # integers as digits, doubles at nine decimals with trailing zeros
+  # trimmed, dates as text, subject codes digested, in the answer's own
+  # order. That is the declared normalisation.
+  normalisation: rendered
+
+  fixtures:
+    # --- the yardstick's four (section 13.2)
+    - name: yardstick-primary
+      family: the yardstick
+      question: PPMS to SPMS converters with three comparable follow-ups between 40 and 50
+      file: fixtures/yardstick-primary.ask.yml
+      outcome: passes
+      note: The layered primary reading of Q1, deal breakers in order.
+    - name: yardstick-strict
+      family: the yardstick
+      question: The same question, read strictly
+      file: fixtures/yardstick-strict.ask.yml
+      outcome: passes
+      note: >-
+        Every comparison against the transition is strict, so a transition
+        known only to its year is not certainly before a follow-up inside
+        that year, and the precision case leaves.
+    - name: yardstick-all-share-one
+      family: the yardstick
+      question: The same question, every follow-up sharing one signature
+      file: fixtures/yardstick-all-share-one.ask.yml
+      outcome: passes
+      note: >-
+        `same` with all at the exact level, where the alternating timings
+        make two groups: a subject whose follow-ups fall into two groups
+        leaves even when the largest group is big enough. Without the
+        clause the same document answers eighteen subjects; with it,
+        sixteen.
+    - name: yardstick-precision
+      family: the yardstick
+      question: The same question over year precision anchors
+      file: fixtures/yardstick-precision.ask.yml
+      outcome: passes
+      note: >-
+        The transition read as the year interval it names, which is the
+        forgiving default and the path the precision case exercises.
+
+    # --- the gold documents of Appendix B
+    - name: gold-a-signatures
+      family: gold
+      question: Comparable acquisitions by signature at a level
+      file: fixtures/gold-a.ask.yml
+      outcome: passes
+    - name: gold-b-pairs
+      family: gold
+      question: Session pairs four to five years apart with scores
+      file: fixtures/gold-b.ask.yml
+      outcome: passes
+      note: The family 6 pair task through `near best` plus `pick per subject`.
+    - name: gold-c-demographics
+      family: gold
+      question: Per cohort demographics with no value list in the document
+      file: fixtures/gold-c.ask.yml
+      outcome: passes
+
+    # --- the conformance suite (section 13.3): every hook and every
+    #     disputed construct, hashed on both backends
+    - name: hooks-rounded-group-key
+      family: conformance
+      question: A rounded group key and a projected rounded value
+      file: fixtures/hooks-rounded-group-key.ask.json
+      outcome: passes
+      note: H4, the rounding hook, as a key and as a value.
+    - name: hooks-avg-and-count
+      family: conformance
+      question: AVG and COUNT projected over a subject's stacks
+      file: fixtures/hooks-avg-and-count.ask.json
+      outcome: passes
+      note: H8, the projection casts, so an average reads alike on both backends.
+    - name: hooks-sorted-list
+      family: conformance
+      question: A sorted list of a subject's sequence names
+      file: fixtures/hooks-sorted-list.ask.json
+      outcome: passes
+      note: H5, the sorted list, which is one text on either engine.
+    - name: hooks-contains-case-blind
+      family: conformance
+      question: contains with a lowercase pattern against uppercase rows
+      file: fixtures/hooks-contains-case-blind.ask.json
+      outcome: passes
+      note: The case folded companion column, not a collation.
+    - name: hooks-key-list
+      family: conformance
+      question: A key list over six hundred keys
+      file: fixtures/hooks-key-list.ask.json
+      outcome: passes
+      note: An uploaded list resolved to its subjects, the gate's own upload.
+    - name: hooks-pick-tie
+      family: conformance
+      question: A pick whose tie falls to the key
+      file: fixtures/hooks-pick-tie.ask.json
+      outcome: passes
+      note: Ties reported, never settled by row order or by text.
+    - name: hooks-null-in-order
+      family: conformance
+      question: A NULL in the field a pick orders by
+      file: fixtures/hooks-null-in-order.ask.json
+      outcome: passes
+      note: NULLS LAST on both backends, as a CASE on SQLite.
+    - name: hooks-coarse-date
+      family: conformance
+      question: A coarse date under every row of section 5.3
+      file: fixtures/hooks-coarse-date.ask.json
+      outcome: passes
+      note: The forgiving reading and the strict one, side by side.
+    - name: hooks-month-window
+      family: conformance
+      question: A month window crossing a month end
+      file: fixtures/hooks-month-window.ask.json
+      outcome: passes
+      note: A month is 31 days, both ends inclusive, and the crossing is arithmetic.
+    - name: hooks-age-at-cohort-edge
+      family: conformance
+      question: An ask at the cohort edge with age and the count level
+      file: fixtures/hooks-age-at-cohort-edge.ask.json
+      outcome: passes
+      note: H3, birthday exact whole years, read twice per date.
+    - name: hooks-paged-record
+      family: conformance
+      question: A record longer than one page, paged to the end by key
+      file: fixtures/hooks-paged-record.ask.json
+      outcome: passes
+      note: Keyset paging on the integer surrogate, never on a text.
+    - name: hooks-sequence
+      family: conformance
+      question: The ordinal, the previous and the next session of a subject
+      file: fixtures/hooks-sequence.ask.json
+      outcome: passes
+      note: The sequences over one subject, ordered by day then precision then key.
+
+    # --- what this wave does not answer, named rather than hidden
+    - name: pair-grain-matching
+      family: family 6, pairs
+      question: >-
+        Match every session of one arm to the nearest session of another arm,
+        one to one, so that no session is used twice
+      outcome: deferred
+      clause: pair
+      note: >-
+        `near best` plus `pick per subject` reproduces the gold pair task
+        (gold-b-pairs), but a one to one matching across a whole arm needs
+        the `pair` grain, which is staged and refused at validate.
+    - name: free-text-search
+      family: family 8, the archive
+      question: Find the studies whose report mentions a new enhancing lesion
+      outcome: out_of_language
+      limit: >-
+        The language reads the catalog's fields, and a report's prose is not
+        one of them: free text beyond the fingerprint's own columns is
+        outside section 14's limits.
+
+  # What each family of the study asks, and what it does not. The gate
+  # carries both lists so a reader sees the edge rather than guessing it.
+  families:
+    - name: family 1, counting a cohort
+      in_scope:
+        - How many subjects, sessions, studies or stacks a cohort holds
+        - The same counts split by a field, a level or a cohort
+      out_of_scope:
+        - A count as of a date in the past; membership is the open interval
+    - name: family 2, the clinical join
+      in_scope:
+        - A score near a session inside a window, by any of the five policies
+        - A course change from one type to another, adjacent or not
+        - An age at a session, birthday exact
+      out_of_scope:
+        - A trajectory model or an interpolation between scores
+    - name: family 6, pairs
+      in_scope:
+        - The nearest partner of each row, and the best partner under an order
+        - A pair per subject through `near best` plus a pick
+      out_of_scope:
+        - A one to one matching across an arm, which needs the `pair` grain
+    - name: family 7, the table
+      in_scope:
+        - A table of counts and averages per group, with shares and scalars
+      out_of_scope:
+        - A pivot whose columns come from the data rather than the document
+    - name: family 8, the archive
+      in_scope:
+        - Every fingerprint field, axis, kind, cohort and derived field
+      out_of_scope:
+        - Free text beyond the fingerprint's columns, and anything a report holds

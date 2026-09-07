@@ -1,0 +1,98 @@
+{
+  "ast_version": 1,
+  "name": "A month window crossing a month end",
+  "params": {
+    "reach": {
+      "type": "window",
+      "value": {
+        "from": -1,
+        "to": 1,
+        "unit": "month"
+      }
+    }
+  },
+  "sets": {
+    "edss": {
+      "grain": "event",
+      "where": [
+        [
+          "=",
+          {},
+          [
+            "field",
+            {},
+            "kind"
+          ],
+          "EDSS"
+        ]
+      ]
+    },
+    "s": {
+      "grain": "session"
+    },
+    "near": {
+      "grain": "session",
+      "from": "s",
+      "near": [
+        {
+          "as": "score",
+          "set": "edss",
+          "window": [
+            "param",
+            {},
+            "reach"
+          ],
+          "policy": "nearest",
+          "tie": "earlier"
+        }
+      ],
+      "bind": {
+        "gap": [
+          "field",
+          {},
+          "score.offset_days"
+        ]
+      }
+    }
+  },
+  "out": {
+    "set": "near",
+    "level": "record",
+    "columns": [
+      [
+        "field",
+        {},
+        "first"
+      ],
+      [
+        "field",
+        {},
+        "score.date"
+      ],
+      [
+        "field",
+        {},
+        "gap"
+      ]
+    ],
+    "order": [
+      [
+        [
+          "field",
+          {},
+          "first"
+        ],
+        "asc"
+      ],
+      [
+        [
+          "field",
+          {},
+          "id"
+        ],
+        "asc"
+      ]
+    ],
+    "limit": 20
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "ast_version": 1,
+  "name": "A pick whose tie falls to the key",
+  "sets": {
+    "s": {
+      "grain": "session"
+    },
+    "t": {
+      "grain": "stack",
+      "of": "s",
+      "where": [
+        [
+          "=",
+          {},
+          [
+            "axis",
+            {},
+            "base"
+          ],
+          "T1w"
+        ]
+      ],
+      "pick": {
+        "per": "session",
+        "by": [
+          [
+            [
+              "field",
+              {},
+              "stack_index"
+            ],
+            "asc"
+          ]
+        ],
+        "ties": "report"
+      }
+    }
+  },
+  "out": {
+    "set": "t",
+    "level": "record",
+    "columns": [
+      [
+        "field",
+        {},
+        "session.id"
+      ],
+      [
+        "field",
+        {},
+        "pick.tied"
+      ],
+      [
+        "field",
+        {},
+        "pick.candidates"
+      ]
+    ],
+    "order": [
+      [
+        [
+          "field",
+          {},
+          "session.id"
+        ],
+        "asc"
+      ]
+    ],
+    "limit": 20
+  }
+}
