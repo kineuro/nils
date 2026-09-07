@@ -1,0 +1,356 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The engine's HTTP API, version 2: version 1 (what `nils serve` exposes in
+# Wave 4a section 11.1) plus the ask doors of Wave 4b section 12.2. One door
+# per operation, resource-shaped; a POST that does anything heavy answers 202
+# with a job id, and progress and results are read from the job; `/api/events`
+# is server-sent events for display and never the execution context. The ask
+# doors take a document (the ask as JSON) or a document handle, run under the
+# caller's roles through a read only reader, and leave handles, never
+# documents, behind.
+openapi: 3.1.0
+info:
+  title: NILS engine API
+  version: "2"
+  description: >-
+    The one door of the engine (decision record 05 section 1). Every answer
+    is JSON; an error is {"error": "..."} with the status that says why: 400
+    a bad request, 401 no or unknown token, 404 no such door or id, 409 a
+    refusal (a job of that kind is running, a decision of a higher rank
+    holds, the registry moved on since a decision was staged), 500 the
+    store. Under --auth token every door takes "Authorization: Bearer
+    <token>" and the token names the principal, user@node.
+servers:
+  - url: http://127.0.0.1:8437
+paths:
+  /api/capabilities:
+    get:
+      summary: What this engine is and speaks (C26)
+      description: The engine version, the contract versions (openapi, review-item, pack), the loaded packs with their versions, the registry id, epoch and schema version, the auth mode, the caller's principal, the node, and the list of doors.
+      responses:
+        "200": {description: The capabilities}
+  /api/status:
+    get:
+      summary: The registry, the running jobs, the last batches (nils status --json)
+      responses:
+        "200": {description: The status document}
+  /api/custody:
+    get:
+      summary: Every store the registry keeps (nils custody --json)
+      responses:
+        "200": {description: The custody document}
+  /api/audit:
+    get:
+      summary: The audit log, newest first (nils audit list --json)
+      parameters:
+        - {name: principal, in: query, schema: {type: string}}
+        - {name: action, in: query, schema: {type: string}, description: An action, or every action under a dotted prefix such as linkage.}
+        - {name: since, in: query, schema: {type: string}, description: An ISO stamp}
+        - {name: limit, in: query, schema: {type: integer, default: 50}}
+      responses:
+        "200": {description: "{count, rows}"}
+  /api/jobs:
+    get:
+      summary: The jobs not over, newest first (nils jobs list)
+      parameters:
+        - {name: all, in: query, schema: {type: boolean}, description: The finished ones too}
+        - {name: limit, in: query, schema: {type: integer, default: 50}}
+      responses:
+        "200": {description: "{count, jobs}"}
+    post:
+      summary: Queue a command line for a worker (nils jobs enqueue)
+      description: The one way anything heavy runs through the door. The verb is one of digest, fingerprint, classify, pick, release, handover; the caller's principal is carried to the verb.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command]
+              properties:
+                command: {type: array, items: {type: string}, description: The command line without the leading nils}
+                name: {type: string}
+      responses:
+        "202": {description: "{job, state: queued}"}
+        "400": {description: Not a verb the door queues}
+  /api/jobs/{id}:
+    get:
+      summary: One job with its state, progress, error and command line (nils jobs show)
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: The job}
+        "404": {description: No such job}
+  /api/jobs/{id}/cancel:
+    post:
+      summary: Ask a running job to stop at its next heartbeat, or drop a queued one (nils jobs cancel)
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: "{job, state}"}
+        "404": {description: No such job}
+  /api/releases:
+    get:
+      summary: The releases the registry holds, newest first (nils release --history)
+      parameters: [{name: limit, in: query, schema: {type: integer, default: 50}}]
+      responses:
+        "200": {description: "{count, releases}"}
+    post:
+      summary: Release a dataset, as a queued job (nils release)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, out]
+              properties:
+                name: {type: string}
+                out: {type: string, description: The directory to write, on the engine's host}
+                layout: {type: string, enum: [descriptive, bids]}
+                dates: {type: string, enum: [keep, shift, year]}
+                on_unknown: {type: string}
+                pack: {type: string}
+                scheme_name: {type: string}
+                subjects: {type: array, items: {type: string}, description: Codes or identifiers (Wave 4a section 8)}
+                sessions: {type: array, items: {type: string}}
+                cohorts: {type: array, items: {type: string}}
+                axes: {type: array, items: {type: string}, description: axis=value}
+                stacks: {type: array, items: {type: integer}}
+                observations: {type: array, items: {type: string}}
+      responses:
+        "202": {description: "{job, state: queued, command}"}
+  /api/handovers:
+    post:
+      summary: Hand a release over, as a queued job (nils handover run)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [release, out]
+              properties:
+                release: {type: string}
+                out: {type: string}
+                key: {type: string}
+      responses:
+        "202": {description: "{job, state: queued, command}"}
+  /api/select:
+    post:
+      summary: What a selection reaches, without releasing it (nils select); the bounded synchronous path
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cohorts: {type: array, items: {type: string}}
+                subjects: {type: array, items: {type: string}}
+                sessions: {type: array, items: {type: string}}
+                stacks: {type: array, items: {type: integer}}
+                axes: {type: object, additionalProperties: true}
+                pack: {type: string, default: mri}
+      responses:
+        "200": {description: "{items, selection, unresolved, reaches}"}
+        "400": {description: An item that cannot be read}
+  /api/review:
+    get:
+      summary: The review items, newest first (nils review list)
+      parameters:
+        - {name: status, in: query, schema: {type: string}}
+        - {name: kind, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, default: 50}}
+      responses:
+        "200": {description: "{count, items}; each item is contracts/review-item v2"}
+  /api/review/{id}:
+    get:
+      summary: One review item with its members (nils review show)
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: The item, and member_stacks for a grouped one}
+        "404": {description: No such item}
+  /api/review/{id}/apply:
+    post:
+      summary: Apply a decision to an item (nils review apply), the one verb of the spine (Wave 4a section 10.2)
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                value: {type: string}
+                nothing: {type: boolean, description: The axis has no value here}
+                member: {type: integer, description: One member of a grouped item, a stack id}
+                scope: {type: string, enum: [stack, series, subject, origin], default: stack}
+                stage: {type: boolean, default: false}
+                author_kind: {type: string, enum: [person, agent, model], default: person}
+                model_version: {type: string}
+                why: {type: string}
+      responses:
+        "200": {description: "{decision, axis, scope, ref, closed, members, staged}"}
+        "409": {description: Refused, with why}
+  /api/review/{id}/accept:
+    post:
+      summary: Acknowledge an item without a decision (nils review accept)
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {why: {type: string}}}
+      responses:
+        "200": {description: "{review_item, accepted_by}"}
+  /api/decisions/{id}/commit:
+    post:
+      summary: Put a staged decision in force (nils review commit)
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {anyway: {type: boolean, description: Even though the registry moved on since it was staged}}}
+      responses:
+        "200": {description: "{committed, items}"}
+        "409": {description: The registry moved on, or nothing is staged}
+  /api/decisions/{id}/withdraw:
+    post:
+      summary: Take a decision out of force and reopen what it closed (nils review withdraw)
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: "{withdrawn, reopened}"}
+        "409": {description: Already withdrawn}
+  /api/events:
+    get:
+      summary: Server-sent events with the open jobs and the epoch, every second, for display
+      responses:
+        "200": {description: "text/event-stream: an event hello, then jobs events"}
+  /api/ask/schema:
+    get:
+      summary: The ask's schema, generated and hand tightened, with its digest (Wave 4b section 4.5)
+      responses:
+        "200": {description: "{generated, tightened, digest}"}
+  /api/ask/catalog:
+    get:
+      summary: The catalog the caller may see, every level's first page (Wave 4b section 9)
+      responses:
+        "200": {description: The catalog document}
+  /api/ask/catalog/{level}:
+    get:
+      summary: One level's fields, paged inside the published byte budget
+      parameters:
+        - {name: level, in: path, required: true, schema: {type: string}}
+        - {name: after, in: query, schema: {type: string}, description: The path the previous page ended on}
+      responses:
+        "200": {description: "{level, fields, next, total}"}
+  /api/ask/validate:
+    post:
+      summary: Strict validation, or repair then validation under mode repair (Wave 4b section 4.4 rule 14)
+      requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, mode: {type: string, enum: [strict, repair]}}}}}}
+      responses:
+        "200": {description: "{hash, warnings, pinned, repairs}"}
+        "400": {description: "{error, issues}: the taxonomy errors with their paths and next calls"}
+  /api/ask/run:
+    post:
+      summary: The bounded path, inside the caps (Wave 4b section 11.5): a handle with its first page of rows
+      description: The document, or a document handle, with a name for the handle, keep, after, limit and purpose; a capped run is flagged truncated and has no hash. Identifiers are projected only by a role that may read them, with an audit row.
+      requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, name: {type: string}, keep: {type: boolean}, after: {type: integer}, limit: {type: integer}, purpose: {type: string}}}}}}
+      responses:
+        "200": {description: "{handle, hash, columns, rows, truncated, pages, measures, drift, kept, identifiers}"}
+        "400": {description: The document is refused}
+        "403": {description: The role may not project identifiers}
+  /api/ask/jobs:
+    post:
+      summary: The unbounded path, 202 with a job id; the handle is the job's result
+      requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, name: {type: string}, keep: {type: boolean}}}}}}
+      responses:
+        "202": {description: "{job, document, state}"}
+  /api/ask/explain:
+    post:
+      summary: Both SQL texts and the columns, selections inlined (Wave 4b section 11.1)
+      responses:
+        "200": {description: "{hash, sqlite, postgres, params, columns, inlined}"}
+  /api/ask/options:
+    post:
+      summary: A set's typed moves with stable ids, templates and legal fillers; no query (Wave 4b section 10)
+      requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, set: {type: string}}}}}}
+      responses:
+        "200": {description: The options, with the token apply takes}
+  /api/ask/apply:
+    post:
+      summary: Apply moves by id to a document handle, atomically; a handle comes back, never a document
+      requestBody: {content: {application/json: {schema: {type: object, required: [document_id, epoch, token, set, moves], properties: {document_id: {type: integer}, epoch: {type: integer}, token: {type: string}, set: {type: string}, moves: {type: array}}}}}}
+      responses:
+        "200": {description: "{document, parent, hash, epoch, changed, options}"}
+        "409": {description: "stale_options: the list came from another document, epoch or scope"}
+  /api/ask/diagnose:
+    post:
+      summary: The issues, the funnel, the drops, the ties, the coarse rows, the cost class, a zero row explanation
+      requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, keys: {type: boolean}}}}}}
+      responses:
+        "200": {description: The diagnosis}
+  /api/ask/preview:
+    post:
+      summary: Ten rows, or the count, by level
+      responses:
+        "200": {description: "{level, columns, rows, truncated}"}
+  /api/ask/describe:
+    post:
+      summary: One sentence per set, the conventions, the denominators, the mechanisms, the disclosure
+      responses:
+        "200": {description: The description}
+  /api/ask/documents:
+    post:
+      summary: Store a document and get its handle
+      responses:
+        "200": {description: "{document, hash, digest}"}
+  /api/ask/documents/{id}:
+    get:
+      summary: A document by handle
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: The document with its provenance}
+        "404": {description: No such document}
+  /api/ask/selections/{name}:
+    put:
+      summary: Save a document as the next version of a selection (reviewer; Wave 4b section 8.2)
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: "{id, name, version, hash, epoch}"}
+        "409": {description: The name is a cohort's}
+    get:
+      summary: A selection's current version, or one named as name@version
+      responses:
+        "200": {description: The version with its document}
+        "404": {description: No such selection}
+  /api/ask/handles/{id}:
+    get:
+      summary: A result handle with its provenance
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: The handle}
+        "404": {description: No such handle}
+  /api/ask/handles/{id}/rows:
+    get:
+      summary: One page of a handle's rows
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+        - {name: page, in: query, schema: {type: integer, default: 0}}
+      responses:
+        "200": {description: "{handle, page, pages, rows}"}
+        "404": {description: No such page, or the rows were dropped by retention}
+  /api/ask/handles/{id}/promote:
+    post:
+      summary: Promote a subject handle into a cohort, as a job (operator; Wave 4b section 8.3)
+      requestBody: {content: {application/json: {schema: {type: object, required: [cohort], properties: {cohort: {type: string}, create: {type: boolean}, reason: {type: string}}}}}}
+      responses:
+        "202": {description: "{job, state}"}
+  /api/ask/values:
+    post:
+      summary: An identifier upload, resolved through the linkage store on arrival; the shape comes back, never a value
+      requestBody: {content: {application/json: {schema: {type: object, required: [namespace, values], properties: {namespace: {type: string}, values: {type: array, items: {type: string}}}}}}}
+      responses:
+        "200": {description: "{upload_id, namespace, n, unresolved, subjects}"}
+  /api/sessions/rebuild:
+    post:
+      summary: Rebuild the session cache for a scheme, as a job under the writer (operator; Wave 4b section 7)
+      requestBody: {content: {application/json: {schema: {type: object, properties: {scheme_name: {type: string}, force: {type: boolean}}}}}}
+      responses:
+        "202": {description: "{job, state}"}

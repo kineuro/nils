@@ -193,7 +193,7 @@ fn the_door_serves_what_the_command_line_has() {
     // C26: the capabilities name the contracts, the pack, the epoch.
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
-    assert_eq!(caps["contracts"]["openapi"], "1", "{caps}");
+    assert_eq!(caps["contracts"]["openapi"], "2", "{caps}");
     assert_eq!(caps["contracts"]["review_item"], "2", "{caps}");
     assert!(
         caps["packs"]
@@ -217,7 +217,7 @@ fn the_door_serves_what_the_command_line_has() {
 
     // Every door the engine lists is in the contract document.
     let text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/openapi/v1/openapi.yaml"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/openapi/v2/openapi.yaml"),
     )
     .unwrap();
     for door in &doors {
@@ -412,7 +412,7 @@ fn under_oidc_the_subject_is_the_principal_and_groups_are_roles() {
     let home = registry();
     let server = Server::start(
         &home,
-        10,
+        11,
         &[
             "--auth",
             "oidc",
@@ -422,6 +422,8 @@ fn under_oidc_the_subject_is_the_principal_and_groups_are_roles() {
             "nils",
             "--oidc-jwks",
             jwks.to_str().unwrap(),
+            "--role",
+            "students=reader",
             "--role",
             "neuro-reviewers=reviewer",
             "--role",
@@ -438,6 +440,13 @@ fn under_oidc_the_subject_is_the_principal_and_groups_are_roles() {
     let stale = token("anna", &[], "nils", now - 600, Some("test-2026"));
     let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&stale));
     assert_eq!(status, 401, "{doc}");
+
+    // Wave 4b §12.4: a token whose groups map to nothing holds no role and
+    // is refused at every door, never defaulted to reader.
+    let unmapped = token("kit", &["guests"], "nils", now + 600, Some("test-2026"));
+    let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&unmapped));
+    assert_eq!(status, 403, "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("no role"), "{doc}");
 
     // A reader: the subject at the issuer's node, the reader role only, and
     // a door that asks for more says so with 403.

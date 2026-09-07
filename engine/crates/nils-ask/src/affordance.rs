@@ -10,7 +10,7 @@ use std::fmt;
 
 use nils_registry::home::Registry;
 use nils_registry::session::Scheme;
-use nils_registry::store::Error as StoreError;
+use nils_registry::store::{Error as StoreError, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -219,6 +219,7 @@ pub fn preview(
     ask: &Ask,
     rows: u64,
     s: &Setting<'_>,
+    reader: Option<&mut Store>,
 ) -> Result<Preview, AffordanceError> {
     let prepared = prepare(ask.clone(), s.names, s.scope)?;
     let mut ask = prepared.ask;
@@ -228,10 +229,11 @@ pub fn preview(
     } else {
         validate(&ask, s.names, s.scope).map_err(AskError::Invalid)?
     };
-    let runner = Runner {
+    let mut runner = Runner {
         names: s.names,
         scheme: s.scheme,
         bounds: s.bounds,
+        reader,
     };
     let limit = match ask.out.level {
         Level::Boolean | Level::Count => None,
@@ -266,6 +268,7 @@ pub fn draft(
     registry: &mut Registry,
     text: &str,
     s: &Setting<'_>,
+    reader: Option<&mut Store>,
 ) -> Result<Drafted, AffordanceError> {
     let (ask, repairs) = parse_repaired(text)?;
     let diagnosis = diagnose(
@@ -277,6 +280,7 @@ pub fn draft(
         s.scheme,
         s.bounds,
         false,
+        reader,
     )?;
     let (document, hash) = if diagnosis.valid {
         let prepared = prepare(ask.clone(), s.names, s.scope)?;

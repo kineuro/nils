@@ -23,6 +23,8 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
+mod ask_cli;
+mod ask_doors;
 mod serve;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::day::Day;
@@ -136,6 +138,11 @@ enum Command {
     },
     /// A synthetic registry, made up by design and deterministic from a seed, into an empty registry (docs/specs/wave4b-the-ask.md, section 13.1)
     Synth(SynthArgs),
+    /// The ask (Wave 4b): run a document to a handle, promote a handle, time the fixtures
+    Ask {
+        #[command(subcommand)]
+        command: ask_cli::AskCommand,
+    },
     /// Every store this registry keeps: where, what it holds, how long, and the command that changes it
     Custody {
         /// Machine-readable output
@@ -374,13 +381,25 @@ struct ServeArgs {
     oidc_groups_claim: String,
     /// A group and the role it grants, as `GROUP=reader|reviewer|operator|admin`;
     /// repeatable. A role implies the ones below it; a caller with no
-    /// mapped group is a reader
+    /// mapped group holds no role and is refused at every door
     #[arg(long, value_name = "GROUP=ROLE")]
     role: Vec<String>,
-    /// A token and who it names, as `TOKEN=user@node`; repeatable. Or set
-    /// NILS_TOKENS to a comma-separated list of the same
-    #[arg(long, value_name = "TOKEN=PRINCIPAL")]
+    /// A token, who it names and the roles it holds, as
+    /// `TOKEN=user@node:reader,operator`; repeatable, or NILS_TOKENS as a
+    /// comma-separated list of the same. Without `:roles` a token holds
+    /// every role (a machine token); with an empty list it holds none
+    #[arg(long, value_name = "TOKEN=PRINCIPAL[:ROLES]")]
     token: Vec<String>,
+    /// The DSN of the ask doors' SELECT only role on Postgres (Wave 4b
+    /// section 12.4); the registry's own, read only, when absent
+    #[arg(long, value_name = "DSN")]
+    ask_dsn: Option<String>,
+    /// Caps for the ask doors, a JSON object over the published defaults
+    #[arg(long, value_name = "JSON")]
+    ask_caps: Option<String>,
+    /// The pack the ask doors read, by name in --pack-dir
+    #[arg(long, default_value = "mri", value_name = "NAME")]
+    ask_pack: String,
     /// Request handlers, each with a registry connection of its own
     #[arg(long, default_value = "4", value_name = "N")]
     workers: usize,
@@ -1073,6 +1092,7 @@ fn main() -> ExitCode {
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
         Command::Synth(args) => synth(&home, args),
+        Command::Ask { command } => ask_cli::ask_command(&home, command),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
     };
     match outcome {
@@ -3647,7 +3667,7 @@ fn read_scheme(path: &Path) -> Result<session::Scheme, Exit> {
     session::Scheme::parse(&text).map_err(|e| usage(format!("{}: {e}", path.display())))
 }
 
-fn stored_scheme(registry: &mut Registry, name: &str) -> Result<session::Scheme, Exit> {
+pub(crate) fn stored_scheme(registry: &mut Registry, name: &str) -> Result<session::Scheme, Exit> {
     let store = registry.store();
     let row = store
         .query_opt(

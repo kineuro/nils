@@ -527,6 +527,30 @@ impl Registry {
         self.home.open_store(&self.config, Kind::Registry)
     }
 
+    /// The ask door's reader (Wave 4b §12.4, Q18): on SQLite the file
+    /// opened read only with `query_only` set; on Postgres a session under
+    /// `dsn` when one is given (the deployment's SELECT only role, with
+    /// `default_transaction_read_only` and a `statement_timeout` set on the
+    /// role) and under the registry's own otherwise, with
+    /// `default_transaction_read_only` set on the session either way.
+    pub fn open_ask_reader(&self, dsn: Option<&str>) -> Result<Store, HomeError> {
+        match self.config.backend {
+            Backend::Sqlite => {
+                let path = self.home.dir().join(REGISTRY_DB);
+                Ok(Store::open_sqlite_read_only(&path)?)
+            }
+            Backend::Postgres => {
+                let dsn = match dsn {
+                    Some(d) => d.to_string(),
+                    None => Home::dsn_of(&self.config)?,
+                };
+                let mut store = Store::connect_postgres(&dsn, &self.config.schema)?;
+                store.batch("SET default_transaction_read_only = on")?;
+                Ok(store)
+            }
+        }
+    }
+
     /// The linkage store, migrated if behind and refused if ahead, and
     /// refused when it belongs to another registry (§4.2). A store from
     /// before slice 4 carries no registry id yet and is claimed on first open.
