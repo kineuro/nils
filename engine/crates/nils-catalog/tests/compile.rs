@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Fixture A (`docs/specs/wave4b-the-ask.md`, §13.3), the part of it slice
-//! 5 owns: one statement per ask, executed on both backends inside a read
-//! transaction, with agreeing content hashes. The rows that need `near`,
-//! the sequences and the derived fields come with slice 6.
+//! Fixture A (`docs/specs/wave4b-the-ask.md`, §13.3) and the gate's
+//! fixtures: one statement per ask, executed on both backends inside a
+//! read transaction, with agreeing content hashes; the yardstick returns
+//! the rows the synthetic registry planted, gold B reproduces through
+//! `near best` plus `pick per: subject`, gold C produces its columns.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::sync::{Mutex, MutexGuard};
 
+use nils_ask::ast::{Ask, Clause, Level, Out};
 use nils_ask::compile::{Compiled, Context, compile};
 use nils_ask::exec::{Answer, Bounds, run};
 use nils_ask::validate::Scope;
@@ -19,7 +21,7 @@ use nils_registry::home::{Home, InitOptions};
 use nils_registry::schema::table;
 use nils_registry::session::Scheme;
 use nils_registry::{Backend, Insert, Param, Registry};
-use serde_json::json;
+use serde_json::{Value, json};
 
 static POSTGRES: Mutex<()> = Mutex::new(());
 
@@ -29,6 +31,7 @@ struct Lab {
     name: &'static str,
     registry: Registry,
     catalog: Catalog,
+    manifest: nils_synth::Manifest,
     _dir: TempDir,
     _guard: Option<MutexGuard<'static, ()>>,
 }
@@ -68,7 +71,7 @@ fn lab(name: &'static str, backend: Backend, dsn: Option<String>) -> Lab {
             session_scheme: None,
         })
         .unwrap();
-    nils_synth::build(
+    let manifest = nils_synth::build(
         &mut registry,
         &nils_synth::Plan {
             seed: 11,
@@ -130,6 +133,7 @@ fn lab(name: &'static str, backend: Backend, dsn: Option<String>) -> Lab {
         name,
         registry,
         catalog,
+        manifest,
         _dir: dir,
         _guard: None,
     }
@@ -151,6 +155,10 @@ fn labs() -> Vec<Lab> {
 
 fn ask_of(l: &mut Lab, text: &str) -> (Compiled, Answer) {
     let ask = parse(text).unwrap_or_else(|e| panic!("{}: {e}", l.name));
+    run_ask(l, ask)
+}
+
+fn run_ask(l: &mut Lab, ask: Ask) -> (Compiled, Answer) {
     let prepared =
         prepare(ask, &l.catalog, &Scope::default()).unwrap_or_else(|e| panic!("{}: {e}", l.name));
     let store = l.registry.store();
@@ -503,4 +511,325 @@ fn a_cap_marks_the_answer_truncated_and_a_timeout_stops_it() {
         // the store is whole after a capped run
         assert!(store.query("SELECT 1", &[]).is_ok());
     }
+}
+
+// ------------------------------------------------------------ the gate's fixtures
+
+fn fixture(name: &str) -> Ask {
+    let path = root().join(format!("engine/crates/nils-ask/fixtures/{name}.ask.yml"));
+    parse(&std::fs::read_to_string(&path).unwrap()).unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
+fn set_param(ask: &mut Ask, name: &str, v: Value) {
+    ask.params
+        .get_mut(name)
+        .unwrap_or_else(|| panic!("no parameter {name}"))
+        .value = Some(v);
+}
+
+/// The subject codes of a set's rows, one per row, in the order returned.
+fn codes_of(l: &mut Lab, ask: &Ask, set: &str) -> Vec<String> {
+    let mut a = ask.clone();
+    a.out = Out {
+        set: set.to_string(),
+        level: Level::Record,
+        columns: vec![Clause::field("subject.code")],
+        measures: Vec::new(),
+        identifiers: Vec::new(),
+        order: Vec::new(),
+        limit: None,
+    };
+    a.keep = Vec::new();
+    let (_, answer) = run_ask(l, a);
+    assert!(!answer.truncated, "{}: {set} truncated", l.name);
+    answer
+        .rows
+        .iter()
+        .map(|r| r.text(2).unwrap().to_string())
+        .collect()
+}
+
+fn count_by_code(rows: &[String]) -> BTreeMap<String, usize> {
+    let mut out = BTreeMap::new();
+    for c in rows {
+        *out.entry(c.clone()).or_insert(0) += 1;
+    }
+    out
+}
+
+/// Every backend's hash of one answer, to compare across backends.
+fn agree(hashes: &BTreeMap<&str, Vec<(String, String, usize)>>) {
+    for (what, per_backend) in hashes {
+        if per_backend.len() == 2 {
+            assert_eq!(
+                per_backend[0].1, per_backend[1].1,
+                "{what}: the two backends disagree ({} rows on {}, {} on {})",
+                per_backend[0].2, per_backend[0].0, per_backend[1].2, per_backend[1].0
+            );
+        }
+    }
+}
+
+/// The yardstick (Appendix A): the answer is exactly the planted positives,
+/// and every planted negative falls out where the manifest says.
+#[test]
+fn the_yardstick_returns_the_planted_rows() {
+    let mut hashes: BTreeMap<&str, Vec<(String, String, usize)>> = BTreeMap::new();
+    for mut l in labs() {
+        let cases = l.manifest.cases.clone();
+        let expected: BTreeSet<String> = cases
+            .iter()
+            .filter(|c| c.falls_out_at == "answer" || c.falls_out_at == "precision")
+            .map(|c| c.code.clone())
+            .collect();
+        let ask = fixture("yardstick");
+        let (compiled, answer) = run_ask(&mut l, ask.clone());
+        assert!(!answer.truncated, "{}", l.name);
+        assert_eq!(
+            answer.columns,
+            vec![
+                "_key",
+                "_subject",
+                "code",
+                "transition.to_date",
+                "transition.precision",
+                "n_good",
+                "comparable.largest",
+                "comparable.groups"
+            ],
+            "{}",
+            l.name
+        );
+        let got: BTreeSet<String> = answer
+            .rows
+            .iter()
+            .map(|r| r.text(2).unwrap().to_string())
+            .collect();
+        assert_eq!(
+            got, expected,
+            "{}: the answer is not the planted positives\n{}",
+            l.name, compiled.sql
+        );
+        for r in &answer.rows {
+            assert!(r.int(5).unwrap() >= 3, "{}: n_good", l.name);
+            assert!(r.int(6).unwrap() >= 3, "{}: comparable.largest", l.name);
+            assert!(
+                r.text(3).unwrap().len() == 10,
+                "{}: a date renders as text",
+                l.name
+            );
+        }
+        hashes.entry("yardstick").or_default().push((
+            l.name.to_string(),
+            answer.content_hash.clone().unwrap(),
+            answer.rows.len(),
+        ));
+        // the funnel, set by set
+        let converted = count_by_code(&codes_of(&mut l, &ask, "converted"));
+        let followups = count_by_code(&codes_of(&mut l, &ask, "followups"));
+        let good = count_by_code(&codes_of(&mut l, &ask, "good"));
+        for c in &cases {
+            let n = |m: &BTreeMap<String, usize>| m.get(&c.code).copied().unwrap_or(0);
+            let at = c.falls_out_at.as_str();
+            let note = format!("{}: {} ({at}: {})", l.name, c.code, c.note);
+            match at {
+                "converted" => assert_eq!(n(&converted), 0, "{note}"),
+                "followups" => {
+                    assert_eq!(n(&converted), 1, "{note}");
+                    assert_eq!(n(&followups), 0, "{note}");
+                }
+                "good" => {
+                    assert!(n(&followups) > 0, "{note}");
+                    assert!(n(&good) < 3, "{note}: {} good rows", n(&good));
+                }
+                "comparable" => {
+                    assert!(n(&good) >= 3, "{note}: {} good rows", n(&good));
+                    assert!(!got.contains(&c.code), "{note}");
+                }
+                "answer" | "precision" => {
+                    assert!(n(&good) >= 3, "{note}: {} good rows", n(&good));
+                    assert!(got.contains(&c.code), "{note}");
+                }
+                other => panic!("{note}: unknown funnel stage {other}"),
+            }
+        }
+        // under strict, the transition known to its year is not certainly
+        // before its own year's follow-ups: the precision case falls out
+        let mut strict = ask.clone();
+        let fu = strict.sets.get_mut("followups").unwrap();
+        fu.where_[0].opts.insert("strict".into(), Value::Bool(true));
+        let (_, s) = run_ask(&mut l, strict);
+        let strict_codes: BTreeSet<String> = s
+            .rows
+            .iter()
+            .map(|r| r.text(2).unwrap().to_string())
+            .collect();
+        let precision: BTreeSet<String> = cases
+            .iter()
+            .filter(|c| c.falls_out_at == "precision")
+            .map(|c| c.code.clone())
+            .collect();
+        assert!(!precision.is_empty());
+        assert_eq!(
+            strict_codes,
+            expected
+                .difference(&precision)
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            "{}: strict",
+            l.name
+        );
+        // the level: at exact, the alternating MPRAGE timings are not comparable
+        let mut exact = ask.clone();
+        for name in ["t1", "flair"] {
+            let (_, c) = exact
+                .sets
+                .get_mut(name)
+                .unwrap()
+                .bind
+                .0
+                .iter_mut()
+                .find(|(b, _)| b == "sig")
+                .unwrap();
+            c.opts.insert("level".into(), Value::String("exact".into()));
+        }
+        let (_, e) = run_ask(&mut l, exact);
+        let exact_codes: BTreeSet<String> = e
+            .rows
+            .iter()
+            .map(|r| r.text(2).unwrap().to_string())
+            .collect();
+        let exact_only: BTreeSet<String> = cases
+            .iter()
+            .filter(|c| c.note.contains("not at exact"))
+            .map(|c| c.code.clone())
+            .collect();
+        assert!(!exact_only.is_empty());
+        assert_eq!(
+            exact_codes,
+            expected
+                .difference(&exact_only)
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            "{}: exact",
+            l.name
+        );
+    }
+    agree(&hashes);
+}
+
+/// Gold B (Appendix B): session pairs four to five years apart through
+/// `near best` plus `pick per: subject`, with both scores carried.
+#[test]
+fn gold_b_reproduces_through_near_best_and_a_pick_per_subject() {
+    let mut hashes: BTreeMap<&str, Vec<(String, String, usize)>> = BTreeMap::new();
+    for mut l in labs() {
+        let mut ask = fixture("gold-b");
+        set_param(&mut ask, "cohort", Value::String("ms-cohort-a".into()));
+        let (compiled, answer) = run_ask(&mut l, ask);
+        assert!(!answer.truncated, "{}", l.name);
+        assert_eq!(
+            answer.columns,
+            vec![
+                "_key",
+                "_subject",
+                "subject.code",
+                "first",
+                "later.first",
+                "gap_days",
+                "score.number",
+                "later.score.number",
+                "pick.tied"
+            ],
+            "{}",
+            l.name
+        );
+        assert!(
+            !answer.rows.is_empty(),
+            "{}: no pairs\n{}",
+            l.name,
+            compiled.sql
+        );
+        let mut seen = BTreeSet::new();
+        for r in &answer.rows {
+            let code = r.text(2).unwrap().to_string();
+            assert!(seen.insert(code.clone()), "{}: {code} paired twice", l.name);
+            let first = r.text(3).unwrap();
+            let later = r.text(4).unwrap();
+            assert!(later > first, "{}: {later} is not after {first}", l.name);
+            let gap = r.int(5).unwrap();
+            assert!((4 * 366..=5 * 366).contains(&gap), "{}: gap {gap}", l.name);
+            assert!(r.opt_double(6).unwrap().is_some(), "{}: a score", l.name);
+            assert!(
+                r.opt_double(7).unwrap().is_some(),
+                "{}: the later score",
+                l.name
+            );
+        }
+        hashes.entry("gold-b").or_default().push((
+            l.name.to_string(),
+            answer.content_hash.clone().unwrap(),
+            answer.rows.len(),
+        ));
+    }
+    agree(&hashes);
+}
+
+/// Gold C (Appendix B): per cohort demographics with no value list in the
+/// document, one row per cohort.
+#[test]
+fn gold_c_produces_its_columns() {
+    let mut hashes: BTreeMap<&str, Vec<(String, String, usize)>> = BTreeMap::new();
+    for mut l in labs() {
+        let mut ask = fixture("gold-c");
+        set_param(
+            &mut ask,
+            "cohorts",
+            json!(["ms-cohort-a", "ms-cohort-b", "ms-cohort-c"]),
+        );
+        let (compiled, answer) = run_ask(&mut l, ask);
+        assert!(!answer.truncated, "{}", l.name);
+        assert_eq!(
+            answer.columns,
+            vec![
+                "_key",
+                "_subject",
+                "cohort.id",
+                "_subjects",
+                "n_female",
+                "pct_female",
+                "mean_age",
+                "min_age",
+                "max_age"
+            ],
+            "{}",
+            l.name
+        );
+        assert_eq!(
+            answer.rows.len(),
+            2,
+            "{}: two cohorts exist\n{}",
+            l.name,
+            compiled.sql
+        );
+        for r in &answer.rows {
+            let n = r.int(3).unwrap();
+            let f = r.int(4).unwrap();
+            assert!(n > 0 && f <= n, "{}", l.name);
+            let pct = r.double(5).unwrap();
+            assert!((0.0..=1.0).contains(&pct), "{}: {pct}", l.name);
+            let (lo, mean, hi) = (
+                r.int(7).unwrap() as f64,
+                r.double(6).unwrap(),
+                r.int(8).unwrap() as f64,
+            );
+            assert!(lo <= mean && mean <= hi, "{}: {lo} {mean} {hi}", l.name);
+        }
+        hashes.entry("gold-c").or_default().push((
+            l.name.to_string(),
+            answer.content_hash.clone().unwrap(),
+            answer.rows.len(),
+        ));
+    }
+    agree(&hashes);
 }

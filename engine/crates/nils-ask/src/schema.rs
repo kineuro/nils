@@ -73,6 +73,7 @@ pub const OPS: &[&str] = &[
     "and",
     "or",
     "not",
+    "picked",
     "abs",
     "round",
     "coalesce",

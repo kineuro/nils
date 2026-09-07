@@ -6,12 +6,14 @@
 //! [`Sql`], the only place the two dialects differ; everything above it is
 //! the same text.
 //!
-//! What lands here (slice 5): the base relation of every grain, `from` (a
-//! set, a role, a handle, an uploaded list), `of`, `algebra`, `group` with
-//! its aggregates, `has`, `bind`, `where`, `pick` with its ties, the answer
-//! with its columns, order, keyset paging and limit, and the comparisons
-//! against a coarse date (§5.3). `near`, `attach`, `same`, `change`,
-//! `share`, the sequences and the derived fields are slice 6.
+//! The base relation of every grain; `from` (a set, a role, a handle, an
+//! uploaded list); `of`; `algebra`; `group` with its aggregates; `near`
+//! with its five policies, precision aware; `attach`; `has`; `bind` with
+//! the functions, the sequences, `change`, `share` and the derived fields
+//! including the level signature; `where`; `pick` with its ties; and the
+//! answer with its columns, order, keyset paging and limit. Every set's
+//! CTE projects the same spine and its frame records everything it
+//! exposes by name, so a reader, a partner or a group reads it by column.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -315,25 +317,29 @@ impl Term {
     }
 }
 
-/// What a set's CTE projects, by name, and how to reach it from a reader.
+/// What a set's CTE projects, by name, and how a reader reaches it.
 #[derive(Debug, Clone, Default)]
 struct Frame {
-    /// Bindings, by name, as their column in the CTE.
+    /// Everything the CTE exposes: a name to a term whose `sql` is the
+    /// bare column name in the CTE.
+    terms: Vec<(String, Term)>,
+    /// Bindings by name, as their column, the subset a union keeps.
     bindings: Vec<(String, String)>,
     /// A group's by paths, as their columns.
     group_by: Vec<(String, String)>,
-    /// Whether the CTE carries `subj`, `day`, `prec`.
     has_subj: bool,
     has_day: bool,
     has_prec: bool,
-    /// The `of` ancestor set, for `<of>.<binding>` paths.
     of: Option<String>,
-    /// Whether the set was picked, for `pick.*`.
     picked: bool,
 }
 
 fn column_name(binding: &str) -> String {
     format!("b_{}", binding.replace('.', "__"))
+}
+
+fn field_col(path: &str) -> String {
+    format!("f_{}", path.replace('.', "__"))
 }
 
 /// The base relation of a grain: its FROM clause, its key, and what it
@@ -371,6 +377,17 @@ fn alias_of(table: &str) -> Option<&'static str> {
     })
 }
 
+const SPINE: &[&str] = &[
+    "k",
+    "subj",
+    "day",
+    "prec",
+    "session_k",
+    "study_k",
+    "series_k",
+    "stack_k",
+];
+
 struct Builder<'a> {
     ctx: &'a Context<'a>,
     ask: &'a Ask,
@@ -381,11 +398,168 @@ struct Builder<'a> {
     reads: HashMap<String, usize>,
     /// The grain of the set being built.
     current: Option<Grain>,
-    /// The field paths other sets read through an aggregate or a group
-    /// over each set, which that set must project.
+    /// The field paths other sets read through an aggregate, a group or a
+    /// partner over each set, which that set must project.
     external: HashMap<String, BTreeSet<String>>,
     answer_columns: Vec<String>,
     code_columns: Vec<usize>,
+}
+
+const AGGREGATES: &[&str] = &["count", "distinct", "min", "max", "sum", "avg", "list"];
+const PHYSICS: &[&str] = &[
+    "magnetic_field_strength",
+    "field_strength_tesla",
+    "repetition_time",
+    "echo_time",
+    "inversion_time",
+    "flip_angle",
+    "echo_train_length",
+    "slice_thickness",
+    "spacing_between_slices",
+    "pixel_spacing_row",
+    "pixel_spacing_col",
+    "number_of_averages",
+];
+
+fn cte_name(set: &str) -> String {
+    format!("s_{set}")
+}
+
+fn window_days(w: &crate::ast::WindowSpec, at: &str) -> R<(Option<i64>, Option<i64>)> {
+    match w {
+        crate::ast::WindowSpec::Literal(win) => Ok(win.days()),
+        crate::ast::WindowSpec::Param(_) => Err(err(
+            at,
+            "a window parameter desugars into the document; desugar first",
+        )),
+    }
+}
+
+/// The field paths a clause reads.
+fn paths_in(c: &Clause, out: &mut BTreeSet<String>) {
+    let mut all = Vec::new();
+    c.walk(&mut all);
+    for cl in all {
+        if cl.op == "field"
+            && let Some(p) = cl.ref_name()
+        {
+            out.insert(p.to_string());
+        }
+    }
+}
+
+/// The derived refs a clause reads, with their options.
+fn derived_in(c: &Clause, out: &mut Vec<(String, BTreeMap<String, Value>)>) {
+    let mut all = Vec::new();
+    c.walk(&mut all);
+    for cl in all {
+        if cl.op == "derived"
+            && let Some(name) = cl.ref_name()
+        {
+            out.push((name.to_string(), cl.opts.clone()));
+        }
+    }
+}
+
+/// Every clause of a set, in the order they are read.
+fn clauses_of(set: &Set) -> Vec<&Clause> {
+    let mut out: Vec<&Clause> = Vec::new();
+    for n in &set.near {
+        out.extend(n.order.iter().map(|o| &o.0));
+    }
+    for (_, c) in &set.bind.0 {
+        out.push(c);
+    }
+    out.extend(set.where_.iter());
+    if let Some(pk) = &set.pick {
+        out.extend(pk.by.iter().map(|o| &o.0));
+    }
+    out
+}
+
+/// For every set, the field paths other sets read through an aggregate
+/// `{set: it}`, a group over it, or a partner relation naming it, to a
+/// fixed point, since a partner's partner is read through two names.
+fn external_paths(ask: &Ask) -> HashMap<String, BTreeSet<String>> {
+    fn collect(c: &Clause, out: &mut HashMap<String, BTreeSet<String>>) {
+        let mut all = Vec::new();
+        c.walk(&mut all);
+        for cl in all {
+            if AGGREGATES.contains(&cl.op.as_str())
+                && let Some(Value::String(target)) = cl.opts.get("set")
+            {
+                let mut paths = BTreeSet::new();
+                for a in &cl.args {
+                    if let Arg::Clause(inner) = a {
+                        paths_in(inner, &mut paths);
+                    }
+                }
+                out.entry(target.clone()).or_default().extend(paths);
+            }
+        }
+    }
+    let mut out: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for set in ask.sets.values() {
+        for c in clauses_of(set) {
+            collect(c, &mut out);
+        }
+        if let Some(g) = &set.group {
+            let mut paths = BTreeSet::new();
+            for c in &g.by {
+                paths_in(c, &mut paths);
+            }
+            out.entry(g.of.clone()).or_default().extend(paths);
+        }
+    }
+    for c in &ask.out.columns {
+        collect(c, &mut out);
+    }
+    // partner paths, to a fixed point
+    loop {
+        let mut changed = false;
+        for (name, set) in &ask.sets {
+            let mut own: BTreeSet<String> = BTreeSet::new();
+            for c in clauses_of(set) {
+                paths_in(c, &mut own);
+            }
+            if *name == ask.out.set {
+                for c in &ask.out.columns {
+                    paths_in(c, &mut own);
+                }
+                for o in &ask.out.order {
+                    paths_in(&o.0, &mut own);
+                }
+            }
+            if let Some(ext) = out.get(name) {
+                own.extend(ext.iter().cloned());
+            }
+            let partners: Vec<(&str, &str)> = set
+                .near
+                .iter()
+                .map(|n| (n.as_.as_str(), n.set.as_str()))
+                .chain(set.attach.iter().map(|a| (a.as_.as_str(), a.set.as_str())))
+                .collect();
+            for p in &own {
+                for (as_, target) in &partners {
+                    if let Some(rest) = p.strip_prefix(as_).and_then(|r| r.strip_prefix('.'))
+                        && !matches!(
+                            rest,
+                            "date" | "precision" | "offset_days" | "tied" | "candidates"
+                        )
+                    {
+                        let entry = out.entry((*target).to_string()).or_default();
+                        if entry.insert(rest.to_string()) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    out
 }
 
 impl<'a> Builder<'a> {
@@ -393,17 +567,30 @@ impl<'a> Builder<'a> {
         qualified(self.ctx.schema.as_deref(), table)
     }
 
-    /// Bind one parameter and return its placeholder. On Postgres an
-    /// integer or a double is cast explicitly: the driver sends an int8 and
-    /// a placeholder beside an int4 expression would infer int4.
+    /// Bind one parameter and return its placeholder, numbered on both
+    /// backends: the layers wrap each other, so an outer expression's
+    /// placeholder sits before an inner one in the text while it is bound
+    /// after it. On Postgres an integer or a double is cast explicitly:
+    /// the driver sends an int8 and a placeholder beside an int4
+    /// expression would infer int4.
     fn p(&mut self, v: Param, ty: Type) -> String {
         self.params.push(v);
         let n = self.params.len();
         match (self.ctx.dialect, ty) {
+            (Dialect::Sqlite, _) => format!("?{n}"),
             (Dialect::Postgres, Type::Int) => format!("${n}::bigint"),
             (Dialect::Postgres, Type::Double) => format!("${n}::double precision"),
             (Dialect::Postgres, Type::Text) => format!("${n}::text"),
             (d, t) => d.param(n, t),
+        }
+    }
+
+    /// A term used once more: a parameter is bound again, anything else is
+    /// its text.
+    fn again(&mut self, t: &Term) -> String {
+        match &t.param {
+            Some((v, ty)) => self.p(v.clone(), *ty),
+            None => t.sql.clone(),
         }
     }
 
@@ -572,47 +759,33 @@ impl<'a> Builder<'a> {
         };
         levels.contains(&level)
     }
-}
 
-/// The set of field paths a set's clauses read, to project them in its
-/// first layer.
-fn paths_in(c: &Clause, out: &mut BTreeSet<String>) {
-    let mut all = Vec::new();
-    c.walk(&mut all);
-    for cl in all {
-        if cl.op == "field"
-            && let Some(p) = cl.ref_name()
+    /// A field path in a set's own base, for the first layer.
+    fn field_term(&self, set: &Set, frame: &Frame, path: &str) -> Option<Term> {
+        let grain = set.grain;
+        let (first, rest) = match path.split_once('.') {
+            Some((f, r)) => (f, Some(r)),
+            None => (path, None),
+        };
+        if let (Some(rest), true) = (rest, Self::level_reachable(grain, first)) {
+            if first == "cohort" && grain == Grain::Subject {
+                return (rest == "id" && frame.of.is_some()).then(|| Term::plain("a.k".into()));
+            }
+            return self.base_column(first, rest);
+        }
+        if let Some(of) = &frame.of
+            && of == first
+            && let Some(rest) = rest
         {
-            out.insert(p.to_string());
+            let ancestor = self.ask.sets.get(of)?;
+            if ancestor.grain == Grain::Cohort {
+                return (rest == "id").then(|| Term::plain("a.k".into()));
+            }
+            return self.base_column(ancestor.grain.name(), rest);
         }
+        self.base_column(grain.name(), path)
     }
-}
 
-fn set_paths(set: &Set, out_columns: &[Clause]) -> BTreeSet<String> {
-    let mut paths = BTreeSet::new();
-    for (_, c) in &set.bind.0 {
-        paths_in(c, &mut paths);
-    }
-    for c in &set.where_ {
-        paths_in(c, &mut paths);
-    }
-    if let Some(pk) = &set.pick {
-        for o in &pk.by {
-            paths_in(&o.0, &mut paths);
-        }
-    }
-    for c in out_columns {
-        paths_in(c, &mut paths);
-    }
-    paths
-}
-
-/// The name a projected field gets in the layers.
-fn field_col(path: &str) -> String {
-    format!("f_{}", path.replace('.', "__"))
-}
-
-impl<'a> Builder<'a> {
     /// The link from a child set's CTE to a parent grain's key.
     fn link(child: &Frame, parent: Grain, child_alias: &str, path: &str) -> R<String> {
         let col = match parent {
@@ -635,8 +808,146 @@ impl<'a> Builder<'a> {
         Ok(format!("{child_alias}.{col}"))
     }
 
-    /// One set as a CTE.
-    fn build_set(&mut self, name: &str, out_columns: &[Clause], out_order: &[Clause]) -> R<()> {
+    /// The inputs a derived field reads, to project them.
+    fn derived_inputs(&self, name: &str, opts: &BTreeMap<String, Value>) -> Vec<String> {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        match name {
+            "acquisition_type" => s(&["acquisition_type_filled", "mr_acquisition_type"]),
+            "field_strength" => s(&["field_strength_tesla"]),
+            "study_day" => Vec::new(),
+            "voxel" => {
+                let third = opts
+                    .get("third")
+                    .and_then(Value::as_str)
+                    .unwrap_or("slice_thickness");
+                vec![
+                    "pixel_spacing_row".into(),
+                    "pixel_spacing_col".into(),
+                    third.to_string(),
+                ]
+            }
+            "voxel_min" | "voxel_max" | "resolution" => {
+                s(&["pixel_spacing_row", "pixel_spacing_col", "slice_thickness"])
+            }
+            "signature" => {
+                let level = opts.get("level").and_then(Value::as_str).unwrap_or("loose");
+                let mut out = s(&[
+                    "acquisition_type_filled",
+                    "mr_acquisition_type",
+                    "orientation",
+                ]);
+                if let Some(spec) = self.ctx.names.level_spec(level) {
+                    for m in spec.exact.iter().chain(spec.rounded.iter().map(|(k, _)| k)) {
+                        if PHYSICS.contains(&m.as_str()) {
+                            out.push(m.clone());
+                        }
+                    }
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The field paths a set must project in its first layer.
+    fn wanted_paths(&self, name: &str, set: &Set) -> BTreeSet<String> {
+        let mut paths = BTreeSet::new();
+        let mut derived: Vec<(String, BTreeMap<String, Value>)> = Vec::new();
+        for c in clauses_of(set) {
+            paths_in(c, &mut paths);
+            derived_in(c, &mut derived);
+        }
+        if name == self.ask.out.set {
+            for c in &self.ask.out.columns {
+                paths_in(c, &mut paths);
+                derived_in(c, &mut derived);
+            }
+            for o in &self.ask.out.order {
+                paths_in(&o.0, &mut paths);
+                derived_in(&o.0, &mut derived);
+            }
+        }
+        if let Some(ext) = self.external.get(name) {
+            paths.extend(ext.iter().cloned());
+        }
+        for h in &set.has {
+            if let Some(on) = &h.on {
+                paths.insert(on.clone());
+            }
+        }
+        for n in &set.near {
+            if let Some(on) = &n.on {
+                paths.insert(on.clone());
+            }
+        }
+        for (d, opts) in derived {
+            paths.extend(self.derived_inputs(&d, &opts));
+        }
+        paths
+    }
+
+    fn push_cte(&mut self, name: &str, body: &str) {
+        let reads = self.reads.get(name).copied().unwrap_or(0);
+        let materialized = if reads > 1 { " MATERIALIZED" } else { "" };
+        self.ctes
+            .push(format!("{} AS{materialized} ({body})", cte_name(name)));
+    }
+
+    fn int_spec(&mut self, spec: &IntSpec, path: &str) -> R<String> {
+        match spec {
+            IntSpec::Literal(n) => Ok(n.to_string()),
+            IntSpec::Param(c) => {
+                let name = c
+                    .ref_name()
+                    .ok_or_else(|| err(path, "a param ref names a parameter"))?;
+                let decl = self
+                    .ask
+                    .params
+                    .get(name)
+                    .ok_or_else(|| err(path, format!("no parameter {name}")))?;
+                let v = decl
+                    .value
+                    .as_ref()
+                    .ok_or_else(|| err(path, format!("parameter {name} has no value")))?;
+                let n = v
+                    .as_i64()
+                    .ok_or_else(|| err(path, format!("parameter {name} is not an integer")))?;
+                Ok(self.p(Param::Int(n), Type::Int))
+            }
+        }
+    }
+
+    /// The literal a clause option holds, or the value of the parameter it
+    /// names, bound as a placeholder.
+    fn opt_placeholder(
+        &mut self,
+        opts: &BTreeMap<String, Value>,
+        key: &str,
+        at: &str,
+    ) -> R<Option<String>> {
+        let Some(v) = opts.get(key) else {
+            return Ok(None);
+        };
+        Ok(Some(match v {
+            Value::String(s) => self.p(Param::from(s.as_str()), Type::Text),
+            Value::Number(n) if n.is_i64() => {
+                self.p(Param::Int(n.as_i64().unwrap_or(0)), Type::Int)
+            }
+            Value::Number(n) => self.p(Param::Double(n.as_f64().unwrap_or(0.0)), Type::Double),
+            other => {
+                let inner = crate::ast::clause_of(other).map_err(|m| err(at, m))?;
+                if inner.op != "param" {
+                    return Err(err(at, format!("option {key} is a literal or a param ref")));
+                }
+                let name = inner.ref_name().unwrap_or("");
+                self.param_term(name, at)?.sql
+            }
+        }))
+    }
+
+    // ---------------------------------------------------------------- a set
+
+    fn build_set(&mut self, name: &str) -> R<()> {
         let set = &self.ask.sets[name];
         let path = format!("sets.{name}");
         if set.grain == Grain::Group {
@@ -645,13 +956,6 @@ impl<'a> Builder<'a> {
         if let Some(a) = &set.algebra {
             return self.build_algebra(name, a);
         }
-        if !set.near.is_empty() {
-            return Err(err(format!("{path}.near"), "near lands with slice 6"));
-        }
-        if !set.attach.is_empty() {
-            return Err(err(format!("{path}.attach"), "attach lands with slice 6"));
-        }
-
         let base = self.base(set.grain, &path)?;
         let mut from = base.from.clone();
         let mut wheres: Vec<String> = base.standing.clone();
@@ -661,55 +965,49 @@ impl<'a> Builder<'a> {
             has_prec: base.prec.is_some(),
             ..Frame::default()
         };
-        // what the first layer projects
+        let null = || "NULL".to_string();
         let mut projected: Vec<String> = vec![
             format!("{} AS k", base.key),
-            format!(
-                "{} AS subj",
-                base.subj.clone().unwrap_or_else(|| "NULL".into())
-            ),
-            format!(
-                "{} AS day",
-                base.day.clone().unwrap_or_else(|| "NULL".into())
-            ),
-            format!(
-                "{} AS prec",
-                base.prec.clone().unwrap_or_else(|| "NULL".into())
-            ),
+            format!("{} AS subj", base.subj.clone().unwrap_or_else(null)),
+            format!("{} AS day", base.day.clone().unwrap_or_else(null)),
+            format!("{} AS prec", base.prec.clone().unwrap_or_else(null)),
             format!(
                 "{} AS session_k",
-                base.session_k.clone().unwrap_or_else(|| "NULL".into())
+                base.session_k.clone().unwrap_or_else(null)
             ),
-            format!(
-                "{} AS study_k",
-                base.study_k.clone().unwrap_or_else(|| "NULL".into())
-            ),
-            format!(
-                "{} AS series_k",
-                base.series_k.clone().unwrap_or_else(|| "NULL".into())
-            ),
-            format!(
-                "{} AS stack_k",
-                base.stack_k.clone().unwrap_or_else(|| "NULL".into())
-            ),
+            format!("{} AS study_k", base.study_k.clone().unwrap_or_else(null)),
+            format!("{} AS series_k", base.series_k.clone().unwrap_or_else(null)),
+            format!("{} AS stack_k", base.stack_k.clone().unwrap_or_else(null)),
         ];
-        // a source: its bindings come along
+        let mut terms: Vec<(String, Term)> = Vec::new();
+        // a source: its bindings and partners come along
         match &set.from {
             None => {}
             Some(Src::Set(s)) => {
                 from.push_str(&format!(" JOIN {} x ON x.k = {}", cte_name(s), base.key));
                 let src = self.frames.get(s).cloned().unwrap_or_default();
-                for (b, col) in &src.bindings {
-                    projected.push(format!("x.{col} AS {col}"));
-                    frame.bindings.push((b.clone(), col.clone()));
-                }
-                frame.of.clone_from(&src.of);
-                frame.picked = src.picked;
-                if src.picked {
-                    for extra in ["pick_tied", "pick_candidates", "pick_rank"] {
-                        projected.push(format!("x.{extra} AS {extra}"));
+                let mut carried: BTreeSet<String> = BTreeSet::new();
+                for (n, t) in &src.terms {
+                    let col = &t.sql;
+                    if col.starts_with("b_")
+                        || col.starts_with("n_")
+                        || col.starts_with("pick_")
+                        || col.starts_with("o_")
+                    {
+                        for c in [Some(col.clone()), t.prec.clone(), t.ci.clone()]
+                            .into_iter()
+                            .flatten()
+                        {
+                            if carried.insert(c.clone()) {
+                                projected.push(format!("x.{c} AS {c}"));
+                            }
+                        }
+                        terms.push((n.clone(), t.clone()));
                     }
                 }
+                frame.bindings = src.bindings.clone();
+                frame.of.clone_from(&src.of);
+                frame.picked = src.picked;
             }
             Some(Src::Role(r)) => {
                 if set.grain != Grain::Stack {
@@ -765,7 +1063,7 @@ impl<'a> Builder<'a> {
                 .get(of)
                 .ok_or_else(|| err(format!("{path}.of"), format!("no set {of}")))?;
             let on = match (ancestor.grain, set.grain) {
-                (Grain::Cohort, Grain::Subject) => {
+                (Grain::Cohort, _) => {
                     from.push_str(&format!(
                         " JOIN {} cm ON cm.subject_id = su.id AND cm.left_at IS NULL",
                         self.q("cohort_member")
@@ -777,13 +1075,6 @@ impl<'a> Builder<'a> {
                     "a.k = scs.session_id".to_string()
                 }
                 (Grain::Stack, Grain::Instance) => "a.k = i.stack_id".to_string(),
-                (Grain::Cohort, _) => {
-                    from.push_str(&format!(
-                        " JOIN {} cm ON cm.subject_id = su.id AND cm.left_at IS NULL",
-                        self.q("cohort_member")
-                    ));
-                    "a.k = cm.cohort_id".to_string()
-                }
                 (g, h) => {
                     return Err(err(
                         format!("{path}.of"),
@@ -793,36 +1084,41 @@ impl<'a> Builder<'a> {
             };
             from.push_str(&format!(" JOIN {} a ON {on}", cte_name(of)));
             let anc = self.frames.get(of).cloned().unwrap_or_default();
-            for (b, col) in &anc.bindings {
-                let mine = format!("o_{}", &col[2..]);
-                projected.push(format!("a.{col} AS {mine}"));
-                frame.bindings.push((format!("{of}.{b}"), mine));
+            let mut carried: BTreeSet<String> = BTreeSet::new();
+            for (n, t) in &anc.terms {
+                if t.sql.starts_with("b_") || t.sql.starts_with("n_") {
+                    let mine = format!("o_{}", t.sql);
+                    if carried.insert(mine.clone()) {
+                        projected.push(format!("a.{} AS {mine}", t.sql));
+                    }
+                    let prec = t.prec.as_ref().map(|p| {
+                        let pc = format!("o_{p}");
+                        if carried.insert(pc.clone()) {
+                            projected.push(format!("a.{p} AS {pc}"));
+                        }
+                        pc
+                    });
+                    terms.push((
+                        format!("{of}.{n}"),
+                        Term {
+                            sql: mine,
+                            prec,
+                            ci: None,
+                            param: None,
+                        },
+                    ));
+                }
             }
             if ancestor.grain == Grain::Cohort {
                 projected.push("a.k AS cohort_k".into());
+                terms.push(("cohort.id".into(), Term::plain("cohort_k".into())));
             }
             frame.of = Some(of.clone());
         }
-        // every field the set reads, projected once
-        let mut wanted = set_paths(
-            set,
-            if name == self.ask.out.set {
-                out_columns
-            } else {
-                &[]
-            },
-        );
-        if let Some(ext) = self.external.get(name) {
-            wanted.extend(ext.iter().cloned());
-        }
-        if name == self.ask.out.set {
-            for c in out_order {
-                paths_in(c, &mut wanted);
-            }
-        }
-        let mut field_cols: Vec<(String, Term)> = Vec::new();
+        // the fields this set and its readers name, projected once
+        let wanted = self.wanted_paths(name, set);
         for p in &wanted {
-            if frame.bindings.iter().any(|(b, _)| b == p) {
+            if terms.iter().any(|(n, _)| n == p) {
                 continue;
             }
             if let Some(t) = self.field_term(set, &frame, p) {
@@ -839,20 +1135,10 @@ impl<'a> Builder<'a> {
                     projected.push(format!("{ci} AS {ccol}"));
                     layered.ci = Some(ccol);
                 }
-                field_cols.push((p.clone(), layered));
+                terms.push((p.clone(), layered));
             }
         }
-        let mut layer = format!("SELECT {} FROM {from}", projected.join(", "));
-        if !wheres.is_empty() {
-            layer.push_str(&format!(" WHERE {}", wheres.join(" AND ")));
-        }
-        wheres.clear();
-
-        // the terms a clause may read in the layers
-        let mut terms: Vec<(String, Term)> = field_cols;
-        for (b, col) in &frame.bindings {
-            terms.push((b.clone(), Term::plain(col.clone())));
-        }
+        // the spine, by name
         if frame.has_day {
             terms.push((
                 "day".into(),
@@ -864,63 +1150,51 @@ impl<'a> Builder<'a> {
                 },
             ));
         }
-        if frame.picked {
-            terms.push(("pick.tied".into(), Term::plain("pick_tied".into())));
-            terms.push((
-                "pick.candidates".into(),
-                Term::plain("pick_candidates".into()),
-            ));
-            terms.push(("pick.rank".into(), Term::plain("pick_rank".into())));
+        terms.push((format!("{}.id", set.grain.name()), Term::plain("k".into())));
+        if frame.has_subj && !terms.iter().any(|(n, _)| n == "subject.id") {
+            terms.push(("subject.id".into(), Term::plain("subj".into())));
         }
+        if set.grain == Grain::Cohort {
+            terms.push(("cohort.id".into(), Term::plain("k".into())));
+        }
+        if frame.picked {
+            for (n, c) in [
+                ("pick.tied", "pick_tied"),
+                ("pick.candidates", "pick_candidates"),
+                ("pick.rank", "pick_rank"),
+            ] {
+                if !terms.iter().any(|(t, _)| t == n) {
+                    terms.push((n.into(), Term::plain(c.into())));
+                }
+            }
+        }
+        let mut layer = format!("SELECT {} FROM {from}", projected.join(", "));
+        if !wheres.is_empty() {
+            layer.push_str(&format!(" WHERE {}", wheres.join(" AND ")));
+        }
+        wheres.clear();
 
+        // near: the one row of a dated set of the same subject in a window
+        for (i, n) in set.near.iter().enumerate() {
+            layer = self.near_layer(
+                name,
+                set,
+                n,
+                &format!("{path}.near[{i}]"),
+                layer,
+                &mut terms,
+            )?;
+        }
+        // attach: the one row of a descendant set picked per this grain
+        for (i, a) in set.attach.iter().enumerate() {
+            layer = self.attach_layer(set, a, &format!("{path}.attach[{i}]"), layer, &mut terms)?;
+        }
         // has, before bind: a count becomes a binding, a bound count a predicate
         let mut has_preds: Vec<String> = Vec::new();
         for (i, h) in set.has.iter().enumerate() {
             let hp = format!("{path}.has[{i}]");
-            let child = self.frames.get(&h.set).cloned().unwrap_or_default();
-            let child_set = &self.ask.sets[&h.set];
-            let count = if child_set.grain == Grain::Group {
-                let key_path = format!("{}.id", set.grain.name());
-                let (_, gcol) = child
-                    .group_by
-                    .iter()
-                    .find(|(p, _)| p == &key_path)
-                    .ok_or_else(|| err(hp.clone(), "the group is not keyed by this grain"))?;
-                format!(
-                    "(SELECT COUNT(*) FROM {} ch WHERE ch.{gcol} = q.k)",
-                    cte_name(&h.set)
-                )
-            } else if child_set.grain == set.grain {
-                format!(
-                    "(SELECT COUNT(*) FROM {} ch WHERE ch.k = q.k)",
-                    cte_name(&h.set)
-                )
-            } else {
-                let link = Self::link(&child, set.grain, "ch", &hp)?;
-                let mut inner = format!(
-                    "SELECT COUNT(*) FROM {} ch WHERE {link} = q.k",
-                    cte_name(&h.set)
-                );
-                if let Some(w) = &h.window {
-                    let (lo, hi) = window_days(w, &hp)?;
-                    let anchor = match &h.on {
-                        Some(on) => terms
-                            .iter()
-                            .find(|(n, _)| n == on)
-                            .map(|(_, t)| t.sql.clone())
-                            .ok_or_else(|| err(hp.clone(), format!("{on} is not bound")))?,
-                        None => "q.day".to_string(),
-                    };
-                    let delta = self.sql.days_between("ch.day", &format!("({anchor})"));
-                    if let Some(lo) = lo {
-                        inner.push_str(&format!(" AND {delta} >= {lo}"));
-                    }
-                    if let Some(hi) = hi {
-                        inner.push_str(&format!(" AND {delta} <= {hi}"));
-                    }
-                }
-                format!("({inner})")
-            };
+            let count =
+                self.count_of(set, &h.set, h.window.as_ref(), h.on.as_deref(), &terms, &hp)?;
             if let Some(as_) = &h.as_ {
                 let col = column_name(as_);
                 layer = format!("SELECT q.*, {count} AS {col} FROM ({layer}) q");
@@ -942,10 +1216,13 @@ impl<'a> Builder<'a> {
                 has_preds.join(" AND ")
             );
         }
-
         // bind, one layer each so a later one reads an earlier one
         for (b, c) in &set.bind.0 {
             let bp = format!("{path}.bind.{b}");
+            if c.op == "change" {
+                layer = self.change_layer(set, b, c, &bp, layer, &mut terms, &mut frame)?;
+                continue;
+            }
             let expr = self.expr(c, &terms, "q", &bp)?;
             let col = column_name(b);
             layer = format!("SELECT q.*, {} AS {col} FROM ({layer}) q", expr.sql);
@@ -1013,69 +1290,427 @@ impl<'a> Builder<'a> {
             );
             layer = format!("SELECT q.* FROM ({layer}) q WHERE q.pick_rn <= {n}");
             frame.picked = true;
+            for (n, c) in [
+                ("pick.tied", "pick_tied"),
+                ("pick.candidates", "pick_candidates"),
+                ("pick.rank", "pick_rank"),
+            ] {
+                if !terms.iter().any(|(t, _)| t == n) {
+                    terms.push((n.into(), Term::plain(c.into())));
+                }
+            }
         }
+        frame.terms = terms;
         self.frames.insert(name.to_string(), frame);
         self.push_cte(name, &layer);
         Ok(())
     }
 
-    fn push_cte(&mut self, name: &str, body: &str) {
-        let reads = self.reads.get(name).copied().unwrap_or(0);
-        let materialized = if reads > 1 { " MATERIALIZED" } else { "" };
-        self.ctes
-            .push(format!("{} AS{materialized} ({body})", cte_name(name)));
-    }
-
-    fn int_spec(&mut self, spec: &IntSpec, path: &str) -> R<String> {
-        match spec {
-            IntSpec::Literal(n) => Ok(n.to_string()),
-            IntSpec::Param(c) => {
-                let name = c
-                    .ref_name()
-                    .ok_or_else(|| err(path, "a param ref names a parameter"))?;
-                let decl = self
-                    .ask
-                    .params
-                    .get(name)
-                    .ok_or_else(|| err(path, format!("no parameter {name}")))?;
-                let v = decl
-                    .value
-                    .as_ref()
-                    .ok_or_else(|| err(path, format!("parameter {name} has no value")))?;
-                let n = v
-                    .as_i64()
-                    .ok_or_else(|| err(path, format!("parameter {name} is not an integer")))?;
-                Ok(self.p(Param::Int(n), Type::Int))
+    /// A partner's columns, carried into this set under `n_<as>__`.
+    fn carry_partner(
+        &self,
+        as_: &str,
+        partner: &Frame,
+        alias: &str,
+        projected: &mut Vec<String>,
+        terms: &mut Vec<(String, Term)>,
+    ) {
+        let mut carried: BTreeSet<String> = BTreeSet::new();
+        let prefix = format!("n_{}__", as_.replace('.', "__"));
+        for (n, t) in &partner.terms {
+            let mut carry = |c: &str| -> String {
+                let mine = format!("{prefix}{c}");
+                if carried.insert(mine.clone()) {
+                    projected.push(format!("{alias}.{c} AS {mine}"));
+                }
+                mine
+            };
+            let sql = carry(&t.sql);
+            let prec = t.prec.as_deref().map(&mut carry);
+            let ci = t.ci.as_deref().map(&mut carry);
+            terms.push((
+                format!("{as_}.{n}"),
+                Term {
+                    sql,
+                    prec,
+                    ci,
+                    param: None,
+                },
+            ));
+        }
+        for (n, c) in [("date", "day"), ("precision", "prec")] {
+            let mine = format!("{prefix}{c}");
+            if carried.insert(mine.clone()) {
+                projected.push(format!("{alias}.{c} AS {mine}"));
             }
+            let prec = (n == "date" && partner.has_prec).then(|| format!("{prefix}prec"));
+            terms.push((
+                format!("{as_}.{n}"),
+                Term {
+                    sql: mine,
+                    prec,
+                    ci: None,
+                    param: None,
+                },
+            ));
+        }
+        let key = format!("{prefix}k");
+        if carried.insert(key.clone()) {
+            projected.push(format!("{alias}.k AS {key}"));
         }
     }
 
-    /// A field path in a set's own base, for the first layer.
-    fn field_term(&self, set: &Set, frame: &Frame, path: &str) -> Option<Term> {
-        let grain = set.grain;
-        let (first, rest) = match path.split_once('.') {
-            Some((f, r)) => (f, Some(r)),
-            None => (path, None),
+    /// One `near`: three layers, the join with the window and the ranks,
+    /// the tie from the ranks, the cut.
+    #[allow(clippy::too_many_arguments)]
+    fn near_layer(
+        &mut self,
+        set_name: &str,
+        set: &Set,
+        n: &crate::ast::Near,
+        at: &str,
+        layer: String,
+        terms: &mut Vec<(String, Term)>,
+    ) -> R<String> {
+        let _ = set_name;
+        let partner = self.frames.get(&n.set).cloned().unwrap_or_default();
+        if !partner.has_day || !set.grain.dated() {
+            return Err(err(at, "near stays between two dated sets"));
+        }
+        let (lo, hi) = window_days(&n.window, at)?;
+        let anchor = match &n.on {
+            Some(on) => {
+                let t = terms
+                    .iter()
+                    .find(|(x, _)| x == on)
+                    .map(|(_, t)| t.clone())
+                    .ok_or_else(|| err(at, format!("{on} is not bound")))?;
+                format!("q.{}", t.sql)
+            }
+            None => "q.day".to_string(),
         };
-        if let (Some(rest), true) = (rest, Self::level_reachable(grain, first)) {
-            if first == "cohort" && grain == Grain::Subject {
-                return (rest == "id" && frame.of.is_some()).then(|| Term::plain("a.k".into()));
+        let p_first = "p.day".to_string();
+        let p_last = if partner.has_prec {
+            self.sql.interval_end("p.day", "p.prec")
+        } else {
+            "p.day".to_string()
+        };
+        let edge = |b: &Builder, bound: i64| -> String {
+            if b.sql.is_pg() {
+                format!("({anchor} + ({bound}))")
+            } else {
+                format!("date({anchor}, '{bound:+} days')")
             }
-            return self.base_column(first, rest);
-        }
-        if let Some(of) = &frame.of
-            && of == first
-            && let Some(rest) = rest
-        {
-            // the ancestor's field, reachable through the base
-            let ancestor = self.ask.sets.get(of)?;
-            let level = ancestor.grain.name();
-            if ancestor.grain == Grain::Cohort {
-                return (rest == "id").then(|| Term::plain("a.k".into()));
+        };
+        let mut on = "p.subj = q.subj".to_string();
+        if let Some(lo) = lo {
+            let e = edge(self, lo);
+            if n.strict {
+                on.push_str(&format!(" AND {p_first} >= {e}"));
+            } else {
+                on.push_str(&format!(" AND {p_last} >= {e}"));
             }
-            return self.base_column(level, rest);
         }
-        self.base_column(grain.name(), path)
+        if let Some(hi) = hi {
+            let e = edge(self, hi);
+            if n.strict {
+                on.push_str(&format!(" AND {p_last} <= {e}"));
+            } else {
+                on.push_str(&format!(" AND {p_first} <= {e}"));
+            }
+        }
+        let prefix = format!("n_{}__", n.as_.replace('.', "__"));
+        // the signed distance to the nearest edge of the partner's interval
+        let offset = format!(
+            "CASE WHEN {anchor} < {p_first} THEN {} WHEN {anchor} > {p_last} THEN {} ELSE 0 END",
+            self.sql.days_between(&p_first, &anchor),
+            self.sql.days_between(&p_last, &anchor)
+        );
+        let tie = match n.tie {
+            Some(crate::ast::Tie::Later) => "DESC",
+            _ => "ASC",
+        };
+        let rank = match n.policy {
+            crate::ast::Policy::Nearest => format!("ABS({offset}) ASC, p.day {tie}"),
+            crate::ast::Policy::First | crate::ast::Policy::Any => "p.day ASC".to_string(),
+            crate::ast::Policy::Last => "p.day DESC".to_string(),
+            crate::ast::Policy::Best => {
+                // the order reads this set's terms as q and the partner's as p
+                let mut both: Vec<(String, Term)> = terms
+                    .iter()
+                    .map(|(x, t)| {
+                        (
+                            x.clone(),
+                            Term {
+                                sql: format!("q.{}", t.sql),
+                                prec: t.prec.as_ref().map(|p| format!("q.{p}")),
+                                ci: None,
+                                param: None,
+                            },
+                        )
+                    })
+                    .collect();
+                for (x, t) in &partner.terms {
+                    both.push((
+                        format!("{}.{x}", n.as_),
+                        Term {
+                            sql: format!("p.{}", t.sql),
+                            prec: t.prec.as_ref().map(|p| format!("p.{p}")),
+                            ci: None,
+                            param: None,
+                        },
+                    ));
+                }
+                both.push((format!("{}.date", n.as_), Term::plain(p_first.clone())));
+                both.push((
+                    format!("{}.offset_days", n.as_),
+                    Term::plain(offset.clone()),
+                ));
+                let mut parts = Vec::new();
+                for (i, o) in n.order.iter().enumerate() {
+                    let e = self.expr(&o.0, &both, "", &format!("{at}.order[{i}]"))?;
+                    parts.push(self.sql.order_term(&e.sql, o.1));
+                }
+                parts.join(", ")
+            }
+        };
+        let mut projected: Vec<String> = vec!["q.*".into()];
+        self.carry_partner(&n.as_, &partner, "p", &mut projected, terms);
+        projected.push(format!("{offset} AS {prefix}offset"));
+        terms.push((
+            format!("{}.offset_days", n.as_),
+            Term::plain(format!("{prefix}offset")),
+        ));
+        projected.push(format!(
+            "ROW_NUMBER() OVER (PARTITION BY q.k ORDER BY {rank}, p.k) AS {prefix}rn"
+        ));
+        projected.push(format!(
+            "RANK() OVER (PARTITION BY q.k ORDER BY {rank}) AS {prefix}rank"
+        ));
+        projected.push(format!(
+            "COUNT(p.k) OVER (PARTITION BY q.k) AS {prefix}cand"
+        ));
+        terms.push((
+            format!("{}.candidates", n.as_),
+            Term::plain(format!("{prefix}cand")),
+        ));
+        let mut layer = format!(
+            "SELECT {} FROM ({layer}) q LEFT JOIN {} p ON {on}",
+            projected.join(", "),
+            cte_name(&n.set)
+        );
+        layer = format!(
+            "SELECT q.*, CASE WHEN SUM(CASE WHEN q.{prefix}rank = 1 AND q.{prefix}k IS NOT NULL THEN 1 ELSE 0 END) OVER (PARTITION BY q.k) > 1 THEN 1 ELSE 0 END AS {prefix}tied FROM ({layer}) q"
+        );
+        terms.push((
+            format!("{}.tied", n.as_),
+            Term::plain(format!("{prefix}tied")),
+        ));
+        let mut cut = format!("q.{prefix}rn = 1");
+        if !n.optional {
+            cut.push_str(&format!(" AND q.{prefix}k IS NOT NULL"));
+        }
+        Ok(format!("SELECT q.* FROM ({layer}) q WHERE {cut}"))
+    }
+
+    /// One `attach`: the partner joined on this grain's key in it.
+    fn attach_layer(
+        &mut self,
+        set: &Set,
+        a: &crate::ast::Attach,
+        at: &str,
+        layer: String,
+        terms: &mut Vec<(String, Term)>,
+    ) -> R<String> {
+        let partner = self.frames.get(&a.set).cloned().unwrap_or_default();
+        let link = Self::link(&partner, set.grain, "p", at)?;
+        let mut projected: Vec<String> = vec!["q.*".into()];
+        self.carry_partner(&a.as_, &partner, "p", &mut projected, terms);
+        let prefix = format!("n_{}__", a.as_.replace('.', "__"));
+        let mut out = format!(
+            "SELECT {} FROM ({layer}) q LEFT JOIN {} p ON {link} = q.k",
+            projected.join(", "),
+            cte_name(&a.set)
+        );
+        if !a.optional {
+            out = format!("SELECT q.* FROM ({out}) q WHERE q.{prefix}k IS NOT NULL");
+        }
+        Ok(out)
+    }
+
+    /// The count of a child set's rows per row of this set, windowed when
+    /// asked, as a correlated subquery.
+    fn count_of(
+        &mut self,
+        set: &Set,
+        child_name: &str,
+        window: Option<&crate::ast::WindowSpec>,
+        on: Option<&str>,
+        terms: &[(String, Term)],
+        at: &str,
+    ) -> R<String> {
+        let child = self.frames.get(child_name).cloned().unwrap_or_default();
+        let child_set = &self.ask.sets[child_name];
+        if child_set.grain == Grain::Group {
+            let key_path = format!("{}.id", set.grain.name());
+            let (_, gcol) = child
+                .group_by
+                .iter()
+                .find(|(p, _)| p == &key_path)
+                .ok_or_else(|| err(at, "the group is not keyed by this grain"))?;
+            return Ok(format!(
+                "(SELECT COUNT(*) FROM {} ch WHERE ch.{gcol} = q.k)",
+                cte_name(child_name)
+            ));
+        }
+        if child_set.grain == set.grain {
+            return Ok(format!(
+                "(SELECT COUNT(*) FROM {} ch WHERE ch.k = q.k)",
+                cte_name(child_name)
+            ));
+        }
+        let link = Self::link(&child, set.grain, "ch", at)?;
+        let mut inner = format!(
+            "SELECT COUNT(*) FROM {} ch WHERE {link} = q.k",
+            cte_name(child_name)
+        );
+        if let Some(w) = window {
+            let (lo, hi) = window_days(w, at)?;
+            let anchor = match on {
+                Some(on) => terms
+                    .iter()
+                    .find(|(n, _)| n == on)
+                    .map(|(_, t)| format!("q.{}", t.sql))
+                    .ok_or_else(|| err(at, format!("{on} is not bound")))?,
+                None => "q.day".to_string(),
+            };
+            let delta = self.sql.days_between("ch.day", &anchor);
+            if let Some(lo) = lo {
+                inner.push_str(&format!(" AND {delta} >= {lo}"));
+            }
+            if let Some(hi) = hi {
+                inner.push_str(&format!(" AND {delta} <= {hi}"));
+            }
+        }
+        Ok(format!("({inner})"))
+    }
+
+    /// `change` (§4.3, §5.4): the first row of the `to` value that follows
+    /// a row of the `from` value, adjacent by default, over a subject's
+    /// course rows or the rows of an event kind, joined per subject.
+    #[allow(clippy::too_many_arguments)]
+    fn change_layer(
+        &mut self,
+        set: &Set,
+        binding: &str,
+        c: &Clause,
+        at: &str,
+        layer: String,
+        terms: &mut Vec<(String, Term)>,
+        frame: &mut Frame,
+    ) -> R<String> {
+        if set.grain != Grain::Subject {
+            return Err(err(at, "change is a subject's history"));
+        }
+        let of = c
+            .opts
+            .get("of")
+            .and_then(Value::as_str)
+            .unwrap_or("course")
+            .to_string();
+        let adjacent = c
+            .opts
+            .get("adjacent")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        // the rows, in text order of their placeholders
+        let rows = if of == "course" {
+            let mut sql = format!(
+                "SELECT sdt.id AS id, sd.subject_id AS subject_id, sdt.assigned_on AS date, \
+                 COALESCE(sdt.assigned_on_precision, 'day') AS prec, dt.name AS value \
+                 FROM {} sdt JOIN {} sd ON sd.id = sdt.subject_disease_id \
+                 JOIN {} dt ON dt.id = sdt.disease_type_id JOIN {} d ON d.id = sd.disease_id \
+                 WHERE sdt.superseded_by IS NULL AND sd.superseded_by IS NULL AND sdt.assigned_on IS NOT NULL",
+                self.q("subject_disease_type"),
+                self.q("subject_disease"),
+                self.q("disease_type"),
+                self.q("disease")
+            );
+            if let Some(d) = self.opt_placeholder(&c.opts, "disease", at)? {
+                sql.push_str(&format!(" AND d.name = {d}"));
+            }
+            sql
+        } else {
+            let kind = self.p(Param::from(of.as_str()), Type::Text);
+            format!(
+                "SELECT e.id AS id, e.subject_id AS subject_id, e.event_date AS date, \
+                 COALESCE(e.event_date_precision, 'day') AS prec, e.value AS value \
+                 FROM {} e JOIN {} ot ON ot.id = e.observation_type_id \
+                 WHERE ot.name = {kind} AND e.superseded_by IS NULL",
+                self.q("event"),
+                self.q("observation_type")
+            )
+        };
+        let from_v = self
+            .opt_placeholder(&c.opts, "from", at)?
+            .ok_or_else(|| err(at, "change needs from"))?;
+        let seq = "PARTITION BY r.subject_id ORDER BY r.date, r.id";
+        let staged = format!(
+            "SELECT r.subject_id, r.date AS to_date, r.prec AS to_prec, r.value, r.id, \
+             LAG(r.date) OVER ({seq}) AS from_date, LAG(r.value) OVER ({seq}) AS prev_value, \
+             MAX(CASE WHEN r.value = {from_v} THEN 1 ELSE 0 END) OVER ({seq} ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS seen_from \
+             FROM ({rows}) r"
+        );
+        let to_v = self
+            .opt_placeholder(&c.opts, "to", at)?
+            .ok_or_else(|| err(at, "change needs to"))?;
+        let mut hit = format!("SELECT t.* FROM ({staged}) t WHERE t.value = {to_v}");
+        if adjacent {
+            let from_again = self
+                .opt_placeholder(&c.opts, "from", at)?
+                .unwrap_or_default();
+            hit.push_str(&format!(" AND t.prev_value = {from_again}"));
+        } else {
+            hit.push_str(" AND t.seen_from = 1");
+        }
+        let first = format!(
+            "SELECT h.* FROM (SELECT t.*, ROW_NUMBER() OVER (PARTITION BY t.subject_id ORDER BY t.to_date, t.id) AS rn FROM ({hit}) t) h WHERE h.rn = 1"
+        );
+        let col = column_name(binding);
+        let gap = self.sql.days_between("ch.to_date", "ch.from_date");
+        let out = format!(
+            "SELECT q.*, ch.to_date AS {col}, ch.to_date AS {col}__to_date, ch.from_date AS {col}__from_date, \
+             ch.to_prec AS {col}__precision, {gap} AS {col}__gap_days \
+             FROM ({layer}) q LEFT JOIN ({first}) ch ON ch.subject_id = q.subj"
+        );
+        frame.bindings.push((binding.to_string(), col.clone()));
+        let dated = |c: String, prec: Option<String>| Term {
+            sql: c,
+            prec,
+            ci: None,
+            param: None,
+        };
+        terms.push((
+            binding.to_string(),
+            dated(col.clone(), Some(format!("{col}__precision"))),
+        ));
+        terms.push((
+            format!("{binding}.to_date"),
+            dated(format!("{col}__to_date"), Some(format!("{col}__precision"))),
+        ));
+        terms.push((
+            format!("{binding}.from_date"),
+            Term::plain(format!("{col}__from_date")),
+        ));
+        terms.push((
+            format!("{binding}.precision"),
+            Term::plain(format!("{col}__precision")),
+        ));
+        terms.push((
+            format!("{binding}.gap_days"),
+            Term::plain(format!("{col}__gap_days")),
+        ));
+        Ok(out)
     }
 
     fn build_group(&mut self, name: &str) -> R<()> {
@@ -1086,9 +1721,7 @@ impl<'a> Builder<'a> {
             .as_ref()
             .ok_or_else(|| err(&path, "a group set needs group"))?;
         let child = self.frames.get(&g.of).cloned().unwrap_or_default();
-        let child_set = &self.ask.sets[&g.of];
-        // the child's terms, as its CTE exposes them
-        let child_terms = self.cte_terms(&g.of, &child, child_set, &[]);
+        let child_terms = child.terms.clone();
         let mut cols: Vec<String> = Vec::new();
         let mut group_cols: Vec<String> = Vec::new();
         let mut frame = Frame::default();
@@ -1113,7 +1746,6 @@ impl<'a> Builder<'a> {
         frame
             .bindings
             .push(("_subjects".into(), "_subjects".into()));
-        // aggregates and arithmetic over them, in order
         let mut terms: Vec<(String, Term)> = vec![
             ("_rows".into(), Term::plain("_rows".into())),
             ("_subjects".into(), Term::plain("_subjects".into())),
@@ -1157,7 +1789,6 @@ impl<'a> Builder<'a> {
             cte_name(&g.of),
             group_cols.join(", ")
         );
-        // arithmetic over the aggregates, in layers above the GROUP BY
         for (b, col) in post {
             let c = set.bind.get(&b).expect("a binding");
             let e = self.expr(c, &terms, "q", &format!("{path}.bind.{b}"))?;
@@ -1184,81 +1815,11 @@ impl<'a> Builder<'a> {
             }
             layer = format!("SELECT q.* FROM ({layer}) q WHERE {}", preds.join(" AND "));
         }
+        terms.push(("group.id".into(), Term::plain("k".into())));
+        frame.terms = terms;
         self.frames.insert(name.to_string(), frame);
         self.push_cte(name, &layer);
         Ok(())
-    }
-
-    /// What a set's CTE exposes to a reader by alias: its bindings, its
-    /// day, and the fields it projected.
-    fn cte_terms(
-        &self,
-        name: &str,
-        frame: &Frame,
-        set: &Set,
-        extra: &[Clause],
-    ) -> Vec<(String, Term)> {
-        let mut out: Vec<(String, Term)> = Vec::new();
-        for (b, col) in &frame.bindings {
-            out.push((b.clone(), Term::plain(col.clone())));
-        }
-        for (label, col) in &frame.group_by {
-            out.push((label.clone(), Term::plain(col.clone())));
-        }
-        if frame.picked {
-            out.push(("pick.tied".into(), Term::plain("pick_tied".into())));
-            out.push((
-                "pick.candidates".into(),
-                Term::plain("pick_candidates".into()),
-            ));
-            out.push(("pick.rank".into(), Term::plain("pick_rank".into())));
-        }
-        if frame.has_day {
-            out.push((
-                "day".into(),
-                Term {
-                    sql: "day".into(),
-                    prec: frame.has_prec.then(|| "prec".to_string()),
-                    ci: None,
-                    param: None,
-                },
-            ));
-        }
-        let mut wanted = set_paths(set, extra);
-        for c in extra {
-            paths_in(c, &mut wanted);
-        }
-        if let Some(ext) = self.external.get(name) {
-            wanted.extend(ext.iter().cloned());
-        }
-        for p in wanted {
-            if !out.iter().any(|(n, _)| n == &p)
-                && let Some(t) = self.field_term(set, frame, &p)
-            {
-                let col = field_col(&p);
-                out.push((
-                    p.clone(),
-                    Term {
-                        sql: col.clone(),
-                        prec: t.prec.map(|_| format!("{col}__prec")),
-                        ci: t.ci.map(|_| format!("{col}__ci")),
-                        param: None,
-                    },
-                ));
-            }
-        }
-        // the child's own key and subject, for a by on them
-        out.push((format!("{}.id", set.grain.name()), Term::plain("k".into())));
-        if frame.has_subj {
-            out.push(("subject.id".into(), Term::plain("subj".into())));
-        }
-        if let Some(of) = &frame.of
-            && let Some(anc) = self.ask.sets.get(of)
-            && anc.grain == Grain::Cohort
-        {
-            out.push(("cohort.id".into(), Term::plain("cohort_k".into())));
-        }
-        out
     }
 
     fn aggregate(&self, op: &str, inner: Option<&str>, path: &str) -> R<String> {
@@ -1283,16 +1844,6 @@ impl<'a> Builder<'a> {
         let left = a.sets.first().ok_or_else(|| err(&path, "no operand"))?;
         let lf = self.frames.get(left).cloned().unwrap_or_default();
         let mut frame = lf.clone();
-        let base_cols = [
-            "k",
-            "subj",
-            "day",
-            "prec",
-            "session_k",
-            "study_k",
-            "series_k",
-            "stack_k",
-        ];
         let layer = match a.op {
             AlgOp::Union => {
                 let mut common: Vec<(String, String)> = lf.bindings.clone();
@@ -1302,21 +1853,38 @@ impl<'a> Builder<'a> {
                 }
                 frame.bindings = common.clone();
                 frame.picked = false;
+                frame.terms.retain(|(n, t)| {
+                    !t.sql.starts_with("b_")
+                        && !t.sql.starts_with("n_")
+                        && !t.sql.starts_with("pick_")
+                        || common.iter().any(|(b, _)| b == n)
+                });
                 let mut parts = Vec::new();
                 for s in &a.sets {
-                    let mut cols: Vec<String> =
-                        base_cols.iter().map(|c| format!("l.{c}")).collect();
+                    let mut cols: Vec<String> = SPINE.iter().map(|c| format!("l.{c}")).collect();
+                    let of = self.frames.get(s).cloned().unwrap_or_default();
+                    // the fields the left exposes, by column; a right operand
+                    // that lacks one yields NULL
+                    for (n, t) in &lf.terms {
+                        if t.sql.starts_with("f_") {
+                            if of.terms.iter().any(|(m, _)| m == n) {
+                                cols.push(format!("l.{} AS {}", t.sql, t.sql));
+                            } else {
+                                cols.push(format!("NULL AS {}", t.sql));
+                            }
+                        }
+                    }
                     for (_, col) in &common {
                         cols.push(format!("l.{col}"));
                     }
-                    if let Some(t) = &a.tag {
-                        let _ = t;
+                    if a.tag.is_some() {
                         cols.push(format!("'{s}' AS tag"));
                     }
                     parts.push(format!("SELECT {} FROM {} l", cols.join(", "), cte_name(s)));
                 }
                 if let Some(t) = &a.tag {
                     frame.bindings.push((t.clone(), "tag".into()));
+                    frame.terms.push((t.clone(), Term::plain("tag".into())));
                     parts.join(" UNION ALL ")
                 } else {
                     parts.join(" UNION ")
@@ -1355,10 +1923,17 @@ impl<'a> Builder<'a> {
             .find(|(n, _)| n == path)
             .map(|(_, t)| t.clone())
             .ok_or_else(|| err(at, format!("{path} is not projected in this layer")))?;
+        let dot = |s: &str| {
+            if alias.is_empty() {
+                s.to_string()
+            } else {
+                format!("{alias}.{s}")
+            }
+        };
         Ok(Term {
-            sql: format!("{alias}.{}", t.sql),
-            prec: t.prec.map(|p| format!("{alias}.{p}")),
-            ci: t.ci.map(|c| format!("{alias}.{c}")),
+            sql: dot(&t.sql),
+            prec: t.prec.as_deref().map(dot),
+            ci: t.ci.as_deref().map(dot),
             param: None,
         })
     }
@@ -1428,15 +2003,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// A term used once more: a parameter is bound again, anything else is
-    /// its text.
-    fn again(&mut self, t: &Term) -> String {
-        match &t.param {
-            Some((v, ty)) => self.p(v.clone(), *ty),
-            None => t.sql.clone(),
-        }
-    }
-
     fn arg(&mut self, a: &Arg, terms: &[(String, Term)], alias: &str, at: &str) -> R<Term> {
         match a {
             Arg::Clause(c) => self.expr(c, terms, alias, at),
@@ -1497,8 +2063,6 @@ impl<'a> Builder<'a> {
         Ok(format!("({})", ph.join(", ")))
     }
 
-    /// A comparison, coarse dates included (§5.3): forgiving by default,
-    /// the certain reading under `strict: true`.
     /// One side of a comparison, used once more: the first use is the
     /// term's own text, a later use binds a parameter again; `end` asks
     /// for the last day of a coarse date's interval.
@@ -1515,6 +2079,8 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A comparison, coarse dates included (§5.3): forgiving by default,
+    /// the certain reading under `strict: true`.
     fn compare(&mut self, op: &str, a: Term, b: Term, strict: bool) -> String {
         if a.prec.is_none() && b.prec.is_none() {
             return format!("({} {op} {})", a.sql, b.sql);
@@ -1573,6 +2139,172 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A derived field (§4.3), from the fields its inputs project.
+    fn derived(&mut self, c: &Clause, terms: &[(String, Term)], alias: &str, at: &str) -> R<Term> {
+        let name = c
+            .ref_name()
+            .ok_or_else(|| err(at, "a derived ref names a field"))?;
+        let col =
+            |b: &Builder, path: &str| -> R<String> { Ok(b.term(terms, alias, path, at)?.sql) };
+        let plain = |s: String| Ok(Term::plain(s));
+        match name {
+            "acquisition_type" => {
+                let filled = col(self, "acquisition_type_filled")?;
+                let read = col(self, "mr_acquisition_type")?;
+                plain(format!("COALESCE({filled}, {read})"))
+            }
+            "field_strength" => plain(col(self, "field_strength_tesla")?),
+            "study_day" => {
+                let k = if alias.is_empty() {
+                    "day".to_string()
+                } else {
+                    format!("{alias}.day")
+                };
+                Ok(Term {
+                    sql: k,
+                    prec: None,
+                    ci: None,
+                    param: None,
+                })
+            }
+            "voxel" | "voxel_max" => {
+                let third = c
+                    .opts
+                    .get("third")
+                    .and_then(Value::as_str)
+                    .unwrap_or("slice_thickness");
+                let (r, cc, t) = (
+                    col(self, "pixel_spacing_row")?,
+                    col(self, "pixel_spacing_col")?,
+                    col(self, third)?,
+                );
+                let inner = self.sql.greatest(&r, &cc);
+                plain(self.sql.greatest(&inner, &t))
+            }
+            "voxel_min" => {
+                let (r, cc, t) = (
+                    col(self, "pixel_spacing_row")?,
+                    col(self, "pixel_spacing_col")?,
+                    col(self, "slice_thickness")?,
+                );
+                let inner = self.sql.least(&r, &cc);
+                plain(self.sql.least(&inner, &t))
+            }
+            "resolution" => {
+                let (r, cc, t) = (
+                    col(self, "pixel_spacing_row")?,
+                    col(self, "pixel_spacing_col")?,
+                    col(self, "slice_thickness")?,
+                );
+                let s = self.sql;
+                let part = |x: &str| format!("CAST({} AS TEXT)", s.rounded_key(x, 2));
+                plain(format!(
+                    "({} || 'x' || {} || 'x' || {})",
+                    part(&r),
+                    part(&cc),
+                    part(&t)
+                ))
+            }
+            "signature" => {
+                let level = c
+                    .opts
+                    .get("level")
+                    .and_then(Value::as_str)
+                    .unwrap_or("loose")
+                    .to_string();
+                let spec = self
+                    .ctx
+                    .names
+                    .level_spec(&level)
+                    .ok_or_else(|| err(at, format!("{level} is not a comparability level")))?;
+                let k = if alias.is_empty() {
+                    "k".to_string()
+                } else {
+                    format!("{alias}.k")
+                };
+                let mut parts: Vec<String> = Vec::new();
+                for m in &spec.exact {
+                    parts.push(self.signature_member(m, None, &k, terms, alias, at)?);
+                }
+                for (m, step) in &spec.rounded {
+                    parts.push(self.signature_member(m, Some(*step), &k, terms, alias, at)?);
+                }
+                plain(format!("({})", parts.join(" || '|' || ")))
+            }
+            "course" => {
+                let subj = if alias.is_empty() {
+                    "subj".to_string()
+                } else {
+                    format!("{alias}.subj")
+                };
+                let mut sql = format!(
+                    "(SELECT dt.name FROM {} sdt JOIN {} sd ON sd.id = sdt.subject_disease_id \
+                     JOIN {} dt ON dt.id = sdt.disease_type_id JOIN {} d ON d.id = sd.disease_id \
+                     WHERE sd.subject_id = {subj} AND sdt.superseded_by IS NULL AND sd.superseded_by IS NULL",
+                    self.q("subject_disease_type"),
+                    self.q("subject_disease"),
+                    self.q("disease_type"),
+                    self.q("disease")
+                );
+                if let Some(d) = self.opt_placeholder(&c.opts, "disease", at)? {
+                    sql.push_str(&format!(" AND d.name = {d}"));
+                }
+                sql.push_str(" ORDER BY sdt.assigned_on DESC, sdt.id DESC LIMIT 1)");
+                plain(sql)
+            }
+            other => Err(err(at, format!("{other} is not a derived field"))),
+        }
+    }
+
+    /// One member of a level's signature, as text that is the same on both
+    /// backends: an axis as its sorted values, the acquisition type and the
+    /// orientation as read, a physics number as an integer at a step.
+    fn signature_member(
+        &mut self,
+        member: &str,
+        step: Option<f64>,
+        key: &str,
+        terms: &[(String, Term)],
+        alias: &str,
+        at: &str,
+    ) -> R<String> {
+        if self.ctx.names.axis_values(member).is_some() {
+            let ax = self.p(Param::from(member), Type::Text);
+            let list = self.sql.sorted_list("ax.value");
+            return Ok(format!(
+                "COALESCE((SELECT {list} FROM {} ax WHERE ax.stack_id = {key} AND ax.axis = {ax}), '')",
+                self.q("classification_axis")
+            ));
+        }
+        let text = match member {
+            "acquisition_type" => {
+                let filled = self.term(terms, alias, "acquisition_type_filled", at)?.sql;
+                let read = self.term(terms, alias, "mr_acquisition_type", at)?.sql;
+                format!("COALESCE({filled}, {read}, '')")
+            }
+            "orientation" => format!(
+                "COALESCE({}, '')",
+                self.term(terms, alias, "orientation", at)?.sql
+            ),
+            physics => {
+                let x = self.term(terms, alias, physics, at)?.sql;
+                let integer = match step {
+                    Some(s) => {
+                        let scaled = format!("({x} / {s})");
+                        if self.sql.is_pg() {
+                            format!("CAST(round(({scaled})::numeric) AS BIGINT)")
+                        } else {
+                            format!("CAST(round({scaled}) AS INTEGER)")
+                        }
+                    }
+                    None => self.sql.rounded_key(&x, 3),
+                };
+                format!("COALESCE(CAST({integer} AS TEXT), '')")
+            }
+        };
+        Ok(text)
+    }
+
     fn expr(&mut self, c: &Clause, terms: &[(String, Term)], alias: &str, at: &str) -> R<Term> {
         let op = c.op.as_str();
         let strict = c
@@ -1581,6 +2313,13 @@ impl<'a> Builder<'a> {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let plain = |s: String| Ok(Term::plain(s));
+        let dot = |s: &str| {
+            if alias.is_empty() {
+                s.to_string()
+            } else {
+                format!("{alias}.{s}")
+            }
+        };
         match op {
             "field" => {
                 let p = c
@@ -1598,9 +2337,8 @@ impl<'a> Builder<'a> {
                 at,
                 "an axis is read through has or =, which compile it as a predicate",
             )),
-            "derived" => Err(err(at, "derived fields land with slice 6")),
+            "derived" => self.derived(c, terms, alias, at),
             "=" | "<>" | ">" | ">=" | "<" | "<=" => {
-                // an axis predicate: EXISTS on the axis rows
                 if let Some(Arg::Clause(l)) = c.args.first()
                     && l.op == "axis"
                 {
@@ -1612,8 +2350,9 @@ impl<'a> Builder<'a> {
                     let ax = self.p(Param::from(axis), Type::Text);
                     let v = self.arg(value, terms, alias, at)?;
                     let exists = format!(
-                        "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {alias}.k AND ax.axis = {ax} AND ax.value = {})",
+                        "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND ax.value = {})",
                         self.q("classification_axis"),
+                        dot("k"),
                         v.sql
                     );
                     return plain(if op == "<>" {
@@ -1689,7 +2428,6 @@ impl<'a> Builder<'a> {
                 ))
             }
             "has" => {
-                // a multi-valued axis holds a value
                 let Some(Arg::Clause(l)) = c.args.first() else {
                     return Err(err(at, "has takes an axis and a value"));
                 };
@@ -1705,10 +2443,29 @@ impl<'a> Builder<'a> {
                     at,
                 )?;
                 plain(format!(
-                    "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {alias}.k AND ax.axis = {ax} AND ax.value = {})",
+                    "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND ax.value = {})",
                     self.q("classification_axis"),
+                    dot("k"),
                     v.sql
                 ))
+            }
+            "picked" => {
+                let role = self
+                    .opt_placeholder(&c.opts, "role", at)?
+                    .ok_or_else(|| err(at, "picked names its role: {role}"))?;
+                let digest = self.p(Param::from(self.ctx.scheme_digest.as_str()), Type::Text);
+                let mut sql = format!(
+                    "EXISTS (SELECT 1 FROM {} p JOIN {} ps ON ps.pick_id = p.id WHERE ps.stack_id = {} AND p.role = {role} \
+                     AND p.withdrawn_at IS NULL AND p.scheme_digest = {digest}",
+                    self.q("pick"),
+                    self.q("pick_stack"),
+                    dot("k")
+                );
+                if let Some(model) = self.opt_placeholder(&c.opts, "model", at)? {
+                    sql.push_str(&format!(" AND p.model = {model}"));
+                }
+                sql.push(')');
+                plain(sql)
             }
             "not_null" | "is_null" => {
                 let a = self.arg(
@@ -1784,7 +2541,6 @@ impl<'a> Builder<'a> {
                     at,
                 )?;
                 if op == "/" {
-                    // a Double cast so SQLite never divides integers
                     return plain(format!(
                         "({} / {})",
                         self.sql.as_double(&a.sql),
@@ -1832,7 +2588,6 @@ impl<'a> Builder<'a> {
                 plain(format!("COALESCE({})", parts.join(", ")))
             }
             "case" => {
-                // ["case", {}, cond, then, else]
                 let cond = self.arg(
                     c.args
                         .first()
@@ -1995,8 +2750,74 @@ impl<'a> Builder<'a> {
                 }
                 plain(self.sql.json_text(&a.sql, key))
             }
+            "ordinal" | "prev" | "next" => {
+                // the interval's first day, then precision (finer first), then the key
+                let finer = match terms
+                    .iter()
+                    .find(|(n, _)| n == "day")
+                    .and_then(|(_, t)| t.prec.clone())
+                {
+                    Some(p) => format!(
+                        ", CASE {} WHEN 'day' THEN 0 WHEN 'month' THEN 1 ELSE 2 END",
+                        dot(&p)
+                    ),
+                    None => String::new(),
+                };
+                let seq = format!(
+                    "PARTITION BY {} ORDER BY {}{finer}, {}",
+                    dot("subj"),
+                    dot("day"),
+                    dot("k")
+                );
+                if op == "ordinal" {
+                    return plain(format!("ROW_NUMBER() OVER ({seq})"));
+                }
+                let a = self.arg(
+                    c.args
+                        .first()
+                        .ok_or_else(|| err(at, format!("{op} needs a clause")))?,
+                    terms,
+                    alias,
+                    at,
+                )?;
+                let f = if op == "prev" { "LAG" } else { "LEAD" };
+                Ok(Term {
+                    sql: format!("{f}({}) OVER ({seq})", a.sql),
+                    prec: None,
+                    ci: None,
+                    param: None,
+                })
+            }
+            "share" => {
+                let of = c
+                    .opts
+                    .get("of")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| err(at, "share names {of, over}"))?;
+                let over = c
+                    .opts
+                    .get("over")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| err(at, "share names {of, over}"))?;
+                let num = self.term(terms, alias, of, at)?.sql;
+                let over_frame = self.frames.get(over).cloned().unwrap_or_default();
+                let counted = if over_frame.has_subj {
+                    "COUNT(DISTINCT o.subj)"
+                } else {
+                    "COUNT(*)"
+                };
+                let denom = format!("(SELECT {counted} FROM {} o)", cte_name(over));
+                plain(format!(
+                    "({} / {})",
+                    self.sql.as_double(&num),
+                    self.sql.as_double(&denom)
+                ))
+            }
+            "change" => Err(err(
+                at,
+                "change is a binding of a subject set, not an expression",
+            )),
             op if AGGREGATES.contains(&op) => {
-                // a correlated aggregate over a descendant or a group
                 let target = c
                     .opts
                     .get("set")
@@ -2009,7 +2830,7 @@ impl<'a> Builder<'a> {
                     .sets
                     .get(&target)
                     .ok_or_else(|| err(at, format!("no set {target}")))?;
-                let grain = self.frame_grain(alias, terms);
+                let grain = self.current;
                 let link = if child_set.grain == Grain::Group {
                     let key_path = format!("{}.id", grain.map(|g| g.name()).unwrap_or("subject"));
                     let (_, gcol) = child
@@ -2019,16 +2840,15 @@ impl<'a> Builder<'a> {
                         .ok_or_else(|| {
                             err(at, format!("group {target} is not keyed by this grain"))
                         })?;
-                    format!("ch.{gcol} = {alias}.k")
+                    format!("ch.{gcol} = {}", dot("k"))
                 } else if Some(child_set.grain) == grain {
-                    format!("ch.k = {alias}.k")
+                    format!("ch.k = {}", dot("k"))
                 } else {
                     let g = grain.ok_or_else(|| err(at, "an aggregate needs a grain"))?;
-                    format!("{} = {alias}.k", Self::link(&child, g, "ch", at)?)
+                    format!("{} = {}", Self::link(&child, g, "ch", at)?, dot("k"))
                 };
-                let child_terms = self.cte_terms(&target, &child, child_set, &[]);
                 let inner = match c.args.first() {
-                    Some(Arg::Clause(inner)) => Some(self.expr(inner, &child_terms, "ch", at)?.sql),
+                    Some(Arg::Clause(inner)) => Some(self.expr(inner, &child.terms, "ch", at)?.sql),
                     Some(_) => return Err(err(at, "an aggregate's argument is a clause")),
                     None => None,
                 };
@@ -2038,131 +2858,15 @@ impl<'a> Builder<'a> {
                     cte_name(&target)
                 ))
             }
-            "ordinal" | "prev" | "next" | "change" | "share" => {
-                Err(err(at, format!("{op} lands with slice 6")))
-            }
             other => Err(err(at, format!("{other} is not an op of the language"))),
         }
     }
 
-    /// The grain of the set being built.
-    fn frame_grain(&self, _alias: &str, _terms: &[(String, Term)]) -> Option<Grain> {
-        self.current
-    }
-}
-
-const AGGREGATES: &[&str] = &["count", "distinct", "min", "max", "sum", "avg", "list"];
-
-/// For every set, the field paths that other sets read through an
-/// aggregate `{set: it}` or a group over it.
-fn external_paths(ask: &Ask) -> HashMap<String, BTreeSet<String>> {
-    fn collect(c: &Clause, out: &mut HashMap<String, BTreeSet<String>>) {
-        let mut all = Vec::new();
-        c.walk(&mut all);
-        for cl in all {
-            if AGGREGATES.contains(&cl.op.as_str())
-                && let Some(Value::String(target)) = cl.opts.get("set")
-            {
-                let mut paths = BTreeSet::new();
-                for a in &cl.args {
-                    if let Arg::Clause(inner) = a {
-                        paths_in(inner, &mut paths);
-                    }
-                }
-                out.entry(target.clone()).or_default().extend(paths);
-            }
-        }
-    }
-    let mut out: HashMap<String, BTreeSet<String>> = HashMap::new();
-    for set in ask.sets.values() {
-        for (_, c) in &set.bind.0 {
-            collect(c, &mut out);
-        }
-        for c in &set.where_ {
-            collect(c, &mut out);
-        }
-        if let Some(g) = &set.group {
-            let mut paths = BTreeSet::new();
-            for c in &g.by {
-                paths_in(c, &mut paths);
-            }
-            out.entry(g.of.clone()).or_default().extend(paths);
-        }
-    }
-    for c in &ask.out.columns {
-        collect(c, &mut out);
-    }
-    out
-}
-
-fn cte_name(set: &str) -> String {
-    format!("s_{set}")
-}
-
-fn window_days(w: &crate::ast::WindowSpec, at: &str) -> R<(Option<i64>, Option<i64>)> {
-    match w {
-        crate::ast::WindowSpec::Literal(win) => Ok(win.days()),
-        crate::ast::WindowSpec::Param(_) => Err(err(
-            at,
-            "a window parameter desugars into the document; desugar first",
-        )),
-    }
-}
-
-/// Compile a desugared, validated ask.
-pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compiled> {
-    let mut reads: HashMap<String, usize> = HashMap::new();
-    for set in ask.sets.values() {
-        for r in set.reads() {
-            *reads.entry(r.to_string()).or_insert(0) += 1;
-        }
-    }
-    *reads.entry(ask.out.set.clone()).or_insert(0) += 1;
-    let mut b = Builder {
-        ctx,
-        ask,
-        sql: Sql {
-            dialect: ctx.dialect,
-        },
-        params: Vec::new(),
-        ctes: Vec::new(),
-        frames: BTreeMap::new(),
-        reads,
-        current: None,
-        external: external_paths(ask),
-        answer_columns: Vec::new(),
-        code_columns: Vec::new(),
-    };
-    let out_columns: Vec<Clause> = ask.out.columns.clone();
-    let out_order: Vec<Clause> = ask.out.order.iter().map(|o| o.0.clone()).collect();
-    for name in &validated.order {
-        b.current = Some(ask.sets[name].grain);
-        b.build_set(name, &out_columns, &out_order)?;
-    }
-    b.current = ask.sets.get(&ask.out.set).map(|s| s.grain);
-    let final_sql = b.answer(&out_columns)?;
-    let sql = format!("WITH {} {final_sql}", b.ctes.join(", "));
-    Ok(Compiled {
-        sql,
-        params: b.params,
-        columns: b.answer_columns.clone(),
-        code_columns: b.code_columns.clone(),
-    })
-}
-
-impl<'a> Builder<'a> {
     /// The final SELECT over the answer's set.
-    fn answer(&mut self, out_columns: &[Clause]) -> R<String> {
+    fn answer(&mut self) -> R<String> {
         let out = &self.ask.out;
-        let set = self
-            .ask
-            .sets
-            .get(&out.set)
-            .ok_or_else(|| err("out.set", "no such set"))?;
         let frame = self.frames.get(&out.set).cloned().unwrap_or_default();
-        let mut extra: Vec<Clause> = out_columns.to_vec();
-        extra.extend(out.order.iter().map(|o| o.0.clone()));
-        let terms = self.cte_terms(&out.set, &frame, set, &extra);
+        let terms = frame.terms.clone();
         let mut cols = vec!["o.k AS _key".to_string(), "o.subj AS _subject".to_string()];
         let mut names = vec!["_key".to_string(), "_subject".to_string()];
         let mut code_columns = Vec::new();
@@ -2192,19 +2896,20 @@ impl<'a> Builder<'a> {
             }
             _ => {}
         }
-        for (i, c) in out_columns.iter().enumerate() {
+        for (i, c) in out.columns.iter().enumerate() {
             let e = self.expr(c, &terms, "o", &format!("out.columns[{i}]"))?;
             let name = c
                 .ref_name()
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("col{i}"));
-            // a date column reads as text on both backends (H8)
-            let rendered = if e.prec.is_some()
+            let is_date = e.prec.is_some()
                 || name == "birth_date"
                 || name.ends_with("date")
                 || name == "first"
                 || name == "last"
-            {
+                || name.ends_with(".first")
+                || name.ends_with(".last");
+            let rendered = if is_date {
                 format!("CAST({} AS TEXT)", e.sql)
             } else {
                 e.sql
@@ -2253,4 +2958,43 @@ impl<'a> Builder<'a> {
         self.code_columns = code_columns;
         Ok(sql)
     }
+}
+
+/// Compile a desugared, validated ask.
+pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compiled> {
+    let mut reads: HashMap<String, usize> = HashMap::new();
+    for set in ask.sets.values() {
+        for r in set.reads() {
+            *reads.entry(r.to_string()).or_insert(0) += 1;
+        }
+    }
+    *reads.entry(ask.out.set.clone()).or_insert(0) += 1;
+    let mut b = Builder {
+        ctx,
+        ask,
+        sql: Sql {
+            dialect: ctx.dialect,
+        },
+        params: Vec::new(),
+        ctes: Vec::new(),
+        frames: BTreeMap::new(),
+        reads,
+        current: None,
+        external: external_paths(ask),
+        answer_columns: Vec::new(),
+        code_columns: Vec::new(),
+    };
+    for name in &validated.order {
+        b.current = Some(ask.sets[name].grain);
+        b.build_set(name)?;
+    }
+    b.current = ask.sets.get(&ask.out.set).map(|s| s.grain);
+    let final_sql = b.answer()?;
+    let sql = format!("WITH {} {final_sql}", b.ctes.join(", "));
+    Ok(Compiled {
+        sql,
+        params: b.params,
+        columns: b.answer_columns.clone(),
+        code_columns: b.code_columns.clone(),
+    })
 }

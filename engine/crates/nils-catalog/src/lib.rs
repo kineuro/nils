@@ -20,7 +20,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nils_ask::ast::Grain;
-use nils_ask::validate::{Class, ColumnRef, DerivedInfo, FieldInfo, KindInfo, Names, Scope};
+use nils_ask::validate::{
+    Class, ColumnRef, DerivedInfo, FieldInfo, KindInfo, LevelSpec, Names, Scope,
+};
 use nils_dicom::catalogue::{self, Level as CatalogueLevel, Sensitivity};
 use nils_pack::pack::{Pack, Visibility};
 use nils_registry::clinical;
@@ -1580,6 +1582,16 @@ impl Names for Catalog {
             .map(|d| DerivedInfo {
                 grain: d.grain,
                 params: d.params.iter().map(|(k, _)| k.clone()).collect(),
+            })
+    }
+
+    fn level_spec(&self, name: &str) -> Option<LevelSpec> {
+        self.levels
+            .iter()
+            .find(|l| l.name == name)
+            .map(|l| LevelSpec {
+                exact: l.exact.clone(),
+                rounded: l.rounded.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             })
     }
 
