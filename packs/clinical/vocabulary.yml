@@ -14,6 +14,8 @@
 # Two marks on an observation kind matter to a release (section 7.4):
 # `primary: true` names the kinds a BIDS tree carries by default, and
 # `sensitive: true` names a kind no release ever writes, named or not.
+# `precision: day | month | year` names how finely a source records the kind's date
+# (Wave 4b section 5.2); `day` when absent.
 #
 # Carried from NILS v0 0.5.3's seed, which is where the observation kinds
 # and the eight diseases with their subtypes were accumulated: fifteen in the
@@ -81,7 +83,8 @@ vocabulary:
     - {name: Treatment, category: Intervention, value_type: text, description: A disease-modifying treatment started, as its name}
     - {name: Diagnosis, category: Assessment, description: The official diagnosis, on its date}
     - {name: Disease Onset, category: Assessment, description: When symptoms first appeared}
-    - {name: SP Transition, category: Assessment, description: The transition to secondary progression, on its date}
+    # Known to the year in every source seen so far (Wave 4b section 5.2): a comparison against it is forgiving.
+    - {name: SP Transition, category: Assessment, precision: year, description: The transition to secondary progression, on its date}
     # Marked sensitive: a release never writes it, by name or by default (Wave 4a section 7.4).
     - {name: Pregnancy Delivery, category: Clinical Event, sensitive: true, description: A delivery, on its date}
     - {name: MRI Scan, category: Imaging, description: An MRI study performed}

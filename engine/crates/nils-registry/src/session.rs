@@ -288,6 +288,22 @@ impl Scheme {
     }
 }
 
+impl Scheme {
+    /// Wave 4b §7: the digest of the definition, BLAKE2b over the canonical
+    /// JSON, sixteen bytes as hex. Two schemes with one digest make the same
+    /// sessions and the same labels; a renamed scheme keeps its digest and a
+    /// redefined one changes it, which is what a pick, a label and a handle
+    /// need to name the scheme they were made under.
+    pub fn digest(&self) -> String {
+        use blake2::digest::consts::U16;
+        use blake2::{Blake2b, Digest};
+        let json = serde_json::to_vec(self).expect("a scheme serializes");
+        let mut hasher = Blake2b::<U16>::new();
+        hasher.update(&json);
+        hex::encode(hasher.finalize())
+    }
+}
+
 impl Default for Scheme {
     /// v0's behaviour: same-day sessions labelled by their date.
     fn default() -> Scheme {

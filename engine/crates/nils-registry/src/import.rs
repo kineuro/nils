@@ -864,7 +864,7 @@ fn run(
     let mut outcomes: Vec<Outcome> = refused_rows;
 
     // The references, resolved once each.
-    let mut kinds: HashMap<String, (i64, Option<String>)> = HashMap::new();
+    let mut kinds: HashMap<String, (i64, Option<String>, String)> = HashMap::new();
     let mut cohorts: HashMap<String, i64> = HashMap::new();
     let mut diseases: HashMap<String, i64> = HashMap::new();
     let mut disease_types: HashMap<(i64, String), i64> = HashMap::new();
@@ -872,7 +872,10 @@ fn run(
         let store = registry.store();
         let d = store.dialect();
         for k in crate::clinical::observation_types(store)? {
-            kinds.insert(k.name.to_lowercase(), (k.id, k.value_type.clone()));
+            kinds.insert(
+                k.name.to_lowercase(),
+                (k.id, k.value_type.clone(), k.precision.clone()),
+            );
         }
         let mut names: Vec<String> = rows.iter().filter_map(|r| r.reference.clone()).collect();
         names.sort();
@@ -945,13 +948,14 @@ fn run(
                 Target::Event => {
                     let name = r.reference.clone().unwrap_or_default();
                     match kinds.get(&name.to_lowercase()) {
-                        Some((kind, value_type)) => vec![write_event(
+                        Some((kind, value_type, precision)) => vec![write_event(
                             store,
                             mapping,
                             r,
                             subject.as_ref().map(|(id, _)| *id).unwrap_or(0),
                             *kind,
                             value_type.as_deref(),
+                            precision,
                             &key_fields,
                             actor,
                             &now,
@@ -1081,6 +1085,7 @@ fn write_event(
     subject: i64,
     kind: i64,
     value_type: Option<&str>,
+    precision: &str,
     key_fields: &[String],
     actor: &str,
     now: &str,
@@ -1153,6 +1158,7 @@ fn write_event(
         "subject_id",
         "observation_type_id",
         "event_date",
+        "event_date_precision",
         "event_time",
         "value",
         "number",
@@ -1167,6 +1173,7 @@ fn write_event(
             Param::Int(subject),
             Param::Int(kind),
             Param::from(date.as_str()),
+            Param::from(precision),
             opt_text(r.fields.get("event_time")),
             opt_text(value),
             match number {
@@ -1190,6 +1197,7 @@ fn write_event(
                 store.update_by_id(
                     table("event"),
                     &[
+                        ("event_date_precision", Param::from(precision)),
                         ("event_time", opt_text(r.fields.get("event_time"))),
                         ("value", opt_text(value)),
                         (
@@ -1431,10 +1439,12 @@ fn write_member(
 
 /// An event of a kind, for a subject on a date, made if absent: how a
 /// subject's disease points at its onset and its diagnosis.
+#[allow(clippy::too_many_arguments)]
 fn event_of(
     store: &mut Store,
     subject: i64,
     kind: i64,
+    precision: &str,
     date: &str,
     actor: &str,
     now: &str,
@@ -1465,6 +1475,7 @@ fn event_of(
             "subject_id",
             "observation_type_id",
             "event_date",
+            "event_date_precision",
             "created_at",
             "actor",
         ],
@@ -1472,6 +1483,7 @@ fn event_of(
             Param::Int(subject),
             Param::Int(kind),
             Param::from(date),
+            Param::from(precision),
             Param::from(now),
             Param::from(actor),
         ],
@@ -1486,7 +1498,7 @@ fn write_subject_disease(
     r: &Parsed,
     subject: i64,
     disease: i64,
-    kinds: &HashMap<String, (i64, Option<String>)>,
+    kinds: &HashMap<String, (i64, Option<String>, String)>,
     actor: &str,
     now: &str,
     do_apply: bool,
@@ -1512,12 +1524,14 @@ fn write_subject_disease(
         ("diagnosis_date", "diagnosis", &mut diagnosis),
     ] {
         if let Some(date) = r.fields.get(field).map(Value::text) {
-            let Some((kind, _)) = kinds.get(kind_name) else {
+            let Some((kind, _, precision)) = kinds.get(kind_name) else {
                 return Ok(Verdict::Refused(format!(
                     "no observation kind named {kind_name}; load the vocabulary first"
                 )));
             };
-            *slot = event_of(store, subject, *kind, &date, actor, now, do_apply)?;
+            *slot = event_of(
+                store, subject, *kind, precision, &date, actor, now, do_apply,
+            )?;
         }
     }
     let columns = [
@@ -1645,15 +1659,21 @@ fn write_subject_disease_type(
         "subject_disease_id",
         "disease_type_id",
         "assigned_on",
+        "assigned_on_precision",
         "notes",
         "created_at",
         "actor",
     ];
+    let assigned_precision = || match r.fields.get("assigned_on") {
+        Some(_) => Param::from("day"),
+        None => Param::Null,
+    };
     let row = || {
         vec![
             Param::Int(subject_disease),
             Param::Int(dtype),
             opt_param(r.fields.get("assigned_on")),
+            assigned_precision(),
             opt_text(r.fields.get("notes")),
             Param::from(now),
             Param::from(actor),
@@ -1667,6 +1687,7 @@ fn write_subject_disease_type(
                     table("subject_disease_type"),
                     &[
                         ("assigned_on", opt_param(r.fields.get("assigned_on"))),
+                        ("assigned_on_precision", assigned_precision()),
                         ("notes", opt_text(r.fields.get("notes"))),
                         ("actor", Param::from(actor)),
                     ],

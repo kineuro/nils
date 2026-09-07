@@ -128,6 +128,62 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | export | `nils audit list --json` |
 | delete | with the registry |
 
+## session cache
+
+| | |
+|---|---|
+| what | each subject's sessions under each window, built by the one resolver over the subject's whole timeline (Wave 4b section 7), with the labels a scheme gives them beside the identity |
+| where | rows of session_cache, session_cache_study and session_label in the registry |
+| holds | quasi-identifying: the first and last study day of each session<br>technical: the surrogate id, the window, the timeline digest, the labels |
+| owner | the registry's operator |
+| kept | no retention: rebuildable, and dropped on rebuild (Wave 4b section 14.1) |
+| read | `nils session list` |
+| change | no command |
+| export | no command |
+| delete | with the registry, or by the next rebuild |
+
+## questions and their answers
+
+| | |
+|---|---|
+| what | a saved question (a selection) with its immutable versions, the handle a question left behind with the keys it named and the pages it was read by, and an uploaded identifier list by reference (Wave 4b section 8) |
+| where | rows of selection, selection_version, handle, handle_member, handle_page, values_source and values_member in the registry |
+| holds | quasi-identifying: the subject keys a handle named, the dates and ages its pages carry<br>technical: the question itself, its hash, its provenance (who, when, node, pack, epoch, scheme) |
+| owner | the research group that asks; the data controller sets the retention |
+| kept | a handle's rows 90 days after its last read, longer while a release, a selection, a job or a cohort names it, then only its metadata, hash and question; a saved question for ever (Wave 4b section 14.1) |
+| read | `nils custody` |
+| change | no command |
+| export | no command |
+| delete | with the registry |
+
+## catalog curation
+
+| | |
+|---|---|
+| what | what a person wrote about a catalog path: a description, a caveat, guidance for an assistant, a visibility or a class, keyed by the path so a re-sync never overwrites it (Wave 4b section 9) |
+| where | rows of catalog_curation in the registry |
+| holds | technical: prose about fields and kinds; never a subject's data |
+| owner | the research group |
+| kept | for ever (Wave 4b section 14.1) |
+| read | `nils custody` |
+| change | no command |
+| export | no command |
+| delete | with the registry |
+
+## identifier read audit
+
+| | |
+|---|---|
+| what | who projected identifiers through which handle, when, which columns and how many rows, at every role (Wave 4b section 9) |
+| where | rows of handle_read_audit in the registry |
+| holds | quasi-identifying: the principal<br>technical: the handle, the columns, the row count, the epoch, the time; never an identifier |
+| owner | the registry's operator; read by whoever answers for the archive |
+| kept | for ever, like the rest of the audit (Wave 4b section 14.1) |
+| read | `nils custody` |
+| change | no command |
+| export | no command |
+| delete | with the registry |
+
 ## logs
 
 | | |

@@ -33,6 +33,14 @@ pub enum Action {
     Handover,
     ReleaseWithdraw,
     JobsPrune,
+    // Wave 4b §8.1: the cohort acts and the saved ask, widened with the
+    // writer and not after it, so a promotion is never a membership writer
+    // with no act and no epoch bump.
+    CohortCreate,
+    CohortMemberAdd,
+    CohortMemberRemove,
+    CohortPromote,
+    SelectionSave,
 }
 
 impl Action {
@@ -51,6 +59,11 @@ impl Action {
             Action::Handover => "handover",
             Action::ReleaseWithdraw => "release.withdraw",
             Action::JobsPrune => "jobs.prune",
+            Action::CohortCreate => "cohort.create",
+            Action::CohortMemberAdd => "cohort.member.add",
+            Action::CohortMemberRemove => "cohort.member.remove",
+            Action::CohortPromote => "cohort.promote",
+            Action::SelectionSave => "selection.save",
         }
     }
 

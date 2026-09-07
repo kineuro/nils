@@ -35,6 +35,14 @@ pub fn fold(s: Option<&str>) -> Option<String> {
     if out.is_empty() { None } else { Some(out) }
 }
 
+/// The case folded companion (Wave 4b §11.3): `fold`, then Unicode
+/// lowercase, for the `text_*_ci` columns the compiler compares under
+/// `contains` and `starts_with`, so that both backends compare the same way.
+/// A pack never reads one of these.
+pub fn fold_ci(s: Option<&str>) -> Option<String> {
+    fold(s).map(|f| f.to_lowercase())
+}
+
 /// The join v0 builds its text blob from: the present parts, in order,
 /// separated by one space (`sort/fingerprint.py`, `_build_text_blob`).
 pub fn join(parts: &[Option<&str>]) -> Option<String> {

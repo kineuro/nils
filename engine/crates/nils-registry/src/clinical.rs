@@ -64,7 +64,14 @@ pub struct ObservationType {
     pub sensitive: bool,
     #[serde(default)]
     pub description: Option<String>,
+    /// Wave 4b §5.2: how finely a source records this kind's date, `day`,
+    /// `month` or `year`; the default an import applies when a row has
+    /// nothing finer, and `day` when absent.
+    #[serde(default)]
+    pub precision: Option<String>,
 }
+
+pub const PRECISIONS: &[&str] = &["day", "month", "year"];
 
 #[derive(Debug, Deserialize)]
 struct File {
@@ -121,6 +128,15 @@ impl Vocabulary {
                     o.name
                 ));
             }
+            if let Some(p) = &o.precision
+                && !PRECISIONS.contains(&p.as_str())
+            {
+                return Err(format!(
+                    "observation type {}: {p} is not a precision; those are {}",
+                    o.name,
+                    PRECISIONS.join(", ")
+                ));
+            }
         }
         Ok(v)
     }
@@ -135,6 +151,10 @@ pub struct Loaded {
     pub disease_types_updated: usize,
     pub observation_types_added: usize,
     pub observation_types_updated: usize,
+    /// Wave 4b §5.2: events whose placeholder day was re-read at the kind's
+    /// declared precision (a 1 January under a `year` kind, a first of the
+    /// month under a `month` kind).
+    pub events_reprecised: usize,
 }
 
 impl Loaded {
@@ -256,7 +276,7 @@ pub fn load(store: &mut Store, v: &Vocabulary) -> Result<Loaded, Error> {
     let obs_t = table("observation_type");
     let obs_by_name = format!(
         "SELECT id, category, value_type, unit, min_value, max_value, is_primary, description, \
-         is_sensitive FROM {} WHERE name = {}",
+         is_sensitive, precision FROM {} WHERE name = {}",
         store.qualified("observation_type"),
         d.param(1, Type::Text)
     );
@@ -269,6 +289,7 @@ pub fn load(store: &mut Store, v: &Vocabulary) -> Result<Loaded, Error> {
         "is_primary",
         "description",
         "is_sensitive",
+        "precision",
     ];
     for o in &v.observation_types {
         let values = |o: &ObservationType| -> Vec<Param> {
@@ -281,6 +302,7 @@ pub fn load(store: &mut Store, v: &Vocabulary) -> Result<Loaded, Error> {
                 Param::Int(i64::from(o.primary)),
                 opt(&o.description),
                 Param::Int(i64::from(o.sensitive)),
+                Param::from(precision_of(o)),
             ]
         };
         match store.query_opt(&obs_by_name, &[Param::from(o.name.as_str())])? {
@@ -292,7 +314,8 @@ pub fn load(store: &mut Store, v: &Vocabulary) -> Result<Loaded, Error> {
                     && r.opt_double(5)? == o.max
                     && r.int(6)? == i64::from(o.primary)
                     && r.opt_text(7)?.map(str::to_string) == o.description
-                    && r.opt_int(8)?.unwrap_or(0) == i64::from(o.sensitive);
+                    && r.opt_int(8)?.unwrap_or(0) == i64::from(o.sensitive)
+                    && r.opt_text(9)?.unwrap_or("day") == precision_of(o);
                 if !same {
                     let vals = values(o);
                     let set: Vec<(&str, Param)> = columns.iter().copied().zip(vals).collect();
@@ -310,7 +333,57 @@ pub fn load(store: &mut Store, v: &Vocabulary) -> Result<Loaded, Error> {
             }
         }
     }
+    out.events_reprecised = reprecise(store, v)?;
     Ok(out)
+}
+
+fn precision_of(o: &ObservationType) -> &str {
+    o.precision.as_deref().unwrap_or("day")
+}
+
+/// Wave 4b §5.2: a row recorded at `day` under a kind the vocabulary now
+/// declares coarser is a placeholder, when its day is the placeholder day
+/// (1 January for a year, the first for a month), and is re-read at the
+/// kind's precision. A row on any other day stays as it was written, because
+/// a source that knew the day knew the day. Idempotent.
+fn reprecise(store: &mut Store, v: &Vocabulary) -> Result<usize, Error> {
+    let d = store.dialect();
+    let event_t = table("event");
+    let date = d.text_of(event_t.column("event_date").expect("event_date"));
+    let by_name = format!(
+        "SELECT id FROM {} WHERE name = {}",
+        store.qualified("observation_type"),
+        d.param(1, Type::Text)
+    );
+    let mut n = 0usize;
+    for o in &v.observation_types {
+        let (precision, placeholder) = match precision_of(o) {
+            "year" => ("year", "%-01-01"),
+            "month" => ("month", "%-01"),
+            _ => continue,
+        };
+        let Some(row) = store.query_opt(&by_name, &[Param::from(o.name.as_str())])? else {
+            continue;
+        };
+        let kind = row.int(0)?;
+        let sql = format!(
+            "UPDATE {} SET event_date_precision = {} WHERE observation_type_id = {} \
+             AND event_date_precision = 'day' AND {date} LIKE {}",
+            store.qualified("event"),
+            d.param(1, Type::Text),
+            d.param(2, Type::Int),
+            d.param(3, Type::Text)
+        );
+        n += store.execute(
+            &sql,
+            &[
+                Param::from(precision),
+                Param::Int(kind),
+                Param::from(placeholder),
+            ],
+        )? as usize;
+    }
+    Ok(n)
 }
 
 /// One observation kind as the registry holds it.
@@ -324,12 +397,14 @@ pub struct Kind {
     pub primary: bool,
     /// Never released (§7.4).
     pub sensitive: bool,
+    /// Wave 4b §5.2: `day`, `month` or `year`.
+    pub precision: String,
 }
 
 /// The observation kinds the registry holds, by name.
 pub fn observation_types(store: &mut Store) -> Result<Vec<Kind>, Error> {
     let sql = format!(
-        "SELECT id, name, category, value_type, unit, is_primary, is_sensitive FROM {} ORDER BY name",
+        "SELECT id, name, category, value_type, unit, is_primary, is_sensitive, precision FROM {} ORDER BY name",
         store.qualified("observation_type")
     );
     let mut out = Vec::new();
@@ -342,6 +417,7 @@ pub fn observation_types(store: &mut Store) -> Result<Vec<Kind>, Error> {
             unit: r.opt_text(4)?.map(str::to_string),
             primary: r.int(5)? != 0,
             sensitive: r.opt_int(6)?.unwrap_or(0) != 0,
+            precision: r.opt_text(7)?.unwrap_or("day").to_string(),
         });
     }
     Ok(out)
