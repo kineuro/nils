@@ -18,6 +18,7 @@ pub mod error;
 pub mod eval;
 pub mod expr;
 pub mod level;
+pub mod mcp;
 pub mod normalize;
 pub mod overlay;
 pub mod pack;

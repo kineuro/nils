@@ -52,6 +52,7 @@ fn every_manifest_key_the_loader_reads_is_on_the_schema() {
         "buckets",
         "fields",
         "levels",
+        "mcp",
     ];
     let version: u32 = std::fs::read_to_string(contracts().join("pack/VERSION"))
         .unwrap()

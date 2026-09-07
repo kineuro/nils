@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# What the MCP door tells a model (docs/specs/wave4b-the-ask.md, section
+# 12.3). The tool list is not the endpoint list: a door reaches a model
+# only when it is named here. This file ships in the pack, so a rule
+# rewritten or an example swapped is a pack release, never an engine one.
+mcp:
+  version: "1"
+
+  grounding:
+    - A question is a document, not SQL. Build it as sets, each with one declared grain, and let the engine compile it.
+    - Never invent a field, an axis value, an event kind or a cohort name. Read the catalog first and use what it lists; what it does not list either does not exist or is not yours to see.
+    - Validate before running. A refused document names the code, the path and the call that settles it, and that message is the next step.
+    - Time is always a window with a unit and a policy. A month is 31 days, a year is 366, both ends inclusive, and a coarse date is read as its interval unless the clause says strict.
+    - An answer is a handle. Read its first page, page the rest, and cite the handle rather than pasting rows.
+    - A result that comes back truncated was cut by a cap. It may be read, never hashed, released, pinned or promoted; run it as a job instead.
+    - Identifiers never enter a document except through an uploaded list, and never leave except through out.identifiers, which most roles may not use.
+    - "When a set surprises you, diagnose it: the funnel names the stage where the subjects went."
+
+  tools:
+    - operation: catalog
+      name: nils_catalog
+      description: >-
+        What this registry holds and what a question may name: the grains and
+        how they meet, every level's fields with their type and class, the
+        classification axes with their values, the event kinds, the diseases,
+        the cohorts, the session schemes, the comparability levels, the derived
+        fields, the window presets and the function table. Read this before
+        writing a document; page a level with after.
+      rules:
+        - Ask for one level when you know it, and page with after rather than asking for everything.
+    - operation: validate
+      name: nils_validate
+      description: >-
+        Validate a document strictly and return its content hash, the
+        selections it pins and the warnings that did not refuse it. Under mode
+        repair the structural slips are fixed first (a missing options object,
+        a lone clause, an operator alias) and the repairs are reported.
+      rules:
+        - Validate every document before running it, and read the issues rather than guessing at a fix.
+    - operation: describe
+      name: nils_describe
+      description: >-
+        One sentence per set in the order the engine reads them, the
+        conventions that always apply, the denominators by name, how each
+        attached row was chosen, and the disclosure level. Use it to show a
+        person what the document actually asks before it runs.
+    - operation: options
+      name: nils_options
+      description: >-
+        What one set of a document may become: its resolved shape, its
+        sentence, and the typed moves with stable ids, each a template with
+        holes and the legal fillers. Apply a move by its id with nils_apply,
+        against the token this call returns.
+      rules:
+        - A move id is stable only inside one options answer; call options again after every apply.
+    - operation: apply
+      name: nils_apply
+      description: >-
+        Apply moves by id to a stored document, atomically, and return a new
+        document handle with what changed and fresh options. It returns a
+        handle, never a document; fetch the document by handle when you need
+        to read it.
+    - operation: diagnose
+      name: nils_diagnose
+      description: >-
+        Why a document answers as it does: the funnel set by set and stage by
+        stage, what each clause of the answer dropped, the ties, the rows
+        coarser than a day, the unresolved uploads, the cost class, and a one
+        line explanation when nothing comes back.
+      rules:
+        - When an answer is empty or smaller than expected, diagnose before changing the document.
+    - operation: preview
+      name: nils_preview
+      description: >-
+        Ten rows of the answer, or the count, by the document's level. Cheap
+        enough to check a document reads as intended before running it.
+    - operation: run
+      name: nils_run
+      description: >-
+        Run a document inside the caps and leave a handle: its columns, its
+        first page of rows, its content hash, and whether a cap truncated it.
+        Name the handle to keep its rows and its question together.
+      rules:
+        - Cite the handle in what you write; paste rows only when a person asked to see them.
+    - operation: rows
+      name: nils_rows
+      description: >-
+        One page of a handle's rows, by page number. Pages are bounded; read
+        the next page rather than asking for everything at once.
+
+  examples:
+    - question: How many subjects are in the cohort ms-cohort-a?
+      note: >-
+        The smallest whole question: a cohort set, a subject set of it, and the
+        count level. Membership is the open interval, so nothing says as of.
+      document: |
+        ast_version: 1
+        sets:
+          scope:  {grain: cohort,  where: [["=", {}, ["field", {}, "name"], "ms-cohort-a"]]}
+          people: {grain: subject, of: scope}
+        out: {set: people, level: count}
+    - question: Which subjects have at least three sessions with a T1 and an EDSS within six months?
+      note: >-
+        The shape most clinical questions take: a session set of the subjects,
+        a stack set picked one per session and attached, a score set brought
+        near inside a window, then a subject set counting the sessions that
+        survived. The counting set is a subject set with has, never a session
+        set with a count column.
+      document: |
+        ast_version: 1
+        params:
+          reach: {type: window, value: {from: -6, to: 6, unit: month}}
+        sets:
+          people:  {grain: subject}
+          visits:  {grain: session, of: people}
+          t1:
+            grain: stack
+            of: visits
+            where: [["=", {}, ["axis", {}, "base"], "T1w"]]
+            pick: {per: session, by: [[["field", {}, "n_instances"], desc]]}
+          edss: {grain: event, where: [["=", {}, ["field", {}, "kind"], "EDSS"]]}
+          good:
+            grain: session
+            from: visits
+            near: [{as: score, set: edss, window: ["param", {}, "reach"], policy: nearest, tie: earlier}]
+            attach: [{as: t1, set: t1}]
+          answer:
+            grain: subject
+            from: people
+            has: [{set: good, min: 3, as: n_good}]
+        out:
+          set: answer
+          level: record
+          columns: [["field", {}, "code"], ["field", {}, "n_good"]]
+          order: [[["field", {}, "code"], asc]]

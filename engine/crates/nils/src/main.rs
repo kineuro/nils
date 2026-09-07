@@ -26,6 +26,7 @@ use clap::{Args, Parser, Subcommand};
 mod ask_cli;
 mod ask_doors;
 mod door_client;
+mod mcp;
 mod serve;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::day::Day;
@@ -401,6 +402,10 @@ struct ServeArgs {
     /// The pack the ask doors read, by name in --pack-dir
     #[arg(long, default_value = "mri", value_name = "NAME")]
     ask_pack: String,
+    /// An authorization server the MCP door's metadata names (RFC 9728);
+    /// repeatable
+    #[arg(long, value_name = "URL")]
+    mcp_authorization_server: Vec<String>,
     /// Request handlers, each with a registry connection of its own
     #[arg(long, default_value = "4", value_name = "N")]
     workers: usize,

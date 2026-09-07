@@ -1464,6 +1464,47 @@ the count, so the command line's own tests stop the engine instead of
 counting its requests. Deferred: `gate` is slice 12's, and the MCP door
 slice 11's.
 
+**As built (slice 11, the MCP door, 2026-09-07; pack contract v4).** The
+door is `POST /mcp` on `nils serve`, streamable HTTP with no stream of its
+own: a JSON-RPC message in, its answer out, a notification answered with
+nothing at all, `GET` refused with 405 and `DELETE` accepted with 204. It
+speaks `2025-06-18` and `2025-03-26`, and answers `initialize`, `ping`,
+`tools/list`, `tools/call`, `prompts/list` and `prompts/get`. Everything a
+model is told ships in the pack: contract v4 adds the optional `mcp` key,
+one file (`packs/mri/mcp.yml`) holding the content version, the grounding
+rules that become the server's instructions, the tools opted in with their
+descriptions and their own rules, and the worked examples that become
+prompts. The tool list is not the endpoint list, and the loader proves it:
+a pack names an operation from a fixed list and the MRI pack opts in nine
+of the twelve, leaving `handle` and `selections` served by the doors and
+unseen by a model. A tool call runs the ask door itself through
+`serve::ask_call`, so the roles, the read only reader, the catalog policy
+and the caps are the doors' own, with no second path to the registry. A
+domain refusal comes back as `isError` with the message and every issue as
+text, because a model reads text and retries; a role refusal comes back as
+a protocol error instead, because it is the caller's to fix. Every answer
+is bounded: a result is cut at 16 KB of rendered JSON, and rows are cut to
+`page_rows_mcp`, a run pointing at the handle for the rest while the rows
+tool pages inside a page by `offset` and says `next_offset` while rows
+remain. Identity is §12.4's, plus RFC 9728: a public protected resource
+metadata document at `/.well-known/oauth-protected-resource` naming the
+resource and the authorization servers (`--mcp-authorization-server`), a
+401 whose `WWW-Authenticate` carries `resource_metadata`, and a 403 that
+says `insufficient_scope`. Audience binding to the MCP resource stays a
+named, dated deviation (2026-09-07) in that document until a client that
+speaks OAuth exists. The tests drive the transport as a client does, over
+a socket: the handshake, the opt-in list, a bounded run paged by offset, a
+refusal read as text, an unknown tool and an unknown method, the public
+metadata, the two refusals with their headers, and the bar's second half,
+a grounding rule edited and an example swapped in a copied pack changing
+what the same binary says. What the tests taught, twice: a test server
+must never inherit the run's stderr, since a server that outlives a panic
+holds the pipe open and hangs the run long after the tests are done.
+Deferred: a real MCP client (an inspector, an assistant) connecting to a
+deployed engine is the operator's check and not CI's, and the pack's
+few-shot gallery stays two worked examples until the assistant wave asks
+for more.
+
 
 Ordering constraints, before the table. Nothing is written before the record
 carries the amendments (slice 0). The two `stack_fingerprint` indexes, the

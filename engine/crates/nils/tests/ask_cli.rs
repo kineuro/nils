@@ -105,7 +105,9 @@ impl Server {
             .env("USER", "anna")
             .env("HOSTNAME", "ward-3")
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            // Never the test's own stderr: a server that outlives a
+            // panic would hold the pipe open and hang the whole run.
+            .stderr(Stdio::null())
             .spawn()
             .unwrap();
         let stdout = child.stdout.take().unwrap();

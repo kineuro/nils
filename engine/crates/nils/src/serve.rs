@@ -385,19 +385,51 @@ impl Auth {
 pub(crate) struct Reply {
     pub(crate) status: u16,
     pub(crate) body: serde_json::Value,
+    /// Headers beside the content type: the MCP door's `WWW-Authenticate`
+    /// carries the metadata a client fetches next (RFC 9728).
+    pub(crate) headers: Vec<(String, String)>,
+    /// A body that is not JSON, sent as it stands (a notification's empty
+    /// answer).
+    pub(crate) empty: bool,
 }
 
 impl Reply {
     pub(crate) fn ok(body: serde_json::Value) -> Reply {
-        Reply { status: 200, body }
+        Reply {
+            status: 200,
+            body,
+            headers: Vec::new(),
+            empty: false,
+        }
     }
     pub(crate) fn accepted(body: serde_json::Value) -> Reply {
-        Reply { status: 202, body }
+        Reply {
+            status: 202,
+            body,
+            headers: Vec::new(),
+            empty: false,
+        }
     }
     pub(crate) fn error(status: u16, message: impl Into<String>) -> Reply {
         Reply {
             status,
             body: serde_json::json!({ "error": message.into() }),
+            headers: Vec::new(),
+            empty: false,
+        }
+    }
+    /// The same reply with one more header.
+    pub(crate) fn with(mut self, name: &str, value: impl Into<String>) -> Reply {
+        self.headers.push((name.to_string(), value.into()));
+        self
+    }
+    /// A reply with no body at all: what a notification is answered with.
+    pub(crate) fn nothing(status: u16) -> Reply {
+        Reply {
+            status,
+            body: serde_json::Value::Null,
+            headers: Vec::new(),
+            empty: true,
         }
     }
 }
@@ -428,6 +460,11 @@ pub(crate) struct Doors {
     pub(crate) ask_dsn: Option<String>,
     pub(crate) ask_caps: nils_catalog::Caps,
     pub(crate) ask_pack: String,
+    /// Wave 4b §12.3: the authorization servers the MCP door's metadata
+    /// names (RFC 9728), and the address it is reached at, which is the
+    /// resource that metadata identifies.
+    pub(crate) mcp_authorization_servers: Vec<String>,
+    pub(crate) bound: String,
 }
 
 pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
@@ -470,6 +507,8 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         ask_dsn: args.ask_dsn.clone(),
         ask_caps,
         ask_pack: args.ask_pack.clone(),
+        mcp_authorization_servers: args.mcp_authorization_server.clone(),
+        bound: bound.clone(),
     });
     let server = Arc::new(server);
     let limit = args.requests;
@@ -518,14 +557,23 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
 }
 
 fn respond(request: Request, reply: Reply) -> std::io::Result<()> {
-    let text = serde_json::to_string_pretty(&reply.body).unwrap_or_default();
+    let text = if reply.empty {
+        String::new()
+    } else {
+        serde_json::to_string_pretty(&reply.body).unwrap_or_default()
+    };
     // Always a content length, never a chunked body: a client that reads
     // the bytes it was told about (the notebook, a script, the tests) gets
     // the whole document, and the ask doors answer above the 32 KB default.
-    let response = Response::from_string(text)
+    let mut response = Response::from_string(text)
         .with_status_code(StatusCode(reply.status))
         .with_chunked_threshold(usize::MAX)
         .with_header(Header::from_bytes("Content-Type", "application/json").expect("header"));
+    for (name, value) in &reply.headers {
+        if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            response = response.with_header(h);
+        }
+    }
     request.respond(response)
 }
 
@@ -556,11 +604,47 @@ fn handle(
         events(doors, registry, request);
         return;
     }
-    let reply = match doors.auth.caller(&request) {
+    let caller = doors.auth.caller(&request);
+    // Wave 4b §12.3: the MCP door and its public metadata, before the
+    // older doors and before a refusal, so a client learns where to
+    // authenticate from the answer it gets.
+    if let Some(reply) = crate::mcp::route(
+        doors,
+        registry,
+        ask,
+        caller.as_ref().ok(),
+        method.as_str(),
+        path,
+        &body,
+    ) {
+        let _ = respond(request, reply);
+        return;
+    }
+    let reply = match caller {
         Ok(caller) => route(doors, registry, ask, &caller, &method, path, &query, &body),
         Err(reply) => reply,
     };
     let _ = respond(request, reply);
+}
+
+/// One ask door called from inside the engine: what the MCP door's tools
+/// run. The roles, the reader and the caps are the doors' own.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ask_call(
+    doors: &Doors,
+    registry: &mut Registry,
+    ask: &mut crate::ask_doors::AskState,
+    caller: &Caller,
+    method: &str,
+    path: &str,
+    query: &HashMap<String, String>,
+    body: &str,
+) -> Reply {
+    let segs = segments(path);
+    match crate::ask_doors::route(doors, registry, ask, caller, method, &segs, query, body) {
+        Some(Ok(reply)) | Some(Err(reply)) => reply,
+        None => Reply::error(404, format!("{method} {path} is not an ask door")),
+    }
 }
 
 pub(crate) fn json_body(body: &str) -> Result<serde_json::Value, Reply> {
@@ -1047,6 +1131,13 @@ fn capabilities(
         "node": doors.node,
         "uptime_seconds": doors.started.elapsed().as_secs(),
         "ask": crate::ask_doors::capabilities(doors, registry, ask),
+        "mcp": {
+            "path": crate::mcp::PATH,
+            "protocol": crate::mcp::PROTOCOL,
+            "metadata": "/.well-known/oauth-protected-resource",
+            "tools": ask.model(doors, registry).map(|m| m.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()).unwrap_or_default(),
+            "content_version": ask.model(doors, registry).map(|m| m.version).unwrap_or_default(),
+        },
         "doors": doors_list,
     })
 }
