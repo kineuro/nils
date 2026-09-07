@@ -150,11 +150,11 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | where | rows of selection, selection_version, handle, handle_member, handle_page, values_source and values_member in the registry |
 | holds | quasi-identifying: the subject keys a handle named, the dates and ages its pages carry<br>technical: the question itself, its hash, its provenance (who, when, node, pack, epoch, scheme) |
 | owner | the research group that asks; the data controller sets the retention |
-| kept | a handle's rows 90 days after its last read, longer while a release, a selection, a job or a cohort names it, then only its metadata, hash and question; a saved question for ever (Wave 4b section 14.1) |
+| kept | handle, its question and its hash: for ever, withdrawable with a reason; handle_member and handle_page: 90 days after the last read, longer while a cohort or a selection names the handle; values_member: the lifetime of the handle that cites it, the upload itself gone on resolution; selection and selection_version: for ever, they hold the question and never subject data (Wave 4b section 14.1) |
 | read | `nils custody` |
 | change | no command |
 | export | no command |
-| delete | with the registry |
+| delete | the rows by nils ask handles prune (slice 10 of Wave 4b); the record with the registry |
 
 ## catalog curation
 

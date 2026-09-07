@@ -3233,12 +3233,21 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "files": [],
             "holds": ["quasi-identifying: the subject keys a handle named, the dates and ages its pages carry", "technical: the question itself, its hash, its provenance (who, when, node, pack, epoch, scheme)"],
             "counts": { "selections": selections, "selection_versions": selection_versions, "handles": handles, "handle_rows": handle_rows, "values_sources": values_sources },
-            "kept": "a handle's rows 90 days after its last read, longer while a release, a selection, a job or a cohort names it, then only its metadata, hash and question; a saved question for ever (Wave 4b section 14.1)",
+            "kept": "handle, its question and its hash: for ever, withdrawable with a reason; handle_member and handle_page: 90 days after the last read, longer while a cohort or a selection names the handle; values_member: the lifetime of the handle that cites it, the upload itself gone on resolution; selection and selection_version: for ever, they hold the question and never subject data (Wave 4b section 14.1)",
+            "retention": {
+                "handle": "for ever",
+                "handle_member": "90 days after the last read unless pinned",
+                "handle_page": "90 days after the last read unless pinned",
+                "values_source": "the lifetime of the handle that cites it",
+                "values_member": "the lifetime of the handle that cites it",
+                "selection": "for ever",
+                "selection_version": "for ever",
+            },
             "commands": {
                 "read": ["nils custody"],
                 "change": [],
                 "export": [],
-                "delete": "with the registry",
+                "delete": "the rows by nils ask handles prune (slice 10 of Wave 4b); the record with the registry",
             },
         }),
         serde_json::json!({

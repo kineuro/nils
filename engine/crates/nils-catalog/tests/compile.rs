@@ -6,184 +6,22 @@
 //! the rows the synthetic registry planted, gold B reproduces through
 //! `near best` plus `pick per: subject`, gold C produces its columns.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::env;
-use std::sync::{Mutex, MutexGuard};
+mod common;
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use common::{Lab, ask_of, fixture, run_ask, set_param};
 use nils_ask::ast::{Ask, Clause, Level, Out};
-use nils_ask::compile::{Compiled, Context, compile};
-use nils_ask::exec::{Answer, Bounds, run};
+use nils_ask::compile::{Context, compile};
+use nils_ask::exec::{Bounds, run};
 use nils_ask::validate::Scope;
 use nils_ask::{parse, prepare};
-use nils_catalog::Catalog;
-use nils_dicom::synth::TempDir;
-use nils_registry::home::{Home, InitOptions};
 use nils_registry::schema::table;
 use nils_registry::session::Scheme;
-use nils_registry::{Backend, Insert, Param, Registry};
 use serde_json::{Value, json};
 
-static POSTGRES: Mutex<()> = Mutex::new(());
-
-const SCHEMA: &str = "nils_compile_test";
-
-struct Lab {
-    name: &'static str,
-    registry: Registry,
-    catalog: Catalog,
-    manifest: nils_synth::Manifest,
-    _dir: TempDir,
-    _guard: Option<MutexGuard<'static, ()>>,
-}
-
-impl Drop for Lab {
-    fn drop(&mut self) {
-        if self._guard.is_some() {
-            self.registry
-                .store()
-                .batch(&format!(
-                    "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCHEMA}_linkage CASCADE"
-                ))
-                .ok();
-        }
-    }
-}
-
-fn root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .unwrap()
-}
-
-fn lab(name: &'static str, backend: Backend, dsn: Option<String>) -> Lab {
-    let dir = TempDir::new("compile-home");
-    let home = Home::new(dir.path());
-    home.keys(None).add("k", b"nils-compile-test-key").unwrap();
-    let mut registry = home
-        .init(&InitOptions {
-            backend,
-            dsn,
-            schema: (backend == Backend::Postgres).then(|| SCHEMA.to_string()),
-            scheme: nils_registry::Scheme::DEFAULT,
-            key: "k".to_string(),
-            display_length: 12,
-            session_scheme: None,
-        })
-        .unwrap();
-    let manifest = nils_synth::build(
-        &mut registry,
-        &nils_synth::Plan {
-            seed: 11,
-            subjects: 48,
-        },
-    )
-    .unwrap();
-    // the sessions, under the default scheme
-    let scheme = Scheme::default();
-    let anchors = nils_session::Anchors::resolve(&mut registry, &scheme, BTreeMap::new()).unwrap();
-    nils_session::ensure(&mut registry, &scheme, &anchors, None, false).unwrap();
-    // an uploaded list of 600 subjects, already resolved (slice 7 does the
-    // resolving; the rows are what the compiler joins)
-    {
-        let store = registry.store();
-        let rows = store
-            .insert(
-                &Insert::new(
-                    table("values_source"),
-                    &[
-                        "upload_id",
-                        "namespace",
-                        "digest",
-                        "n",
-                        "unresolved",
-                        "principal",
-                        "created_at",
-                    ],
-                )
-                .returning(&["id"]),
-                &[vec![
-                    Param::from("u-600"),
-                    Param::from("patient-id"),
-                    Param::from("d"),
-                    Param::Int(600),
-                    Param::Int(0),
-                    Param::from("test"),
-                    Param::from("2026-09-07T00:00:00Z"),
-                ]],
-            )
-            .unwrap();
-        let source = rows[0].int(0).unwrap();
-        let members: Vec<Vec<Param>> = (0..600)
-            .map(|i| vec![Param::Int(source), Param::Int(i), Param::Int(1 + (i % 48))])
-            .collect();
-        store
-            .insert(
-                &Insert::new(
-                    table("values_member"),
-                    &["source_id", "position", "subject_id"],
-                ),
-                &members,
-            )
-            .unwrap();
-    }
-    let pack = nils_pack::load(&root().join("packs/mri"), None).unwrap();
-    let catalog = Catalog::build(&mut registry, &pack).unwrap();
-    Lab {
-        name,
-        registry,
-        catalog,
-        manifest,
-        _dir: dir,
-        _guard: None,
-    }
-}
-
 fn labs() -> Vec<Lab> {
-    let mut out = vec![lab("sqlite", Backend::Sqlite, None)];
-    match env::var("NILS_TEST_POSTGRES_DSN") {
-        Ok(dsn) if !dsn.is_empty() => {
-            let guard = POSTGRES.lock().unwrap_or_else(|e| e.into_inner());
-            let mut l = lab("postgres", Backend::Postgres, Some(dsn));
-            l._guard = Some(guard);
-            out.push(l);
-        }
-        _ => eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped"),
-    }
-    out
-}
-
-fn ask_of(l: &mut Lab, text: &str) -> (Compiled, Answer) {
-    let ask = parse(text).unwrap_or_else(|e| panic!("{}: {e}", l.name));
-    run_ask(l, ask)
-}
-
-fn run_ask(l: &mut Lab, ask: Ask) -> (Compiled, Answer) {
-    let prepared =
-        prepare(ask, &l.catalog, &Scope::default()).unwrap_or_else(|e| panic!("{}: {e}", l.name));
-    let store = l.registry.store();
-    let ctx = Context {
-        names: &l.catalog,
-        dialect: store.dialect(),
-        schema: store.schema().map(str::to_string),
-        window_days: 0,
-        scheme_digest: Scheme::default().digest(),
-        after: None,
-        limit: None,
-    };
-    let compiled = compile(&prepared.ask, &prepared.validated, &ctx)
-        .unwrap_or_else(|e| panic!("{}: {e}", l.name));
-    let answer = run(
-        store,
-        &compiled,
-        Bounds {
-            timeout_ms: 20_000,
-            max_rows: 5_000,
-            max_bytes: 4 * 1024 * 1024,
-        },
-    )
-    .unwrap_or_else(|e| panic!("{}: {e}\n{}", l.name, compiled.sql));
-    (compiled, answer)
+    common::labs("nils_compile_test")
 }
 
 /// One backend's answer to one row: its name, the hash, the row count and
@@ -514,18 +352,6 @@ fn a_cap_marks_the_answer_truncated_and_a_timeout_stops_it() {
 }
 
 // ------------------------------------------------------------ the gate's fixtures
-
-fn fixture(name: &str) -> Ask {
-    let path = root().join(format!("engine/crates/nils-ask/fixtures/{name}.ask.yml"));
-    parse(&std::fs::read_to_string(&path).unwrap()).unwrap_or_else(|e| panic!("{name}: {e}"))
-}
-
-fn set_param(ask: &mut Ask, name: &str, v: Value) {
-    ask.params
-        .get_mut(name)
-        .unwrap_or_else(|| panic!("no parameter {name}"))
-        .value = Some(v);
-}
 
 /// The subject codes of a set's rows, one per row, in the order returned.
 fn codes_of(l: &mut Lab, ask: &Ask, set: &str) -> Vec<String> {
