@@ -458,7 +458,15 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     preflight(settings.root, wanted)?;
     let days = study_days(registry.store())?;
     let pixels = pixel_verdicts(registry.store())?;
-    let named = places(registry.store(), &days, settings.scheme, settings.pack)?;
+    // Wave 4b §7: sessions come from the cache, built over each subject's
+    // whole timeline under the scheme's own anchor, so that this, the picker
+    // and `nils session list` read the same rows.
+    let anchors = nils_session::Anchors::resolve(registry, settings.scheme, BTreeMap::new())
+        .map_err(session_err)?;
+    nils_session::ensure(registry, settings.scheme, &anchors, None, false).map_err(session_err)?;
+    let by_study =
+        nils_session::labels_by_study(registry.store(), settings.scheme).map_err(session_err)?;
+    let named = places(registry.store(), &by_study, settings.pack)?;
     // The dataset this is a version of, and the version before it, read before
     // anything is written.
     let dataset = dataset_of(registry.store(), settings.name, settings.root)?;
@@ -547,7 +555,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         if mine.is_empty() {
             continue;
         }
-        let labels = session_labels(&mine, &days, settings.scheme);
+        let labels = session_labels(&mine, &by_study);
         let offset = match settings.policy.dates {
             crate::dates::Policy::Shift => {
                 let o = crate::dates::draw(settings.key, subject);
@@ -2282,39 +2290,25 @@ fn study_days(store: &mut Store) -> Result<HashMap<i64, Day>, Error> {
     Ok(out)
 }
 
-/// The session label of each of a subject's studies.
+/// The session label of each of a subject's studies, from the cache.
 fn session_labels(
     mine: &[Instance],
-    days: &HashMap<i64, Day>,
-    scheme: &Scheme,
+    by_study: &HashMap<i64, nils_session::Labelled>,
 ) -> HashMap<i64, String> {
-    let mut studies: Vec<session::Study> = Vec::new();
-    let mut seen: Vec<i64> = Vec::new();
-    for i in mine {
-        if seen.contains(&i.study) {
-            continue;
-        }
-        let Some(day) = days.get(&i.study) else {
-            continue;
-        };
-        seen.push(i.study);
-        studies.push(session::Study::new(i.study, *day));
-    }
-    let anchor = studies.iter().map(|s| s.day).min();
     let mut out = HashMap::new();
-    for occasion in session::sessions(&studies, anchor, scheme) {
-        // A session with no label is named by the day it opened, which is what
-        // `keep_date` means and why §4.3 refuses the combination that would
-        // put a date here under a policy that moves them.
-        let label = occasion
-            .label
-            .clone()
-            .unwrap_or_else(|| occasion.first.compact());
-        for study in &occasion.studies {
-            out.insert(*study, label.clone());
+    for i in mine {
+        if let Some(l) = by_study.get(&i.study) {
+            out.entry(i.study).or_insert_with(|| l.name());
         }
     }
     out
+}
+
+fn session_err(e: nils_session::Error) -> Error {
+    match e {
+        nils_session::Error::Store(s) => Error::Store(s),
+        other => Error::Refused(other.to_string()),
+    }
 }
 
 struct Written {
@@ -2726,8 +2720,7 @@ fn write_rows(
 /// acquisitions that are otherwise the same thing.
 fn places(
     store: &mut Store,
-    days: &HashMap<i64, Day>,
-    scheme: &Scheme,
+    by_study: &HashMap<i64, nils_session::Labelled>,
     pack: &nils_pack::pack::Pack,
 ) -> Result<HashMap<i64, Placed>, Error> {
     let axes = axis_values(store)?;
@@ -2758,35 +2751,15 @@ fn places(
     // Bucket by subject, session and folder, which is the directory a name has
     // to be unique in.
     let mut buckets: BTreeMap<(i64, String, String), Vec<name::Named>> = BTreeMap::new();
+    // Wave 4b §7: each study's session label from the cache, by subject.
     let mut labels: HashMap<i64, HashMap<i64, String>> = HashMap::new();
-    let mut studies_of: BTreeMap<i64, Vec<(i64, Day)>> = BTreeMap::new();
+    for (study, l) in by_study {
+        labels
+            .entry(l.subject_id)
+            .or_default()
+            .insert(*study, l.name());
+    }
     let rows = store.query(&sql, &[])?;
-    for r in &rows {
-        if let Some(day) = days.get(&r.int(2)?) {
-            let mine = studies_of.entry(r.int(1)?).or_default();
-            if !mine.iter().any(|(id, _)| *id == r.int(2).unwrap_or(0)) {
-                mine.push((r.int(2)?, *day));
-            }
-        }
-    }
-    for (subject, studies) in &studies_of {
-        let points: Vec<session::Study> = studies
-            .iter()
-            .map(|(id, day)| session::Study::new(*id, *day))
-            .collect();
-        let anchor = points.iter().map(|s| s.day).min();
-        let mut mine = HashMap::new();
-        for occasion in session::sessions(&points, anchor, scheme) {
-            let label = occasion
-                .label
-                .clone()
-                .unwrap_or_else(|| occasion.first.compact());
-            for study in &occasion.studies {
-                mine.insert(*study, label.clone());
-            }
-        }
-        labels.insert(*subject, mine);
-    }
 
     // The BIDS name of every stack, bucketed by the directory it has to be
     // unique in, which for BIDS is the datatype and not a directory per stack.
