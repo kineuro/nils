@@ -1,0 +1,531 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! `describe` (§10): one deterministic sentence per set in deal breaker
+//! order (membership, then counts, then sameness, which is the order of
+//! rule 5: source, near, attach, has, bind, where, pick), the conventions
+//! block, the denominators by name, the mechanism that chose each attached
+//! row, and the disclosure level. Pure over the document: no query.
+
+use std::collections::BTreeSet;
+
+use nils_registry::session::Scheme;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::ast::{AlgOp, Arg, Ask, Clause, Dir, IntSpec, Policy, Set, Src, Tie, WindowSpec};
+use crate::validate::{Names, Scope};
+
+/// What describe says.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Description {
+    /// One sentence per set, in topological order when known, else by name.
+    pub sets: Vec<(String, String)>,
+    pub conventions: Vec<String>,
+    /// A named count and the set it counts.
+    pub denominators: Vec<(String, String)>,
+    /// A set, a partner name, and how its row was chosen.
+    pub mechanisms: Vec<(String, String, String)>,
+    pub disclosure: String,
+    /// The answer, in words.
+    pub answer: String,
+}
+
+fn literal(a: &Arg) -> String {
+    match a {
+        Arg::Clause(c) => clause_text(c),
+        Arg::Text(t) => t.clone(),
+        Arg::Int(i) => i.to_string(),
+        Arg::Number(n) => n.to_string(),
+        Arg::Bool(b) => b.to_string(),
+        Arg::Null => "null".into(),
+        Arg::List(items) => format!(
+            "[{}]",
+            items.iter().map(literal).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+fn opt_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        other => match crate::ast::clause_of(other) {
+            Ok(c) => clause_text(&c),
+            Err(_) => other.to_string(),
+        },
+    }
+}
+
+/// A clause in words, deterministic.
+pub fn clause_text(c: &Clause) -> String {
+    let op = c.op.as_str();
+    let arg = |i: usize| c.args.get(i).map(literal).unwrap_or_default();
+    let opt = |k: &str| c.opts.get(k).map(opt_text);
+    let strict = c
+        .opts
+        .get("strict")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut text = match op {
+        "field" | "axis" => c.ref_name().unwrap_or("").to_string(),
+        "param" => format!("{{{}}}", c.ref_name().unwrap_or("")),
+        "derived" => {
+            let name = c.ref_name().unwrap_or("");
+            let mut opts: Vec<String> = c
+                .opts
+                .iter()
+                .map(|(k, v)| format!("{k} {}", opt_text(v)))
+                .collect();
+            opts.sort();
+            if opts.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name} at {}", opts.join(", "))
+            }
+        }
+        "=" | "<>" | ">" | ">=" | "<" | "<=" => format!("{} {op} {}", arg(0), arg(1)),
+        "~=" => format!(
+            "{} within {} of {}",
+            arg(0),
+            opt("tol").unwrap_or_default(),
+            arg(1)
+        ),
+        "in" => format!("{} among {}", arg(0), arg(1)),
+        "not_in" => format!("{} not among {}", arg(0), arg(1)),
+        "has" => format!("{} has {}", arg(0), arg(1)),
+        "picked" => format!("picked as {}", opt("role").unwrap_or_default()),
+        "not_null" => format!("{} is known", arg(0)),
+        "is_null" => format!("{} is unknown", arg(0)),
+        "contains" => format!("{} contains {}", arg(0), arg(1)),
+        "starts_with" => format!("{} starts with {}", arg(0), arg(1)),
+        "and" | "or" => c
+            .args
+            .iter()
+            .map(literal)
+            .collect::<Vec<_>>()
+            .join(&format!(" {op} ")),
+        "not" => format!("not {}", arg(0)),
+        "+" | "-" | "*" | "/" => format!("{} {op} {}", arg(0), arg(1)),
+        "abs" => format!("|{}|", arg(0)),
+        "round" => format!("{} rounded to {} places", arg(0), arg(1)),
+        "coalesce" => format!(
+            "the first known of {}",
+            c.args.iter().map(literal).collect::<Vec<_>>().join(", ")
+        ),
+        "case" => format!("{} if {} else {}", arg(1), arg(0), arg(2)),
+        "concat" => c.args.iter().map(literal).collect::<Vec<_>>().join(" + "),
+        "days_between" => format!("days from {} to {}", arg(1), arg(0)),
+        "shift" => format!(
+            "{} shifted {} {}s",
+            arg(0),
+            arg(1),
+            opt("unit").unwrap_or_else(|| "day".into())
+        ),
+        "age_at" => format!("age at {} from {}", arg(1), arg(0)),
+        "bucket" => format!("{} by {}", arg(0), opt("unit").unwrap_or_default()),
+        "part" => format!("the {} of {}", opt("unit").unwrap_or_default(), arg(0)),
+        "least" | "greatest" => format!("the {op} of {} and {}", arg(0), arg(1)),
+        "json" => format!("{} in {}", arg(1), arg(0)),
+        "ordinal" => "the ordinal within the subject".into(),
+        "prev" => format!("the previous {}", arg(0)),
+        "next" => format!("the next {}", arg(0)),
+        "share" => format!(
+            "{} as a share of {}",
+            opt("of").unwrap_or_default(),
+            opt("over").unwrap_or_default()
+        ),
+        "change" => {
+            let adjacent = c
+                .opts
+                .get("adjacent")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            format!(
+                "the {} changes from {} to {}{}",
+                opt("of").unwrap_or_else(|| "course".into()),
+                opt("from").unwrap_or_default(),
+                opt("to").unwrap_or_default(),
+                if adjacent {
+                    " (adjacent)"
+                } else {
+                    " (any earlier)"
+                }
+            )
+        }
+        "count" | "distinct" | "min" | "max" | "sum" | "avg" | "list" => {
+            let set = opt("set").unwrap_or_default();
+            match c.args.first() {
+                Some(a) => format!("the {op} of {} over {set}", literal(a)),
+                None => format!("the {op} of {set}"),
+            }
+        }
+        other => format!(
+            "{other}({})",
+            c.args.iter().map(literal).collect::<Vec<_>>().join(", ")
+        ),
+    };
+    if strict {
+        text.push_str(" (strict)");
+    }
+    text
+}
+
+fn dir_text(d: Dir) -> &'static str {
+    match d {
+        Dir::Asc => "asc",
+        Dir::Desc => "desc",
+    }
+}
+
+fn window_text(w: &WindowSpec) -> String {
+    match w {
+        WindowSpec::Literal(win) => {
+            let (lo, hi) = win.days();
+            match (lo, hi) {
+                (Some(a), Some(b)) => format!("{a} to {b} days"),
+                (Some(a), None) => format!("from {a} days on"),
+                (None, Some(b)) => format!("up to {b} days"),
+                (None, None) => "any distance".into(),
+            }
+        }
+        WindowSpec::Param(c) => clause_text(c),
+    }
+}
+
+fn int_text(i: &IntSpec) -> String {
+    match i {
+        IntSpec::Literal(n) => n.to_string(),
+        IntSpec::Param(c) => clause_text(c),
+    }
+}
+
+fn src_text(s: &Src) -> String {
+    match s {
+        Src::Set(x) => format!(" from {x}"),
+        Src::Role(r) => format!(" in the role {r}"),
+        Src::Handle { id, pin } => {
+            format!(" from handle {id}{}", if *pin { " (pinned)" } else { "" })
+        }
+        Src::Selection {
+            name,
+            version: Some(v),
+        } => format!(" from the selection {name} as of version {v}"),
+        Src::Selection {
+            name,
+            version: None,
+        } => format!(" from the selection {name}"),
+        Src::Values(v) => format!(" listed in the upload {v}"),
+    }
+}
+
+/// One set's sentence, in the order of rule 5.
+pub fn set_sentence(name: &str, set: &Set) -> String {
+    let mut s = format!("{name}: {}s", set.grain.name());
+    if let Some(a) = &set.algebra {
+        let op = match a.op {
+            AlgOp::Union => "the union of",
+            AlgOp::Intersect => "the intersection of",
+            AlgOp::Except => "the difference of",
+        };
+        s.push_str(&format!(" {op} {}", a.sets.join(", ")));
+        if let Some(t) = &a.tag {
+            s.push_str(&format!(" tagged as {t}"));
+        }
+    }
+    if let Some(g) = &set.group {
+        s = format!(
+            "{name}: groups of {} by {}",
+            g.of,
+            g.by.iter().map(clause_text).collect::<Vec<_>>().join(", ")
+        );
+    }
+    if let Some(of) = &set.of {
+        s.push_str(&format!(" of {of}"));
+    }
+    if let Some(src) = &set.from {
+        s.push_str(&src_text(src));
+    }
+    for n in &set.near {
+        let policy = match n.policy {
+            Policy::Nearest => format!(
+                "the nearest {} (tie {})",
+                n.set,
+                match n.tie {
+                    Some(Tie::Later) => "later",
+                    _ => "earlier",
+                }
+            ),
+            Policy::First => format!("the first {}", n.set),
+            Policy::Last => format!("the last {}", n.set),
+            Policy::Best => format!(
+                "the best {} by {}",
+                n.set,
+                n.order
+                    .iter()
+                    .map(|o| format!("{} {}", clause_text(&o.0), dir_text(o.1)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Policy::Any => format!("any {}", n.set),
+        };
+        s.push_str(&format!(
+            "; {} as {} within {}{}{}",
+            policy,
+            n.as_,
+            window_text(&n.window),
+            n.on.as_ref()
+                .map(|o| format!(" of {o}"))
+                .unwrap_or_default(),
+            match (n.strict, n.optional) {
+                (true, true) => " (every day inside; when present)",
+                (true, false) => " (every day inside)",
+                (false, true) => " (when present)",
+                (false, false) => "",
+            }
+        ));
+    }
+    for a in &set.attach {
+        s.push_str(&format!(
+            "; with {} from {}{}",
+            a.as_,
+            a.set,
+            if a.optional { " when present" } else { "" }
+        ));
+    }
+    for h in &set.has {
+        let bound = match (&h.min, &h.max) {
+            (Some(a), Some(b)) => format!("between {} and {}", int_text(a), int_text(b)),
+            (Some(a), None) => format!("at least {}", int_text(a)),
+            (None, Some(IntSpec::Literal(0))) => "no".to_string(),
+            (None, Some(b)) => format!("at most {}", int_text(b)),
+            (None, None) => "counted".to_string(),
+        };
+        s.push_str(&format!(
+            "; {bound} {}{}{}",
+            h.set,
+            h.window
+                .as_ref()
+                .map(|w| format!(" within {}", window_text(w)))
+                .unwrap_or_default(),
+            h.as_
+                .as_ref()
+                .map(|a| format!(" as {a}"))
+                .unwrap_or_default()
+        ));
+    }
+    for (b, c) in &set.bind.0 {
+        s.push_str(&format!("; {b} = {}", clause_text(c)));
+    }
+    if !set.where_.is_empty() {
+        s.push_str(&format!(
+            "; where {}",
+            set.where_
+                .iter()
+                .map(clause_text)
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ));
+    }
+    if let Some(p) = &set.pick {
+        s.push_str(&format!(
+            "; {} per {} by {}",
+            p.n.as_ref()
+                .map(|n| format!("the first {}", int_text(n)))
+                .unwrap_or_else(|| "one".into()),
+            p.per.name(),
+            p.by.iter()
+                .map(|o| format!("{} {}", clause_text(&o.0), dir_text(o.1)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    s.push('.');
+    s
+}
+
+/// Whether any clause of the document carries `strict: true`.
+fn strict_anywhere(ask: &Ask) -> bool {
+    fn in_clause(c: &Clause) -> bool {
+        let mut all = Vec::new();
+        c.walk(&mut all);
+        all.iter().any(|x| {
+            x.opts
+                .get("strict")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+    }
+    ask.sets.values().any(|s| {
+        s.near.iter().any(|n| n.strict)
+            || s.bind.0.iter().any(|(_, c)| in_clause(c))
+            || s.where_.iter().any(in_clause)
+    })
+}
+
+/// Describe a document, pure.
+pub fn describe(
+    ask: &Ask,
+    order: &[String],
+    names: &dyn Names,
+    scope: &Scope,
+    scheme: &Scheme,
+) -> Description {
+    let mut sets = Vec::new();
+    let mut seen = BTreeSet::new();
+    for name in order.iter().chain(ask.sets.keys()) {
+        if name.contains("__") || !seen.insert(name.clone()) {
+            continue;
+        }
+        if let Some(s) = ask.sets.get(name) {
+            sets.push((name.clone(), set_sentence(name, s)));
+        }
+    }
+    let mut conventions = vec![
+        "windows are days with both ends inclusive; a month is 31 days and a year 366".to_string(),
+        format!(
+            "a date carries its precision; comparisons and windows read a coarse date as its interval, forgiving unless the clause says strict{}",
+            if strict_anywhere(ask) { " (this document asks for strict on some clauses)" } else { " (no clause here does)" }
+        ),
+        "cohort membership is the open interval; there is no as-of date".to_string(),
+        "stack sets exclude the excluded disposition; superseded rows and withdrawn picks are never read".to_string(),
+        format!(
+            "the session scheme is {} with a window of {} days",
+            scheme.digest(),
+            scheme.window_days
+        ),
+    ];
+    if scheme.window_days > 0 && ask.sets.values().any(|s| !s.near.is_empty()) {
+        conventions.push(format!(
+            "a session's own window of {} days sits beside every near window on the same row",
+            scheme.window_days
+        ));
+    }
+    let mut levels: BTreeSet<String> = BTreeSet::new();
+    for s in ask.sets.values() {
+        for (_, c) in &s.bind.0 {
+            let mut all = Vec::new();
+            c.walk(&mut all);
+            for x in all {
+                if x.op == "derived"
+                    && x.ref_name() == Some("signature")
+                    && let Some(l) = x.opts.get("level").and_then(Value::as_str)
+                {
+                    levels.insert(l.to_string());
+                }
+            }
+        }
+    }
+    for l in levels {
+        if let Some(spec) = names.level_spec(&l) {
+            conventions.push(format!(
+                "the level {l} compares {} exactly{}",
+                spec.exact.join(", "),
+                if spec.rounded.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " and rounds {}",
+                        spec.rounded
+                            .iter()
+                            .map(|(k, v)| format!("{k} to {v}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            ));
+        }
+    }
+    let mut denominators = Vec::new();
+    let mut mechanisms = Vec::new();
+    for (name, s) in &ask.sets {
+        for h in &s.has {
+            if let Some(a) = &h.as_ {
+                denominators.push((a.clone(), h.set.clone()));
+            }
+        }
+        for n in &s.near {
+            mechanisms.push((
+                name.clone(),
+                n.as_.clone(),
+                format!("{:?} within {}", n.policy, window_text(&n.window)).to_lowercase(),
+            ));
+        }
+        for a in &s.attach {
+            let how = ask
+                .sets
+                .get(&a.set)
+                .and_then(|p| p.pick.as_ref())
+                .map(|p| {
+                    format!(
+                        "one per {} by {}",
+                        p.per.name(),
+                        p.by.iter()
+                            .map(|o| format!("{} {}", clause_text(&o.0), dir_text(o.1)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .unwrap_or_else(|| "the set's one row per key".into());
+            mechanisms.push((name.clone(), a.as_.clone(), how));
+        }
+    }
+    for m in &ask.out.measures {
+        for (kind, spec) in &m.0 {
+            if kind == "share"
+                && let (Some(of), Some(over)) = (
+                    spec.get("of").and_then(Value::as_str),
+                    spec.get("over").and_then(Value::as_str),
+                )
+            {
+                denominators.push((format!("share.{of}"), over.to_string()));
+            }
+        }
+    }
+    let mut classes: Vec<String> = scope
+        .classes
+        .iter()
+        .map(|c| format!("{c:?}").to_lowercase())
+        .collect();
+    classes.sort();
+    let disclosure = format!(
+        "{}{}",
+        if scope.federated {
+            "federated"
+        } else {
+            "local"
+        },
+        if classes.is_empty() {
+            String::new()
+        } else {
+            format!(", projecting {}", classes.join(" and "))
+        }
+    );
+    let answer = format!(
+        "the answer is {} at the {:?} level{}",
+        ask.out.set,
+        ask.out.level,
+        if ask.out.columns.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " with {}",
+                ask.out
+                    .columns
+                    .iter()
+                    .map(clause_text)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    )
+    .to_lowercase();
+    Description {
+        sets,
+        conventions,
+        denominators,
+        mechanisms,
+        disclosure,
+        answer,
+    }
+}

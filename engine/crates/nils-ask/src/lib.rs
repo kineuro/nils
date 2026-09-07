@@ -6,12 +6,17 @@
 //! [`validate::Names`], and the compiler and the executor are the next
 //! slices.
 
+pub mod affordance;
 pub mod ast;
 pub mod compile;
+pub mod describe;
+pub mod diagnose;
+pub mod document;
 pub mod exec;
 pub mod handle;
 pub mod hash;
 pub mod measure;
+pub mod moves;
 pub mod promote;
 pub mod repair;
 pub mod run;

@@ -24,7 +24,9 @@ use nils_registry::{Error, Insert, Param, Registry, Store};
 use serde::{Deserialize, Serialize};
 
 /// The vocabulary the registry is planted with: one disease with four
-/// courses, two scales, a diagnosis, and a transition known to the year.
+/// courses, two scales, a diagnosis, a transition known to the year, and
+/// a sensitive kind with no rows, so the affordances can prove they never
+/// enumerate it.
 pub const VOCABULARY: &str = r#"vocabulary:
   diseases:
     - name: Multiple Sclerosis
@@ -39,6 +41,7 @@ pub const VOCABULARY: &str = r#"vocabulary:
     - {name: SDMT, category: Clinical Measurement, value_type: numeric, unit: correct, min: 0, max: 110, description: Symbol Digit Modalities Test}
     - {name: Diagnosis, category: Assessment, description: The official diagnosis, on its date}
     - {name: SP Transition, category: Assessment, precision: year, description: The transition to secondary progression, known to the year}
+    - {name: HIV Status, category: Assessment, sensitive: true, description: A sensitive kind no one sees without the class; the visibility fixture's}
 "#;
 
 /// What to build.

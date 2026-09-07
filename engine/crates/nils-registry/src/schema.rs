@@ -1432,6 +1432,24 @@ fn build_registry() -> Vec<Table> {
         )
         .index(&["handle_id"])
         .index(&["principal"]),
+        // Wave 4b §10: a document under authoring, addressed by handle so
+        // `apply` never returns a document; `digest` covers the whole
+        // canonical text (parameters bound) where `hash` is the core's.
+        Table::new(
+            "ask_document",
+            vec![
+                col("id", Type::Id),
+                req("digest", Type::Text),
+                req("hash", Type::Text),
+                req("ask", Type::Json),
+                req("principal", Type::Text),
+                req("created_at", Type::Timestamp),
+                req("last_used_at", Type::Timestamp),
+                col("parent_id", Type::Int),
+            ],
+        )
+        .unique(&["digest"])
+        .index(&["principal"]),
     ]
 }
 

@@ -93,6 +93,37 @@ pub trait Names {
         let _ = name;
         None
     }
+    /// Every field of a level, for the affordances' fillers; identifying
+    /// fields have no record, sensitive ones come with their class so the
+    /// caller applies the scope.
+    fn fields_of(&self, level: &str) -> Vec<(String, FieldInfo)> {
+        let _ = level;
+        Vec::new()
+    }
+    /// Every event kind, with its sensitivity.
+    fn kinds(&self) -> Vec<(String, KindInfo)> {
+        Vec::new()
+    }
+    /// Every classification axis.
+    fn axes(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Every comparability level.
+    fn levels(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Every role the pack ships.
+    fn roles(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Every cohort.
+    fn cohorts(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Every derived field.
+    fn derived_fields(&self) -> Vec<(String, DerivedInfo)> {
+        Vec::new()
+    }
 }
 
 /// The principal's scope, as the catalog's policy sees it.
