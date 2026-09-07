@@ -14,7 +14,7 @@ use nils_registry::dialect::Dialect;
 use nils_registry::home::{HomeError, Registry};
 use nils_registry::linkage::{self, Subkeys};
 use nils_registry::session::Scheme;
-use nils_registry::store::{Cell, Error as StoreError, Row};
+use nils_registry::store::{Cell, Error as StoreError, Row, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -101,6 +101,10 @@ pub struct Request<'a> {
     /// The door's decision for `out.identifiers` (§9).
     pub may_project_raw: bool,
     pub purpose: Option<&'a str>,
+    /// The store the compiled statement runs on when it is not the
+    /// registry's own: the door's read only reader (§12.4). The handle and
+    /// the audit are written through the registry either way.
+    pub reader: Option<&'a mut Store>,
 }
 
 /// A handle source read at another epoch than it was made, or expired:
@@ -192,17 +196,26 @@ pub(crate) struct Runner<'a> {
     pub(crate) names: &'a dyn Names,
     pub(crate) scheme: &'a Scheme,
     pub(crate) bounds: Bounds,
+    /// The door's reader, when the statement runs elsewhere than the
+    /// registry's own connection.
+    pub(crate) reader: Option<&'a mut Store>,
 }
 
 impl Runner<'_> {
-    fn context<'b>(
-        &'b self,
+    /// Compile and execute one document as it stands, no handle.
+    pub(crate) fn answer(
+        &mut self,
         registry: &mut Registry,
+        ask: &Ask,
+        validated: &Validated,
         after: Option<i64>,
         limit: Option<u64>,
-    ) -> Context<'b> {
-        let store = registry.store();
-        Context {
+    ) -> Result<(Compiled, Answer), RunError> {
+        let store: &mut Store = match self.reader.as_deref_mut() {
+            Some(r) => r,
+            None => registry.store(),
+        };
+        let ctx = Context {
             names: self.names,
             dialect: store.dialect(),
             schema: store.schema().map(str::to_string),
@@ -210,24 +223,19 @@ impl Runner<'_> {
             scheme_digest: self.scheme.digest(),
             after,
             limit,
-        }
-    }
-
-    /// Compile and execute one document as it stands, no handle.
-    pub(crate) fn answer(
-        &self,
-        registry: &mut Registry,
-        ask: &Ask,
-        validated: &Validated,
-        after: Option<i64>,
-        limit: Option<u64>,
-    ) -> Result<(Compiled, Answer), RunError> {
-        let ctx = self.context(registry, after, limit);
+        };
         let compiled =
             compile(ask, validated, &ctx).map_err(|e| RunError::Message(e.to_string()))?;
-        let answer = execute(registry.store(), &compiled, self.bounds)?;
+        let answer = execute(store, &compiled, self.bounds)?;
         Ok((compiled, answer))
     }
+}
+
+/// A reborrow of the door's reader for one more run; clippy reads the
+/// reborrow as needless, but the reader is used again after it.
+#[allow(clippy::needless_option_as_deref)]
+fn lend<'b>(reader: &'b mut Option<&mut Store>) -> Option<&'b mut Store> {
+    reader.as_deref_mut()
 }
 
 /// Run an ask to a handle.
@@ -241,11 +249,7 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
             "handles reading handles more than four deep, or in a cycle".into(),
         ));
     }
-    let runner = Runner {
-        names: req.names,
-        scheme: req.scheme,
-        bounds: req.bounds,
-    };
+    let mut reader = req.reader;
     let prepared = prepare(req.ask.clone(), req.names, req.scope)?;
     let hash = prepared.hash.clone();
     let mut ask = prepared.ask;
@@ -304,6 +308,7 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
                 limit: None,
                 may_project_raw: false,
                 purpose: None,
+                reader: lend(&mut reader),
             },
             depth + 1,
         )?;
@@ -342,6 +347,12 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
         }
     }
     // the answer
+    let mut runner = Runner {
+        names: req.names,
+        scheme: req.scheme,
+        bounds: req.bounds,
+        reader: lend(&mut reader),
+    };
     let (compiled, mut answer) = runner.answer(registry, &ask, &validated, req.after, req.limit)?;
     // the post pass
     let mut over: BTreeMap<String, f64> = BTreeMap::new();
@@ -361,8 +372,14 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
     }
     let stored_answer = answer.clone();
     // a scalar the answer lacks but a group's child exposes: per group
-    let mut group_columns =
-        group_scalars(registry, &runner, &ask, req.names, req.scope, &mut answer)?;
+    let mut group_columns = group_scalars(
+        registry,
+        &mut runner,
+        &ask,
+        req.names,
+        req.scope,
+        &mut answer,
+    )?;
     let remaining: Vec<crate::ast::Measure> = ask
         .out
         .measures
@@ -534,7 +551,7 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
 /// the answer by its key.
 fn group_scalars(
     registry: &mut Registry,
-    runner: &Runner<'_>,
+    runner: &mut Runner<'_>,
     ask: &Ask,
     names: &dyn Names,
     scope: &Scope,

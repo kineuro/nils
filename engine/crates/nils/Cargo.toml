@@ -23,6 +23,8 @@ nils-registry.workspace = true
 nils-session.workspace = true
 nils-release.workspace = true
 nils-synth.workspace = true
+nils-ask.workspace = true
+nils-catalog.workspace = true
 
 clap.workspace = true
 csv.workspace = true

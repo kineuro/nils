@@ -57,6 +57,15 @@ pub fn root() -> std::path::PathBuf {
 }
 
 pub fn lab(name: &'static str, backend: Backend, dsn: Option<String>, schema: &'static str) -> Lab {
+    // A run killed mid-test leaves its schema behind, and init refuses a
+    // schema that already holds a registry: the lab starts clean.
+    if let Some(dsn) = &dsn
+        && let Ok(mut store) = nils_registry::store::Store::connect_postgres(dsn, "public")
+    {
+        let _ = store.batch(&format!(
+            "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+        ));
+    }
     let dir = TempDir::new("compile-home");
     let home = Home::new(dir.path());
     home.keys(None).add("k", b"nils-compile-test-key").unwrap();

@@ -35,7 +35,7 @@ const PACK_CONTRACT_VERSION: &str = include_str!("../../../../contracts/pack/VER
 /// `operator` queues work and cancels it; `admin` reads the audit log and
 /// the custody. Under `off` and `token` every caller holds every role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Role {
+pub(crate) enum Role {
     Reader,
     Reviewer,
     Operator,
@@ -53,7 +53,7 @@ impl Role {
         })
     }
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Role::Reader => "reader",
             Role::Reviewer => "reviewer",
@@ -106,19 +106,19 @@ enum Auth {
     /// The local user, as the command line would record it.
     Off,
     /// A bearer token names the caller.
-    Token(HashMap<String, String>),
+    Token(HashMap<String, (String, Vec<Role>)>),
     /// An OIDC token names the caller, and its groups say what they may do.
     Oidc(Box<Oidc>),
 }
 
 /// A caller: who, and with which roles.
-struct Caller {
-    principal: String,
-    roles: Vec<Role>,
+pub(crate) struct Caller {
+    pub(crate) principal: String,
+    pub(crate) roles: Vec<Role>,
 }
 
 impl Caller {
-    fn can(&self, role: Role) -> bool {
+    pub(crate) fn can(&self, role: Role) -> bool {
         self.roles.contains(&role)
     }
 }
@@ -141,8 +141,25 @@ impl Auth {
                     );
                 }
                 for t in given {
-                    let Some((token, who)) = t.split_once('=') else {
-                        return Err(usage(format!("{t} is not TOKEN=user@node")));
+                    let Some((token, rest)) = t.split_once('=') else {
+                        return Err(usage(format!("{t} is not TOKEN=user@node[:roles]")));
+                    };
+                    // `user@node:reader,operator`; no suffix is every role,
+                    // an empty suffix is no role (Wave 4b §12.4)
+                    let (who, roles) = match rest.split_once(':') {
+                        Some((who, list)) => {
+                            let mut roles = Vec::new();
+                            for r in list.split(',').map(str::trim).filter(|r| !r.is_empty()) {
+                                let Some(role) = Role::parse(r) else {
+                                    return Err(usage(format!(
+                                        "{r} is not a role: reader, reviewer, operator or admin"
+                                    )));
+                                };
+                                roles.push(role);
+                            }
+                            (who, roles)
+                        }
+                        None => (rest, EVERY_ROLE.to_vec()),
                     };
                     let Some(p) = nils_registry::principal::Principal::parse(who) else {
                         return Err(usage(format!("{who} is not a principal, user@node")));
@@ -150,7 +167,13 @@ impl Auth {
                     if token.len() < 16 {
                         return Err(usage("a token is at least 16 characters"));
                     }
-                    tokens.insert(token.to_string(), p.to_string());
+                    let mut roles = roles;
+                    roles.sort();
+                    roles.dedup();
+                    if let Some(top) = roles.iter().max().copied() {
+                        roles = EVERY_ROLE.iter().copied().filter(|r| *r <= top).collect();
+                    }
+                    tokens.insert(token.to_string(), (p.to_string(), roles));
                 }
                 if tokens.is_empty() {
                     return Err(usage(
@@ -268,9 +291,9 @@ impl Auth {
             Auth::Token(tokens) => {
                 let token = bearer()?;
                 match tokens.get(&token) {
-                    Some(p) => Ok(Caller {
+                    Some((p, roles)) => Ok(Caller {
                         principal: p.clone(),
-                        roles: EVERY_ROLE.to_vec(),
+                        roles: roles.clone(),
                     }),
                     None => Err(Reply::error(401, "the token names nobody")),
                 }
@@ -340,9 +363,8 @@ impl Auth {
                 if let Some(top) = roles.iter().max().copied() {
                     roles = EVERY_ROLE.iter().copied().filter(|r| *r <= top).collect();
                 }
-                if roles.is_empty() {
-                    roles.push(Role::Reader);
-                }
+                // Wave 4b §12.4: a token with no role is refused at every
+                // door, never defaulted to reader.
                 let _ = (&claims.email, &claims.preferred_username);
                 // The audit principal is the subject (§11.2), at the issuer's node.
                 let principal = format!("{}@{}", claims.sub, oidc.node);
@@ -360,19 +382,19 @@ impl Auth {
 }
 
 /// What a route answers.
-struct Reply {
-    status: u16,
-    body: serde_json::Value,
+pub(crate) struct Reply {
+    pub(crate) status: u16,
+    pub(crate) body: serde_json::Value,
 }
 
 impl Reply {
-    fn ok(body: serde_json::Value) -> Reply {
+    pub(crate) fn ok(body: serde_json::Value) -> Reply {
         Reply { status: 200, body }
     }
-    fn accepted(body: serde_json::Value) -> Reply {
+    pub(crate) fn accepted(body: serde_json::Value) -> Reply {
         Reply { status: 202, body }
     }
-    fn error(status: u16, message: impl Into<String>) -> Reply {
+    pub(crate) fn error(status: u16, message: impl Into<String>) -> Reply {
         Reply {
             status,
             body: serde_json::json!({ "error": message.into() }),
@@ -394,14 +416,18 @@ impl From<nils_registry::Error> for Reply {
 }
 
 /// What every handler shares.
-struct Doors {
-    home: Home,
+pub(crate) struct Doors {
+    pub(crate) home: Home,
     auth: Auth,
-    pack_dir: Option<std::path::PathBuf>,
+    pub(crate) pack_dir: Option<std::path::PathBuf>,
     /// The bound address, for the capabilities.
-    node: String,
+    pub(crate) node: String,
     started: Instant,
     served: AtomicUsize,
+    /// Wave 4b §12.4: the ask doors' reader DSN, the caps, the pack.
+    pub(crate) ask_dsn: Option<String>,
+    pub(crate) ask_caps: nils_catalog::Caps,
+    pub(crate) ask_pack: String,
 }
 
 pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
@@ -422,6 +448,18 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         args.workers.max(1),
         home.dir().display()
     );
+    let ask_caps = match &args.ask_caps {
+        Some(text) => {
+            let over: serde_json::Value = serde_json::from_str(text)
+                .map_err(|e| usage(format!("--ask-caps is not a JSON object: {e}")))?;
+            let mut base = serde_json::to_value(nils_catalog::Caps::default()).unwrap_or_default();
+            for (k, v) in over.as_object().into_iter().flatten() {
+                base[k] = v.clone();
+            }
+            serde_json::from_value(base).map_err(|e| usage(format!("--ask-caps: {e}")))?
+        }
+        None => nils_catalog::Caps::default(),
+    };
     let doors = Arc::new(Doors {
         home: home.clone(),
         auth,
@@ -429,6 +467,9 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         node: nils_registry::job::hostname(),
         started: Instant::now(),
         served: AtomicUsize::new(0),
+        ask_dsn: args.ask_dsn.clone(),
+        ask_caps,
+        ask_pack: args.ask_pack.clone(),
     });
     let server = Arc::new(server);
     let limit = args.requests;
@@ -437,8 +478,10 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         let server = Arc::clone(&server);
         let doors = Arc::clone(&doors);
         handles.push(std::thread::spawn(move || {
-            // One registry per handler thread: the pool of §13.6.
+            // One registry per handler thread: the pool of §13.6, and the
+            // ask doors' reader, pack and catalog beside it.
             let mut registry: Option<Registry> = None;
+            let mut ask_state = crate::ask_doors::AskState::default();
             loop {
                 let Ok(request) = server.recv_timeout(Duration::from_millis(250)) else {
                     return;
@@ -460,7 +503,7 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
                     );
                     continue;
                 };
-                handle(&doors, reg, request);
+                handle(&doors, reg, &mut ask_state, request);
                 if limit.is_some_and(|max| n >= max) {
                     server.unblock();
                     return;
@@ -476,13 +519,22 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
 
 fn respond(request: Request, reply: Reply) -> std::io::Result<()> {
     let text = serde_json::to_string_pretty(&reply.body).unwrap_or_default();
+    // Always a content length, never a chunked body: a client that reads
+    // the bytes it was told about (the notebook, a script, the tests) gets
+    // the whole document, and the ask doors answer above the 32 KB default.
     let response = Response::from_string(text)
         .with_status_code(StatusCode(reply.status))
+        .with_chunked_threshold(usize::MAX)
         .with_header(Header::from_bytes("Content-Type", "application/json").expect("header"));
     request.respond(response)
 }
 
-fn handle(doors: &Doors, registry: &mut Registry, mut request: Request) {
+fn handle(
+    doors: &Doors,
+    registry: &mut Registry,
+    ask: &mut crate::ask_doors::AskState,
+    mut request: Request,
+) {
     let method = request.method().clone();
     let url = request.url().to_string();
     let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
@@ -505,13 +557,13 @@ fn handle(doors: &Doors, registry: &mut Registry, mut request: Request) {
         return;
     }
     let reply = match doors.auth.caller(&request) {
-        Ok(caller) => route(doors, registry, &caller, &method, path, &query, &body),
+        Ok(caller) => route(doors, registry, ask, &caller, &method, path, &query, &body),
         Err(reply) => reply,
     };
     let _ = respond(request, reply);
 }
 
-fn json_body(body: &str) -> Result<serde_json::Value, Reply> {
+pub(crate) fn json_body(body: &str) -> Result<serde_json::Value, Reply> {
     if body.trim().is_empty() {
         return Ok(serde_json::json!({}));
     }
@@ -522,24 +574,28 @@ fn segments(path: &str) -> Vec<&str> {
     path.trim_matches('/').split('/').collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn route(
     doors: &Doors,
     registry: &mut Registry,
+    ask: &mut crate::ask_doors::AskState,
     caller: &Caller,
     method: &Method,
     path: &str,
     query: &HashMap<String, String>,
     body: &str,
 ) -> Reply {
-    match routed(doors, registry, caller, method, path, query, body) {
+    match routed(doors, registry, ask, caller, method, path, query, body) {
         Ok(r) => r,
         Err(r) => r,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn routed(
     doors: &Doors,
     registry: &mut Registry,
+    ask: &mut crate::ask_doors::AskState,
     caller: &Caller,
     method: &Method,
     path: &str,
@@ -548,6 +604,19 @@ fn routed(
 ) -> Result<Reply, Reply> {
     let principal = caller.principal.as_str();
     let segs = segments(path);
+    // Wave 4b §12.2: the ask doors check their own roles.
+    if let Some(r) = crate::ask_doors::route(
+        doors,
+        registry,
+        ask,
+        caller,
+        method.as_str(),
+        &segs,
+        query,
+        body,
+    ) {
+        return r;
+    }
     let get = *method == Method::Get;
     let post = *method == Method::Post;
     // Which role a door asks for (§11.2). A door not named here asks for
@@ -567,12 +636,16 @@ fn routed(
             format!(
                 "{path} asks for the {} role; {principal} holds {}",
                 needs.name(),
-                caller
-                    .roles
-                    .iter()
-                    .map(|r| r.name())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                if caller.roles.is_empty() {
+                    "no role: an installer binds roles before a caller reads".to_string()
+                } else {
+                    caller
+                        .roles
+                        .iter()
+                        .map(|r| r.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
             ),
         ));
     }
@@ -586,7 +659,7 @@ fn routed(
         .and_then(|l| l.parse::<usize>().ok())
         .unwrap_or(50);
     match segs.as_slice() {
-        ["api", "capabilities"] if get => Ok(Reply::ok(capabilities(doors, registry, caller))),
+        ["api", "capabilities"] if get => Ok(Reply::ok(capabilities(doors, registry, caller, ask))),
         ["api", "status"] if get => Ok(Reply::ok(crate::status_doc(&doors.home, registry)?)),
         ["api", "custody"] if get => Ok(Reply::ok(crate::custody_doc(&doors.home, registry)?)),
         ["api", "audit"] if get => {
@@ -899,9 +972,12 @@ const QUEUEABLE: &[&str] = &[
     // Wave 4b §7: `session rebuild`, the cache built under the worker's
     // principal, never by a read door.
     "session",
+    // Wave 4b §12.2: `ask run` and `ask promote`, the unbounded path and
+    // the promotion, both jobs.
+    "ask",
 ];
 
-fn job_err(e: nils_registry::job::Error) -> Reply {
+pub(crate) fn job_err(e: nils_registry::job::Error) -> Reply {
     match e {
         nils_registry::job::Error::Busy { .. } => Reply::error(409, e.to_string()),
         other => Reply::error(500, other.to_string()),
@@ -915,7 +991,12 @@ fn review_err(e: nils_registry::review::Error) -> Reply {
     }
 }
 
-fn capabilities(doors: &Doors, registry: &mut Registry, caller: &Caller) -> serde_json::Value {
+fn capabilities(
+    doors: &Doors,
+    registry: &mut Registry,
+    caller: &Caller,
+    ask: &mut crate::ask_doors::AskState,
+) -> serde_json::Value {
     let meta = registry.meta().clone();
     let packs: Vec<serde_json::Value> = doors
         .pack_dir
@@ -926,6 +1007,31 @@ fn capabilities(doors: &Doors, registry: &mut Registry, caller: &Caller) -> serd
         .filter_map(|p| nils_pack::load(&p, None).ok())
         .map(|p| serde_json::json!({ "name": p.name, "version": p.version.to_string(), "contract": p.contract }))
         .collect();
+    let doors_list: Vec<String> = [
+        "GET /api/capabilities",
+        "GET /api/status",
+        "GET /api/custody",
+        "GET /api/audit",
+        "GET /api/jobs",
+        "POST /api/jobs",
+        "GET /api/jobs/{id}",
+        "POST /api/jobs/{id}/cancel",
+        "GET /api/releases",
+        "POST /api/releases",
+        "POST /api/handovers",
+        "POST /api/select",
+        "GET /api/review",
+        "GET /api/review/{id}",
+        "POST /api/review/{id}/apply",
+        "POST /api/review/{id}/accept",
+        "POST /api/decisions/{id}/commit",
+        "POST /api/decisions/{id}/withdraw",
+        "GET /api/events",
+    ]
+    .iter()
+    .chain(crate::ask_doors::DOORS.iter())
+    .map(|d| (*d).to_string())
+    .collect();
     serde_json::json!({
         "engine": { "name": "nils", "version": env!("CARGO_PKG_VERSION") },
         "contracts": {
@@ -940,14 +1046,8 @@ fn capabilities(doors: &Doors, registry: &mut Registry, caller: &Caller) -> serd
         "roles": caller.roles.iter().map(|r| r.name()).collect::<Vec<_>>(),
         "node": doors.node,
         "uptime_seconds": doors.started.elapsed().as_secs(),
-        "doors": [
-            "GET /api/capabilities", "GET /api/status", "GET /api/custody", "GET /api/audit",
-            "GET /api/jobs", "POST /api/jobs", "GET /api/jobs/{id}", "POST /api/jobs/{id}/cancel",
-            "GET /api/releases", "POST /api/releases", "POST /api/handovers", "POST /api/select",
-            "GET /api/review", "GET /api/review/{id}", "POST /api/review/{id}/apply",
-            "POST /api/review/{id}/accept", "POST /api/decisions/{id}/commit",
-            "POST /api/decisions/{id}/withdraw", "GET /api/events",
-        ],
+        "ask": crate::ask_doors::capabilities(doors, registry, ask),
+        "doors": doors_list,
     })
 }
 

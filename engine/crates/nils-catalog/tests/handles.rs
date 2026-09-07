@@ -59,6 +59,7 @@ fn go(l: &mut Lab, ask: Ask, name: Option<&str>, keep: bool) -> nils_ask::run::O
             limit: None,
             may_project_raw: false,
             purpose: None,
+            reader: None,
         },
     )
     .unwrap_or_else(|e| panic!("{}: {e}", l.name))
@@ -453,6 +454,7 @@ fn go_raw(l: &mut Lab, ask: Ask, may: bool) -> Result<nils_ask::run::Outcome, Ru
             limit: None,
             may_project_raw: may,
             purpose: Some("a test"),
+            reader: None,
         },
     )
 }
@@ -687,6 +689,7 @@ fn a_drifted_handle_is_re_evaluated_and_an_expired_one_says_so() {
                 limit: None,
                 may_project_raw: false,
                 purpose: None,
+                reader: None,
             },
         )
         .unwrap_err();

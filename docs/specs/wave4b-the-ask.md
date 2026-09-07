@@ -792,6 +792,11 @@ until the timing run of slice 9.
 | `values_inline_rows` | 500 | on the upload call |
 | `diagnose_variants` | 24 | job only |
 
+Measured so far (slice 9, the synthetic half of bar 10): on the 48 subject
+synthetic registry, SQLite, a debug build, the yardstick runs in 62 ms at
+p50 and 64 ms at p95 and its diagnose pass in 473 ms over 31 stages; the
+gold documents in under 10 ms. The reference corpus half sets the numbers.
+
 A row cap bounds rows returned, not work: a MATERIALIZED CTE runs to
 completion before the outer scan yields its first row, so the timeout is the
 only bound on work. A capped run is flagged `truncated: true`; it can be paged
@@ -1383,6 +1388,52 @@ attach) or at `answer`'s `has good`, the alternating scanner at
 carries the flag (slice 9); the leave one out variant of diagnose is a
 job; `best` is not a policy a move sets, since it needs an order, which
 `draft` composes.
+
+**As built (slice 9, doors and caps, 2026-09-07; OpenAPI contract v2).**
+`nils serve` has the doors of §12.2 in `crates/nils/src/ask_doors.rs`,
+one per operation, routed before the older doors and checking their own
+roles: a reader asks, runs, explains, previews, diagnoses, describes,
+posts documents, applies moves, uploads a list and reads handles; a
+reviewer saves a selection; an operator queues a promotion or a session
+rebuild. The catalog's policy reads the caller's roles from whichever auth
+mode supplied them: a reader's scope projects no class, a reviewer's the
+quasi identifying fields, an operator's the sensitive kinds, and only an
+operator may project identifiers. Every handler thread keeps, beside its
+registry connection, the pack, the catalog rebuilt when the epoch moves,
+and the reader of §12.4: on SQLite the file opened read only with
+`query_only` set (`Store::open_sqlite_read_only`), on Postgres a session
+under `--ask-dsn` (the deployment's SELECT only role) or the registry's
+own DSN, with `default_transaction_read_only` on either way
+(`Registry::open_ask_reader`). The compiled statement runs on that reader
+(`Request.reader`, threaded through the runner, diagnose, preview and
+draft); the handle, the pages and the audit rows are written through the
+registry, and every cache is a job's. `capabilities.ask` carries the caps
+(the published defaults of §11.5, a deployment overriding them with
+`--ask-caps` as a JSON object), the catalog's schema digest, the ask
+schema's digest, the epoch, the move cap, the pack, how the reader is
+opened, and the doors. A capped run is flagged truncated and has no hash;
+the promotion of a truncated handle is refused. No default reader: an
+OIDC caller with no mapped group holds no role, a token carries its roles
+as `TOKEN=user@node:reader,operator` (no suffix is every role, a machine
+token; an empty suffix is none), and a caller with no role gets 403 at
+every door with a message that says an installer binds roles first. The
+job path: `POST /api/ask/jobs` stores the document and queues `nils ask
+run --document ID`, `POST /api/ask/handles/{id}/promote` queues `nils ask
+promote`, `POST /api/sessions/rebuild` queues `nils session rebuild`;
+`ask` joins the queueable verbs, and `nils ask run`, `nils ask promote`
+and `nils ask time` exist for the worker and the timing (the rest of the
+runner is slice 10's). The OpenAPI contract is version 2: version 1 plus
+these doors, in a titled pull request. Every reply carries a content
+length and is never chunked, because the ask doors answer above tiny
+http's 32 KB threshold and a client that reads the bytes it was told
+about must get the whole document. The synthetic timing (bar 10, the
+synthetic half): `nils ask time` on the 48 subject registry, SQLite, a
+debug build, five runs, gives the yardstick a p50 of 62 ms and a p95 of
+64 ms with its diagnose pass at 473 ms over 31 stages, gold B 6 ms, gold
+C 4 ms, gold A 3 ms; the reference corpus half and the Postgres half run
+on the private host and set the numbers of §11.5, which stay provisional
+until then. Deferred to slice 10 and 12: the 26 shapes of the traffic as
+a timing suite, the CSV export off a handle, and the gate.
 
 
 Ordering constraints, before the table. Nothing is written before the record

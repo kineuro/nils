@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nils_registry::home::Registry;
 use nils_registry::session::Scheme;
+use nils_registry::store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -233,7 +234,7 @@ struct Counter<'a> {
 }
 
 impl Counter<'_> {
-    fn count(&self, registry: &mut Registry, ask: &Ask) -> Result<(i64, i64), RunError> {
+    fn count(&mut self, registry: &mut Registry, ask: &Ask) -> Result<(i64, i64), RunError> {
         let v = validate(ask, self.names, self.scope).map_err(AskError::Invalid)?;
         let (_, a) = self.runner.answer(registry, ask, &v, None, None)?;
         let row = a.rows.first();
@@ -244,7 +245,7 @@ impl Counter<'_> {
     }
 
     /// The subject keys of a record level variant, bounded by the cap.
-    fn keys(&self, registry: &mut Registry, ask: &Ask) -> Result<(i64, Vec<i64>), RunError> {
+    fn keys(&mut self, registry: &mut Registry, ask: &Ask) -> Result<(i64, Vec<i64>), RunError> {
         let v = validate(ask, self.names, self.scope).map_err(AskError::Invalid)?;
         let (_, a) = self.runner.answer(registry, ask, &v, None, None)?;
         let mut keys: Vec<i64> = a
@@ -275,6 +276,7 @@ pub fn diagnose(
     scheme: &Scheme,
     bounds: Bounds,
     with_keys: bool,
+    reader: Option<&mut Store>,
 ) -> Result<Diagnosis, RunError> {
     let cost = cost_of(&ask);
     let prepared = match prepare(ask, names, scope) {
@@ -306,11 +308,12 @@ pub fn diagnose(
     } else {
         validate(&ask, names, scope).map_err(AskError::Invalid)?
     };
-    let counter = Counter {
+    let mut counter = Counter {
         runner: Runner {
             names,
             scheme,
             bounds,
+            reader,
         },
         names,
         scope,

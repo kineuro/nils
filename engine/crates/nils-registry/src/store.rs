@@ -399,6 +399,24 @@ impl Store {
         Ok(Store::Sqlite(conn))
     }
 
+    /// Open a SQLite file read only (Wave 4b §12.4, the ask door): the
+    /// connection refuses every write at the driver, `query_only` refuses
+    /// it again at the engine, and a temp table still works.
+    pub fn open_sqlite_read_only(path: &std::path::Path) -> Result<Store, Error> {
+        use rusqlite::OpenFlags;
+        let conn = rusqlite::Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch(
+            "PRAGMA query_only = 1;\n\
+             PRAGMA temp_store = MEMORY;\n\
+             PRAGMA cache_size = -65536;",
+        )?;
+        Ok(Store::Sqlite(conn))
+    }
+
     /// An in-memory SQLite store, for tests.
     pub fn sqlite_in_memory() -> Result<Store, Error> {
         Ok(Store::Sqlite(rusqlite::Connection::open_in_memory()?))

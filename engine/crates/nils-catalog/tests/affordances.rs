@@ -479,6 +479,7 @@ fn the_funnel_names_the_set_where_each_planted_negative_falls_out() {
             &scheme,
             bounds(),
             true,
+            None,
         )
         .unwrap();
         assert!(d.valid && d.issues.is_empty(), "{}", l.name);
@@ -571,6 +572,7 @@ fn the_funnel_names_the_set_where_each_planted_negative_falls_out() {
             &scheme,
             bounds(),
             false,
+            None,
         )
         .unwrap();
         let why = z.zero_rows.clone().expect("a zero row explanation");
@@ -594,6 +596,7 @@ fn the_funnel_names_the_set_where_each_planted_negative_falls_out() {
             &scheme,
             bounds(),
             false,
+            None,
         )
         .unwrap();
         assert!(!b.valid && !b.issues.is_empty() && b.funnel.is_empty());
@@ -615,14 +618,14 @@ fn preview_describe_and_draft() {
             values_cap: 50,
         };
         let ask = fixture("yardstick");
-        let p = affordance::preview(&mut l.registry, &ask, 5, &s).unwrap();
+        let p = affordance::preview(&mut l.registry, &ask, 5, &s, None).unwrap();
         assert_eq!(p.rows.len(), 5, "{}", l.name);
         assert_eq!(p.columns.len(), 8);
         let mut counted = ask.clone();
         counted.out.level = nils_ask::ast::Level::Count;
         counted.out.columns.clear();
         counted.out.order.clear();
-        let c = affordance::preview(&mut l.registry, &counted, 5, &s).unwrap();
+        let c = affordance::preview(&mut l.registry, &counted, 5, &s, None).unwrap();
         assert_eq!(c.rows.len(), 1);
         assert_eq!(c.rows[0][1], json!(14));
         let d = affordance::describe(&ask, &s).unwrap();
@@ -685,7 +688,7 @@ fn preview_describe_and_draft() {
             "out": {"set": "a", "level": "count"}
         })
         .to_string();
-        let drafted = affordance::draft(&mut l.registry, &text, &s).unwrap();
+        let drafted = affordance::draft(&mut l.registry, &text, &s, None).unwrap();
         assert!(!drafted.repairs.is_empty(), "{}", l.name);
         assert!(
             drafted.diagnosis.valid,
@@ -693,7 +696,7 @@ fn preview_describe_and_draft() {
             l.name, drafted.diagnosis.issues
         );
         assert!(drafted.document.is_some());
-        let broken = affordance::draft(&mut l.registry, &json!({"ast_version": 1, "sets": {"a": {"grain": "subject", "from": "nowhere"}}, "out": {"set": "a", "level": "count"}}).to_string(), &s).unwrap();
+        let broken = affordance::draft(&mut l.registry, &json!({"ast_version": 1, "sets": {"a": {"grain": "subject", "from": "nowhere"}}, "out": {"set": "a", "level": "count"}}).to_string(), &s, None).unwrap();
         assert!(!broken.diagnosis.valid && broken.document.is_none());
     }
 }
