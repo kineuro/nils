@@ -37,6 +37,16 @@ pub(crate) struct AskState {
 }
 
 impl AskState {
+    /// What the pack tells a model (§12.3), or none when it says nothing.
+    pub(crate) fn model(
+        &mut self,
+        doors: &Doors,
+        registry: &mut Registry,
+    ) -> Option<nils_pack::mcp::Model> {
+        self.ensure(doors, registry).ok()?;
+        self.pack.as_ref().and_then(|p| p.mcp.clone())
+    }
+
     fn ensure(&mut self, doors: &Doors, registry: &mut Registry) -> Result<(), Reply> {
         if self.pack.is_none() {
             let dir = doors
@@ -129,6 +139,8 @@ fn issues_reply(status: u16, what: &str, issues: &[nils_ask::validate::Issue]) -
             "issues": issues,
             "next": issues.iter().map(|i| i.next.clone()).collect::<Vec<_>>(),
         }),
+        headers: Vec::new(),
+        empty: false,
     }
 }
 

@@ -24,6 +24,7 @@ and gets a version; nothing is amended in place.
 | 1 | [`v1/pack.schema.json`](v1/pack.schema.json) | Wave 2 (the manifest as the loader reads it); written down in Wave 4a |
 | 2 | [`v2/pack.schema.json`](v2/pack.schema.json) | Wave 4a slice 15, 2026-09-06: the optional `fields` key, a visibility (`local`, `federated`, `sensitive`) the pack puts on a catalogue field (C27) |
 | 3 | [`v3/pack.schema.json`](v3/pack.schema.json) | Wave 4b slice 4, 2026-09-07: the optional `levels` key, the comparability level files that say what the same acquisition means at each named level (Wave 4b section 6) |
+| 4 | [`v4/pack.schema.json`](v4/pack.schema.json) | Wave 4b slice 11, 2026-09-07: the optional `mcp` key, what the MCP door tells a model and which doors it opts in as tools (Wave 4b section 12.3) |
 
 The engine's own copy of the version is `nils_pack::CONTRACT`; a test keeps
 the two the same and keeps every manifest key the loader reads on the schema.

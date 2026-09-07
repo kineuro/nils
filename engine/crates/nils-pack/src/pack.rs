@@ -33,7 +33,7 @@ use crate::yaml::{self, File};
 /// The pack contract this engine implements. A pack declaring a higher one is
 /// refused rather than half-understood. Version 2 (Wave 4a §11.2, C27) adds
 /// the optional `fields` key: a visibility on a catalogue field.
-pub const CONTRACT: u32 = 3;
+pub const CONTRACT: u32 = 4;
 
 /// What a field may be shown to (Wave 4a §11.2, C27): `local` (this node
 /// only: free text, paths, exact dates, identifiers), `federated` (on the
@@ -99,6 +99,9 @@ pub struct Pack {
     /// Wave 4b §6: the comparability levels, what "the same acquisition"
     /// means at each named level.
     pub levels: Vec<crate::level::Level>,
+    /// Wave 4b §12.3: what the MCP door tells a model, and which doors it
+    /// opts in as tools. A pack that says nothing opts nothing in.
+    pub mcp: Option<crate::mcp::Model>,
     /// The rule sets, in the order they run.
     pub rule_sets: Vec<RuleSet>,
     /// §10: how one stack per session and role is chosen. A pack that
@@ -535,6 +538,12 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         levels.push(level);
     }
 
+    // --- what the pack tells a model (Wave 4b §12.3), one file
+    let mcp = match files_of(m, &manifest, dir, "mcp")?.first() {
+        Some(f) => Some(crate::mcp::load(f)?),
+        None => None,
+    };
+
     // --- rule sets written longhand, after the axes they decide
     for f in files_of(m, &manifest, dir, "rules")? {
         let set = load_rule_set(
@@ -674,6 +683,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         derived,
         axes,
         levels,
+        mcp,
         rule_sets,
         picks,
         ingest,

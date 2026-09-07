@@ -10,7 +10,7 @@
 
 pack: mri
 version: 0.1.0
-contract: 3
+contract: 4
 modality: MR
 
 parsers:
@@ -92,6 +92,11 @@ levels:
   - levels/exact.yml
   - levels/strict.yml
   - levels/loose.yml
+
+# What the MCP door tells a model (Wave 4b section 12.3): the doors it
+# opts in as tools, the grounding rules and the worked examples.
+mcp:
+  - mcp.yml
 
 # What a field may be shown to (Wave 4a section 11.2, C27): local is this
 # node only, federated is on the allowlist a peer may read, sensitive is
