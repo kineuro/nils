@@ -178,6 +178,10 @@ fn ask_of(l: &mut Lab, text: &str) -> (Compiled, Answer) {
     (compiled, answer)
 }
 
+/// One backend's answer to one row: its name, the hash, the row count and
+/// the first rows rendered.
+type Seen = (String, String, usize, Vec<String>);
+
 /// Every fixture row runs on every backend; the answers' hashes agree.
 #[test]
 fn fixture_a_executes_on_both_backends_with_agreeing_hashes() {
@@ -275,7 +279,7 @@ fn fixture_a_executes_on_both_backends_with_agreeing_hashes() {
             "out": {"set": "active", "level": "count"}
         }).to_string()),
     ];
-    let mut hashes: BTreeMap<&str, Vec<(String, String, usize, Vec<String>)>> = BTreeMap::new();
+    let mut hashes: BTreeMap<&str, Vec<Seen>> = BTreeMap::new();
     for mut l in labs() {
         for (what, text) in &rows {
             let (_, answer) = ask_of(&mut l, text);
