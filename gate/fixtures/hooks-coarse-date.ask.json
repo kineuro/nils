@@ -1,0 +1,171 @@
+{
+  "ast_version": 1,
+  "name": "A coarse date under every row of section 5.3",
+  "params": {
+    "cut": {
+      "type": "date",
+      "value": "2012-06-15"
+    }
+  },
+  "sets": {
+    "e": {
+      "grain": "event",
+      "where": [
+        [
+          "=",
+          {},
+          [
+            "field",
+            {},
+            "kind"
+          ],
+          "SP Transition"
+        ]
+      ]
+    },
+    "after_forgiving": {
+      "grain": "event",
+      "from": "e",
+      "where": [
+        [
+          ">",
+          {},
+          [
+            "field",
+            {},
+            "date"
+          ],
+          [
+            "param",
+            {},
+            "cut"
+          ]
+        ]
+      ]
+    },
+    "after_strict": {
+      "grain": "event",
+      "from": "e",
+      "where": [
+        [
+          ">",
+          {
+            "strict": true
+          },
+          [
+            "field",
+            {},
+            "date"
+          ],
+          [
+            "param",
+            {},
+            "cut"
+          ]
+        ]
+      ]
+    },
+    "all": {
+      "grain": "event",
+      "from": "e",
+      "bind": {
+        "y": [
+          "part",
+          {
+            "unit": "year"
+          },
+          [
+            "field",
+            {},
+            "date"
+          ]
+        ],
+        "gap": [
+          "days_between",
+          {},
+          [
+            "field",
+            {},
+            "date"
+          ],
+          [
+            "param",
+            {},
+            "cut"
+          ]
+        ],
+        "n_forgiving": [
+          "count",
+          {
+            "set": "after_forgiving"
+          }
+        ],
+        "n_strict": [
+          "count",
+          {
+            "set": "after_strict"
+          }
+        ]
+      }
+    }
+  },
+  "keep": [
+    "after_forgiving",
+    "after_strict"
+  ],
+  "out": {
+    "set": "all",
+    "level": "record",
+    "columns": [
+      [
+        "field",
+        {},
+        "date"
+      ],
+      [
+        "field",
+        {},
+        "precision"
+      ],
+      [
+        "field",
+        {},
+        "y"
+      ],
+      [
+        "field",
+        {},
+        "gap"
+      ],
+      [
+        "field",
+        {},
+        "n_forgiving"
+      ],
+      [
+        "field",
+        {},
+        "n_strict"
+      ]
+    ],
+    "order": [
+      [
+        [
+          "field",
+          {},
+          "date"
+        ],
+        "asc"
+      ],
+      [
+        [
+          "field",
+          {},
+          "id"
+        ],
+        "asc"
+      ]
+    ],
+    "limit": 20
+  }
+}

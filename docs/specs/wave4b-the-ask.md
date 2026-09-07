@@ -1505,6 +1505,40 @@ deployed engine is the operator's check and not CI's, and the pack's
 few-shot gallery stays two worked examples until the assistant wave asks
 for more.
 
+**As built (slice 12, the gate, 2026-09-08).** The gate is data in the
+repository and one verb: `gate/gate.yml` names every fixture, its family,
+its document and the outcome it is allowed to have; `gate/fixtures/` holds
+the documents; `gate/expect/` holds what each returned when the canonicals
+were taken; `nils ask gate` runs them on whichever backend the registry
+is. Twenty one fixtures: the yardstick's four (the layered primary
+reading, the strict reading where the transition known to its year is no
+longer certainly before its own year's follow-ups, the all-share-one
+reading at the exact level where the alternating timings make two groups
+and sixteen subjects survive of eighteen, and the precision path carrying
+the interval's own edges), the three gold documents of Appendix B fitted
+to the gate's registry, twelve conformance fixtures that exercise the
+hooks and the disputed constructs (the rounded group key, AVG and COUNT
+projected, the sorted list, case blind `contains`, a six hundred key
+upload the gate writes itself, a pick whose tie falls to the key, a NULL
+in the field a pick orders by, the coarse date under every row of §5.3, a
+month window crossing a month end, `age_at` at the cohort edge, a record
+longer than a page, and the sequences), and two that carry no document at
+all: the family 6 one to one matching, deferred by the `pair` clause, and
+free text beyond the fingerprint's columns, out of the language. A fourth
+outcome does not exist, and the runner refuses one. Every canonical
+carries the content hash, the columns, the rows rendered by the engine's
+own renderer (the declared normalisation) and the funnel's last stage per
+named set, so a fixture that drifts says both what came back and where the
+subjects went; a hash alone was never the oracle, which is why the rows
+are in the file. The canonicals were taken on SQLite and hold on Postgres
+unchanged, which is bars 2 and 4 in one act: the two backends agreeing is
+each of them agreeing with one file. CI runs the gate as two steps of the
+engine job, building the registry with `nils synth` on each backend, so
+the wave's gate runs on every pull request. `--write` retakes the
+canonicals, and the README says what it is for and what it is not for.
+Deferred: bar 10's reference corpus half stays the private host's, and bar
+1's record walk lives in the private record where C39 to C42 already sit.
+
 
 Ordering constraints, before the table. Nothing is written before the record
 carries the amendments (slice 0). The two `stack_fingerprint` indexes, the

@@ -1,0 +1,92 @@
+{
+  "ast_version": 1,
+  "name": "AVG and COUNT projected over a subject's stacks",
+  "sets": {
+    "p": {
+      "grain": "subject"
+    },
+    "t": {
+      "grain": "stack",
+      "of": "p",
+      "where": [
+        [
+          "=",
+          {},
+          [
+            "axis",
+            {},
+            "disposition"
+          ],
+          "acquisition"
+        ]
+      ]
+    },
+    "a": {
+      "grain": "subject",
+      "from": "p",
+      "bind": {
+        "n": [
+          "count",
+          {
+            "set": "t"
+          }
+        ],
+        "mean_te": [
+          "avg",
+          {
+            "set": "t"
+          },
+          [
+            "field",
+            {},
+            "echo_time"
+          ]
+        ]
+      },
+      "where": [
+        [
+          ">",
+          {},
+          [
+            "field",
+            {},
+            "n"
+          ],
+          0
+        ]
+      ]
+    }
+  },
+  "out": {
+    "set": "a",
+    "level": "record",
+    "columns": [
+      [
+        "field",
+        {},
+        "code"
+      ],
+      [
+        "field",
+        {},
+        "n"
+      ],
+      [
+        "field",
+        {},
+        "mean_te"
+      ]
+    ],
+    "order": [
+      [
+        [
+          "field",
+          {},
+          "code"
+        ],
+        "asc"
+      ]
+    ],
+    "limit": 20
+  }
+}

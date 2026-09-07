@@ -1,0 +1,62 @@
+{
+  "ast_version": 1,
+  "name": "A sorted list of a subject's sequence names",
+  "sets": {
+    "t": {
+      "grain": "stack"
+    },
+    "g": {
+      "grain": "group",
+      "group": {
+        "of": "t",
+        "by": [
+          [
+            "field",
+            {},
+            "subject.id"
+          ]
+        ]
+      },
+      "bind": {
+        "techniques": [
+          "list",
+          {
+            "set": "t"
+          },
+          [
+            "field",
+            {},
+            "text_sequence_name"
+          ]
+        ]
+      }
+    }
+  },
+  "out": {
+    "set": "g",
+    "level": "aggregate",
+    "columns": [
+      [
+        "field",
+        {},
+        "subject.id"
+      ],
+      [
+        "field",
+        {},
+        "techniques"
+      ]
+    ],
+    "order": [
+      [
+        [
+          "field",
+          {},
+          "subject.id"
+        ],
+        "asc"
+      ]
+    ],
+    "limit": 12
+  }
+}

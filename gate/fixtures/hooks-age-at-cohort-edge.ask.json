@@ -1,0 +1,88 @@
+{
+  "ast_version": 1,
+  "name": "An ask at the cohort edge with age and the count level",
+  "params": {
+    "as_of": {
+      "type": "date",
+      "value": "2026-01-01"
+    },
+    "cohorts": {
+      "type": "list",
+      "value": [
+        "ms-cohort-a"
+      ]
+    }
+  },
+  "sets": {
+    "scope": {
+      "grain": "cohort",
+      "where": [
+        [
+          "in",
+          {},
+          [
+            "field",
+            {},
+            "name"
+          ],
+          [
+            "param",
+            {},
+            "cohorts"
+          ]
+        ]
+      ]
+    },
+    "people": {
+      "grain": "subject",
+      "of": "scope",
+      "bind": {
+        "age": [
+          "age_at",
+          {},
+          [
+            "field",
+            {},
+            "birth_date"
+          ],
+          [
+            "param",
+            {},
+            "as_of"
+          ]
+        ]
+      },
+      "where": [
+        [
+          ">=",
+          {},
+          [
+            "field",
+            {},
+            "age"
+          ],
+          50
+        ]
+      ]
+    },
+    "visits": {
+      "grain": "session",
+      "of": "people"
+    },
+    "active": {
+      "grain": "subject",
+      "from": "people",
+      "has": [
+        {
+          "set": "visits",
+          "min": 2,
+          "as": "n_visits"
+        }
+      ]
+    }
+  },
+  "out": {
+    "set": "active",
+    "level": "count"
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "ast_version": 1,
+  "name": "A NULL in the field a pick orders by",
+  "sets": {
+    "s": {
+      "grain": "session"
+    },
+    "t": {
+      "grain": "stack",
+      "of": "s",
+      "pick": {
+        "per": "session",
+        "by": [
+          [
+            [
+              "field",
+              {},
+              "inversion_time"
+            ],
+            "desc"
+          ]
+        ]
+      }
+    }
+  },
+  "out": {
+    "set": "t",
+    "level": "record",
+    "columns": [
+      [
+        "field",
+        {},
+        "id"
+      ],
+      [
+        "field",
+        {},
+        "inversion_time"
+      ]
+    ],
+    "order": [
+      [
+        [
+          "field",
+          {},
+          "inversion_time"
+        ],
+        "asc"
+      ],
+      [
+        [
+          "field",
+          {},
+          "id"
+        ],
+        "asc"
+      ]
+    ],
+    "limit": 20
+  }
+}

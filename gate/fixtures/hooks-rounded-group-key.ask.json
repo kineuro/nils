@@ -1,0 +1,108 @@
+{
+  "ast_version": 1,
+  "name": "A rounded group key and a projected rounded value",
+  "sets": {
+    "t": {
+      "grain": "stack",
+      "where": [
+        [
+          "=",
+          {},
+          [
+            "axis",
+            {},
+            "base"
+          ],
+          "T1w"
+        ]
+      ],
+      "bind": {
+        "te": [
+          "round",
+          {
+            "key": true
+          },
+          [
+            "field",
+            {},
+            "echo_time"
+          ],
+          1
+        ]
+      }
+    },
+    "g": {
+      "grain": "group",
+      "group": {
+        "of": "t",
+        "by": [
+          [
+            "field",
+            {},
+            "te"
+          ]
+        ]
+      },
+      "bind": {
+        "n": [
+          "count",
+          {
+            "set": "t"
+          }
+        ],
+        "mean_tr": [
+          "avg",
+          {
+            "set": "t"
+          },
+          [
+            "field",
+            {},
+            "repetition_time"
+          ]
+        ],
+        "shown": [
+          "round",
+          {},
+          [
+            "field",
+            {},
+            "mean_tr"
+          ],
+          1
+        ]
+      }
+    }
+  },
+  "out": {
+    "set": "g",
+    "level": "aggregate",
+    "columns": [
+      [
+        "field",
+        {},
+        "te"
+      ],
+      [
+        "field",
+        {},
+        "n"
+      ],
+      [
+        "field",
+        {},
+        "shown"
+      ]
+    ],
+    "order": [
+      [
+        [
+          "field",
+          {},
+          "te"
+        ],
+        "asc"
+      ]
+    ]
+  }
+}

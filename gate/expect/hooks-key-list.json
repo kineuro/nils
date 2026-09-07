@@ -1,0 +1,19 @@
+{
+  "name": "hooks-key-list",
+  "question": "A key list over six hundred keys",
+  "hash": "e251394325b3049cee6b27f7ff87e3ca11d34c1024b4b0311692b19797e85912",
+  "columns": [
+    "rows",
+    "subjects"
+  ],
+  "row_count": 1,
+  "rows": [
+    [
+      "600",
+      "48"
+    ]
+  ],
+  "funnel": {
+    "a": 48
+  }
+}

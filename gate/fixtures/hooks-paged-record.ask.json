@@ -1,0 +1,53 @@
+{
+  "ast_version": 1,
+  "name": "A record longer than one page, paged to the end by key",
+  "sets": {
+    "t": {
+      "grain": "stack",
+      "where": [
+        [
+          "=",
+          {},
+          [
+            "axis",
+            {},
+            "disposition"
+          ],
+          "acquisition"
+        ]
+      ]
+    }
+  },
+  "out": {
+    "set": "t",
+    "level": "record",
+    "columns": [
+      [
+        "field",
+        {},
+        "id"
+      ],
+      [
+        "field",
+        {},
+        "stack_index"
+      ],
+      [
+        "field",
+        {},
+        "orientation"
+      ]
+    ],
+    "order": [
+      [
+        [
+          "field",
+          {},
+          "id"
+        ],
+        "asc"
+      ]
+    ],
+    "limit": 250
+  }
+}

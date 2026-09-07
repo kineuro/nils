@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# From docs/specs/wave4b-the-ask.md, the appendices; the gate's fixtures.
+ast_version: 1
+name: PPMS-to-SPMS converters whose follow-ups all share one signature at the exact level
+scheme: default
+params:
+  disease:      {type: text,    value: "Multiple Sclerosis"}
+  from_type:    {type: text,    value: PPMS}
+  to_type:      {type: text,    value: SPMS}
+  score_window: {type: window,  value: {from: -6, to: 6, unit: month}}   # 186 days each way, inclusive
+  age_from:     {type: integer, value: 40}
+  age_to:       {type: integer, value: 50}
+  iso_mm:       {type: number,  value: 0.5}
+  tol_mm:       {type: number,  value: 0.05}
+  min_sessions: {type: integer, value: 2}
+  level:        {type: level,   value: exact}     # the level at which the alternating timings differ
+
+sets:
+  # the transition: the first SPMS course row immediately preceded by a PPMS row
+  # (adjacent: false would accept PPMS, then anything, then SPMS)
+  converted:
+    grain: subject
+    bind:
+      transition: ["change", {of: course,
+                              disease: ["param", {}, "disease"],
+                              from: ["param", {}, "from_type"],
+                              to: ["param", {}, "to_type"],
+                              adjacent: true}]
+    where:
+      - ["not_null", {}, ["field", {}, "transition.to_date"]]
+      - ["not_null", {}, ["field", {}, "birth_date"]]     # a missing birth date excludes explicitly
+
+  # follow-up sessions after the transition, inside the age window
+  # (the transition may be known to the year: "after" is forgiving, section 5.3)
+  followups:
+    grain: session
+    of: converted
+    bind:
+      age: ["age_at", {}, ["field", {}, "subject.birth_date"], ["field", {}, "first"]]
+    where:
+      - [">",  {}, ["field", {}, "first"], ["field", {}, "converted.transition.to_date"]]
+      - [">=", {}, ["field", {}, "age"], ["param", {}, "age_from"]]
+      - ["<",  {}, ["field", {}, "age"], ["param", {}, "age_to"]]
+
+  # the two required acquisitions, one per session, with their signatures at the level
+  t1:
+    grain: stack
+    of: followups
+    where:
+      - ["=",  {}, ["axis", {}, "base"], "T1w"]
+      - ["=",  {}, ["axis", {}, "technique"], "MPRAGE"]
+      - ["=",  {}, ["derived", {}, "acquisition_type"], "3D"]
+      - ["~=", {tol: ["param", {}, "tol_mm"]},
+               ["derived", {third: slice_thickness}, "voxel"], ["param", {}, "iso_mm"]]
+    bind:
+      sig: ["derived", {level: ["param", {}, "level"]}, "signature"]
+    pick: {per: session, ties: report,
+           by: [[["field", {}, "n_instances"], desc], [["field", {}, "id"], asc]]}
+
+  flair:
+    grain: stack
+    of: followups
+    where:
+      - ["=",   {}, ["axis", {}, "base"], "T2w"]
+      - ["has", {}, ["axis", {}, "modifier"], "FLAIR"]
+      - ["=",   {}, ["derived", {}, "acquisition_type"], "3D"]
+      - ["~=",  {tol: ["param", {}, "tol_mm"]},
+                ["derived", {third: slice_thickness}, "voxel"], ["param", {}, "iso_mm"]]
+    bind:
+      sig: ["derived", {level: ["param", {}, "level"]}, "signature"]
+    pick: {per: session, ties: report,
+           by: [[["field", {}, "n_instances"], desc], [["field", {}, "id"], asc]]}
+
+  edss: {grain: event, where: [["=", {}, ["field", {}, "kind"], "EDSS"]]}
+  sdmt: {grain: event, where: [["=", {}, ["field", {}, "kind"], "SDMT"]]}
+
+  # follow-ups that satisfy every per-session condition (near and attach drop rows with no partner)
+  good:
+    grain: session
+    from: followups
+    near:
+      - {as: edss, set: edss, window: ["param", {}, "score_window"], policy: nearest, tie: earlier}
+      - {as: sdmt, set: sdmt, window: ["param", {}, "score_window"], policy: nearest, tie: earlier}
+    attach:
+      - {as: t1,    set: t1}
+      - {as: flair, set: flair}
+
+  answer:
+    grain: subject
+    from: converted
+    has:
+      - {set: good, min: ["param", {}, "min_sessions"], as: n_good}
+    same:
+      - {as: comparable, over: good, all: true,
+         by: [["field", {}, "t1.sig"], ["field", {}, "flair.sig"]],
+         min: ["param", {}, "min_sessions"]}
+
+keep: [converted, followups, good, answer]
+out:
+  set: answer
+  level: record
+  columns:
+    - ["field", {}, "code"]
+    - ["field", {}, "transition.to_date"]
+    - ["field", {}, "transition.precision"]
+    - ["field", {}, "n_good"]
+    - ["field", {}, "comparable.largest"]
+    - ["field", {}, "comparable.groups"]
+  order: [[["field", {}, "code"], asc]]

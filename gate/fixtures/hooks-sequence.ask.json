@@ -1,0 +1,83 @@
+{
+  "ast_version": 1,
+  "name": "The ordinal, the previous and the next session of a subject",
+  "sets": {
+    "s": {
+      "grain": "session",
+      "bind": {
+        "n": [
+          "ordinal",
+          {}
+        ],
+        "before": [
+          "prev",
+          {},
+          [
+            "field",
+            {},
+            "first"
+          ]
+        ],
+        "after": [
+          "next",
+          {},
+          [
+            "field",
+            {},
+            "first"
+          ]
+        ]
+      }
+    }
+  },
+  "out": {
+    "set": "s",
+    "level": "record",
+    "columns": [
+      [
+        "field",
+        {},
+        "subject.id"
+      ],
+      [
+        "field",
+        {},
+        "first"
+      ],
+      [
+        "field",
+        {},
+        "n"
+      ],
+      [
+        "field",
+        {},
+        "before"
+      ],
+      [
+        "field",
+        {},
+        "after"
+      ]
+    ],
+    "order": [
+      [
+        [
+          "field",
+          {},
+          "subject.id"
+        ],
+        "asc"
+      ],
+      [
+        [
+          "field",
+          {},
+          "first"
+        ],
+        "asc"
+      ]
+    ],
+    "limit": 20
+  }
+}
