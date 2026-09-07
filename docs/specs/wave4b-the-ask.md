@@ -1064,6 +1064,32 @@ twentieth of one's members left. Instances are not written; nothing in the
 gate reads the instance grain yet. The manifest carries the counts and the
 cases, and the gate's fixtures are checked against it.
 
+**As built (slice 2, sessions, 2026-09-07).** `nils-session` owns the
+cache; the pure resolver stays in `nils-registry::session` and is the only
+resolver. `ensure(registry, scheme, anchors, subject, force)` reads every
+dated study of every subject (the whole timeline, never a selection), digests
+each timeline, and rebuilds only the subjects whose digest changed: identity
+rows keyed by (subject, window) with a surrogate id, membership in
+`session_cache_study`, and the scheme's labels in `session_label` keyed by the
+scheme's digest, so a second scheme with the same window adds labels and
+rebuilds nothing. A rebuild matches the resolver's sessions to the stored
+ones by the studies they share; a session whose first day moved keeps its
+id, its picks made under the scheme (or before picks named a digest) are
+re-keyed to the new day, and a `session.moved` review item at subject scope
+says so; a session that vanished withdraws its picks and says so too. The
+release, the picker and `nils session list` all call `ensure` and then read
+`labels_by_study` or `sessions_of`, under the scheme's own anchor (an event
+anchor comes from the clinical layer through `Anchors::resolve`), which
+closes the three call sites that hard-coded a first-session anchor; the
+picker writes `pick.scheme_digest`. `nils session rebuild
+[--scheme|--scheme-name] [--anchors] [--subject] [--force] [--json]` is the
+verb, queueable through `POST /api/jobs` as `session rebuild`; a door of its
+own, `POST /api/sessions/rebuild`, waits for the OpenAPI contract's next
+version, which slice 9 cuts for `/api/ask/*`. Not built here: the span
+movement rate on a real ingest (§16), and any threshold; the whole-archive
+read is the rebuild's unit of work and it is measured by the gate's timing
+run.
+
 
 Ordering constraints, before the table. Nothing is written before the record
 carries the amendments (slice 0). The two `stack_fingerprint` indexes, the

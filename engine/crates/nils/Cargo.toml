@@ -20,6 +20,7 @@ nils-classify.workspace = true
 nils-pack.workspace = true
 nils-digest.workspace = true
 nils-registry.workspace = true
+nils-session.workspace = true
 nils-release.workspace = true
 nils-synth.workspace = true
 

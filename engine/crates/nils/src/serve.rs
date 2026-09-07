@@ -896,6 +896,9 @@ const QUEUEABLE: &[&str] = &[
     "pick",
     "release",
     "handover",
+    // Wave 4b §7: `session rebuild`, the cache built under the worker's
+    // principal, never by a read door.
+    "session",
 ];
 
 fn job_err(e: nils_registry::job::Error) -> Reply {

@@ -1480,6 +1480,7 @@ dependencies = [
  "nils-pack",
  "nils-registry",
  "nils-release",
+ "nils-session",
  "nils-synth",
  "regex",
  "serde",
@@ -1497,6 +1498,7 @@ dependencies = [
  "nils-digest",
  "nils-pack",
  "nils-registry",
+ "nils-session",
  "serde",
  "serde_json",
  "unicode-normalization",
@@ -1583,6 +1585,22 @@ dependencies = [
  "nils-digest",
  "nils-pack",
  "nils-registry",
+ "nils-session",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nils-session"
+version = "1.0.0-alpha.0"
+dependencies = [
+ "blake2",
+ "csv",
+ "hex",
+ "nils-dicom",
+ "nils-registry",
+ "nils-synth",
+ "regex",
  "serde",
  "serde_json",
 ]
