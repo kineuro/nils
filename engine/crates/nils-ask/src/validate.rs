@@ -45,6 +45,15 @@ pub struct DerivedInfo {
     pub params: Vec<String>,
 }
 
+/// Where a field lives, for the compiler (§11): the table and column, and
+/// the case folded companion of a text column when it has one (§11.3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnRef {
+    pub table: String,
+    pub column: String,
+    pub ci: Option<String>,
+}
+
 /// What validation asks the catalog (§9).
 pub trait Names {
     /// A field of a level (`subject`, `study`, `series`, `session`, `stack`,
@@ -64,6 +73,12 @@ pub trait Names {
     fn handle(&self, id: &str) -> Option<Grain>;
     fn upload(&self, id: &str) -> bool;
     fn derived(&self, name: &str) -> Option<DerivedInfo>;
+    /// The column a field reads, for the compiler; a catalog that has no
+    /// columns (a fixture) answers none, and compiling refuses the field.
+    fn column(&self, level: &str, path: &str) -> Option<ColumnRef> {
+        let _ = (level, path);
+        None
+    }
 }
 
 /// The principal's scope, as the catalog's policy sees it.

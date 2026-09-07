@@ -20,6 +20,8 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+nils-dicom.workspace = true
+nils-session.workspace = true
 nils-synth.workspace = true
 
 [lints]
