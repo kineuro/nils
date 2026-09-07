@@ -366,6 +366,10 @@ starting elsewhere with four dialects; NILS starts where they ended.
 
 ### 5.2 Grain, windows, sets and lists are primitives (C18, D20)
 
+*Amended 2026-09-07 ([18](18-wave4b-the-ask.md) §5): the stage is a named set at one
+grain and the pipeline is the chain shaped case of a DAG; every clause below is walked
+against the ask's op table there, with each rename and drop recorded.*
+
 The traffic's errors are about what a row *is*. So:
 
 - Every stage declares its **grain**: `subject | session | stack | instance | event`.
@@ -539,9 +543,9 @@ staged ([15](15-ratification.md) §2 and §9).
 
 | Id | Affects | Proposal | Status |
 |---|---|---|---|
-| C16 | D5, C4 | The 28 gold tasks (with result hashes) and the ten families are the AST gate: Wave 4 proves every one is expressible as an AST fixture; Wave 5 proves each gold task reproduces its hash on the migrated registry | accepted 2026-09-02 (15 §9) |
-| C17 | D5, 05 §2 | The AST adopts Metabase's shape (stages, `[op, {opts}, ...args]`, name-path refs, bucketing in ref options, parameters outside), one external dialect only, generated JSON Schema, `ast_version` with on-read upgrade, structural repair pass with a fixed error taxonomy | accepted 2026-09-02 (15 §9) |
-| C18 | D5 → D20 | Grain declared per stage and changed only by summarize or pick; counts name their grain and shares their denominator; `nearest`, `within`, `pairs`, `age_at` clauses; set algebra on selections; values sources with a namespace; identifier projection; derived fields including the protocol fingerprint | accepted 2026-09-02, staged: grain, summarize, pick, `within` and `nearest` in Wave 4; `pairs`, `age_at`, set algebra and derived fields with the notebook in Wave 5 (15 §2) |
+| C16 | D5, C4 | The 28 gold tasks (with result hashes) and the ten families are the AST gate: Wave 4 proves every one is expressible as an AST fixture; Wave 5 proves each gold task reproduces its hash on the migrated registry | accepted 2026-09-02 (15 §9); replaced 2026-09-07 by the row oracle with three outcomes (18 D40) |
+| C17 | D5, 05 §2 | The AST adopts Metabase's shape (stages, `[op, {opts}, ...args]`, name-path refs, bucketing in ref options, parameters outside), one external dialect only, generated JSON Schema, `ast_version` with on-read upgrade, structural repair pass with a fixed error taxonomy | accepted 2026-09-02 (15 §9); amended 2026-09-07: the stage list becomes a DAG (18 §5) |
+| C18 | D5 → D20 | Grain declared per stage and changed only by summarize or pick; counts name their grain and shares their denominator; `nearest`, `within`, `pairs`, `age_at` clauses; set algebra on selections; values sources with a namespace; identifier projection; derived fields including the protocol fingerprint | accepted 2026-09-02, staged: grain, summarize, pick, `within` and `nearest` in Wave 4; `pairs`, `age_at`, set algebra and derived fields with the notebook in Wave 5 (15 §2); walked clause by clause 2026-09-07, with `age_at`, set algebra and derived fields unstaged into 4b (18 §5) |
 | C19 | D12, C8, D16 → D21 | Roles as catalog objects, picks as ordered preferences yielding one stack per session-role with ties reported; image-type tokens as a structured stack attribute; "main acquisition" = the default role set, computed as picks | accepted 2026-09-02 (15 §9) |
 | C20 | 05 §2, 06 | Engine-served affordances `options`, `describe`, `preview`, `diagnose` keyed by `(ast, stage)`; field records with semantic type, `sensitive` visibility, fingerprints, remaps, `ai_context`; vocabularies as catalog entities; curation survives re-sync | accepted 2026-09-02 (15 §9) |
 | C21 | D14, 05 §1 → D22 | Result handles (id, name, grain, columns, row count, hash, AST version, provenance) paged by continuation token; exports and send-to consume handles; the same object as D14's staged result versions | accepted 2026-09-02 (15 §9) |
@@ -553,7 +557,9 @@ staged ([15](15-ratification.md) §2 and §9).
 Decisions proposed for the register:
 
 - **D20, grain and denominators are explicit in the AST** (from C18). Ratified
-  2026-09-02.
+  2026-09-02. Amended 2026-09-07 ([18](18-wave4b-the-ask.md) §3, C39, C40): gains the
+  `group` grain and the rule that nothing changes grain; the denominator half is
+  restored as a scalar count over a named set.
 - **D21, roles and picks are registry facts** (from C19): a role is a catalog
   predicate, a pick is an ordered preference producing one stack per session-role,
   and the default role set is the main acquisition. Ratified 2026-09-02.

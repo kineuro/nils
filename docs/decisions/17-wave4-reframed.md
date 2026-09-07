@@ -158,3 +158,8 @@ Both apps are placeholders. What each is: the first lets a person **ask** the re
 ## 9. Where to start
 
 Now: the Wave 4a spec, written from §3, with §6 as its do-not-forget list and the 4a questions (retention, the correction path, acknowledgement, the multi-valued axis storage) settled in it. Slices 1-5 start when the spec merges; the private-tag candidates (slice 3) wait on Nima striking the list.
+
+**Wave 4b opened 2026-09-07.** The talk of §4 was held as a study
+([18](18-wave4b-the-ask.md)): the eleven items it had to settle are answered in
+18 §4, the spec is `docs/specs/wave4b-the-ask.md` in the public repository with
+thirteen slices, and the app's name (§8) stays open.

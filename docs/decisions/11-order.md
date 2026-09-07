@@ -708,6 +708,11 @@ federated principal.
 **Wave 5 — absorbed into Wave 4b (17-wave4-reframed.md, 2026-09-06).** The
 paragraph stands as the description of 4b's gate.
 
+**Wave 4b — opened 2026-09-07** ([18](18-wave4b-the-ask.md); spec
+`docs/specs/wave4b-the-ask.md` in the public repository, thirteen slices in its §15).
+*Gate:* the ten bars of the spec's §13.4 on the synthetic registry and on both backends,
+and the yardstick of 18 §1 returning its planted rows.
+
 **Wave 5 — nils-query MVP.** Notebook, saved selections, send-to. *Gate:* a real
 study's cohort defined as a selection and exported end to end without a hand-written
 manifest. Addition (C16): every gold task expressed in the notebook

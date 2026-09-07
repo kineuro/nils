@@ -484,8 +484,7 @@ services refuse non-browser clients; it gates the word-mark filing of
 recorded in 10, is not a decision yet.
 
 "First step" is item 2 of section 6: the repository, per R1 to R8, with the
-mirror archived (R3). What was done is recorded in section 11. Next ids: C39
-and D32.
+mirror archived (R3). What was done is recorded in section 11. Next ids: C43 and D41 (section 12).
 
 ## 11. The repository, 2026-09-02
 
@@ -504,3 +503,22 @@ Done the same day, every commit authored by nima-ch without trailers (R2).
 
 The `TRADEMARKS.md` claim ("registration is in progress") waits on Nima's search
 (section 10). Item 3 of section 6, the spike and the baseline VM, starts next.
+
+## 12. Wave 4b, 2026-09-07
+
+The study of 2026-09-06 ([18](18-wave4b-the-ask.md)) closed with nine rulings,
+four amendments to ratified text and eighteen answers from Nima; all ratified
+2026-09-07 ("I agree with all. confirmed."). The rows below extend the tables
+above; the changed rows of sections 2 and 3 carry a dated note in their own
+documents.
+
+| Item | Verdict | What it settles |
+|---|---|---|
+| C39 to C42 | accept | the denominator restored, the cohort key groupable, `values` by reference, the event key as the table's id (18 §3) |
+| D32 to D40 | ratified | the ask, time and precision, the session cache, cohorts and handles, the affordances, execution on both backends, where the code lives, identity as external and optional, the gate as N fixtures (18 §2) |
+| Q1 to Q18 | ratified | Nima's answers of 2026-09-07 with the defaults adopted for Q7, Q11, Q14 and Q15 (18 §4) |
+| C16 | replaced | the row oracle with three outcomes (D40) |
+| C17 | accept, changed | the stage list becomes a DAG; everything else stands (18 §5) |
+| C18 | walked | every clause kept, renamed, changed, moved or dropped is listed in 18 §5; `age_at`, set algebra and derived fields are unstaged into 4b |
+| D3 | amended | DuckDB struck (02) |
+| D20 | amended | the `group` grain, nothing changes grain, the denominator half restored (13 §6) |

@@ -66,6 +66,12 @@ managing the symptom.
   declared once, and the full test suite runs against both backends in CI. Any
   feature that cannot be expressed on both does not go in the schema.
 
+**Amended 2026-09-07 ([18](18-wave4b-the-ask.md) §3, D37).** DuckDB is struck: the
+embedded registry is SQLite alone, the server is Postgres 16, and the columnar passes
+DuckDB was named for are window functions and materialised CTEs that both backends run.
+"Expressible on both" is now a contract with a fixture: one ask exercising every hook
+executes on both backends and its content hashes agree.
+
 This is per-registry, not per-cohort — see [03-registry.md](03-registry.md) for why
 cohorts stopped being containers.
 
