@@ -26,6 +26,7 @@ nils-classify = { path = "crates/nils-classify" }
 nils-pack = { path = "crates/nils-pack" }
 nils-release = { path = "crates/nils-release" }
 nils-synth = { path = "crates/nils-synth" }
+nils-session = { path = "crates/nils-session" }
 
 blake2 = "0.11"
 bytes = "1"

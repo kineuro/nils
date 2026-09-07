@@ -99,30 +99,37 @@ fn run_pick(
         None => "registry".to_string(),
     };
 
+    // Wave 4b §7: the occasions come from the session cache, built over each
+    // subject's whole timeline under the scheme's own anchor, and not from
+    // this role's candidates, so a pick keys on the day every reader sees.
+    let anchors =
+        nils_session::Anchors::resolve(registry, scheme, BTreeMap::new()).map_err(session_err)?;
+    nils_session::ensure(registry, scheme, &anchors, subject, false).map_err(session_err)?;
     let store = registry.store();
-    let days = study_days(store)?;
+    let labels = nils_session::labels_by_study(store, scheme).map_err(session_err)?;
     for model in &pack.picks {
         let rows = read_rows(store, model, subject)?;
-        run_one(store, model, pack, scheme, &days, &rows, actor, &mut report)?;
+        run_one(
+            store,
+            model,
+            pack,
+            scheme,
+            &labels,
+            &rows,
+            actor,
+            &mut report,
+        )?;
     }
     report.seconds = started.elapsed().as_secs_f64();
     Ok(report)
 }
 
 /// The day each study happened on, which is what a session is grouped by.
-fn study_days(store: &mut Store) -> Result<HashMap<i64, Day>, Error> {
-    let sql = format!(
-        "SELECT id, COALESCE(date_filled, study_date) FROM {} \
-         WHERE COALESCE(date_filled, study_date) IS NOT NULL",
-        store.qualified("study")
-    );
-    let mut out = HashMap::new();
-    for r in store.query(&sql, &[])? {
-        if let Some(day) = Day::parse(r.text(1)?) {
-            out.insert(r.int(0)?, day);
-        }
+fn session_err(e: nils_session::Error) -> Error {
+    match e {
+        nils_session::Error::Store(s) => Error::Store(s),
+        nils_session::Error::Message(m) => Error::Store(StoreError::Message(m)),
     }
-    Ok(out)
 }
 
 /// Every stack that holds a role, with the values this model reads.
@@ -224,7 +231,7 @@ fn run_one(
     model: &Model,
     pack: &Pack,
     scheme: &Scheme,
-    days: &HashMap<i64, Day>,
+    labels: &HashMap<i64, nils_session::Labelled>,
     rows: &[Row],
     actor: &str,
     report: &mut Picked,
@@ -232,6 +239,7 @@ fn run_one(
     let now = now_iso();
     let scheme_json = serde_json::to_string(scheme).unwrap_or_default();
     let scheme_name = short_scheme(scheme);
+    let scheme_digest = scheme.digest();
 
     for role in &model.roles {
         let mine: Vec<&Row> = rows
@@ -248,30 +256,20 @@ fn run_one(
             by_subject.entry(r.subject).or_default().push(r);
         }
         for (subject, subject_rows) in &by_subject {
-            let mut studies: Vec<session::Study> = Vec::new();
-            let mut seen: Vec<i64> = Vec::new();
+            let mut occasions: BTreeMap<i64, (Day, Vec<&Row>)> = BTreeMap::new();
             for r in subject_rows {
-                if seen.contains(&r.study) {
-                    continue;
-                }
-                let Some(day) = days.get(&r.study) else {
+                let Some(l) = labels.get(&r.study) else {
                     continue;
                 };
-                seen.push(r.study);
-                studies.push(session::Study::new(r.study, *day));
+                occasions
+                    .entry(l.session_id)
+                    .or_insert_with(|| (l.first, Vec::new()))
+                    .1
+                    .push(r);
             }
-            if studies.is_empty() {
-                continue;
-            }
-            let anchor = studies.iter().map(|s| s.day).min();
-            for occasion in session::sessions(&studies, anchor, scheme) {
+            for (first, here) in occasions.values() {
                 report.sessions += 1;
-                let here: Vec<&Row> = subject_rows
-                    .iter()
-                    .copied()
-                    .filter(|r| occasion.studies.contains(&r.study))
-                    .collect();
-                let candidates = group(model, &here);
+                let candidates = group(model, here);
                 let picked = pick::pick(model, role, &candidates, &reference);
                 for b in &picked.borders {
                     *report.borders.entry(b.name().to_string()).or_insert(0) += 1;
@@ -286,9 +284,10 @@ fn run_one(
                     pack,
                     &picked,
                     *subject,
-                    occasion.first,
+                    *first,
                     &scheme_name,
                     &scheme_json,
+                    &scheme_digest,
                     &reference.name,
                     actor,
                     &now,
@@ -483,6 +482,7 @@ fn write(
     day: Day,
     scheme_name: &str,
     scheme_json: &str,
+    scheme_digest: &str,
     reference: &str,
     actor: &str,
     now: &str,
@@ -551,6 +551,7 @@ fn write(
                     "subject_id",
                     "session_day",
                     "scheme",
+                    "scheme_digest",
                     "score",
                     "margin",
                     "runner_up_score",
@@ -572,6 +573,7 @@ fn write(
                 Param::Int(subject),
                 Param::from(day.to_string()),
                 Param::from(scheme_name),
+                Param::from(scheme_digest),
                 Param::Double(scored.score),
                 Param::Double(picked.margin),
                 Param::Double(picked.runner_up_score),
