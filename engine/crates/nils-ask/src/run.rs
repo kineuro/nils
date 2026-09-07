@@ -147,7 +147,10 @@ pub struct Explained {
 
 const MAX_DEPTH: usize = 4;
 
-fn inline_selections(registry: &mut Registry, ask: &mut Ask) -> Result<Vec<Inlined>, RunError> {
+pub(crate) fn inline_selections(
+    registry: &mut Registry,
+    ask: &mut Ask,
+) -> Result<Vec<Inlined>, RunError> {
     let store = registry.store();
     let mut load = |name: &str, version: u64| -> Result<Option<Ask>, SelectionError> {
         Ok(selection::get(store, name, Some(version))?.map(|v| v.ask))
@@ -155,7 +158,7 @@ fn inline_selections(registry: &mut Registry, ask: &mut Ask) -> Result<Vec<Inlin
     Ok(selection::inline(ask, &mut load)?)
 }
 
-fn count_level(ask: &Ask, set: &str) -> Ask {
+pub(crate) fn count_level(ask: &Ask, set: &str) -> Ask {
     let mut a = ask.clone();
     a.out = Out {
         set: set.to_string(),
@@ -170,7 +173,7 @@ fn count_level(ask: &Ask, set: &str) -> Ask {
     a
 }
 
-fn keys_level(ask: &Ask, set: &str) -> Ask {
+pub(crate) fn keys_level(ask: &Ask, set: &str) -> Ask {
     let mut a = ask.clone();
     a.out = Out {
         set: set.to_string(),
@@ -185,10 +188,10 @@ fn keys_level(ask: &Ask, set: &str) -> Ask {
     a
 }
 
-struct Runner<'a> {
-    names: &'a dyn Names,
-    scheme: &'a Scheme,
-    bounds: Bounds,
+pub(crate) struct Runner<'a> {
+    pub(crate) names: &'a dyn Names,
+    pub(crate) scheme: &'a Scheme,
+    pub(crate) bounds: Bounds,
 }
 
 impl Runner<'_> {
@@ -211,7 +214,7 @@ impl Runner<'_> {
     }
 
     /// Compile and execute one document as it stands, no handle.
-    fn answer(
+    pub(crate) fn answer(
         &self,
         registry: &mut Registry,
         ask: &Ask,

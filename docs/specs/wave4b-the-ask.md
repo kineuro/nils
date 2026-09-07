@@ -1325,6 +1325,65 @@ and the identifier appears in none. Deferred: the disclosure projection
 and suppression beyond the scope's classes, and a handle's session ids
 for a `pin` that replays from rows, both with the doors of slice 9.
 
+**As built (slice 8, the affordances, 2026-09-07).** `nils_ask::moves` is
+the move catalog: thirty kinds, published under the catalog document as
+`moves` with `move_kinds_cap`, and a compile time assertion holds the cap.
+`options` is pure over the desugared document and the catalog (no query:
+its signature has no store): the set's resolved shape (the fields its
+grain and its ancestors' levels expose, its bindings, its near partners'
+dates and offsets and its attached partners' bindings, its ancestor's
+bindings, a group's by fields, `pick.*`), its sentence, the warnings that
+touch it, and the moves with ids 1 to n, each a template with holes and
+the legal fillers; a hole with no fillers is free text or a number. The
+error rule holds by construction: fillers come from `Names` listings
+filtered by the scope's classes (a sensitive kind is absent from the kind
+move without the class, present with it), and the author's own set names
+are always listed (partners for `near`, picked descendants for `attach`,
+descendants for `has`, every visible set for `set_out`, `keep_set` and
+`rename_set`; hidden `__` sets never). The options token digests the
+document hash, the epoch, the scheme digest, the set and the scope.
+`nils_ask::document` is the document store of §10: `ask_document` (schema
+version 31, in custody as ninety days after the last use) keyed by the
+digest of the whole canonical text, so the same text posted twice is one
+handle. `nils_ask::affordance::apply` takes a document handle, the epoch,
+the token and a list of moves, refuses another epoch or token with
+`stale_options` naming the re-call, applies the list atomically on the
+authored document (every move is checked against its fillers before any
+is applied), validates the result strictly, stores nothing when the
+result is invalid, and returns a new document handle with the parent, the
+hash, the sets touched with their new sentences, and fresh options for
+the same set. `preview` runs the answer with a limit at record and
+aggregate level and the one row at count and boolean level. `describe` is
+`nils_ask::describe`: one deterministic sentence per set in the order of
+rule 5, every clause rendered in words (`the course changes from
+{from_type} to {to_type} (adjacent)`), the conventions block (days,
+precision and the reading applied, the open interval, the standing
+predicates, the scheme's window beside a near window, each level's
+members), the denominators by name, the mechanism behind every near and
+attach, the disclosure and the answer in words. `draft` parses with add
+only repair, diagnoses, and stores the document when it validates.
+`nils_ask::diagnose` returns the issues with their paths and next calls
+without a query when the document is invalid, and otherwise the funnel:
+every named set in topological order, every stage of it (source, each
+near, each attach, each has, each where clause, the pick), each stage
+one count query over the document cut after that stage with the set's
+readers removed, and with `keys` the subject keys surviving, so
+`falls_out` names the first stage on the subject's path (a cohort,
+subject or session set; a stack or event set is a helper a partner reads)
+a subject is missing from; then the answer's where clauses with the rows
+before, after and the rows the clause could not judge (its field null),
+the ties per picked set, the rows coarser than a day per event set, the
+unresolved uploads, the cost class by shape, and a zero row explanation in
+domain words naming the first empty stage. On the yardstick the funnel
+names the manifest's set for every planted negative: the course cases at
+`converted`, the age case at `followups`, the kit cases at `good` (the
+attach) or at `answer`'s `has good`, the alternating scanner at
+`answer`'s `where comparable.largest`. Deferred: `count_on_options` and
+`preview_on_options` stay off with no way to turn them on until a door
+carries the flag (slice 9); the leave one out variant of diagnose is a
+job; `best` is not a policy a move sets, since it needs an order, which
+`draft` composes.
+
 
 Ordering constraints, before the table. Nothing is written before the record
 carries the amendments (slice 0). The two `stack_fingerprint` indexes, the

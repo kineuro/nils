@@ -81,14 +81,7 @@ impl Default for Caps {
 }
 
 /// The window presets, by convention (§5.1).
-pub const PRESETS: &[(&str, i64)] = &[
-    ("30 days", 30),
-    ("3 months", 93),
-    ("6 months", 186),
-    ("1 year", 366),
-    ("2 years", 732),
-    ("5 years", 1830),
-];
+pub use nils_ask::moves::PRESETS;
 
 /// One field of one level, as the catalog serves it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1491,6 +1484,8 @@ impl Catalog {
             "presets": PRESETS.iter().map(|(n, d)| json!({ "name": n, "days": d })).collect::<Vec<_>>(),
             "functions": functions(),
             "selections": self.selections,
+            "moves": nils_ask::moves::CATALOG,
+            "move_kinds_cap": nils_ask::moves::MOVE_KINDS_CAP,
         })
     }
 }
@@ -1593,6 +1588,69 @@ impl Names for Catalog {
                 exact: l.exact.clone(),
                 rounded: l.rounded.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             })
+    }
+
+    fn fields_of(&self, level: &str) -> Vec<(String, FieldInfo)> {
+        self.fields
+            .iter()
+            .filter(|((l, _), f)| l == level && f.class != Class::Identifying)
+            .map(|((_, p), f)| {
+                (
+                    p.clone(),
+                    FieldInfo {
+                        class: f.class,
+                        dated: f.dated,
+                        federated: f.federated,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn kinds(&self) -> Vec<(String, KindInfo)> {
+        self.kinds
+            .iter()
+            .map(|k| {
+                (
+                    k.name.clone(),
+                    KindInfo {
+                        precision: k.precision.clone(),
+                        sensitive: k.sensitive,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn axes(&self) -> Vec<String> {
+        self.axes.iter().map(|a| a.name.clone()).collect()
+    }
+
+    fn levels(&self) -> Vec<String> {
+        self.levels.iter().map(|l| l.name.clone()).collect()
+    }
+
+    fn roles(&self) -> Vec<String> {
+        self.roles.clone()
+    }
+
+    fn cohorts(&self) -> Vec<String> {
+        self.cohorts.iter().map(|c| c.name.clone()).collect()
+    }
+
+    fn derived_fields(&self) -> Vec<(String, DerivedInfo)> {
+        self.derived
+            .iter()
+            .map(|d| {
+                (
+                    d.name.clone(),
+                    DerivedInfo {
+                        grain: d.grain,
+                        params: d.params.iter().map(|(k, _)| k.clone()).collect(),
+                    },
+                )
+            })
+            .collect()
     }
 
     fn column(&self, level: &str, path: &str) -> Option<ColumnRef> {

@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 30;
+pub const SCHEMA_VERSION: i64 = 31;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +173,10 @@ pub static MIGRATIONS: &[Migration] = &[
     Migration {
         version: 30,
         apply: a_question_leaves_a_handle,
+    },
+    Migration {
+        version: 31,
+        apply: a_document_has_a_handle,
     },
 ];
 
@@ -396,6 +400,14 @@ fn a_question_leaves_a_handle(store: &mut Store, kind: Kind) -> Result<(), Error
             "handle_read_audit",
         ],
     )
+}
+
+/// Wave 4b §10: a document under authoring is addressed by handle.
+fn a_document_has_a_handle(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["ask_document"])
 }
 
 /// Wave 4a §13.1: a release is the history of what left and is never

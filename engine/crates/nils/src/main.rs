@@ -3001,6 +3001,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let values_sources = count_of(store, "values_source", "")?;
     let curated = count_of(store, "catalog_curation", "")?;
     let identifier_reads = count_of(store, "handle_read_audit", "")?;
+    let documents = count_of(store, "ask_document", "")?;
     let schema = store.schema().map(str::to_string);
     let linkage_holdings = linkage::holdings(&mut registry.open_linkage()?)?;
 
@@ -3229,10 +3230,10 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "store": "questions and their answers",
             "owner": "the research group that asks; the data controller sets the retention",
             "what": "a saved question (a selection) with its immutable versions, the handle a question left behind with the keys it named and the pages it was read by, and an uploaded identifier list by reference (Wave 4b section 8)",
-            "where": "rows of selection, selection_version, handle, handle_member, handle_page, values_source and values_member in the registry",
+            "where": "rows of selection, selection_version, handle, handle_member, handle_page, values_source, values_member and ask_document in the registry",
             "files": [],
             "holds": ["quasi-identifying: the subject keys a handle named, the dates and ages its pages carry", "technical: the question itself, its hash, its provenance (who, when, node, pack, epoch, scheme)"],
-            "counts": { "selections": selections, "selection_versions": selection_versions, "handles": handles, "handle_rows": handle_rows, "values_sources": values_sources },
+            "counts": { "selections": selections, "selection_versions": selection_versions, "handles": handles, "handle_rows": handle_rows, "values_sources": values_sources, "documents": documents },
             "kept": "handle, its question and its hash: for ever, withdrawable with a reason; handle_member and handle_page: 90 days after the last read, longer while a cohort or a selection names the handle; values_member: the lifetime of the handle that cites it, the upload itself gone on resolution; selection and selection_version: for ever, they hold the question and never subject data (Wave 4b section 14.1)",
             "retention": {
                 "handle": "for ever",
@@ -3242,6 +3243,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
                 "values_member": "the lifetime of the handle that cites it",
                 "selection": "for ever",
                 "selection_version": "for ever",
+                "ask_document": "90 days after the last use; a document under authoring holds the question and never subject data",
             },
             "commands": {
                 "read": ["nils custody"],

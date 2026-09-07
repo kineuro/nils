@@ -147,7 +147,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | | |
 |---|---|
 | what | a saved question (a selection) with its immutable versions, the handle a question left behind with the keys it named and the pages it was read by, and an uploaded identifier list by reference (Wave 4b section 8) |
-| where | rows of selection, selection_version, handle, handle_member, handle_page, values_source and values_member in the registry |
+| where | rows of selection, selection_version, handle, handle_member, handle_page, values_source, values_member and ask_document in the registry |
 | holds | quasi-identifying: the subject keys a handle named, the dates and ages its pages carry<br>technical: the question itself, its hash, its provenance (who, when, node, pack, epoch, scheme) |
 | owner | the research group that asks; the data controller sets the retention |
 | kept | handle, its question and its hash: for ever, withdrawable with a reason; handle_member and handle_page: 90 days after the last read, longer while a cohort or a selection names the handle; values_member: the lifetime of the handle that cites it, the upload itself gone on resolution; selection and selection_version: for ever, they hold the question and never subject data (Wave 4b section 14.1) |
