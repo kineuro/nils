@@ -1508,6 +1508,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nils-catalog"
+version = "1.0.0-alpha.0"
+dependencies = [
+ "nils-ask",
+ "nils-dicom",
+ "nils-pack",
+ "nils-registry",
+ "nils-synth",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nils-classify"
 version = "1.0.0-alpha.0"
 dependencies = [

@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+level: loose
+description: The axes and the acquisition type exact, resolution rounded to 0.5 mm, timing ignored; an MPRAGE and a plain GRE differ here however close their numbers sit.
+exact:
+  - base
+  - technique
+  - modifier
+  - construct
+  - provenance
+  - post_contrast
+  - body_part
+  - acquisition_type
+  - magnetic_field_strength
+rounded:
+  slice_thickness: 0.5
+  pixel_spacing_row: 0.5
+  pixel_spacing_col: 0.5
+ignored:
+  - repetition_time
+  - echo_time
+  - inversion_time
+  - flip_angle

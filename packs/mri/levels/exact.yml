@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# A comparability level (docs/specs/wave4b-the-ask.md, section 6): what "the
+# same acquisition" means at this level. Every categorical axis and the
+# acquisition type compare exactly at every level; only the numbers widen.
+level: exact
+description: The whole fingerprint equal, timing and resolution to the digit.
+exact:
+  - base
+  - technique
+  - modifier
+  - construct
+  - provenance
+  - post_contrast
+  - body_part
+  - acquisition_type
+  - magnetic_field_strength
+  - repetition_time
+  - echo_time
+  - inversion_time
+  - flip_angle
+  - slice_thickness
+  - pixel_spacing_row
+  - pixel_spacing_col

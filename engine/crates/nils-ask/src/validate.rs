@@ -1227,6 +1227,30 @@ fn check_clause(
             }
         }
     }
+    // an event kind named by its literal is checked against the vocabulary,
+    // and a sensitive kind is refused without the class (rule 15)
+    if set.grain == Grain::Event {
+        for cl in &all {
+            if (cl.op == "=" || cl.op == "in")
+                && let (Some(Arg::Clause(l)), Some(r)) = (cl.args.first(), cl.args.get(1))
+                && l.op == "field"
+                && l.ref_name() == Some("kind")
+            {
+                let literals: Vec<&str> = match r {
+                    Arg::Text(t) => vec![t.as_str()],
+                    Arg::List(items) => items.iter().filter_map(Arg::as_text).collect(),
+                    _ => Vec::new(),
+                };
+                for name in literals {
+                    match names.kind(name) {
+                        None => issues.push(issue(Code::UnknownValue, path, format!("{name} is not an observation kind the registry holds"), "GET /api/ask/catalog for the kinds")),
+                        Some(k) if k.sensitive && !scope.classes.contains(&Class::Sensitive) => issues.push(issue(Code::ForbiddenField, path, format!("{name} is a sensitive kind and this principal holds no class for it"), "ask for the class, or drop the kind")),
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+    }
     for cl in all {
         let op = cl.op.as_str();
         match op {

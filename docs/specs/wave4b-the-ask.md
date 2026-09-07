@@ -1125,6 +1125,41 @@ on every node; the tightened one closes every struct with
 slot, and its digest is what `capabilities.ask` will carry. The four
 documents of the appendices are the crate's fixtures.
 
+**As built (slice 4, the catalog, 2026-09-07; pack contract v3).**
+`nils-catalog` builds `Catalog` from a registry and a pack once per epoch
+and pack version: the grains with their keys, days and carried ancestors, the
+five edges with their standing predicates, every field of every level (the
+catalogue's own columns with their class, plus the fixed fields the
+registry, the fingerprint, the session cache and the clinical layer add) with
+the pack's visibility applied and the curation of `catalog_curation` laid
+over it by path, the axes with their values and labels, the kinds with their
+precision, the diseases with their courses, the identifier namespaces, the
+cohorts with their open member counts, the schemes with their digests (the
+default first), the roles and pick models of the pack, the comparability
+levels, the derived fields with their parameters and defaults, the window
+presets, the function table by family, the caps of §11.5 as constants, the
+epoch and the ask-schema digest. It implements the ask's `Names`, so the
+four fixtures validate against the real catalog of the synthetic registry
+and the MR pack, which is now a test. The policy of rule 15 lives inside it:
+an identifying field has no record, a sensitive field or kind is absent for
+a principal without the class (`visible`) and refused at validate, and a
+quasi-identifying field is usable in a predicate and in `age_at` by anyone
+who may ask but projected raw only with the class (`may_project_raw`). A
+level's field listing pages inside `PAGE_BYTES` (8,192) with a cursor on the
+last path served, and the stack level needs more than one page, which is
+what the budget exists for. The comparability levels are pack data:
+`levels/*.yml`, each naming what compares exactly (every axis, always), what
+rounds to a step, and what is ignored, checked against the pack's axes and
+the fingerprint's physics on load; the MR pack ships `exact`, `strict` and
+`loose`, and the manifest's new `levels` key is pack contract version 3. The
+validator gained one rule with the catalog: an event kind named by its
+literal is checked against the vocabulary, unknown is `unknown_value`,
+sensitive without the class is `forbidden_field`. Not here: the release,
+the review and the federation still read the registry's own kind flags and
+the pack's visibility directly; they move onto this crate when the federated
+merge (Wave 5) needs one policy in one place, and `has_values` is not
+computed yet.
+
 
 Ordering constraints, before the table. Nothing is written before the record
 carries the amendments (slice 0). The two `stack_fingerprint` indexes, the

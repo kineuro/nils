@@ -10,7 +10,7 @@
 
 pack: mri
 version: 0.1.0
-contract: 2
+contract: 3
 modality: MR
 
 parsers:
@@ -83,6 +83,15 @@ dictionary:
 # itself is the engine's; this is only which of our values means `T1w`.
 bids:
   - bids.yml
+
+# The comparability levels of the question wave (Wave 4b section 6): what
+# "relatively the same acquisition" means, in physics. The categorical axes
+# and the acquisition type compare exactly at every level; only the numbers
+# widen from one level to the next.
+levels:
+  - levels/exact.yml
+  - levels/strict.yml
+  - levels/loose.yml
 
 # What a field may be shown to (Wave 4a section 11.2, C27): local is this
 # node only, federated is on the allowlist a peer may read, sensitive is
