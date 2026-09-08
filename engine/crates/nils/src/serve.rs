@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicUsize, atomic::Ordering};
 use std::time::{Duration, Instant};
 
@@ -74,6 +75,11 @@ struct Claims {
     email: Option<String>,
     #[serde(default)]
     preferred_username: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    /// RFC 8693: who is acting for the subject, when a token was exchanged.
+    #[serde(default)]
+    act: Option<serde_json::Value>,
     #[serde(flatten)]
     rest: HashMap<String, serde_json::Value>,
 }
@@ -82,24 +88,134 @@ struct Claims {
 /// issuer's keys and its audience, maps groups to roles, and keeps no user
 /// table beyond a cache of claims for the token's lifetime.
 struct Oidc {
+    /// Wave 4c §5.3: the issuers the engine trusts, each with its own
+    /// audience and keys; a token is verified against the one it names.
+    trusts: Vec<Trust>,
+    groups_claim: String,
+    /// group -> role
+    roles: HashMap<String, Role>,
+    /// token -> what was verified, until the token expires
+    cache: std::sync::Mutex<ClaimsCache>,
+    /// The floor between two fetches of one issuer's keys, in seconds.
+    refetch_floor: u64,
+}
+
+type Key = (
+    Option<String>,
+    jsonwebtoken::DecodingKey,
+    jsonwebtoken::Algorithm,
+);
+
+/// Where an issuer's keys come from: a file the deployment keeps current,
+/// or the issuer's own URL, refetched on a key id the engine does not hold.
+enum Jwks {
+    File(PathBuf),
+    Url(String),
+}
+
+/// One trusted issuer (Wave 4c §5.3).
+struct Trust {
     issuer: String,
     audience: String,
     /// The issuer's host, which is the node half of the principal.
     node: String,
-    keys: Vec<(
-        Option<String>,
-        jsonwebtoken::DecodingKey,
-        jsonwebtoken::Algorithm,
-    )>,
-    groups_claim: String,
-    /// group -> role
-    roles: HashMap<String, Role>,
-    /// token -> (principal, roles, expiry as unix seconds)
-    cache: std::sync::Mutex<ClaimsCache>,
+    jwks: Jwks,
+    keys: std::sync::Mutex<Vec<Key>>,
+    fetched: std::sync::Mutex<Instant>,
 }
 
-/// What the engine keeps of a token it verified, until the token expires.
-type ClaimsCache = HashMap<String, (String, Vec<Role>, u64)>;
+impl Trust {
+    /// Fetch the keys again, when they come from a URL and the floor has
+    /// passed; true when the key list was replaced.
+    fn refetch(&self, floor: u64) -> bool {
+        let Jwks::Url(_) = &self.jwks else {
+            return false;
+        };
+        let mut fetched = match self.fetched.lock() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        if fetched.elapsed().as_secs() < floor {
+            return false;
+        }
+        *fetched = Instant::now();
+        match load_jwks(&self.jwks) {
+            Ok(keys) => {
+                if let Ok(mut held) = self.keys.lock() {
+                    *held = keys;
+                }
+                true
+            }
+            Err(e) => {
+                eprintln!(
+                    "nils serve: the keys of {} could not be refetched: {e}",
+                    self.issuer
+                );
+                false
+            }
+        }
+    }
+}
+
+/// The keys of a JWKS document, from a file or a URL; a shared secret is
+/// skipped, because the engine holds no secrets.
+fn load_jwks(jwks: &Jwks) -> Result<Vec<Key>, String> {
+    let (text, name) = match jwks {
+        Jwks::File(path) => (
+            std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?,
+            path.display().to_string(),
+        ),
+        Jwks::Url(url) => {
+            let mut response = ureq::get(url).call().map_err(|e| format!("{url}: {e}"))?;
+            (
+                response
+                    .body_mut()
+                    .read_to_string()
+                    .map_err(|e| format!("{url}: {e}"))?,
+                url.clone(),
+            )
+        }
+    };
+    let set: jsonwebtoken::jwk::JwkSet =
+        serde_json::from_str(&text).map_err(|e| format!("{name}: not a JWKS document: {e}"))?;
+    let mut keys = Vec::new();
+    for jwk in &set.keys {
+        let Ok(key) = jsonwebtoken::DecodingKey::from_jwk(jwk) else {
+            continue;
+        };
+        let algorithm = match &jwk.algorithm {
+            jsonwebtoken::jwk::AlgorithmParameters::RSA(_) => jsonwebtoken::Algorithm::RS256,
+            jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(_) => {
+                jsonwebtoken::Algorithm::ES256
+            }
+            jsonwebtoken::jwk::AlgorithmParameters::OctetKeyPair(_) => {
+                jsonwebtoken::Algorithm::EdDSA
+            }
+            // A shared secret is not OIDC: the engine holds no secrets.
+            _ => continue,
+        };
+        keys.push((jwk.common.key_id.clone(), key, algorithm));
+    }
+    if keys.is_empty() {
+        return Err(format!("{name}: no RSA, EC or EdDSA key to verify with"));
+    }
+    Ok(keys)
+}
+
+/// What the engine keeps of a token it verified, until the token expires:
+/// the principal, the roles, and (Wave 4c §5.9) the display name and mail
+/// beside the subject, which are listed in custody and are never a key.
+#[derive(Clone)]
+struct Known {
+    principal: String,
+    roles: Vec<Role>,
+    exp: u64,
+    display: Option<String>,
+    email: Option<String>,
+    /// The `act` claim's subject, when the token was exchanged.
+    act: Option<String>,
+}
+type ClaimsCache = HashMap<String, Known>;
 
 /// Who a request is from.
 enum Auth {
@@ -115,6 +231,15 @@ enum Auth {
 pub(crate) struct Caller {
     pub(crate) principal: String,
     pub(crate) roles: Vec<Role>,
+    /// Wave 4c §5.9: the display name and mail the token carried, kept
+    /// beside the subject and never a key.
+    pub(crate) display: Option<String>,
+    pub(crate) email: Option<String>,
+    /// Wave 4c §5.5: who acts for the principal on this call; absent is
+    /// its own value.
+    pub(crate) actor: serde_json::Value,
+    /// Wave 4c §5.5: the downgrade only ceiling the call named, if any.
+    pub(crate) ceiling: Option<Role>,
 }
 
 impl Caller {
@@ -189,47 +314,79 @@ impl Auth {
                 Ok(Auth::Token(tokens))
             }
             "oidc" => {
-                let issuer = args
-                    .oidc_issuer
-                    .clone()
-                    .ok_or_else(|| usage("--auth oidc needs --oidc-issuer URL"))?;
-                let audience = args
-                    .oidc_audience
-                    .clone()
-                    .ok_or_else(|| usage("--auth oidc needs --oidc-audience"))?;
-                let jwks_path = args.oidc_jwks.clone().ok_or_else(|| {
-                    usage("--auth oidc needs --oidc-jwks FILE, the issuer's JWKS document")
-                })?;
-                let text = std::fs::read_to_string(&jwks_path)
-                    .map_err(|e| fail(format!("{}: {e}", jwks_path.display())))?;
-                let set: jsonwebtoken::jwk::JwkSet = serde_json::from_str(&text).map_err(|e| {
-                    usage(format!("{}: not a JWKS document: {e}", jwks_path.display()))
-                })?;
-                let mut keys = Vec::new();
-                for jwk in &set.keys {
-                    let Ok(key) = jsonwebtoken::DecodingKey::from_jwk(jwk) else {
-                        continue;
-                    };
-                    let algorithm = match &jwk.algorithm {
-                        jsonwebtoken::jwk::AlgorithmParameters::RSA(_) => {
-                            jsonwebtoken::Algorithm::RS256
+                // Wave 4c §5.3: a trust list; the three single flags of
+                // Wave 4b are sugar for one entry.
+                let mut specs: Vec<(String, String, Jwks)> = Vec::new();
+                for t in &args.oidc_trust {
+                    let (mut issuer, mut audience, mut jwks) = (None, None, None);
+                    for part in t.split(',') {
+                        let Some((k, v)) = part.split_once('=') else {
+                            return Err(usage(format!(
+                                "{t} is not issuer=URL,audience=ID,jwks=URL"
+                            )));
+                        };
+                        let v = v.trim().to_string();
+                        match k.trim() {
+                            "issuer" => issuer = Some(v),
+                            "audience" => audience = Some(v),
+                            "jwks" => {
+                                jwks =
+                                    Some(if v.starts_with("https://") || v.starts_with("http://") {
+                                        Jwks::Url(v)
+                                    } else {
+                                        Jwks::File(PathBuf::from(v))
+                                    })
+                            }
+                            other => {
+                                return Err(usage(format!(
+                                    "{other} is not a part of --oidc-trust: issuer, audience, jwks"
+                                )));
+                            }
                         }
-                        jsonwebtoken::jwk::AlgorithmParameters::EllipticCurve(_) => {
-                            jsonwebtoken::Algorithm::ES256
+                    }
+                    match (issuer, audience, jwks) {
+                        (Some(i), Some(a), Some(j)) => specs.push((i, a, j)),
+                        _ => {
+                            return Err(usage(format!(
+                                "{t}: --oidc-trust names issuer, audience and jwks together"
+                            )));
                         }
-                        jsonwebtoken::jwk::AlgorithmParameters::OctetKeyPair(_) => {
-                            jsonwebtoken::Algorithm::EdDSA
-                        }
-                        // A shared secret is not OIDC: the engine holds no secrets.
-                        _ => continue,
-                    };
-                    keys.push((jwk.common.key_id.clone(), key, algorithm));
+                    }
                 }
-                if keys.is_empty() {
-                    return Err(usage(format!(
-                        "{}: no RSA, EC or EdDSA key to verify with",
-                        jwks_path.display()
-                    )));
+                match (&args.oidc_issuer, &args.oidc_audience, &args.oidc_jwks) {
+                    (Some(i), Some(a), Some(j)) => {
+                        specs.push((i.clone(), a.clone(), Jwks::File(j.clone())));
+                    }
+                    (None, None, None) => {}
+                    _ => {
+                        return Err(usage(
+                            "--oidc-issuer, --oidc-audience and --oidc-jwks go together; or name an issuer as --oidc-trust issuer=URL,audience=ID,jwks=URL",
+                        ));
+                    }
+                }
+                if specs.is_empty() {
+                    return Err(usage(
+                        "--auth oidc needs an issuer: --oidc-trust issuer=URL,audience=ID,jwks=URL (repeatable), or --oidc-issuer, --oidc-audience and --oidc-jwks together",
+                    ));
+                }
+                let mut trusts = Vec::new();
+                for (issuer, audience, jwks) in specs {
+                    let keys = load_jwks(&jwks).map_err(usage)?;
+                    let node = issuer
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .split('/')
+                        .next()
+                        .unwrap_or("issuer")
+                        .to_string();
+                    trusts.push(Trust {
+                        issuer,
+                        audience,
+                        node,
+                        jwks,
+                        keys: std::sync::Mutex::new(keys),
+                        fetched: std::sync::Mutex::new(Instant::now()),
+                    });
                 }
                 let mut roles = HashMap::new();
                 for r in &args.role {
@@ -243,21 +400,12 @@ impl Auth {
                     };
                     roles.insert(group.trim().to_string(), role);
                 }
-                let node = issuer
-                    .trim_start_matches("https://")
-                    .trim_start_matches("http://")
-                    .split('/')
-                    .next()
-                    .unwrap_or("issuer")
-                    .to_string();
                 Ok(Auth::Oidc(Box::new(Oidc {
-                    issuer,
-                    audience,
-                    node,
-                    keys,
+                    trusts,
                     groups_claim: args.oidc_groups_claim.clone(),
                     roles,
                     cache: std::sync::Mutex::new(HashMap::new()),
+                    refetch_floor: args.jwks_refetch_secs.unwrap_or(60),
                 })))
             }
             other => Err(usage(format!("--auth is off, token or oidc, not {other}"))),
@@ -289,19 +437,27 @@ impl Auth {
                 .trim()
                 .to_string())
         };
-        match self {
-            Auth::Off => Ok(Caller {
+        let caller = match self {
+            Auth::Off => Caller {
                 principal: crate::actor(),
                 roles: EVERY_ROLE.to_vec(),
-            }),
+                display: None,
+                email: None,
+                actor: nils_registry::actor::absent(),
+                ceiling: None,
+            },
             Auth::Token(tokens) => {
                 let token = bearer()?;
                 match tokens.get(&token) {
-                    Some((p, roles)) => Ok(Caller {
+                    Some((p, roles)) => Caller {
                         principal: p.clone(),
                         roles: roles.clone(),
-                    }),
-                    None => Err(Reply::error(401, "the token names nobody")),
+                        display: None,
+                        email: None,
+                        actor: nils_registry::actor::absent(),
+                        ceiling: None,
+                    },
+                    None => return Err(Reply::error(401, "the token names nobody")),
                 }
             }
             Auth::Oidc(oidc) => {
@@ -310,79 +466,175 @@ impl Auth {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                if let Ok(cache) = oidc.cache.lock()
-                    && let Some((principal, roles, exp)) = cache.get(&token)
-                    && *exp > now
-                {
-                    return Ok(Caller {
-                        principal: principal.clone(),
-                        roles: roles.clone(),
-                    });
-                }
-                let header = jsonwebtoken::decode_header(&token)
-                    .map_err(|e| Reply::error(401, format!("not a token: {e}")))?;
-                let mut last = String::from("no key of the issuer verifies it");
-                let mut claims: Option<Claims> = None;
-                for (kid, key, algorithm) in &oidc.keys {
-                    if let (Some(k), Some(h)) = (kid, &header.kid)
-                        && k != h
-                    {
-                        continue;
-                    }
-                    let mut validation = jsonwebtoken::Validation::new(*algorithm);
-                    validation.set_issuer(&[oidc.issuer.as_str()]);
-                    validation.set_audience(&[oidc.audience.as_str()]);
-                    validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
-                    match jsonwebtoken::decode::<Claims>(&token, key, &validation) {
-                        Ok(data) => {
-                            claims = Some(data.claims);
-                            break;
-                        }
-                        Err(e) => last = e.to_string(),
-                    }
-                }
-                let Some(claims) = claims else {
-                    return Err(Reply::error(401, format!("the token is refused: {last}")));
+                let cached = oidc
+                    .cache
+                    .lock()
+                    .ok()
+                    .and_then(|c| c.get(&token).filter(|k| k.exp > now).cloned());
+                let known = match cached {
+                    Some(k) => k,
+                    None => oidc.verify(&token, now)?,
                 };
-                // The groups: the standard claim, or the one the deployment names.
-                let groups: Vec<String> = if oidc.groups_claim == "groups" {
-                    claims.groups.clone()
-                } else {
-                    claims
-                        .rest
-                        .get(&oidc.groups_claim)
-                        .and_then(|v| v.as_array())
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|g| g.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default()
+                let actor = match &known.act {
+                    Some(sub) => serde_json::json!({ "kind": "agent", "name": sub }),
+                    None => nils_registry::actor::absent(),
                 };
-                let mut roles: Vec<Role> = groups
-                    .iter()
-                    .filter_map(|g| oidc.roles.get(g).copied())
-                    .collect();
-                roles.sort();
-                roles.dedup();
-                // A role implies the ones below it: an operator reads.
-                if let Some(top) = roles.iter().max().copied() {
-                    roles = EVERY_ROLE.iter().copied().filter(|r| *r <= top).collect();
+                Caller {
+                    principal: known.principal,
+                    roles: known.roles,
+                    display: known.display,
+                    email: known.email,
+                    actor,
+                    ceiling: None,
                 }
-                // Wave 4b §12.4: a token with no role is refused at every
-                // door, never defaulted to reader.
-                let _ = (&claims.email, &claims.preferred_username);
-                // The audit principal is the subject (§11.2), at the issuer's node.
-                let principal = format!("{}@{}", claims.sub, oidc.node);
-                if let Ok(mut cache) = oidc.cache.lock() {
-                    cache.retain(|_, (_, _, exp)| *exp > now);
-                    cache.insert(
-                        token.clone(),
-                        (principal.clone(), roles.clone(), claims.exp),
-                    );
-                }
-                Ok(Caller { principal, roles })
             }
+        };
+        narrow(caller, request)
+    }
+}
+
+/// Wave 4c §5.5: the two headers a call may carry. `X-Nils-Ceiling` can
+/// only remove roles; `X-Nils-Actor` names who acts for the principal and
+/// is recorded with the ceiling inside it.
+fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
+    let header = |name: &'static str| -> Option<String> {
+        request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv(name))
+            .map(|h| h.value.as_str().trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(actor) = header("X-Nils-Actor") {
+        let value: serde_json::Value = serde_json::from_str(&actor)
+            .map_err(|e| Reply::error(400, format!("X-Nils-Actor is not a JSON object: {e}")))?;
+        if !value.is_object() || !value["kind"].is_string() {
+            return Err(Reply::error(
+                400,
+                "X-Nils-Actor is a JSON object with a kind: person, agent or model",
+            ));
+        }
+        caller.actor = value;
+    }
+    if let Some(ceiling) = header("X-Nils-Ceiling") {
+        let Some(role) = Role::parse(&ceiling) else {
+            return Err(Reply::error(
+                400,
+                format!(
+                    "X-Nils-Ceiling {ceiling} is not a role: reader, reviewer, operator or admin"
+                ),
+            ));
+        };
+        caller.roles.retain(|r| *r <= role);
+        caller.ceiling = Some(role);
+        caller.actor["ceiling"] = serde_json::Value::String(role.name().to_string());
+    }
+    Ok(caller)
+}
+
+impl Oidc {
+    /// Verify a token against the issuer it names, refetching that
+    /// issuer's keys once on a key id the engine does not hold.
+    fn verify(&self, token: &str, now: u64) -> Result<Known, Reply> {
+        let header = jsonwebtoken::decode_header(token)
+            .map_err(|e| Reply::error(401, format!("not a token: {e}")))?;
+        let mut last = String::from("no key of any trusted issuer verifies it");
+        let mut found: Option<(Claims, &Trust)> = None;
+        'trusts: for trust in &self.trusts {
+            for attempt in 0..2 {
+                let keys: Vec<Key> = match trust.keys.lock() {
+                    Ok(k) => k.clone(),
+                    Err(_) => break,
+                };
+                let holds_kid = header
+                    .kid
+                    .as_ref()
+                    .is_none_or(|h| keys.iter().any(|(k, _, _)| k.as_ref() == Some(h)));
+                if holds_kid {
+                    for (kid, key, algorithm) in &keys {
+                        if let (Some(k), Some(h)) = (kid, &header.kid)
+                            && k != h
+                        {
+                            continue;
+                        }
+                        let mut validation = jsonwebtoken::Validation::new(*algorithm);
+                        validation.set_issuer(&[trust.issuer.as_str()]);
+                        validation.set_audience(&[trust.audience.as_str()]);
+                        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+                        match jsonwebtoken::decode::<Claims>(token, key, &validation) {
+                            Ok(data) => {
+                                found = Some((data.claims, trust));
+                                break 'trusts;
+                            }
+                            Err(e) => last = e.to_string(),
+                        }
+                    }
+                    break;
+                }
+                // A key id the engine does not hold: the issuer may have
+                // rotated, so fetch once, then read the keys again.
+                if attempt == 0 && trust.refetch(self.refetch_floor) {
+                    continue;
+                }
+                last = format!(
+                    "no key named {} of any trusted issuer",
+                    header.kid.as_deref().unwrap_or("")
+                );
+                break;
+            }
+        }
+        let Some((claims, trust)) = found else {
+            return Err(Reply::error(401, format!("the token is refused: {last}")));
+        };
+        let oidc = self;
+        {
+            // The groups: the standard claim, or the one the deployment names.
+            let groups: Vec<String> = if oidc.groups_claim == "groups" {
+                claims.groups.clone()
+            } else {
+                claims
+                    .rest
+                    .get(&oidc.groups_claim)
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|g| g.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let mut roles: Vec<Role> = groups
+                .iter()
+                .filter_map(|g| oidc.roles.get(g).copied())
+                .collect();
+            roles.sort();
+            roles.dedup();
+            // A role implies the ones below it: an operator reads.
+            if let Some(top) = roles.iter().max().copied() {
+                roles = EVERY_ROLE.iter().copied().filter(|r| *r <= top).collect();
+            }
+            // Wave 4b §12.4: a token with no role is refused at every
+            // door, never defaulted to reader.
+            // The audit principal is the subject (§11.2), at the issuer's node.
+            let principal = format!("{}@{}", claims.sub, trust.node);
+            let known = Known {
+                principal,
+                roles,
+                exp: claims.exp,
+                display: claims.preferred_username.clone().or(claims.name.clone()),
+                email: claims.email.clone(),
+                act: claims
+                    .act
+                    .as_ref()
+                    .and_then(|a| a.get("sub"))
+                    .and_then(|s| s.as_str())
+                    .map(String::from),
+            };
+            if let Ok(mut cache) = oidc.cache.lock() {
+                cache.retain(|_, k| k.exp > now);
+                cache.insert(token.to_string(), known.clone());
+            }
+            Ok(known)
         }
     }
 }
@@ -623,7 +875,9 @@ fn handle(
         })
         .collect();
     let mut body = String::new();
-    if method == Method::Post {
+    // A body rides on a POST and on a PUT (the selection door); reading
+    // it only on a POST was why a PUT selection could carry no document.
+    if matches!(method, Method::Post | Method::Put) {
         let _ = request.as_reader().read_to_string(&mut body);
     }
     if path == "/api/events" && method == Method::Get {
@@ -633,6 +887,11 @@ fn handle(
         return;
     }
     let caller = doors.auth.caller(&request);
+    // Wave 4c §5.5: the actor of this call, read by every writer of
+    // provenance on this thread.
+    if let Ok(c) = &caller {
+        nils_registry::actor::set(c.actor.clone());
+    }
     // Wave 4b §12.3: the MCP door and its public metadata, before the
     // older doors and before a refusal, so a client learns where to
     // authenticate from the answer it gets.
@@ -645,6 +904,7 @@ fn handle(
         path,
         &body,
     ) {
+        nils_registry::actor::clear();
         let _ = respond(request, reply);
         return;
     }
@@ -652,6 +912,7 @@ fn handle(
         Ok(caller) => route(doors, registry, ask, &caller, &method, path, &query, &body),
         Err(reply) => reply,
     };
+    nils_registry::actor::clear();
     let _ = respond(request, reply);
 }
 
@@ -1156,6 +1417,10 @@ fn capabilities(
         "auth": doors.auth.name(),
         "principal": caller.principal,
         "roles": caller.roles.iter().map(|r| r.name()).collect::<Vec<_>>(),
+        "display": caller.display,
+        "email": caller.email,
+        "ceiling": caller.ceiling.map(Role::name),
+        "actor": caller.actor,
         "node": doors.node,
         "uptime_seconds": doors.started.elapsed().as_secs(),
         "ask": crate::ask_doors::capabilities(doors, registry, ask),

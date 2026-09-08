@@ -481,6 +481,8 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
                 Param::from(axis.as_str()),
             ],
         )?;
+        // Wave 4c §5.5: the actor object beside the author, absent being its own value.
+        let actor_detail = crate::actor::current();
         let decision = store
             .insert(
                 &Insert::new(
@@ -493,6 +495,7 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
                         "actor",
                         "author_kind",
                         "author_version",
+                        "actor_detail",
                         "why",
                         "decided_at",
                         "staged_at",
@@ -509,6 +512,7 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
                     Param::from(a.author.who),
                     Param::from(a.author.kind),
                     a.author.version.map_or(Param::Null, Param::from),
+                    Param::from(actor_detail.to_string()),
                     a.why.map_or(Param::Null, Param::from),
                     Param::from(now.as_str()),
                     if a.stage {
@@ -537,6 +541,7 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
             "actor": a.author.who,
             "author_kind": a.author.kind,
             "model_version": a.author.version,
+            "actor_detail": actor_detail,
             "why": a.why,
             "decision": decision,
             "staged": a.stage,

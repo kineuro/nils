@@ -1186,6 +1186,7 @@ fn custody_quarantine_review_and_purge_go_round() {
             "quarantine list",
             "classifications",
             "clinical layer",
+            "claims cache",
             "job records",
             "audit log",
             "session cache",

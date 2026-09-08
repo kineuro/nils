@@ -119,6 +119,7 @@ pub fn record(registry: &mut Registry, entry: &Entry<'_>) -> Result<i64, StoreEr
                 "job_id",
                 "epoch",
                 "details",
+                "actor",
             ],
         )
         .returning(&["id"]),
@@ -137,6 +138,7 @@ pub fn record(registry: &mut Registry, entry: &Entry<'_>) -> Result<i64, StoreEr
                 .details
                 .as_ref()
                 .map_or(Param::Null, |d| Param::from(d.to_string())),
+            Param::from(crate::actor::current().to_string()),
         ]],
     )?;
     rows.first()
@@ -156,6 +158,8 @@ pub struct Row {
     pub job_id: Option<i64>,
     pub epoch: Option<i64>,
     pub details: Option<serde_json::Value>,
+    /// Wave 4c §5.5: who acted for the principal; absent is its own value.
+    pub actor: Option<serde_json::Value>,
 }
 
 impl Row {
@@ -170,6 +174,7 @@ impl Row {
             "job_id": self.job_id,
             "epoch": self.epoch,
             "details": self.details,
+            "actor": self.actor,
         })
     }
 }
@@ -221,12 +226,13 @@ pub fn list(store: &mut Store, filter: &Filter) -> Result<Vec<Row>, StoreError> 
         format!(" WHERE {}", wheres.join(" AND "))
     };
     let sql = format!(
-        "SELECT id, {}, principal, action, {}, {}, job_id, epoch, {} FROM {}{filter_sql} \
+        "SELECT id, {}, principal, action, {}, {}, job_id, epoch, {}, {} FROM {}{filter_sql} \
          ORDER BY id DESC LIMIT {}",
         text("at"),
         text("scope"),
         text("policy"),
         text("details"),
+        text("actor"),
         store.qualified("audit"),
         filter.limit.max(1)
     );
@@ -245,6 +251,7 @@ pub fn list(store: &mut Store, filter: &Filter) -> Result<Vec<Row>, StoreError> 
                 job_id: r.opt_int(6)?,
                 epoch: r.opt_int(7)?,
                 details: json(r.opt_text(8)?),
+                actor: json(r.opt_text(9)?),
             })
         })
         .collect()

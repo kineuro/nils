@@ -149,6 +149,30 @@ impl Server {
         body: Option<&str>,
         token: Option<&str>,
     ) -> (u16, String) {
+        self.raw_with(method, path, body, token, &[])
+    }
+
+    fn request_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        token: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> (u16, serde_json::Value) {
+        let (status, text) = self.raw_with(method, path, body, token, headers);
+        let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+        (status, json)
+    }
+
+    fn raw_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        token: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> (u16, String) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         let body = body.unwrap_or("");
         let mut head = format!(
@@ -160,6 +184,9 @@ impl Server {
         }
         if let Some(t) = token {
             head.push_str(&format!("Authorization: Bearer {t}\r\n"));
+        }
+        for (name, value) in headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
         }
         head.push_str("\r\n");
         stream.write_all(head.as_bytes()).unwrap();
@@ -194,7 +221,7 @@ fn the_door_serves_what_the_command_line_has() {
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
     assert_eq!(caps["contracts"]["openapi"], "2", "{caps}");
-    assert_eq!(caps["contracts"]["review_item"], "2", "{caps}");
+    assert_eq!(caps["contracts"]["review_item"], "3", "{caps}");
     assert!(
         caps["packs"]
             .as_array()
@@ -557,4 +584,159 @@ fn oidc_refuses_a_misconfiguration_before_it_listens() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("--oidc-issuer"));
+}
+
+/// A JWKS document served over HTTP from a thread, replaceable while the
+/// engine runs: what an issuer looks like to `--oidc-trust jwks=URL`.
+fn serve_jwks(doc: std::sync::Arc<std::sync::Mutex<String>>) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { break };
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            let body = doc.lock().unwrap().clone();
+            let _ = s.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    port
+}
+
+/// Wave 4c §5.3 and §5.9: a trust list of two issuers, each with its own
+/// audience and keys; keys by URL refetched on a key id the engine does not
+/// hold; the `act` claim read as the actor; the display name and mail kept.
+#[test]
+fn a_trust_list_verifies_two_issuers_and_refetches_a_rotated_key_by_url() {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/oidc");
+    let key1 = EncodingKey::from_rsa_pem(&std::fs::read(fixtures.join("signing-key.pem")).unwrap())
+        .unwrap();
+    let key2 =
+        EncodingKey::from_rsa_pem(&std::fs::read(fixtures.join("signing-key-2.pem")).unwrap())
+            .unwrap();
+    let served = std::sync::Arc::new(std::sync::Mutex::new(
+        std::fs::read_to_string(fixtures.join("jwks.json")).unwrap(),
+    ));
+    let port = serve_jwks(served.clone());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mint = |key: &EncodingKey, kid: &str, mut claims: serde_json::Value| -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.to_string());
+        claims["exp"] = serde_json::json!(now + 600);
+        claims["iat"] = serde_json::json!(now);
+        encode(&header, &claims, key).unwrap()
+    };
+    let iss1 = "https://id.example.org/application/o/nils/";
+    let iss2 = "https://other.example.org/";
+    let home = registry();
+    let trust1 = format!("issuer={iss1},audience=nils,jwks=http://127.0.0.1:{port}/jwks");
+    let trust2 = format!(
+        "issuer={iss2},audience=desk,jwks={}",
+        fixtures.join("jwks-2.json").display()
+    );
+    let server = Server::start(
+        &home,
+        7,
+        &[
+            "--auth",
+            "oidc",
+            "--oidc-trust",
+            &trust1,
+            "--oidc-trust",
+            &trust2,
+            "--jwks-refetch-secs",
+            "0",
+            "--role",
+            "students=reader",
+            "--role",
+            "neuro-ops=operator",
+        ],
+        &[],
+    );
+    // 1. the first issuer, its key fetched by URL at start
+    let t = mint(
+        &key1,
+        "test-2026",
+        serde_json::json!({"iss": iss1, "aud": "nils", "sub": "anna", "groups": ["students"], "preferred_username": "Anna", "email": "anna@example.org"}),
+    );
+    let (status, caps) = server.request("GET", "/api/capabilities", None, Some(&t));
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(caps["principal"], "anna@id.example.org");
+    assert_eq!(caps["display"], "Anna", "{caps}");
+    assert_eq!(caps["email"], "anna@example.org", "{caps}");
+    assert_eq!(caps["actor"]["kind"], "absent", "{caps}");
+    // 2. a key the issuer has not published: refetched, still absent, refused
+    let rotated = mint(
+        &key2,
+        "test-2027",
+        serde_json::json!({"iss": iss1, "aud": "nils", "sub": "anna", "groups": ["students"]}),
+    );
+    let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&rotated));
+    assert_eq!(status, 401, "{doc}");
+    // 3. the issuer rotates: the next call refetches and verifies
+    *served.lock().unwrap() = std::fs::read_to_string(fixtures.join("jwks-rotated.json")).unwrap();
+    let (status, caps) = server.request("GET", "/api/capabilities", None, Some(&rotated));
+    assert_eq!(status, 200, "{caps}");
+    // 4. the second issuer, with its own audience, from a file
+    let t2 = mint(
+        &key2,
+        "test-2027",
+        serde_json::json!({"iss": iss2, "aud": "desk", "sub": "kit", "groups": ["neuro-ops"]}),
+    );
+    let (status, caps) = server.request("GET", "/api/capabilities", None, Some(&t2));
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(caps["principal"], "kit@other.example.org", "{caps}");
+    assert_eq!(
+        caps["roles"],
+        serde_json::json!(["reader", "reviewer", "operator"]),
+        "{caps}"
+    );
+    // 5. an audience that is the other issuer's is refused
+    let crossed = mint(
+        &key2,
+        "test-2027",
+        serde_json::json!({"iss": iss2, "aud": "nils", "sub": "kit", "groups": ["neuro-ops"]}),
+    );
+    let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&crossed));
+    assert_eq!(status, 401, "{doc}");
+    // 6. an exchanged token names its actor
+    let acted = mint(
+        &key2,
+        "test-2027",
+        serde_json::json!({"iss": iss1, "aud": "nils", "sub": "anna", "groups": ["students"], "act": {"sub": "nils-assistant"}}),
+    );
+    let (status, caps) = server.request("GET", "/api/capabilities", None, Some(&acted));
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(
+        caps["actor"],
+        serde_json::json!({"kind": "agent", "name": "nils-assistant"}),
+        "{caps}"
+    );
+    // 7. a ceiling narrows an operator to a reviewer, and says so
+    let (status, caps) = server.request_with(
+        "GET",
+        "/api/capabilities",
+        None,
+        Some(&t2),
+        &[("X-Nils-Ceiling", "reviewer")],
+    );
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(
+        caps["roles"],
+        serde_json::json!(["reader", "reviewer"]),
+        "{caps}"
+    );
+    assert_eq!(caps["ceiling"], "reviewer", "{caps}");
+    assert_eq!(caps["actor"]["ceiling"], "reviewer", "{caps}");
+    server.finish();
 }

@@ -49,6 +49,8 @@ libc = "0.2"
 lru = "0.18"
 nix = { version = "0.31", features = ["signal"] }
 tiny_http = "0.12"
+# Wave 4c section 5.3: the one outbound call the engine makes, a JWKS by URL.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 postgres = "0.19"
 regex = "1.13"

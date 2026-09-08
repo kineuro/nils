@@ -379,6 +379,15 @@ struct ServeArgs {
     /// The issuer's JWKS document, as a file the deployment keeps current
     #[arg(long, value_name = "FILE")]
     oidc_jwks: Option<PathBuf>,
+    /// An issuer the engine trusts, as `issuer=URL,audience=ID,jwks=URL`
+    /// where jwks is the issuer's JWKS URL or a file; repeatable (Wave 4c
+    /// section 5.3). The three flags above are one entry
+    #[arg(long, value_name = "ISSUER,AUDIENCE,JWKS")]
+    oidc_trust: Vec<String>,
+    /// The floor between two fetches of one issuer's keys, in seconds
+    /// (for tests)
+    #[arg(long, hide = true)]
+    jwks_refetch_secs: Option<u64>,
     /// The claim that carries the groups
     #[arg(long, default_value = "groups", value_name = "CLAIM")]
     oidc_groups_claim: String,
@@ -3215,6 +3224,22 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             },
         }),
         serde_json::json!({
+            "store": "claims cache",
+            "owner": "the registry's operator",
+            "what": "what nils serve keeps of a token it verified (Wave 4c section 5.9): the subject, the roles, the display name and the mail the token carried, and who acted for the subject; in memory, for the token's lifetime",
+            "where": "the memory of nils serve; nothing on disk",
+            "files": [],
+            "holds": ["quasi-identifying: the subject, the display name, the mail", "technical: the roles, the expiry, the actor"],
+            "counts": {},
+            "kept": "until the token expires, at most its lifetime; gone at restart",
+            "commands": {
+                "read": ["GET /api/capabilities, for the caller's own entry"],
+                "change": [],
+                "export": [],
+                "delete": "restart nils serve",
+            },
+        }),
+        serde_json::json!({
             "store": "job records",
             "owner": "the registry's operator",
             "what": "every verb that runs longer than a second, and the queue (Wave 4a section 9.1): its command line and arguments, host and pid, heartbeat, progress, counts and outcome",
@@ -3307,7 +3332,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         serde_json::json!({
             "store": "identifier read audit",
             "owner": "the registry's operator; read by whoever answers for the archive",
-            "what": "who projected identifiers through which handle, when, which columns and how many rows, at every role (Wave 4b section 9)",
+            "what": "who read which handle, when, which columns and how many rows, and for what purpose: every page read and every export at every role (Wave 4c section 6.1), and every identifier projection (Wave 4b section 9), with who acted for the principal",
             "where": "rows of handle_read_audit in the registry",
             "files": [],
             "holds": ["quasi-identifying: the principal", "technical: the handle, the columns, the row count, the epoch, the time; never an identifier"],
@@ -4736,6 +4761,14 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                 .env("NILS_PRINCIPAL", next.principal().unwrap_or(&actor()))
                 .env("NILS_JOB_ROLES", roles)
                 .env("NILS_JOB_RAW", raw)
+                .env(
+                    nils_registry::actor::VAR,
+                    if next.args["actor"].is_object() {
+                        next.args["actor"].to_string()
+                    } else {
+                        nils_registry::actor::absent().to_string()
+                    },
+                )
                 .status();
                 // The verb adopted the row and finished it itself; the
                 // worker writes the outcome only when the verb did not.

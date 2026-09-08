@@ -1246,6 +1246,34 @@ The wave closes when:
 
 ## 13. Order of work
 
+**As built (A2, identity, the ceiling and the actor, 2026-09-09).** The trust
+list is `--oidc-trust issuer=URL,audience=ID,jwks=URL` (repeatable; `jwks` may
+also be a file), with the three Wave 4b flags kept as one entry; each issuer
+holds its own keys, a JWKS by URL is fetched at start and refetched once on a
+key id the engine does not hold, at most once a minute (`--jwks-refetch-secs`,
+hidden, sets the floor for tests), and the audit principal is the subject at
+that issuer's host. The claims cache keeps `preferred_username` (or `name`)
+and `email` beside the subject; `GET /api/capabilities` answers `display`,
+`email`, `ceiling` and `actor` for the caller, and `nils custody` lists the
+cache as a store held in memory for the token's lifetime. The two headers:
+`X-Nils-Ceiling` (a role name, else 400) can only remove roles and is written
+into the actor as `ceiling`; `X-Nils-Actor` (a JSON object with a `kind`, else
+400) names who acts for the principal, and an exchanged token's `act.sub` is
+read as `{"kind":"agent","name":...}` when no header is given. The actor is
+carried by a thread-local the door sets for the request and a worker hands to
+its verb as `NILS_ACTOR`, and every writer of provenance reads it there, so no
+call site threads it: the audit row (`audit.actor`), the handle (`handle.actor`)
+and the decision (`decision.actor_detail`) each record it, with
+`{"kind":"absent"}` as its own value (migration 33). A queued job records it in
+its args beside the roles. `review-item` is bumped to v3 in this slice rather
+than in A7, because a property added to the item is a version by that
+contract's own rule: `decision.actor_detail`. The engine gained one outbound
+dependency, `ureq` with rustls, for the JWKS fetch. Fixture 7 is the engine's
+own test (a ceiling narrows an operator, the actor lands on the handle, the
+job, the audit row and the worker's handle; a person alone reads `absent`),
+and a second test drives two issuers, a rotation refetched by URL, a crossed
+audience refused and the `act` claim.
+
 **As built (A1, the repairs, 2026-09-08).** Step 0 ran first and all four
 checks confirmed the study: a reader read an operator's handle (200, no audit
 row), a reader's queued job ran under the worker's own scope and left a

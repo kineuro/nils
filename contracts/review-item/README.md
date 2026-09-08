@@ -22,6 +22,7 @@ the contract; adding or removing a property of the item is.
 |---|---|---|
 | 1 | [`v1/review-item.schema.json`](v1/review-item.schema.json) | Wave 1 (the table); written down in Wave 4a |
 | 2 | [`v2/review-item.schema.json`](v2/review-item.schema.json) | Wave 4a slice 13, 2026-09-06: `scope` gains `group`, `status` gains `accepted`, `rejected`, `superseded` and `staged`, and the item gains `members`, `group_key` and `accepted_by` |
+| 3 | [`v3/review-item.schema.json`](v3/review-item.schema.json) | Wave 4c slice A2, 2026-09-09: `decision` gains `actor_detail`, the actor object of the suite contract (who acted for the principal: kind, name, model, version, conversation, ceiling; `absent` as its own value) |
 
 ## The kinds so far
 

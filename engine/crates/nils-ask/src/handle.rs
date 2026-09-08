@@ -116,6 +116,8 @@ pub struct Handle {
     pub withdrawn_at: Option<String>,
     pub withdrawn_by: Option<String>,
     pub withdrawn_why: Option<String>,
+    /// Wave 4c §5.5: who acted for the principal that ran it.
+    pub actor: Value,
 }
 
 impl Handle {
@@ -156,7 +158,7 @@ pub struct Spec<'a> {
     pub page_rows: usize,
 }
 
-const COLUMNS: [&str; 25] = [
+const COLUMNS: [&str; 26] = [
     "id",
     "name",
     "grain",
@@ -182,6 +184,7 @@ const COLUMNS: [&str; 25] = [
     "withdrawn_at",
     "withdrawn_by",
     "withdrawn_why",
+    "actor",
 ];
 
 fn json_of(r: &Row, i: usize) -> Result<Value, HandleError> {
@@ -234,6 +237,7 @@ fn handle_of(r: &Row) -> Result<Handle, HandleError> {
         withdrawn_at: opt(22)?,
         withdrawn_by: opt(23)?,
         withdrawn_why: opt(24)?,
+        actor: json_of(r, 25)?,
     })
 }
 
@@ -321,6 +325,7 @@ pub fn save(store: &mut Store, spec: &Spec<'_>, answer: &Answer) -> Result<Handl
                 "suppression",
                 "truncated",
                 "values_unresolved",
+                "actor",
             ],
         )
         .returning(&["id"]),
@@ -347,6 +352,7 @@ pub fn save(store: &mut Store, spec: &Spec<'_>, answer: &Answer) -> Result<Handl
             Param::from(p.suppression.to_string()),
             Param::Int(i64::from(answer.truncated)),
             Param::from(spec.values_unresolved.to_string()),
+            Param::from(nils_registry::actor::current().to_string()),
         ]],
     )?;
     let id = rows
