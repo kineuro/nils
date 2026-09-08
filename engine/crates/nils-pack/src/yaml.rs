@@ -36,6 +36,23 @@ impl File {
         })
     }
 
+    /// A document handed over as text rather than read from a path: an
+    /// overlay a door received, a case a test wrote. `name` is what a
+    /// refusal blames.
+    pub fn from_text(name: &str, source: &str) -> R<File> {
+        let value: Value = serde_saphyr::from_str(source).map_err(|e| Error {
+            file: Some(std::path::PathBuf::from(name)),
+            line: None,
+            path: String::new(),
+            message: format!("is not YAML: {e}"),
+        })?;
+        Ok(File {
+            path: std::path::PathBuf::from(name),
+            source: source.to_string(),
+            value,
+        })
+    }
+
     /// Attach this file to a refusal raised while reading it.
     pub fn blame<T>(&self, r: R<T>) -> R<T> {
         r.map_err(|e| e.in_file(&self.path, Some(&self.source)))

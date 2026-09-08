@@ -261,7 +261,7 @@ fn the_door_serves_what_the_command_line_has() {
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
     assert_eq!(caps["contracts"]["openapi"], "3", "{caps}");
-    assert_eq!(caps["contracts"]["review_item"], "3", "{caps}");
+    assert_eq!(caps["contracts"]["review_item"], "4", "{caps}");
     assert!(
         caps["packs"]
             .as_array()
@@ -918,4 +918,294 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
     assert!(restored.contains("pre-restore archive"), "{restored}");
     let status = run(&home, &["status", "--json"], None);
     assert!(status.contains("registry_id"), "{status}");
+}
+
+/// A registry of two stacks whose sequence names differ by a site word, so
+/// that an overlay adding the word to the localizer bucket moves exactly one.
+fn knob_registry() -> TempDir {
+    let home = TempDir::new("knob-home");
+    let dir = TempDir::new("knob-src");
+    for (study, sop, description) in [
+        ("1.2.3.A", "1.2.3.A.1.1", "t1 mprage zzgado"),
+        ("1.2.3.B", "1.2.3.B.1.1", "t1 mprage"),
+    ] {
+        let mut e = synth::minimal_mr(study, &format!("{study}.1"), sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, "P1"));
+        e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, description));
+        e.push(synth::text(tags::SEQUENCE_NAME, VR::SH, "tfl3d1_16"));
+        e.push(synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"));
+        dir.file(
+            &format!("{study}/{sop}"),
+            &synth::part10(&MetaFields::mr(sop), &e, true),
+        );
+    }
+    run(&home, &["key", "add", "k"], Some("a knob test key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    run(
+        &home,
+        &[
+            "digest",
+            "--name",
+            "a",
+            "--no-private",
+            dir.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+    run(
+        &home,
+        &["classify", "--pack-dir", packs().to_str().unwrap()],
+        None,
+    );
+    std::mem::forget(dir);
+    home
+}
+
+const SITE_OVERLAY: &str = r#"{
+  "overlay": "site", "version": "1.0.0", "pack": "mri",
+  "scope": {"manufacturer": "SYNTHETIC"},
+  "buckets": {"contrast_positive": {"add": ["zzgado", "zzznever"]}},
+  "cases": [{"name": "the site's own agent",
+             "stack": {"text_series_description": "t1 mprage zzgado"},
+             "axes": {"post_contrast": "1"}}]
+}"#;
+
+/// Wave 4c §6.6: the knob engine. A site word added to an overlay: `try`
+/// names the stacks that would move and adopt moves exactly those; the
+/// probe on a synthetic tree names the placeholder by shape and no field of
+/// its answer is a seeded value or a path segment.
+#[test]
+fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
+    let home = knob_registry();
+    let root = TempDir::new("knob-root");
+    for (person, study) in [("AAA111", "A"), ("BBB222", "B"), ("CCC333", "C")] {
+        for i in 1..=8 {
+            let sop = format!("{study}.1.{i}");
+            let mut e = synth::minimal_mr(study, &format!("{study}.1"), &sop);
+            e.push(synth::text(tags::PATIENT_ID, VR::LO, "XXXX"));
+            root.file(
+                &format!("{person}/{study}/IM_{i:04}"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
+    }
+    let root_flag = format!("src={}", root.path().display());
+    let server = Server::start(
+        &home,
+        17,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reviewer",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--ingest-root",
+            &root_flag,
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-len");
+    let ops = Some("an-operator-token-of-len");
+
+    // 1-3: the signals are a reviewer's, over a scope that parses
+    let (status, doc) = server.request("GET", "/api/classify/signals?scope=batch:1", None, reader);
+    assert_eq!(status, 403, "{doc}");
+    let (status, doc) = server.request(
+        "GET",
+        "/api/classify/signals?scope=nonsense",
+        None,
+        reviewer,
+    );
+    assert_eq!(status, 400, "{doc}");
+    let (status, signals) =
+        server.request("GET", "/api/classify/signals?scope=batch:1", None, reviewer);
+    assert_eq!(status, 200, "{signals}");
+    assert!(
+        signals["axes"]["technique"]["tiers"].is_object(),
+        "{signals}"
+    );
+    assert!(signals["diagnostics"].is_object(), "{signals}");
+
+    // 4: a rehearsal writes nothing and names what would move
+    let body = format!(r#"{{"overlay": {SITE_OVERLAY}, "scope": "batch:1", "sample": 100}}"#);
+    let (status, tried) = server.request("POST", "/api/classify/try", Some(&body), reviewer);
+    assert_eq!(status, 200, "{tried}");
+    assert_eq!(tried["sample"]["read"], 2, "{tried}");
+    assert_eq!(tried["cases"]["passed"], 1, "{tried}");
+    assert_eq!(tried["cases"]["failed"], 0, "{tried}");
+    let moves = tried["moves"].as_array().unwrap();
+    assert!(
+        moves
+            .iter()
+            .any(|m| m["axis"] == "post_contrast" && m["to"] == "1"),
+        "the site's agent moves post_contrast: {tried}"
+    );
+    assert!(
+        moves.iter().all(|m| m["stacks"] == 1),
+        "exactly the one stack with the word: {tried}"
+    );
+    let (status, doc) = server.request("GET", "/api/overlays", None, reader);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(
+        doc["overlays"].as_array().unwrap().len(),
+        0,
+        "nothing was stored: {doc}"
+    );
+
+    // 6-8: a proposal is stored with its rehearsal and a review item beside it
+    let body = format!(
+        r#"{{"name": "site words", "overlay": {SITE_OVERLAY}, "scope": "batch:1", "why": "the site's localizer word"}}"#
+    );
+    let (status, doc) = server.request("POST", "/api/overlays", Some(&body), reader);
+    assert_eq!(status, 403, "{doc}");
+    let (status, proposed) = server.request("POST", "/api/overlays", Some(&body), reviewer);
+    assert_eq!(status, 201, "{proposed}");
+    let id = proposed["overlay"]["id"].as_i64().unwrap();
+    let item = proposed["review_item"].as_i64().unwrap();
+    assert_eq!(proposed["overlay"]["status"], "proposed", "{proposed}");
+    assert_eq!(proposed["overlay"]["author_kind"], "person", "{proposed}");
+    assert_eq!(
+        proposed["overlay"]["tried"]["moves"], tried["moves"],
+        "{proposed}"
+    );
+    let (status, shown) = server.request("GET", &format!("/api/review/{item}"), None, reviewer);
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(shown["kind"], "overlay.proposed", "{shown}");
+    assert_eq!(shown["scope"], "overlay", "{shown}");
+
+    // 9-11: adoption is an operator's, once, and queues the reclassify
+    let (status, doc) =
+        server.request("POST", &format!("/api/overlays/{id}/adopt"), None, reviewer);
+    assert_eq!(status, 403, "{doc}");
+    let (status, adopted) = server.request("POST", &format!("/api/overlays/{id}/adopt"), None, ops);
+    assert_eq!(status, 202, "{adopted}");
+    let adopt_job = adopted["job"].as_i64().unwrap();
+    let (status, doc) = server.request("POST", &format!("/api/overlays/{id}/adopt"), None, ops);
+    assert_eq!(status, 409, "{doc}");
+
+    // 12-15: the probe is an operator's, over a registered location, with
+    // rules that parse; the queued command line carries no path
+    let rules = r#"[{"id_type": "patient-id", "from": [{"field": "PatientID"}]},
+                    {"id_type": "subject-code", "code": "verbatim", "from": [{"field": "PatientID", "pattern": "^(?<id>[A-Z]{3}[0-9]{3})$"}, {"path": {"segment": 1}, "pattern": "^(?<id>.+)$"}]}]"#;
+    let body = format!(r#"{{"location": "src", "sample": 50, "rules": {rules}}}"#);
+    let (status, doc) = server.request("POST", "/api/ingest/probe", Some(&body), reviewer);
+    assert_eq!(status, 403, "{doc}");
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(&format!(r#"{{"location": "nowhere", "rules": {rules}}}"#)),
+        ops,
+    );
+    assert_eq!(status, 400, "{doc}");
+    let (status, doc) = server.request(
+        "POST",
+        "/api/ingest/probe",
+        Some(r#"{"location": "src", "rules": [{"id_type": "patient-id", "from": [{"field": "NotAKeyword"}]}]}"#),
+        ops,
+    );
+    assert_eq!(status, 400, "{doc}");
+    let (status, queued) = server.request("POST", "/api/ingest/probe", Some(&body), ops);
+    assert_eq!(status, 202, "{queued}");
+    let probe_job = queued["job"].as_i64().unwrap();
+    // 16
+    let (status, shown) = server.request("GET", &format!("/api/jobs/{probe_job}"), None, ops);
+    assert_eq!(status, 200, "{shown}");
+    let argv = shown["args"]["argv"].to_string();
+    assert!(argv.contains("@src"), "{argv}");
+    assert!(!argv.contains(&root.path().display().to_string()), "{argv}");
+    // 17
+    let (status, listed) = server.request("GET", &format!("/api/overlays/{id}"), None, reader);
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["status"], "adopted", "{listed}");
+    assert_eq!(listed["job"], adopt_job, "{listed}");
+    server.finish();
+
+    // a worker runs the reclassify under the adopted overlay, then the probe
+    for _ in 0..2 {
+        let _ = run(
+            &home,
+            &["jobs", "work", "--once", "--ingest-root", &root_flag],
+            None,
+        );
+    }
+    let job = run(
+        &home,
+        &["jobs", "show", &adopt_job.to_string(), "--json"],
+        None,
+    );
+    let job: serde_json::Value = serde_json::from_str(&job).unwrap();
+    assert_eq!(job["state"], "done", "{job}");
+    // adopt moved exactly what try said: the moved stack now stores `to`
+    let moved_stack = run(&home, &["explain", "1", "--json"], None);
+    let moved: serde_json::Value = serde_json::from_str(&moved_stack).unwrap();
+    assert_eq!(moved["overlay"], "site@1.0.0", "{moved}");
+    for m in moves {
+        let axis = m["axis"].as_str().unwrap();
+        let got = moved["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["axis"] == axis)
+            .filter_map(|a| a["value"].as_str().map(str::to_string))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(got, m["to"].as_str().unwrap(), "{axis}: {moved}");
+    }
+    let still = run(&home, &["explain", "2", "--json"], None);
+    let still: serde_json::Value = serde_json::from_str(&still).unwrap();
+    assert_eq!(still["overlay"], "site@1.0.0", "{still}");
+    let audited = run(
+        &home,
+        &["audit", "list", "--action", "overlay.adopt", "--json"],
+        None,
+    );
+    assert!(audited.contains("\"overlay.adopt\""), "{audited}");
+
+    // the probe's answer: shapes, counts, no value and no path
+    let job = run(
+        &home,
+        &["jobs", "show", &probe_job.to_string(), "--json"],
+        None,
+    );
+    let job: serde_json::Value = serde_json::from_str(&job).unwrap();
+    assert_eq!(job["state"], "done", "{job}");
+    let result = &job["result"];
+    assert_eq!(result["sample"]["files"], 24, "{result}");
+    let c = &result["candidates"];
+    assert_eq!(c[0]["subjects"], 1, "{result}");
+    assert_eq!(c[0]["identity_constant"]["constant"], true, "{result}");
+    assert_eq!(c[0]["identity_constant"]["shape"], "AAAA", "{result}");
+    assert_eq!(c[1]["subjects"], 3, "{result}");
+    assert_eq!(c[1]["sources"][1]["shapes"]["AAA999"], 24, "{result}");
+    let text = result.to_string();
+    for marker in ["XXXX", "AAA111", "BBB222", "CCC333", "IM_0001"] {
+        assert!(!text.contains(marker), "{marker} escaped: {text}");
+    }
+    assert!(!text.contains(&root.path().display().to_string()), "{text}");
+    // and the command line verbs read the same objects
+    let listed = run(&home, &["overlay", "list"], None);
+    assert!(
+        listed.contains("adopted") && listed.contains("site words@1.0.0"),
+        "{listed}"
+    );
+    let out = TempDir::new("knob-export");
+    let wrote = run(
+        &home,
+        &[
+            "overlay",
+            "export",
+            &id.to_string(),
+            "--to",
+            out.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(wrote.contains("site-1.0.0.overlay.json"), "{wrote}");
+    let exported = nils_pack::Overlay::load(&out.path().join("site-1.0.0.overlay.json")).unwrap();
+    assert_eq!(exported.id, "site@1.0.0");
 }

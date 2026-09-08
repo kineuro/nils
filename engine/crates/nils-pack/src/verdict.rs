@@ -46,6 +46,34 @@ impl AxisVerdict {
     }
 }
 
+/// What the evaluator noticed and did not act on (Wave 4c §6.6, Wave 2 §10's
+/// names): a rule that reached an axis an earlier set had closed with a
+/// different answer (`axis_conflict`, both recorded), an axis of this phase
+/// that ended with no value and no default (`axis_unresolved`), and a keyword
+/// that matched on this stack but was never cited because an earlier rule
+/// or an earlier keyword in the same list won (`keyword_shadowed`). None of
+/// these change a verdict; they are counted per batch by whoever stores it.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct Diagnostic {
+    pub kind: String,
+    pub axis: String,
+    /// The rule set and rule that were pre-empted, and what they would have
+    /// said, citing what.
+    pub rule_set: String,
+    pub rule: String,
+    pub value: String,
+    pub matched: String,
+    /// What pre-empted it: the set, the rule, its value and its citation.
+    pub by_rule_set: String,
+    pub by_rule: String,
+    pub by_value: String,
+    pub by_matched: String,
+}
+
+/// The most diagnostics one verdict keeps. A stack that trips more than this
+/// is a question about the pack, and the count says so without the list.
+pub const DIAGNOSTICS_MAX: usize = 64;
+
 /// What a pack decided about one stack.
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct Verdict {
@@ -57,6 +85,9 @@ pub struct Verdict {
     /// weakly an axis resolved (§8.2). A localizer excluded on purpose is
     /// the case it exists for.
     pub silent: bool,
+    /// Wave 4c §6.6: what the evaluator noticed and did not act on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl Verdict {

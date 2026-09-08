@@ -135,6 +135,9 @@ pub struct Pack {
     pub passes: Vec<Pass>,
     /// The overlay applied, when one was, for the classified row to record.
     pub overlay: Option<String>,
+    /// The terms that overlay added, for `overlay_unused` (Wave 4c §6.6):
+    /// a term never cited over a batch is a site word that matched nothing.
+    pub overlay_terms: Vec<String>,
     /// How many cases its own corpus holds, all of which passed.
     pub cases: usize,
     /// When a person is asked about an axis. The pack's call, not the
@@ -202,14 +205,26 @@ impl Pack {
 /// the opposite of what an overlay is for: a site that adds a word to a bucket
 /// would break a case that says the word is not there.
 pub fn load(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
+    let (pack, failures) = load_judged(dir, overlay)?;
+    if let Some(f) = failures {
+        return Err(f);
+    }
+    Ok(pack)
+}
+
+/// Load a pack under an overlay and answer with the overlay's case failures
+/// beside it rather than refusing (Wave 4c §6.6): a rehearsal wants the
+/// amended pack and the pass or fail of the cases, both, writing nothing.
+/// Without an overlay the failures are `None`.
+pub fn load_judged(dir: &Path, overlay: Option<&Overlay>) -> R<(Pack, Option<Error>)> {
     let bare = build(dir, None)?;
     let Some(o) = overlay else {
-        return Ok(bare);
+        return Ok((bare, None));
     };
     let mut amended = build(dir, Some(o))?;
     amended.cases = bare.cases;
-    crate::corpus::run(&amended, &o.cases, "the overlay's cases")?;
-    Ok(amended)
+    let failures = crate::corpus::run(&amended, &o.cases, "the overlay's cases").err();
+    Ok((amended, failures))
 }
 
 fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
@@ -244,6 +259,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         }
     }
     let mut overlay_id = None;
+    let mut overlay_terms = Vec::new();
     if let Some(o) = overlay {
         o.check_against(&name, &buckets)?;
         for (bucket, edit) in &o.buckets {
@@ -251,6 +267,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             buckets.insert(bucket.clone(), crate::overlay::merge(&base, edit));
         }
         overlay_id = Some(o.id.clone());
+        overlay_terms = o.added_terms();
     }
 
     // --- when a person is asked about an axis
@@ -705,6 +722,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         flag_order,
         regexes,
         overlay: overlay_id,
+        overlay_terms,
         cases: 0,
         review,
     };
@@ -2167,11 +2185,27 @@ fn load_rule_set(
                     Error::at(&cat, format!("no field named {field_name}"))
                         .in_file(&f.path, Some(&f.source))
                 })?;
+                // Wave 4c §6.6: a keyword list may be an editable bucket,
+                // so that a site adds a contrast word through an overlay
+                // and a rehearsal names the stacks it would move.
+                let list = match kw.get("bucket") {
+                    Some(b) => {
+                        let name = f.blame(yaml::text(b, &format!("{cat}.bucket")))?;
+                        buckets.get(&name).cloned().ok_or_else(|| {
+                            Error::at(
+                                format!("{cat}.bucket"),
+                                format!("no bucket named {name} is declared by the pack"),
+                            )
+                            .in_file(&f.path, Some(&f.source))
+                        })?
+                    }
+                    None => f.blame(yaml::texts(kw, &cat))?,
+                };
                 Clause::Keywords {
                     tier,
                     confidence,
                     field,
-                    list: f.blame(yaml::texts(kw, &cat))?,
+                    list,
                 }
             } else {
                 Clause::When {

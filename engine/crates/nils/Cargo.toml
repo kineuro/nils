@@ -38,10 +38,11 @@ ureq.workspace = true
 blake2.workspace = true
 hex.workspace = true
 ctrlc.workspace = true
-
-[dev-dependencies]
+# Wave 4c §6.8: the gate seeds a synthetic tree of its own.
 dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
+
+[dev-dependencies]
 
 [lints]
 workspace = true

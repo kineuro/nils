@@ -127,6 +127,12 @@ fn select(store: &Store, modality: Option<&str>, ids: bool) -> String {
             sp.column("elements").expect("series_private.elements"),
         )))
         .collect();
+    // Wave 4c §6.6: the batch the stack first arrived in, last, so that
+    // what the evaluator noticed is counted per batch.
+    let cols: Vec<String> = cols
+        .into_iter()
+        .chain(std::iter::once("k.first_batch_id".to_string()))
+        .collect();
     let private_join = format!(
         " LEFT JOIN {} AS sp ON sp.series_id = f.series_id",
         store.qualified("series_private")
@@ -138,7 +144,10 @@ fn select(store: &Store, modality: Option<&str>, ids: bool) -> String {
             store.qualified("series"),
         )
     } else {
-        private_join
+        format!(
+            " JOIN {} AS k ON k.id = f.stack_id{private_join}",
+            store.qualified("stack"),
+        )
     };
     let filter = match modality {
         Some(m) => format!(" AND f.modality = '{}'", m.replace('\'', "''")),
@@ -151,6 +160,50 @@ fn select(store: &Store, modality: Option<&str>, ids: bool) -> String {
         dialect.param(1, Type::Int),
         dialect.param(2, Type::Int),
     )
+}
+
+/// The select of a bounded sample of stacks in a scope, in stack order,
+/// with the columns `select` reads without ids (Wave 4c §6.6). The
+/// parameters are the modality, the scope's own, then the limit.
+pub(crate) fn scoped_select(
+    store: &Store,
+    modality: &str,
+    scope: &crate::scope::Scope,
+    limit: usize,
+) -> (String, Vec<Param>) {
+    let t = table("stack_fingerprint");
+    let dialect = store.dialect();
+    let cols: Vec<String> = std::iter::once("f.stack_id".to_string())
+        .chain(FIELDS.iter().map(|(_, c)| {
+            let column = t
+                .column(c)
+                .unwrap_or_else(|| panic!("stack_fingerprint.{c} is not a column"));
+            dialect.text_of_qualified(Some("f"), column)
+        }))
+        .chain(std::iter::once(
+            dialect.text_of_qualified(
+                Some("sp"),
+                table("series_private")
+                    .column("elements")
+                    .expect("series_private.elements"),
+            ),
+        ))
+        .chain(std::iter::once("k.first_batch_id".to_string()))
+        .collect();
+    let (stacks, scope_params) = scope.stacks_sql(store, 2);
+    let mut params = vec![Param::from(modality)];
+    params.extend(scope_params);
+    params.push(Param::Int(limit as i64));
+    let sql = format!(
+        "SELECT {} FROM {} AS f JOIN {} AS k ON k.id = f.stack_id LEFT JOIN {} AS sp ON sp.series_id = f.series_id WHERE f.modality = {} AND f.stack_id IN {stacks} ORDER BY f.stack_id LIMIT {}",
+        cols.join(", "),
+        store.qualified("stack_fingerprint"),
+        store.qualified("stack"),
+        store.qualified("series_private"),
+        dialect.param(1, Type::Text),
+        dialect.param(params.len(), Type::Int),
+    );
+    (sql, params)
 }
 
 /// The rows of one axis of one stack (Wave 4a §6.1, fault 4): one per
@@ -209,7 +262,11 @@ pub(crate) fn cell_text(c: &nils_registry::store::Cell) -> Option<String> {
 
 /// One fingerprint row as the pack sees it, and the series' private
 /// elements beside it, one text per entry of the pack's ingest list.
-fn to_stack(r: &Row, with_ids: bool, pack: &Pack) -> Result<(Ids, Stack, Vec<String>), Error> {
+pub(crate) fn to_stack(
+    r: &Row,
+    with_ids: bool,
+    pack: &Pack,
+) -> Result<(Ids, Stack, Vec<String>), Error> {
     let first = if with_ids { 3 } else { 1 };
     let mut s = Stack::new();
     for (i, (field, _)) in FIELDS.iter().enumerate() {
@@ -224,6 +281,12 @@ fn to_stack(r: &Row, with_ids: bool, pack: &Pack) -> Result<(Ids, Stack, Vec<Str
     };
     let private = private_values(pack, cell_text(r.get(first + FIELDS.len())).as_deref());
     Ok((ids, s, private))
+}
+
+/// The batch column the select carries last (Wave 4c §6.6).
+pub(crate) fn batch_of(r: &Row, with_ids: bool) -> i64 {
+    let first = if with_ids { 3 } else { 1 };
+    r.int(first + FIELDS.len() + 1).unwrap_or(0)
 }
 
 /// The pack's ingested fields, in the pack's order, from the JSON object the
@@ -293,7 +356,7 @@ pub struct Author {
 /// Which stack a fingerprint row belongs to, and to what. Read only when a
 /// decision wider than a stack exists, so the usual run is one table.
 #[derive(Clone, Copy, Default)]
-struct Ids {
+pub(crate) struct Ids {
     stack: i64,
     series: i64,
     subject: i64,
@@ -526,6 +589,10 @@ fn run(
         .unwrap_or(0)
         > 0;
 
+    // Wave 4c §6.6: what the evaluator noticed, tallied per batch and
+    // written once at the end as diagnostic rows with samples.
+    let mut tallies: crate::diagnostics::Tallies = Default::default();
+
     let mut after: i64 = 0;
     loop {
         if cancel.stop() {
@@ -560,6 +627,7 @@ fn run(
                 continue;
             }
             let verdict = Evaluated::with_private(pack, &stack, private).classify();
+            tallies.note(batch_of(r, with_ids), &verdict);
             let mut raised = 0i64;
 
             for a in &verdict.axes {
@@ -886,6 +954,12 @@ fn run(
         if rows.len() < window {
             break;
         }
+    }
+
+    // Wave 4c §6.6: the diagnostics, per batch and per kind, replacing
+    // what the last run said about the same batches.
+    if !report.cancelled {
+        report.diagnostics = tallies.write(store, &pack.overlay_terms, &now)?;
     }
 
     // The passes: the phases that read more than one stack. They run once,

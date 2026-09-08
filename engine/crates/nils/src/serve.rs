@@ -682,6 +682,14 @@ impl Reply {
             empty: false,
         }
     }
+    pub(crate) fn created(body: serde_json::Value) -> Reply {
+        Reply {
+            status: 201,
+            body,
+            headers: Vec::new(),
+            empty: false,
+        }
+    }
     pub(crate) fn error(status: u16, message: impl Into<String>) -> Reply {
         Reply {
             status,
@@ -1034,6 +1042,13 @@ fn routed(
     let needs = match (method.as_str(), segs.as_slice()) {
         ("GET", ["api", "audit"]) | ("GET", ["api", "custody"]) => Role::Admin,
         ("GET", ["api", "quarantine"]) => Role::Reviewer,
+        // Wave 4c §6.6: the knob engine.
+        ("GET", ["api", "classify", "signals"])
+        | ("POST", ["api", "classify", "try"])
+        | ("POST", ["api", "overlays"]) => Role::Reviewer,
+        ("POST", ["api", "overlays", _, "adopt"]) | ("POST", ["api", "ingest", "probe"]) => {
+            Role::Operator
+        }
         ("POST", ["api", "jobs"])
         | ("POST", ["api", "jobs", _, "cancel"])
         | ("POST", ["api", "releases"])
@@ -1110,6 +1125,246 @@ fn routed(
                 batch,
                 query.get("class").map(String::as_str),
             )?))
+        }
+        // Wave 4c §6.6: the knob engine.
+        ["api", "classify", "signals"] if get => {
+            let scope = query.get("scope").map(String::as_str).ok_or_else(|| {
+                Reply::error(400, "scope: batch:<id>, origin:<name> or pack:<version>")
+            })?;
+            let scope =
+                nils_classify::scope::Scope::parse(scope).map_err(|e| Reply::error(400, e))?;
+            Ok(Reply::ok(nils_classify::signals::signals(
+                registry.store(),
+                &scope,
+            )?))
+        }
+        ["api", "classify", "try"] if post => {
+            let doc = json_body(body)?;
+            let scope = scope_of(&doc)?;
+            let sample = nils_classify::rehearse::sample_of(doc["sample"].as_i64());
+            let (_, tried) = rehearsed(doors, registry, &doc["overlay"], &scope, sample)?;
+            Ok(Reply::ok(tried))
+        }
+        ["api", "overlays"] if get => {
+            let rows = nils_registry::overlay::list(registry.store())?;
+            Ok(Reply::ok(serde_json::json!({
+                "overlays": rows.iter().map(|o| o.as_json(false)).collect::<Vec<_>>(),
+            })))
+        }
+        ["api", "overlays"] if post => {
+            let doc = json_body(body)?;
+            let name = doc["name"]
+                .as_str()
+                .filter(|n| !n.trim().is_empty())
+                .ok_or_else(|| Reply::error(400, "name: what the proposal is called"))?;
+            let scope = scope_of(&doc)?;
+            let sample = nils_classify::rehearse::sample_of(doc["sample"].as_i64());
+            let (overlay, tried) = rehearsed(doors, registry, &doc["overlay"], &scope, sample)?;
+            let (kind, _) = author_of(caller);
+            let proposal = nils_registry::overlay::Proposal {
+                name,
+                version: overlay.id.rsplit('@').next().unwrap_or("0"),
+                pack: &overlay.pack,
+                author: principal,
+                author_kind: kind,
+                actor: caller.actor.clone(),
+                scope: serde_json::json!({
+                    "over": scope.text(),
+                    "keyed": overlay.scope,
+                }),
+                document: doc["overlay"].clone(),
+                tried: tried.clone(),
+                why: doc["why"].as_str(),
+            };
+            let (id, item) = nils_registry::overlay::propose(registry.store(), &proposal)?;
+            nils_registry::audit::record(
+                registry,
+                &nils_registry::audit::Entry {
+                    principal,
+                    action: nils_registry::audit::Action::OverlayPropose,
+                    scope: serde_json::json!({"overlay": id, "scope": scope.text()}),
+                    policy: None,
+                    job_id: None,
+                    details: Some(
+                        serde_json::json!({"name": name, "pack": overlay.pack, "review_item": item, "tried": tried["review_items"]}),
+                    ),
+                },
+            )?;
+            let row = nils_registry::overlay::show(registry.store(), id)?;
+            Ok(Reply::created(serde_json::json!({
+                "overlay": row.map(|o| o.as_json(true)),
+                "review_item": item,
+                "status": nils_registry::overlay::PROPOSED,
+            })))
+        }
+        ["api", "overlays", _] if get => {
+            let id = id_at(2)?;
+            match nils_registry::overlay::show(registry.store(), id)? {
+                Some(o) => Ok(Reply::ok(o.as_json(true))),
+                None => Err(Reply::error(404, format!("no overlay {id}"))),
+            }
+        }
+        ["api", "overlays", _, "adopt"] if post => {
+            let id = id_at(2)?;
+            let Some(o) = nils_registry::overlay::show(registry.store(), id)? else {
+                return Err(Reply::error(404, format!("no overlay {id}")));
+            };
+            if o.status != nils_registry::overlay::PROPOSED {
+                return Err(Reply::error(
+                    409,
+                    format!(
+                        "overlay {id} is {}, and only a proposed one is adopted",
+                        o.status
+                    ),
+                ));
+            }
+            // The existing ranking: a lower author than the one who
+            // proposed does not adopt over them.
+            let (kind, _) = author_of(caller);
+            if nils_registry::review::rank(kind) < nils_registry::review::rank(&o.author_kind) {
+                return Err(Reply::error(
+                    409,
+                    format!(
+                        "overlay {id} was proposed by a {}, and a {kind} does not adopt over them",
+                        o.author_kind
+                    ),
+                ));
+            }
+            let mut command = vec![
+                "classify".to_string(),
+                "--pack".into(),
+                o.pack.clone(),
+                "--overlay-id".into(),
+                id.to_string(),
+            ];
+            // The worker runs where this engine runs, but knows no pack
+            // directory of its own: the one this engine serves is named.
+            if let Some(dir) = &doors.pack_dir {
+                command.push("--pack-dir".into());
+                command.push(dir.display().to_string());
+            }
+            let job = nils_registry::job::enqueue_with(
+                registry.store(),
+                &command,
+                Some(&format!("adopt overlay {id}")),
+                Some(principal),
+                serde_json::json!({
+                    "roles": caller.roles.iter().map(|r| r.name()).collect::<Vec<_>>(),
+                    "actor": caller.actor,
+                    "overlay": id,
+                }),
+            )
+            .map_err(job_err)?;
+            nils_registry::overlay::decide(
+                registry.store(),
+                id,
+                nils_registry::overlay::ADOPTED,
+                principal,
+                Some(job),
+                None,
+            )?;
+            nils_registry::audit::record(
+                registry,
+                &nils_registry::audit::Entry {
+                    principal,
+                    action: nils_registry::audit::Action::OverlayAdopt,
+                    scope: serde_json::json!({"overlay": id, "scope": o.scope}),
+                    policy: None,
+                    job_id: Some(job),
+                    details: Some(
+                        serde_json::json!({"name": o.name, "version": o.version, "pack": o.pack}),
+                    ),
+                },
+            )?;
+            Ok(Reply::accepted(serde_json::json!({
+                "job": job,
+                "overlay": id,
+                "status": nils_registry::overlay::ADOPTED,
+            })))
+        }
+        ["api", "ingest", "probe"] if post => {
+            let doc = json_body(body)?;
+            // A pre-registered location, never a path: the name and an
+            // optional relative part, resolved by the worker.
+            let location = doc["location"].as_str().ok_or_else(|| {
+                Reply::error(
+                    400,
+                    "location: a registered ingest location, as name or name/relative",
+                )
+            })?;
+            let location = location.trim().trim_start_matches('@');
+            let (name, rel) = location.split_once('/').unwrap_or((location, ""));
+            if !doors.ingest_roots.contains_key(name) {
+                return Err(Reply::error(
+                    400,
+                    format!(
+                        "location {name} is not registered; this deployment names {}",
+                        if doors.ingest_roots.is_empty() {
+                            "none".to_string()
+                        } else {
+                            doors
+                                .ingest_roots
+                                .keys()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        }
+                    ),
+                ));
+            }
+            if rel.split('/').any(|s| s == "..") || rel.starts_with('/') {
+                return Err(Reply::error(
+                    400,
+                    "location: the relative part stays inside the location",
+                ));
+            }
+            let rules = doc["rules"]
+                .as_array()
+                .filter(|r| !r.is_empty())
+                .ok_or_else(|| {
+                    Reply::error(
+                        400,
+                        "rules: one or more candidate identity rules, as objects",
+                    )
+                })?;
+            let mut command = vec![
+                "ingest".to_string(),
+                "probe".into(),
+                format!(
+                    "@{name}{}",
+                    if rel.is_empty() {
+                        String::new()
+                    } else {
+                        format!("/{rel}")
+                    }
+                ),
+                "--sample".into(),
+                nils_digest::probe::sample_of(doc["sample"].as_i64()).to_string(),
+            ];
+            for (i, r) in rules.iter().enumerate() {
+                if !r.is_object() {
+                    return Err(Reply::error(400, format!("rules[{i}]: an object")));
+                }
+                let text = serde_json::json!({"identity": r}).to_string();
+                nils_digest::Rule::parse(&text)
+                    .map_err(|e| Reply::error(400, format!("rules[{i}]: {e}")))?;
+                command.push("--rule-json".into());
+                command.push(r.to_string());
+            }
+            let job = nils_registry::job::enqueue_with(
+                registry.store(),
+                &command,
+                doc["name"].as_str().or(Some("identity probe")),
+                Some(principal),
+                serde_json::json!({
+                    "roles": caller.roles.iter().map(|r| r.name()).collect::<Vec<_>>(),
+                    "actor": caller.actor,
+                }),
+            )
+            .map_err(job_err)?;
+            Ok(Reply::accepted(
+                serde_json::json!({ "job": job, "state": "queued" }),
+            ))
         }
         ["api", "custody"] if get => Ok(Reply::ok(crate::custody_doc(&doors.home, registry)?)),
         ["api", "audit"] if get => {
@@ -1434,6 +1689,79 @@ const QUEUEABLE: &[&str] = &[
     "ask",
 ];
 
+/// Wave 4c §6.6: the scope a body names.
+fn scope_of(doc: &serde_json::Value) -> Result<nils_classify::scope::Scope, Reply> {
+    let text = doc["scope"]
+        .as_str()
+        .ok_or_else(|| Reply::error(400, "scope: batch:<id>, origin:<name> or pack:<version>"))?;
+    nils_classify::scope::Scope::parse(text).map_err(|e| Reply::error(400, e))
+}
+
+/// The author kind the caller acts as: the actor's kind when one was
+/// declared, else a person at a keyboard. With the model version beside it.
+fn author_of(caller: &Caller) -> (&str, Option<&str>) {
+    // Anything else, `absent` included, is a person at a keyboard.
+    let kind = match caller.actor["kind"].as_str() {
+        Some("agent") => "agent",
+        Some("model") => "model",
+        _ => "person",
+    };
+    (kind, caller.actor["version"].as_str())
+}
+
+/// Wave 4c §6.6: an overlay from a body, rehearsed over a scope. The pack
+/// it amends is loaded bare and amended; the overlay's own cases are judged
+/// and their failure is part of the answer, not a refusal.
+fn rehearsed(
+    doors: &Doors,
+    registry: &mut Registry,
+    overlay: &serde_json::Value,
+    scope: &nils_classify::scope::Scope,
+    sample: usize,
+) -> Result<(nils_pack::Overlay, serde_json::Value), Reply> {
+    if !overlay.is_object() {
+        return Err(Reply::error(
+            400,
+            "overlay: the overlay document, as an object",
+        ));
+    }
+    let o = nils_pack::Overlay::parse("overlay", &overlay.to_string())
+        .map_err(|e| Reply::error(400, e.to_string()))?;
+    let dir = doors
+        .pack_dir
+        .as_ref()
+        .map(|d| d.join(&o.pack))
+        .filter(|d| d.join("pack.yml").is_file())
+        .ok_or_else(|| {
+            Reply::error(
+                400,
+                format!(
+                    "the overlay amends {}, which this engine does not serve",
+                    o.pack
+                ),
+            )
+        })?;
+    let (before, _) =
+        nils_pack::load_judged(&dir, None).map_err(|e| Reply::error(500, e.to_string()))?;
+    let (after, failure) =
+        nils_pack::load_judged(&dir, Some(&o)).map_err(|e| Reply::error(400, e.to_string()))?;
+    let assertions: usize = o
+        .cases
+        .iter()
+        .map(|(_, c)| c.flags.len() + c.axes.len())
+        .sum();
+    let tried = nils_classify::rehearse::run(
+        registry.store(),
+        &before,
+        &after,
+        scope,
+        sample,
+        None,
+        (assertions, failure.map(|e| e.to_string())),
+    )?;
+    Ok((o, tried))
+}
+
 pub(crate) fn job_err(e: nils_registry::job::Error) -> Reply {
     match e {
         nils_registry::job::Error::Busy { .. } => Reply::error(409, e.to_string()),
@@ -1489,6 +1817,13 @@ fn capabilities(
         "GET /api/batches",
         "GET /api/batches/{id}",
         "GET /api/quarantine",
+        "GET /api/classify/signals",
+        "POST /api/classify/try",
+        "GET /api/overlays",
+        "POST /api/overlays",
+        "GET /api/overlays/{id}",
+        "POST /api/overlays/{id}/adopt",
+        "POST /api/ingest/probe",
     ]
     .iter()
     .chain(crate::ask_doors::DOORS.iter())
@@ -2001,6 +2336,76 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "every file",
             "Listing quarantine",
             "Listed quarantine",
+        ),
+        row(
+            "GET /api/classify/signals",
+            "reviewer",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading the classifier's signals",
+            "Read the classifier's signals",
+        ),
+        row(
+            "POST /api/classify/try",
+            "reviewer",
+            false,
+            false,
+            "bounded",
+            "one manifest",
+            "Rehearsing an overlay",
+            "Rehearsed an overlay",
+        ),
+        row(
+            "GET /api/overlays",
+            "reader",
+            false,
+            false,
+            "free",
+            "every overlay",
+            "Listing overlays",
+            "Listed overlays",
+        ),
+        row(
+            "POST /api/overlays",
+            "reviewer",
+            true,
+            false,
+            "bounded",
+            "one overlay",
+            "Proposing an overlay",
+            "Proposed an overlay",
+        ),
+        row(
+            "GET /api/overlays/{id}",
+            "reader",
+            false,
+            false,
+            "free",
+            "one overlay",
+            "Reading an overlay",
+            "Read an overlay",
+        ),
+        row(
+            "POST /api/overlays/{id}/adopt",
+            "operator",
+            true,
+            false,
+            "queued",
+            "one job",
+            "Adopting an overlay",
+            "Adopted an overlay",
+        ),
+        row(
+            "POST /api/ingest/probe",
+            "operator",
+            false,
+            false,
+            "queued",
+            "one job",
+            "Probing identity rules",
+            "Probed identity rules",
         ),
         row(
             "GET /api/ask/schema",

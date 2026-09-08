@@ -11,13 +11,17 @@
 
 pub mod classify;
 pub mod derived;
+pub mod diagnostics;
 pub mod dwi;
 pub mod fingerprint;
 pub mod fold;
 pub mod job;
 pub mod passes;
 pub mod picking;
+pub mod rehearse;
 pub mod report;
+pub mod scope;
+pub mod signals;
 
 pub use job::{Error, Settings, fingerprint as run};
 pub use report::{Classified, Report};

@@ -31,6 +31,10 @@ pub enum Action {
     LinkageReveal,
     /// Wave 4c §6.5: an archive was written.
     Backup,
+    /// Wave 4c §6.6: an overlay proposed as a registry object, and one
+    /// adopted, which queues the reclassify that changes judgements.
+    OverlayPropose,
+    OverlayAdopt,
     Release,
     Handover,
     ReleaseWithdraw,
@@ -58,6 +62,8 @@ impl Action {
             Action::LinkagePurge => "linkage.purge",
             Action::LinkageReveal => "linkage.reveal",
             Action::Backup => "backup",
+            Action::OverlayPropose => "overlay.propose",
+            Action::OverlayAdopt => "overlay.adopt",
             Action::Release => "release",
             Action::Handover => "handover",
             Action::ReleaseWithdraw => "release.withdraw",
@@ -75,7 +81,11 @@ impl Action {
     pub fn changes_judgement(self) -> bool {
         !matches!(
             self,
-            Action::ReviewAccept | Action::LinkageReveal | Action::JobsPrune | Action::Backup
+            Action::ReviewAccept
+                | Action::LinkageReveal
+                | Action::JobsPrune
+                | Action::Backup
+                | Action::OverlayPropose
         )
     }
 }

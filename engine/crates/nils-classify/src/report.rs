@@ -107,6 +107,13 @@ pub struct Classified {
     /// Wave 4a §10.2: the items those questions collapsed into, one per
     /// (kind, value, tier). This is the length of the queue a person reads.
     pub review_groups: i64,
+    /// Wave 4c §6.6: what the evaluator noticed and did not act on, by
+    /// kind, over every batch: `axis_conflict`, `axis_unresolved`,
+    /// `keyword_shadowed` (keywords that can never match) and
+    /// `overlay_unused` (site terms that matched nothing). The rows are in
+    /// the batch's `diagnostic` table with samples.
+    #[serde(default)]
+    pub diagnostics: std::collections::BTreeMap<String, i64>,
     pub seconds: f64,
     pub peak_rss: Option<u64>,
     pub cancelled: bool,
@@ -129,6 +136,7 @@ impl Classified {
             by_tier: std::collections::BTreeMap::new(),
             review_items: 0,
             review_groups: 0,
+            diagnostics: std::collections::BTreeMap::new(),
             seconds: 0.0,
             peak_rss: None,
             cancelled: false,
@@ -207,6 +215,14 @@ impl fmt::Display for Classified {
             for (method, n) in how.iter().take(5) {
                 writeln!(f, "    {method:<24} {n:>8}")?;
             }
+        }
+        if !self.diagnostics.is_empty() {
+            let line: Vec<String> = self
+                .diagnostics
+                .iter()
+                .map(|(k, n)| format!("{k} {n}"))
+                .collect();
+            writeln!(f, "  diagnostics      {}", line.join(", "))?;
         }
         writeln!(f, "  {:.1} s, {:.0} stacks/s", self.seconds, self.rate())?;
         if let Some(rss) = self.peak_rss {

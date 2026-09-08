@@ -101,6 +101,14 @@ enum Command {
     /// work them (Wave 4a section 9.1)
     #[command(subcommand)]
     Jobs(JobsCommand),
+    /// Overlays as registry objects: proposed with a rehearsal, adopted by
+    /// an operator, exported to a pack directory (Wave 4c section 6.6)
+    #[command(subcommand)]
+    Overlay(OverlayCommand),
+    /// A tree before it is digested: candidate identity rules probed over a
+    /// sample, shapes only (Wave 4c section 6.6)
+    #[command(subcommand)]
+    Ingest(IngestCommand),
     /// The audit log: who did what, to which scope, when, under which
     /// policy (Wave 4a section 9.2)
     #[command(subcommand)]
@@ -520,7 +528,69 @@ enum JobsCommand {
         /// Seconds between looks at an empty queue
         #[arg(long, default_value = "5")]
         every: u64,
+        /// A registered ingest location the worker resolves for a probe
+        /// (Wave 4c section 6.6), as the serve flag names it
+        #[arg(long = "ingest-root", value_name = "NAME=PATH")]
+        ingest_root: Vec<String>,
     },
+}
+
+/// Wave 4c §6.6: overlays as registry objects.
+#[derive(Debug, Subcommand)]
+enum OverlayCommand {
+    /// Every overlay the registry holds, with its status
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// One overlay: its document, its scope and the rehearsal that justified it
+    Show {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write an overlay's document to a directory, for a pack directory to load
+    Export {
+        id: i64,
+        /// The directory to write into
+        #[arg(long, value_name = "DIR")]
+        to: PathBuf,
+    },
+    /// Refuse a proposed overlay, closing the review item beside it
+    Refuse {
+        id: i64,
+        #[arg(long)]
+        why: Option<String>,
+    },
+}
+
+/// Wave 4c §6.6: what is asked of a tree before it is digested.
+#[derive(Debug, Subcommand)]
+enum IngestCommand {
+    /// Candidate identity rules over a bounded sample, side by side
+    Probe(ProbeArgs),
+}
+
+#[derive(Debug, Parser)]
+struct ProbeArgs {
+    /// A registered location as @name or @name/relative, or a directory
+    location: String,
+    /// The most files read
+    #[arg(long, default_value_t = nils_digest::probe::SAMPLE_DEFAULT)]
+    sample: usize,
+    /// A candidate rule file, as `nils digest --identity-rule` reads it
+    #[arg(long, value_name = "FILE")]
+    rule: Vec<PathBuf>,
+    /// A candidate rule as the JSON object of its `identity` block
+    #[arg(long, value_name = "JSON")]
+    rule_json: Vec<String>,
+    /// A registered location, as the serve flag names it
+    #[arg(long = "ingest-root", value_name = "NAME=PATH")]
+    ingest_root: Vec<String>,
+    #[arg(long, default_value = "4")]
+    workers: usize,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1126,6 +1196,8 @@ fn main() -> ExitCode {
         Command::Clinical(command) => clinical_command(&home, command),
         Command::Select(args) => select_preview(&home, args),
         Command::Jobs(command) => jobs_command(&home, command),
+        Command::Overlay(command) => overlay_command(&home, command),
+        Command::Ingest(command) => ingest_command(&home, command),
         Command::Serve(args) => serve::serve(&home, *args),
         Command::Audit(AuditCommand::List {
             principal,
@@ -1306,6 +1378,9 @@ struct ClassifyArgs {
     /// An origin-scoped amendment to it
     #[arg(long, value_name = "FILE")]
     overlay: Option<PathBuf>,
+    /// An adopted overlay, by its registry id (Wave 4c section 6.6)
+    #[arg(long, value_name = "ID", conflicts_with = "overlay")]
+    overlay_id: Option<i64>,
     /// The run's label, recorded on the job
     #[arg(long)]
     name: Option<String>,
@@ -1329,7 +1404,10 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
         .into_iter()
         .find(|p| p.file_name().is_some_and(|f| f == args.pack.as_str()))
         .ok_or_else(|| fail(format!("no pack named {} in {}", args.pack, dir.display())))?;
-    let overlay = load_overlay(args.overlay.as_ref())?;
+    let overlay = match args.overlay_id {
+        Some(id) => Some(stored_overlay(home, id)?),
+        None => load_overlay(args.overlay.as_ref())?,
+    };
     let pack = nils_pack::load(&found, overlay.as_ref()).map_err(|e| fail(e.to_string()))?;
 
     let mut settings = nils_classify::Settings {
@@ -1582,6 +1660,245 @@ fn packs_in(dir: &Path) -> Result<Vec<PathBuf>, Exit> {
         .collect();
     out.sort();
     Ok(out)
+}
+
+/// Wave 4c §6.6: an overlay from the registry, by id, as the row stored it.
+fn stored_overlay(home: &Home, id: i64) -> Result<nils_pack::Overlay, Exit> {
+    let mut registry = open(home)?;
+    let row = nils_registry::overlay::show(registry.store(), id)
+        .map_err(|e| fail(e.to_string()))?
+        .ok_or_else(|| fail(format!("no overlay {id} in the registry")))?;
+    nils_pack::Overlay::parse(&format!("overlay {id}"), &row.document.to_string())
+        .map_err(|e| fail(e.to_string()))
+}
+
+/// Wave 4c §6.6: `nils overlay ...`.
+fn overlay_command(home: &Home, command: OverlayCommand) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    match command {
+        OverlayCommand::List { json } => {
+            let rows =
+                nils_registry::overlay::list(registry.store()).map_err(|e| fail(e.to_string()))?;
+            if json {
+                let doc: Vec<_> = rows.iter().map(|o| o.as_json(false)).collect();
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+            } else if rows.is_empty() {
+                println!("no overlays");
+            } else {
+                println!(
+                    "{:>5}  {:<10} {:<24} {:<10} {:<8} scope",
+                    "id", "status", "overlay", "pack", "author"
+                );
+                for o in &rows {
+                    println!(
+                        "{:>5}  {:<10} {:<24} {:<10} {:<8} {}",
+                        o.id,
+                        o.status,
+                        format!("{}@{}", o.name, o.version),
+                        o.pack,
+                        o.author_kind,
+                        o.scope["over"].as_str().unwrap_or("")
+                    );
+                }
+            }
+            Ok(())
+        }
+        OverlayCommand::Show { id, json } => {
+            let o = nils_registry::overlay::show(registry.store(), id)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| fail(format!("no overlay {id}")))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&o.as_json(true)).unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "overlay {}: {}@{} for {} ({})",
+                    o.id, o.name, o.version, o.pack, o.status
+                );
+                println!(
+                    "  proposed by {} ({}) at {}",
+                    o.author, o.author_kind, o.created_at
+                );
+                if let Some(by) = &o.decided_by {
+                    println!(
+                        "  {} by {} at {}",
+                        o.status,
+                        by,
+                        o.decided_at.as_deref().unwrap_or("")
+                    );
+                }
+                println!("  scope {}", o.scope);
+                let moves = o.tried["moves"].as_array().map(|m| m.len()).unwrap_or(0);
+                println!(
+                    "  rehearsal: {moves} move(s), review items close {} open {}, cases passed {} failed {}",
+                    o.tried["review_items"]["close"],
+                    o.tried["review_items"]["open"],
+                    o.tried["cases"]["passed"],
+                    o.tried["cases"]["failed"]
+                );
+                if let Some(w) = &o.why {
+                    println!("  why: {w}");
+                }
+            }
+            Ok(())
+        }
+        OverlayCommand::Export { id, to } => {
+            let o = nils_registry::overlay::show(registry.store(), id)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| fail(format!("no overlay {id}")))?;
+            std::fs::create_dir_all(&to).map_err(|e| fail(format!("{}: {e}", to.display())))?;
+            // JSON is YAML, and it is the document as the registry holds it.
+            let own = o.document["overlay"].as_str().unwrap_or(&o.name);
+            let path = to.join(format!("{own}-{}.overlay.json", o.version));
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&o.document).unwrap_or_default() + "\n",
+            )
+            .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+            println!("wrote {}", path.display());
+            Ok(())
+        }
+        OverlayCommand::Refuse { id, why } => {
+            let o = nils_registry::overlay::show(registry.store(), id)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| fail(format!("no overlay {id}")))?;
+            if o.status != nils_registry::overlay::PROPOSED {
+                return Err(fail(format!(
+                    "overlay {id} is {}, and only a proposed one is refused",
+                    o.status
+                )));
+            }
+            nils_registry::overlay::decide(
+                registry.store(),
+                id,
+                nils_registry::overlay::REFUSED,
+                &actor(),
+                None,
+                why.as_deref(),
+            )
+            .map_err(|e| fail(e.to_string()))?;
+            println!("overlay {id} refused");
+            Ok(())
+        }
+    }
+}
+
+/// The registered locations a probe may name: the flags, then the env the
+/// worker sets (Wave 4c §6.6).
+fn ingest_roots(flags: &[String]) -> Result<std::collections::BTreeMap<String, PathBuf>, Exit> {
+    let mut out = std::collections::BTreeMap::new();
+    let env = std::env::var("NILS_INGEST_ROOTS").unwrap_or_default();
+    for entry in env.split(';').chain(flags.iter().map(String::as_str)) {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (name, path) = entry
+            .split_once('=')
+            .ok_or_else(|| fail(format!("--ingest-root {entry}: NAME=PATH")))?;
+        out.insert(name.to_string(), PathBuf::from(path));
+    }
+    Ok(out)
+}
+
+/// Wave 4c §6.6: `nils ingest probe`.
+fn ingest_command(home: &Home, command: IngestCommand) -> Result<(), Exit> {
+    let IngestCommand::Probe(args) = command;
+    use nils_registry::job::{self, Claim, State};
+    // Where to read: a registered name, or a directory from the keyboard.
+    let root = if let Some(rest) = args.location.strip_prefix('@') {
+        let roots = ingest_roots(&args.ingest_root)?;
+        let (name, rel) = rest.split_once('/').unwrap_or((rest, ""));
+        if rel.split('/').any(|s| s == "..") {
+            return Err(fail("a location's relative part stays inside it"));
+        }
+        let base = roots
+            .get(name)
+            .ok_or_else(|| fail(format!("no registered location named {name}")))?;
+        if rel.is_empty() {
+            base.clone()
+        } else {
+            base.join(rel)
+        }
+    } else {
+        PathBuf::from(&args.location)
+    };
+    let mut candidates: Vec<(String, nils_digest::Rule)> = Vec::new();
+    for p in &args.rule {
+        let text = std::fs::read_to_string(p).map_err(|e| fail(format!("{}: {e}", p.display())))?;
+        let rule =
+            nils_digest::Rule::parse(&text).map_err(|e| fail(format!("{}: {e}", p.display())))?;
+        candidates.push((
+            p.file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            rule,
+        ));
+    }
+    for (i, text) in args.rule_json.iter().enumerate() {
+        let value: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| fail(format!("--rule-json {}: {e}", i + 1)))?;
+        let rule = nils_digest::Rule::parse(&serde_json::json!({"identity": value}).to_string())
+            .map_err(|e| fail(format!("--rule-json {}: {e}", i + 1)))?;
+        candidates.push((format!("rule {}", candidates.len() + 1), rule));
+    }
+    if candidates.is_empty() {
+        candidates.push(("default".into(), nils_digest::Rule::default()));
+    }
+    let mut registry = open(home)?;
+    let job = job::claim(
+        registry.store(),
+        &Claim {
+            kind: "ingest",
+            name: "probe",
+            args: serde_json::json!({"location": args.location, "sample": args.sample, "rules": candidates.len()}),
+        },
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    match nils_digest::probe::probe(&root, args.sample, &candidates, args.workers) {
+        Ok(mut doc) => {
+            doc["location"] = serde_json::json!(args.location.split('/').next().unwrap_or(""));
+            doc["job"] = serde_json::json!(job);
+            job::finish(registry.store(), job, State::Done, None)
+                .map_err(|e| fail(e.to_string()))?;
+            job::set_result(registry.store(), job, &doc).map_err(|e| fail(e.to_string()))?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+            } else {
+                println!(
+                    "probed {} file(s), {} parsed",
+                    doc["sample"]["files"], doc["sample"]["parsed"]
+                );
+                for c in doc["candidates"].as_array().into_iter().flatten() {
+                    println!(
+                        "  {}: {} subject(s), {} stud(ies), {} fell back, first field constant: {}",
+                        c["label"].as_str().unwrap_or(""),
+                        c["subjects"],
+                        c["studies"],
+                        c["fell_back"],
+                        c["identity_constant"]["constant"]
+                    );
+                    for s in c["sources"].as_array().into_iter().flatten() {
+                        println!(
+                            "    {:<24} answered {:>6}  empty {:>6}  unparsed {:>6}",
+                            s["source"].as_str().unwrap_or(""),
+                            s["answered"],
+                            s["empty"],
+                            s["unparsed"]
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            job::finish(registry.store(), job, State::Failed, Some(&e))
+                .map_err(|e| fail(e.to_string()))?;
+            Err(fail(e))
+        }
+    }
 }
 
 fn load_overlay(path: Option<&PathBuf>) -> Result<Option<nils_pack::Overlay>, Exit> {
@@ -3012,6 +3329,9 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     );
     let classes = count(store, &classes_sql)?;
     let open_items = count_of(store, "review_item", " WHERE status = 'open'")?;
+    let overlays = count_of(store, "overlay", "")?;
+    let overlays_proposed = count_of(store, "overlay", " WHERE status = 'proposed'")?;
+    let overlays_adopted = count_of(store, "overlay", " WHERE status = 'adopted'")?;
     let jobs = count_of(store, "job", "")?;
     let batches = count_of(store, "ingest_batch", "")?;
     let cohorts = count_of(store, "cohort", "")?;
@@ -3184,6 +3504,22 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
                 "read": ["nils explain <stack>", "nils review list", "nils pack show <name>"],
                 "change": ["nils fingerprint", "nils classify", "nils review decide <id> --value <v>"],
                 "export": ["nils explain <stack> --json"],
+                "delete": "with the registry",
+            },
+        }),
+        serde_json::json!({
+            "store": "overlays",
+            "owner": "the reviewer who proposed each, the operator who adopted it",
+            "what": "a site's amendments to a pack as registry objects: the document, its scope, the rehearsal that justified it, and who proposed, adopted or refused it (Wave 4c section 6.6)",
+            "where": "rows of overlay in the registry, with a review item beside each proposal",
+            "files": [],
+            "holds": ["a site's words for a pack's buckets and the cases that show what they change", "who proposed and who adopted, with the actor"],
+            "counts": { "overlays": overlays, "proposed": overlays_proposed, "adopted": overlays_adopted },
+            "kept": "for good; an adopted overlay is what the rows it judged cite",
+            "commands": {
+                "read": ["nils overlay list", "nils overlay show <id>"],
+                "change": ["nils overlay refuse <id>", "POST /api/overlays", "POST /api/overlays/<id>/adopt"],
+                "export": ["nils overlay export <id> --to <dir>"],
                 "delete": "with the registry",
             },
         }),
@@ -4691,7 +5027,14 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             println!("queued job {id}: nils {}", command.join(" "));
             Ok(())
         }
-        JobsCommand::Work { once, every } => {
+        JobsCommand::Work {
+            once,
+            every,
+            ingest_root,
+        } => {
+            // Wave 4c §6.6: the worker's own registered locations, handed to
+            // a probe by name; the queued command line carries no path.
+            let roots_env = ingest_root.join(";");
             let worker = job::claim(
                 store,
                 &job::Claim {
@@ -4760,6 +5103,7 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                 .env("NILS_PRINCIPAL", next.principal().unwrap_or(&actor()))
                 .env("NILS_JOB_ROLES", roles)
                 .env("NILS_JOB_RAW", raw)
+                .env("NILS_INGEST_ROOTS", &roots_env)
                 .env(
                     nils_registry::actor::VAR,
                     if next.args["actor"].is_object() {

@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 34;
+pub const SCHEMA_VERSION: i64 = 35;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +189,10 @@ pub static MIGRATIONS: &[Migration] = &[
     Migration {
         version: 34,
         apply: a_writing_door_takes_an_idempotency_key,
+    },
+    Migration {
+        version: 35,
+        apply: an_overlay_is_a_registry_object,
     },
 ];
 
@@ -448,6 +452,14 @@ fn a_writing_door_takes_an_idempotency_key(store: &mut Store, kind: Kind) -> Res
         return Ok(());
     }
     add_tables(store, kind, &["idempotency"])
+}
+
+/// Wave 4c §6.6: an overlay is proposed, rehearsed and adopted as a row.
+fn an_overlay_is_a_registry_object(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["overlay"])
 }
 
 /// Wave 4a §13.1: a release is the history of what left and is never
