@@ -1246,6 +1246,20 @@ The wave closes when:
 
 ## 13. Order of work
 
+**As built (A3, idempotency, 2026-09-09).** `Idempotency-Key` (at most 256
+characters) rides on the caller like the two headers of A2 and is honoured on
+`POST /api/ask/run`, `/jobs`, `/apply` and `/handles/{id}/promote`, the doors
+whose repeat creates a row with an audit consequence; documents are content
+addressed, an upload and a selection write are idempotent by construction, so
+they take none. The door looks the key up per principal before it answers: the
+same body digest is answered again from the stored reply with `deduplicated:
+true` and the original status, a different body under the same key is refused
+with 409, and a fresh key records a successful answer (status below 300) in the
+`idempotency` table (migration 34) for 24 hours, swept on every record.
+`capabilities.idempotency` names the header, the doors and the hours. Fixture 4
+is the engine's own test: two runs under one key leave one handle, two job
+submissions leave one queued job, and a changed body is refused.
+
 **As built (A2, identity, the ceiling and the actor, 2026-09-09).** The trust
 list is `--oidc-trust issuer=URL,audience=ID,jwks=URL` (repeatable; `jwks` may
 also be a file), with the three Wave 4b flags kept as one entry; each issuer

@@ -254,8 +254,81 @@ pub(crate) fn route(
     ))
 }
 
+/// Wave 4c §6.3: the doors whose repeat creates a row with an audit
+/// consequence, so they take an idempotency key.
+pub(crate) const IDEMPOTENT_DOORS: &[&str] = &[
+    "POST /api/ask/run",
+    "POST /api/ask/jobs",
+    "POST /api/ask/apply",
+    "POST /api/ask/handles/{id}/promote",
+];
+
+/// Wave 4c §6.3: on a writing door, a key the caller carried is looked up
+/// first: the same body is answered again with `deduplicated: true`, a
+/// different body under the same key is refused with 409, and a fresh key
+/// records the answer for a day. Everything else goes straight through.
 #[allow(clippy::too_many_arguments)]
 fn routed(
+    doors: &Doors,
+    registry: &mut Registry,
+    state: &mut AskState,
+    caller: &Caller,
+    method: &str,
+    segs: &[&str],
+    query: &HashMap<String, String>,
+    body: &str,
+) -> Result<Reply, Reply> {
+    let idempotent = method == "POST"
+        && matches!(
+            segs,
+            ["api", "ask", "run"]
+                | ["api", "ask", "jobs"]
+                | ["api", "ask", "apply"]
+                | ["api", "ask", "handles", _, "promote"]
+        );
+    let Some(key) = caller.idempotency_key.as_deref().filter(|_| idempotent) else {
+        return answer(doors, registry, state, caller, method, segs, query, body);
+    };
+    let principal = caller.principal.as_str();
+    let digest = nils_registry::idempotency::digest(body);
+    match nils_registry::idempotency::lookup(registry.store(), principal, key)
+        .map_err(|e| Reply::error(500, e.to_string()))?
+    {
+        Some(record) if record.digest == digest => {
+            let mut body = record.reply;
+            body["deduplicated"] = json!(true);
+            return Ok(Reply {
+                status: record.status as u16,
+                body,
+                headers: Vec::new(),
+                empty: false,
+            });
+        }
+        Some(_) => {
+            return Err(Reply::error(
+                409,
+                format!("Idempotency-Key {key} was already used with a different body"),
+            ));
+        }
+        None => {}
+    }
+    let reply = answer(doors, registry, state, caller, method, segs, query, body)?;
+    if reply.status < 300 {
+        nils_registry::idempotency::record(
+            registry.store(),
+            principal,
+            key,
+            &digest,
+            i64::from(reply.status),
+            &reply.body,
+        )
+        .map_err(|e| Reply::error(500, e.to_string()))?;
+    }
+    Ok(reply)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn answer(
     doors: &Doors,
     registry: &mut Registry,
     state: &mut AskState,
