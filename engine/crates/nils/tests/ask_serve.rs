@@ -143,9 +143,26 @@ impl Server {
         (status, json)
     }
 
+    /// The server exits on its own once it has served the count the test
+    /// started it with; a count that is wrong must fail fast, never hang.
     fn finish(mut self) {
-        let status = self.child.wait().unwrap();
-        assert!(status.success(), "nils serve exited {status}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            match self.child.try_wait().unwrap() {
+                Some(status) => {
+                    assert!(status.success(), "nils serve exited {status}");
+                    return;
+                }
+                None if std::time::Instant::now() > deadline => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    panic!(
+                        "nils serve still waiting for requests after 20 s: the test's request count is wrong"
+                    );
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
     }
 }
 
@@ -467,4 +484,311 @@ fn the_job_path_queues_an_ask_run_and_a_worker_runs_it() {
     let v: serde_json::Value = serde_json::from_str(&shown).unwrap();
     assert_eq!(v["truncated"], false, "{v}");
     assert!(v["handle"].as_i64().unwrap() > 0);
+}
+
+/// A subject grain document that projects an identifier: what only an
+/// operator may run, on either path.
+fn identified(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ast_version": 1,
+        "name": name,
+        "scheme": "default",
+        "params": {"cohorts": {"type": "list", "value": ["ms-cohort-a", "ms-cohort-b"]}},
+        "sets": {
+            "scope": {"grain": "cohort", "where": [["in", {}, ["field", {}, "name"], ["param", {}, "cohorts"]]]},
+            "people": {"grain": "subject", "of": "scope"}
+        },
+        "keep": ["people"],
+        "out": {"set": "people", "level": "record", "identifiers": ["patient-id"]}
+    })
+}
+
+/// The same population at record level with no identifier: a reader may
+/// run it, and gets the columns the reader's scope reaches.
+fn plain(name: &str) -> serde_json::Value {
+    let mut d = identified(name);
+    d["out"] = serde_json::json!({"set": "people", "level": "record"});
+    d
+}
+
+/// Wave 4c §6.1, gate fixture 2: the job path refuses what the synchronous
+/// door refuses, the job carries the caller's roles, and the worker runs it
+/// under them and records what it produced on the row.
+#[test]
+fn a_queued_job_runs_under_the_roles_the_door_recorded() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        4,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let ops = Some("an-operator-token-of-len");
+    // a reader queuing identifiers is refused before anything is queued
+    let (status, refused) = server.request(
+        "POST",
+        "/api/ask/jobs",
+        Some(&body(
+            serde_json::json!({"document": identified("reader-idents")}),
+        )),
+        reader,
+    );
+    assert_eq!(status, 403, "{refused}");
+    // a reader queuing a plain document is accepted, and the row records the roles
+    let (status, queued) = server.request(
+        "POST",
+        "/api/ask/jobs",
+        Some(&body(
+            serde_json::json!({"document": plain("reader-plain"), "name": "reader-plain"}),
+        )),
+        reader,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let reader_job = queued["job"].as_i64().unwrap();
+    let (status, shown) = server.request("GET", &format!("/api/jobs/{reader_job}"), None, ops);
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(
+        shown["args"]["roles"],
+        serde_json::json!(["reader"]),
+        "{shown}"
+    );
+    assert_eq!(shown["args"]["may_project_raw"], false);
+    // an operator queuing identifiers is accepted
+    let (status, queued) = server.request(
+        "POST",
+        "/api/ask/jobs",
+        Some(&body(
+            serde_json::json!({"document": identified("ops-idents"), "name": "ops-idents"}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let ops_job = queued["job"].as_i64().unwrap();
+    server.finish();
+    // the worker runs both, each under its own roles
+    run(&home, &["jobs", "work", "--once"], None);
+    run(&home, &["jobs", "work", "--once"], None);
+    let listed = run(&home, &["jobs", "list", "--all", "--json"], None);
+    let jobs: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let job = |id: i64| -> serde_json::Value {
+        jobs.as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no job {id} in {listed}"))
+    };
+    let r = job(reader_job);
+    assert_eq!(r["state"], "done", "{r}");
+    assert!(r["result"]["handle"].as_i64().unwrap() > 0, "{r}");
+    assert_eq!(
+        r["args"]["roles"],
+        serde_json::json!(["reader"]),
+        "the roles survive the claim: {r}"
+    );
+    let o = job(ops_job);
+    assert_eq!(o["state"], "done", "{o}");
+    assert!(o["result"]["handle"].as_i64().unwrap() > 0, "{o}");
+    // the reader's handle carries no class; the operator's carries both
+    let reader_handle = r["result"]["handle"].as_i64().unwrap();
+    let ops_handle = o["result"]["handle"].as_i64().unwrap();
+    let shown = run(
+        &home,
+        &[
+            "ask",
+            "handles",
+            "show",
+            "--handle",
+            &reader_handle.to_string(),
+            "--json",
+        ],
+        None,
+    );
+    let h: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(h["suppression"]["classes"], serde_json::json!([]), "{h}");
+    let shown = run(
+        &home,
+        &[
+            "ask",
+            "handles",
+            "show",
+            "--handle",
+            &ops_handle.to_string(),
+            "--json",
+        ],
+        None,
+    );
+    let h: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(
+        h["suppression"]["classes"],
+        serde_json::json!(["quasi_identifying", "sensitive"]),
+        "{h}"
+    );
+}
+
+/// Wave 4c §6.1, gate fixture 3: a handle is read within the caller's own
+/// scope, whoever produced it, and every page read is audited.
+#[test]
+fn a_handle_is_read_within_the_callers_scope_and_every_page_is_audited() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        8,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let ops = Some("an-operator-token-of-len");
+    let (status, ran) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(
+            serde_json::json!({"document": plain("ops-rows"), "name": "ops-rows"}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 200, "{ran}");
+    let ops_handle = ran["handle"].as_i64().unwrap();
+    // a reader is refused the operator's handle and its rows
+    let (status, refused) = server.request(
+        "GET",
+        &format!("/api/ask/handles/{ops_handle}"),
+        None,
+        reader,
+    );
+    assert_eq!(status, 403, "{refused}");
+    let (status, refused) = server.request(
+        "GET",
+        &format!("/api/ask/handles/{ops_handle}/rows?page=0"),
+        None,
+        reader,
+    );
+    assert_eq!(status, 403, "{refused}");
+    // the operator pages it, and the page read is audited with its purpose
+    let (status, page) = server.request(
+        "GET",
+        &format!("/api/ask/handles/{ops_handle}/rows?page=0&purpose=a%20look"),
+        None,
+        ops,
+    );
+    assert_eq!(status, 200, "{page}");
+    let (status, shown) =
+        server.request("GET", &format!("/api/ask/handles/{ops_handle}"), None, ops);
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(shown["reads"], 1, "{shown}");
+    // a reader's own run leaves a handle a reader may read
+    let (status, ran) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(
+            serde_json::json!({"document": plain("reader-rows"), "name": "reader-rows"}),
+        )),
+        reader,
+    );
+    assert_eq!(status, 200, "{ran}");
+    let reader_handle = ran["handle"].as_i64().unwrap();
+    let (status, page) = server.request(
+        "GET",
+        &format!("/api/ask/handles/{reader_handle}/rows?page=0"),
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{page}");
+    let (status, shown) = server.request(
+        "GET",
+        &format!("/api/ask/handles/{reader_handle}"),
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(shown["reads"], 1, "{shown}");
+    server.finish();
+    // an export from the command line is a read too
+    run(
+        &home,
+        &[
+            "ask",
+            "handles",
+            "export",
+            "--handle",
+            &reader_handle.to_string(),
+        ],
+        None,
+    );
+    let shown = run(
+        &home,
+        &[
+            "ask",
+            "handles",
+            "show",
+            "--handle",
+            &reader_handle.to_string(),
+            "--json",
+        ],
+        None,
+    );
+    let h: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(h["reads"], 2, "{h}");
+}
+
+/// Wave 4c §6.1, gate fixture 6: the event stream asks for the reader role
+/// and is capped, so open streams cannot wedge the other doors.
+#[test]
+fn event_streams_ask_for_the_reader_role_and_are_capped() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        4,
+        &[
+            "--event-streams",
+            "1",
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-roleless-token-of-len=guest@lab:",
+        ],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let (status, refused) =
+        server.request("GET", "/api/events", None, Some("a-roleless-token-of-len"));
+    assert_eq!(status, 403, "{refused}");
+    // one stream held open
+    let mut held = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    held.write_all(
+        b"GET /api/events HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer a-reader-token-of-length\r\n\r\n",
+    )
+    .unwrap();
+    let mut first = [0u8; 64];
+    let n = held.read(&mut first).unwrap();
+    assert!(n > 0);
+    // the second is refused with a typed reason, and the other doors answer
+    let (status, refused) = server.request("GET", "/api/events", None, reader);
+    assert_eq!(status, 503, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("event_streams_full"),
+        "{refused}"
+    );
+    let (status, caps) = server.request("GET", "/api/capabilities", None, reader);
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(caps["event_streams"], 1, "{caps}");
+    drop(held);
+    server.finish();
 }

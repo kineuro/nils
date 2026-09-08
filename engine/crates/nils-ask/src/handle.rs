@@ -625,6 +625,17 @@ pub fn prune(store: &mut Store, now: &str, keep_days: i64) -> Result<Pruned, Han
 /// Record that identifiers were projected through a handle (§9): who,
 /// which handle, which columns, how many rows, at which epoch; never a
 /// value.
+/// How many times a handle's rows were read or exported (Wave 4c §6.1).
+pub fn read_count(store: &mut Store, id: i64) -> Result<i64, HandleError> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT COUNT(*) FROM {} WHERE handle_id = {}",
+        store.qualified("handle_read_audit"),
+        d.param(1, Type::Int)
+    );
+    Ok(store.query(&sql, &[Param::Int(id)])?[0].int(0)?)
+}
+
 pub fn read_audit(
     store: &mut Store,
     principal: &str,

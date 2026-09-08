@@ -43,7 +43,7 @@ pub(crate) enum Role {
 }
 
 impl Role {
-    fn parse(text: &str) -> Option<Role> {
+    pub(crate) fn parse(text: &str) -> Option<Role> {
         Some(match text {
             "reader" => Role::Reader,
             "reviewer" => Role::Reviewer,
@@ -159,7 +159,13 @@ impl Auth {
                             }
                             (who, roles)
                         }
-                        None => (rest, EVERY_ROLE.to_vec()),
+                        None => {
+                            // Wave 4c §6.1: the shortest form is the widest one.
+                            eprintln!(
+                                "nils serve: the token for {rest} names no roles and therefore holds every role, admin included; a machine token that should hold less is written {rest}:reader,operator"
+                            );
+                            (rest, EVERY_ROLE.to_vec())
+                        }
                     };
                     let Some(p) = nils_registry::principal::Principal::parse(who) else {
                         return Err(usage(format!("{who} is not a principal, user@node")));
@@ -465,11 +471,28 @@ pub(crate) struct Doors {
     /// resource that metadata identifies.
     pub(crate) mcp_authorization_servers: Vec<String>,
     pub(crate) bound: String,
+    /// Wave 4c §6.5: the assistant installed beside this engine, if one is.
+    pub(crate) assist: Option<String>,
+    /// Wave 4c §6.1: the cap on open event streams, and how many are open;
+    /// every stream pins a worker for its life.
+    pub(crate) event_streams: usize,
+    streams_open: AtomicUsize,
 }
 
 pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     if !home.exists() {
         return Err(usage(format!("no registry in {}", home.dir().display())));
+    }
+    // Wave 4c §6.1: where an assistant is installed, the ask doors run as
+    // their own SELECT only role, which on Postgres is a DSN and not a
+    // session setting.
+    if args.assist.is_some() && args.ask_dsn.is_none() {
+        let registry = crate::open(home)?;
+        if format!("{:?}", registry.config().backend).to_lowercase() == "postgres" {
+            return Err(usage(
+                "--assist names an assistant, so the ask doors need their own SELECT only role on Postgres: pass --ask-dsn (Wave 4c section 6.1)",
+            ));
+        }
     }
     let auth = Auth::parse(&args)?;
     let server = tiny_http::Server::http(&args.bind)
@@ -509,6 +532,11 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         ask_pack: args.ask_pack.clone(),
         mcp_authorization_servers: args.mcp_authorization_server.clone(),
         bound: bound.clone(),
+        assist: args.assist.clone(),
+        event_streams: args
+            .event_streams
+            .unwrap_or_else(|| (args.workers / 2).max(1)),
+        streams_open: AtomicUsize::new(0),
     });
     let server = Arc::new(server);
     let limit = args.requests;
@@ -1139,6 +1167,8 @@ fn capabilities(
             "content_version": ask.model(doors, registry).map(|m| m.version).unwrap_or_default(),
         },
         "doors": doors_list,
+        "assist": doors.assist.as_ref().map(|u| serde_json::json!({ "url": u })),
+        "event_streams": doors.event_streams,
     })
 }
 
@@ -1199,10 +1229,50 @@ fn review_list(
 /// `GET /api/events`: server-sent events with the open jobs, every second,
 /// until the client goes away. Display plumbing only.
 fn events(doors: &Doors, registry: &mut Registry, request: Request) {
-    if let Err(reply) = doors.auth.caller(&request) {
-        let _ = respond(request, reply);
+    let caller = match doors.auth.caller(&request) {
+        Ok(c) => c,
+        Err(reply) => {
+            let _ = respond(request, reply);
+            return;
+        }
+    };
+    // Wave 4c §6.1: a door like any other, so it asks for the reader role;
+    // and capped well below the worker count, because an open stream pins
+    // a worker for its life and four tabs must not wedge every door.
+    if !caller.can(Role::Reader) {
+        let _ = respond(
+            request,
+            Reply::error(
+                403,
+                format!(
+                    "/api/events asks for the reader role; {} holds no role",
+                    caller.principal
+                ),
+            ),
+        );
         return;
     }
+    if doors.streams_open.fetch_add(1, Ordering::SeqCst) >= doors.event_streams {
+        doors.streams_open.fetch_sub(1, Ordering::SeqCst);
+        let _ = respond(
+            request,
+            Reply::error(
+                503,
+                format!(
+                    "event_streams_full: {} event streams are open, which is the cap; poll GET /api/jobs instead",
+                    doors.event_streams
+                ),
+            ),
+        );
+        return;
+    }
+    struct Open<'a>(&'a AtomicUsize);
+    impl Drop for Open<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    let _open = Open(&doors.streams_open);
     let mut writer = request.into_writer();
     let _ = writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n");
     let _ = writer.write_all(b"event: hello\ndata: {}\n\n");

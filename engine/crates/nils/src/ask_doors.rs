@@ -99,6 +99,55 @@ fn may_project_raw(caller: &Caller) -> bool {
     caller.can(Role::Operator)
 }
 
+/// The same scope from a role list alone, for the worker that runs a
+/// queued job under the roles the door recorded (Wave 4c §6.1).
+pub(crate) fn scope_of_roles(roles: &[Role]) -> Scope {
+    let mut classes = BTreeSet::new();
+    if roles.iter().any(|r| *r >= Role::Reviewer) {
+        classes.insert(Class::QuasiIdentifying);
+    }
+    if roles.iter().any(|r| *r >= Role::Operator) {
+        classes.insert(Class::Sensitive);
+    }
+    Scope {
+        federated: false,
+        classes,
+    }
+}
+
+pub(crate) fn may_project_raw_of_roles(roles: &[Role]) -> bool {
+    roles.iter().any(|r| *r >= Role::Operator)
+}
+
+/// Wave 4c §6.1: a handle's pages carry the classes the producing scope
+/// allowed, recorded on the handle; a caller whose own scope is narrower is
+/// refused, whoever produced it.
+fn handle_within_scope(h: &handle::Handle, scope: &Scope, id: i64) -> Result<(), Reply> {
+    let classes: BTreeSet<Class> =
+        serde_json::from_value(h.suppression["classes"].clone()).unwrap_or_default();
+    let beyond: Vec<String> = classes
+        .iter()
+        .filter(|c| !scope.classes.contains(c))
+        .map(|c| {
+            serde_json::to_value(c)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default()
+        })
+        .collect();
+    if beyond.is_empty() {
+        Ok(())
+    } else {
+        Err(Reply::error(
+            403,
+            format!(
+                "handle {id} holds {} fields, which this role's scope does not reach",
+                beyond.join(" and ")
+            ),
+        ))
+    }
+}
+
 fn scheme_of(registry: &mut Registry, ask: &Ask) -> Result<Scheme, Reply> {
     match &ask.scheme {
         None => Ok(Scheme::default()),
@@ -365,6 +414,14 @@ fn routed(
         }
         ["api", "ask", "jobs"] if post => {
             let (ask, id) = document_of(registry, &doc)?;
+            // Wave 4c §6.1: the job path refuses what the synchronous door
+            // refuses, before anything is queued.
+            if !ask.out.identifiers.is_empty() && !may_project_raw(caller) {
+                return Err(Reply::error(
+                    403,
+                    "identifiers are projected only by a role that may read them",
+                ));
+            }
             let id = match id {
                 Some(id) => id,
                 None => {
@@ -390,11 +447,17 @@ fn routed(
                 command.extend(["--pack-dir".into(), dir.display().to_string()]);
             }
             command.extend(["--pack".into(), doors.ask_pack.clone()]);
-            let job = nils_registry::job::enqueue(
+            // Wave 4c §6.1: the job carries the caller, so the worker runs
+            // it under these roles and never its own.
+            let job = nils_registry::job::enqueue_with(
                 registry.store(),
                 &command,
                 doc["name"].as_str(),
                 Some(principal),
+                json!({
+                    "roles": caller.roles.iter().map(|r| r.name()).collect::<Vec<_>>(),
+                    "may_project_raw": may_project_raw(caller),
+                }),
             )
             .map_err(job_err)?;
             Ok(Reply::accepted(
@@ -576,10 +639,15 @@ fn routed(
             let h = handle::get(registry.store(), id)
                 .map_err(|e| Reply::error(500, e.to_string()))?
                 .ok_or_else(|| Reply::error(404, format!("no handle {id}")))?;
+            handle_within_scope(&h, &scope, id)?;
             let pins = handle::pinned_by(registry.store(), id)
                 .map_err(|e| Reply::error(500, e.to_string()))?;
             let mut v = serde_json::to_value(&h).unwrap_or(Value::Null);
             v["pinned_by"] = json!(pins);
+            v["reads"] = json!(
+                handle::read_count(registry.store(), id)
+                    .map_err(|e| Reply::error(500, e.to_string()))?
+            );
             v["pages"] = json!(
                 handle::page_count(registry.store(), id)
                     .map_err(|e| Reply::error(500, e.to_string()))?
@@ -595,6 +663,7 @@ fn routed(
             let h = handle::get(registry.store(), id)
                 .map_err(|e| Reply::error(500, e.to_string()))?
                 .ok_or_else(|| Reply::error(404, format!("no handle {id}")))?;
+            handle_within_scope(&h, &scope, id)?;
             if !h.has_rows() {
                 return Err(Reply::error(404, HandleError::Expired(id).to_string()));
             }
@@ -603,6 +672,19 @@ fn routed(
             let rows = handle::page(registry.store(), id, page)
                 .map_err(|e| Reply::error(500, e.to_string()))?
                 .ok_or_else(|| Reply::error(404, format!("handle {id} has {pages} pages")))?;
+            // Wave 4c §6.1: every page read is audited, not only a reveal.
+            let epoch = registry.meta().epoch;
+            let columns: Vec<String> = h.columns.iter().map(|c| c.name.clone()).collect();
+            handle::read_audit(
+                registry.store(),
+                principal,
+                id,
+                &columns,
+                rows.len(),
+                query.get("purpose").map(String::as_str),
+                epoch,
+            )
+            .map_err(|e| Reply::error(500, e.to_string()))?;
             Ok(Reply::ok(
                 json!({"handle": id, "page": page, "pages": pages, "columns": h.columns, "rows": rows}),
             ))
