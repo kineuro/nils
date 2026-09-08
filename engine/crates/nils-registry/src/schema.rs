@@ -1439,6 +1439,21 @@ fn build_registry() -> Vec<Table> {
         )
         .index(&["handle_id"])
         .index(&["principal"]),
+        // Wave 4c §6.3: what a writing door answered under an idempotency
+        // key, per principal, for a day.
+        Table::new(
+            "idempotency",
+            vec![
+                col("id", Type::Id),
+                req("principal", Type::Text),
+                req("key", Type::Text),
+                req("body_digest", Type::Text),
+                req("status", Type::Int),
+                req("reply", Type::Json),
+                req("created_at", Type::Timestamp),
+            ],
+        )
+        .index(&["principal", "key"]),
         // Wave 4b §10: a document under authoring, addressed by handle so
         // `apply` never returns a document; `digest` covers the whole
         // canonical text (parameters bound) where `hash` is the core's.

@@ -967,3 +967,69 @@ fn a_ceiling_only_removes_roles_and_the_actor_is_recorded_on_what_it_touches() {
     let h: serde_json::Value = serde_json::from_str(&shown).unwrap();
     assert_eq!(h["actor"]["name"], "ask-help", "{h}");
 }
+
+/// Wave 4c §6.3, gate fixture 4: two identical calls under one key produce
+/// one handle and one answer, the second saying so; the same key with a
+/// different body is refused; a job is queued once.
+#[test]
+fn an_idempotency_key_makes_a_repeat_one_handle_and_one_answer() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        6,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let ops = Some("an-operator-token-of-len");
+    let keyed: &[(&str, &str)] = &[("Idempotency-Key", "call-0001")];
+    let doc = body(serde_json::json!({"document": plain("once"), "name": "once"}));
+    let (status, first) = server.request_with("POST", "/api/ask/run", Some(&doc), ops, keyed);
+    assert_eq!(status, 200, "{first}");
+    assert!(first["deduplicated"].is_null(), "{first}");
+    let (status, again) = server.request_with("POST", "/api/ask/run", Some(&doc), ops, keyed);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["deduplicated"], true, "{again}");
+    assert_eq!(again["handle"], first["handle"], "{again}");
+    // the same key with another body is a refusal, not a second run
+    let other = body(serde_json::json!({"document": plain("twice"), "name": "twice"}));
+    let (status, refused) = server.request_with("POST", "/api/ask/run", Some(&other), ops, keyed);
+    assert_eq!(status, 409, "{refused}");
+    // a job is queued once under its key
+    let job_key: &[(&str, &str)] = &[("Idempotency-Key", "call-0002")];
+    let (status, queued) = server.request_with("POST", "/api/ask/jobs", Some(&doc), ops, job_key);
+    assert_eq!(status, 202, "{queued}");
+    let (status, again) = server.request_with("POST", "/api/ask/jobs", Some(&doc), ops, job_key);
+    assert_eq!(status, 202, "{again}");
+    assert_eq!(again["job"], queued["job"], "{again}");
+    assert_eq!(again["deduplicated"], true, "{again}");
+    // the capabilities say which doors take the key
+    let (status, caps) = server.request("GET", "/api/capabilities", None, ops);
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(caps["idempotency"]["hours"], 24, "{caps}");
+    server.finish();
+    // one handle named once, one job queued
+    let listed = run(&home, &["ask", "handles", "list", "--json"], None);
+    let handles: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let named: Vec<&serde_json::Value> = handles["handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|h| h["name"] == "once")
+        .collect();
+    assert_eq!(named.len(), 1, "{listed}");
+    let jobs = run(&home, &["jobs", "list", "--all", "--json"], None);
+    let jobs: serde_json::Value = serde_json::from_str(&jobs).unwrap();
+    assert_eq!(
+        jobs.as_array()
+            .unwrap()
+            .iter()
+            .filter(|j| j["state"] == "queued")
+            .count(),
+        1,
+        "{jobs}"
+    );
+}

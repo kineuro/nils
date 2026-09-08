@@ -21,6 +21,7 @@ pub mod clinical;
 pub mod day;
 pub mod dialect;
 pub mod home;
+pub mod idempotency;
 pub mod import;
 pub mod job;
 pub mod keys;

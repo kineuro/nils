@@ -240,6 +240,8 @@ pub(crate) struct Caller {
     pub(crate) actor: serde_json::Value,
     /// Wave 4c §5.5: the downgrade only ceiling the call named, if any.
     pub(crate) ceiling: Option<Role>,
+    /// Wave 4c §6.3: the `Idempotency-Key` the call carried, if any.
+    pub(crate) idempotency_key: Option<String>,
 }
 
 impl Caller {
@@ -445,6 +447,7 @@ impl Auth {
                 email: None,
                 actor: nils_registry::actor::absent(),
                 ceiling: None,
+                idempotency_key: None,
             },
             Auth::Token(tokens) => {
                 let token = bearer()?;
@@ -456,6 +459,7 @@ impl Auth {
                         email: None,
                         actor: nils_registry::actor::absent(),
                         ceiling: None,
+                        idempotency_key: None,
                     },
                     None => return Err(Reply::error(401, "the token names nobody")),
                 }
@@ -486,6 +490,7 @@ impl Auth {
                     email: known.email,
                     actor,
                     ceiling: None,
+                    idempotency_key: None,
                 }
             }
         };
@@ -528,6 +533,15 @@ fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
         caller.roles.retain(|r| *r <= role);
         caller.ceiling = Some(role);
         caller.actor["ceiling"] = serde_json::Value::String(role.name().to_string());
+    }
+    if let Some(key) = header("Idempotency-Key") {
+        if key.len() > 256 {
+            return Err(Reply::error(
+                400,
+                "Idempotency-Key is at most 256 characters",
+            ));
+        }
+        caller.idempotency_key = Some(key);
     }
     Ok(caller)
 }
@@ -1434,6 +1448,11 @@ fn capabilities(
         "doors": doors_list,
         "assist": doors.assist.as_ref().map(|u| serde_json::json!({ "url": u })),
         "event_streams": doors.event_streams,
+        "idempotency": {
+            "header": "Idempotency-Key",
+            "doors": crate::ask_doors::IDEMPOTENT_DOORS,
+            "hours": nils_registry::idempotency::KEEP_HOURS,
+        },
     })
 }
 

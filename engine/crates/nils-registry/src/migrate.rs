@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 33;
+pub const SCHEMA_VERSION: i64 = 34;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +185,10 @@ pub static MIGRATIONS: &[Migration] = &[
     Migration {
         version: 33,
         apply: an_act_names_its_actor,
+    },
+    Migration {
+        version: 34,
+        apply: a_writing_door_takes_an_idempotency_key,
     },
 ];
 
@@ -436,6 +440,14 @@ fn an_act_names_its_actor(store: &mut Store, kind: Kind) -> Result<(), Error> {
     add_columns(store, "audit", &["actor"])?;
     add_columns(store, "handle", &["actor"])?;
     add_columns(store, "decision", &["actor_detail"])
+}
+
+/// Wave 4c §6.3: a writing door remembers what it answered under a key.
+fn a_writing_door_takes_an_idempotency_key(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["idempotency"])
 }
 
 /// Wave 4a §13.1: a release is the history of what left and is never
