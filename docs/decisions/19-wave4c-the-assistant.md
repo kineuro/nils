@@ -3,7 +3,7 @@
 Written 2026-09-08 from the study that 17 §5 required before Wave 4c could open
 (`studies/2026-09-08-wave4c-study/`: ten readers, five designs, three judges, the
 report and its twenty open questions, 9,188 lines in `results/`). Status:
-**proposed**, waiting for Nima's confirmation. The specification written from it
+**ratified 2026-09-08** (Nima: "19 §3 and §4 confirmed", with every permission for the wave: Asgard, its GPUs and memory, the mixed corpus in scratch, containers as needed; the commercial test key arrives in a file outside every repository). The specification written from it
 is `docs/specs/wave4c-the-assistant.md` in the public repository; this document is
 the record it cites.
 

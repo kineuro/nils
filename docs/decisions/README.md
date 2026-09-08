@@ -15,7 +15,7 @@ in `kineuro/nils`). Open on evidence only: the baseline measurement and the
 pack-format prototype (approved work), and on other people: Amsterdam's cluster and
 Vienna's answers. The name is NILS (D31, 2026-09-02). Wave 4b opened 2026-09-07
 ([18](18-wave4b-the-ask.md)) and closed 2026-09-08; the Wave 4c record
-([19](19-wave4c-the-assistant.md)) is proposed.
+([19](19-wave4c-the-assistant.md)) was ratified the same day and Wave 4c opened.
 
 This directory is the public copy of the record, which is kept in the private
 repository `kineuro/nils-design` and copied here after a scrub pass
@@ -55,7 +55,7 @@ listed in [SCRUB.md](SCRUB.md). Nothing that was left out changes a decision.
 | [16-v0-capability-audit.md](16-v0-capability-audit.md) | Every package of v0's engine backend walked, capability by capability, against v1's status: done, partial, missing, dropped or planned. Written 2026-09-04 after the Wave 3 draft proved to rest on a partial reading. Names four capabilities no wave owns, the largest being identity from the path and study-date repair, which together block digesting the legacy MS data |
 | [17-wave4-reframed.md](17-wave4-reframed.md) | The 2026-09-06 reframing of Wave 4 into three waves: the engine completes (4a), the question (4b), the assistant (4c); Nima's rulings R1 to R8 |
 | [18-wave4b-the-ask.md](18-wave4b-the-ask.md) | The 2026-09-07 record of the Wave 4b study: nine rulings D32 to D40, amendments C39 to C42, Nima's eighteen answers, and the C17/C18 clause walk |
-| [19-wave4c-the-assistant.md](19-wave4c-the-assistant.md) | The 2026-09-08 record of the Wave 4c study: Nima's rulings R9 to R11, the twenty open questions answered, decisions D41 to D51, amendments C43 to C47, the design in one page and the wave of four sections; proposed, waiting for confirmation |
+| [19-wave4c-the-assistant.md](19-wave4c-the-assistant.md) | The 2026-09-08 record of the Wave 4c study: Nima's rulings R9 to R11, the twenty open questions answered, decisions D41 to D51, amendments C43 to C47, the design in one page and the wave of four sections; ratified 2026-09-08 |
 
 ## Decision register
 
@@ -131,7 +131,7 @@ amended by C35 and C36. Ratified with them: the license (10), the repository res
 R1 to R9 and the freeze F1 (15 §5), the six-week agent pilot and the 90-day
 transcript default (15 §1), and D27's defaults of k = 5 and 10. Two questions for
 Vienna and Amsterdam are listed in 14 §7 and gate nothing before Wave 7. D31, the
-name, was decided by Nima later the same day (15 §10). D41 to D51 and C43 to C47 were proposed by the Wave 4c record ([19](19-wave4c-the-assistant.md), 2026-09-08) and wait for Nima's confirmation. Next ids: C48 and D52.
+name, was decided by Nima later the same day (15 §10). D41 to D51 and C43 to C47 were proposed by the Wave 4c record ([19](19-wave4c-the-assistant.md), 2026-09-08) and ratified the same day. Next ids: C48 and D52.
 
 ## Where this came from
 
