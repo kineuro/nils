@@ -12,7 +12,9 @@ use nils_registry::session::Scheme;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ast::{AlgOp, Arg, Ask, Clause, Dir, IntSpec, Policy, Set, Src, Tie, WindowSpec};
+use crate::ast::{
+    AlgOp, Arg, Ask, Clause, Dir, IntSpec, Policy, SchemeRef, Set, Src, Tie, WindowSpec,
+};
 use crate::validate::{Names, Scope};
 
 /// What describe says.
@@ -527,5 +529,238 @@ pub fn describe(
         mechanisms,
         disclosure,
         answer,
+    }
+}
+
+/// Wave 4c §6.4: the six silent decisions of an answer, and two more, in
+/// the same object as the number. The corpus corrected the assistant
+/// twenty-two times for a decision the question never stated; every one
+/// of them is a field here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Declaration {
+    pub grain: String,
+    pub session_scheme: SchemeNamed,
+    pub membership: String,
+    pub key_namespace: String,
+    pub pick_rule: String,
+    pub denominator: String,
+    pub disclosure: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SchemeNamed {
+    pub name: String,
+    pub digest: String,
+}
+
+/// The declaration of a document's answer, pure over the desugared
+/// document and its description.
+pub fn declaration(
+    ask: &Ask,
+    description: &Description,
+    scheme_digest: &str,
+    truncated: bool,
+) -> Declaration {
+    let out_set = ask.sets.get(&ask.out.set);
+    let grain = out_set
+        .map(|s| s.grain.name().to_string())
+        .unwrap_or_default();
+    let name = match &ask.scheme {
+        None => "default".to_string(),
+        Some(SchemeRef::Name(n)) => n.clone(),
+        Some(SchemeRef::Inline(_)) => "inline".to_string(),
+    };
+    let membership = match out_set {
+        Some(set) if !set.has.is_empty() => set
+            .has
+            .iter()
+            .map(|h| {
+                let min = h.min.as_ref().map(int_text).unwrap_or_else(|| "1".into());
+                match &h.max {
+                    Some(max) => format!(
+                        "in {} at least {min} and at most {} times",
+                        h.set,
+                        int_text(max)
+                    ),
+                    None => format!("in {} at least {min} times", h.set),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; and "),
+        Some(set) if set.algebra.is_some() => {
+            let a = set.algebra.as_ref().expect("checked");
+            format!(
+                "{} of {}",
+                format!("{:?}", a.op).to_lowercase(),
+                a.sets.join(", ")
+            )
+        }
+        Some(set) => match (&set.of, &set.from) {
+            (Some(of), _) => format!("every member reached through {of}"),
+            (None, Some(_)) => "every member of the source it starts from".to_string(),
+            (None, None) => "the whole grain".to_string(),
+        },
+        None => String::new(),
+    };
+    let key_namespace = if ask.out.identifiers.is_empty() {
+        "the registry's pseudonymous key".to_string()
+    } else {
+        format!(
+            "{}, projected raw and audited",
+            ask.out.identifiers.join(", ")
+        )
+    };
+    let mut picks: Vec<String> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack: Vec<&str> = vec![ask.out.set.as_str()];
+    while let Some(name) = stack.pop() {
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        if let Some(set) = ask.sets.get(name) {
+            if let Some(p) = &set.pick {
+                let by =
+                    p.by.iter()
+                        .map(|o| format!("{} {}", clause_text(&o.0), dir_name(o.1)))
+                        .collect::<Vec<_>>()
+                        .join(", then ");
+                picks.push(format!(
+                    "{name}: one per {} by {by}{}",
+                    p.per.name(),
+                    p.ties
+                        .as_ref()
+                        .map(|t| format!(", ties {t:?}").to_lowercase())
+                        .unwrap_or_default()
+                ));
+            }
+            stack.extend(set.reads());
+        }
+    }
+    let pick_rule = if picks.is_empty() {
+        "none: every row of the set".to_string()
+    } else {
+        picks.join("; ")
+    };
+    let denominator = if description.denominators.is_empty() {
+        "none: a count over the set".to_string()
+    } else {
+        description
+            .denominators
+            .iter()
+            .map(|(n, s)| format!("{n} over {s}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    Declaration {
+        grain,
+        session_scheme: SchemeNamed {
+            name,
+            digest: scheme_digest.to_string(),
+        },
+        membership,
+        key_namespace,
+        pick_rule,
+        denominator,
+        disclosure: description.disclosure.clone(),
+        truncated,
+    }
+}
+
+/// Wave 4c §6.4: one node of a document, described so that a chip label,
+/// a model's tool output and an audit line are the same string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Node {
+    pub display_name: String,
+    pub long_display_name: String,
+    pub flags: serde_json::Value,
+}
+
+/// A node is a set, or one entry of a set's `where`, `has`, `near`,
+/// `attach`, its `pick`, or one of the answer's `columns`.
+pub fn node(ask: &Ask, set: &str, part: &str, index: usize) -> Option<Node> {
+    let s = ask.sets.get(set)?;
+    let flags = |op: Option<&str>| serde_json::json!({"set": set, "part": part, "index": index, "op": op, "grain": s.grain.name()});
+    let sentence = set_sentence(set, s);
+    Some(match part {
+        "set" => Node {
+            display_name: set.to_string(),
+            long_display_name: sentence,
+            flags: flags(None),
+        },
+        "where" => {
+            let c = s.where_.get(index)?;
+            let text = clause_text(c);
+            Node {
+                display_name: text.clone(),
+                long_display_name: format!("{set}: where {text}"),
+                flags: flags(Some(c.op.as_str())),
+            }
+        }
+        "has" => {
+            let h = s.has.get(index)?;
+            let text = format!(
+                "has {} at least {}",
+                h.set,
+                h.min.as_ref().map(int_text).unwrap_or_else(|| "1".into())
+            );
+            Node {
+                display_name: text.clone(),
+                long_display_name: format!("{set}: {text}"),
+                flags: flags(Some("has")),
+            }
+        }
+        "near" => {
+            let n = s.near.get(index)?;
+            let text = format!("near {} as {}", n.set, n.as_);
+            Node {
+                display_name: text.clone(),
+                long_display_name: format!("{set}: {text}"),
+                flags: flags(Some("near")),
+            }
+        }
+        "attach" => {
+            let a = s.attach.get(index)?;
+            let text = format!("attach {} as {}", a.set, a.as_);
+            Node {
+                display_name: text.clone(),
+                long_display_name: format!("{set}: {text}"),
+                flags: flags(Some("attach")),
+            }
+        }
+        "pick" => {
+            let p = s.pick.as_ref()?;
+            let by =
+                p.by.iter()
+                    .map(|o| format!("{} {}", clause_text(&o.0), dir_name(o.1)))
+                    .collect::<Vec<_>>()
+                    .join(", then ");
+            let text = format!("pick one per {} by {by}", p.per.name());
+            Node {
+                display_name: text.clone(),
+                long_display_name: format!("{set}: {text}"),
+                flags: flags(Some("pick")),
+            }
+        }
+        "columns" => {
+            if ask.out.set != set {
+                return None;
+            }
+            let c = ask.out.columns.get(index)?;
+            let text = clause_text(c);
+            Node {
+                display_name: text.clone(),
+                long_display_name: format!("{set}: column {text}"),
+                flags: flags(Some(c.op.as_str())),
+            }
+        }
+        _ => return None,
+    })
+}
+
+fn dir_name(d: Dir) -> &'static str {
+    match d {
+        Dir::Asc => "asc",
+        Dir::Desc => "desc",
     }
 }

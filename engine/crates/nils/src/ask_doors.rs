@@ -435,6 +435,20 @@ fn answer(
         ["api", "ask", "run"] if post => {
             let (ask, _) = document_of(registry, &doc)?;
             let scheme = scheme_of(registry, &ask)?;
+            // Wave 4c §6.4: the declaration block travels with the answer.
+            let described = affordance::describe(
+                &ask,
+                &Setting {
+                    names: catalog,
+                    scope: &scope,
+                    scheme: &scheme,
+                    principal,
+                    bounds,
+                    values_cap: caps.options_values as usize,
+                },
+            )
+            .ok();
+            let asked = ask.clone();
             let out = run::run(
                 registry,
                 Request {
@@ -466,11 +480,15 @@ fn answer(
                 .map(|r| Value::Array(r.0.iter().map(handle::cell_json).collect()))
                 .collect();
             let n = out.answer.rows.len();
+            let declaration = described.map(|d| {
+                nils_ask::describe::declaration(&asked, &d, &scheme.digest(), out.answer.truncated)
+            });
             Ok(Reply::ok(json!({
                 "handle": out.handle.id,
                 "hash": out.hash,
                 "grain": out.handle.grain,
                 "row_count": n,
+                "declaration": declaration,
                 "content_hash": out.handle.content_hash,
                 "truncated": out.answer.truncated,
                 "columns": out.answer.columns,
@@ -536,6 +554,117 @@ fn answer(
             .map_err(job_err)?;
             Ok(Reply::accepted(
                 json!({"job": job, "document": id, "state": "queued"}),
+            ))
+        }
+        ["api", "ask", "guide"] if get => {
+            // Wave 4c §6.4: one source for what a caller is told, on both
+            // transports: the pack's grounding and examples, the schema
+            // digest, the doors' policy and the caps in force.
+            let model = state.model(doors, registry);
+            let schema_digest = state.catalog.as_ref().map(|(_, c)| c.schema_digest.clone());
+            Ok(Reply::ok(json!({
+                "grounding": model.as_ref().map(|m| m.grounding.clone()).unwrap_or_default(),
+                "examples": model.as_ref().map(|m| m.examples.iter().map(|e| json!({"question": e.question, "document": e.document, "note": e.note})).collect::<Vec<_>>()).unwrap_or_default(),
+                "content_version": model.as_ref().map(|m| m.version.clone()),
+                "schema_digest": schema_digest,
+                "policy": DOORS,
+                "caps": caps,
+            })))
+        }
+        ["api", "ask", "draft"] if post => {
+            // Wave 4c §6.4: authored text in, add only repair, a diagnosis,
+            // a stored document when it validates. Words stay outside.
+            let text = doc["text"]
+                .as_str()
+                .ok_or_else(|| Reply::error(400, "text: the document, as YAML or JSON"))?;
+            let scheme = Scheme::default();
+            let s = Setting {
+                names: catalog,
+                scope: &scope,
+                scheme: &scheme,
+                principal,
+                bounds,
+                values_cap: caps.options_values as usize,
+            };
+            let drafted =
+                affordance::draft(registry, text, &s, Some(reader)).map_err(affordance_err)?;
+            Ok(Reply::ok(
+                serde_json::to_value(drafted).unwrap_or(Value::Null),
+            ))
+        }
+        ["api", "ask", "diff"] if post => {
+            // Wave 4c §6.4: one diff over the canonical form. Two documents,
+            // two handles, or one of each.
+            let side = |which: &str| -> Result<Value, Reply> {
+                let v = &doc[which];
+                if !v.is_object() {
+                    return Err(Reply::error(
+                        400,
+                        format!("{which}: {{document}}, {{document_id}} or {{handle}}"),
+                    ));
+                }
+                Ok(v.clone())
+            };
+            let a = side("a")?;
+            let b = side("b")?;
+            let mut handle_of = |v: &Value| -> Result<Option<handle::Handle>, Reply> {
+                let Some(id) = v["handle"].as_i64() else {
+                    return Ok(None);
+                };
+                let h = handle::get(registry.store(), id)
+                    .map_err(|e| Reply::error(500, e.to_string()))?
+                    .ok_or_else(|| Reply::error(404, format!("no handle {id}")))?;
+                handle_within_scope(&h, &scope, id)?;
+                Ok(Some(h))
+            };
+            let ha = handle_of(&a)?;
+            let hb = handle_of(&b)?;
+            match (ha, hb) {
+                (Some(x), Some(y)) => Ok(Reply::ok(nils_ask::diff::handles(&x, &y))),
+                (x, y) => {
+                    let mut ask_of = |v: &Value, h: Option<handle::Handle>| -> Result<Ask, Reply> {
+                        match h {
+                            Some(h) => h.ask.ok_or_else(|| {
+                                Reply::error(409, format!("handle {} keeps no document", h.id))
+                            }),
+                            None => Ok(document_of(registry, v)?.0),
+                        }
+                    };
+                    let da = ask_of(&a, x)?;
+                    let db = ask_of(&b, y)?;
+                    Ok(Reply::ok(
+                        serde_json::to_value(nils_ask::diff::documents(&da, &db))
+                            .unwrap_or(Value::Null),
+                    ))
+                }
+            }
+        }
+        ["api", "ask", "catalog", level, field, "values"] if get => {
+            // Wave 4c §6.4: the value sampler, under the caller's scope.
+            if !nils_ask::validate::levels().contains(level) {
+                return Err(Reply::error(
+                    404,
+                    format!("{level} is not a level of the catalog"),
+                ));
+            }
+            let scheme = Scheme::default();
+            let s = Setting {
+                names: catalog,
+                scope: &scope,
+                scheme: &scheme,
+                principal,
+                bounds,
+                values_cap: caps.options_values as usize,
+            };
+            let cap = query
+                .get("limit")
+                .and_then(|l| l.parse::<usize>().ok())
+                .unwrap_or(caps.options_values as usize)
+                .clamp(1, caps.options_values as usize);
+            let sample = affordance::values(registry, level, field, &s, cap, Some(reader))
+                .map_err(affordance_err)?;
+            Ok(Reply::ok(
+                serde_json::to_value(sample).unwrap_or(Value::Null),
             ))
         }
         ["api", "ask", "explain"] if post => {
@@ -629,7 +758,12 @@ fn answer(
                 .min(caps.page_rows_max);
             let p = affordance::preview(registry, &ask, rows, &s, Some(reader))
                 .map_err(affordance_err)?;
-            Ok(Reply::ok(serde_json::to_value(p).unwrap_or(Value::Null)))
+            let declaration = affordance::describe(&ask, &s)
+                .ok()
+                .map(|d| nils_ask::describe::declaration(&ask, &d, &scheme.digest(), p.truncated));
+            let mut v = serde_json::to_value(p).unwrap_or(Value::Null);
+            v["declaration"] = json!(declaration);
+            Ok(Reply::ok(v))
         }
         ["api", "ask", "describe"] if post => {
             let (ask, _) = document_of(registry, &doc)?;
@@ -642,8 +776,24 @@ fn answer(
                 bounds,
                 values_cap: caps.options_values as usize,
             };
+            // Wave 4c §6.4: one node, so a chip label, a model's tool output
+            // and an audit line are one string.
+            if let Some(node) = doc.get("node").filter(|n| n.is_object()) {
+                let set = node["set"].as_str().unwrap_or_default();
+                let part = node["part"].as_str().unwrap_or("set");
+                let index = node["index"].as_u64().unwrap_or(0) as usize;
+                let found = nils_ask::describe::node(&ask, set, part, index).ok_or_else(|| {
+                    Reply::error(404, format!("no node {part}[{index}] in set {set}"))
+                })?;
+                return Ok(Reply::ok(
+                    serde_json::to_value(found).unwrap_or(Value::Null),
+                ));
+            }
             let d = affordance::describe(&ask, &s).map_err(affordance_err)?;
-            Ok(Reply::ok(serde_json::to_value(d).unwrap_or(Value::Null)))
+            let declaration = nils_ask::describe::declaration(&ask, &d, &scheme.digest(), false);
+            let mut v = serde_json::to_value(d).unwrap_or(Value::Null);
+            v["declaration"] = json!(declaration);
+            Ok(Reply::ok(v))
         }
         ["api", "ask", "documents"] if post => {
             let (ask, _) = document_of(registry, &doc)?;
@@ -859,6 +1009,10 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/ask/schema",
     "GET /api/ask/catalog",
     "GET /api/ask/catalog/{level}",
+    "GET /api/ask/catalog/{level}/{field}/values",
+    "GET /api/ask/guide",
+    "POST /api/ask/draft",
+    "POST /api/ask/diff",
     "POST /api/ask/validate",
     "POST /api/ask/run",
     "POST /api/ask/jobs",

@@ -70,6 +70,11 @@ pub const OPERATIONS: &[&str] = &[
     "handle",
     "rows",
     "selections",
+    // Wave 4c §6.4: the guide, the draft, and the long path.
+    "guide",
+    "draft",
+    "job",
+    "job_status",
 ];
 
 pub fn load(f: &File) -> R<Model> {

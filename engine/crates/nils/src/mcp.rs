@@ -135,6 +135,36 @@ fn input_schema(operation: &str) -> Value {
                 "offset": {"type": "integer", "description": "Where in that page to start; an answer says next_offset while rows remain"},
             },
         }),
+        "guide" => json!({
+            "type": "object",
+            "properties": {},
+            "description": "Read this first: the grounding rules, the worked examples, the schema digest, the doors and the caps in force",
+        }),
+        "draft" => json!({
+            "type": "object",
+            "required": ["text"],
+            "properties": {
+                "text": {"type": "string", "description": "A whole document as YAML or JSON; structural repairs are applied and reported, and a valid document is stored"},
+            },
+        }),
+        "job" => json!({
+            "type": "object",
+            "properties": {
+                "document": document,
+                "document_id": document_id,
+                "name": {"type": "string"},
+                "keep": {"type": "boolean"},
+            },
+            "description": "Run a document as a job under your own roles when the synchronous run was truncated; poll it with job_status",
+        }),
+        "job_status" => json!({
+            "type": "object",
+            "required": ["job"],
+            "properties": {
+                "job": {"type": "integer", "description": "The id the job answer carried"},
+            },
+            "description": "The job's state and, once done, its result: the handle, the hash and the counts",
+        }),
         "selections" => json!({
             "type": "object",
             "properties": {"name": {"type": "string", "description": "The selection, as name or name@version"}},
@@ -203,6 +233,16 @@ fn call_of(operation: &str, args: &Value) -> Result<(String, String, Value), Str
                 format!("/api/ask/selections/{name}"),
                 Value::Null,
             )
+        }
+        "guide" => ("GET".into(), "/api/ask/guide".into(), Value::Null),
+        "draft" => {
+            let t = text("text").ok_or("text: the document, as YAML or JSON")?;
+            ("POST".into(), "/api/ask/draft".into(), json!({"text": t}))
+        }
+        "job" => ("POST".into(), "/api/ask/jobs".into(), body),
+        "job_status" => {
+            let id = int("job").ok_or("job: the id a job answer carried")?;
+            ("GET".into(), format!("/api/jobs/{id}"), Value::Null)
         }
         other => ("POST".into(), format!("/api/ask/{other}"), body),
     })

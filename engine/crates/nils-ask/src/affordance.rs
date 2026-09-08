@@ -23,7 +23,7 @@ use crate::handle::cell_json;
 use crate::moves::{self, MoveCall, MoveError, Options};
 use crate::repair::Repair;
 use crate::run::{RunError, Runner};
-use crate::validate::{Code, Issue, Names, Scope, validate};
+use crate::validate::{Class, Code, Issue, Names, Scope, validate};
 use crate::{Error as AskError, parse_repaired, prepare};
 
 #[derive(Debug)]
@@ -307,4 +307,174 @@ pub fn describe(ask: &Ask, s: &Setting<'_>) -> Result<Description, AffordanceErr
         s.scope,
         s.scheme,
     ))
+}
+
+/// Wave 4c §6.4: what a field holds, sampled under the caller's scope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sample {
+    pub level: String,
+    pub field: String,
+    /// `values` for a field whose values may be listed, `shapes` for one
+    /// whose values may not: free text, a quasi-identifying or a sensitive
+    /// field, where digits read 9, lower case a and upper case A.
+    pub kind: String,
+    pub items: Vec<(String, i64)>,
+    /// How many distinct values the field holds in all.
+    pub distinct: i64,
+    pub truncated: bool,
+}
+
+fn shape_of(v: &str) -> String {
+    let mut out = String::new();
+    for c in v.chars().take(40) {
+        out.push(match c {
+            '0'..='9' => '9',
+            'a'..='z' => 'a',
+            'A'..='Z' => 'A',
+            other => other,
+        });
+    }
+    if v.chars().count() > 40 {
+        out.push('~');
+    }
+    out
+}
+
+/// Sample the values of one field at one level, as a grouped count under
+/// the caller's own scope and bounds: values for a technical or clinical
+/// field, shapes for the rest, the distinct count either way.
+pub fn values(
+    registry: &mut Registry,
+    level: &str,
+    field: &str,
+    s: &Setting<'_>,
+    cap: usize,
+    reader: Option<&mut Store>,
+) -> Result<Sample, AffordanceError> {
+    let info = s.names.field(level, field).ok_or_else(|| {
+        AffordanceError::Message(format!("no field {field} at {level} in this scope"))
+    })?;
+    let shapes = matches!(
+        info.class,
+        Class::QuasiIdentifying | Class::Sensitive | Class::Identifying
+    );
+    let fetch = if shapes {
+        cap.saturating_mul(20).max(cap)
+    } else {
+        cap.saturating_add(1)
+    };
+    let text = serde_json::json!({
+        "ast_version": 1,
+        "name": format!("values of {level}.{field}"),
+        "sets": {
+            "v": {"grain": level},
+            "g": {"grain": "group", "group": {"of": "v", "by": [["field", {}, field]]}}
+        },
+        "keep": ["g"],
+        "out": {
+            "set": "g",
+            "level": "record",
+            "columns": [["field", {}, field], ["field", {}, "_rows"]],
+            "order": [[["field", {}, "_rows"], "desc"]],
+            "limit": fetch
+        }
+    });
+    let ask: Ask = crate::parse(&text.to_string())?;
+    let distinct_text = serde_json::json!({
+        "ast_version": 1,
+        "name": format!("distinct of {level}.{field}"),
+        "sets": {
+            "v": {"grain": level},
+            "g": {"grain": "group", "group": {"of": "v", "by": [["field", {}, field]]}}
+        },
+        "keep": ["g"],
+        "out": {"set": "g", "level": "count"}
+    });
+    let distinct_ask: Ask = crate::parse(&distinct_text.to_string())?;
+    let prepared = prepare(ask, s.names, s.scope)?;
+    let counted = prepare(distinct_ask, s.names, s.scope)?;
+    let mut runner = Runner {
+        names: s.names,
+        scheme: s.scheme,
+        bounds: s.bounds,
+        reader,
+    };
+    let (_, rows) = runner.answer(
+        registry,
+        &prepared.ask,
+        &prepared.validated,
+        None,
+        Some(fetch as u64),
+    )?;
+    let (_, count) = runner.answer(registry, &counted.ask, &counted.validated, None, None)?;
+    // the answer carries the grain's own keys first; the field and the
+    // count are found by name
+    let at = |name: &str| rows.columns.iter().position(|c| c == name);
+    let vi = at(field).unwrap_or(rows.columns.len().saturating_sub(2));
+    let ni = at("_rows").unwrap_or(rows.columns.len().saturating_sub(1));
+    let distinct = count
+        .rows
+        .first()
+        .and_then(|r| r.0.first())
+        .map(|c| match cell_json(c) {
+            serde_json::Value::Number(n) => n.as_i64().unwrap_or(0),
+            _ => 0,
+        })
+        .unwrap_or(0);
+    let mut items: Vec<(String, i64)> = Vec::new();
+    if shapes {
+        let mut by_shape: std::collections::BTreeMap<String, i64> =
+            std::collections::BTreeMap::new();
+        for r in &rows.rows {
+            let v =
+                r.0.get(vi)
+                    .map(cell_json)
+                    .unwrap_or(serde_json::Value::Null);
+            let n =
+                r.0.get(ni)
+                    .map(cell_json)
+                    .and_then(|c| c.as_i64())
+                    .unwrap_or(0);
+            let text = match v {
+                serde_json::Value::Null => "null".to_string(),
+                serde_json::Value::String(t) => shape_of(&t),
+                other => shape_of(&other.to_string()),
+            };
+            *by_shape.entry(text).or_insert(0) += n;
+        }
+        items = by_shape.into_iter().collect();
+        items.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    } else {
+        for r in rows.rows.iter().take(cap) {
+            let v =
+                r.0.get(vi)
+                    .map(cell_json)
+                    .unwrap_or(serde_json::Value::Null);
+            let n =
+                r.0.get(ni)
+                    .map(cell_json)
+                    .and_then(|c| c.as_i64())
+                    .unwrap_or(0);
+            let text = match v {
+                serde_json::Value::Null => "null".to_string(),
+                serde_json::Value::String(t) => t,
+                other => other.to_string(),
+            };
+            items.push((text, n));
+        }
+    }
+    let truncated = items.len() > cap || rows.rows.len() > cap || rows.truncated;
+    items.truncate(cap);
+    Ok(Sample {
+        level: level.to_string(),
+        field: field.to_string(),
+        kind: if shapes {
+            "shapes".into()
+        } else {
+            "values".into()
+        },
+        items,
+        distinct,
+        truncated,
+    })
 }

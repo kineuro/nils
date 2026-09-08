@@ -214,6 +214,7 @@ fn a_client_lists_the_opted_in_tools_pages_a_result_and_reads_a_refusal_as_text(
     assert_eq!(
         names,
         vec![
+            "nils_guide",
             "nils_catalog",
             "nils_validate",
             "nils_describe",
@@ -221,9 +222,22 @@ fn a_client_lists_the_opted_in_tools_pages_a_result_and_reads_a_refusal_as_text(
             "nils_apply",
             "nils_diagnose",
             "nils_preview",
+            "nils_draft",
             "nils_run",
+            "nils_job",
+            "nils_job_status",
             "nils_rows"
         ]
+    );
+    // Wave 4c §6.4: a tool only client obtains the worked examples
+    let guide = server.call("nils_guide", json!({}), None);
+    let text = guide["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("examples"), "{guide}");
+    assert!(
+        guide["structuredContent"]["examples"]
+            .as_array()
+            .is_some_and(|e| !e.is_empty()),
+        "{guide}"
     );
     // the engine serves these doors and the pack opted neither in
     assert!(!names.contains(&"nils_handle") && !names.contains(&"nils_selections"));
@@ -338,7 +352,7 @@ fn a_client_lists_the_opted_in_tools_pages_a_result_and_reads_a_refusal_as_text(
     assert_eq!(status, 200);
     let caps: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(caps["mcp"]["path"], "/mcp");
-    assert_eq!(caps["mcp"]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(caps["mcp"]["tools"].as_array().unwrap().len(), 13);
     assert_eq!(caps["mcp"]["content_version"], "1");
     server.stop();
 }
@@ -417,7 +431,7 @@ fn the_metadata_is_public_and_a_refusal_names_it() {
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
         Some("a-reader-token-of-length"),
     );
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 13);
 
     // no stream of its own, and a session ends politely
     let (status, _, _) = server.request("GET", "/mcp", None, Some("a-reader-token-of-length"));
