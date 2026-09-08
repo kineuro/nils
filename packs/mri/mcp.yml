@@ -8,6 +8,7 @@ mcp:
   version: "1"
 
   grounding:
+    - Two things a question may ask that this language does not say, and where the answer lives instead. A pair of sessions as one row (a baseline beside its follow-up, eight columns across both) is not a grain here; ask for the sessions at session grain with the ordinal and previous relations, and the pairing is a step in the notebook. Where a file sits on disk, and whether the registry and the disk agree, is not a question of the registry; nils status and nils digest answer it at the command line.
     - A question is a document, not SQL. Build it as sets, each with one declared grain, and let the engine compile it.
     - Never invent a field, an axis value, an event kind or a cohort name. Read the catalog first and use what it lists; what it does not list either does not exist or is not yours to see.
     - Validate before running. A refused document names the code, the path and the call that settles it, and that message is the next step.
@@ -18,6 +19,14 @@ mcp:
     - "When a set surprises you, diagnose it: the funnel names the stage where the subjects went."
 
   tools:
+    - operation: guide
+      name: nils_guide
+      description: >-
+        Read this before writing a document: the rules a document obeys, two
+        worked question-and-document pairs, the schema digest, the doors and
+        the caps in force. One call, once per conversation.
+      rules:
+        - Call it first, and again only when the schema digest in the catalog changed.
     - operation: catalog
       name: nils_catalog
       description: >-
@@ -75,6 +84,15 @@ mcp:
       description: >-
         Ten rows of the answer, or the count, by the document's level. Cheap
         enough to check a document reads as intended before running it.
+    - operation: draft
+      name: nils_draft
+      description: >-
+        A whole document as text when no move reaches what you need: the
+        structural repairs are applied and reported, the diagnosis says what
+        is wrong in domain words, and a valid document is stored and answered
+        by handle. Prefer options and apply; draft is the fallback.
+      rules:
+        - Never write SQL here or anywhere; a draft is the document, in YAML or JSON.
     - operation: run
       name: nils_run
       description: >-
@@ -83,6 +101,21 @@ mcp:
         Name the handle to keep its rows and its question together.
       rules:
         - Cite the handle in what you write; paste rows only when a person asked to see them.
+    - operation: job
+      name: nils_job
+      description: >-
+        Run a document as a job under your own roles when a run came back
+        truncated: the answer is a job id, and the result (the handle, the
+        hash, the counts) is read with nils_job_status once the job is done.
+      rules:
+        - A job runs under the roles you hold; it reaches nothing a run refused you.
+    - operation: job_status
+      name: nils_job_status
+      description: >-
+        The state of a job and, once it is done, its result: the handle to
+        page with nils_rows, the hash, the row count and whether a cap cut it.
+      rules:
+        - Poll rather than spin, since a job that is queued or running answers its state only.
     - operation: rows
       name: nils_rows
       description: >-

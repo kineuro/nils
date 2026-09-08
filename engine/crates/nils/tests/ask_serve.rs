@@ -197,7 +197,7 @@ fn the_ask_doors_run_a_document_to_a_handle_and_its_affordances_answer() {
     // the capabilities carry the ask block and the contract version
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
-    assert_eq!(caps["contracts"]["openapi"], "2");
+    assert_eq!(caps["contracts"]["openapi"], "3");
     let ask = &caps["ask"];
     assert_eq!(ask["caps"]["sync_max_rows"], 5000, "{ask}");
     assert_eq!(ask["move_kinds_cap"], 30);
@@ -215,9 +215,14 @@ fn the_ask_doors_run_a_document_to_a_handle_and_its_affordances_answer() {
         "{doors:?}"
     );
     // every door in the contract
-    let contract = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/openapi/v2/openapi.yaml"),
+    let version = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/openapi/VERSION"),
     )
+    .unwrap();
+    let contract = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../../contracts/openapi/v{}/openapi.yaml",
+        version.trim()
+    )))
     .unwrap();
     for door in &doors {
         let path = door.split_whitespace().nth(1).unwrap();
@@ -1032,4 +1037,148 @@ fn an_idempotency_key_makes_a_repeat_one_handle_and_one_answer() {
         1,
         "{jobs}"
     );
+}
+
+/// Wave 4c §6.4: the guide, the draft, the declaration on every answer,
+/// the node describe, the diff and the value sampler.
+#[test]
+fn the_ask_additions_answer_the_guide_the_draft_the_declaration_the_diff_and_the_sampler() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        9,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let ops = Some("an-operator-token-of-len");
+    // the guide
+    let (status, guide) = server.request("GET", "/api/ask/guide", None, ops);
+    assert_eq!(status, 200, "{guide}");
+    assert!(
+        guide["grounding"].as_array().is_some_and(|g| !g.is_empty()),
+        "{guide}"
+    );
+    assert!(
+        guide["examples"].as_array().is_some_and(|e| !e.is_empty()),
+        "{guide}"
+    );
+    assert!(guide["schema_digest"].is_string(), "{guide}");
+    // the draft
+    let text = serde_json::to_string(&plain("drafted")).unwrap();
+    let (status, drafted) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(serde_json::json!({"text": text}))),
+        ops,
+    );
+    assert_eq!(status, 200, "{drafted}");
+    assert!(drafted["document"].as_i64().is_some(), "{drafted}");
+    assert!(drafted["hash"].is_string(), "{drafted}");
+    // the declaration on a run
+    let (status, ran) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(
+            serde_json::json!({"document": plain("declared"), "name": "declared"}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 200, "{ran}");
+    let d = &ran["declaration"];
+    assert_eq!(d["grain"], "subject", "{ran}");
+    assert_eq!(d["session_scheme"]["name"], "default", "{ran}");
+    assert!(d["session_scheme"]["digest"].is_string(), "{ran}");
+    assert!(
+        d["key_namespace"]
+            .as_str()
+            .unwrap()
+            .contains("pseudonymous"),
+        "{ran}"
+    );
+    assert_eq!(d["truncated"], false, "{ran}");
+    let handle = ran["handle"].as_i64().unwrap();
+    // and on a preview
+    let (status, previewed) = server.request(
+        "POST",
+        "/api/ask/preview",
+        Some(&body(serde_json::json!({"document": plain("previewed")}))),
+        ops,
+    );
+    assert_eq!(status, 200, "{previewed}");
+    assert_eq!(previewed["declaration"]["grain"], "subject", "{previewed}");
+    // one node described
+    let (status, node) = server.request(
+        "POST",
+        "/api/ask/describe",
+        Some(&body(serde_json::json!({"document": plain("node"), "node": {"set": "people", "part": "set"}}))),
+        ops,
+    );
+    assert_eq!(status, 200, "{node}");
+    assert_eq!(node["display_name"], "people", "{node}");
+    assert!(
+        node["long_display_name"].as_str().unwrap().len() > 6,
+        "{node}"
+    );
+    // the whole description carries the declaration too
+    let (status, described) = server.request(
+        "POST",
+        "/api/ask/describe",
+        Some(&body(serde_json::json!({"document": plain("described")}))),
+        ops,
+    );
+    assert_eq!(status, 200, "{described}");
+    assert_eq!(described["declaration"]["grain"], "subject", "{described}");
+    // two documents differ set by set
+    let mut changed = plain("changed");
+    changed["sets"]["scope"]["where"] = serde_json::json!([
+        ["in", {}, ["field", {}, "name"], ["param", {}, "cohorts"]],
+        ["contains", {}, ["field", {}, "name"], "a"]
+    ]);
+    let (status, diff) = server.request(
+        "POST",
+        "/api/ask/diff",
+        Some(&body(
+            serde_json::json!({"a": {"document": plain("changed")}, "b": {"document": changed}}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 200, "{diff}");
+    assert_eq!(diff["same"], false, "{diff}");
+    let change = &diff["changes"][0];
+    assert_eq!(change["set"], "scope", "{diff}");
+    assert_eq!(change["part"], "where", "{diff}");
+    assert_eq!(change["kind"], "changed", "{diff}");
+    assert!(
+        diff["canonical_a"].is_string() && diff["canonical_b"].is_string(),
+        "{diff}"
+    );
+    // two handles compare by hash
+    let (status, same) = server.request(
+        "POST",
+        "/api/ask/diff",
+        Some(&body(
+            serde_json::json!({"a": {"handle": handle}, "b": {"handle": handle}}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 200, "{same}");
+    assert_eq!(same["same"], true, "{same}");
+    // the value sampler lists a declared field's values with counts
+    let (status, sample) = server.request("GET", "/api/ask/catalog/cohort/name/values", None, ops);
+    assert_eq!(status, 200, "{sample}");
+    assert_eq!(sample["kind"], "values", "{sample}");
+    assert!(sample["distinct"].as_i64().unwrap() >= 2, "{sample}");
+    assert!(
+        sample["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i[0] == "ms-cohort-a" && i[1].as_i64().unwrap() > 0),
+        "{sample}"
+    );
+    server.finish();
 }

@@ -11,6 +11,7 @@ pub mod ast;
 pub mod compile;
 pub mod describe;
 pub mod diagnose;
+pub mod diff;
 pub mod document;
 pub mod exec;
 pub mod handle;

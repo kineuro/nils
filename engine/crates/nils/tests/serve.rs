@@ -220,7 +220,7 @@ fn the_door_serves_what_the_command_line_has() {
     // C26: the capabilities name the contracts, the pack, the epoch.
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
-    assert_eq!(caps["contracts"]["openapi"], "2", "{caps}");
+    assert_eq!(caps["contracts"]["openapi"], "3", "{caps}");
     assert_eq!(caps["contracts"]["review_item"], "3", "{caps}");
     assert!(
         caps["packs"]
@@ -243,9 +243,14 @@ fn the_door_serves_what_the_command_line_has() {
     assert!(doors.contains(&"POST /api/review/{id}/apply"), "{doors:?}");
 
     // Every door the engine lists is in the contract document.
-    let text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/openapi/v2/openapi.yaml"),
+    let version = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/openapi/VERSION"),
     )
+    .unwrap();
+    let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../../contracts/openapi/v{}/openapi.yaml",
+        version.trim()
+    )))
     .unwrap();
     for door in &doors {
         let path = door.split_whitespace().nth(1).unwrap();

@@ -38,6 +38,9 @@ pub(crate) enum AskCommand {
     Run(AskRunArgs),
     /// Validate a document strictly, or repair it first, and print its hash
     Validate(AskValidateArgs),
+    /// Authored text with add only repair: the repairs, the diagnosis and,
+    /// when it validates, the stored document (Wave 4c section 6.4)
+    Draft(AskDraftArgs),
     /// Print the SQL a document compiles to, on either dialect or both
     Explain(AskExplainArgs),
     /// The typed moves a set offers, with their templates and fillers
@@ -63,6 +66,15 @@ pub(crate) enum AskCommand {
     /// The gate (Wave 4b section 13): every fixture of the repository
     /// against its canonical, on this registry's backend
     Gate(AskGateArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AskDraftArgs {
+    /// The text to draft from, YAML or JSON; `-` reads standard input
+    #[arg(long, value_name = "FILE")]
+    file: PathBuf,
+    #[command(flatten)]
+    at: Where,
 }
 
 #[derive(Debug, Args)]
@@ -352,6 +364,7 @@ pub(crate) fn ask_command(home: &Home, cmd: AskCommand) -> Result<(), Exit> {
     match cmd {
         AskCommand::Run(args) => ask_run(home, args),
         AskCommand::Validate(args) => validate(home, args),
+        AskCommand::Draft(args) => draft(home, args),
         AskCommand::Explain(args) => explain(home, args),
         AskCommand::Options(args) => options(home, args),
         AskCommand::Diagnose(args) => diagnose_cmd(home, args),
@@ -1504,5 +1517,61 @@ fn ask_time(home: &Home, args: AskTimeArgs) -> Result<(), Exit> {
         "shapes": shapes,
     });
     println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+    Ok(())
+}
+
+/// `nils ask draft`: the draft affordance, in process or at a door.
+fn draft(home: &Home, args: AskDraftArgs) -> Result<(), Exit> {
+    let text = if args.file.to_str() == Some("-") {
+        let mut t = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)
+            .map_err(|e| usage(format!("standard input: {e}")))?;
+        t
+    } else {
+        std::fs::read_to_string(&args.file)
+            .map_err(|e| usage(format!("{}: {e}", args.file.display())))?
+    };
+    let doc = match args.at.door()? {
+        Some(door) => door.post("/api/ask/draft", &json!({"text": text}))?,
+        None => {
+            let mut registry = open(home)?;
+            let dir = args
+                .at
+                .pack_dir
+                .clone()
+                .ok_or_else(|| usage("--pack-dir DIR, when drafting in process"))?;
+            let pack = load_pack(&dir, &args.at.pack)?;
+            let catalog = Catalog::build(&mut registry, &pack).map_err(|e| fail(e.to_string()))?;
+            let scope = scope();
+            let scheme = Scheme::default();
+            let s = nils_ask::affordance::Setting {
+                names: &catalog,
+                scope: &scope,
+                scheme: &scheme,
+                principal: &principal(),
+                bounds: bounds(),
+                values_cap: Caps::default().options_values as usize,
+            };
+            let d = nils_ask::affordance::draft(&mut registry, &text, &s, None)
+                .map_err(|e| fail(e.to_string()))?;
+            serde_json::to_value(d).unwrap_or_default()
+        }
+    };
+    if args.at.json {
+        print_json(&doc);
+        return Ok(());
+    }
+    match doc["document"].as_i64() {
+        Some(id) => println!(
+            "nils ask draft   document {id}   hash {}   {} repairs",
+            text_of(&doc["hash"]),
+            doc["repairs"].as_array().map_or(0, Vec::len)
+        ),
+        None => println!(
+            "nils ask draft   not valid   {} repairs   {} issues",
+            doc["repairs"].as_array().map_or(0, Vec::len),
+            doc["diagnosis"]["issues"].as_array().map_or(0, Vec::len)
+        ),
+    }
     Ok(())
 }

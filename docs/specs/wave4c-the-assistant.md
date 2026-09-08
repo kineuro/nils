@@ -514,10 +514,11 @@ Built to Wave 2 §10's names, which the code never implemented (C44):
 
 ### 6.7 The contracts (A7)
 
-Published at the end of the engine section, each in a titled pull request under
-the DCO: `openapi` v3 (every door above, `securitySchemes` and per-operation
-`security`, the three headers, the declaration block, the policy table),
-`review-item` v3 (the actor), `suite` v1 (§4.5), and `mcp` v1 (the operation
+Each in a titled pull request under the DCO: `openapi` v3 (every door of this
+section, the security scheme, the three headers, the declaration block, the
+policy table; published in A4, see the as-built note of §13), `review-item` v3
+(the actor; published in A2), and at the end of the engine section `suite` v1
+(§4.5) and `mcp` v1 (the operation
 vocabulary of sixteen, the input schema per operation, the result envelope, the
 paging contract, the policy fields). The desk and the assistant generate their
 clients from `openapi` v3; the desk warns on a minor mismatch and refuses only a
@@ -1245,6 +1246,37 @@ The wave closes when:
 | auto-commit | off for every station and kind |
 
 ## 13. Order of work
+
+**As built (A4, the ask additions; openapi contract v3, 2026-09-09).** The contract is bumped in this slice rather than in A7, because the engine's own test refuses to serve a door the published contract does not describe, and that rule is worth more than the plan's ordering: v3 is written once here with every door of §6.1 to §6.6, the slices after A4 serve what it describes, and A7 keeps `suite` v1 and `mcp` v1. The declaration block
+(`grain`, `session_scheme {name, digest}`, `membership`, `key_namespace`,
+`pick_rule`, `denominator`, `disclosure`, `truncated`) is computed pure over
+the desugared document from the description and rides on the answer of
+`run`, `preview` and `describe`; it is derived, not stored, so a job's result
+carries the handle and the desk reads the declaration from `describe` of the
+handle's document. `POST /api/ask/diff` takes `{a, b}` each a `document`, a
+`document_id` or a `handle`: two documents answer the structural diff (per
+set and part: added, removed, changed) with both canonical texts; two handles
+answer by content hash and refuse by name when either is truncated.
+`POST /api/ask/draft` and `nils ask draft --file` give the library's draft
+its door and verb. `GET /api/ask/guide` answers the pack's grounding and
+examples, the content version, the schema digest, the door list and the caps.
+`POST /api/ask/describe` takes an optional `node {set, part, index}` (part
+one of `set`, `where`, `has`, `near`, `attach`, `pick`, `columns`) and answers
+`display_name`, `long_display_name` and `flags`. The value sampler is
+`GET /api/ask/catalog/{level}/{field}/values`, a grouped count under the
+caller's scope: values with counts for a technical or clinical field, shapes
+(digits 9, lower a, upper A, cut at forty) for a quasi-identifying, sensitive
+or identifying one, the distinct count either way, capped by
+`options_values` or `?limit=`. `contains` and `starts_with` already existed
+in the language since Wave 4b (the gate's case-blind fixture), so §6.4's
+sixth item reduces to the two refusal sentences, which now open the pack's
+grounding: the pair of sessions as one row, and where a file sits on disk.
+The MCP door gains `guide`, `draft`, `job` and `job_status` in the closed
+operation list, and the pack opts all four in, `nils_guide` first, so the tool
+list is thirteen. Deferred from this slice: the automatic promotion of a
+prefix population to a saved selection, because `starts_with` on a name is
+already a clause and the subject key itself is not a filterable field; it
+waits for a real question that needs it.
 
 **As built (A3, idempotency, 2026-09-09).** `Idempotency-Key` (at most 256
 characters) rides on the caller like the two headers of A2 and is honoured on
