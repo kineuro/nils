@@ -203,10 +203,36 @@ rename or drop recorded, as the D32 ruling required.
 | C17: `ast_version` with on-read upgrade | the same | kept |
 | C17: repair pass with a fixed taxonomy | nineteen codes enumerated in spec §4.4 rule 14 | kept |
 
-## 6. What stays open
+## 6. Built and closed, 2026-09-08
 
-The cap numbers (measured in slice 9); whether guided decoding accepts the
-positional clause form; the span movement rate on the first ingest that keeps
+Every slice of §15 is merged into `kineuro/nils` main: the spec and the
+record (#63), the schema, the store and the synthetic registry (#64),
+sessions as a cache (#66), the ask itself (#67), the catalog with the
+comparability levels as pack data at pack contract v3 (#68), the compiler
+and the executor (#69), the relations (#70), handles and custody (#71),
+the affordances (#72), the doors and caps at OpenAPI contract v2 (#73),
+the command line (#74), the MCP door at pack contract v4 (#75) and the
+gate (#76).
+
+What the wave leaves behind, in the public repository: four crates
+(`nils-ask`, `nils-catalog`, `nils-session`, `nils-synth`), the ask doors
+and the MCP door on `nils serve`, `nils ask` with eleven verbs, two
+contract versions, and `gate/`, twenty one fixtures with their canonicals
+and their three outcomes, run by CI on SQLite and on Postgres on every
+pull request.
+
+Bars of §13.4 as they stand: 2, 3, 4 and 7 hold in CI through the gate and
+the command line's own tests; 5 (the leak test) and 6 (custody) hold in
+the engine tests; 8 holds through the SELECT only reader; 9 held from
+slice 2; 1 is this record's own walk, above; 10 is half measured, the
+synthetic half in §11.5 and the reference corpus half waiting on the
+private host.
+
+## 7. What stays open
+
+The cap numbers on the reference corpus (the synthetic half is measured
+and written into §11.5); whether guided decoding accepts the positional
+clause form; the span movement rate on the first ingest that keeps
 dateless studies; the app's repository name (17 §8); the web application's
-name (Q10); whether the move catalog stays under 30 kinds. Next ids: C43 and
-D41.
+name (Q10); whether the move catalog stays under 30 kinds, which slice 11
+holds at exactly 30 with a compile time assertion. Next ids: C43 and D41.
