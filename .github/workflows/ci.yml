@@ -112,7 +112,13 @@ jobs:
           nils --registry /tmp/gate-pg init --key k --backend postgres --schema gate
           nils --registry /tmp/gate-pg synth --seed 11 --subjects 48 > /dev/null
           nils --registry /tmp/gate-pg session rebuild > /dev/null
-          nils --registry /tmp/gate-pg ask gate --pack-dir ../packs
+          # Wave 4c section 6.8 fixture 1: the ask reader is a SELECT only
+          # role, and the gate measures that it cannot write.
+          psql "$NILS_DSN" -v ON_ERROR_STOP=1 -c "CREATE ROLE nils_reader LOGIN PASSWORD 'reader'" \
+            -c "GRANT USAGE ON SCHEMA gate TO nils_reader" \
+            -c "GRANT SELECT ON ALL TABLES IN SCHEMA gate TO nils_reader"
+          nils --registry /tmp/gate-pg ask gate --pack-dir ../packs \
+            --ask-dsn postgres://nils_reader:reader@localhost:5432/nils_test
         env:
           NILS_DSN: postgres://nils:nils@localhost:5432/nils_test
 

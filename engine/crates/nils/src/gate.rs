@@ -356,6 +356,7 @@ pub(crate) fn gate(
     given: Option<PathBuf>,
     write: bool,
     json_out: bool,
+    ask_dsn: Option<String>,
 ) -> Result<(), Exit> {
     let dir = gate_dir(given)?;
     let text = std::fs::read_to_string(dir.join("gate.yml"))
@@ -370,6 +371,7 @@ pub(crate) fn gate(
     let backend = format!("{:?}", registry.config().backend).to_lowercase();
 
     let mut ran: Vec<Ran> = Vec::new();
+    ran.push(write_refusal(&registry, ask_dsn.as_deref(), &backend)?);
     for f in &gate.fixtures {
         match f.outcome.as_str() {
             "passes" => {
@@ -500,4 +502,75 @@ pub(crate) fn gate(
         });
     }
     Ok(())
+}
+
+/// Wave 4c §6.8, fixture 1: the ask reader cannot write, measured against
+/// the live store rather than asserted. On SQLite the reader is the read
+/// only connection. On Postgres it is the DSN of the SELECT only role, and
+/// the fixture first tries to undo the session setting the fallback reader
+/// relies on, because a setting is not a privilege; without a DSN the
+/// fixture is deferred, since the role is a deployment's to create.
+fn write_refusal(
+    registry: &nils_registry::Registry,
+    ask_dsn: Option<&str>,
+    backend: &str,
+) -> Result<Ran, Exit> {
+    let name = "write-refusal".to_string();
+    let family = "custody".to_string();
+    if backend == "postgres" && ask_dsn.is_none() {
+        return Ok(Ran {
+            name,
+            family,
+            outcome: "deferred".into(),
+            ok: true,
+            hash: None,
+            rows: 0,
+            differs: Vec::new(),
+            note: Some("no --ask-dsn: the SELECT only role is a deployment's to create".into()),
+        });
+    }
+    let mut reader = registry
+        .open_ask_reader(ask_dsn)
+        .map_err(|e| fail(format!("the ask reader: {e}")))?;
+    if backend == "postgres" {
+        // A session setting is not a privilege: a real role survives this.
+        let _ = reader.batch("SET default_transaction_read_only = off");
+    }
+    let t = reader.qualified("handle_read_audit");
+    let statements = [
+        (
+            "INSERT",
+            format!(
+                "INSERT INTO {t} (principal, handle_id, read_at, columns, rows, epoch) VALUES ('gate', 0, '2026-01-01T00:00:00Z', '[]', 0, 0)"
+            ),
+        ),
+        ("UPDATE", format!("UPDATE {t} SET rows = 0 WHERE id = 0")),
+        ("DELETE", format!("DELETE FROM {t} WHERE id = 0")),
+        (
+            "CREATE",
+            "CREATE TABLE gate_write_refusal (id INTEGER)".to_string(),
+        ),
+        ("COPY", format!("COPY {t} TO '/dev/null'")),
+    ];
+    let mut differs = Vec::new();
+    for (verb, sql) in &statements {
+        if reader.batch(sql).is_ok() {
+            differs.push(format!("{verb} succeeded through the ask reader"));
+        }
+    }
+    let ok = differs.is_empty();
+    Ok(Ran {
+        name,
+        family,
+        outcome: "passes".into(),
+        ok,
+        hash: None,
+        rows: 0,
+        differs,
+        note: Some(if ok {
+            "INSERT, UPDATE, DELETE, CREATE and COPY all refused".into()
+        } else {
+            "the ask reader can write".into()
+        }),
+    })
 }

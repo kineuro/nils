@@ -267,6 +267,7 @@ fn build_registry() -> Vec<Table> {
                 col("finished_at", Type::Timestamp),
                 col("progress", Type::Json),
                 col("error", Type::Text),
+                col("result", Type::Json),
             ],
         )
         .index(&["state"]),

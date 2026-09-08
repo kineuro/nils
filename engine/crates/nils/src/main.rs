@@ -410,6 +410,15 @@ struct ServeArgs {
     /// Request handlers, each with a registry connection of its own
     #[arg(long, default_value = "4", value_name = "N")]
     workers: usize,
+    /// The cap on open event streams (Wave 4c section 6.1); half the
+    /// workers, at least one, when absent
+    #[arg(long, value_name = "N")]
+    event_streams: Option<usize>,
+    /// The assistant installed beside this engine, published under
+    /// capabilities.assist (Wave 4c section 6.5); on Postgres it needs
+    /// --ask-dsn
+    #[arg(long, value_name = "URL")]
+    assist: Option<String>,
     /// The pack directory the doors read packs from
     #[arg(long, value_name = "DIR")]
     pack_dir: Option<PathBuf>,
@@ -4698,6 +4707,23 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                 }
                 let argv = next.argv().unwrap_or_default();
                 println!("job {}: nils {}", next.id, argv.join(" "));
+                // Wave 4c section 6.1: the roles the door recorded reach
+                // the verb, which runs under them and never under the
+                // worker's own.
+                let roles = next.args["roles"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                let raw = if next.args["may_project_raw"].as_bool() == Some(true) {
+                    "1"
+                } else {
+                    "0"
+                };
                 // The queued command line names no registry; the worker's
                 // is the one it runs in.
                 let status = std::process::Command::new(
@@ -4708,6 +4734,8 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                 .args(&argv)
                 .env(job::ADOPT_VAR, next.id.to_string())
                 .env("NILS_PRINCIPAL", next.principal().unwrap_or(&actor()))
+                .env("NILS_JOB_ROLES", roles)
+                .env("NILS_JOB_RAW", raw)
                 .status();
                 // The verb adopted the row and finished it itself; the
                 // worker writes the outcome only when the verb did not.

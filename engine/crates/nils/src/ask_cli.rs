@@ -81,6 +81,10 @@ pub(crate) struct AskGateArgs {
     write: bool,
     #[arg(long)]
     json: bool,
+    /// The DSN of the ask doors' SELECT only role on Postgres, for the
+    /// write refusal fixture (Wave 4c section 6.8); deferred when absent
+    #[arg(long, value_name = "DSN")]
+    ask_dsn: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -363,6 +367,7 @@ pub(crate) fn ask_command(home: &Home, cmd: AskCommand) -> Result<(), Exit> {
             args.gate,
             args.write,
             args.json,
+            args.ask_dsn,
         ),
     }
 }
@@ -867,9 +872,12 @@ fn handles(home: &Home, cmd: HandlesCommand) -> Result<(), Exit> {
                         .map_err(|e| fail(e.to_string()))?;
                     let pages = handle::page_count(registry.store(), args.handle)
                         .map_err(|e| fail(e.to_string()))?;
+                    let reads = handle::read_count(registry.store(), args.handle)
+                        .map_err(|e| fail(e.to_string()))?;
                     let mut v = serde_json::to_value(&h).unwrap_or_default();
                     v["pinned_by"] = json!(pins);
                     v["pages"] = json!(pages);
+                    v["reads"] = json!(reads);
                     v
                 }
             };
@@ -993,7 +1001,21 @@ fn export(home: &Home, args: ExportArgs) -> Result<(), Exit> {
                     pages.push(rows);
                 }
             }
-            (h.columns.iter().map(|c| c.name.clone()).collect(), pages)
+            // Wave 4c §6.1: an export is a read, audited like a page.
+            let columns: Vec<String> = h.columns.iter().map(|c| c.name.clone()).collect();
+            let total: usize = pages.iter().map(Vec::len).sum();
+            let epoch = registry.meta().epoch;
+            handle::read_audit(
+                registry.store(),
+                &principal(),
+                args.handle,
+                &columns,
+                total,
+                Some("nils ask handles export"),
+                epoch,
+            )
+            .map_err(|e| fail(e.to_string()))?;
+            (columns, pages)
         }
     };
     let mut writer: Box<dyn std::io::Write> = match &args.out {
@@ -1250,7 +1272,26 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
         },
     )
     .map_err(|e| fail(e.to_string()))?;
-    let scope = scope();
+    // Wave 4c §6.1: under a claim a door queued, the roles the door
+    // recorded decide the scope and the projection, never the worker's own;
+    // from a terminal, the operator at the keyboard holds every class.
+    let queued_roles = std::env::var("NILS_JOB_ROLES")
+        .ok()
+        .filter(|r| !r.is_empty());
+    let (scope, may_project_raw) = match &queued_roles {
+        Some(list) => {
+            let roles: Vec<crate::serve::Role> = list
+                .split(',')
+                .filter_map(crate::serve::Role::parse)
+                .collect();
+            (
+                crate::ask_doors::scope_of_roles(&roles),
+                crate::ask_doors::may_project_raw_of_roles(&roles)
+                    && std::env::var("NILS_JOB_RAW").ok().as_deref() == Some("1"),
+            )
+        }
+        None => (scope(), true),
+    };
     let pack_version = pack.version.to_string();
     let node = job::hostname();
     let outcome = run::run(
@@ -1269,7 +1310,7 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
             keep: args.keep,
             after: None,
             limit: None,
-            may_project_raw: true,
+            may_project_raw,
             purpose: Some("nils ask run"),
             reader: None,
         },
@@ -1290,6 +1331,8 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
                 "drift": out.drift,
                 "job": job,
             });
+            // Wave 4c §6.1: the job row carries what it produced.
+            job::set_result(registry.store(), job, &doc).map_err(|e| fail(e.to_string()))?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
             } else {

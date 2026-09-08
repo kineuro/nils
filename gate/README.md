@@ -53,3 +53,22 @@ Each canonical carries the answer's content hash, its columns, its rows and
 the funnel's last stage per named set, so a fixture that drifts says both
 what came back and where the subjects went. A hash alone is not an oracle,
 which is why the rows are here.
+
+## The Wave 4c fixtures
+
+Wave 4c (`docs/specs/wave4c-the-assistant.md` §6.8) adds eight fixtures, each of
+which failed on `main` when it was written. They live in two places, because
+the gate runs in one process and some of them are about a door:
+
+- **In the gate itself**: `write-refusal`, always first in the run. It opens the
+  ask reader (the read only connection on SQLite; on Postgres the SELECT only
+  role named by `--ask-dsn`, after trying to undo the session setting the
+  fallback reader relies on) and asserts that `INSERT`, `UPDATE`, `DELETE`,
+  `CREATE` and `COPY` all fail. On Postgres without `--ask-dsn` it is
+  deferred, because the role is a deployment's to create; CI creates one.
+- **In the engine's own tests** (`engine/crates/nils/tests/ask_serve.rs`,
+  named after the fixture they are): a reader queuing a document that projects
+  identifiers is refused and a queued job runs under the roles the door
+  recorded; a reader paging an operator's handle is refused and every page read
+  is audited; event streams ask for the reader role and are capped. The
+  idempotency, ceiling, sampler and schema fixtures join with their slices.

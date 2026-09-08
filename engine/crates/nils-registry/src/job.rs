@@ -234,6 +234,16 @@ pub fn claim(store: &mut Store, claim: &Claim<'_>) -> Result<i64, Error> {
     }
     args["argv"] = std::env::args().collect::<Vec<String>>().into();
     if let Some(id) = adopted {
+        // Wave 4c §6.1: what the queue recorded beside the command line
+        // (the principal, the roles, the projection flag) survives the
+        // adoption; the verb's own args are laid over it.
+        if let Some(queued) = show(store, id)?.and_then(|j| j.args.as_object().cloned()) {
+            for (k, v) in queued {
+                if args.get(&k).is_none() {
+                    args[k] = v;
+                }
+            }
+        }
         // The row a worker took for this verb: it becomes this run.
         let n = store.update_by_id(
             job_t,
@@ -340,6 +350,18 @@ pub fn finish(
     Ok(())
 }
 
+/// Record what a job produced (Wave 4c §6.1): the handle, the hash, the
+/// counts, never rows. Written by the verb on the row it adopted.
+pub fn set_result(store: &mut Store, job_id: i64, result: &serde_json::Value) -> Result<(), Error> {
+    store.update_by_id(
+        table("job"),
+        &[("result", Param::from(result.to_string()))],
+        "id",
+        job_id,
+    )?;
+    Ok(())
+}
+
 /// Ask a job to stop. A running one becomes `cancelling` and stops at its
 /// next heartbeat; a queued one is cancelled outright. Returns the state
 /// it is in now, or nothing if there is no such job.
@@ -390,6 +412,8 @@ pub struct Job {
     pub progress: Option<serde_json::Value>,
     pub error: Option<String>,
     pub args: serde_json::Value,
+    /// What the job produced, as the verb recorded it (Wave 4c §6.1).
+    pub result: Option<serde_json::Value>,
 }
 
 impl Job {
@@ -421,18 +445,20 @@ impl Job {
             "progress": self.progress,
             "error": self.error,
             "args": self.args,
+            "result": self.result,
         })
     }
 }
 
 fn select_columns(store: &Store) -> String {
     format!(
-        "id, kind, name, state, pid, host, {}, {}, {}, {}, error, {}",
+        "id, kind, name, state, pid, host, {}, {}, {}, {}, error, {}, {}",
         stamp(store, "started_at"),
         stamp(store, "heartbeat_at"),
         stamp(store, "finished_at"),
         stamp(store, "progress"),
         stamp(store, "args"),
+        stamp(store, "result"),
     )
 }
 
@@ -457,6 +483,7 @@ fn job_of(r: &crate::store::Row) -> Result<Job, Error> {
         progress: json(9)?,
         error: r.opt_text(10)?.map(str::to_string),
         args: json(11)?.unwrap_or(serde_json::Value::Null),
+        result: json(12)?,
     })
 }
 
@@ -499,6 +526,19 @@ pub fn enqueue(
     name: Option<&str>,
     principal: Option<&str>,
 ) -> Result<i64, Error> {
+    enqueue_with(store, argv, name, principal, serde_json::Value::Null)
+}
+
+/// `enqueue` with more recorded beside the principal: the roles the door
+/// saw and whether it may project raw identifiers (Wave 4c §6.1), so the
+/// worker runs the verb under the caller's reach and never its own.
+pub fn enqueue_with(
+    store: &mut Store,
+    argv: &[String],
+    name: Option<&str>,
+    principal: Option<&str>,
+    extra: serde_json::Value,
+) -> Result<i64, Error> {
     let Some(verb) = argv.first() else {
         return Err(Error::Message(
             "nothing to queue: the command line is empty".into(),
@@ -506,7 +546,12 @@ pub fn enqueue(
     };
     let now = now_iso();
     // Wave 4a §9.2: who asked, carried to the verb the worker runs.
-    let args = serde_json::json!({ "argv": argv, "principal": principal });
+    let mut args = serde_json::json!({ "argv": argv, "principal": principal });
+    if let Some(more) = extra.as_object() {
+        for (k, v) in more {
+            args[k] = v.clone();
+        }
+    }
     let rows = store.insert(
         &Insert::new(
             table("job"),

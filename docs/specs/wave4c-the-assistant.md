@@ -1246,6 +1246,34 @@ The wave closes when:
 
 ## 13. Order of work
 
+**As built (A1, the repairs, 2026-09-08).** Step 0 ran first and all four
+checks confirmed the study: a reader read an operator's handle (200, no audit
+row), a reader's queued job ran under the worker's own scope and left a
+subject-grain handle, five event streams hung the capabilities door, and the
+provider's managed entitlements mapping emits `roles` as a list of plain
+entitlement names, so `--oidc-groups-claim roles` needs no engine change. The
+repairs, as landed: the jobs door refuses `out.identifiers` below operator
+before anything is queued and records `roles` and `may_project_raw` in the job's
+args, the worker hands them to the verb as `NILS_JOB_ROLES` and `NILS_JOB_RAW`,
+the verb builds its scope and its projection from them and never from its own
+when they are present, the adopted row keeps what the queue recorded, and the
+verb writes its result (handle, hash, counts, truncation) on the row, read back
+under `result` by `GET /api/jobs/{id}` (migration 32, `job.result`). A handle
+read (`GET /api/ask/handles/{id}`, `/rows`, and the command line's export) is
+refused with 403 when the classes recorded on the handle exceed the caller's
+scope, whoever produced it; every page read and every export writes a
+`handle_read_audit` row with the optional `purpose` from the query, and the
+handle answers `reads`. `GET /api/events` asks for the reader role and is capped
+by `--event-streams` (half the workers, at least one; a refusal is 503 with a
+reason starting `event_streams_full`), published as `capabilities.event_streams`.
+A token with no role suffix warns at start. `--assist URL` publishes
+`capabilities.assist` and on Postgres refuses to start without `--ask-dsn`. The
+gate runs `write-refusal` first (`nils ask gate --ask-dsn`, deferred on Postgres
+without a DSN; CI creates a SELECT only role and passes it), and the three door
+fixtures are the engine's own tests. Contract deltas collected for `openapi` v3
+(A7): `result` on the job, `reads` and the 403 on the handle doors, `purpose` on
+the rows query, `assist` and `event_streams` in capabilities, the jobs door's 403.
+
 Step 0, before any code: the four live checks. Page an operator's handle as a
 reader. Queue a job as a reader with identifiers projected. Open five event streams
 against a four-worker engine and call another door. Mint one token against the
