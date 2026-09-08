@@ -14,7 +14,8 @@ the public repository ([11](11-order.md), `docs/specs/wave1-parse-and-digest.md`
 in `kineuro/nils`). Open on evidence only: the baseline measurement and the
 pack-format prototype (approved work), and on other people: Amsterdam's cluster and
 Vienna's answers. The name is NILS (D31, 2026-09-02). Wave 4b opened 2026-09-07
-([18](18-wave4b-the-ask.md)).
+([18](18-wave4b-the-ask.md)) and closed 2026-09-08; the Wave 4c record
+([19](19-wave4c-the-assistant.md)) is proposed.
 
 This directory is the public copy of the record, which is kept in the private
 repository `kineuro/nils-design` and copied here after a scrub pass
@@ -54,6 +55,7 @@ listed in [SCRUB.md](SCRUB.md). Nothing that was left out changes a decision.
 | [16-v0-capability-audit.md](16-v0-capability-audit.md) | Every package of v0's engine backend walked, capability by capability, against v1's status: done, partial, missing, dropped or planned. Written 2026-09-04 after the Wave 3 draft proved to rest on a partial reading. Names four capabilities no wave owns, the largest being identity from the path and study-date repair, which together block digesting the legacy MS data |
 | [17-wave4-reframed.md](17-wave4-reframed.md) | The 2026-09-06 reframing of Wave 4 into three waves: the engine completes (4a), the question (4b), the assistant (4c); Nima's rulings R1 to R8 |
 | [18-wave4b-the-ask.md](18-wave4b-the-ask.md) | The 2026-09-07 record of the Wave 4b study: nine rulings D32 to D40, amendments C39 to C42, Nima's eighteen answers, and the C17/C18 clause walk |
+| [19-wave4c-the-assistant.md](19-wave4c-the-assistant.md) | The 2026-09-08 record of the Wave 4c study: Nima's rulings R9 to R11, the twenty open questions answered, decisions D41 to D51, amendments C43 to C47, the design in one page and the wave of four sections; proposed, waiting for confirmation |
 
 ## Decision register
 
@@ -108,6 +110,17 @@ docs carry it in place.
 | D38 | `nils-session`, `nils-catalog`, `nils-ask`, `nils-synth`; the app edits and never executes; the MCP door in the engine | 18 §2 | Q10, Q17 |
 | D39 | Identity is external, optional and admitted per app; a roleless token is refused | 18 §2 | Q8, Q9 |
 | D40 | The gate is N fixtures with a row oracle and three outcomes on a synthetic registry | 18 §2 | Q12, Q13 |
+| D41 | Our own stations reach the engine over the HTTP doors through one seam; MCP is the third-party surface; the pack's model-facing content is the one source on either path | 19 §4 | C43 (amends D11, C22, C23) |
+| D42 | Identity is three desk modes (`off`, `local`, `oidc`) over one engine path with a trust list; one application in the pilot; five entitlements; the desk is the only origin | 19 §4 | C46 (amends D8) |
+| D43 | Every station call carries an actor and a downgrade-only role ceiling, recorded by the engine | 19 §4 | |
+| D44 | Disclosure into a model follows locality: local sees what the person sees, remote only opened purposes, identifiers never | 19 §4 | R9 |
+| D45 | Kvasir: the only holder of a model credential, requirement in and grant out, admission before listing, counts-only ledger, pi-messages outward, one allocated card | 19 §4 | R9, R11, C47 |
+| D46 | The desk: one Rust binary, the one origin, a capabilities-driven shell, one write path, an app registry | 19 §4 | |
+| D47 | A station is a manifest, a brief, a result schema and a fixture set; document apply permitted, decision apply forbidden | 19 §4 | |
+| D48 | The bench before the first station: scrubbed and rebased corpus, closed taxonomy, held-out split, recorded provider, no judge | 19 §4 | C25 |
+| D49 | The two disclosure defects are repaired before any 4c feature; idempotency on the writing doors | 19 §4 | |
+| D50 | Restore is a printed command; backup is a job; ingest verbs run against pre-registered locations | 19 §4 | |
+| D51 | No cell suppression inside the site; the egress policy is the control | 19 §4 | D27 stands for federation |
 
 D13 to D19 were proposed by the review ([12](12-review-devils-advocate.md)
 §5), D20 to D24 by the query and agent study
@@ -118,7 +131,7 @@ amended by C35 and C36. Ratified with them: the license (10), the repository res
 R1 to R9 and the freeze F1 (15 §5), the six-week agent pilot and the 90-day
 transcript default (15 §1), and D27's defaults of k = 5 and 10. Two questions for
 Vienna and Amsterdam are listed in 14 §7 and gate nothing before Wave 7. D31, the
-name, was decided by Nima later the same day (15 §10). Next ids: C43 and D41.
+name, was decided by Nima later the same day (15 §10). D41 to D51 and C43 to C47 were proposed by the Wave 4c record ([19](19-wave4c-the-assistant.md), 2026-09-08) and wait for Nima's confirmation. Next ids: C48 and D52.
 
 ## Where this came from
 
