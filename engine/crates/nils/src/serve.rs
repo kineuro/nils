@@ -743,6 +743,11 @@ pub(crate) struct Doors {
     /// every stream pins a worker for its life.
     pub(crate) event_streams: usize,
     streams_open: AtomicUsize,
+    /// Wave 4c §6.5: the ingest locations the deployment registered, by
+    /// name; a job that walks a tree names one of these, never a path.
+    pub(crate) ingest_roots: std::collections::BTreeMap<String, PathBuf>,
+    /// Wave 4c §6.5: where the backup job writes.
+    pub(crate) backup_dir: Option<PathBuf>,
 }
 
 pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
@@ -803,6 +808,24 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
             .event_streams
             .unwrap_or_else(|| (args.workers / 2).max(1)),
         streams_open: AtomicUsize::new(0),
+        ingest_roots: {
+            let mut roots = std::collections::BTreeMap::new();
+            for r in &args.ingest_root {
+                let Some((name, path)) = r.split_once('=') else {
+                    return Err(usage(format!("{r} is not NAME=PATH")));
+                };
+                let path = PathBuf::from(path.trim());
+                if !path.is_absolute() || !path.is_dir() {
+                    return Err(usage(format!(
+                        "--ingest-root {name}: {} is not an absolute directory",
+                        path.display()
+                    )));
+                }
+                roots.insert(name.trim().to_string(), path);
+            }
+            roots
+        },
+        backup_dir: args.backup_dir.clone(),
     });
     let server = Arc::new(server);
     let limit = args.requests;
@@ -1010,6 +1033,7 @@ fn routed(
     // reader, which every caller holds.
     let needs = match (method.as_str(), segs.as_slice()) {
         ("GET", ["api", "audit"]) | ("GET", ["api", "custody"]) => Role::Admin,
+        ("GET", ["api", "quarantine"]) => Role::Reviewer,
         ("POST", ["api", "jobs"])
         | ("POST", ["api", "jobs", _, "cancel"])
         | ("POST", ["api", "releases"])
@@ -1048,6 +1072,45 @@ fn routed(
     match segs.as_slice() {
         ["api", "capabilities"] if get => Ok(Reply::ok(capabilities(doors, registry, caller, ask))),
         ["api", "status"] if get => Ok(Reply::ok(crate::status_doc(&doors.home, registry)?)),
+        ["api", "packs"] if get => {
+            let dir = doors
+                .pack_dir
+                .clone()
+                .ok_or_else(|| Reply::error(404, "no pack directory"))?;
+            Ok(Reply::ok(crate::packs_doc(&dir)?))
+        }
+        ["api", "packs", name] if get => {
+            let dir = doors
+                .pack_dir
+                .clone()
+                .ok_or_else(|| Reply::error(404, "no pack directory"))?;
+            match crate::pack_doc(&dir, name)? {
+                Some(doc) => Ok(Reply::ok(doc)),
+                None => Err(Reply::error(404, format!("no pack named {name}"))),
+            }
+        }
+        ["api", "batches"] if get => {
+            let limit = query
+                .get("limit")
+                .and_then(|l| l.parse::<usize>().ok())
+                .unwrap_or(50);
+            Ok(Reply::ok(crate::batches_doc(registry, limit)?))
+        }
+        ["api", "batches", _] if get => {
+            let id = id_at(2)?;
+            match crate::batch_doc(registry, id)? {
+                Some(doc) => Ok(Reply::ok(doc)),
+                None => Err(Reply::error(404, format!("no batch {id}"))),
+            }
+        }
+        ["api", "quarantine"] if get => {
+            let batch = query.get("batch").and_then(|b| b.parse::<i64>().ok());
+            Ok(Reply::ok(crate::quarantine_doc(
+                registry,
+                batch,
+                query.get("class").map(String::as_str),
+            )?))
+        }
         ["api", "custody"] if get => Ok(Reply::ok(crate::custody_doc(&doors.home, registry)?)),
         ["api", "audit"] if get => {
             let rows = nils_registry::audit::list(
@@ -1100,6 +1163,10 @@ fn routed(
                     ),
                 ));
             }
+            // Wave 4c §6.5: a tree is named by a registered location, as
+            // @name/relative, never by a path a caller composes; backup and
+            // verify go to the deployment's backup directory.
+            let command = located(doors, command)?;
             let id = nils_registry::job::enqueue(
                 registry.store(),
                 &command,
@@ -1350,6 +1417,9 @@ fn routed(
 /// The verbs a queued command line may start with: what the door runs
 /// through a worker, and nothing that reads a file the caller names.
 const QUEUEABLE: &[&str] = &[
+    // Wave 4c §6.5: an archive as a job, and its check; never a restore.
+    "backup",
+    "verify",
     "digest",
     "fingerprint",
     "classify",
@@ -1414,6 +1484,11 @@ fn capabilities(
         "POST /api/decisions/{id}/commit",
         "POST /api/decisions/{id}/withdraw",
         "GET /api/events",
+        "GET /api/packs",
+        "GET /api/packs/{name}",
+        "GET /api/batches",
+        "GET /api/batches/{id}",
+        "GET /api/quarantine",
     ]
     .iter()
     .chain(crate::ask_doors::DOORS.iter())
@@ -1448,6 +1523,9 @@ fn capabilities(
         "doors": doors_list,
         "assist": doors.assist.as_ref().map(|u| serde_json::json!({ "url": u })),
         "event_streams": doors.event_streams,
+        "ingest_roots": doors.ingest_roots.keys().collect::<Vec<_>>(),
+        "backup_dir": doors.backup_dir.is_some(),
+        "policy": policy(),
         "idempotency": {
             "header": "Idempotency-Key",
             "doors": crate::ask_doors::IDEMPOTENT_DOORS,
@@ -1577,4 +1655,602 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request) {
         }
         std::thread::sleep(Duration::from_secs(1));
     }
+}
+
+/// Wave 4c §6.5: the paths a queued command may name. `@name/relative`
+/// resolves against a registered ingest root and may not escape it; an
+/// absolute path, or one with a parent step, is refused. `backup` takes
+/// the deployment's directory; `verify NAME` checks one archive in it.
+fn located(doors: &Doors, command: Vec<String>) -> Result<Vec<String>, Reply> {
+    let verb = command[0].as_str();
+    match verb {
+        "backup" => {
+            let dir = doors.backup_dir.as_ref().ok_or_else(|| {
+                Reply::error(
+                    409,
+                    "no backup directory: start nils serve with --backup-dir",
+                )
+            })?;
+            return Ok(vec![
+                "backup".into(),
+                "--dir".into(),
+                dir.display().to_string(),
+            ]);
+        }
+        "verify" => {
+            let dir = doors.backup_dir.as_ref().ok_or_else(|| {
+                Reply::error(
+                    409,
+                    "no backup directory: start nils serve with --backup-dir",
+                )
+            })?;
+            let name = command.get(1).ok_or_else(|| {
+                Reply::error(400, "verify NAME: an archive in the backup directory")
+            })?;
+            if name.contains('/') || name.contains("..") || name.is_empty() {
+                return Err(Reply::error(400, "verify NAME: a name, not a path"));
+            }
+            return Ok(vec!["verify".into(), dir.join(name).display().to_string()]);
+        }
+        _ => {}
+    }
+    let takes_a_tree =
+        verb == "digest" || (verb == "linkage" && command.get(1).is_some_and(|c| c == "import"));
+    let mut out = Vec::with_capacity(command.len());
+    for arg in command {
+        if let Some(rest) = arg.strip_prefix('@') {
+            let (name, rel) = rest.split_once('/').unwrap_or((rest, ""));
+            let root = doors.ingest_roots.get(name).ok_or_else(|| {
+                Reply::error(
+                    400,
+                    format!(
+                        "@{name} is not a registered ingest location; those are {}",
+                        doors
+                            .ingest_roots
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )
+            })?;
+            if rel.split('/').any(|seg| seg == "..") || rel.starts_with('/') {
+                return Err(Reply::error(
+                    400,
+                    format!("@{name}/{rel} steps outside its location"),
+                ));
+            }
+            let path = if rel.is_empty() {
+                root.clone()
+            } else {
+                root.join(rel)
+            };
+            out.push(path.display().to_string());
+        } else if takes_a_tree
+            && !arg.starts_with('-')
+            && (arg.starts_with('/') || arg.contains(".."))
+        {
+            return Err(Reply::error(
+                400,
+                format!(
+                    "{arg}: a path a caller composes is refused; name a registered ingest location as @name/relative"
+                ),
+            ));
+        } else {
+            out.push(arg);
+        }
+    }
+    Ok(out)
+}
+
+/// Wave 4c §6.5: one row per door: the role it needs, whether it writes,
+/// whether it takes an idempotency key, its cost class, its result cap and
+/// a human label in the present and the past tense. The desk's controls,
+/// the MCP door's gating and the audit line derive from this table.
+pub(crate) fn policy() -> Vec<serde_json::Value> {
+    let row = |door: &str,
+               role: &str,
+               writes: bool,
+               idem: bool,
+               cost: &str,
+               cap: &str,
+               now: &str,
+               then: &str| {
+        serde_json::json!({
+            "door": door, "role": role, "writes": writes, "idempotent": idem,
+            "cost": cost, "result_cap": cap, "label": {"present": now, "past": then},
+        })
+    };
+    vec![
+        row(
+            "GET /api/capabilities",
+            "reader",
+            false,
+            false,
+            "free",
+            "one document",
+            "Reading what the engine speaks",
+            "Read what the engine speaks",
+        ),
+        row(
+            "GET /api/status",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading the status",
+            "Read the status",
+        ),
+        row(
+            "GET /api/custody",
+            "admin",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading custody",
+            "Read custody",
+        ),
+        row(
+            "GET /api/audit",
+            "admin",
+            false,
+            false,
+            "bounded",
+            "limit rows",
+            "Reading the audit log",
+            "Read the audit log",
+        ),
+        row(
+            "GET /api/jobs",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "limit rows",
+            "Listing jobs",
+            "Listed jobs",
+        ),
+        row(
+            "POST /api/jobs",
+            "operator",
+            true,
+            false,
+            "job",
+            "one id",
+            "Queuing a job",
+            "Queued a job",
+        ),
+        row(
+            "GET /api/jobs/{id}",
+            "reader",
+            false,
+            false,
+            "free",
+            "one document",
+            "Reading a job",
+            "Read a job",
+        ),
+        row(
+            "POST /api/jobs/{id}/cancel",
+            "operator",
+            true,
+            true,
+            "free",
+            "one state",
+            "Cancelling a job",
+            "Cancelled a job",
+        ),
+        row(
+            "GET /api/releases",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "limit rows",
+            "Listing releases",
+            "Listed releases",
+        ),
+        row(
+            "POST /api/releases",
+            "operator",
+            true,
+            false,
+            "job",
+            "one id",
+            "Cutting a release",
+            "Cut a release",
+        ),
+        row(
+            "POST /api/handovers",
+            "operator",
+            true,
+            false,
+            "job",
+            "one id",
+            "Handing over",
+            "Handed over",
+        ),
+        row(
+            "POST /api/select",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "sync_max_rows",
+            "Previewing a selection",
+            "Previewed a selection",
+        ),
+        row(
+            "GET /api/review",
+            "reviewer",
+            false,
+            false,
+            "bounded",
+            "limit rows",
+            "Listing the review queue",
+            "Listed the review queue",
+        ),
+        row(
+            "GET /api/review/{id}",
+            "reviewer",
+            false,
+            false,
+            "free",
+            "one item",
+            "Reading a review item",
+            "Read a review item",
+        ),
+        row(
+            "POST /api/review/{id}/apply",
+            "reviewer",
+            true,
+            false,
+            "free",
+            "one decision",
+            "Deciding",
+            "Decided",
+        ),
+        row(
+            "POST /api/review/{id}/accept",
+            "reviewer",
+            true,
+            true,
+            "free",
+            "one item",
+            "Acknowledging",
+            "Acknowledged",
+        ),
+        row(
+            "POST /api/decisions/{id}/commit",
+            "reviewer",
+            true,
+            true,
+            "free",
+            "one decision",
+            "Committing a decision",
+            "Committed a decision",
+        ),
+        row(
+            "POST /api/decisions/{id}/withdraw",
+            "reviewer",
+            true,
+            true,
+            "free",
+            "one decision",
+            "Withdrawing a decision",
+            "Withdrew a decision",
+        ),
+        row(
+            "GET /api/events",
+            "reader",
+            false,
+            false,
+            "stream",
+            "event_streams",
+            "Watching jobs",
+            "Watched jobs",
+        ),
+        row(
+            "GET /api/packs",
+            "reader",
+            false,
+            false,
+            "free",
+            "one list",
+            "Listing packs",
+            "Listed packs",
+        ),
+        row(
+            "GET /api/packs/{name}",
+            "reader",
+            false,
+            false,
+            "free",
+            "one document",
+            "Reading a pack",
+            "Read a pack",
+        ),
+        row(
+            "GET /api/batches",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "limit rows",
+            "Listing batches",
+            "Listed batches",
+        ),
+        row(
+            "GET /api/batches/{id}",
+            "reader",
+            false,
+            false,
+            "free",
+            "one report",
+            "Reading a batch",
+            "Read a batch",
+        ),
+        row(
+            "GET /api/quarantine",
+            "reviewer",
+            false,
+            false,
+            "bounded",
+            "every file",
+            "Listing quarantine",
+            "Listed quarantine",
+        ),
+        row(
+            "GET /api/ask/schema",
+            "reader",
+            false,
+            false,
+            "free",
+            "one schema",
+            "Reading the schema",
+            "Read the schema",
+        ),
+        row(
+            "GET /api/ask/catalog",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "catalog_page_bytes",
+            "Reading the catalog",
+            "Read the catalog",
+        ),
+        row(
+            "GET /api/ask/catalog/{level}",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "catalog_page_bytes",
+            "Reading a level",
+            "Read a level",
+        ),
+        row(
+            "GET /api/ask/catalog/{level}/{field}/values",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "options_values",
+            "Sampling a field",
+            "Sampled a field",
+        ),
+        row(
+            "GET /api/ask/guide",
+            "reader",
+            false,
+            false,
+            "free",
+            "one document",
+            "Reading the guide",
+            "Read the guide",
+        ),
+        row(
+            "POST /api/ask/draft",
+            "reader",
+            true,
+            false,
+            "bounded",
+            "one document",
+            "Drafting",
+            "Drafted",
+        ),
+        row(
+            "POST /api/ask/diff",
+            "reader",
+            false,
+            false,
+            "free",
+            "one diff",
+            "Comparing",
+            "Compared",
+        ),
+        row(
+            "POST /api/ask/validate",
+            "reader",
+            false,
+            false,
+            "free",
+            "issues",
+            "Validating",
+            "Validated",
+        ),
+        row(
+            "POST /api/ask/run",
+            "reader",
+            true,
+            true,
+            "bounded",
+            "sync_max_rows",
+            "Running a question",
+            "Ran a question",
+        ),
+        row(
+            "POST /api/ask/jobs",
+            "reader",
+            true,
+            true,
+            "job",
+            "one id",
+            "Queuing a question",
+            "Queued a question",
+        ),
+        row(
+            "POST /api/ask/explain",
+            "reader",
+            false,
+            false,
+            "free",
+            "two texts",
+            "Explaining",
+            "Explained",
+        ),
+        row(
+            "POST /api/ask/options",
+            "reader",
+            false,
+            false,
+            "free",
+            "move_kinds",
+            "Offering moves",
+            "Offered moves",
+        ),
+        row(
+            "POST /api/ask/apply",
+            "reader",
+            true,
+            true,
+            "free",
+            "one document",
+            "Applying moves",
+            "Applied moves",
+        ),
+        row(
+            "POST /api/ask/diagnose",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "diagnose_variants",
+            "Diagnosing",
+            "Diagnosed",
+        ),
+        row(
+            "POST /api/ask/preview",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "preview_rows",
+            "Previewing",
+            "Previewed",
+        ),
+        row(
+            "POST /api/ask/describe",
+            "reader",
+            false,
+            false,
+            "free",
+            "one description",
+            "Describing",
+            "Described",
+        ),
+        row(
+            "POST /api/ask/documents",
+            "reader",
+            true,
+            false,
+            "free",
+            "one handle",
+            "Storing a document",
+            "Stored a document",
+        ),
+        row(
+            "GET /api/ask/documents/{id}",
+            "reader",
+            false,
+            false,
+            "free",
+            "one document",
+            "Reading a document",
+            "Read a document",
+        ),
+        row(
+            "PUT /api/ask/selections/{name}",
+            "reviewer",
+            true,
+            false,
+            "free",
+            "one version",
+            "Saving a selection",
+            "Saved a selection",
+        ),
+        row(
+            "GET /api/ask/selections/{name}",
+            "reader",
+            false,
+            false,
+            "free",
+            "one version",
+            "Reading a selection",
+            "Read a selection",
+        ),
+        row(
+            "GET /api/ask/handles/{id}",
+            "reader",
+            false,
+            false,
+            "free",
+            "one handle",
+            "Reading a handle",
+            "Read a handle",
+        ),
+        row(
+            "GET /api/ask/handles/{id}/rows",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "page_rows",
+            "Paging a result",
+            "Paged a result",
+        ),
+        row(
+            "POST /api/ask/handles/{id}/promote",
+            "operator",
+            true,
+            true,
+            "job",
+            "one id",
+            "Promoting to a cohort",
+            "Promoted to a cohort",
+        ),
+        row(
+            "POST /api/ask/values",
+            "reader",
+            true,
+            false,
+            "bounded",
+            "values_inline_rows",
+            "Uploading a list",
+            "Uploaded a list",
+        ),
+        row(
+            "POST /api/sessions/rebuild",
+            "operator",
+            true,
+            false,
+            "job",
+            "one id",
+            "Rebuilding sessions",
+            "Rebuilt sessions",
+        ),
+    ]
 }

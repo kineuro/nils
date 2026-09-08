@@ -16,6 +16,38 @@ fn nils() -> Command {
     Command::new(env!("CARGO_BIN_EXE_nils"))
 }
 
+/// Run the command line in the registry and hand back its stdout.
+fn run(home: &TempDir, args: &[&str], stdin: Option<&str>) -> String {
+    let mut cmd = nils();
+    cmd.arg("--registry")
+        .arg(home.path())
+        .args(args)
+        .env("USER", "anna")
+        .env("HOSTNAME", "ward-3")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    if let Some(text) = stdin {
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+    } else {
+        drop(child.stdin.take());
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
 fn packs() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs")
 }
@@ -123,7 +155,15 @@ impl Server {
         let mut child = cmd.spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let mut lines = BufReader::new(stdout).lines();
-        let first = lines.next().unwrap().unwrap();
+        // A server that dies before it listens says why, never a bare unwrap.
+        let Some(Ok(first)) = lines.next() else {
+            let mut err = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                let _ = e.read_to_string(&mut err);
+            }
+            let _ = child.wait();
+            panic!("nils serve did not listen: {err}");
+        };
         // "nils serve   127.0.0.1:PORT   auth ..."
         let addr = first.split_whitespace().nth(2).unwrap();
         let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
@@ -744,4 +784,138 @@ fn a_trust_list_verifies_two_issuers_and_refetches_a_rotated_key_by_url() {
     assert_eq!(caps["ceiling"], "reviewer", "{caps}");
     assert_eq!(caps["actor"]["ceiling"], "reviewer", "{caps}");
     server.finish();
+}
+
+/// Wave 4c §6.5: the deployment surface. Packs, batches and quarantine
+/// have doors; a queued tree is named by a registered location, never by
+/// a path; backup is a job whose archive verifies; the policy table names
+/// every door; restore is a command that refuses without --yes.
+#[test]
+fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
+    let home = registry();
+    let root = TempDir::new("a5-root");
+    std::fs::create_dir_all(root.path().join("sub")).unwrap();
+    let backups = TempDir::new("a5-backups");
+    let root_flag = format!("src={}", root.path().display());
+    let server = Server::start(
+        &home,
+        13,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--ingest-root",
+            &root_flag,
+            "--backup-dir",
+            backups.path().to_str().unwrap(),
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let ops = Some("an-operator-token-of-len");
+    let (status, caps) = server.request("GET", "/api/capabilities", None, ops);
+    assert_eq!(status, 200, "{caps}");
+    assert!(
+        caps["policy"].as_array().is_some_and(|p| p.len() >= 40),
+        "{caps}"
+    );
+    assert_eq!(caps["ingest_roots"], serde_json::json!(["src"]), "{caps}");
+    assert_eq!(caps["backup_dir"], true, "{caps}");
+    let (status, packs_doc) = server.request("GET", "/api/packs", None, reader);
+    assert_eq!(status, 200, "{packs_doc}");
+    assert_eq!(packs_doc["packs"][0]["name"], "mri", "{packs_doc}");
+    let (status, pack) = server.request("GET", "/api/packs/mri", None, reader);
+    assert_eq!(status, 200, "{pack}");
+    assert!(
+        pack["axes"].as_array().is_some_and(|a| !a.is_empty()),
+        "{pack}"
+    );
+    let (status, batches) = server.request("GET", "/api/batches", None, reader);
+    assert_eq!(status, 200, "{batches}");
+    assert!(batches["count"].as_i64().unwrap() >= 1, "{batches}");
+    let (status, batch) = server.request("GET", "/api/batches/1", None, reader);
+    assert_eq!(status, 200, "{batch}");
+    assert!(batch["report"].is_object(), "{batch}");
+    let (status, refused) = server.request("GET", "/api/quarantine", None, reader);
+    assert_eq!(status, 403, "{refused}");
+    let (status, quarantine) = server.request("GET", "/api/quarantine", None, ops);
+    assert_eq!(status, 200, "{quarantine}");
+    assert_eq!(quarantine["count"], 0, "{quarantine}");
+    // a path a caller composes is refused; a location is resolved
+    for bad in ["/etc", "@src/../x", "@nowhere/x"] {
+        let (status, doc) = server.request(
+            "POST",
+            "/api/jobs",
+            Some(&format!(r#"{{"command": ["digest", "{bad}"]}}"#)),
+            ops,
+        );
+        assert_eq!(status, 400, "{bad}: {doc}");
+    }
+    let (status, queued) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@src/sub"]}"#),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let digest_job = queued["job"].as_i64().unwrap();
+    let (status, shown) = server.request("GET", &format!("/api/jobs/{digest_job}"), None, ops);
+    assert_eq!(status, 200, "{shown}");
+    let argv = shown["args"]["argv"].to_string();
+    assert!(
+        argv.contains(&root.path().join("sub").display().to_string()),
+        "{argv}"
+    );
+    assert!(!argv.contains("@src"), "{argv}");
+    let (status, queued) =
+        server.request("POST", "/api/jobs", Some(r#"{"command": ["backup"]}"#), ops);
+    assert_eq!(status, 202, "{queued}");
+    server.finish();
+    // a worker runs both; the archive verifies; the audit log says so
+    run(&home, &["jobs", "work", "--once"], None);
+    run(&home, &["jobs", "work", "--once"], None);
+    let archives: Vec<_> = std::fs::read_dir(backups.path())
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(archives.len(), 1, "one archive");
+    let archive = archives[0].path();
+    let verified = run(
+        &home,
+        &["verify", archive.to_str().unwrap(), "--json"],
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&verified).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(v["files"].as_array().unwrap().len() >= 2, "{v}");
+    let audited = run(
+        &home,
+        &["audit", "list", "--action", "backup", "--json"],
+        None,
+    );
+    assert!(audited.contains("\"backup\""), "{audited}");
+    // restore refuses without --yes, and puts the archive back with it
+    let out = nils()
+        .arg("--registry")
+        .arg(home.path())
+        .args(["restore", archive.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let restored = run(
+        &home,
+        &["restore", archive.to_str().unwrap(), "--yes"],
+        None,
+    );
+    assert!(restored.contains("pre-restore archive"), "{restored}");
+    let status = run(&home, &["status", "--json"], None);
+    assert!(status.contains("registry_id"), "{status}");
 }

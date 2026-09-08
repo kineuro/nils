@@ -29,6 +29,8 @@ pub enum Action {
     LinkageUnlink,
     LinkagePurge,
     LinkageReveal,
+    /// Wave 4c §6.5: an archive was written.
+    Backup,
     Release,
     Handover,
     ReleaseWithdraw,
@@ -55,6 +57,7 @@ impl Action {
             Action::LinkageUnlink => "linkage.unlink",
             Action::LinkagePurge => "linkage.purge",
             Action::LinkageReveal => "linkage.reveal",
+            Action::Backup => "backup",
             Action::Release => "release",
             Action::Handover => "handover",
             Action::ReleaseWithdraw => "release.withdraw",
@@ -72,7 +75,7 @@ impl Action {
     pub fn changes_judgement(self) -> bool {
         !matches!(
             self,
-            Action::ReviewAccept | Action::LinkageReveal | Action::JobsPrune
+            Action::ReviewAccept | Action::LinkageReveal | Action::JobsPrune | Action::Backup
         )
     }
 }

@@ -114,6 +114,20 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | export | no command |
 | delete | restart nils serve |
 
+## backups
+
+| | |
+|---|---|
+| what | an archive of the registry and the linkage store with a manifest (Wave 4c section 6.5), written by nils backup or the backup job; the key store is never in one and is copied on its own |
+| where | the directory nils backup --dir or nils serve --backup-dir names; <home>/backups by default; <home>/backups-before-restore before a restore |
+| holds | everything the registry and the linkage store hold, at the moment of the archive<br>technical: the manifest, with sizes and digests |
+| owner | the registry's operator |
+| kept | until removed; the operator's rotation |
+| read | `nils verify <archive>` |
+| change | `nils backup [--dir <dir>]`<br>`nils restore <archive> --yes` (with nils serve stopped) |
+| export | copy the archive directory |
+| delete | remove the archive directory |
+
 ## job records
 
 | | |

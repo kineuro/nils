@@ -25,6 +25,7 @@ use clap::{Args, Parser, Subcommand};
 
 mod ask_cli;
 mod ask_doors;
+mod backup;
 mod door_client;
 mod gate;
 mod mcp;
@@ -87,6 +88,14 @@ enum Command {
     },
     /// The registry: its metadata, the running jobs, the last batches
     Status(StatusArgs),
+    /// One archive of the registry and the linkage store, with a manifest
+    /// (Wave 4c section 6.5); the key store is copied on its own
+    Backup(BackupArgs),
+    /// Check an archive against its manifest
+    Verify(VerifyArgs),
+    /// Put an archive back, with the engine stopped; a pre-restore archive
+    /// is written first
+    Restore(RestoreArgs),
     /// The jobs: every verb that runs longer than a second is one, with a
     /// heartbeat and its progress; list, show, cancel, resume, queue and
     /// work them (Wave 4a section 9.1)
@@ -98,7 +107,7 @@ enum Command {
     Audit(AuditCommand),
     /// The one door: the HTTP API over this registry, one route per
     /// operation, jobs for anything heavy (Wave 4a section 11)
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
     /// What private elements an archive carries, by creator, so an allowlist
     /// is chosen from the data rather than from a chair (§8.4)
     Private(PrivateArgs),
@@ -431,6 +440,14 @@ struct ServeArgs {
     /// The pack directory the doors read packs from
     #[arg(long, value_name = "DIR")]
     pack_dir: Option<PathBuf>,
+    /// An ingest location a queued digest or import may name as
+    /// @NAME/relative (Wave 4c section 6.5); repeatable; never a path a
+    /// caller composes
+    #[arg(long, value_name = "NAME=PATH")]
+    ingest_root: Vec<String>,
+    /// Where the backup job writes its archives (Wave 4c section 6.5)
+    #[arg(long, value_name = "DIR")]
+    backup_dir: Option<PathBuf>,
     /// Stop after serving this many requests (for tests)
     #[arg(long, hide = true)]
     requests: Option<usize>,
@@ -1097,6 +1114,9 @@ fn main() -> ExitCode {
         Command::Explain { stack, json } => explain(&home, stack, json),
         Command::Pack { command } => pack_command(&home, command),
         Command::Status(args) => status(&home, args),
+        Command::Backup(args) => backup_command(&home, args),
+        Command::Verify(args) => verify_command(args),
+        Command::Restore(args) => restore_command(&home, args),
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
@@ -1106,7 +1126,7 @@ fn main() -> ExitCode {
         Command::Clinical(command) => clinical_command(&home, command),
         Command::Select(args) => select_preview(&home, args),
         Command::Jobs(command) => jobs_command(&home, command),
-        Command::Serve(args) => serve::serve(&home, args),
+        Command::Serve(args) => serve::serve(&home, *args),
         Command::Audit(AuditCommand::List {
             principal,
             action,
@@ -2524,46 +2544,9 @@ fn confirm(prompt: &str) -> Result<bool, Exit> {
 fn quarantine_command(home: &Home, command: QuarantineCommand) -> Result<(), Exit> {
     let QuarantineCommand::List { batch, class, json } = command;
     let mut registry = open(home)?;
-    let store = registry.store();
-    let d = store.dialect();
-    let mut sql = format!(
-        "SELECT f.batch_id, f.reason, s.root, f.path, f.detail, {} FROM {} AS f JOIN {} AS s ON s.id = f.source_id WHERE f.status = 'quarantined'",
-        text_of(store, "source_file", "seen_at").replace("seen_at", "f.seen_at"),
-        store.qualified("source_file"),
-        store.qualified("source")
-    );
-    let mut params = Vec::new();
-    if let Some(id) = batch {
-        params.push(Param::Int(id));
-        sql.push_str(&format!(
-            " AND f.batch_id = {}",
-            d.param(params.len(), Type::Int)
-        ));
-    }
-    if let Some(c) = &class {
-        params.push(Param::from(c.as_str()));
-        sql.push_str(&format!(
-            " AND f.reason = {}",
-            d.param(params.len(), Type::Text)
-        ));
-    }
-    sql.push_str(" ORDER BY f.batch_id, f.path");
-    let files: Vec<serde_json::Value> = store
-        .query(&sql, &params)?
-        .iter()
-        .map(|r| {
-            let path = PathBuf::from(r.text(2)?).join(r.text(3)?);
-            Ok(serde_json::json!({
-                "batch_id": r.opt_int(0)?,
-                "class": r.opt_text(1)?.unwrap_or("-"),
-                "path": path.display().to_string(),
-                "detail": r.opt_text(4)?,
-                "seen_at": r.opt_text(5)?,
-            }))
-        })
-        .collect::<Result<_, nils_registry::Error>>()?;
+    let doc = quarantine_doc(&mut registry, batch, class.as_deref())?;
+    let files: Vec<serde_json::Value> = doc["files"].as_array().cloned().unwrap_or_default();
     if json {
-        let doc = serde_json::json!({ "count": files.len(), "files": files });
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return Ok(());
     }
@@ -3237,6 +3220,22 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
                 "change": [],
                 "export": [],
                 "delete": "restart nils serve",
+            },
+        }),
+        serde_json::json!({
+            "store": "backups",
+            "owner": "the registry's operator",
+            "what": "an archive of the registry and the linkage store with a manifest (Wave 4c section 6.5), written by nils backup or the backup job; the key store is never in one and is copied on its own",
+            "where": "the directory nils backup --dir or nils serve --backup-dir names; <home>/backups by default; <home>/backups-before-restore before a restore",
+            "files": [],
+            "holds": ["everything the registry and the linkage store hold, at the moment of the archive", "technical: the manifest, with sizes and digests"],
+            "counts": {},
+            "kept": "until removed; the operator's rotation",
+            "commands": {
+                "read": ["nils verify <archive>"],
+                "change": ["nils backup [--dir <dir>]", "nils restore <archive> --yes (with nils serve stopped)"],
+                "export": ["copy the archive directory"],
+                "delete": "remove the archive directory",
             },
         }),
         serde_json::json!({
@@ -6351,4 +6350,256 @@ mod tests {
             "postgres://localhost/nils"
         );
     }
+}
+
+#[derive(Debug, Args)]
+struct BackupArgs {
+    /// Where the archive goes; <home>/backups by default
+    #[arg(long, value_name = "DIR")]
+    dir: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct VerifyArgs {
+    /// The archive directory
+    archive: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct RestoreArgs {
+    /// The archive directory
+    archive: PathBuf,
+    /// Yes, replace the registry and the linkage store with the archive
+    #[arg(long)]
+    yes: bool,
+}
+
+/// Wave 4c §6.5: the packs a directory holds, for the door.
+pub(crate) fn packs_doc(dir: &Path) -> Result<serde_json::Value, Exit> {
+    let mut packs = Vec::new();
+    for p in packs_in(dir)? {
+        match nils_pack::load(&p, None) {
+            Ok(pack) => packs.push(serde_json::json!({
+                "name": pack.name, "version": pack.version.to_string(), "contract": pack.contract,
+                "modality": pack.modality, "cases": pack.cases,
+            })),
+            Err(e) => packs.push(serde_json::json!({
+                "name": p.file_name().unwrap_or_default().to_string_lossy(), "error": e.to_string(),
+            })),
+        }
+    }
+    Ok(serde_json::json!({"packs": packs}))
+}
+
+/// Wave 4c §6.5: one pack, for the door: what a person tunes.
+pub(crate) fn pack_doc(dir: &Path, name: &str) -> Result<Option<serde_json::Value>, Exit> {
+    let Some(found) = packs_in(dir)?
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|f| f == name))
+    else {
+        return Ok(None);
+    };
+    let pack = nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
+    Ok(Some(serde_json::json!({
+        "pack": pack.name,
+        "version": pack.version.to_string(),
+        "contract": pack.contract,
+        "modality": pack.modality,
+        "axes": pack.axes.iter().map(|a| serde_json::json!({
+            "axis": a.name, "multi": a.multi, "values": a.values.len(),
+            "review_below": pack.review.below(&a.name),
+            "asks_when_missing": pack.review.asks_when_missing(&a.name),
+        })).collect::<Vec<_>>(),
+        "rule_sets": pack.rule_sets.iter().map(|r| serde_json::json!({
+            "rule_set": r.name, "rules": r.rules.len(), "decides": r.decides,
+        })).collect::<Vec<_>>(),
+        "passes": pack.passes.iter().map(|p| serde_json::json!({"pass": p.name, "kind": p.kind_name()})).collect::<Vec<_>>(),
+        "buckets": pack.buckets,
+        "cases": pack.cases,
+        "mcp": pack.mcp.as_ref().map(|m| serde_json::json!({"version": m.version, "tools": m.tools.len(), "examples": m.examples.len()})),
+    })))
+}
+
+/// Wave 4c §6.5: the batches, newest first, as the status document lists them.
+pub(crate) fn batches_doc(
+    registry: &mut Registry,
+    limit: usize,
+) -> Result<serde_json::Value, Exit> {
+    let store = registry.store();
+    let sql = format!(
+        "SELECT id, name, state, {}, {}, epoch_after, {} FROM {} ORDER BY id DESC LIMIT {}",
+        text_of(store, "ingest_batch", "started_at"),
+        text_of(store, "ingest_batch", "finished_at"),
+        text_of(store, "ingest_batch", "counts"),
+        store.qualified("ingest_batch"),
+        limit.clamp(1, 1000)
+    );
+    let batches: Vec<serde_json::Value> = store
+        .query(&sql, &[])?
+        .iter()
+        .map(|r| {
+            let counts = r
+                .opt_text(6)?
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+            let pick = |path: &[&str]| -> Option<u64> {
+                let mut v = counts.as_ref()?;
+                for p in path {
+                    v = v.get(p)?;
+                }
+                v.as_u64()
+            };
+            Ok(serde_json::json!({
+                "id": r.int(0)?,
+                "name": r.text(1)?,
+                "state": r.text(2)?,
+                "started_at": r.opt_text(3)?,
+                "finished_at": r.opt_text(4)?,
+                "epoch_after": r.opt_int(5)?,
+                "seen": pick(&["seen"]),
+                "parsed": pick(&["parsed"]),
+                "quarantined": pick(&["quarantined"]),
+                "ingested": pick(&["written", "ingested"]),
+            }))
+        })
+        .collect::<Result<_, nils_registry::Error>>()?;
+    Ok(serde_json::json!({"count": batches.len(), "batches": batches}))
+}
+
+/// Wave 4c §6.5: one batch and its report; the report's samples are shapes.
+pub(crate) fn batch_doc(
+    registry: &mut Registry,
+    id: i64,
+) -> Result<Option<serde_json::Value>, Exit> {
+    let store = registry.store();
+    let sql = format!(
+        "SELECT state, name, {}, {}, {} FROM {} WHERE id = {}",
+        text_of(store, "ingest_batch", "started_at"),
+        text_of(store, "ingest_batch", "finished_at"),
+        text_of(store, "ingest_batch", "counts"),
+        store.qualified("ingest_batch"),
+        store.dialect().param(1, Type::Int)
+    );
+    let Some(row) = store.query_opt(&sql, &[Param::Int(id)])? else {
+        return Ok(None);
+    };
+    let report = row
+        .opt_text(4)?
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    Ok(Some(serde_json::json!({
+        "id": id,
+        "state": row.text(0)?,
+        "name": row.text(1)?,
+        "started_at": row.opt_text(2)?,
+        "finished_at": row.opt_text(3)?,
+        "report": report,
+    })))
+}
+
+/// Wave 4c §6.5: the quarantined files, for the door and the verb.
+pub(crate) fn quarantine_doc(
+    registry: &mut Registry,
+    batch: Option<i64>,
+    class: Option<&str>,
+) -> Result<serde_json::Value, Exit> {
+    let store = registry.store();
+    let d = store.dialect();
+    let mut sql = format!(
+        "SELECT f.batch_id, f.reason, s.root, f.path, f.detail, {} FROM {} AS f JOIN {} AS s ON s.id = f.source_id WHERE f.status = 'quarantined'",
+        text_of(store, "source_file", "seen_at").replace("seen_at", "f.seen_at"),
+        store.qualified("source_file"),
+        store.qualified("source")
+    );
+    let mut params = Vec::new();
+    if let Some(id) = batch {
+        params.push(Param::Int(id));
+        sql.push_str(&format!(
+            " AND f.batch_id = {}",
+            d.param(params.len(), Type::Int)
+        ));
+    }
+    if let Some(c) = class {
+        params.push(Param::from(c));
+        sql.push_str(&format!(
+            " AND f.reason = {}",
+            d.param(params.len(), Type::Text)
+        ));
+    }
+    sql.push_str(" ORDER BY f.batch_id, f.path");
+    let files: Vec<serde_json::Value> = store
+        .query(&sql, &params)?
+        .iter()
+        .map(|r| {
+            let path = PathBuf::from(r.text(2)?).join(r.text(3)?);
+            Ok(serde_json::json!({
+                "batch_id": r.opt_int(0)?,
+                "class": r.opt_text(1)?.unwrap_or("-"),
+                "path": path.display().to_string(),
+                "detail": r.opt_text(4)?,
+                "seen_at": r.opt_text(5)?,
+            }))
+        })
+        .collect::<Result<_, nils_registry::Error>>()?;
+    Ok(serde_json::json!({ "count": files.len(), "files": files }))
+}
+
+fn backup_command(home: &Home, args: BackupArgs) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let dir = args.dir.unwrap_or_else(|| home.dir().join("backups"));
+    let manifest = backup::backup(home, &mut registry, &dir)?;
+    let files = manifest["files"].as_array().map_or(0, Vec::len);
+    audit(
+        &mut registry,
+        nils_registry::audit::Action::Backup,
+        serde_json::json!({"archive": manifest["archive"], "files": files}),
+        None,
+    )?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&manifest).unwrap_or_default()
+        );
+    } else {
+        println!(
+            "nils backup   {}   epoch {}   {files} files",
+            manifest["archive"].as_str().unwrap_or_default(),
+            manifest["epoch"]
+        );
+    }
+    Ok(())
+}
+
+fn verify_command(args: VerifyArgs) -> Result<(), Exit> {
+    let doc = backup::verify(&args.archive)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+    } else {
+        println!(
+            "nils verify   {}   {}",
+            doc["archive"].as_str().unwrap_or_default(),
+            if doc["ok"] == true { "ok" } else { "DIFFERS" }
+        );
+    }
+    if doc["ok"] == true {
+        Ok(())
+    } else {
+        Err(Exit {
+            code: FAILED,
+            message: "the archive does not match its manifest".into(),
+        })
+    }
+}
+
+fn restore_command(home: &Home, args: RestoreArgs) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let doc = backup::restore(home, &mut registry, &args.archive, args.yes)?;
+    println!(
+        "nils restore   {}   pre-restore archive {}",
+        doc["restored"].as_str().unwrap_or_default(),
+        doc["pre_restore"].as_str().unwrap_or_default()
+    );
+    Ok(())
 }
