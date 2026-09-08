@@ -111,6 +111,17 @@ impl Server {
         body: Option<&str>,
         token: Option<&str>,
     ) -> (u16, serde_json::Value) {
+        self.request_with(method, path, body, token, &[])
+    }
+
+    fn request_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        token: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> (u16, serde_json::Value) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         let body = body.unwrap_or("");
         let mut head = format!(
@@ -122,6 +133,9 @@ impl Server {
         }
         if let Some(t) = token {
             head.push_str(&format!("Authorization: Bearer {t}\r\n"));
+        }
+        for (name, value) in headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
         }
         head.push_str("\r\n");
         stream.write_all(head.as_bytes()).unwrap();
@@ -791,4 +805,165 @@ fn event_streams_ask_for_the_reader_role_and_are_capped() {
     assert_eq!(caps["event_streams"], 1, "{caps}");
     drop(held);
     server.finish();
+}
+
+/// Wave 4c §5.5, gate fixture 7: a ceiling only removes roles, and the
+/// actor is recorded on what the call touched: the handle, the queued job,
+/// the audit row, the handle a worker later writes.
+#[test]
+fn a_ceiling_only_removes_roles_and_the_actor_is_recorded_on_what_it_touches() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        11,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--token",
+            "an-admin-token-of-length=chief@lab:admin",
+        ],
+    );
+    let ops = Some("an-operator-token-of-len");
+    let admin = Some("an-admin-token-of-length");
+    let actor = r#"{"kind":"agent","name":"ask-help","model":"qwen-27b","version":"1","conversation":"c1"}"#;
+    let acting: &[(&str, &str)] = &[("X-Nils-Ceiling", "reviewer"), ("X-Nils-Actor", actor)];
+    // the ceiling narrows the operator and is written into the actor
+    let (status, caps) = server.request_with("GET", "/api/capabilities", None, ops, acting);
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(
+        caps["roles"],
+        serde_json::json!(["reader", "reviewer"]),
+        "{caps}"
+    );
+    assert_eq!(caps["actor"]["name"], "ask-help", "{caps}");
+    assert_eq!(caps["actor"]["ceiling"], "reviewer", "{caps}");
+    // a ceiling that is not a role is refused, not ignored
+    let (status, doc) = server.request_with(
+        "GET",
+        "/api/capabilities",
+        None,
+        ops,
+        &[("X-Nils-Ceiling", "chief")],
+    );
+    assert_eq!(status, 400, "{doc}");
+    // a run under the actor leaves a handle that names it
+    let (status, ran) = server.request_with(
+        "POST",
+        "/api/ask/run",
+        Some(&body(
+            serde_json::json!({"document": plain("acted"), "name": "acted"}),
+        )),
+        ops,
+        acting,
+    );
+    assert_eq!(status, 200, "{ran}");
+    let acted_handle = ran["handle"].as_i64().unwrap();
+    let (status, shown) = server.request(
+        "GET",
+        &format!("/api/ask/handles/{acted_handle}"),
+        None,
+        ops,
+    );
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(shown["actor"]["name"], "ask-help", "{shown}");
+    assert_eq!(shown["actor"]["ceiling"], "reviewer", "{shown}");
+    // the ceiling holds at an operator door
+    let (status, refused) = server.request_with(
+        "POST",
+        &format!("/api/ask/handles/{acted_handle}/promote"),
+        Some(r#"{"cohort": "ms-cohort-a"}"#),
+        ops,
+        acting,
+    );
+    assert_eq!(status, 403, "{refused}");
+    // a person alone is recorded as absent, never as nothing
+    let (status, ran) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(
+            serde_json::json!({"document": plain("alone"), "name": "alone"}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 200, "{ran}");
+    let alone = ran["handle"].as_i64().unwrap();
+    let (status, shown) = server.request("GET", &format!("/api/ask/handles/{alone}"), None, ops);
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(
+        shown["actor"],
+        serde_json::json!({"kind": "absent"}),
+        "{shown}"
+    );
+    // a queued job carries the actor to the worker
+    let (status, queued) = server.request_with(
+        "POST",
+        "/api/ask/jobs",
+        Some(&body(
+            serde_json::json!({"document": plain("acted-job"), "name": "acted-job"}),
+        )),
+        ops,
+        acting,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let job = queued["job"].as_i64().unwrap();
+    let (status, shown) = server.request("GET", &format!("/api/jobs/{job}"), None, ops);
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(shown["args"]["actor"]["name"], "ask-help", "{shown}");
+    assert_eq!(
+        shown["args"]["roles"],
+        serde_json::json!(["reader", "reviewer"]),
+        "{shown}"
+    );
+    // a saved selection writes an audit row that names the actor
+    let (status, saved) = server.request_with(
+        "PUT",
+        "/api/ask/selections/acted-selection",
+        Some(&body(
+            serde_json::json!({"document": plain("acted-selection"), "note": "by the helper"}),
+        )),
+        ops,
+        acting,
+    );
+    assert!(status == 200 || status == 201, "{status} {saved}");
+    let (status, audit) = server.request("GET", "/api/audit?limit=5", None, admin);
+    assert_eq!(status, 200, "{audit}");
+    let rows = audit
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| audit["rows"].as_array().cloned().unwrap_or_default());
+    assert!(
+        rows.iter()
+            .any(|r| r["actor"]["name"] == "ask-help" && r["actor"]["ceiling"] == "reviewer"),
+        "{audit}"
+    );
+    server.finish();
+    // the worker runs the queued job under the actor it carried
+    run(&home, &["jobs", "work", "--once"], None);
+    let listed = run(&home, &["jobs", "list", "--all", "--json"], None);
+    let jobs: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let done = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == job)
+        .cloned()
+        .unwrap();
+    assert_eq!(done["state"], "done", "{done}");
+    let handle = done["result"]["handle"].as_i64().unwrap();
+    let shown = run(
+        &home,
+        &[
+            "ask",
+            "handles",
+            "show",
+            "--handle",
+            &handle.to_string(),
+            "--json",
+        ],
+        None,
+    );
+    let h: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(h["actor"]["name"], "ask-help", "{h}");
 }

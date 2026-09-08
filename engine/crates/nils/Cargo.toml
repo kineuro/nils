@@ -34,6 +34,7 @@ serde.workspace = true
 serde_json.workspace = true
 tiny_http.workspace = true
 jsonwebtoken.workspace = true
+ureq.workspace = true
 ctrlc.workspace = true
 
 [dev-dependencies]

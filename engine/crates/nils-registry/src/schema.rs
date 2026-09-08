@@ -248,6 +248,8 @@ fn build_registry() -> Vec<Table> {
                 col("job_id", Type::Int),
                 col("epoch", Type::Int),
                 col("details", Type::Json),
+                // Wave 4c §5.5: who acted for the principal, as JSON.
+                col("actor", Type::Json),
             ],
         )
         .index(&["principal"])
@@ -832,6 +834,8 @@ fn build_registry() -> Vec<Table> {
                 // keyword classifier happens to disagree.
                 req("author_kind", Type::Text),
                 col("author_version", Type::Text),
+                // Wave 4c §5.5: the actor object beside the author.
+                col("actor_detail", Type::Json),
                 col("why", Type::Text),
                 req("decided_at", Type::Timestamp),
                 // Wave 4a §10.2: a staged decision is written but not in
@@ -1315,6 +1319,8 @@ fn build_registry() -> Vec<Table> {
                 col("withdrawn_at", Type::Timestamp),
                 col("withdrawn_by", Type::Text),
                 col("withdrawn_why", Type::Text),
+                // Wave 4c §5.5: who acted for the principal that ran it.
+                col("actor", Type::Json),
             ],
         )
         .unique(&["name"]),

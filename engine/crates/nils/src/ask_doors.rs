@@ -457,6 +457,7 @@ fn routed(
                 json!({
                     "roles": caller.roles.iter().map(|r| r.name()).collect::<Vec<_>>(),
                     "may_project_raw": may_project_raw(caller),
+                    "actor": caller.actor,
                 }),
             )
             .map_err(job_err)?;

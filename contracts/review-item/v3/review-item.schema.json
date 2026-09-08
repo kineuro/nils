@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/review-item/v3/review-item.schema.json",
+  "title": "NILS review item",
+  "description": "One thing the engine was not certain of, in a scope, with the evidence that raised it and the decision that closed it. Version 2 (Wave 4a section 10.2): a grouped question is one item of scope group with n members; a decision may be staged before it is committed; an acknowledgement records who accepted the item without a decision.",
+  "type": "object",
+  "required": [
+    "id",
+    "kind",
+    "scope",
+    "status",
+    "created_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "integer",
+      "description": "The item's row id in the registry it lives in."
+    },
+    "kind": {
+      "type": "string",
+      "description": "What was found: `<area>.<what>` for an engine stage, `<axis>:<reason>` for the classifier.",
+      "pattern": "^([a-z_]+\\.[a-z_]+|[a-z_]+:(low_confidence|missing|decision|vote))$"
+    },
+    "scope": {
+      "type": "string",
+      "description": "What the item is about. A group is one question about a rule, an origin or a study, with its members in the registry.",
+      "enum": [
+        "stack",
+        "series",
+        "study",
+        "subject",
+        "batch",
+        "run",
+        "group"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "description": "Open until decided or acknowledged (accepted); staged while its decision waits for a commit; superseded when a later run asked again.",
+      "enum": [
+        "open",
+        "accepted",
+        "rejected",
+        "superseded",
+        "staged"
+      ]
+    },
+    "actor": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Who decided it, as the registry names them; null while open."
+    },
+    "created_at": {
+      "type": "string",
+      "description": "When it was raised, ISO 8601 UTC."
+    },
+    "decided_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "When it was decided, ISO 8601 UTC; null while open."
+    },
+    "ref": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "What the scope names: `stack_id`, `series_id`, `study_id`, `subject_id`, `batch_id` or `run_id`, as the scope requires."
+    },
+    "evidence": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "What the emitting stage found, structured, in the shape its kind describes; never a value the registry holds in confidence."
+    },
+    "decision": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "What was decided, once it was: for a classifier kind, the axis, the value, who decided (`actor`, `author_kind` person, agent or model, `model_version`) and why. Since version 3, `actor_detail` says who acted for that principal.",
+      "properties": {
+        "axis": {
+          "type": "string"
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "actor": {
+          "type": "string"
+        },
+        "author_kind": {
+          "type": "string",
+          "enum": [
+            "person",
+            "agent",
+            "model"
+          ]
+        },
+        "model_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "why": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "actor_detail": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Wave 4c: who acted for the principal named in `actor`. `kind` is `person`, `agent`, `model` or `absent`; an agent names itself, its model, its version and its conversation, and the role ceiling it ran under. Absent is its own value, so a person acting alone is never confused with a missing record.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "person",
+                "agent",
+                "model",
+                "absent"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            },
+            "conversation": {
+              "type": "string"
+            },
+            "ceiling": {
+              "type": "string",
+              "enum": [
+                "reader",
+                "reviewer",
+                "operator",
+                "admin"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      }
+    },
+    "members": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "For a grouped question, how many stacks it is about."
+    },
+    "group_key": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "For a grouped question, what groups its members: kind|value|tier."
+    },
+    "accepted_by": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The principal who acknowledged the item without a decision (Wave 4a section 13.4), as user@node."
+    }
+  }
+}

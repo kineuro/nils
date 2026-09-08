@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 32;
+pub const SCHEMA_VERSION: i64 = 33;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +181,10 @@ pub static MIGRATIONS: &[Migration] = &[
     Migration {
         version: 32,
         apply: a_job_carries_its_result,
+    },
+    Migration {
+        version: 33,
+        apply: an_act_names_its_actor,
     },
 ];
 
@@ -421,6 +425,17 @@ fn a_job_carries_its_result(store: &mut Store, kind: Kind) -> Result<(), Error> 
         return Ok(());
     }
     add_columns(store, "job", &["result"])
+}
+
+/// Wave 4c §5.5: an audit row, a handle and a decision each record who
+/// acted for the principal, with "absent" as its own value.
+fn an_act_names_its_actor(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "audit", &["actor"])?;
+    add_columns(store, "handle", &["actor"])?;
+    add_columns(store, "decision", &["actor_detail"])
 }
 
 /// Wave 4a §13.1: a release is the history of what left and is never

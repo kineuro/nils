@@ -100,6 +100,20 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | export | `nils release` |
 | delete | remove `<home>/registry.db` (nils has no command for it) |
 
+## claims cache
+
+| | |
+|---|---|
+| what | what nils serve keeps of a token it verified (Wave 4c section 5.9): the subject, the roles, the display name and the mail the token carried, and who acted for the subject; in memory, for the token's lifetime |
+| where | the memory of nils serve; nothing on disk |
+| holds | quasi-identifying: the subject, the display name, the mail<br>technical: the roles, the expiry, the actor |
+| owner | the registry's operator |
+| kept | until the token expires, at most its lifetime; gone at restart |
+| read | GET /api/capabilities, for the caller's own entry |
+| change | no command |
+| export | no command |
+| delete | restart nils serve |
+
 ## job records
 
 | | |
@@ -174,7 +188,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 
 | | |
 |---|---|
-| what | who projected identifiers through which handle, when, which columns and how many rows, at every role (Wave 4b section 9) |
+| what | who read which handle, when, which columns and how many rows, and for what purpose: every page read and every export at every role (Wave 4c section 6.1), and every identifier projection (Wave 4b section 9), with who acted for the principal |
 | where | rows of handle_read_audit in the registry |
 | holds | quasi-identifying: the principal<br>technical: the handle, the columns, the row count, the epoch, the time; never an identifier |
 | owner | the registry's operator; read by whoever answers for the archive |
