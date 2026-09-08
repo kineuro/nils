@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://nils.kineuro.se/contracts/review-item/v3/review-item.schema.json",
+  "$id": "https://nils.kineuro.se/contracts/review-item/v4/review-item.schema.json",
   "title": "NILS review item",
   "description": "One thing the engine was not certain of, in a scope, with the evidence that raised it and the decision that closed it. Version 2 (Wave 4a section 10.2): a grouped question is one item of scope group with n members; a decision may be staged before it is committed; an acknowledgement records who accepted the item without a decision.",
   "type": "object",
