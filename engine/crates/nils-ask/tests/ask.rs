@@ -586,6 +586,26 @@ fn both_schemas_exist_and_the_tightened_one_closes_every_struct() {
             .any(|v| v == "change")
     );
     assert_eq!(nils_ask::schema::digest().len(), 32);
+    // every reference resolves inside the document: a definition named and
+    // never registered is what a grammar backend refuses the whole schema
+    // for (Wave 4c C0 found `Arg` missing)
+    for (which, schema) in [("generated", &generated), ("tightened", &tight)] {
+        let mut refs = BTreeSet::new();
+        collect_refs(schema, &mut refs);
+        assert!(
+            refs.contains("#/$defs/Arg"),
+            "{which}: the clause's arguments are a reference"
+        );
+        for r in refs {
+            let name = r
+                .strip_prefix("#/$defs/")
+                .unwrap_or_else(|| panic!("{which}: {r} is not a local reference"));
+            assert!(
+                schema["$defs"][name].is_object(),
+                "{which}: {r} names no definition"
+            );
+        }
+    }
     // every fixture only uses ops the tightened schema lists
     for name in FIXTURES {
         let mut ask = parse(&fixture(name)).unwrap();
@@ -629,5 +649,24 @@ fn the_yaml_rendering_round_trips() {
         let yaml = nils_ask::to_yaml(&ask).unwrap();
         let back = parse(&yaml).unwrap_or_else(|e| panic!("{name}: {e}\n{yaml}"));
         assert_eq!(ask, back, "{name}");
+    }
+}
+
+fn collect_refs(v: &Value, out: &mut BTreeSet<String>) {
+    match v {
+        Value::Object(m) => {
+            if let Some(r) = m.get("$ref").and_then(Value::as_str) {
+                out.insert(r.to_string());
+            }
+            for x in m.values() {
+                collect_refs(x, out);
+            }
+        }
+        Value::Array(a) => {
+            for x in a {
+                collect_refs(x, out);
+            }
+        }
+        _ => {}
     }
 }

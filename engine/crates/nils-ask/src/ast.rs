@@ -304,7 +304,13 @@ impl JsonSchema for Clause {
         "Clause".into()
     }
 
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // The argument's definition is asked of the generator, which is
+        // what registers it under `$defs`: a reference written by hand
+        // names a definition nothing registers, and a strict consumer
+        // (the grammar backend of Wave 4c C0 was the first) refuses the
+        // whole schema for it.
+        let arg = generator.subschema_for::<Arg>();
         schemars::json_schema!({
             "type": "array",
             "description": "One clause: [op, {opts}, ...args]. The options map is mandatory, even when empty. A ref is a clause: [\"field\", {}, path], [\"axis\", {}, name], [\"derived\", {params}, name], [\"param\", {}, name].",
@@ -312,7 +318,7 @@ impl JsonSchema for Clause {
                 { "type": "string", "description": "the op" },
                 { "type": "object", "description": "the options of the op" }
             ],
-            "items": { "$ref": "#/$defs/Arg" },
+            "items": arg,
             "minItems": 2
         })
     }
@@ -323,13 +329,15 @@ impl JsonSchema for Arg {
         "Arg".into()
     }
 
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let clause = generator.subschema_for::<Clause>();
+        let arg = generator.subschema_for::<Arg>();
         schemars::json_schema!({
             "description": "An argument of a clause: another clause, or a literal (a string, a number, a boolean, null, or a list of literals).",
             "anyOf": [
-                { "$ref": "#/$defs/Clause" },
+                clause,
                 { "type": ["string", "number", "boolean", "null"] },
-                { "type": "array", "items": { "$ref": "#/$defs/Arg" } }
+                { "type": "array", "items": arg }
             ]
         })
     }
