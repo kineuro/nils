@@ -95,7 +95,32 @@ fn ask(args: AssistAskArgs) -> Result<(), Exit> {
             state["error"].as_str().unwrap_or("no reason given")
         )));
     }
-    let verdict = assistant.get(&format!("/runs/{run}/verdict"))?;
+    let verdict = match assistant.get(&format!("/runs/{run}/verdict")) {
+        Ok(v) => v,
+        Err(_) => {
+            // the run ended without settling: the reply names the terminal reason
+            let terminal = state["reply"]["metadata"]["terminal"]
+                .as_str()
+                .unwrap_or("no reason recorded")
+                .to_string();
+            let text = state["reply"]["text"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            return Err(fail(format!(
+                "run {run} ended without a verdict: {terminal}{}",
+                if text.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; the station's last words: {}",
+                        text.chars().take(240).collect::<String>()
+                    )
+                }
+            )));
+        }
+    };
     if args.json {
         println!(
             "{}",
