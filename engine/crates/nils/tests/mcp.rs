@@ -507,3 +507,51 @@ fn copy_tree(from: &Path, to: &Path) {
         }
     }
 }
+
+/// Wave 4c §6.7: every tool a live server lists carries its operation's
+/// input schema exactly as `contracts/mcp/v1` fixes it; the operation of a
+/// tool is what the pack opted it in as.
+#[test]
+fn every_listed_tool_s_input_schema_is_the_contract_s() {
+    let contract: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../contracts/mcp/v1/mcp.schema.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let pack = nils_pack::load(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri"),
+        None,
+    )
+    .unwrap();
+    let model = pack.mcp.as_ref().expect("the MRI pack opts tools in");
+    let home = synthetic();
+    let server = Server::start(&home, &packs(), &[]);
+    let hello = server.rpc(
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        None,
+    );
+    assert_eq!(hello["result"]["serverInfo"]["name"], "nils", "{hello}");
+    let listed = server.rpc(
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        None,
+    );
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    assert!(!tools.is_empty());
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        let op = &model
+            .tools
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("{name} is a tool the pack opted in"))
+            .operation;
+        assert_eq!(
+            tool["inputSchema"], contract["$defs"]["input"][op],
+            "{name} ({op}): the input schema is the contract's, verbatim"
+        );
+        assert!(name.starts_with("nils_"), "{name}");
+    }
+}

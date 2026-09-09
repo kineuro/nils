@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/suite/v1/purpose.schema.json",
+  "title": "NILS purpose registry entry",
+  "description": "Wave 4c section 8.3 (D44): a purpose is registered by an app in Kvasir's configuration, never invented by a caller. Its content class bounds what it may carry; every backend has a locality; the policy table maps a purpose to a backend.",
+  "$defs": {
+    "content_class": {
+      "type": "string",
+      "enum": [
+        "catalog",
+        "rows",
+        "identifiers"
+      ],
+      "description": "catalog: names, axis values, describe sentences, the person's words. rows: handle rows, counts, sampled values, funnels, review evidence. identifiers: anything that projects out.identifiers or reaches the linkage store."
+    },
+    "locality": {
+      "type": "string",
+      "enum": [
+        "local",
+        "remote"
+      ]
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "foreground",
+        "background"
+      ],
+      "description": "foreground calls retry capacity errors, background calls bail at once"
+    },
+    "refusal_layer": {
+      "type": "string",
+      "enum": [
+        "deployment",
+        "requirement",
+        "policy",
+        "quota",
+        "health"
+      ],
+      "description": "The layer that removed a candidate when nothing qualifies"
+    }
+  },
+  "type": "object",
+  "required": [
+    "id",
+    "app",
+    "content",
+    "kind"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*\\.[a-z][a-z0-9_-]*$",
+      "description": "app.purpose, such as assistant.ask-help"
+    },
+    "app": {
+      "type": "string"
+    },
+    "content": {
+      "$ref": "#/$defs/content_class"
+    },
+    "kind": {
+      "$ref": "#/$defs/kind"
+    },
+    "description": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "policy": {
+    "description": "What an admin may open per content class (section 8.3)",
+    "catalog": "a remote backend by choosing one in the desk's models table",
+    "rows": "a remote backend only with a recorded acknowledgement that rows of the archive will leave the site",
+    "identifiers": "never remote; a request whose user text matches an identifier shape is bumped to identifiers for that request and runs local"
+  }
+}

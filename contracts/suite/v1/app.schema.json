@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/suite/v1/app.schema.json",
+  "title": "NILS app registry entry",
+  "description": "Wave 4c section 4.4: an app the desk proxies under /apps/{id}/ on the one origin, with the person's token attached, whose capabilities document the desk merges into the deployment capabilities document.",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "url",
+    "entitlement"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "title": {
+      "type": "string"
+    },
+    "url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "entitlement": {
+      "type": "string",
+      "enum": [
+        "reader",
+        "reviewer",
+        "operator",
+        "admin",
+        "assist"
+      ],
+      "description": "The entitlement that shows the app's section"
+    },
+    "capabilities": {
+      "type": "string",
+      "default": "/capabilities",
+      "description": "The app's capabilities path, relative to its url"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/suite/v1/headers.schema.json",
+  "title": "NILS request headers",
+  "description": "Wave 4c sections 5.5 and 6.3: the three headers a caller may set on an engine door, and the actor object the engine records.",
+  "$defs": {
+    "ceiling": {
+      "type": "string",
+      "enum": [
+        "reader",
+        "reviewer",
+        "operator",
+        "admin"
+      ],
+      "description": "X-Nils-Ceiling: a downgrade only cap on the token's roles; it can only remove roles and is recorded on what the call touches"
+    },
+    "actor": {
+      "type": "object",
+      "description": "X-Nils-Actor as JSON, and what the engine stores on audit rows, handles and decisions. An absent header is recorded as {\"kind\": \"absent\"}.",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "person",
+            "agent",
+            "model",
+            "absent"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "description": "The station or agent, such as ask-help"
+        },
+        "model": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "conversation": {
+          "type": "string"
+        },
+        "ceiling": {
+          "$ref": "#/$defs/ceiling",
+          "description": "The ceiling in force when the engine recorded the actor"
+        }
+      },
+      "additionalProperties": false
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Idempotency-Key on run, jobs, apply and promote: per principal, kept for a day; a repeat is answered again and says so, a changed body is refused"
+    }
+  },
+  "type": "object",
+  "properties": {
+    "X-Nils-Ceiling": {
+      "$ref": "#/$defs/ceiling"
+    },
+    "X-Nils-Actor": {
+      "$ref": "#/$defs/actor"
+    },
+    "Idempotency-Key": {
+      "$ref": "#/$defs/idempotency_key"
+    }
+  },
+  "additionalProperties": false
+}
