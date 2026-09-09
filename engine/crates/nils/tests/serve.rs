@@ -1140,25 +1140,56 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     );
     let job: serde_json::Value = serde_json::from_str(&job).unwrap();
     assert_eq!(job["state"], "done", "{job}");
-    // adopt moved exactly what try said: the moved stack now stores `to`
-    let moved_stack = run(&home, &["explain", "1", "--json"], None);
-    let moved: serde_json::Value = serde_json::from_str(&moved_stack).unwrap();
+    // adopt moved exactly what try said: the stack whose evidence cites the
+    // site's word now stores `to`, the other is unchanged. Which id is
+    // which depends on the digest's walk, so the word decides, not the id.
+    let explained: Vec<serde_json::Value> = [1, 2]
+        .iter()
+        .map(|id| {
+            let text = run(&home, &["explain", &id.to_string(), "--json"], None);
+            serde_json::from_str(&text).unwrap()
+        })
+        .collect();
+    let cites = |doc: &serde_json::Value| {
+        doc["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["matched"] == "zzgado")
+    };
+    let moved = explained
+        .iter()
+        .find(|d| cites(d))
+        .expect("one stack cites the site's word");
+    let still = explained
+        .iter()
+        .find(|d| !cites(d))
+        .expect("and one does not");
     assert_eq!(moved["overlay"], "site@1.0.0", "{moved}");
-    for m in moves {
-        let axis = m["axis"].as_str().unwrap();
-        let got = moved["axes"]
+    assert_eq!(still["overlay"], "site@1.0.0", "{still}");
+    let value_of = |doc: &serde_json::Value, axis: &str| -> String {
+        doc["axes"]
             .as_array()
             .unwrap()
             .iter()
             .filter(|a| a["axis"] == axis)
             .filter_map(|a| a["value"].as_str().map(str::to_string))
             .collect::<Vec<_>>()
-            .join(",");
-        assert_eq!(got, m["to"].as_str().unwrap(), "{axis}: {moved}");
+            .join(",")
+    };
+    for m in moves {
+        let axis = m["axis"].as_str().unwrap();
+        assert_eq!(
+            value_of(moved, axis),
+            m["to"].as_str().unwrap(),
+            "{axis}: {moved}"
+        );
+        assert_eq!(
+            value_of(still, axis),
+            m["from"].as_str().unwrap(),
+            "{axis}: {still}"
+        );
     }
-    let still = run(&home, &["explain", "2", "--json"], None);
-    let still: serde_json::Value = serde_json::from_str(&still).unwrap();
-    assert_eq!(still["overlay"], "site@1.0.0", "{still}");
     let audited = run(
         &home,
         &["audit", "list", "--action", "overlay.adopt", "--json"],
