@@ -858,6 +858,41 @@ fn answer(
                 .ok_or_else(|| Reply::error(404, format!("no selection {spec}")))?;
             Ok(Reply::ok(serde_json::to_value(v).unwrap_or(Value::Null)))
         }
+        ["api", "ask", "handles"] if get => {
+            // Wave 4c §7.4: the result surface lists what runs left. Newest
+            // first, within the caller's scope: a handle holding fields
+            // beyond the role's scope is left out, not refused, so the list
+            // is what this caller may open. `withdrawn=1` includes the
+            // withdrawn ones; `limit` caps the answer at page_rows_max.
+            let withdrawn = query
+                .get("withdrawn")
+                .is_some_and(|w| w == "1" || w == "true");
+            let limit = query
+                .get("limit")
+                .and_then(|l| l.parse::<usize>().ok())
+                .unwrap_or(100)
+                .clamp(1, caps.page_rows_max as usize);
+            let all = handle::list(registry.store(), withdrawn)
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            let mine: Vec<Value> = all
+                .iter()
+                .filter(|h| handle_within_scope(h, &scope, h.id).is_ok())
+                .take(limit)
+                .map(|h| {
+                    json!({
+                        "id": h.id, "name": h.name, "grain": h.grain, "row_count": h.row_count,
+                        "content_hash": h.content_hash, "principal": h.principal, "actor": h.actor,
+                        "created_at": h.created_at, "epoch": h.epoch, "pack_version": h.pack_version,
+                        "disclosure": h.disclosure, "truncated": h.truncated,
+                        "limit": h.ask.as_ref().and_then(|a| a.out.limit),
+                        "kept": h.has_rows(), "last_read_at": h.last_read_at,
+                        "withdrawn_at": h.withdrawn_at, "ask_hash": h.ask_hash(),
+                        "columns": h.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            Ok(Reply::ok(json!({"count": mine.len(), "handles": mine})))
+        }
         ["api", "ask", "handles", _] if get => {
             let id = id_at(3)?;
             let h = handle::get(registry.store(), id)
@@ -1026,6 +1061,7 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/ask/documents/{id}",
     "PUT /api/ask/selections/{name}",
     "GET /api/ask/selections/{name}",
+    "GET /api/ask/handles",
     "GET /api/ask/handles/{id}",
     "GET /api/ask/handles/{id}/rows",
     "POST /api/ask/handles/{id}/promote",

@@ -287,6 +287,45 @@ fn the_ask_doors_run_a_document_to_a_handle_and_its_affordances_answer() {
     assert_eq!(status, 200, "{h}");
     assert_eq!(h["name"], "converters");
     assert_eq!(h["pages"], 1);
+    // Wave 4c §7.4: the list door names the handle newest first with what
+    // the result surface reads, and the policy table carries the door.
+    let (status, list) = server.request("GET", "/api/ask/handles?limit=5", None, None);
+    assert_eq!(status, 200, "{list}");
+    // the run kept three child sets after the answer: newest first
+    assert_eq!(list["count"], 4, "{list}");
+    let ids: Vec<i64> = list["handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["id"].as_i64().unwrap())
+        .collect();
+    assert!(ids.windows(2).all(|w| w[0] > w[1]), "{ids:?}");
+    let first = list["handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["id"] == handle)
+        .unwrap();
+    assert_eq!(first["name"], "converters");
+    assert_eq!(first["row_count"], 14);
+    assert_eq!(first["kept"], true);
+    assert_eq!(first["truncated"], false);
+    assert!(first["ask_hash"].is_string(), "{first}");
+    assert_eq!(
+        first["columns"].as_array().unwrap().len(),
+        h["columns"].as_array().unwrap().len()
+    );
+    let (status, caps) = server.request("GET", "/api/capabilities", None, None);
+    assert_eq!(status, 200);
+    assert!(
+        caps["ask"]["doors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == "GET /api/ask/handles"),
+        "{}",
+        caps["ask"]["doors"]
+    );
     let (status, rows) = server.request(
         "GET",
         &format!("/api/ask/handles/{handle}/rows?page=0"),

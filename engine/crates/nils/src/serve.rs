@@ -2613,6 +2613,16 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Read a selection",
         ),
         row(
+            "GET /api/ask/handles",
+            "reader",
+            false,
+            false,
+            "free",
+            "page_rows_max handles",
+            "Listing results",
+            "Listed results",
+        ),
+        row(
             "GET /api/ask/handles/{id}",
             "reader",
             false,
