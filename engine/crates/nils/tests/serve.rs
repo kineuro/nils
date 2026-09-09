@@ -262,6 +262,43 @@ fn the_door_serves_what_the_command_line_has() {
     assert_eq!(status, 200, "{caps}");
     assert_eq!(caps["contracts"]["openapi"], "3", "{caps}");
     assert_eq!(caps["contracts"]["review_item"], "4", "{caps}");
+    // Wave 4c §4.5: the engine's document is the `engine` part of the
+    // deployment capabilities document, and carries what the suite requires.
+    assert_eq!(caps["contracts"]["suite"], "1", "{caps}");
+    assert_eq!(caps["contracts"]["mcp"], "1", "{caps}");
+    let suite: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../contracts/suite/v1/capabilities.schema.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    for key in suite["properties"]["engine"]["required"]
+        .as_array()
+        .unwrap()
+    {
+        let key = key.as_str().unwrap();
+        assert!(
+            !caps[key].is_null(),
+            "the suite requires {key} of the engine: {caps}"
+        );
+    }
+    for row in caps["policy"].as_array().unwrap() {
+        for key in suite["$defs"]["policy_row"]["required"].as_array().unwrap() {
+            assert!(!row[key.as_str().unwrap()].is_null(), "policy row {row}");
+        }
+        let costs: Vec<&str> = suite["$defs"]["policy_row"]["properties"]["cost"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.as_str())
+            .collect();
+        assert!(
+            costs.contains(&row["cost"].as_str().unwrap()),
+            "policy row {row}"
+        );
+    }
     assert!(
         caps["packs"]
             .as_array()
@@ -1239,4 +1276,97 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     assert!(wrote.contains("site-1.0.0.overlay.json"), "{wrote}");
     let exported = nils_pack::Overlay::load(&out.path().join("site-1.0.0.overlay.json")).unwrap();
     assert_eq!(exported.id, "site@1.0.0");
+}
+
+/// Wave 4c §5.3: the trust list vectors of `contracts/suite/v1` run against
+/// the engine. Each case is minted with the key it names and presented; what
+/// happened is compared with what the vector expects.
+#[test]
+fn the_trust_list_vectors_hold() {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/suite/v1/vectors");
+    let t: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(vectors.join("trust-list.json")).unwrap())
+            .unwrap();
+    let keys: std::collections::BTreeMap<String, EncodingKey> = t["keys"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(kid, pem)| {
+            let pem = std::fs::read(vectors.join(pem.as_str().unwrap())).unwrap();
+            (kid.clone(), EncodingKey::from_rsa_pem(&pem).unwrap())
+        })
+        .collect();
+    // the first entry's JWKS by URL, the second's by file
+    let served = std::sync::Arc::new(std::sync::Mutex::new(
+        std::fs::read_to_string(vectors.join(t["trust"][0]["jwks"].as_str().unwrap())).unwrap(),
+    ));
+    let port = serve_jwks(served.clone());
+    let trust1 = format!(
+        "issuer={},audience={},jwks=http://127.0.0.1:{port}/jwks",
+        t["trust"][0]["issuer"].as_str().unwrap(),
+        t["trust"][0]["audience"].as_str().unwrap()
+    );
+    let trust2 = format!(
+        "issuer={},audience={},jwks={}",
+        t["trust"][1]["issuer"].as_str().unwrap(),
+        t["trust"][1]["audience"].as_str().unwrap(),
+        vectors
+            .join(t["trust"][1]["jwks"].as_str().unwrap())
+            .display()
+    );
+    let mut extra: Vec<String> = vec![
+        "--auth".into(),
+        "oidc".into(),
+        "--oidc-trust".into(),
+        trust1,
+        "--oidc-trust".into(),
+        trust2,
+        "--jwks-refetch-secs".into(),
+        "0".into(),
+        "--oidc-groups-claim".into(),
+        t["groups_claim"].as_str().unwrap().into(),
+    ];
+    for (group, role) in t["roles"].as_object().unwrap() {
+        extra.push("--role".into());
+        extra.push(format!("{group}={}", role.as_str().unwrap()));
+    }
+    let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+    let cases = t["cases"].as_array().unwrap();
+    let home = registry();
+    let server = Server::start(&home, cases.len(), &extra, &[]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let mut header = Header::new(Algorithm::RS256);
+        let kid = case["key"].as_str().unwrap();
+        header.kid = Some(kid.to_string());
+        let mut claims = case["claims"].clone();
+        let expired = case["expired"].as_bool() == Some(true);
+        claims["iat"] = serde_json::json!(if expired { now - 1200 } else { now });
+        claims["exp"] = serde_json::json!(if expired { now - 600 } else { now + 600 });
+        let token = encode(&header, &claims, &keys[kid]).unwrap();
+        let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&token));
+        let expect = &case["expect"];
+        if expect["admitted"] == true {
+            assert_eq!(status, 200, "{name}: {doc}");
+            for key in ["principal", "roles", "display", "email"] {
+                if !expect[key].is_null() {
+                    assert_eq!(doc[key], expect[key], "{name}: {key}: {doc}");
+                }
+            }
+            if let Some(actor) = expect["actor"].as_object() {
+                for (k, v) in actor {
+                    assert_eq!(&doc["actor"][k], v, "{name}: actor.{k}: {doc}");
+                }
+            }
+        } else {
+            let want = expect["status"].as_u64().unwrap_or(401) as u16;
+            assert_eq!(status, want, "{name}: {doc}");
+        }
+    }
+    server.finish();
 }

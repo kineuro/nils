@@ -1,0 +1,463 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/mcp/v1/mcp.schema.json",
+  "title": "NILS MCP door",
+  "description": "Wave 4c section 6.7 (D11, C43): what a third party MCP client gets from the engine's /mcp door. The vocabulary is sixteen operations; a pack opts each in as a tool by name with its own description and rules (packs/<name>/mcp.yml), and the tool's input schema is the operation's, verbatim. Every result is the envelope below; a rows answer pages by offset; the policy of each operation is the policy row of the door it calls (contracts/suite capabilities.schema.json, policy_row).",
+  "operations": [
+    "apply",
+    "catalog",
+    "describe",
+    "diagnose",
+    "draft",
+    "explain",
+    "guide",
+    "handle",
+    "job",
+    "job_status",
+    "options",
+    "preview",
+    "rows",
+    "run",
+    "selections",
+    "validate"
+  ],
+  "$defs": {
+    "operation": {
+      "type": "string",
+      "enum": [
+        "apply",
+        "catalog",
+        "describe",
+        "diagnose",
+        "draft",
+        "explain",
+        "guide",
+        "handle",
+        "job",
+        "job_status",
+        "options",
+        "preview",
+        "rows",
+        "run",
+        "selections",
+        "validate"
+      ]
+    },
+    "input": {
+      "catalog": {
+        "type": "object",
+        "properties": {
+          "level": {
+            "type": "string",
+            "description": "One level (subject, session, study, series, stack, instance, event, cohort); every level when absent"
+          },
+          "after": {
+            "type": "string",
+            "description": "The path the previous page ended on"
+          }
+        }
+      },
+      "validate": {
+        "type": "object",
+        "properties": {
+          "document": {
+            "type": "object",
+            "description": "The ask as JSON, as the schema of GET /api/ask/schema describes it"
+          },
+          "document_id": {
+            "type": "integer",
+            "description": "A document handle from a previous call, instead of the document itself"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "strict",
+              "repair"
+            ],
+            "description": "repair fixes what is structural first and reports it"
+          }
+        }
+      },
+      "explain": {
+        "type": "object",
+        "properties": {
+          "document": {
+            "type": "object",
+            "description": "The ask as JSON, as the schema of GET /api/ask/schema describes it"
+          },
+          "document_id": {
+            "type": "integer",
+            "description": "A document handle from a previous call, instead of the document itself"
+          }
+        }
+      },
+      "options": {
+        "type": "object",
+        "properties": {
+          "document": {
+            "type": "object",
+            "description": "The ask as JSON, as the schema of GET /api/ask/schema describes it"
+          },
+          "document_id": {
+            "type": "integer",
+            "description": "A document handle from a previous call, instead of the document itself"
+          },
+          "set": {
+            "type": "string",
+            "description": "The set to offer moves on; the answer's set when absent"
+          }
+        }
+      },
+      "apply": {
+        "type": "object",
+        "required": [
+          "document_id",
+          "epoch",
+          "token",
+          "set",
+          "moves"
+        ],
+        "properties": {
+          "document_id": {
+            "type": "integer",
+            "description": "A document handle from a previous call, instead of the document itself"
+          },
+          "epoch": {
+            "type": "integer"
+          },
+          "token": {
+            "type": "string",
+            "description": "The token the options answer carried"
+          },
+          "set": {
+            "type": "string"
+          },
+          "moves": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "move_id"
+              ],
+              "properties": {
+                "move_id": {
+                  "type": "integer"
+                },
+                "args": {
+                  "type": "object",
+                  "description": "One value per hole of the move's template"
+                }
+              }
+            }
+          }
+        }
+      },
+      "diagnose": {
+        "type": "object",
+        "properties": {
+          "document": {
+            "type": "object",
+            "description": "The ask as JSON, as the schema of GET /api/ask/schema describes it"
+          },
+          "document_id": {
+            "type": "integer",
+            "description": "A document handle from a previous call, instead of the document itself"
+          },
+          "keys": {
+            "type": "boolean",
+            "description": "Carry the surviving subject keys through the funnel"
+          }
+        }
+      },
+      "preview": {
+        "type": "object",
+        "properties": {
+          "document": {
+            "type": "object",
+            "description": "The ask as JSON, as the schema of GET /api/ask/schema describes it"
+          },
+          "document_id": {
+            "type": "integer",
+            "description": "A document handle from a previous call, instead of the document itself"
+          },
+          "rows": {
+            "type": "integer",
+            "description": "Rows to show, inside the preview cap"
+          }
+        }
+      },
+      "describe": {
+        "type": "object",
+        "properties": {
+          "document": {
+            "type": "object",
+            "description": "The ask as JSON, as the schema of GET /api/ask/schema describes it"
+          },
+          "document_id": {
+            "type": "integer",
+            "description": "A document handle from a previous call, instead of the document itself"
+          }
+        }
+      },
+      "run": {
+        "type": "object",
+        "properties": {
+          "document": {
+            "type": "object",
+            "description": "The ask as JSON, as the schema of GET /api/ask/schema describes it"
+          },
+          "document_id": {
+            "type": "integer",
+            "description": "A document handle from a previous call, instead of the document itself"
+          },
+          "name": {
+            "type": "string",
+            "description": "A name for the handle; a named handle keeps its question with its rows"
+          },
+          "keep": {
+            "type": "boolean",
+            "description": "Leave a handle for every kept set too"
+          }
+        }
+      },
+      "handle": {
+        "type": "object",
+        "required": [
+          "handle"
+        ],
+        "properties": {
+          "handle": {
+            "type": "integer"
+          }
+        }
+      },
+      "rows": {
+        "type": "object",
+        "required": [
+          "handle"
+        ],
+        "properties": {
+          "handle": {
+            "type": "integer"
+          },
+          "page": {
+            "type": "integer",
+            "description": "The handle's page to read, from zero"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Where in that page to start; an answer says next_offset while rows remain"
+          }
+        }
+      },
+      "selections": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The selection, as name or name@version"
+          }
+        }
+      },
+      "guide": {
+        "type": "object",
+        "properties": {},
+        "description": "Read this first: the grounding rules, the worked examples, the schema digest, the doors and the caps in force"
+      },
+      "draft": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "A whole document as YAML or JSON; structural repairs are applied and reported, and a valid document is stored"
+          }
+        }
+      },
+      "job": {
+        "type": "object",
+        "properties": {
+          "document": {
+            "type": "object",
+            "description": "The ask as JSON, as the schema of GET /api/ask/schema describes it"
+          },
+          "document_id": {
+            "type": "integer",
+            "description": "A document handle from a previous call, instead of the document itself"
+          },
+          "name": {
+            "type": "string"
+          },
+          "keep": {
+            "type": "boolean"
+          }
+        },
+        "description": "Run a document as a job under your own roles when the synchronous run was truncated; poll it with job_status"
+      },
+      "job_status": {
+        "type": "object",
+        "required": [
+          "job"
+        ],
+        "properties": {
+          "job": {
+            "type": "integer",
+            "description": "The id the job answer carried"
+          }
+        },
+        "description": "The job's state and, once done, its result: the handle, the hash and the counts"
+      }
+    },
+    "door_of": {
+      "catalog": "GET /api/ask/catalog",
+      "validate": "POST /api/ask/validate",
+      "explain": "POST /api/ask/explain",
+      "options": "POST /api/ask/options",
+      "apply": "POST /api/ask/apply",
+      "diagnose": "POST /api/ask/diagnose",
+      "preview": "POST /api/ask/preview",
+      "describe": "POST /api/ask/describe",
+      "run": "POST /api/ask/run",
+      "handle": "GET /api/ask/handles/{id}",
+      "rows": "GET /api/ask/handles/{id}/rows",
+      "selections": "GET /api/ask/selections",
+      "guide": "GET /api/ask/guide",
+      "draft": "POST /api/ask/draft",
+      "job": "POST /api/ask/jobs",
+      "job_status": "GET /api/jobs/{id}"
+    },
+    "tool": {
+      "type": "object",
+      "required": [
+        "name",
+        "description",
+        "inputSchema"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^nils_[a-z_]+$"
+        },
+        "description": {
+          "type": "string",
+          "description": "The pack's description, then one line per rule"
+        },
+        "inputSchema": {
+          "type": "object"
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "description": "The envelope of every tools/call answer: the document as text a model reads, the same document structured when it fits the result cap, and whether it is a refusal. A domain refusal is text a model can act on, never a transport error.",
+      "required": [
+        "content",
+        "isError"
+      ],
+      "properties": {
+        "content": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "type",
+              "text"
+            ],
+            "properties": {
+              "type": {
+                "const": "text"
+              },
+              "text": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "isError": {
+          "type": "boolean"
+        },
+        "structuredContent": {
+          "type": "object",
+          "description": "Absent when the text was cut at the result cap; read the rest by page or by handle"
+        },
+        "_meta": {
+          "type": "object",
+          "properties": {
+            "bounded": {
+              "type": "boolean",
+              "description": "The rows were cut to the door's page; next_offset in the document says where the rest is"
+            }
+          }
+        }
+      }
+    },
+    "paging": {
+      "type": "object",
+      "description": "A rows answer: the handle's page, from offset, bounded to the door's page size; while rows remain the document carries next_offset, and the next call passes it as offset",
+      "properties": {
+        "page": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "next_offset": {
+          "type": "integer"
+        },
+        "rows_in_page": {
+          "type": "integer"
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "description": "The policy fields a client may show beside a tool: the row of the door the operation calls",
+      "required": [
+        "door",
+        "role",
+        "writes",
+        "idempotent",
+        "cost",
+        "result_cap"
+      ],
+      "properties": {
+        "door": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "reader",
+            "reviewer",
+            "operator",
+            "admin"
+          ]
+        },
+        "writes": {
+          "type": "boolean"
+        },
+        "idempotent": {
+          "type": "boolean"
+        },
+        "cost": {
+          "type": "string",
+          "enum": [
+            "free",
+            "bounded",
+            "job",
+            "stream"
+          ],
+          "description": "free: one read; bounded: a read capped by the door; job: queued for a worker, answered with an id; stream: held open"
+        },
+        "result_cap": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

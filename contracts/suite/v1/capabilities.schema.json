@@ -1,0 +1,336 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/suite/v1/capabilities.schema.json",
+  "title": "NILS deployment capabilities document",
+  "description": "Wave 4c section 4.3: the one object the desk builds at session start and refreshes when the engine's epoch moves or a part's health changes. Nothing else in the desk may ask whether the deployment has something.",
+  "type": "object",
+  "required": [
+    "engine",
+    "person",
+    "desk"
+  ],
+  "properties": {
+    "engine": {
+      "type": "object",
+      "description": "GET /api/capabilities of the engine, verbatim (contracts/openapi)",
+      "required": [
+        "engine",
+        "contracts",
+        "doors",
+        "policy",
+        "auth",
+        "principal",
+        "roles",
+        "registry",
+        "packs"
+      ],
+      "properties": {
+        "engine": {
+          "type": "object",
+          "required": [
+            "name",
+            "version"
+          ],
+          "properties": {
+            "name": {
+              "const": "nils"
+            },
+            "version": {
+              "type": "string"
+            }
+          }
+        },
+        "contracts": {
+          "type": "object",
+          "required": [
+            "openapi",
+            "review_item",
+            "pack"
+          ],
+          "properties": {
+            "openapi": {
+              "type": "string"
+            },
+            "review_item": {
+              "type": "string"
+            },
+            "pack": {
+              "type": "string"
+            },
+            "suite": {
+              "type": "string"
+            },
+            "mcp": {
+              "type": "string"
+            }
+          }
+        },
+        "doors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(GET|POST|PUT|DELETE) /api/"
+          }
+        },
+        "policy": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/policy_row"
+          }
+        },
+        "auth": {
+          "type": "string",
+          "enum": [
+            "off",
+            "token",
+            "oidc"
+          ]
+        },
+        "principal": {
+          "type": "string"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "reader",
+              "reviewer",
+              "operator",
+              "admin"
+            ]
+          }
+        },
+        "ceiling": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "actor": {
+          "$ref": "headers.schema.json#/$defs/actor"
+        },
+        "registry": {
+          "type": "object",
+          "required": [
+            "epoch"
+          ],
+          "properties": {
+            "epoch": {
+              "type": "integer"
+            },
+            "schema_version": {
+              "type": "integer"
+            },
+            "node": {
+              "type": "string"
+            }
+          }
+        },
+        "packs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "version"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "contract": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "ingest_roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "backup_dir": {
+          "type": "boolean"
+        },
+        "event_streams": {
+          "type": "integer"
+        },
+        "assist": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idempotency": {
+          "type": "object"
+        },
+        "ask": {
+          "type": "object"
+        },
+        "mcp": {
+          "type": "object"
+        }
+      }
+    },
+    "kvasir": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "GET /v1/config of Kvasir, or absent"
+    },
+    "assistant": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "GET /capabilities of the assistant, or absent"
+    },
+    "apps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The app's capabilities document, or null for its absence"
+          }
+        }
+      }
+    },
+    "person": {
+      "type": "object",
+      "required": [
+        "subject",
+        "display_name",
+        "entitlements",
+        "roles"
+      ],
+      "properties": {
+        "subject": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "entitlements": {
+          "type": "array",
+          "items": {
+            "$ref": "entitlements.schema.json#/$defs/entitlement"
+          }
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "entitlements.schema.json#/$defs/role"
+          }
+        }
+      }
+    },
+    "desk": {
+      "type": "object",
+      "required": [
+        "version",
+        "mode",
+        "contracts"
+      ],
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "off",
+            "local",
+            "oidc"
+          ]
+        },
+        "contracts": {
+          "type": "object",
+          "description": "The contract versions the desk was generated from, by name",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "policy_row": {
+      "type": "object",
+      "description": "One row of the engine's static policy table (Wave 4c section 6.5): what a door does, for whom, at what cost",
+      "required": [
+        "door",
+        "role",
+        "writes",
+        "idempotent",
+        "cost",
+        "result_cap",
+        "label"
+      ],
+      "properties": {
+        "door": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "reader",
+            "reviewer",
+            "operator",
+            "admin"
+          ]
+        },
+        "writes": {
+          "type": "boolean"
+        },
+        "idempotent": {
+          "type": "boolean"
+        },
+        "cost": {
+          "type": "string",
+          "enum": [
+            "free",
+            "bounded",
+            "job",
+            "stream"
+          ],
+          "description": "free: one read; bounded: a read capped by the door; job: queued for a worker, answered with an id; stream: held open"
+        },
+        "result_cap": {
+          "type": "string"
+        },
+        "label": {
+          "type": "object",
+          "required": [
+            "present",
+            "past"
+          ],
+          "properties": {
+            "present": {
+              "type": "string"
+            },
+            "past": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

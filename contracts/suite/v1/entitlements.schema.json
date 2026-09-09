@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/suite/v1/entitlements.schema.json",
+  "title": "NILS entitlements",
+  "description": "Wave 4c section 5.2: five names carried in the token's roles claim as plain strings. reader, reviewer, operator and admin are the engine's ladder and each implies the ones below; assist is orthogonal and read only by the desk and the assistant.",
+  "$defs": {
+    "entitlement": {
+      "type": "string",
+      "enum": [
+        "reader",
+        "reviewer",
+        "operator",
+        "admin",
+        "assist"
+      ]
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "reader",
+        "reviewer",
+        "operator",
+        "admin"
+      ],
+      "description": "An entitlement the engine reads; the ladder, lowest first"
+    }
+  },
+  "type": "object",
+  "properties": {
+    "roles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entitlement"
+      },
+      "uniqueItems": true,
+      "description": "The token's roles claim: an array of plain strings, never objects"
+    }
+  },
+  "required": [
+    "roles"
+  ],
+  "additionalProperties": false,
+  "ladder": [
+    "reader",
+    "reviewer",
+    "operator",
+    "admin"
+  ],
+  "orthogonal": [
+    "assist"
+  ]
+}

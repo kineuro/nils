@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/suite/v1/station.schema.json",
+  "title": "NILS station manifest",
+  "description": "Wave 4c section 9.4: one decision point of the assistant, a guarded phase machine loaded from a directory the configuration lists.",
+  "type": "object",
+  "required": [
+    "id",
+    "app",
+    "purpose",
+    "content",
+    "ceiling",
+    "grant",
+    "brief",
+    "result",
+    "checks",
+    "budget",
+    "writes",
+    "phases",
+    "evals"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "app": {
+      "type": "string"
+    },
+    "purpose": {
+      "type": "string",
+      "description": "The Kvasir purpose it runs under, a purpose registry entry's id"
+    },
+    "content": {
+      "$ref": "purpose.schema.json#/$defs/content_class"
+    },
+    "ceiling": {
+      "$ref": "headers.schema.json#/$defs/ceiling"
+    },
+    "grant": {
+      "type": "object",
+      "description": "The door operations it may call and the caps per operation",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "calls": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "brief": {
+      "type": "object",
+      "required": [
+        "path",
+        "hash"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16,128}$"
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "description": "The JSON schema of the verdict it must produce; the input schema of its finish tool"
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Named assertions the verdict must pass before a run may settle"
+    },
+    "budget": {
+      "type": "object",
+      "required": [
+        "turns",
+        "tool_calls",
+        "wall_clock_seconds",
+        "input_tokens"
+      ],
+      "properties": {
+        "turns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wall_clock_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "writes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/proposal_kind"
+      },
+      "uniqueItems": true,
+      "description": "The closed set of proposal kinds it may emit"
+    },
+    "phases": {
+      "type": "object",
+      "required": [
+        "initial",
+        "transitions"
+      ],
+      "properties": {
+        "initial": {
+          "type": "string"
+        },
+        "transitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "from",
+              "to"
+            ],
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              },
+              "when": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "evals": {
+      "type": "string",
+      "description": "The fixture directory that gates any change to any of the above"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "proposal_kind": {
+      "type": "string",
+      "enum": [
+        "document_version",
+        "review_decision",
+        "overlay",
+        "identity_rule",
+        "note"
+      ]
+    },
+    "terminal_reason": {
+      "type": "string",
+      "enum": [
+        "settled",
+        "budget_turns",
+        "budget_tools",
+        "budget_wall_clock",
+        "budget_tokens",
+        "token_unavailable",
+        "provider_error",
+        "provider_refused",
+        "loop_stopped",
+        "aborted"
+      ]
+    }
+  }
+}

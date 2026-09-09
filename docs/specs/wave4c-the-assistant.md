@@ -1247,6 +1247,33 @@ The wave closes when:
 
 ## 13. Order of work
 
+**As built (A7, the contracts: suite v1 and mcp v1, 2026-09-09).**
+`contracts/suite/v1` is seven documents and a directory of vectors:
+`entitlements` (the five names, the ladder of four, `assist` orthogonal, the
+`roles` claim as plain strings), `headers` (the ceiling as a role, the actor
+object with `absent` as its own kind, the idempotency key at two hundred and
+fifty six), `purpose` (the entry, the three content classes, the two
+localities, the five refusal layers, and what an admin may open per class),
+`capabilities` (the deployment document with the engine's own document as its
+`engine` part and the policy row as a definition), `app` (the registry entry)
+and `station` (the manifest, the five proposal kinds, the ten terminal
+reasons), plus `vectors/trust-list.json` with the two issuers, the two keys,
+the two JWKS documents and eight cases with their outcomes, which the engine
+runs against a live server in its door tests and Kvasir will run as the same
+file. `contracts/mcp/v1` is one document: the sixteen operations, the input
+schema of each verbatim from the engine, the door each calls, the tool object,
+the result envelope, the paging by offset and the policy fields, which are the
+policy row of the door. There is no schema validator in the engine, so its
+tests hold the documents to the engine's own vocabulary structurally (the
+enums are the roles the engine knows, the operations are the pack loader's
+list, every listed tool's input schema equals the contract's, the engine's
+capabilities carry every key the suite requires of them) and the vectors by
+running them. `GET /api/capabilities` now names `suite` and `mcp` beside
+`openapi`, `review_item` and `pack`. The engine section closes here; §6.8's
+eight fixtures stand as: 1 and 5 in the gate, 2, 3, 4, 6 and 7 as the
+engine's own door tests named after them (A1 to A3), and 8 in the ask
+schema's contract test of Wave 4b.
+
 **As built (A6, the knob engine; review-item contract v4, 2026-09-09).** The
 four diagnostics are the evaluator's to report, not the evidence rows' to
 imply (§14's question, answered by reading `eval.rs`): a rule whose axes an

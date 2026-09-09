@@ -29,6 +29,9 @@ use crate::{Exit, ServeArgs, fail, usage};
 /// contracts at build time so that the door and the document cannot drift.
 const OPENAPI_VERSION: &str = include_str!("../../../../contracts/openapi/VERSION");
 const REVIEW_ITEM_VERSION: &str = include_str!("../../../../contracts/review-item/VERSION");
+// Wave 4c §6.7: the suite vocabulary and the MCP door, each versioned.
+const SUITE_VERSION: &str = include_str!("../../../../contracts/suite/VERSION");
+const MCP_VERSION: &str = include_str!("../../../../contracts/mcp/VERSION");
 const PACK_CONTRACT_VERSION: &str = include_str!("../../../../contracts/pack/VERSION");
 
 /// What a caller may do (Wave 4a §11.2): groups map to roles, and a door
@@ -1834,6 +1837,8 @@ fn capabilities(
         "contracts": {
             "openapi": OPENAPI_VERSION.trim(),
             "review_item": REVIEW_ITEM_VERSION.trim(),
+            "suite": SUITE_VERSION.trim(),
+            "mcp": MCP_VERSION.trim(),
             "pack": PACK_CONTRACT_VERSION.trim(),
         },
         "packs": packs,
@@ -2392,7 +2397,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "operator",
             true,
             false,
-            "queued",
+            "job",
             "one job",
             "Adopting an overlay",
             "Adopted an overlay",
@@ -2402,7 +2407,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "operator",
             false,
             false,
-            "queued",
+            "job",
             "one job",
             "Probing identity rules",
             "Probed identity rules",
