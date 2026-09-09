@@ -1247,6 +1247,37 @@ The wave closes when:
 
 ## 13. Order of work
 
+**Refined (ask-help on point, 2026-09-09, evening).** After the close, two more
+bars set by Nima: the gold questions were paraphrased from the previous
+prototype's traffic and were never written for this NILS, so the bench should
+carry questions of our own; and on the local model the station must be on
+point, with fewer calls, errors and retries, not merely right. Built as
+kineuro/nils-assistant #14 and #15. The bench gained an authored corpus of
+thirty-six questions written for the ask language and worded as a researcher
+asks them, each with a gold authored against the synthetic registry and verified
+to run, nine held out by the hash of the id, and two authored follow-up
+chains with a gold for every turn; the evals read each run's trace from the
+conversation history (calls, refused calls, drafts, drafts the engine refused)
+and report the medians beside the answers. The station was cut to five tools,
+the draft answering the handle, the diagnosis and a preview in one call, so
+the loop is draft then settle; the brief is inline, the registry's prelude is
+warmed by the host and sits in the instructions, the phase left the prompt and
+the memory index is held for a conversation's life, so every render of one
+person's conversations is one text and the runtime's prefix cache serves it;
+the small-model selector of §9.9 chooses four worked examples per delivered
+message from the cookbook (the loop split of both corpora) by the idioms the
+words carry; a refusal is a settle without a document that names the choices;
+and the draft undoes the HTML entities a small model writes into its YAML.
+Before, the closing station on the authored corpus: 26 of 36 the same answer,
+a median of 36 s and 5 calls, 27 of 65 drafts refused, four runs stopped by
+the loop detector; on the paraphrased corpus 14 of 18 at 33 s and 5 calls.
+After, on the same card in one run: the authored corpus 36 of 36 the same answer (35 by the strict hash, every held-out question), a median of 15 s and 2 calls with 35 of 36 runs exactly one draft and one settle, no refused call, one draft refused; the paraphrased corpus 15 of 18 (14 strict; loop 10 of 11, held out 5 of 7) at 24 s and 2 calls; the three chains reached the gold at the opening with no correction where the researcher gave fourteen, every follow-up turn leaving a document; the two authored chains reached their gold on every turn; the stability check answered one number five times with one scheme digest at about twenty seconds each. Filed on the way:
+kineuro/nils#98 (the draft door reads a bare `n` in YAML as a boolean), #99
+(a share measure without its denominator passes validate and fails at run),
+#100 (the catalog lists a kind validate refuses at the ceiling). The local
+rig moved from the session's scratch to `~/Projects/nils-rig` with a guide
+for testing it by hand and by the bench.
+
 **Closing (2026-09-09).** Against the eight bars of §11: (1) the eight engine
 fixtures are green on both backends in CI and the two defects of §2 left `main`
 with A1. (2) The three identity modes carry a hand-built question through its
