@@ -28,6 +28,7 @@ mod ask_doors;
 mod backup;
 mod door_client;
 mod gate;
+mod login;
 mod mcp;
 mod serve;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
@@ -101,6 +102,10 @@ enum Command {
     /// work them (Wave 4a section 9.1)
     #[command(subcommand)]
     Jobs(JobsCommand),
+    /// A token for the command line, from the desk or a provider (Wave 4c section 5.8)
+    Login(LoginArgs),
+    /// Forget the command line's token
+    Logout,
     /// Overlays as registry objects: proposed with a rehearsal, adopted by
     /// an operator, exported to a pack directory (Wave 4c section 6.6)
     #[command(subcommand)]
@@ -1196,6 +1201,15 @@ fn main() -> ExitCode {
         Command::Clinical(command) => clinical_command(&home, command),
         Command::Select(args) => select_preview(&home, args),
         Command::Jobs(command) => jobs_command(&home, command),
+        Command::Login(args) => login_command(args),
+        Command::Logout => {
+            if login::logout() {
+                println!("forgotten: {}", login::token_path().display());
+            } else {
+                println!("no token was kept");
+            }
+            Ok(())
+        }
         Command::Overlay(command) => overlay_command(&home, command),
         Command::Ingest(command) => ingest_command(&home, command),
         Command::Serve(args) => serve::serve(&home, *args),
@@ -1899,6 +1913,55 @@ fn ingest_command(home: &Home, command: IngestCommand) -> Result<(), Exit> {
             Err(fail(e))
         }
     }
+}
+
+/// `nils login` (Wave 4c §5.8).
+#[derive(Debug, Parser)]
+struct LoginArgs {
+    /// The desk, in local mode: username and password for a token of one day
+    #[arg(long, value_name = "URL", conflicts_with = "issuer")]
+    desk: Option<String>,
+    /// A provider: the app password over the client credentials grant
+    #[arg(long, value_name = "URL", requires = "client")]
+    issuer: Option<String>,
+    /// The provider's client id for the command line
+    #[arg(long, value_name = "ID")]
+    client: Option<String>,
+    #[arg(long)]
+    username: String,
+    /// The password (or app password) on stdin, one line; never a flag
+    #[arg(long)]
+    password_stdin: bool,
+}
+
+fn login_command(args: LoginArgs) -> Result<(), Exit> {
+    if !args.password_stdin {
+        return Err(usage(
+            "the password is read from stdin: pass --password-stdin and pipe it in",
+        ));
+    }
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| fail(e.to_string()))?;
+    let password = line.trim_end_matches(['\n', '\r']);
+    if password.is_empty() {
+        return Err(usage("an empty password"));
+    }
+    let doc = match (&args.desk, &args.issuer, &args.client) {
+        (Some(d), _, _) => login::desk(d, &args.username, password),
+        (None, Some(i), Some(c)) => login::exchange(i, c, &args.username, password),
+        _ => return Err(usage("--desk URL, or --issuer URL --client ID")),
+    }
+    .map_err(fail)?;
+    let path = login::login(&doc).map_err(fail)?;
+    println!(
+        "logged in as {}; the token is kept at {} until {}",
+        args.username,
+        path.display(),
+        doc["expires_at"]
+    );
+    Ok(())
 }
 
 fn load_overlay(path: Option<&PathBuf>) -> Result<Option<nils_pack::Overlay>, Exit> {

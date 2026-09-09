@@ -1247,6 +1247,60 @@ The wave closes when:
 
 ## 13. Order of work
 
+**As built (B2, the three identity modes, 2026-09-09).** In the desk
+(`kineuro/nils-desk`): `local` mode is the small issuer of C46, an EdDSA
+key made at first start and readable by the desk's account only, a JWKS and
+a discovery document under `/.well-known/`, argon2id users added at the
+command line (`nils-desk user add`, the first with `--admin`) and granted on
+the settings page, and tokens of fifteen minutes minted only for the subject
+that just authenticated with the entitlements stored for that user and no
+wider, so the engine runs with one trust entry pointing at the desk and
+cannot tell; `oidc` mode is the authorization code grant with PKCE as a
+confidential client, the id token verified against the provider's JWKS with
+one refetch on a key id miss, the person's access and refresh tokens held in
+the session row and refreshed before expiry, the entitlements read from the
+`roles` claim; `nils-desk register --authentik URL --token FILE --origin URL
+--allow GROUP --bind ENTITLEMENT=GROUP` creates or finds the signing key,
+the provider (confidential, redirect `{origin}/desk/callback`, fifteen-minute
+access and thirty-day refresh tokens, the standard and the entitlements scope
+mappings), the application, the policy bindings and the five entitlements,
+and prints the engine's flags and the desk's `[oidc]` table; on the group's
+provider the first run created what was missing and the second created
+nothing, after one correction found only there: the provider's listings do
+not filter on every field they accept, so every lookup now checks the
+answer's fields itself. The display name is recorded beside the subject at
+first sight, and a person renamed at the provider moves no row (tested
+against a fake provider; the group's provider is registered but the desk is
+not yet deployed at the registered origin, so the live sign-in waits for the
+deployment). In the engine: `nils login --desk URL --username U
+--password-stdin` keeps the desk's one-day token at `NILS_CONFIG_DIR`
+(else `XDG_CONFIG_HOME/nils`, else `~/.config/nils`) as `token.json`, mode
+600; `nils login --issuer URL --client ID` exchanges an app password over the
+client credentials grant and keeps the app password beside the token to
+exchange again on expiry; every `--server` verb reads the kept token when
+`--token` and `NILS_TOKEN` are absent; `nils logout` forgets it. The device
+authorization grant stays the growth path.
+
+**As built (B1, the desk, the process and the shell, 2026-09-09).**
+`kineuro/nils-desk`, one Rust binary (axum) with the React shell embedded by
+`rust-embed`, in `off` mode: a session cookie (`HttpOnly`, `SameSite=Lax`,
+`Secure` behind https) naming a row in one SQLite file; `/api/*`, `/kvasir/*`,
+`/assistant/*` and `/apps/{id}/*` proxied on the one origin with the bearer
+the desk holds, responses streamed through, every non-GET refused without
+`X-Nils-Desk: 1` and an `Origin` or `Referer` that is the desk (a form post
+from elsewhere gets 403, tested); `GET /desk/capabilities` composes the
+deployment document of `contracts/suite/v1` from the engine's document
+verbatim, Kvasir, the assistant and each app or its absence, the person, and
+the desk with `engine_reachable` and `contract_mismatch`; `nils-desk check`
+and `serve` compare the engine's `openapi` and `suite` against the desk's:
+an engine behind refuses to start by name, an engine ahead is a warning the
+shell shows, an engine that does not answer is a state the shell renders;
+the shell is a pure function of the document, its sections and controls
+predicates over a door and an entitlement with the ladder implying the ones
+below, the assistant section present only when the assistant answered and
+the person holds `assist`, one section per registered app that answered,
+and the named states unbound person, warming and contract mismatch.
+
 **As built (C0, the serving benchmark, 2026-09-09).** Run on the
 production host against SGLang directly (the cookbook image for the model,
 `flashinfer` attention on SM120, FP8 KV cache, eight running requests), one
