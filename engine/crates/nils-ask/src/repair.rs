@@ -59,7 +59,7 @@ pub fn repair(doc: &mut Value) -> Vec<Repair> {
         }
     }
     if let Some(o) = doc.get_mut("out").and_then(Value::as_object_mut) {
-        repair_slots(o, "out", &mut out);
+        repair_slots(o, "out", &mut out, true);
     }
     if let Some(params) = doc.get_mut("params").and_then(Value::as_object_mut) {
         for (name, decl) in params.iter_mut() {
@@ -75,7 +75,7 @@ fn repair_set(set: &mut Value, path: &str, out: &mut Vec<Repair>) {
     let Some(m) = set.as_object_mut() else {
         return;
     };
-    repair_slots(m, path, out);
+    repair_slots(m, path, out, true);
     for slot in ["near", "attach", "has", "same", "every"] {
         if let Some(v) = m.get_mut(slot) {
             // a lone relation object where a list belongs
@@ -90,7 +90,7 @@ fn repair_set(set: &mut Value, path: &str, out: &mut Vec<Repair>) {
             if let Some(items) = v.as_array_mut() {
                 for (i, item) in items.iter_mut().enumerate() {
                     if let Some(o) = item.as_object_mut() {
-                        repair_slots(o, &format!("{path}.{slot}[{i}]"), out);
+                        repair_slots(o, &format!("{path}.{slot}[{i}]"), out, true);
                         if let Some(w) = o.get_mut("window") {
                             repair_units(w, &format!("{path}.{slot}[{i}].window"), out);
                         }
@@ -100,10 +100,11 @@ fn repair_set(set: &mut Value, path: &str, out: &mut Vec<Repair>) {
         }
     }
     if let Some(p) = m.get_mut("pick").and_then(Value::as_object_mut) {
-        repair_slots(p, &format!("{path}.pick"), out);
+        repair_slots(p, &format!("{path}.pick"), out, true);
     }
+    // a group's `by` is a list of clauses, not order terms: no direction belongs there
     if let Some(g) = m.get_mut("group").and_then(Value::as_object_mut) {
-        repair_slots(g, &format!("{path}.group"), out);
+        repair_slots(g, &format!("{path}.group"), out, false);
     }
     if let Some(b) = m.get_mut("bind").and_then(Value::as_object_mut) {
         for (name, c) in b.iter_mut() {
@@ -113,8 +114,9 @@ fn repair_set(set: &mut Value, path: &str, out: &mut Vec<Repair>) {
 }
 
 /// The list slots of one object: a lone clause is wrapped, every clause
-/// inside is repaired.
-fn repair_slots(m: &mut Map<String, Value>, path: &str, out: &mut Vec<Repair>) {
+/// inside is repaired. `by_is_order` says whether `by` holds order terms
+/// (`pick`, `out`) or plain clauses (`group`).
+fn repair_slots(m: &mut Map<String, Value>, path: &str, out: &mut Vec<Repair>, by_is_order: bool) {
     for slot in LIST_SLOTS {
         let Some(v) = m.get_mut(*slot) else {
             continue;
@@ -131,7 +133,7 @@ fn repair_slots(m: &mut Map<String, Value>, path: &str, out: &mut Vec<Repair>) {
             for (i, item) in items.iter_mut().enumerate() {
                 let p = format!("{path}.{slot}[{i}]");
                 // an order term is [clause, dir]; a bare clause gets asc
-                if *slot == "by" || *slot == "order" {
+                if (*slot == "by" && by_is_order) || *slot == "order" {
                     if is_clause_shaped(item) {
                         let c = item.take();
                         *item = Value::Array(vec![c, Value::String("asc".into())]);
