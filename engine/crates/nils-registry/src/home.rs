@@ -533,6 +533,17 @@ impl Registry {
     /// `default_transaction_read_only` and a `statement_timeout` set on the
     /// role) and under the registry's own otherwise, with
     /// `default_transaction_read_only` set on the session either way.
+    /// The Postgres connection string this registry runs on (Wave 4c §6.5,
+    /// for a backup); an error on SQLite.
+    pub fn dsn(&self) -> Result<String, HomeError> {
+        match self.config.backend {
+            Backend::Postgres => Home::dsn_of(&self.config),
+            Backend::Sqlite => Err(HomeError::Config(
+                "the registry is on SQLite and has no dsn".into(),
+            )),
+        }
+    }
+
     pub fn open_ask_reader(&self, dsn: Option<&str>) -> Result<Store, HomeError> {
         match self.config.backend {
             Backend::Sqlite => {

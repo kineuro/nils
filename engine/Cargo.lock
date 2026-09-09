@@ -1496,11 +1496,13 @@ dependencies = [
 name = "nils"
 version = "1.0.0-alpha.0"
 dependencies = [
+ "blake2",
  "clap",
  "csv",
  "ctrlc",
  "dicom-core",
  "dicom-dictionary-std",
+ "hex",
  "jsonwebtoken",
  "nils-ask",
  "nils-catalog",

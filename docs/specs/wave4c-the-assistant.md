@@ -1247,6 +1247,29 @@ The wave closes when:
 
 ## 13. Order of work
 
+**As built (A5, the deployment surface, 2026-09-09).** `capabilities.policy`
+is one row per door (the role, whether it writes, whether it takes an
+idempotency key, the cost class `free`, `bounded`, `job` or `stream`, the
+result cap by name, and a label in the present and the past tense), kept as
+one table in the engine. Ingest locations are `--ingest-root NAME=PATH`
+(absolute directories, repeatable), published as `capabilities.ingest_roots`
+by name; `POST /api/jobs` resolves `@name/relative` against them for `digest`
+and `linkage import`, refuses a parent step or an unregistered name, and
+refuses an absolute path a caller composes. `backup` and `verify` join the
+queueable verbs: `backup` writes to `--backup-dir` (409 without one) and
+`verify NAME` checks one archive in it. The verbs: `nils backup [--dir]`
+writes one archive directory (a `VACUUM INTO` of the registry and the linkage
+store on SQLite, a custom format `pg_dump` per schema on Postgres, the
+configuration, and a manifest with the registry id, epoch, schema version and
+every file's size and BLAKE2b digest; the key store is never in it), audited
+as `backup`; `nils verify ARCHIVE` recomputes the digests; `nils restore
+ARCHIVE --yes` refuses without the flag, refuses an archive that does not
+verify or belongs to another registry or backend, writes a pre-restore
+archive under the home first, then replaces the stores; it is a command an
+operator runs with the engine stopped and never a job (D50). New doors:
+`GET /api/packs`, `/packs/{name}`, `/batches`, `/batches/{id}` (the report,
+samples as shapes) and `/quarantine` (reviewer). Custody lists backups.
+
 **As built (A4, the ask additions; openapi contract v3, 2026-09-09).** The contract is bumped in this slice rather than in A7, because the engine's own test refuses to serve a door the published contract does not describe, and that rule is worth more than the plan's ordering: v3 is written once here with every door of §6.1 to §6.6, the slices after A4 serve what it describes, and A7 keeps `suite` v1 and `mcp` v1. The declaration block
 (`grain`, `session_scheme {name, digest}`, `membership`, `key_namespace`,
 `pick_rule`, `denominator`, `disclosure`, `truncated`) is computed pure over
