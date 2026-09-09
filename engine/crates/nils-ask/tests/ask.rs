@@ -566,6 +566,17 @@ out: {set: each, level: aggregate, columns: [["field", {}, "code"], ["field", {}
     assert_eq!(group.by.len(), 2, "{group:?}");
     let pick = ask.sets["visits"].pick.as_ref().expect("the pick");
     assert_eq!(pick.by.len(), 1, "{pick:?}");
+    // a relation's by is a list of clauses too: the yardstick's `same` reaches the parser as written
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/yardstick.ask.yml"
+    ))
+    .unwrap();
+    let (_, repairs) = parse_repaired(&text).unwrap();
+    assert!(
+        !repairs.iter().any(|r| r.path.contains(".same[")),
+        "a same relation's by is not an order list: {repairs:?}"
+    );
 }
 
 #[test]

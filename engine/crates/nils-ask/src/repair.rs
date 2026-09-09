@@ -90,7 +90,8 @@ fn repair_set(set: &mut Value, path: &str, out: &mut Vec<Repair>) {
             if let Some(items) = v.as_array_mut() {
                 for (i, item) in items.iter_mut().enumerate() {
                     if let Some(o) = item.as_object_mut() {
-                        repair_slots(o, &format!("{path}.{slot}[{i}]"), out, true);
+                        // a relation's `by` (same, every) is a list of clauses; its `order` (near) stays order terms
+                        repair_slots(o, &format!("{path}.{slot}[{i}]"), out, false);
                         if let Some(w) = o.get_mut("window") {
                             repair_units(w, &format!("{path}.{slot}[{i}].window"), out);
                         }
