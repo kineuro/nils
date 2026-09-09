@@ -25,6 +25,7 @@ use clap::{Args, Parser, Subcommand};
 
 mod ask_cli;
 mod ask_doors;
+mod assist_cli;
 mod backup;
 mod door_client;
 mod gate;
@@ -167,6 +168,11 @@ enum Command {
     Ask {
         #[command(subcommand)]
         command: ask_cli::AskCommand,
+    },
+    /// The assistant's stations from the command line (Wave 4c section 9.15): words to a document
+    Assist {
+        #[command(subcommand)]
+        command: assist_cli::AssistCommand,
     },
     /// Every store this registry keeps: where, what it holds, how long, and the command that changes it
     Custody {
@@ -1224,6 +1230,7 @@ fn main() -> ExitCode {
         Command::Session { command } => session_command(&home, command),
         Command::Synth(args) => synth(&home, args),
         Command::Ask { command } => ask_cli::ask_command(&home, command),
+        Command::Assist { command } => assist_cli::assist_command(command),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
     };
     match outcome {
