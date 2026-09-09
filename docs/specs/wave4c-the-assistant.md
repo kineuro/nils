@@ -1247,6 +1247,36 @@ The wave closes when:
 
 ## 13. Order of work
 
+**As built (C0, the serving benchmark, 2026-09-09).** Run on the
+production host against SGLang directly (the cookbook image for the model,
+`flashinfer` attention on SM120, FP8 KV cache, eight running requests), one
+whole 96 GB card per configuration, the model in BF16, temperature 0,
+`ignore_eos` on, thinking off, the first request of every run discarded; the
+client, the raw rows and the full report are in the private record. Against
+§8.10's thresholds at eight streams: the aggregate of 150 tokens per second
+is reached only with speculative decoding (the in-checkpoint MTP head gives
+175, plain gives 101, a block-diffusion draft gives 144); the p95 first token
+under two seconds on the comparable load is reached only without it (plain
+1.3 s, MTP 5.0 s, the draft 20 s), and a larger prefill chunk does not move
+the speculative figure, so the two thresholds name two operating points and
+the `card` profile carries both, foreground and background purposes choosing
+between them; the real load (24,000 tokens in) is prefill bound in every
+configuration, p95 first token 25 to 37 s against the 8 s asked, so the
+budgets of §12 are what the prompt cache makes cheap, and the cache does:
+a resident prefix answers in 0.2 to 0.8 s and eight distinct 4k prefixes
+stay resident across interleaved rounds, so conversation affinity is not
+needed at this pool size. Single stream, the MTP head doubles decode (63
+against 27 tokens per second). The chosen grammar backend, llguidance, does
+not load in the runtime as shipped (a version mismatch inside it), so the
+schema pass fraction is not measured; with the default backend every
+constrained document parsed and none passed `nils ask validate` zero shot,
+because the model invented measures without the guide's grounding, which is
+the number behind §6.4; the negative control did not discriminate. The first
+constrained run found an engine bug instead: the generated ask schema named
+`#/$defs/Arg` and never registered it, fixed in A7's branch with a test that
+every reference resolves. C1's admission suite is where the runtime pin and
+the backend are settled.
+
 **As built (A7, the contracts: suite v1 and mcp v1, 2026-09-09).**
 `contracts/suite/v1` is seven documents and a directory of vectors:
 `entitlements` (the five names, the ladder of four, `assist` orthogonal, the
