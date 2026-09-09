@@ -1370,3 +1370,145 @@ fn the_trust_list_vectors_hold() {
     }
     server.finish();
 }
+
+/// Wave 4c §5.8: `nils login --desk` keeps a token of one day in the
+/// configuration directory, every `--server` verb reads it when `--token`
+/// and `NILS_TOKEN` are absent, and `nils logout` forgets it.
+#[test]
+fn login_keeps_a_token_the_server_verbs_read() {
+    // a fake desk: one request, the command line's login
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let desk_port = listener.local_addr().unwrap().port();
+    let minted = "a-cli-token-of-length-24";
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        // the headers, then the body the content length promises
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        let req = loop {
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 {
+                break String::from_utf8_lossy(&got).to_string();
+            }
+            got.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&got).to_string();
+            if let Some(end) = text.find("\r\n\r\n") {
+                let length = text[..end]
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                if got.len() >= end + 4 + length {
+                    break text;
+                }
+            }
+        };
+        assert!(req.starts_with("POST /desk/cli-login"), "{req}");
+        assert!(req.contains("\"username\":\"bo\""), "{req}");
+        assert!(
+            req.contains("\"password\":\"another long password\""),
+            "{req}"
+        );
+        let body = format!(
+            r#"{{"token":"{minted}","expires_at":{},"issuer":"http://desk"}}"#,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 86_400
+        );
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(reply.as_bytes()).unwrap();
+    });
+    let config = TempDir::new("login-config");
+    let mut cmd = nils();
+    cmd.args([
+        "login",
+        "--desk",
+        &format!("http://127.0.0.1:{desk_port}"),
+        "--username",
+        "bo",
+        "--password-stdin",
+    ])
+    .env("NILS_CONFIG_DIR", config.path())
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"another long password\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let kept = config.path().join("token.json");
+    assert!(kept.is_file(), "the token is kept");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&kept).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&kept).unwrap()).unwrap();
+    assert_eq!(doc["token"], minted);
+    assert_eq!(doc["kind"], "desk");
+
+    // an engine that knows that token; a --server verb reads it unasked
+    let home = registry();
+    let server = Server::start(
+        &home,
+        1,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            &format!("{minted}=bo@lab:reader"),
+        ],
+        &[],
+    );
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../gate/fixtures/gold-a.ask.yml");
+    let out = nils()
+        .args([
+            "ask",
+            "validate",
+            "--server",
+            &format!("http://127.0.0.1:{}", server.port),
+            "--file",
+            fixture.to_str().unwrap(),
+        ])
+        .env("NILS_CONFIG_DIR", config.path())
+        .env_remove("NILS_TOKEN")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    server.finish();
+
+    // logout forgets it
+    let out = nils()
+        .args(["logout"])
+        .env("NILS_CONFIG_DIR", config.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(!kept.exists());
+}

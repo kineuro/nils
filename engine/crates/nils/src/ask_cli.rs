@@ -395,7 +395,8 @@ impl Where {
         let token = self
             .token
             .clone()
-            .or_else(|| std::env::var("NILS_TOKEN").ok().filter(|t| !t.is_empty()));
+            .or_else(|| std::env::var("NILS_TOKEN").ok().filter(|t| !t.is_empty()))
+            .or_else(crate::login::saved_token);
         Door::new(url, token, Caps::default().sync_timeout_ms + 5_000).map(Some)
     }
 }
