@@ -1247,6 +1247,234 @@ The wave closes when:
 
 ## 13. Order of work
 
+**Closing (2026-09-09).** Against the eight bars of §11: (1) the eight engine
+fixtures are green on both backends in CI and the two defects of §2 left `main`
+with A1. (2) The three identity modes carry a hand-built question through its
+versions, authors, diffs and compiled SQL, headless in the desk's tests and
+live on the rig (B2, B3). (3) The local model passed admission on the
+production runtime, the serving benchmark met its thresholds with one measured
+tunnel caveat, and the ledger has no content column, asserted by a test (C0,
+C2, C4). (4) The baseline re-ran on the rebased corpus at one shape in eighteen
+on both models; `ask-help` on the local model reaches fourteen of eighteen the
+same answer and ten by the strict hash after the rework for the local model,
+and needed two correction turns on the three chains where the researcher gave fourteen, with every follow-up turn leaving a document; the composition question returned one number five times with its scheme digest. (5) A provider deployment is the three commands of §5.7 and a
+`local` deployment with two users ran on a laptop (B2). (6) The custody page
+lists every store of §10, the assistant's included (B5, D2). (7) No station
+holds a decision-apply verb: the seam refuses the forbidden operations in code
+and the assistant's gate greps every manifest in CI (D2, D3). (8)
+`keyword-tune` proposed an overlay whose `try` named seventeen stacks and
+adoption moved seventeen; `identity-check` named the placeholder tag by its
+shape against the path segment (D6, D7). Left open, named where they arose: the
+signals door carries no text sample (kineuro/nils#94), the nightly credential
+reconciliation of §10 and a live OAuth grant (C5), the small-model selector and
+the compaction template of §9.9 (D5), and the three held-out shapes the local
+model still misses, one of them unanswerable as asked.
+
+**As built (C5, brought keys and the OAuth slot, 2026-09-09).** In
+`kineuro/kvasir`: a person's own provider key is sealed with the same
+XChaCha20-Poly1305 seal key as the organisation's, with the person's immutable
+subject bound in as associated data, so a row moved to another subject's name
+does not open; a machine or a minted key holds none. The OAuth slot is a public
+client with PKCE (S256), a state bound to the subject and the desk's tab,
+expiring in ten minutes and used once, and one fixed redirect on Kvasir's own
+origin, `/v1/personal/oauth/callback`, the only door served before
+authentication, since the browser arrives from the provider with no bearer and
+the state is its identity; the code is exchanged with the verifier, access and
+refresh are stored sealed under the subject, the refresh rotates on every use
+and is serialised per person and provider through a lock, and revoke deletes
+both. A stream carries the person's own credential for a provider before the
+organisation's. The wave's two providers are the defaults of `oauth` in the
+configuration: the personal source is offered for the one whose terms permit
+it and absent by policy for the one whose terms as of 20 February 2026 forbid
+it, with the sentence and the date carried by `GET /v1/personal` and shown by
+the desk's settings section, where a person brings a key, connects or
+disconnects a subscription. The bars are tests: two people connect in the same
+minute with their own states and sessions and neither sees the other's grant;
+a dump holds no readable brought key and the minted keys stay hashes; the
+forbidden provider shows the sentence and the date; one refresh serves two
+concurrent uses. Not done: the nightly reconciliation against the provider of
+§10, and a live grant against a real provider, since no account of the
+permitted provider was at hand on the rig.
+
+**As built (D6 and D7, `keyword-tune` and `identity-check`, 2026-09-09).** Two
+stations on the framework of D3, checked live on a synthetic knob rig: a tree
+of 209 files made by the engine's own DICOM synthesis helpers (five subjects,
+a placeholder patient id, subject codes as the first directory, a site's own
+contrast word the pack does not know), digested and classified into its own
+registry, served with an ingest root and a worker. `keyword-tune` surveys the
+signals and the open review items, writes one hypothesis for one bucket of one
+axis with a falsifiable prediction (the groups that flip, the values that must
+not regress) before anything is rehearsed, rehearses it as an overlay through
+`try`, reads the diff as keep, partial or revert, and proposes the overlay for
+an operator to adopt; its checks read the run state and the seam's ledger, not
+the model's word: one bucket, the prediction before the first rehearsal, no
+write before the last rehearsal, every named group one the signals showed.
+Closing bar 8, first half: the rehearsal named seventeen stacks moving on
+`post_contrast`, adoption queued the reclassify, and the axis's keyword tier
+went from ten to twenty-seven. Two things the live run taught: a scope's colon
+must stay a colon on the wire, and the signals door carries no sample of the
+text an axis matched against (kineuro/nils#94), so the term comes from the
+person's words, the shadowed keywords or the overridden terms; without the word
+in the brief the station hypothesised a term the bucket already held and spent
+its budget. `identity-check` reads the registered locations, probes the
+current rule and a candidate side by side through the engine's own door, which
+validates every rule and answers shapes only, proposes one of the rules the
+probe took with the path question answered explicitly, and settles naming the
+source the rule reads and the shape it saw; its check tells a code from its
+shape, so a value never passes. The rule grammar sits in the tool's own words
+and is checked before the grant is spent, after the first run burnt its three
+probes on rules the engine refused. Closing bar 8, second half: it named the
+placeholder tag by its shape (`AAAA`, constant across the sample, one subject)
+against the path segment (`AAA999`, three subjects) and proposed the path rule
+with `path_is_direct_identifier` false. The desk's keyword tab sits beside the
+review queue and the anonymisation page in the data section, each starting a
+headless run through the proxy and rendering the verdict from the assistant's
+store; the desk composes no overlay and no rule, and the re-digest stays a
+person's act.
+
+**As built (D5, the concierge, clarification and memory, 2026-09-09).** The
+concierge holds exactly the grant of §9.12 (describe, a handle, one page of its
+rows, the capabilities, the jobs) plus `delegate`, and writes nothing.
+Delegation follows Flue's shape without Flue's subagent, because a station
+keeps durable state and a Flue delegate may not: `delegate(station, brief)`
+dispatches the station as its own agent instance, a child conversation under
+the parent's with the parent's token, and answers a task id at once; the
+concierge settles in the same turn with a status sentence; when the delegate
+settles the host wakes the concierge with a signal, a follow-up turn starts and
+it renders the verdict from the store, so the document it settles with is one
+a delegate found, which its own check enforces. Checked live through the desk:
+delegated, settled at once, woken, settled again with what the delegate found.
+Two things the live run taught: the wake goes through the scanned agent
+function the build registered, never the inner render; and a concierge that
+polls its delegate spends its budget waiting, so the brief says settle first
+and the prompt forbids the poll. A brief carrying SQL is refused: it is the
+person's words. Clarification is one typed choice, at a pick, a scope or a
+grain and nowhere else, said by the result schema (an enum) and by a check.
+Memory across threads: typed notes (person, correction, study, reference) per
+subject, one row each, the newest five in a prompt with a staleness caveat past
+a day, a study note written mechanically at settle and a correction note from
+every rejected proposal, deletion by subject through the host and the command
+line; across people only structural corrections (station, decision axis, the
+check that would now catch it) accepted by a named person, whose row has no
+field a value fits. Not done from §9.9: the small-model selector over the index
+(recency stands in), the background fork that writes notes with a model, the
+compaction template, and the reader-side catalog filter, since a structural
+row carries nothing to filter.
+
+**As built (D4 and B7, `ask-help` and the assistant pane, 2026-09-09).** The
+station walks resolve, shape, refine, check and finish over the engine's ask
+doors through the seam, one tool per operation the grant names, opened by
+phase; the five checks run before settle and the result's hash and declaration
+are filled mechanically from validate and describe. The desk seam is one named
+data part per kind of the closed union (status on every advance; move_proposal,
+choice, handle_ref and status at settle), so a conversation's history keeps the
+last of each and the live stream sees every write. The pane: question left,
+chat right, stacked below 700 px, sharing the document id and the epoch; one
+reducer under 300 lines admits the union and decides what each part may touch,
+dropping the rest; a proposal is a unified diff of the two canonical texts
+under the assistant's sentence, accept moves the pointer and records the
+lineage, reject sends it back as feedback, which the next turn's prompt names
+so a rejected proposal is not repeated; a choice renders its options with
+counts; the pane says warming when Kvasir does. A follow-up turn re-enters the
+station on the settled document, or on the last document stored when the run
+ended by budget, the budget starting over. The desk pushes the person's bearer
+per conversation since a browser holds none; in off mode with an engine whose
+authentication is off, the seam takes the turn without a token and refuses it
+against any other engine. `nils assist ask` in the engine repository prints
+the describe sentence, the diff against the base and the handle.
+
+The first numbers sent the station back to the drawing board: the commercial
+model reached one shape in eighteen and the local one none, both spending
+their hundred and eighty seconds on ceremony (the guide, the catalog level by
+level, the sampler, `advance` between five phases, settle refused on a schema
+slip), and Nima's ruling was that the local model must run the shapes with no
+problem at all, the fix pragmatic, in what the station carries, never in a
+smarter model (a commercial model is a test of the two provider shapes, nothing
+more). Four things changed. The prelude: the engine's catalog and guide
+rendered compactly (grains and how a set draws from another, the fields per
+level, the axes and their values, the kinds, the cohorts, the schemes, the
+derived fields, the functions, the grounding), fetched through the seam under
+the person's token once per person and appended as a signal that joins the
+first response, about four thousand tokens read once instead of paged for.
+The cookbook: worked examples beside the brief, the eleven golds of the
+bench's loop split with their questions, in the YAML the draft door takes,
+plus three written for the cookbook and marked so (the most common value, the
+per-cohort statistics of a count per subject, one stack per session by rules
+given one at a time); the seven held-out golds are not in it, which a test
+asserts by content hash. Implicit phase moves: a tool called from the phase
+before the one it opens in moves the run there, recorded like an explicit
+advance, and ask-help mounts no advance tool at all. A brief for a small model:
+five steps, the idioms of the language in words, the parent-key rule, and no
+rereading of what the prelude carries. Around it: a default temperature per
+Kvasir backend (0.2 on the card), a 64k context on the runtime (the 32k of the
+serving benchmark overflowed on the longest runs), a budget of 300 seconds
+and sixteen turns in place of §9.11's 180 and twelve, and the grant's caps
+widened so a refusal costs a draft, not the run. Three engine gaps surfaced
+and closed on the way: the repair pass gave every clause under `group.by`
+and a relation's `by` a direction as if they were order terms, so the draft
+door refused every grouped document (#95, and the same slip for `same` in
+#96); strict validate stopped at `prepare` while run compiled, so a document
+a door accepted could be refused at run time (#93, closed by #96: validate,
+the documents door and the draft door now compile, answering
+`not_compilable` with the path). The bench gained the selection measure
+beside the hash, the same set of subject codes however the column is reached,
+since the golds' column choices are one author's and a table with one column
+more is not a wrong answer. The numbers: on the local 27B with thinking off at temperature 0.2, ten of eighteen
+shapes by the strict hash and fourteen of eighteen the same answer (every one
+of the eleven loop shapes, three of the seven held-out), a median of
+forty-six seconds a shape, against none of eighteen and every run ending by
+budget before the rework; the three held-out misses are a question the
+language cannot answer as asked (a cohort's owner beside its subject count,
+which the gold itself drops), a count the model listed instead of counting,
+and a composition the gold rebased to a sequence the words do not name. On
+MiniMax through the Anthropic shape the same station reached seven of
+eighteen with most misses by budget, the test of the provider shape it is
+meant to be. The chains, scored as the bar says, the opening of each chain against the
+gold's answer with the researcher's corrections held back and sent one at a
+time until it is reached, then the additions as follow-up turns of the same
+conversation: chain A reached the gold's answer at the second correction
+where the researcher gave five, chains B and C at the opening with none where
+the researcher gave five and four, two corrections needed where the
+researcher gave fourteen on these chains and twenty-two across the traffic;
+every follow-up turn of the three chains left a document (eight, seven and
+one). The composition question five times: five of five reach the gold's answer, one number, one scheme digest, about
+half a minute each, once the brief said that a total of sessions and subjects
+is the count level and not a group, and once the value sampler answered an
+axis from the registry instead of refusing it five times over.
+
+**As built (D1 to D3, the bench, the host and the station framework,
+2026-09-09).** In `kineuro/nils-assistant`. D1, the bench: the twenty-five
+shapes and the three chains of the traffic paraphrased into the corpus, each
+shape with its silent decisions and its earned tags from the taxonomy, an
+attribution per shape to the wave that owns the fix, a replay of the engine's
+gate fixtures through the pi-messages wire shape, the manifest matrix and the
+loop and held-out split by a hash of the shape's id (one in three held out),
+eighteen golds recorded as unnamed handles at the registry's epoch and pack
+version with their content hashes, and a one-shot baseline (the rules, two
+worked examples and a catalog slice in one prompt) that reached one shape in
+eighteen on both the commercial model and the local one, the number the
+station had to beat. D2, the host: one Node process on Flue 2.0.3 and pi-ai
+0.83.0, pinned exactly, with a Hono surface for the desk only; no credential
+of its own, the person's token handed per turn and pushed before expiry, Kvasir
+reached with the app's minted key through one provider per station carrying
+its purpose; the seam (the grant keeper counting calls and rows per run, the
+headers the engine reads, the redactor over what a station may say, the
+ledger of every dial with its outcome and never its content, the client over
+the engine's generated types); headless runs, verdicts beside them, and the
+record store exported and imported at table level, because Flue's append
+refuses a record it did not admit. D3, the framework: a station is a manifest
+validated against the vendored station schema with its brief's hash checked at
+start, a guarded phase machine with the budget counted in run state and a loop
+detector over the salient arguments of each call, a verdict whose proposals
+are the only effect, checks named in the manifest and run before settle, the
+result schema turned into a Valibot schema, and one agent factory around it.
+What Flue taught on the way: `finish` is a reserved tool name, so the station
+ends with `settle`; one runtime per process; an agent is a `'use agent'`
+module with a capitalised export or an `agentName` static; a `tool-output`
+chunk carries the call's id, not its name; a read attached late misses the
+chunks before it, so the tests read the stream store; the producer sequence
+starts at zero per epoch.
+
 **As built (C4, the admission suite, 2026-09-09).** In `kineuro/kvasir`: the
 five checks of §8.6 as one suite against a backend through its own adapter,
 mechanical throughout. Tool calls: twenty fixtures over our own schemas,
