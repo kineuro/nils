@@ -334,6 +334,14 @@ paths:
       responses:
         "200": {description: The version with its document}
         "404": {description: No such selection}
+  /api/ask/handles:
+    get:
+      summary: The result handles this caller may open, newest first, within the caller's scope (Wave 4c section 7.4)
+      parameters:
+        - {name: withdrawn, in: query, schema: {type: boolean, default: false}, description: Include the withdrawn handles}
+        - {name: limit, in: query, schema: {type: integer, default: 100}, description: At most this many, capped at page_rows_max}
+      responses:
+        "200": {description: "{count, handles: [{id, name, grain, row_count, content_hash, principal, actor, created_at, epoch, pack_version, disclosure, truncated, limit, kept, last_read_at, withdrawn_at, ask_hash, columns}]}"}
   /api/ask/handles/{id}:
     get:
       summary: A result handle with its provenance
