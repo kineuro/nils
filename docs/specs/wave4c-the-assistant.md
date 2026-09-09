@@ -1247,6 +1247,55 @@ The wave closes when:
 
 ## 13. Order of work
 
+**As built (C1 to C3, Kvasir: the door, identity, keys, admission, the
+ledger, grants and policy, 2026-09-09).** `kineuro/kvasir`, TypeScript on
+Node 22 with `@earendil-works/pi-ai` at the exact version Flue pins (0.83.0).
+C1: `POST /v1/messages` takes `{model, context, options}` and answers the
+pi-messages event stream, streamed through pi-ai's own adapters
+(`openai-completions`, `anthropic-messages`, a fixed list in code) with the
+runtime key attached by Kvasir; `POST /v1/chat/completions` and `GET
+/v1/models` are the OpenAI shape for a script; `GET /v1/config` is the
+catalog as pi's model store reads it (`baseUrl` and `models[]` with the
+measured `contextWindow` and `maxTokens`) plus each backend's locality and
+health; a local backend is warming until its first token since start and is
+warmed at start; a pi client streams through with zero compatibility flags
+and a thinking signature round trips byte for byte (tested against fakes).
+C2: the engine's three modes, ladder and trust list (jose; JWKS by URL with
+a cooldown or by file), verified against the suite's vectors vendored from
+`contracts/suite/v1`; a caller with no mapped role and a stream with no
+principal are refused; minted keys `kvs_` of thirty-two random bytes shown
+once, stored as keyed BLAKE2b hashes under a pepper file made at first start,
+compared in constant time, revoked by a deleted row, local only without a
+purpose; per-backend admission with a queue of eight behind the admitted
+streams (the spec's sixteen read as the total in flight: the ninth queues
+with a heartbeat on the socket, the seventeenth is refused at the health
+layer, as does a sixty-second wait); the ledger, one row per stream in
+counts with no content column, asserted; `GET /metrics` with backend, model
+and outcome as its only labels. C3: purposes registered in the configuration
+and never by a caller; the policy table (`GET /v1/purposes`, `PUT
+/v1/purposes/{id}/policy`) opening `catalog` to a remote backend by choice,
+`rows` only with an acknowledgement recorded under the admin's name,
+`identifiers` never; `POST /v1/grants` answering the model, backend, measured
+limits and `chose_because`, or refusing with the layer and the one relaxation,
+a pin recorded and never above the policy, a warming backend refused at the
+health layer; the identifier-shape rule (a personal number, a DICOM UID, a
+long digit run in the person's text) bumping the request to `identifiers`
+and running it local whatever the table says, a pinned remote model set
+aside and said so; a stream naming `x-kvasir-purpose` or `x-kvasir-grant`,
+a minted key's first purpose applying unnamed within its allowlist and
+class, and without any purpose a call reaching only a local backend; the
+organisation's key at `PUT /v1/credentials/{provider}`, sealed with
+XChaCha20-Poly1305 under a key held in a file outside the database with the
+provider as associated data, decrypted in memory at use, never returned,
+rotated in place. Checked live against the test provider R9 named through
+both of its API shapes, the key posted over loopback and absent from every
+log; under the OpenAI shape that provider returns its thinking inline as
+text, under the Anthropic shape as a thinking block, which the admission
+suite of C4 records per shape. Two things learned: a remote provider counts
+as warm, the warm-up rule being a local runtime's; and a catalog entry may
+name the provider's own model name apart from its id, so both shapes of one
+provider list.
+
 **As built (B2, the three identity modes, 2026-09-09).** In the desk
 (`kineuro/nils-desk`): `local` mode is the small issuer of C46, an EdDSA
 key made at first start and readable by the desk's account only, a JWKS and
