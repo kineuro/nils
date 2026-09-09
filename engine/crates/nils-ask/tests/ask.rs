@@ -527,6 +527,47 @@ out: {set: a, level: count, order: [["field", {}, "code"]]}
     );
 }
 
+/// A group's `by` is a list of clauses and a pick's `by` a list of order
+/// terms: repair gives the second a direction and leaves the first alone,
+/// so a grouped document a person wrote as the grammar says reaches the
+/// parser unchanged (Wave 4c, seen from the assistant's draft tool).
+#[test]
+fn repair_leaves_a_groups_by_clauses_alone_and_directs_a_picks_by() {
+    let text = r#"
+ast_version: 1
+sets:
+  people: {grain: subject}
+  each:
+    grain: group
+    group: {of: people, by: [["field", {}, "code"], ["field", {}, "sex"]]}
+    bind:
+      n: ["count", {set: people}]
+  visits:
+    grain: session
+    of: people
+    pick: {per: subject, n: 1, ties: report, by: [["field", {}, "first"]]}
+out: {set: each, level: aggregate, columns: [["field", {}, "code"], ["field", {}, "n"]]}
+"#;
+    let (ask, repairs) = parse_repaired(text).unwrap();
+    let what: Vec<&str> = repairs.iter().map(|r| r.what.as_str()).collect();
+    assert!(
+        !repairs
+            .iter()
+            .any(|r| r.path.starts_with("sets.each.group")),
+        "a group's by is not an order list: {repairs:?}"
+    );
+    assert!(
+        repairs
+            .iter()
+            .any(|r| r.path == "sets.visits.pick.by[0]" && r.what.contains("without a direction")),
+        "{what:?}"
+    );
+    let group = ask.sets["each"].group.as_ref().expect("the group");
+    assert_eq!(group.by.len(), 2, "{group:?}");
+    let pick = ask.sets["visits"].pick.as_ref().expect("the pick");
+    assert_eq!(pick.by.len(), 1, "{pick:?}");
+}
+
 #[test]
 fn an_older_version_is_upgraded_and_a_newer_one_refused() {
     let mut old: nils_ask::Ask = serde_json::from_value(json!({"ast_version": 0, "sets": {"a": {"grain": "subject"}}, "out": {"set": "a", "level": "count"}})).unwrap();
