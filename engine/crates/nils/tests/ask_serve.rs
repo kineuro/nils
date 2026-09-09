@@ -193,7 +193,7 @@ fn body(v: serde_json::Value) -> String {
 #[test]
 fn the_ask_doors_run_a_document_to_a_handle_and_its_affordances_answer() {
     let home = synthetic();
-    let server = Server::start(&home, 20, &[]);
+    let server = Server::start(&home, 22, &[]);
     // the capabilities carry the ask block and the contract version
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
