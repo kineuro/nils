@@ -157,6 +157,8 @@ pub enum Code {
     NotReleasable,
     Truncated,
     StaleOptions,
+    /// What the compiler refuses: validate compiles what run would (Wave 4c).
+    NotCompilable,
 }
 
 impl Code {
@@ -181,6 +183,7 @@ impl Code {
             Code::NotReleasable => "not_releasable",
             Code::Truncated => "truncated",
             Code::StaleOptions => "stale_options",
+            Code::NotCompilable => "not_compilable",
         }
     }
 

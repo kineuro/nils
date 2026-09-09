@@ -1221,3 +1221,82 @@ fn the_ask_additions_answer_the_guide_the_draft_the_declaration_the_diff_and_the
     );
     server.finish();
 }
+
+/// Wave 4c (kineuro/nils#93): strict validate, the documents door and the
+/// draft door compile what run would, so a document they accept runs.
+/// A cohort record that counts a subject set in its columns passes the
+/// validator and not the compiler; every door refuses it by name.
+#[test]
+fn validate_the_documents_door_and_the_draft_door_refuse_what_run_would() {
+    let home = synthetic();
+    let server = Server::start(&home, 5, &[]);
+    let doc = serde_json::json!({
+        "ast_version": 1,
+        "sets": {"co": {"grain": "cohort"}, "people": {"grain": "subject", "of": "co"}},
+        "out": {"set": "co", "level": "record",
+                "columns": [["field", {}, "name"], ["field", {}, "owner"], ["count", {"set": "people"}]]}
+    });
+    let (status, v) = server.request(
+        "POST",
+        "/api/ask/validate",
+        Some(&body(
+            serde_json::json!({"document": doc, "mode": "strict"}),
+        )),
+        None,
+    );
+    assert_eq!(status, 400, "{v}");
+    assert_eq!(v["issues"][0]["code"], "not_compilable", "{v}");
+    assert!(
+        v["issues"][0]["path"]
+            .as_str()
+            .unwrap()
+            .starts_with("out.columns"),
+        "{v}"
+    );
+    let (status, d) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(serde_json::json!({"document": doc}))),
+        None,
+    );
+    assert_eq!(status, 400, "{d}");
+    assert_eq!(d["issues"][0]["code"], "not_compilable", "{d}");
+    let (status, drafted) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(serde_json::json!({"text": doc.to_string()}))),
+        None,
+    );
+    assert_eq!(status, 200, "{drafted}");
+    assert_eq!(drafted["diagnosis"]["valid"], false, "{drafted}");
+    assert!(drafted["document"].is_null(), "{drafted}");
+    assert!(
+        drafted["diagnosis"]["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["code"] == "not_compilable"),
+        "{drafted}"
+    );
+    // a document that compiles still validates, stores and drafts
+    let good = yardstick();
+    let (status, v) = server.request(
+        "POST",
+        "/api/ask/validate",
+        Some(&body(
+            serde_json::json!({"document": good, "mode": "strict"}),
+        )),
+        None,
+    );
+    assert_eq!(status, 200, "{v}");
+    let text = std::fs::read_to_string(fixtures().join("yardstick.ask.yml")).unwrap();
+    let (status, drafted) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(serde_json::json!({"text": text}))),
+        None,
+    );
+    assert_eq!(status, 200, "{drafted}");
+    assert!(drafted["document"].is_number(), "{drafted}");
+    server.finish();
+}

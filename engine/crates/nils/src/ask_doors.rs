@@ -423,7 +423,23 @@ fn answer(
             } else {
                 (document_of(registry, &doc)?.0, Vec::new())
             };
-            let prepared = prepare(ask, catalog, &scope).map_err(ask_err)?;
+            let prepared = prepare(ask.clone(), catalog, &scope).map_err(ask_err)?;
+            // Wave 4c: strict validate compiles what run would (kineuro/nils#93)
+            if !repair {
+                let scheme = scheme_of(registry, &ask)?;
+                let s = Setting {
+                    names: catalog,
+                    scope: &scope,
+                    scheme: &scheme,
+                    principal,
+                    bounds,
+                    values_cap: caps.options_values as usize,
+                };
+                let issues = affordance::compile_issues(registry, &ask, &s);
+                if !issues.is_empty() {
+                    return Err(issues_reply(400, "the document is refused", &issues));
+                }
+            }
             Ok(Reply::ok(json!({
                 "hash": prepared.hash,
                 "warnings": prepared.validated.warnings,
