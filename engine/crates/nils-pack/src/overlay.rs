@@ -42,7 +42,25 @@ pub struct Overlay {
 
 impl Overlay {
     pub fn load(path: &Path) -> R<Overlay> {
-        let f = File::read(path)?;
+        Overlay::of(File::read(path)?)
+    }
+
+    /// An overlay from its text (YAML, or the JSON a door received, which is
+    /// YAML too). `name` is what a refusal blames.
+    pub fn parse(name: &str, text: &str) -> R<Overlay> {
+        Overlay::of(File::from_text(name, text)?)
+    }
+
+    /// The terms the overlay adds, over every bucket: what `overlay_unused`
+    /// counts against the citations of a batch (Wave 4c §6.6).
+    pub fn added_terms(&self) -> Vec<String> {
+        self.buckets
+            .values()
+            .flat_map(|e| e.add.iter().cloned())
+            .collect()
+    }
+
+    fn of(f: File) -> R<Overlay> {
         let m = f.blame(yaml::obj(&f.value, "overlay"))?;
         let name = f.blame(yaml::text(yaml::get(m, "overlay", "overlay")?, "overlay"))?;
         let version = f.blame(yaml::text(yaml::get(m, "version", "overlay")?, "version"))?;

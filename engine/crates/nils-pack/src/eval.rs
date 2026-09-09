@@ -201,7 +201,7 @@ impl Ctx for Evaluated<'_> {
 // decided (§6.3).
 
 use crate::rules::{AxisPhase, Clause, Rule, Tier, Which};
-use crate::verdict::{AxisVerdict, Evidence, Verdict};
+use crate::verdict::{AxisVerdict, DIAGNOSTICS_MAX, Diagnostic, Evidence, Verdict};
 
 /// The value index a set names: the one it wrote, or the one the rule set
 /// worked out for this stack.
@@ -262,6 +262,11 @@ impl Evaluated<'_> {
         // An axis a rule decided to be nothing is closed too: the default is
         // for an axis nobody spoke about, not for one told to stay empty.
         let mut said_nothing: Vec<bool> = vec![false; pack.axes.len()];
+        // Wave 4c §6.6: who closed each axis, so that a later rule reaching
+        // it can be recorded against the one that won. Set, rule, the stored
+        // value and the citation.
+        let mut decided_by: Vec<Option<(String, String, String, String)>> =
+            vec![None; pack.axes.len()];
 
         for set in &pack.rule_sets {
             if set.phase != phase {
@@ -284,18 +289,26 @@ impl Evaluated<'_> {
                         .map(|c| c.value)
                 })
                 .collect();
-            for rule in &set.rules {
+            for (ri, rule) in set.rules.iter().enumerate() {
                 // A rule whose every axis is single-valued and already
-                // decided has nothing left to say.
-                if rule.sets.iter().all(|s| closed[s.axis]) {
-                    continue;
-                }
+                // decided has nothing left to say. It is still evaluated,
+                // because a rule that would have said something different
+                // is the diagnostic of Wave 4c §6.6, and the evidence rows
+                // cannot tell: they record only what was cited.
+                let all_closed = rule.sets.iter().all(|s| closed[s.axis]);
                 let Some(fired) = self.fire(rule) else {
                     continue;
                 };
+                if all_closed {
+                    for sets in &rule.sets {
+                        self.conflict(&mut verdict, set, rule, &fired, sets, &derived, &decided_by);
+                    }
+                    continue;
+                }
                 for sets in &rule.sets {
                     let axis = &pack.axes[sets.axis];
                     if closed[sets.axis] {
+                        self.conflict(&mut verdict, set, rule, &fired, sets, &derived, &decided_by);
                         continue;
                     }
                     for v in &sets.values {
@@ -327,6 +340,12 @@ impl Evaluated<'_> {
                     // does not add to what an axis's own rules would say.
                     if !set.collect && !set.adds.contains(&sets.axis) {
                         closed[sets.axis] = true;
+                        decided_by[sets.axis] = Some((
+                            set.name.clone(),
+                            rule.id.clone(),
+                            self.would_store(axis, sets, &derived),
+                            fired.matched.clone(),
+                        ));
                     }
                     // A later rule set reads what this one decided. The
                     // conditions are evaluated before the borrow, because
@@ -341,6 +360,12 @@ impl Evaluated<'_> {
                     self.decided.borrow_mut()[sets.axis].extend(just_set);
                 }
                 if !set.collect {
+                    // Wave 4c §6.6: what else would have matched on this
+                    // stack, in this rule and in the rest of the set, and
+                    // was never cited because this rule won. A keyword
+                    // shadowed on every stack of a batch is a keyword that
+                    // can never match.
+                    self.shadowed(&mut verdict, set, ri, rule, &fired);
                     break;
                 }
             }
@@ -380,6 +405,13 @@ impl Evaluated<'_> {
             if hits.is_empty() {
                 if said_nothing[ai] {
                     continue;
+                }
+                if axis.default.is_none() && verdict.diagnostics.len() < DIAGNOSTICS_MAX {
+                    verdict.diagnostics.push(Diagnostic {
+                        kind: "axis_unresolved".into(),
+                        axis: axis.name.clone(),
+                        ..Diagnostic::default()
+                    });
                 }
                 if let Some(d) = &axis.default {
                     verdict.axes.push(AxisVerdict {
@@ -442,6 +474,147 @@ impl Evaluated<'_> {
             .as_ref()
             .is_some_and(|e| e.eval(None, self));
         verdict
+    }
+
+    /// What a rule's `sets` entry would store for this stack: the values
+    /// whose conditions hold, as the axis stores them, joined as a row does.
+    fn would_store(
+        &self,
+        axis: &crate::rules::Axis,
+        sets: &crate::rules::Sets,
+        derived: &[Option<usize>],
+    ) -> String {
+        sets.values
+            .iter()
+            .filter(|v| v.when.as_ref().is_none_or(|w| w.eval(None, self)))
+            .filter_map(|v| which(v.value, derived))
+            .map(|i| axis.stored(i).to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// Wave 4c §6.6, `axis_conflict`: a rule fired for an axis an earlier
+    /// set closed, and would have stored something else. The order decided;
+    /// both are recorded. The same answer is agreement and says nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn conflict(
+        &self,
+        verdict: &mut Verdict,
+        set: &crate::rules::RuleSet,
+        rule: &Rule,
+        fired: &Fired,
+        sets: &crate::rules::Sets,
+        derived: &[Option<usize>],
+        decided_by: &[Option<(String, String, String, String)>],
+    ) {
+        if verdict.diagnostics.len() >= DIAGNOSTICS_MAX {
+            return;
+        }
+        let axis = &self.pack.axes[sets.axis];
+        let value = self.would_store(axis, sets, derived);
+        let (by_set, by_rule, by_value, by_matched) = match &decided_by[sets.axis] {
+            Some((s, r, v, m)) => (s.clone(), r.clone(), v.clone(), m.clone()),
+            None => (String::new(), String::new(), String::new(), String::new()),
+        };
+        if value == by_value {
+            return;
+        }
+        verdict.diagnostics.push(Diagnostic {
+            kind: "axis_conflict".into(),
+            axis: axis.name.clone(),
+            rule_set: set.name.clone(),
+            rule: rule.id.clone(),
+            value,
+            matched: fired.matched.clone(),
+            by_rule_set: by_set,
+            by_rule,
+            by_value,
+            by_matched,
+        });
+    }
+
+    /// Every keyword of a rule that is found in its field on this stack, in
+    /// list order. `fire` cites the first; the rest are what it hid.
+    fn keyword_hits(&self, rule: &Rule) -> Vec<String> {
+        let mut out = Vec::new();
+        for c in &rule.clauses {
+            if let Clause::Keywords { field, list, .. } = c {
+                let text = <Self as Ctx>::text(self, *field).to_lowercase();
+                if text.is_empty() {
+                    continue;
+                }
+                for kw in list {
+                    if text.contains(&kw.to_lowercase()) {
+                        out.push(kw.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Wave 4c §6.6, `keyword_shadowed`: the keywords that matched on this
+    /// stack and were not cited, because the winning rule cited another, or
+    /// because a later rule of a deciding set never ran.
+    fn shadowed(
+        &self,
+        verdict: &mut Verdict,
+        set: &crate::rules::RuleSet,
+        won: usize,
+        winner: &Rule,
+        fired: &Fired,
+    ) {
+        let axis_of = |r: &Rule| {
+            r.sets
+                .first()
+                .map(|s| self.pack.axes[s.axis].name.clone())
+                .unwrap_or_default()
+        };
+        let by_value = winner
+            .sets
+            .first()
+            .map(|s| {
+                let axis = &self.pack.axes[s.axis];
+                s.values
+                    .iter()
+                    .filter_map(|v| match v.value {
+                        Which::Fixed(i) => Some(axis.stored(i).to_string()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        let mut push = |rule: &Rule, kw: String| {
+            if verdict.diagnostics.len() >= DIAGNOSTICS_MAX {
+                return;
+            }
+            verdict.diagnostics.push(Diagnostic {
+                kind: "keyword_shadowed".into(),
+                axis: axis_of(rule),
+                rule_set: set.name.clone(),
+                rule: rule.id.clone(),
+                value: String::new(),
+                matched: kw,
+                by_rule_set: set.name.clone(),
+                by_rule: winner.id.clone(),
+                by_value: by_value.clone(),
+                by_matched: fired.matched.clone(),
+            });
+        };
+        for kw in self.keyword_hits(winner) {
+            if !kw.eq_ignore_ascii_case(&fired.matched) {
+                push(winner, kw);
+            }
+        }
+        for rule in &set.rules[won + 1..] {
+            if self.fire(rule).is_none() {
+                continue;
+            }
+            for kw in self.keyword_hits(rule) {
+                push(rule, kw);
+            }
+        }
     }
 
     /// The first clause of a rule that holds, with what it cites. A rule with

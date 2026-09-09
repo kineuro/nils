@@ -9,7 +9,7 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 0.1.0
+version: 0.1.1
 contract: 4
 modality: MR
 
@@ -158,3 +158,9 @@ buckets:
     [DIFFUSION, ADC, FA, TRACEW, ISODWI, EXP, EADC, CALC_BVALUE, MIXED, MIX,
      MOTIONCORRECTION]
   localizer_words: [scout, localizer, loc_]
+  # The words that say contrast was given, and the words that say it was
+  # not (Wave 4c section 6.6): a site's own agent name is added here.
+  contrast_negative:
+    ['utan gd', 'utan_gd', 'ej gd', 'utan kontrast', 'ej kontrast', 'utan k', 'ej k', 'ingen gd', 'ingen k', ' -k', ' -gd', ' -c', 'pre gd', 'pre-gd', 'pre contrast', 'pre-contrast', 'without contrast', 'no contrast', 'non-contrast', 'non contrast', 'no gd', 'ohne gd', 'ohne kontrast', 'ohne km', 'nativ', 'kein gd', 'sans gd', 'sans contraste', 'sans gado', 'senza gd', 'senza contrasto', 'uten gd', 'uden gd', 'zonder gd', 'geen gd', 'pre - gd']
+  contrast_positive:
+    ['dotarem', 'clariscan', 'omniscan', 'magnevist', 'gadovist', 'prohance', 'multihance', 'optimark', 'eovist', 'primovist', 'gadavist', 'gadolinium', 'gadobutrol', 'gadoterate', 'gadoteridol', 'gadobenate', 'gadoxetate', ' gd', '_gd', '+k', '+gd', '+c', '+ gd', '+ k', 'k+', 'k +', '+contrast', 'med gd', 'med kontrast', 'med-kontrast', 'med_kontrast', 'med k', 'efter kontrast', 'spruta kontrast', 'gd direkt', 'post gd', 'post-gd', 'post contrast', 'post-contrast', 'with contrast', 'after contrast', 'contrast enhanced', 'mit gd', 'mit kontrast', 'nach gd', 'nach km', 'avec gd', 'avec contraste', 'post - gd']

@@ -517,7 +517,7 @@ Built to Wave 2 §10's names, which the code never implemented (C44):
 Each in a titled pull request under the DCO: `openapi` v3 (every door of this
 section, the security scheme, the three headers, the declaration block, the
 policy table; published in A4, see the as-built note of §13), `review-item` v3
-(the actor; published in A2), and at the end of the engine section `suite` v1
+(the actor; published in A2; v4 adds the `overlay` scope in A6), and at the end of the engine section `suite` v1
 (§4.5) and `mcp` v1 (the operation
 vocabulary of sixteen, the input schema per operation, the result envelope, the
 paging contract, the policy fields). The desk and the assistant generate their
@@ -1246,6 +1246,61 @@ The wave closes when:
 | auto-commit | off for every station and kind |
 
 ## 13. Order of work
+
+**As built (A6, the knob engine; review-item contract v4, 2026-09-09).** The
+four diagnostics are the evaluator's to report, not the evidence rows' to
+imply (§14's question, answered by reading `eval.rs`): a rule whose axes an
+earlier set closed was skipped before it fired, and `fire` stops at the first
+clause, so nothing recorded the pre-empted match. The evaluator now fires
+those rules for the record and answers `Verdict.diagnostics` with
+`axis_conflict` (the value it would have stored beside the one that won,
+both cited), `axis_unresolved` (no hit, no default, not told to stay empty)
+and `keyword_shadowed` (a keyword found in the text and not cited, whether
+hidden by an earlier keyword of its own list or by an earlier rule of its
+set), capped at sixty four per stack. `classify` tallies them per batch and
+writes one row per kind to the batch's `diagnostic` table beside the digest's
+own, with up to ten samples, replacing the last run's rows for the batches
+it read; `keyword_shadowed` at batch level counts keywords shadowed somewhere
+and cited nowhere, which is "can never match", and `overlay_unused` is a term
+the overlay added that no evidence row of the batch cites, since the pack
+keeps no bucket provenance after load. They are `diagnostic` rows and not
+review items, so no kind joins the review-item contract. `GET
+/api/classify/signals?scope=` takes `batch:<id>`, `origin:<name>` (matched
+against the manufacturer, the model and the station) or `pack:<version>`
+and answers per axis the tier counts, the confidence spread as bounds, mean
+and counts under 0.5, 0.7 and 0.9 (a histogram both backends compute the
+same way), the open review items by kind through the grouped items'
+members, the shadowed keywords and unused terms from the diagnostic rows of
+the batches in scope, the terms whose citations a person's stack decision
+overrode most, and beside the axes the image type, echo time, slice count
+and sequence variant of the overridden stacks as values, because those are
+acquisition parameters and what a rule is written from. `POST
+/api/classify/try` parses the overlay from the body (JSON is YAML), loads
+the pack bare and amended, judges the overlay's cases as a count rather than
+a refusal, and classifies a bounded sample of the scope under both (two
+thousand stacks unless asked, twenty thousand at most), answering the moves
+per axis, the review items that would close and open by the same gate
+`classify` uses, and the cases. Overlays are a registry table (migration 35:
+name, version, pack, author and kind, actor, scope, status, the document,
+the rehearsal, why, who decided) with a review item of kind
+`overlay.proposed` and scope `overlay` beside each proposal, which is the one
+addition of review-item v4; adopt refuses a status other than proposed and
+an author kind ranked below the proposer's, queues `classify --overlay-id`
+under the caller's roles, writes `overlay.adopt` to the audit log and closes
+the item; `nils overlay list|show|export|refuse` are the command line, and
+export writes the document as JSON into a directory a pack loads it from.
+`POST /api/ingest/probe` takes a registered location by name, never a path:
+the queued command line carries `@name/relative`, and the worker resolves it
+from its own `--ingest-root` flags (`nils jobs work --ingest-root`), so the
+job document never holds a path either. `nils ingest probe` reads the sample
+once for the union of every candidate's fields and traces each rule over it
+without touching the file (`Rule::trace`), answering per candidate and per
+source the shape histogram and how many files it answered, had nothing,
+could not parse or were not read because an earlier source answered,
+`identity_constant` over the first field source, the subject and study
+counts, the fall backs and the reader's diagnostics, all written to the
+job's result. The engine's tests seed a placeholder and codes in a tree and
+assert none of them and no path appears in the answer.
 
 **As built (A5, the deployment surface, 2026-09-09).** `capabilities.policy`
 is one row per door (the role, whether it writes, whether it takes an

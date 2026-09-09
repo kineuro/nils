@@ -86,6 +86,20 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | export | `nils explain <stack> --json` |
 | delete | with the registry |
 
+## overlays
+
+| | |
+|---|---|
+| what | a site's amendments to a pack as registry objects: the document, its scope, the rehearsal that justified it, and who proposed, adopted or refused it (Wave 4c section 6.6) |
+| where | rows of overlay in the registry, with a review item beside each proposal |
+| holds | a site's words for a pack's buckets and the cases that show what they change<br>who proposed and who adopted, with the actor |
+| owner | the reviewer who proposed each, the operator who adopted it |
+| kept | for good; an adopted overlay is what the rows it judged cite |
+| read | `nils overlay list`<br>`nils overlay show <id>` |
+| change | `nils overlay refuse <id>`<br>POST /api/overlays<br>POST /api/overlays/<id>/adopt |
+| export | `nils overlay export <id> --to <dir>` |
+| delete | with the registry |
+
 ## clinical layer
 
 | | |

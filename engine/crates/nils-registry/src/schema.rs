@@ -751,6 +751,35 @@ fn build_registry() -> Vec<Table> {
         // not columns: the registry stores what a pack says without knowing
         // what any of it means, which is what lets a modality be added
         // without touching this file (§13, slice 8).
+        // Wave 4c §6.6: an overlay as a registry object, proposed with the
+        // rehearsal that justified it and adopted by a reclassify job. The
+        // document is the overlay as written (buckets, cases, scope); the
+        // pack directory stays where an adopted one is exported to, by a
+        // command.
+        Table::new(
+            "overlay",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("version", Type::Text),
+                req("pack", Type::Text),
+                req("author", Type::Text),
+                req("author_kind", Type::Text),
+                col("actor", Type::Json),
+                req("scope", Type::Json),
+                req("status", Type::Text),
+                req("document", Type::Json),
+                col("tried", Type::Json),
+                col("why", Type::Text),
+                req("created_at", Type::Timestamp),
+                col("decided_at", Type::Timestamp),
+                col("decided_by", Type::Text),
+                col("review_item", Type::Int),
+                col("job_id", Type::Int),
+            ],
+        )
+        .unique(&["name", "version"])
+        .index(&["status"]),
         Table::new(
             "classification",
             vec![

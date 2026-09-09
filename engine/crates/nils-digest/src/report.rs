@@ -66,7 +66,7 @@ pub struct Counts {
 const PROBE_MAX: usize = 64;
 
 /// Below this many probed files a batch is too small to call a value constant.
-const PROBE_MIN: u64 = 20;
+pub(crate) const PROBE_MIN: u64 = 20;
 
 #[derive(Debug, Default, Clone)]
 struct Tally {

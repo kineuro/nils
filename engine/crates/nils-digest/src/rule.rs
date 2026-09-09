@@ -83,6 +83,40 @@ fn segment(rel: &str, n: usize) -> Option<&str> {
     parts.get(n - 1).copied()
 }
 
+/// What one source did on one file (Wave 4c §6.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// It read a value and the rule took it.
+    Answered,
+    /// It had nothing, and the rule fell through.
+    Empty,
+    /// It had a value the pattern did not match, and the rule fell through.
+    Unparsed,
+    /// It had a value, and an earlier source had already answered.
+    Unread,
+}
+
+impl Outcome {
+    pub fn name(self) -> &'static str {
+        match self {
+            Outcome::Answered => "answered",
+            Outcome::Empty => "empty",
+            Outcome::Unparsed => "unparsed",
+            Outcome::Unread => "unread",
+        }
+    }
+}
+
+/// One file under one rule, every source accounted for, nothing written.
+#[derive(Debug, Clone)]
+pub struct Traced {
+    /// Per source in rule order: the shape of what it read, and what it did.
+    pub sources: Vec<(Option<String>, Outcome)>,
+    /// The source that answered, or none when the fallback was taken.
+    pub answered_by: Option<usize>,
+    pub ident: Ident,
+}
+
 /// The identifier of one file as the rule resolved it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ident {
@@ -335,6 +369,103 @@ impl Rule {
             "code": if self.verbatim { "verbatim" } else { "derived" },
             "source": self.source,
         })
+    }
+
+    /// Wave 4c §6.6: resolve one file without touching it, and say what
+    /// every source did on the way. The probe reads this; the digest reads
+    /// [`Rule::apply`]. `values` is one entry per *field* source of this
+    /// rule, in order, as the reader extracted them.
+    pub fn trace(&self, values: &[Option<String>], study_uid: &str, rel: &str) -> Traced {
+        let mut next_field = 0usize;
+        let mut probe: Option<String> = None;
+        let mut sources: Vec<(Option<String>, Outcome)> = Vec::with_capacity(self.from.len());
+        let mut answer: Option<(usize, String)> = None;
+        for (i, source) in self.from.iter().enumerate() {
+            let read: Option<String> = match &source.from {
+                From::Field(_) => {
+                    let v = values.get(next_field).and_then(|v| v.clone());
+                    next_field += 1;
+                    if probe.is_none()
+                        && let Some(raw) = v.as_deref().map(str::trim)
+                        && !raw.is_empty()
+                    {
+                        probe = Some(raw.to_string());
+                    }
+                    v
+                }
+                From::Segment(n) => segment(rel, *n).map(str::to_string),
+            };
+            let Some(value) = read.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+                sources.push((None, Outcome::Empty));
+                continue;
+            };
+            let shape = Some(nils_dicom::diagnostic::shape(value));
+            if answer.is_some() {
+                // Read for the record; an earlier source already answered.
+                sources.push((shape, Outcome::Unread));
+                continue;
+            }
+            match &source.pattern {
+                None => {
+                    sources.push((shape, Outcome::Answered));
+                    answer = Some((i, value.to_string()));
+                }
+                Some(re) => {
+                    let id = re
+                        .captures(value)
+                        .and_then(|c| c.name("id"))
+                        .map(|m| m.as_str())
+                        .filter(|id| !id.is_empty());
+                    match id {
+                        Some(id) => {
+                            sources.push((shape, Outcome::Answered));
+                            answer = Some((i, id.to_string()));
+                        }
+                        None => sources.push((shape, Outcome::Unparsed)),
+                    }
+                }
+            }
+        }
+        match answer {
+            Some((i, value)) => Traced {
+                sources,
+                answered_by: Some(i),
+                ident: Ident {
+                    value,
+                    probe,
+                    fell_back: false,
+                },
+            },
+            None => Traced {
+                sources,
+                answered_by: None,
+                ident: Ident {
+                    value: study_uid.to_string(),
+                    probe,
+                    fell_back: true,
+                },
+            },
+        }
+    }
+
+    /// The label of every source, in order: `PatientID`, `path segment 1`.
+    pub fn source_labels(&self) -> Vec<String> {
+        self.from.iter().map(|s| s.from.label()).collect()
+    }
+
+    /// The field keywords of the rule, in order.
+    pub fn field_keywords(&self) -> Vec<String> {
+        self.from
+            .iter()
+            .filter_map(|s| match &s.from {
+                From::Field(f) => Some(f.clone()),
+                From::Segment(_) => None,
+            })
+            .collect()
+    }
+
+    pub fn id_type(&self) -> &str {
+        &self.id_type
     }
 
     /// Resolve one file: the first field that yields, else the fallback; the

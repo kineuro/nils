@@ -66,6 +66,12 @@ the gate runs in one process and some of them are about a door:
   fallback reader relies on) and asserts that `INSERT`, `UPDATE`, `DELETE`,
   `CREATE` and `COPY` all fail. On Postgres without `--ask-dsn` it is
   deferred, because the role is a deployment's to create; CI creates one.
+- **In the gate itself**: `marker-escape`, second in the run (Wave 4c §6.6, A6).
+  The value sampler is asked for the subject code under the gate's scope and
+  must answer shapes that contain none of the registry's own codes; the
+  identity probe reads a synthetic tree seeded with a placeholder in the tag
+  and three codes in the paths, and its answer must name the placeholder by
+  shape and hold neither a seeded value nor a path.
 - **In the engine's own tests** (`engine/crates/nils/tests/ask_serve.rs`,
   named after the fixture they are): a reader queuing a document that projects
   identifiers is refused and a queued job runs under the roles the door

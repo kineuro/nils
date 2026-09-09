@@ -95,6 +95,7 @@ fn rows(reg: &mut Registry, sql: &str) -> Vec<Row> {
         "review_item",
         "decision",
         "stack",
+        "diagnostic",
     ] {
         text = text.replace(&format!("{{{t}}}"), &reg.store().qualified(t));
     }
@@ -855,5 +856,96 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
             review::withdraw(&mut reg, staged.decision, "anna@ward-3").is_err(),
             "{name}: twice is refused"
         );
+    }
+}
+
+/// Wave 4c §6.6: what the evaluator noticed is counted per batch, and a
+/// site term that matched nothing is named.
+#[test]
+fn the_diagnostics_are_counted_per_batch_and_an_unused_overlay_term_is_named() {
+    let overlay = nils_pack::Overlay::parse(
+        "overlay",
+        "\
+overlay: site
+version: 1.0.0
+pack: mri
+scope: {manufacturer: SYNTHETIC}
+buckets:
+  localizer_words: {add: [zzznever]}
+cases:
+  - name: the site's own localizer word
+    stack: {text_sequence_name: 'zzznever_3d'}
+    flags: {is_localizer: true}
+",
+    )
+    .expect("the overlay parses");
+    let pack = nils_pack::load(&packs(), Some(&overlay)).expect("the MRI pack loads amended");
+    assert_eq!(pack.overlay_terms, vec!["zzznever"]);
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let mut reg = prepare(&lab, &dir);
+        for round in 1..=2 {
+            let report = nils_classify::classify::classify(
+                &mut reg,
+                &pack,
+                &Default::default(),
+                &Cancel::new(),
+            )
+            .unwrap();
+            assert_eq!(report.written, 1, "{name}");
+            assert_eq!(
+                report.diagnostics.get("overlay_unused"),
+                Some(&1),
+                "{name} round {round}: {:?}",
+                report.diagnostics
+            );
+            // one row per kind per batch, replaced on the second run
+            let rows_now: Vec<(String, i64, String)> = rows(
+                &mut reg,
+                "SELECT kind, count, sample FROM {diagnostic} WHERE kind = 'overlay_unused' ORDER BY id",
+            )
+            .iter()
+            .map(|r| {
+                (
+                    r.text(0).unwrap().into(),
+                    r.int(1).unwrap(),
+                    r.opt_text(2).unwrap().unwrap_or("").into(),
+                )
+            })
+            .collect();
+            assert_eq!(rows_now.len(), 1, "{name} round {round}: {rows_now:?}");
+            assert_eq!(rows_now[0].1, 1, "{name}");
+            assert!(rows_now[0].2.contains("zzznever"), "{name}: {rows_now:?}");
+            // every diagnostic row of the classifier's kinds is scoped to the batch
+            let scopes = one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {diagnostic} WHERE kind IN ('axis_conflict', 'axis_unresolved', 'keyword_shadowed', 'overlay_unused') AND scope <> 'batch'",
+            );
+            assert_eq!(scopes, 0, "{name}");
+        }
+        // and the signals over the batch read the same rows back
+        let scope = nils_classify::scope::Scope::parse("batch:1").unwrap();
+        let signals = nils_classify::signals::signals(reg.store(), &scope).unwrap();
+        assert_eq!(
+            signals["diagnostics"]["overlay_unused"], 1,
+            "{name}: {signals}"
+        );
+        assert_eq!(
+            signals["unused_overlay_terms"],
+            serde_json::json!(["zzznever"]),
+            "{name}: {signals}"
+        );
+        assert!(
+            signals["axes"]["technique"]["tiers"].is_object(),
+            "{name}: {signals}"
+        );
+        let origin = nils_classify::scope::Scope::parse("origin:SYNTHETIC").unwrap();
+        let by_origin = nils_classify::signals::signals(reg.store(), &origin).unwrap();
+        assert_eq!(
+            by_origin["diagnostics"]["overlay_unused"], 1,
+            "{name}: {by_origin}"
+        );
+        assert!(nils_classify::scope::Scope::parse("nonsense").is_err());
     }
 }

@@ -372,6 +372,7 @@ pub(crate) fn gate(
 
     let mut ran: Vec<Ran> = Vec::new();
     ran.push(write_refusal(&registry, ask_dsn.as_deref(), &backend)?);
+    ran.push(marker_escape(&mut registry, &catalog)?);
     for f in &gate.fixtures {
         match f.outcome.as_str() {
             "passes" => {
@@ -510,6 +511,132 @@ pub(crate) fn gate(
 /// the fixture first tries to undo the session setting the fallback reader
 /// relies on, because a setting is not a privilege; without a DSN the
 /// fixture is deferred, since the role is a deployment's to create.
+/// Wave 4c §6.8, fixture 5: no seeded marker escapes the value sampler or
+/// the probe. The registry's own subject codes are the markers the sampler
+/// is asked about, under the gate's scope, which holds the quasi identifying
+/// class; a synthetic tree seeded here with a placeholder and three codes in
+/// its paths is what the probe reads. Nothing is written by either.
+fn marker_escape(registry: &mut nils_registry::Registry, catalog: &Catalog) -> Result<Ran, Exit> {
+    let name = "marker-escape".to_string();
+    let family = "custody".to_string();
+    let mut differs = Vec::new();
+
+    // The sampler, over the one field every registry seeds.
+    let subject = registry.store().qualified("subject");
+    let codes: Vec<String> = registry
+        .store()
+        .query(
+            &format!("SELECT code FROM {subject} WHERE code IS NOT NULL ORDER BY id LIMIT 8"),
+            &[],
+        )
+        .map_err(|e| fail(e.to_string()))?
+        .iter()
+        .filter_map(|r| r.opt_text(0).ok().flatten().map(str::to_string))
+        .filter(|c| c.len() >= 4)
+        .collect();
+    let scope = scope();
+    let scheme = Scheme::default();
+    let who = actor();
+    let setting = nils_ask::affordance::Setting {
+        names: catalog,
+        scope: &scope,
+        scheme: &scheme,
+        principal: &who,
+        bounds: bounds(),
+        values_cap: Caps::default().options_values as usize,
+    };
+    match nils_ask::affordance::values(registry, "subject", "code", &setting, 50, None) {
+        Ok(sample) => {
+            if sample.kind != "shapes" {
+                differs.push(format!(
+                    "the sampler lists subject codes as {} rather than shapes",
+                    sample.kind
+                ));
+            }
+            let text = serde_json::to_string(&sample).unwrap_or_default();
+            for code in &codes {
+                if text.contains(code.as_str()) {
+                    differs.push("a subject code escaped the value sampler".into());
+                    break;
+                }
+            }
+        }
+        Err(e) => differs.push(format!("the sampler refused subject code: {e}")),
+    }
+
+    // The probe, over a tree seeded here.
+    let tree = nils_dicom::synth::TempDir::new("gate-probe");
+    let markers = ["AAA111", "BBB222", "CCC333"];
+    // Eight files a person: past the floor under which no batch calls a
+    // value constant.
+    for (n, person) in markers.iter().enumerate() {
+        for i in 1..=8 {
+            let study = format!("1.2.3.{n}");
+            let sop = format!("{study}.1.{i}");
+            let mut e = nils_dicom::synth::minimal_mr(&study, &format!("{study}.1"), &sop);
+            e.push(nils_dicom::synth::text(
+                dicom_dictionary_std::tags::PATIENT_ID,
+                dicom_core::VR::LO,
+                "XXXX",
+            ));
+            tree.file(
+                &format!("{person}/{study}/IM_{i:04}"),
+                &nils_dicom::synth::part10(&nils_dicom::synth::MetaFields::mr(&sop), &e, true),
+            );
+        }
+    }
+    let rules = [
+        (
+            "tag".to_string(),
+            nils_digest::Rule::parse("identity:\n  id_type: patient-id\n  from:\n    - field: PatientID\n")
+                .map_err(|e| fail(e.to_string()))?,
+        ),
+        (
+            "path".to_string(),
+            nils_digest::Rule::parse(
+                "identity:\n  id_type: subject-code\n  code: verbatim\n  from:\n    - field: PatientID\n      pattern: '^(?<id>[A-Z]{3}[0-9]{3})$'\n    - path:\n        segment: 1\n        pattern: '^(?<id>.+)$'\n",
+            )
+            .map_err(|e| fail(e.to_string()))?,
+        ),
+    ];
+    match nils_digest::probe::probe(tree.path(), 100, &rules, 2) {
+        Ok(doc) => {
+            let text = doc.to_string();
+            for m in markers.iter().chain(["XXXX", "IM_0001"].iter()) {
+                if text.contains(m) {
+                    differs.push(format!("a seeded value escaped the probe: {m}"));
+                }
+            }
+            if text.contains(&tree.path().display().to_string()) {
+                differs.push("the tree's path escaped the probe".into());
+            }
+            if doc["candidates"][1]["subjects"] != 3 {
+                differs.push("the path rule did not find three subjects".into());
+            }
+            if doc["candidates"][0]["identity_constant"]["constant"] != true {
+                differs.push("the placeholder was not named as constant".into());
+            }
+        }
+        Err(e) => differs.push(format!("the probe refused: {e}")),
+    }
+
+    let ok = differs.is_empty();
+    Ok(Ran {
+        name,
+        family,
+        outcome: "passes".into(),
+        ok,
+        hash: None,
+        rows: 0,
+        differs,
+        note: Some(if ok {
+            "the sampler answered shapes and the probe named the placeholder by shape; no marker, no path".into()
+        } else {
+            "the fixture did not hold".into()
+        }),
+    })
+}
+
 fn write_refusal(
     registry: &nils_registry::Registry,
     ask_dsn: Option<&str>,
