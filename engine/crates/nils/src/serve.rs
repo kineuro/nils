@@ -1421,6 +1421,14 @@ fn routed(
                     ),
                 ));
             }
+            // Wave 4c §6.5: of the linkage verbs only `import` is a job the
+            // door queues; purge and the rest stay on the command line.
+            if command[0] == "linkage" && command.get(1).map(String::as_str) != Some("import") {
+                return Err(Reply::error(
+                    400,
+                    "linkage import is the one linkage verb the door queues",
+                ));
+            }
             // Wave 4c §6.5: a tree is named by a registered location, as
             // @name/relative, never by a path a caller composes; backup and
             // verify go to the deployment's backup directory.
@@ -1684,6 +1692,9 @@ const QUEUEABLE: &[&str] = &[
     "pick",
     "release",
     "handover",
+    // Wave 4c §6.5: `linkage import` over a pre-registered location; the
+    // CSV is named as @root/relative and never as a path of the host.
+    "linkage",
     // Wave 4b §7: `session rebuild`, the cache built under the worker's
     // principal, never by a read door.
     "session",

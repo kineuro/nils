@@ -255,7 +255,7 @@ impl Server {
 #[test]
 fn the_door_serves_what_the_command_line_has() {
     let home = registry();
-    let server = Server::start(&home, 16, &[], &[]);
+    let server = Server::start(&home, 17, &[], &[]);
 
     // C26: the capabilities name the contracts, the pack, the epoch.
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
@@ -418,6 +418,21 @@ fn the_door_serves_what_the_command_line_has() {
         "POST",
         "/api/jobs",
         Some(r#"{"command": ["linkage", "purge", "--all"]}"#),
+        None,
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("linkage import"),
+        "{refused}"
+    );
+    // Wave 4c §6.5: linkage import is queued, over a registered location only
+    let (status, refused) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["linkage", "import", "/etc/passwd"]}"#),
         None,
     );
     assert_eq!(status, 400, "{refused}");
