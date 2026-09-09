@@ -1247,6 +1247,121 @@ The wave closes when:
 
 ## 13. Order of work
 
+**As built (C4, the admission suite, 2026-09-09).** In `kineuro/kvasir`: the
+five checks of §8.6 as one suite against a backend through its own adapter,
+mechanical throughout. Tool calls: twenty fixtures over our own schemas,
+vendored from the engine's MCP door, each a prompt and the call that answers
+it, validity above 0.95 to pass. The chat template: a system message in the
+position our clients send it. The enforced schema: a tool whose parameters
+carry `minItems: 2`, the call forced with `tool_choice` so a model cannot
+dodge the control by answering in prose, the positive request first, then the
+negative control asking for a one-element clause; enforced or refused passes,
+accepted and ignored fails, and a failed positive call leaves the verdict
+inconclusive. Overflow: a prompt a quarter past the context window, whose
+answer (`error`, `truncated` or `accepted`) is published as the catalog flag.
+Stream integrity: a signed thinking block sent back byte for byte in a second
+turn, not applicable to a shape that carries none (pi-ai marks the reasoning
+field it read where a signature would sit, and that marker is not one). The
+records sit in the one database keyed by backend, model, runtime and build
+(`kvasir admission run|list`, `GET /v1/admission`, `POST /v1/admission/run`
+for an admin) and the gate of §8.6 is on by default: a local model is listed
+by `GET /v1/config` only once its newest record for the runtime the backend
+reports now has passed, so an upgrade drops it until the suite runs again.
+Kvasir's own overhead is measured in the same process: the same prompt and
+client straight at the backend and through the door, eight streams with
+distinct four-thousand-token prefixes, every prefix warmed once and the order
+of the two paths alternating by round so the runtime's prompt cache favours
+neither, four rounds, the difference of the times to first token at p50 and
+p95 against the thresholds of §8.10. Run live against the C0 runtime on the
+production host (the 27B model, xgrammar, plain decoding) three times, the
+first two teaching the suite: pi-ai's OpenAI adapter sends the system prompt
+as the `developer` role, which that runtime refuses, so a backend now carries
+pi-ai's compatibility flags with local defaults set by the operator and never
+by a client; a fixture's arguments are matched as a subset; the chat-template
+check gives the model's thinking room; and the overhead measurement had let
+the cache decide. The third run admits the model: nineteen of twenty calls
+well formed (the miss called the guide instead of the catalog), the template
+accepted, `minItems: 2` enforced under xgrammar with the forced call, the
+oversized prompt refused, and Kvasir's overhead under the noise, thirty
+milliseconds below the direct path at p50 and fourteen above at p95 over
+thirty-two streams each way. The admission record names runtime and build.
+Two things left open: thinking stayed on during the tool calls, and a run
+with it off would be another admission; and both paths crossed one tunnel,
+so the absolute times are not the host's own.
+
+**As built (B3 to B6, the desk's pages, 2026-09-09).** In `kineuro/nils-desk`,
+four slices, each a page of §7 as a function of the engine's doors and the
+person's entitlements, checked live against a local engine. B3, the question
+page: the editor is derived from the stored ask document on every render, a
+step per set in the order the engine reads them (a source before what reads
+it, the children of `has` before the parent), sub-steps for the clause groups
+with `active`, `visible`, `valid` and `revert`; every control is a move from
+`POST /api/ask/options` rendered from its template and holes (fillers as a
+select, a value with the sampler's datalist), every edit goes through `POST
+/api/ask/apply` against the options token, and `409 stale_options` refetches
+the options and says so. The desk composes no ask JSON: a question starts
+from a stored id, from authored text through `POST /api/ask/draft`, or from a
+worked example of `GET /api/ask/guide`. The declaration block from
+`describe`, the compiled SQL panel from `explain` in both dialects, the
+preview that goes stale on purpose with a Refresh button, the per-step
+funnel from `diagnose` (the preview door runs the document's `out`, so the
+"capped run of the prefix" is the funnel's rows and subjects per stage
+rather than ten rows per step), the diagnose drawer opened when the answer is
+empty or smaller than the version before, the version chain from the
+document parents with an author on every line and what changed from `diff`,
+the diff view over any two versions, and compare as a command over two
+documents or two handles. The projection preset of the `out` step is a
+display projection over the answer's columns, because no move sets
+`out.columns` (an engine move for it is the one thing this page still
+wants). A cell click offers only the moves whose template has a hole the
+value can fill; a chip click drops its clause through `remove_where`; both
+make the same audit shape. Presenting a result twice executes once, keyed by
+document and epoch. Checked through the proxy: apply then revert answers the
+root document again, byte-identical canonical forms and an empty diff; a
+reused token is `409`; a no-op diff is empty; a cross-origin write is `403`.
+B4, the result surface: the engine gained `GET /api/ask/handles` (this
+caller's handles newest first within its scope, with `kept`, `truncated`,
+the person's own `limit` and the columns); the page pages a handle from the
+rows door and never re-executes; running is the ask run jobs not over,
+polled by thirty seconds while any runs, the two-minute tail named; stale is
+a named overlay when the desk's own lineage record (which document followed
+which, ids only, written after every apply) says the document moved on, or
+when the registry's epoch moved; truncated tells your limit apart from our
+truncation, the row count is the control that points at the `out` step, and
+release and promote are disabled with the reason on the control; export is
+CSV off a handle through `GET /desk/export/{handle}?purpose=`, which pages
+the engine's rows under the caller's own identity so every page carries the
+read audit and the purpose the person typed, and `export` in the desk's
+configuration names the entitlement it needs or `off`; promote is a job. No
+charts. B5, operations and data: jobs live from `GET /api/events` under the
+cap with polling as the fallback; review with the item, its members and
+evidence, apply, accept, commit and withdraw; releases with the history and a
+form that shows exactly what will be released (the handle's first page and
+every stack id read off its rows, the question's sentences and who authored
+each version, or the cohorts, subjects and axes named by hand) and requires
+the selection's name typed before `POST /api/releases`; handovers; custody,
+the registry's stores beside `GET /desk/custody` (the desk's own store and
+the parts that keep theirs, C45); audit with its filters; sessions rebuild as
+a job. Data: packs with a pack's axes, rule sets, passes and buckets; batches
+with their reports as shapes; quarantine by batch and class; the ingest
+forms for digest, classify, fingerprint and linkage import, each queued over
+a pre-registered location as `@root/relative` with an absolute path or a
+parent step refused in the desk before the engine refuses it again (the job
+door gained `linkage import` as the one linkage verb it queues); backup as a
+job with its archives listed; verify as a job; restore as a page that prints
+the exact command and the pre-restore procedure and runs nothing (D50). B6,
+settings: one section per part; the engine read only with the policy table
+and the flags to paste for the desk's identity mode; the desk's own settings
+(`desk.settings` in the capabilities document: mode, origin, engine URL,
+session and token lifetimes, export, store, retention) read only, users in
+`local` mode; Kvasir's backends with their health in words, the models table
+where an admin sets a backend, a `rows` purpose only with the acknowledgement
+sentence and an `identifiers` purpose never (the option is disabled), the
+minted keys with the secret shown once, the organisation's key stored sealed
+and shown never; the assistant's own document when it answered; the app
+registry. The shell reads the hash for its section (`#ask/12`,
+`#results/77`, `#operations/releases/77`, `#data/ingest`).
+
 **As built (C1 to C3, Kvasir: the door, identity, keys, admission, the
 ledger, grants and policy, 2026-09-09).** `kineuro/kvasir`, TypeScript on
 Node 22 with `@earendil-works/pi-ai` at the exact version Flue pins (0.83.0).
