@@ -1310,16 +1310,6 @@ fn the_summary_the_start_from_resolver_and_the_document_list_answer_on_the_synth
     let server = Server::start(
         &home,
         30,
-/// Wave 5 section 12.2, slice A2: the timeline door orders a document's
-/// versions, runs and promotion; a handle's timeline carries its source
-/// document and its promotion; a job's carries what it did; the door
-/// refuses a kind it does not serve and an id no row has.
-#[test]
-fn the_timeline_door_orders_a_documents_versions_runs_and_promotion() {
-    let home = synthetic();
-    let server = Server::start(
-        &home,
-        15,
         &[
             "--auth",
             "token",
@@ -1439,50 +1429,6 @@ fn the_timeline_door_orders_a_documents_versions_runs_and_promotion() {
     assert_eq!(status, 200, "{from_doc}");
     assert_eq!(from_doc["set"], yardstick()["out"]["set"]);
     assert!(from_doc["count"].as_i64().unwrap() > 0, "{from_doc}");
-            "an-operator-token-of-len=ops@lab:operator",
-        ],
-    );
-    let ops = Some("an-operator-token-of-len");
-    // a document, then a second version by a move
-    let (status, posted) = server.request(
-        "POST",
-        "/api/ask/documents",
-        Some(&body(serde_json::json!({"document": yardstick()}))),
-        ops,
-    );
-    assert_eq!(status, 200, "{posted}");
-    let first = posted["document"].as_i64().unwrap();
-    let (status, caps) = server.request("GET", "/api/capabilities", None, ops);
-    assert_eq!(status, 200, "{caps}");
-    let epoch = caps["ask"]["epoch"].as_i64().unwrap();
-    let (status, opts) = server.request(
-        "POST",
-        "/api/ask/options",
-        Some(&body(
-            serde_json::json!({"document_id": first, "set": "good"}),
-        )),
-        ops,
-    );
-    assert_eq!(status, 200, "{opts}");
-    let window = opts["moves"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|m| m["kind"] == "set_window")
-        .unwrap();
-    let (status, applied) = server.request(
-        "POST",
-        "/api/ask/apply",
-        Some(&body(serde_json::json!({
-            "document_id": first, "epoch": epoch, "token": opts["token"], "set": "good",
-            "moves": [{"move_id": window["id"], "args": {"relation": "near:edss", "preset": "3 months"}}]
-        }))),
-        ops,
-    );
-    assert_eq!(status, 200, "{applied}");
-    let second = applied["document"].as_i64().unwrap();
-    assert_ne!(first, second);
-    // a run of the first version, then its promotion through a worker
     let (status, ran) = server.request(
         "POST",
         "/api/ask/run",
@@ -1544,6 +1490,70 @@ fn the_timeline_door_orders_a_documents_versions_runs_and_promotion() {
             "{door}"
         );
     }
+}
+
+/// Wave 5 section 12.2, slice A2: the timeline door orders a document's
+/// versions, runs and promotion; a handle's timeline carries its source
+/// document and its promotion; a job's carries what it did; the door
+/// refuses a kind it does not serve and an id no row has.
+#[test]
+fn the_timeline_door_orders_a_documents_versions_runs_and_promotion() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        15,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let ops = Some("an-operator-token-of-len");
+    // a document, then a second version by a move
+    let (status, posted) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(serde_json::json!({"document": yardstick()}))),
+        ops,
+    );
+    assert_eq!(status, 200, "{posted}");
+    let first = posted["document"].as_i64().unwrap();
+    let (status, caps) = server.request("GET", "/api/capabilities", None, ops);
+    assert_eq!(status, 200, "{caps}");
+    let epoch = caps["ask"]["epoch"].as_i64().unwrap();
+    let (status, opts) = server.request(
+        "POST",
+        "/api/ask/options",
+        Some(&body(
+            serde_json::json!({"document_id": first, "set": "good"}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 200, "{opts}");
+    let window = opts["moves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["kind"] == "set_window")
+        .unwrap();
+    let (status, applied) = server.request(
+        "POST",
+        "/api/ask/apply",
+        Some(&body(serde_json::json!({
+            "document_id": first, "epoch": epoch, "token": opts["token"], "set": "good",
+            "moves": [{"move_id": window["id"], "args": {"relation": "near:edss", "preset": "3 months"}}]
+        }))),
+        ops,
+    );
+    assert_eq!(status, 200, "{applied}");
+    let second = applied["document"].as_i64().unwrap();
+    assert_ne!(first, second);
+    // a run of the first version, then its promotion through a worker
+    let (status, ran) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(
             serde_json::json!({"document": yardstick(), "name": "timed"}),
         )),
         ops,
