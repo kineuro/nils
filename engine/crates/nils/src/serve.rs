@@ -767,6 +767,8 @@ pub(crate) struct Doors {
     pub(crate) bound: String,
     /// Wave 4c §6.5: the assistant installed beside this engine, if one is.
     pub(crate) assist: Option<String>,
+    /// Wave 5 §10.4: the supervisor on this host, if one is.
+    pub(crate) supervisor: Option<String>,
     /// Wave 4c §6.1: the cap on open event streams, and how many are open;
     /// every stream pins a worker for its life.
     pub(crate) event_streams: usize,
@@ -832,6 +834,7 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         mcp_authorization_servers: args.mcp_authorization_server.clone(),
         bound: bound.clone(),
         assist: args.assist.clone(),
+        supervisor: args.supervisor.clone(),
         event_streams: args
             .event_streams
             .unwrap_or_else(|| (args.workers / 2).max(1)),
@@ -1936,6 +1939,7 @@ fn capabilities(
         },
         "doors": doors_list,
         "assist": doors.assist.as_ref().map(|u| serde_json::json!({ "url": u })),
+        "supervisor": doors.supervisor.as_ref().map(|u| serde_json::json!({ "url": u })),
         "event_streams": doors.event_streams,
         "ingest_roots": doors.ingest_roots.keys().collect::<Vec<_>>(),
         "backup_dir": doors.backup_dir.is_some(),

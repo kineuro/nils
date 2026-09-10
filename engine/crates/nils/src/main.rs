@@ -33,6 +33,7 @@ mod login;
 mod mcp;
 mod serve;
 mod summary;
+mod supervise;
 mod timeline;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::day::Day;
@@ -124,6 +125,12 @@ enum Command {
     /// The one door: the HTTP API over this registry, one route per
     /// operation, jobs for anything heavy (Wave 4a section 11)
     Serve(Box<ServeArgs>),
+    /// The supervisor (Wave 5 section 10.4): keys, artifacts, the verifier,
+    /// the channel and the update of a part on this host
+    Supervise {
+        #[command(subcommand)]
+        command: supervise::SuperviseCommand,
+    },
     /// What private elements an archive carries, by creator, so an allowlist
     /// is chosen from the data rather than from a chair (§8.4)
     Private(PrivateArgs),
@@ -451,6 +458,10 @@ struct ServeArgs {
     /// repeatable
     #[arg(long, value_name = "URL")]
     mcp_authorization_server: Vec<String>,
+    /// The supervisor on this host (Wave 5 section 10.4), so the desk finds
+    /// it through the capabilities; none when absent
+    #[arg(long, value_name = "URL")]
+    supervisor: Option<String>,
     /// Request handlers, each with a registry connection of its own
     #[arg(long, default_value = "4", value_name = "N")]
     workers: usize,
@@ -1243,6 +1254,7 @@ fn main() -> ExitCode {
         Command::Overlay(command) => overlay_command(&home, command),
         Command::Ingest(command) => ingest_command(&home, command),
         Command::Serve(args) => serve::serve(&home, *args),
+        Command::Supervise { command } => supervise::command(command),
         Command::Audit(AuditCommand::List {
             principal,
             action,
