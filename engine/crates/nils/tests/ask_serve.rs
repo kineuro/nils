@@ -1675,3 +1675,152 @@ fn the_timeline_door_orders_a_documents_versions_runs_and_promotion() {
     assert_eq!(of_session["events"][0]["kind"], "built", "{of_session}");
     server.finish();
 }
+
+/// Wave 5 slice A3: the funnel keyed by clause group sums to the funnel keyed
+/// by set; every error carries its disclosure; the declaration carries the
+/// registry's timezone and week start, and they are part of the hash.
+#[test]
+fn the_clause_funnel_sums_and_errors_disclose_and_the_timezone_is_the_registrys() {
+    let home = synthetic();
+    let server = Server::start(&home, 7, &[]);
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../gate/fixtures/gold-a.ask.yml"),
+    )
+    .unwrap();
+    let gold = serde_json::to_value(nils_ask::parse(&text).unwrap()).unwrap();
+    let (status, by_set) = server.request(
+        "POST",
+        "/api/ask/diagnose",
+        Some(&body(serde_json::json!({"document": gold.clone()}))),
+        None,
+    );
+    assert_eq!(status, 200, "{by_set}");
+    assert_eq!(by_set["by"], "set");
+    assert!(by_set["groups"].is_null(), "{by_set}");
+    let (status, by_clause) = server.request(
+        "POST",
+        "/api/ask/diagnose",
+        Some(&body(serde_json::json!({"document": gold, "by": "clause"}))),
+        None,
+    );
+    assert_eq!(status, 200, "{by_clause}");
+    assert_eq!(by_clause["by"], "clause");
+    let groups = by_clause["groups"].as_array().unwrap();
+    let funnel = by_set["funnel"].as_array().unwrap();
+    assert!(!groups.is_empty());
+    let order = ["source", "near", "attach", "has", "where", "pick", "out"];
+    let mut sets: Vec<String> = groups
+        .iter()
+        .map(|g| g["set"].as_str().unwrap().to_string())
+        .collect();
+    sets.dedup();
+    for set in &sets {
+        let mine: Vec<&serde_json::Value> = groups.iter().filter(|g| g["set"] == *set).collect();
+        let source = mine.iter().find(|g| g["group"] == "source").unwrap()["kept"]
+            .as_i64()
+            .unwrap();
+        let lost: i64 = mine.iter().map(|g| g["lost"].as_i64().unwrap()).sum();
+        let last = funnel.iter().rfind(|s| s["set"] == *set).unwrap()["rows"]
+            .as_i64()
+            .unwrap();
+        // the set's source less what its groups took is its answer
+        assert_eq!(source - lost, last, "{set}: {mine:?}");
+        let positions: Vec<usize> = mine
+            .iter()
+            .map(|g| {
+                order
+                    .iter()
+                    .position(|o| *o == g["group"].as_str().unwrap())
+                    .unwrap()
+            })
+            .collect();
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "{set}: {positions:?}"
+        );
+    }
+    assert!(groups.iter().any(|g| g["group"] == "has"), "{by_clause}");
+    assert!(groups.iter().any(|g| g["group"] == "where"), "{by_clause}");
+    assert!(
+        groups
+            .iter()
+            .any(|g| g["group"] == "out" && g["set"] == "both"),
+        "{by_clause}"
+    );
+    // the disclosure: a taxonomy error and a missing id are safe, a bad keying too
+    let (status, e) = server.request(
+        "POST",
+        "/api/ask/validate",
+        Some(&body(serde_json::json!({"document": {"ast_version": 1, "sets": {"x": {"grain": "subject", "of": "nowhere"}}, "out": {"set": "x", "level": "count"}}}))),
+        None,
+    );
+    assert_eq!(status, 400, "{e}");
+    assert_eq!(e["disclosure"], "safe", "{e}");
+    let (status, e) = server.request("GET", "/api/review/999999", None, None);
+    assert_eq!(status, 404, "{e}");
+    assert_eq!(e["disclosure"], "safe");
+    let (status, e) = server.request(
+        "POST",
+        "/api/ask/diagnose",
+        Some(&body(
+            serde_json::json!({"document": yardstick(), "by": "rows"}),
+        )),
+        None,
+    );
+    assert_eq!(status, 400, "{e}");
+    assert_eq!(e["disclosure"], "safe");
+    // the declaration carries the defaults, and the hash is the one it always was
+    let (status, d) = server.request(
+        "POST",
+        "/api/ask/describe",
+        Some(&body(serde_json::json!({"document": yardstick()}))),
+        None,
+    );
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(d["declaration"]["timezone"], "UTC", "{d}");
+    assert_eq!(d["declaration"]["week_start"], "monday");
+    let (status, stored) = server.request(
+        "POST",
+        "/api/ask/validate",
+        Some(&body(serde_json::json!({"document": yardstick()}))),
+        None,
+    );
+    assert_eq!(status, 200, "{stored}");
+    // the gate's canonicals hold this hash unchanged: the default locale is
+    // left out of the core
+    let utc = stored["hash"].as_str().unwrap().to_string();
+    server.finish();
+    // the registry moves to Stockholm: the epoch moves, the declaration says
+    // so, and the same document is another question
+    let out = run(
+        &home,
+        &["settings", "set", "timezone", "Europe/Stockholm"],
+        None,
+    );
+    assert!(out.contains("Europe/Stockholm"), "{out}");
+    let shown = run(&home, &["settings", "show", "--json"], None);
+    assert!(
+        shown.contains("\"timezone\":\"Europe/Stockholm\""),
+        "{shown}"
+    );
+    let server = Server::start(&home, 2, &[]);
+    let (status, d) = server.request(
+        "POST",
+        "/api/ask/describe",
+        Some(&body(serde_json::json!({"document": yardstick()}))),
+        None,
+    );
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(d["declaration"]["timezone"], "Europe/Stockholm", "{d}");
+    // a stored document keeps the hash it was put with; a fresh preparation
+    // reads the registry's locale and is another question
+    let (status, stored) = server.request(
+        "POST",
+        "/api/ask/validate",
+        Some(&body(serde_json::json!({"document": yardstick()}))),
+        None,
+    );
+    assert_eq!(status, 200, "{stored}");
+    assert_ne!(stored["hash"].as_str().unwrap(), utc);
+    server.finish();
+}

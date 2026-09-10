@@ -693,10 +693,27 @@ impl Reply {
             empty: false,
         }
     }
+    /// An error, with its disclosure (Wave 5 section 12.6): `internal` for
+    /// a 5xx, whose text names the engine's own failure; `safe` otherwise,
+    /// for a message built from document, set, field and door names and
+    /// counts. A message that could carry a value of a person is built
+    /// with `gated` instead.
     pub(crate) fn error(status: u16, message: impl Into<String>) -> Reply {
+        let disclosure = if status >= 500 { "internal" } else { "safe" };
         Reply {
             status,
-            body: serde_json::json!({ "error": message.into() }),
+            body: serde_json::json!({ "error": message.into(), "disclosure": disclosure }),
+            headers: Vec::new(),
+            empty: false,
+        }
+    }
+    /// An error whose text may carry a value of a person: a subject code,
+    /// a display code, a header value, a name, a path under a source root.
+    /// A desk renders it through the projection door with its audit row.
+    pub(crate) fn gated(status: u16, message: impl Into<String>) -> Reply {
+        Reply {
+            status,
+            body: serde_json::json!({ "error": message.into(), "disclosure": "gated" }),
             headers: Vec::new(),
             empty: false,
         }
@@ -1825,9 +1842,11 @@ pub(crate) fn job_err(e: nils_registry::job::Error) -> Reply {
     }
 }
 
+/// A review refusal quotes what it refuses: a reference, a header value, a
+/// name, the person who decided; every one is gated.
 fn review_err(e: nils_registry::review::Error) -> Reply {
     match e {
-        nils_registry::review::Error::Refused(m) => Reply::error(409, m),
+        nils_registry::review::Error::Refused(m) => Reply::gated(409, m),
         other => Reply::error(500, other.to_string()),
     }
 }
@@ -2768,4 +2787,28 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Rebuilt sessions",
         ),
     ]
+}
+
+#[cfg(test)]
+mod disclosure_tests {
+    use super::*;
+
+    #[test]
+    fn every_error_carries_its_disclosure() {
+        assert_eq!(
+            Reply::error(400, "the set x is not declared").body["disclosure"],
+            "safe"
+        );
+        assert_eq!(Reply::error(404, "no handle 7").body["disclosure"], "safe");
+        assert_eq!(
+            Reply::error(500, "the store: locked").body["disclosure"],
+            "internal"
+        );
+        // a review refusal quotes a reference and who decided: gated
+        let r = review_err(nils_registry::review::Error::Refused(
+            "manufacturer at subject S-0001 was decided by a person (anna); an agent does not override that".into(),
+        ));
+        assert_eq!(r.status, 409);
+        assert_eq!(r.body["disclosure"], "gated");
+    }
 }

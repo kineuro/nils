@@ -80,7 +80,15 @@ pub struct Meta {
     /// Set when the registry was built by `nils synth`: the name of the
     /// builder. A desk shows a banner on it; real data never carries it.
     pub synthetic: Option<String>,
+    /// The timezone the dates are read under, `UTC` or an IANA name, and
+    /// the day a week starts on (Wave 5 section 12.6). Settings of the
+    /// registry, never of a browser; `nils settings set` changes them.
+    pub timezone: String,
+    pub week_start: String,
 }
+
+pub const DEFAULT_TIMEZONE: &str = "UTC";
+pub const DEFAULT_WEEK_START: &str = "monday";
 
 /// What `nils init` takes.
 #[derive(Debug, Clone)]
@@ -328,6 +336,8 @@ impl Home {
             display_length: opts.display_length,
             session_scheme,
             synthetic: None,
+            timezone: DEFAULT_TIMEZONE.to_string(),
+            week_start: DEFAULT_WEEK_START.to_string(),
         };
         store.begin()?;
         for (k, v) in meta.rows() {
@@ -400,6 +410,8 @@ impl Meta {
             ("pseudonym_key", self.pseudonym_key.clone()),
             ("display_length", self.display_length.to_string()),
             ("session_scheme", self.session_scheme.clone()),
+            ("timezone", self.timezone.clone()),
+            ("week_start", self.week_start.clone()),
         ]
     }
 }
@@ -471,6 +483,14 @@ fn read_meta(store: &mut Store) -> Result<Meta, HomeError> {
             .cloned()
             .unwrap_or_else(|| DEFAULT_SESSION_SCHEME.to_string()),
         synthetic: map.get("synthetic").cloned(),
+        timezone: map
+            .get("timezone")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_TIMEZONE.to_string()),
+        week_start: map
+            .get("week_start")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_WEEK_START.to_string()),
     })
 }
 

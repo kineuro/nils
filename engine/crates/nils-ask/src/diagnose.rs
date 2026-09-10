@@ -62,6 +62,25 @@ pub struct Cost {
     pub class: String,
 }
 
+/// One clause group of one set (Wave 5 section 12.3): the funnel keyed by
+/// set and group in the language's own order (source, near, attach, has,
+/// where, pick, out), so a step's own counts are computable without the
+/// document being rewritten. `kept` is the rows after the group's last
+/// clause; `lost` is what the group took from the rows before it, so a
+/// set's source rows less the sum of its groups' losses is its answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClauseGroup {
+    pub set: String,
+    pub grain: String,
+    pub group: String,
+    pub clauses: usize,
+    pub kept: i64,
+    pub subjects: i64,
+    pub lost: i64,
+}
+
+pub const GROUPS: [&str; 7] = ["source", "near", "attach", "has", "where", "pick", "out"];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnosis {
     pub valid: bool,
@@ -77,10 +96,74 @@ pub struct Diagnosis {
     pub coarse: Vec<(String, i64)>,
     pub cost: Cost,
     pub funnel: Vec<Stage>,
+    /// How the funnel is keyed: `set` (the stages) or `clause` (the groups
+    /// below are filled).
+    #[serde(default = "by_set")]
+    pub by: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<ClauseGroup>,
     pub next: Vec<String>,
 }
 
+fn by_set() -> String {
+    "set".to_string()
+}
+
 impl Diagnosis {
+    /// Key the funnel by clause group (Wave 5 section 12.3): the stages of
+    /// each set folded into the language's groups, in order; a group a set
+    /// has no clause of is not a row; the answer's set ends with `out`.
+    pub fn by_clause(mut self, out_set: &str) -> Diagnosis {
+        let mut groups: Vec<ClauseGroup> = Vec::new();
+        let mut sets: Vec<&str> = Vec::new();
+        for st in &self.funnel {
+            if !sets.contains(&st.set.as_str()) {
+                sets.push(&st.set);
+            }
+        }
+        for set in sets {
+            let stages: Vec<&Stage> = self.funnel.iter().filter(|s| s.set == set).collect();
+            let mut before: Option<i64> = None;
+            for group in GROUPS.iter().take(6) {
+                let mine: Vec<&&Stage> = stages
+                    .iter()
+                    .filter(|s| s.stage == *group || s.stage.starts_with(&format!("{group} ")))
+                    .collect();
+                let Some(last) = mine.last() else {
+                    continue;
+                };
+                let kept = last.rows;
+                let lost = before.map(|b| b - kept).unwrap_or(0).max(0);
+                groups.push(ClauseGroup {
+                    set: set.to_string(),
+                    grain: last.grain.clone(),
+                    group: group.to_string(),
+                    clauses: mine.len(),
+                    kept,
+                    subjects: last.subjects,
+                    lost,
+                });
+                before = Some(kept);
+            }
+            if set == out_set
+                && let Some(last) = stages.last()
+            {
+                groups.push(ClauseGroup {
+                    set: set.to_string(),
+                    grain: last.grain.clone(),
+                    group: "out".to_string(),
+                    clauses: 1,
+                    kept: last.rows,
+                    subjects: last.subjects,
+                    lost: 0,
+                });
+            }
+        }
+        self.by = "clause".to_string();
+        self.groups = groups;
+        self
+    }
+
     /// The first stage on the subject's path a subject is missing from, in
     /// funnel order (Q1's layered reading).
     pub fn falls_out(&self, subject: i64) -> Option<&Stage> {
@@ -295,6 +378,8 @@ pub fn diagnose(
                 coarse: Vec::new(),
                 cost,
                 funnel: Vec::new(),
+                by: by_set(),
+                groups: Vec::new(),
                 next,
             });
         }
@@ -494,6 +579,8 @@ pub fn diagnose(
         coarse,
         cost,
         funnel,
+        by: by_set(),
+        groups: Vec::new(),
         next,
     })
 }

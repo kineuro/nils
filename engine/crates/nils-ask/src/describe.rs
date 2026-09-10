@@ -546,6 +546,10 @@ pub struct Declaration {
     pub denominator: String,
     pub disclosure: String,
     pub truncated: bool,
+    /// The timezone the engine read the dates under, and the day a week
+    /// starts on (Wave 5 section 12.6): the registry's, never the browser's.
+    pub timezone: String,
+    pub week_start: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -561,6 +565,7 @@ pub fn declaration(
     description: &Description,
     scheme_digest: &str,
     truncated: bool,
+    locale: &crate::hash::Locale,
 ) -> Declaration {
     let out_set = ask.sets.get(&ask.out.set);
     let grain = out_set
@@ -664,6 +669,8 @@ pub fn declaration(
         denominator,
         disclosure: description.disclosure.clone(),
         truncated,
+        timezone: locale.timezone.clone(),
+        week_start: locale.week_start.clone(),
     }
 }
 

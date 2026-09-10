@@ -99,7 +99,7 @@ pub fn prepare(mut ask: Ask, names: &dyn Names, scope: &Scope) -> Result<Prepare
     desugar(&mut ask).map_err(Error::Sugar)?;
     let pinned = validate::pin_selections(&mut ask, names).map_err(|i| Error::Invalid(vec![i]))?;
     let validated = validate(&ask, names, scope).map_err(Error::Invalid)?;
-    let hash = content_hash(&ask);
+    let hash = hash::content_hash_under(&ask, &names.locale());
     Ok(Prepared {
         ask,
         hash,
