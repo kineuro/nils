@@ -666,15 +666,29 @@ pub(crate) struct Reply {
     /// A body that is not JSON, sent as it stands (a notification's empty
     /// answer).
     pub(crate) empty: bool,
+    /// Wave 5 §12.7: bytes with their own content type, the instance door's
+    /// tiles and renders; `body` is ignored when set.
+    pub(crate) raw: Option<Box<(String, Vec<u8>)>>,
 }
 
 impl Reply {
+    /// Bytes with a content type, and any headers beside it.
+    pub(crate) fn raw(content_type: &str, bytes: Vec<u8>, headers: Vec<(String, String)>) -> Reply {
+        Reply {
+            status: 200,
+            body: serde_json::Value::Null,
+            headers,
+            empty: false,
+            raw: Some(Box::new((content_type.to_string(), bytes))),
+        }
+    }
     pub(crate) fn ok(body: serde_json::Value) -> Reply {
         Reply {
             status: 200,
             body,
             headers: Vec::new(),
             empty: false,
+            raw: None,
         }
     }
     pub(crate) fn accepted(body: serde_json::Value) -> Reply {
@@ -683,6 +697,7 @@ impl Reply {
             body,
             headers: Vec::new(),
             empty: false,
+            raw: None,
         }
     }
     pub(crate) fn created(body: serde_json::Value) -> Reply {
@@ -691,6 +706,7 @@ impl Reply {
             body,
             headers: Vec::new(),
             empty: false,
+            raw: None,
         }
     }
     /// An error, with its disclosure (Wave 5 section 12.6): `internal` for
@@ -705,6 +721,7 @@ impl Reply {
             body: serde_json::json!({ "error": message.into(), "disclosure": disclosure }),
             headers: Vec::new(),
             empty: false,
+            raw: None,
         }
     }
     /// An error whose text may carry a value of a person: a subject code,
@@ -716,6 +733,7 @@ impl Reply {
             body: serde_json::json!({ "error": message.into(), "disclosure": "gated" }),
             headers: Vec::new(),
             empty: false,
+            raw: None,
         }
     }
     /// The same reply with one more header.
@@ -730,6 +748,7 @@ impl Reply {
             body: serde_json::Value::Null,
             headers: Vec::new(),
             empty: true,
+            raw: None,
         }
     }
 }
@@ -911,6 +930,21 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
 }
 
 fn respond(request: Request, reply: Reply) -> std::io::Result<()> {
+    if let Some(raw) = reply.raw {
+        let (content_type, bytes) = *raw;
+        let mut response = Response::from_data(bytes)
+            .with_status_code(StatusCode(reply.status))
+            .with_chunked_threshold(usize::MAX)
+            .with_header(
+                Header::from_bytes("Content-Type", content_type.as_bytes()).expect("header"),
+            );
+        for (name, value) in &reply.headers {
+            if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+                response = response.with_header(h);
+            }
+        }
+        return request.respond(response);
+    }
     let text = if reply.empty {
         String::new()
     } else {
@@ -1198,6 +1232,10 @@ fn routed(
             let sample = nils_classify::rehearse::sample_of(doc["sample"].as_i64());
             let (_, tried) = rehearsed(doors, registry, &doc["overlay"], &scope, sample)?;
             Ok(Reply::ok(tried))
+        }
+        // Wave 5 §12.7: the gated instance door, shaped by the viewer study.
+        ["api", "instances", stack, rest @ ..] if get => {
+            crate::pyramid::door(registry, caller, stack, rest, query)
         }
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
@@ -2016,6 +2054,8 @@ fn routed(
 /// The verbs a queued command line may start with: what the door runs
 /// through a worker, and nothing that reads a file the caller names.
 const QUEUEABLE: &[&str] = &[
+    // Wave 5 §12.7: the viewing pyramid of a stack, into a working place.
+    "pyramid",
     // Wave 4c §6.5: an archive as a job, and its check; never a restore.
     "backup",
     "verify",
@@ -2179,6 +2219,10 @@ fn capabilities(
         "GET /api/places",
         "POST /api/places",
         "PUT /api/places/{id}",
+        "GET /api/instances/{stack}/manifest",
+        "GET /api/instances/{stack}/tiles/{level}/{z}",
+        "GET /api/instances/{stack}/slab/{level}/{z0}-{z1}",
+        "GET /api/instances/{stack}/render/{level}/{z}",
     ]
     .iter()
     .chain(crate::ask_doors::DOORS.iter())
@@ -2715,6 +2759,46 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one manifest",
             "Rehearsing an overlay",
             "Rehearsed an overlay",
+        ),
+        row(
+            "GET /api/instances/{stack}/manifest",
+            "reader",
+            false,
+            false,
+            "free",
+            "one document",
+            "Reading a stack's pyramid manifest",
+            "Read a stack's pyramid manifest",
+        ),
+        row(
+            "GET /api/instances/{stack}/tiles/{level}/{z}",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "one plane of tiles",
+            "Reading a plane of a stack",
+            "Read a plane of a stack",
+        ),
+        row(
+            "GET /api/instances/{stack}/slab/{level}/{z0}-{z1}",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "thirty-two planes of tiles",
+            "Reading a slab of a stack",
+            "Read a slab of a stack",
+        ),
+        row(
+            "GET /api/instances/{stack}/render/{level}/{z}",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "one image",
+            "Rendering a plane of a stack",
+            "Rendered a plane of a stack",
         ),
         row(
             "GET /api/places",

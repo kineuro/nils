@@ -572,6 +572,57 @@ paths:
       summary: Every apply and every refusal, one row each (Wave 5 section 10.4)
       responses:
         "200": {description: "{rows: [{at, part, from, to, digest, ok, why}]}"}
+  /api/instances/{stack}/manifest:
+    get:
+      summary: The viewing pyramid of a stack, as its manifest (Wave 5 section 12.7)
+      description: "Built by the pyramid job (`nils pyramid build --stack ID`, queueable as a job) into a working place: four in-plane levels of 256 by 256 reversible HTJ2K tiles, every slice at every level. The manifest names the codec (`htj2k`), the tile size, the levels with their shapes and tile grids and bytes, the shape and spacing at level 0, the dtype and the intercept (a signed volume is stored shifted by 32768), the window the viewer opens at (the first and ninety-ninth percentiles), the burned-in annotation flag and where it is held, the build time and the precompute's cost. The pixels are quasi-identifying: the reviewer role opens them; a reader is refused with a gated 403. Reading it counts as opening the stack: one audit row `instance.open` per person and stack in ten minutes, not per tile."
+      parameters:
+        - {name: stack, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: "{stack, codec, tile, levels, shape, spacing, dtype, intercept, window: {percentiles, center, width}, bytes_per_level, level_shapes: [{level, shape, tiles, bytes}], annotation: {burned_in, where}, built_at, pack_version, precompute, place, held}"}
+        "403": {description: "The reader role does not open pixels (disclosure gated)"}
+        "404": {description: No pyramid for the stack yet}
+        "409": {description: No working place is bound}
+  /api/instances/{stack}/tiles/{level}/{z}:
+    get:
+      summary: One plane's tiles in one response (Wave 5 section 12.7)
+      description: "The container is little endian: a u32 count, then one u32 offset per tile from the start of the container, then the tiles in row-major order of the plane's tile grid, each an HTJ2K codestream (`X-Nils-Codec: htj2k`). `Content-Type: application/x-nils-tiles`. When the manifest says burned-in annotation is present, the tiles open to the operator role only; below it they are refused with a gated 403 and the render holds the band."
+      parameters:
+        - {name: stack, in: path, required: true, schema: {type: integer}}
+        - {name: level, in: path, required: true, schema: {type: integer}}
+        - {name: z, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: The plane's tiles in one container}
+        "403": {description: Below the disclosure class (gated)}
+        "404": {description: No pyramid, no such level, or a plane past the stack}
+  /api/instances/{stack}/slab/{level}/{z0}-{z1}:
+    get:
+      summary: Up to thirty-two planes in one response (Wave 5 section 12.7)
+      description: "The same container one level up: a u32 count of planes, one u32 offset per plane, then each plane's own container. `z1` is exclusive; more than thirty-two planes is 416."
+      parameters:
+        - {name: stack, in: path, required: true, schema: {type: integer}}
+        - {name: level, in: path, required: true, schema: {type: integer}}
+        - {name: z0, in: path, required: true, schema: {type: integer}}
+        - {name: z1, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: The slab's planes, each a container of tiles}
+        "403": {description: Below the disclosure class (gated)}
+        "416": {description: More than thirty-two planes, or past the stack}
+  /api/instances/{stack}/render/{level}/{z}:
+    get:
+      summary: One plane with window and level applied, as JPEG (Wave 5 section 12.7)
+      description: "The server render: for the first image, for thin clients and for the gated case. `axis` is z (default), y or x, `z` the index along it; `c` and `w` the window's center and width in stored units after the intercept, the manifest's window when absent. When burned-in annotation is present and the caller is below the operator role, the top and bottom eighths are blanked and `X-Nils-Held: true` says so."
+      parameters:
+        - {name: stack, in: path, required: true, schema: {type: integer}}
+        - {name: level, in: path, required: true, schema: {type: integer}}
+        - {name: z, in: path, required: true, schema: {type: integer}}
+        - {name: axis, in: query, schema: {type: string, enum: [z, y, x]}}
+        - {name: c, in: query, schema: {type: number}}
+        - {name: w, in: query, schema: {type: number}}
+      responses:
+        "200": {description: "image/jpeg"}
+        "403": {description: The reader role does not open pixels (gated)}
+        "404": {description: No pyramid, or no such level}
   /api/places:
     get:
       summary: Every place with its role, its guarantees, what the engine measured and the deployment's paths bound under it (Wave 5 section 12.5, 10.2)
