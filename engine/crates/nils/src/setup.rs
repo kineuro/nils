@@ -328,6 +328,29 @@ fn have(program: &str) -> bool {
     run_quiet(program, &["--version"]).is_some()
 }
 
+/// The first four words of a command, for a line that says what was done
+/// without repeating a screen of mounts.
+fn short(line: &str) -> String {
+    let words: Vec<&str> = line.split_whitespace().take(4).collect();
+    format!("{} ...", words.join(" "))
+}
+
+/// Run one of the container lines this wizard prints, as it is written.
+fn run_line(line: &str) -> Result<(), String> {
+    let mut words = line.split_whitespace();
+    let program = words.next().ok_or("an empty command")?;
+    let args: Vec<&str> = words.collect();
+    let out = Command::new(program)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("{program}: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let why = String::from_utf8_lossy(&out.stderr);
+    Err(why.lines().last().unwrap_or("it failed").to_string())
+}
+
 // ------------------------------------------------------------- the console
 
 /// The terminal, when there is one. A piped run has no prompt and takes
@@ -1845,8 +1868,16 @@ fn do_it(
             Err(e) => println!("  no services were written: {}", e.message),
         }
     } else if plan.runtime.container() {
+        // No unit files were asked for, but a container still has to be
+        // started, or the person is left with images and nothing running.
         for line in container_commands(plan) {
-            println!("  run: {line}");
+            match run_line(&line) {
+                Ok(()) => println!("  {}", short(&line)),
+                Err(e) => {
+                    println!("  that failed: {e}");
+                    println!("  run: {line}");
+                }
+            }
         }
     }
 
