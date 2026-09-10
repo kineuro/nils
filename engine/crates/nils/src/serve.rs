@@ -1066,6 +1066,7 @@ fn routed(
     }
     let get = *method == Method::Get;
     let post = *method == Method::Post;
+    let put = *method == Method::Put;
     // Which role a door asks for (§11.2). A door not named here asks for
     // reader, which every caller holds.
     let needs = match (method.as_str(), segs.as_slice()) {
@@ -1078,6 +1079,7 @@ fn routed(
         ("POST", ["api", "overlays", _, "adopt"]) | ("POST", ["api", "ingest", "probe"]) => {
             Role::Operator
         }
+        ("POST", ["api", "places"]) | ("PUT", ["api", "places", _]) => Role::Operator,
         ("POST", ["api", "jobs"])
         | ("POST", ["api", "jobs", _, "cancel"])
         | ("POST", ["api", "releases"])
@@ -1196,6 +1198,187 @@ fn routed(
             let sample = nils_classify::rehearse::sample_of(doc["sample"].as_i64());
             let (_, tried) = rehearsed(doors, registry, &doc["overlay"], &scope, sample)?;
             Ok(Reply::ok(tried))
+        }
+        ["api", "places"] if get => {
+            // Wave 5 §12.5: every place with its role, guarantees, probe and
+            // the deployment's paths bound under it. `?probe=1` measures
+            // every active place again first.
+            use nils_registry::place;
+            let refresh = query.get("probe").is_some_and(|p| p == "1" || p == "true");
+            let mut rows = place::list(registry.store())?;
+            if refresh {
+                let mut fresh = Vec::with_capacity(rows.len());
+                for p in rows {
+                    if p.retired_at.is_some() {
+                        fresh.push(p);
+                        continue;
+                    }
+                    let probed = crate::places::probe(std::path::Path::new(&p.path));
+                    fresh.push(place::set(
+                        registry.store(),
+                        p.id,
+                        None,
+                        None,
+                        Some(&probed),
+                    )?);
+                }
+                rows = fresh;
+            }
+            let configured: Vec<(&str, &std::path::Path)> = doors
+                .ingest_roots
+                .values()
+                .map(|p| ("serve --ingest-root", p.as_path()))
+                .chain(
+                    doors
+                        .backup_dir
+                        .iter()
+                        .map(|p| ("serve --backup-dir", p.as_path())),
+                )
+                .chain(std::iter::once(("registry", doors.home.dir())))
+                .collect();
+            let places: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|p| {
+                    let mut doc = p.as_json();
+                    doc["bound"] = serde_json::json!(crate::places::bound_paths(p, &configured));
+                    doc["holds"] = serde_json::json!(p.role.holds());
+                    doc["must"] = serde_json::json!(p.role.must());
+                    doc
+                })
+                .collect();
+            Ok(Reply::ok(serde_json::json!({
+                "count": places.len(),
+                "enforced": rows.iter().any(|p| p.retired_at.is_none()),
+                "places": places,
+                "bindings": crate::places::bindings_doc(),
+            })))
+        }
+        ["api", "places"] if post => {
+            use nils_registry::place::{self, Role as PlaceRole};
+            let doc = json_body(body)?;
+            let name = doc["name"]
+                .as_str()
+                .filter(|n| !n.trim().is_empty())
+                .ok_or_else(|| Reply::error(400, "name: one word the place is called"))?;
+            let role_text = doc["role"].as_str().unwrap_or("");
+            let role = PlaceRole::parse(role_text).ok_or_else(|| {
+                Reply::error(
+                    400,
+                    format!(
+                        "role is one of {}, not {role_text}",
+                        PlaceRole::ALL
+                            .iter()
+                            .map(|r| r.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )
+            })?;
+            let path_text = doc["path"]
+                .as_str()
+                .filter(|p| !p.trim().is_empty())
+                .ok_or_else(|| Reply::error(400, "path: the directory"))?;
+            let path = std::path::PathBuf::from(path_text);
+            if !path.is_absolute() {
+                return Err(Reply::error(
+                    400,
+                    format!("{path_text} is not an absolute path"),
+                ));
+            }
+            let path = std::fs::canonicalize(&path).unwrap_or(path);
+            let guarantees = if doc["guarantees"].is_object() {
+                doc["guarantees"].clone()
+            } else {
+                serde_json::json!({"backup": null, "snapshots": false, "protected": false, "fast": false})
+            };
+            let probed = crate::places::probe(&path);
+            let id = place::add(
+                registry.store(),
+                &place::New {
+                    name,
+                    role,
+                    path: &path.display().to_string(),
+                    guarantees,
+                    probed,
+                },
+            )
+            .map_err(|e| match e {
+                nils_registry::store::Error::Message(m) => Reply::error(409, m),
+                other => Reply::error(500, other.to_string()),
+            })?;
+            nils_registry::audit::record(
+                registry,
+                &nils_registry::audit::Entry {
+                    principal,
+                    action: nils_registry::audit::Action::PlaceAdd,
+                    scope: serde_json::json!({"place": id, "name": name, "role": role.name()}),
+                    policy: None,
+                    job_id: None,
+                    details: None,
+                },
+            )?;
+            let p = place::show(registry.store(), id)?
+                .ok_or_else(|| Reply::error(500, format!("place {id} was not written")))?;
+            Ok(Reply::created(p.as_json()))
+        }
+        ["api", "places", _] if put => {
+            use nils_registry::place;
+            let id = id_at(2)?;
+            let doc = json_body(body)?;
+            let current = place::show(registry.store(), id)?
+                .ok_or_else(|| Reply::error(404, format!("no place {id}")))?;
+            if doc["retired"].as_bool() == Some(true) {
+                let p = place::retire(registry.store(), id)?;
+                nils_registry::audit::record(
+                    registry,
+                    &nils_registry::audit::Entry {
+                        principal,
+                        action: nils_registry::audit::Action::PlaceRetire,
+                        scope: serde_json::json!({"place": id, "name": current.name}),
+                        policy: None,
+                        job_id: None,
+                        details: None,
+                    },
+                )?;
+                return Ok(Reply::ok(p.as_json()));
+            }
+            let path = match doc["path"].as_str() {
+                Some(text) => {
+                    let path = std::path::PathBuf::from(text);
+                    if !path.is_absolute() {
+                        return Err(Reply::error(400, format!("{text} is not an absolute path")));
+                    }
+                    Some(std::fs::canonicalize(&path).unwrap_or(path))
+                }
+                None => None,
+            };
+            let guarantees = doc["guarantees"]
+                .is_object()
+                .then(|| doc["guarantees"].clone());
+            let probed = path.as_deref().map(crate::places::probe);
+            let p = place::set(
+                registry.store(),
+                id,
+                path.as_deref().map(|p| p.display().to_string()).as_deref(),
+                guarantees.as_ref(),
+                probed.as_ref(),
+            )
+            .map_err(|e| match e {
+                nils_registry::store::Error::Message(m) => Reply::error(409, m),
+                other => Reply::error(500, other.to_string()),
+            })?;
+            nils_registry::audit::record(
+                registry,
+                &nils_registry::audit::Entry {
+                    principal,
+                    action: nils_registry::audit::Action::PlaceSet,
+                    scope: serde_json::json!({"place": id, "name": current.name}),
+                    policy: None,
+                    job_id: None,
+                    details: None,
+                },
+            )?;
+            Ok(Reply::ok(p.as_json()))
         }
         ["api", "overlays"] if get => {
             let rows = nils_registry::overlay::list(registry.store())?;
@@ -1548,6 +1731,14 @@ fn routed(
             let out = doc["out"]
                 .as_str()
                 .ok_or_else(|| Reply::error(400, "out is required"))?;
+            // Wave 5 §10.2: a release writes only to an export place, refused
+            // at the door and not discovered on disk.
+            crate::places::require(
+                registry.store(),
+                nils_registry::place::Role::Export,
+                std::path::Path::new(out),
+            )
+            .map_err(|r| Reply::error(409, r.message))?;
             command.extend(["--name".into(), name.into(), "--out".into(), out.into()]);
             for (flag, key) in [
                 ("--layout", "layout"),
@@ -1622,6 +1813,13 @@ fn routed(
             let out = doc["out"]
                 .as_str()
                 .ok_or_else(|| Reply::error(400, "out is required"))?;
+            // Wave 5 §10.2: a handover writes only to an exchange place.
+            crate::places::require(
+                registry.store(),
+                nils_registry::place::Role::Exchange,
+                std::path::Path::new(out),
+            )
+            .map_err(|r| Reply::error(409, r.message))?;
             let mut command = vec![
                 "handover".to_string(),
                 "run".to_string(),
@@ -1978,6 +2176,9 @@ fn capabilities(
         "GET /api/overlays/{id}",
         "POST /api/overlays/{id}/adopt",
         "POST /api/ingest/probe",
+        "GET /api/places",
+        "POST /api/places",
+        "PUT /api/places/{id}",
     ]
     .iter()
     .chain(crate::ask_doors::DOORS.iter())
@@ -2017,6 +2218,7 @@ fn capabilities(
         "event_streams": doors.event_streams,
         "ingest_roots": doors.ingest_roots.keys().collect::<Vec<_>>(),
         "backup_dir": doors.backup_dir.is_some(),
+        "places": crate::places::capabilities(registry.store()),
         "policy": policy(),
         "idempotency": {
             "header": "Idempotency-Key",
@@ -2513,6 +2715,36 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one manifest",
             "Rehearsing an overlay",
             "Rehearsed an overlay",
+        ),
+        row(
+            "GET /api/places",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "every place",
+            "Reading the places",
+            "Read the places",
+        ),
+        row(
+            "POST /api/places",
+            "operator",
+            true,
+            false,
+            "bounded",
+            "one place",
+            "Declaring a place",
+            "Declared a place",
+        ),
+        row(
+            "PUT /api/places/{id}",
+            "operator",
+            true,
+            true,
+            "bounded",
+            "one place",
+            "Changing a place",
+            "Changed a place",
         ),
         row(
             "GET /api/overlays",

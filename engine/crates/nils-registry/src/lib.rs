@@ -28,6 +28,7 @@ pub mod keys;
 pub mod linkage;
 pub mod migrate;
 pub mod overlay;
+pub mod place;
 pub mod principal;
 pub mod pseudonym;
 pub mod review;

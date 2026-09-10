@@ -1538,6 +1538,19 @@ fn an_adoption_names_the_stacks_that_move_and_the_handles_that_stop_reproducing(
     let server = Server::start(
         &home,
         14,
+/// Wave 5 §12.5 and §10.2: places as registry objects, and the rules at
+/// the doors. A registry place without a backup is refused; a release to
+/// a path outside an export place is refused at the door; a retired place
+/// binds nothing.
+#[test]
+fn places_are_registry_objects_and_the_rules_hold_at_the_doors() {
+    let home = registry();
+    let export = TempDir::new("a4-export");
+    let backup = TempDir::new("a4-backup");
+    let elsewhere = TempDir::new("a4-elsewhere");
+    let server = Server::start(
+        &home,
+        15,
         &[
             "--auth",
             "token",
@@ -1549,6 +1562,7 @@ fn an_adoption_names_the_stacks_that_move_and_the_handles_that_stop_reproducing(
             "an-operator-token-of-len=ops@lab:operator",
             "--token",
             "an-admin-token-of-length=adm@lab:admin",
+            "an-operator-token-of-len=ops@lab:operator",
         ],
         &[],
     );
@@ -1692,6 +1706,49 @@ fn an_adoption_names_the_stacks_that_move_and_the_handles_that_stop_reproducing(
         "POST",
         &format!("/api/ask/handles/{handle}/promote"),
         Some(r#"{"cohort": "x"}"#),
+    let ops = Some("an-operator-token-of-len");
+    // before any place is declared, nothing is enforced and the door says so
+    let (status, caps) = server.request("GET", "/api/capabilities", None, reader);
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(caps["places"]["enforced"], false, "{caps}");
+    assert!(
+        caps["doors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == "GET /api/places"),
+        "{caps}"
+    );
+    let (status, none) = server.request("GET", "/api/places", None, reader);
+    assert_eq!(status, 200, "{none}");
+    assert_eq!(none["count"], 0, "{none}");
+    assert_eq!(none["enforced"], false, "{none}");
+    // a reader may read, not declare
+    let body = |name: &str, role: &str, path: &std::path::Path, guarantees: serde_json::Value| {
+        serde_json::json!({"name": name, "role": role, "path": path.display().to_string(), "guarantees": guarantees}).to_string()
+    };
+    let (status, refused) = server.request(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "vault",
+            "backup",
+            backup.path(),
+            serde_json::json!({}),
+        )),
+        reader,
+    );
+    assert_eq!(status, 403, "{refused}");
+    // the registry role without a backup is refused, with the rule in the sentence
+    let (status, refused) = server.request(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "reg",
+            "registry",
+            home.path(),
+            serde_json::json!({"protected": true}),
+        )),
         ops,
     );
     assert_eq!(status, 409, "{refused}");
@@ -1714,4 +1771,142 @@ fn an_adoption_names_the_stacks_that_move_and_the_handles_that_stop_reproducing(
         "{refused}"
     );
     server.finish();
+            .contains("without a backup"),
+        "{refused}"
+    );
+    // the backup place first, then the registry place naming it
+    let (status, vault) = server.request(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "vault",
+            "backup",
+            backup.path(),
+            serde_json::json!({"protected": true}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 201, "{vault}");
+    assert_eq!(vault["probed"]["directory"], true, "{vault}");
+    assert_eq!(vault["probed"]["writable"], true, "{vault}");
+    let (status, reg) = server.request(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "reg",
+            "registry",
+            home.path(),
+            serde_json::json!({"protected": true, "backup": "vault"}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 201, "{reg}");
+    // an unknown role, a taken name
+    let (status, bad) = server.request(
+        "POST",
+        "/api/places",
+        Some(&body("x", "attic", elsewhere.path(), serde_json::json!({}))),
+        ops,
+    );
+    assert_eq!(status, 400, "{bad}");
+    let (status, taken) = server.request(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "vault",
+            "backup",
+            elsewhere.path(),
+            serde_json::json!({}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 409, "{taken}");
+    // the export place; now the rules are in force
+    let (status, out) = server.request(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "out",
+            "export",
+            export.path(),
+            serde_json::json!({"snapshots": true}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 201, "{out}");
+    let out_id = out["id"].as_i64().unwrap();
+    let (status, listed) = server.request("GET", "/api/places?probe=1", None, reader);
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["count"], 3, "{listed}");
+    assert_eq!(listed["enforced"], true, "{listed}");
+    assert!(
+        listed["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["role"] == "export"),
+        "{listed}"
+    );
+    // a release to a path outside any export place is refused at the door, naming the rule
+    let (status, refused) = server.request(
+        "POST",
+        "/api/releases",
+        Some(&serde_json::json!({"name": "d", "out": elsewhere.path().join("tree").display().to_string()}).to_string()),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("export place"),
+        "{refused}"
+    );
+    // and one under the export place is queued
+    let (status, queued) = server.request(
+        "POST",
+        "/api/releases",
+        Some(&serde_json::json!({"name": "d", "out": export.path().join("tree").display().to_string()}).to_string()),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    // a handover writes only to an exchange place, and none is declared
+    let (status, refused) = server.request(
+        "POST",
+        "/api/handovers",
+        Some(
+            &serde_json::json!({"release": "d", "out": export.path().display().to_string()})
+                .to_string(),
+        ),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("exchange place"),
+        "{refused}"
+    );
+    // retiring the export place takes the binding away
+    let (status, retired) = server.request(
+        "PUT",
+        &format!("/api/places/{out_id}"),
+        Some(r#"{"retired": true}"#),
+        ops,
+    );
+    assert_eq!(status, 200, "{retired}");
+    assert_eq!(retired["retired"], true, "{retired}");
+    let (status, refused) = server.request(
+        "POST",
+        "/api/releases",
+        Some(&serde_json::json!({"name": "d", "out": export.path().join("tree").display().to_string()}).to_string()),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    server.finish();
+    // the acts are on the audit log
+    let audited = run(
+        &home,
+        &["audit", "list", "--action", "place.add", "--json"],
+        None,
+    );
+    assert!(audited.contains("\"place.add\""), "{audited}");
 }

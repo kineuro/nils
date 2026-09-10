@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 36;
+pub const SCHEMA_VERSION: i64 = 37;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,6 +197,10 @@ pub static MIGRATIONS: &[Migration] = &[
     Migration {
         version: 36,
         apply: a_handle_may_be_invalidated,
+    },
+    Migration {
+        version: 37,
+        apply: a_place_is_a_registry_object,
     },
 ];
 
@@ -472,6 +476,15 @@ fn a_handle_may_be_invalidated(store: &mut Store, kind: Kind) -> Result<(), Erro
         return Ok(());
     }
     add_tables(store, kind, &["handle_invalidation"])
+
+/// Wave 5 §12.5: a place as a registry object, so that every path the
+/// engine takes is bound to a role and the rules of §10.2 are checked at
+/// the doors.
+fn a_place_is_a_registry_object(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["place"])
 }
 
 /// Wave 4a §13.1: a release is the history of what left and is never

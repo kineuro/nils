@@ -3707,3 +3707,139 @@ fn a_release_is_withdrawn_with_a_reason_and_finished_jobs_are_pruned_by_age() {
     assert_eq!(doc[0]["scope"]["pruned"], 2, "{doc}");
     assert_eq!(doc[0]["epoch"], serde_json::Value::Null, "{doc}");
 }
+
+/// Wave 5 §10.2, the laptop test: on one machine a place is a directory
+/// and its guarantees are what the person declares, and the rules are the
+/// same. Binding a source and an export directory, a release into the
+/// export place passes and one into any other directory is refused before
+/// anything is written.
+#[test]
+fn a_laptop_binds_directories_as_places_and_a_release_keeps_to_the_export_one() {
+    let home = home();
+    let dir = tree();
+    let out = TempDir::new("cli-place-out");
+    let elsewhere = TempDir::new("cli-place-elsewhere");
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+
+    let done = nils()
+        .args(registry)
+        .args(["digest", "--name", "first"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", stderr(&done));
+
+    // no places yet: the rules are not in force, and the listing says so
+    let listed = nils()
+        .args(registry)
+        .args(["place", "list"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    assert!(
+        stdout(&listed).contains("not in force"),
+        "{}",
+        stdout(&listed)
+    );
+
+    let added = nils()
+        .args(registry)
+        .args(["place", "add", "src"])
+        .arg(dir.path())
+        .args(["--role", "source", "--json"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr(&added));
+    let src: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(src["role"], "source", "{src}");
+    assert_eq!(src["probed"]["directory"], true, "{src}");
+    let added = nils()
+        .args(registry)
+        .args(["place", "add", "out"])
+        .arg(out.path())
+        .args(["--role", "export", "--snapshots"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    // the registry role needs a backup place; a laptop declares one first
+    let refused = nils()
+        .args(registry)
+        .args(["place", "add", "reg"])
+        .arg(home.path())
+        .args(["--role", "registry"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("without a backup"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let release = [
+        "release",
+        "--name",
+        "a-dataset",
+        "--on-unknown",
+        "write",
+        "--pack-dir",
+        packs.to_str().unwrap(),
+        "--out",
+    ];
+    // into the export place: written
+    let first = nils()
+        .args(registry)
+        .args(release)
+        .arg(out.path().join("tree"))
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert!(stdout(&first).contains("version 20"), "{}", stdout(&first));
+    // anywhere else: refused, naming the rule, and nothing written
+    let refused = nils()
+        .args(registry)
+        .args(release)
+        .arg(elsewhere.path().join("tree"))
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("export place"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(!elsewhere.path().join("tree").exists());
+    // into the source place: refused, because a source place is never written
+    let refused = nils()
+        .args(registry)
+        .args(release)
+        .arg(dir.path().join("tree"))
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("never writes"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let bindings = nils()
+        .args(registry)
+        .args(["place", "bindings"])
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&bindings).contains("release --out"),
+        "{}",
+        stdout(&bindings)
+    );
+    let listed = nils()
+        .args(registry)
+        .args(["place", "list", "--json", "--probe"])
+        .output()
+        .unwrap();
+    let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 2, "{rows}");
+}

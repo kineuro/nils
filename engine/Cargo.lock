@@ -1567,6 +1567,7 @@ dependencies = [
  "flate2",
  "hex",
  "jsonwebtoken",
+ "libc",
  "nils-ask",
  "nils-catalog",
  "nils-classify",
