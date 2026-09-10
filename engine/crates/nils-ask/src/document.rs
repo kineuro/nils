@@ -179,6 +179,16 @@ pub fn get(store: &mut Store, id: i64) -> Result<Option<Document>, DocumentError
     Ok(Some(document_of(&r)?))
 }
 
+/// Every document, oldest first, without moving any last use (the list
+/// door of Wave 5 §12.1 reads them all to fold them into lineages).
+pub fn list(store: &mut Store) -> Result<Vec<Document>, DocumentError> {
+    let sql = format!(
+        "SELECT {COLUMNS} FROM {} ORDER BY id",
+        store.qualified("ask_document")
+    );
+    store.query(&sql, &[])?.iter().map(document_of).collect()
+}
+
 /// Drop every document unused for `keep_days`; returns how many went.
 pub fn prune(store: &mut Store, now: &str, keep_days: i64) -> Result<u64, DocumentError> {
     let now_secs =

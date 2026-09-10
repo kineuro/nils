@@ -10,7 +10,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use nils_ask::affordance::{self, AffordanceError, Setting};
-use nils_ask::ast::{Ask, SchemeRef};
+use nils_ask::ast::{Ask, Grain, SchemeRef};
 use nils_ask::exec::{Bounds, ExecError};
 use nils_ask::handle::{self, HandleError};
 use nils_ask::moves::{MOVE_KINDS_CAP, MoveCall};
@@ -343,6 +343,10 @@ fn answer(
     let path = format!("/{}", segs.join("/"));
     let needs = match (method, segs) {
         ("PUT", ["api", "ask", "selections", _]) => Role::Reviewer,
+        // Wave 5 §12.1: an identifier list is quasi-identifying territory,
+        // so uploading one, and starting a question from one, asks for the
+        // reviewer role; the resolver checks the second itself
+        ("POST", ["api", "ask", "values"]) => Role::Reviewer,
         ("POST", ["api", "ask", "handles", _, "promote"])
         | ("POST", ["api", "sessions", "rebuild"]) => Role::Operator,
         _ => Role::Reader,
@@ -380,14 +384,27 @@ fn answer(
         catalog,
         pack,
     } = state;
-    let catalog: &Catalog = &catalog.as_ref().expect("the catalog is built").1;
-    let reader: &mut Store = reader.as_mut().expect("the reader is open");
-    let pack_version = pack.as_ref().map(|p| p.version.to_string());
     let doc = if post || put {
         json_body(body)?
     } else {
         json!({})
     };
+    // A catalog is built at an epoch and a run moves no epoch, so a handle
+    // written since is unknown to it until the next build. The resolver of
+    // Wave 5 §12.1 starts from the handle a person just ran, so it reads the
+    // handle itself and tells the catalog before it validates.
+    if matches!(segs, ["api", "ask", "start"])
+        && let Some(id) = doc["from"]["handle"].as_i64()
+        && let Some((_, c)) = catalog.as_mut()
+        && !c.handles.contains_key(&id.to_string())
+        && let Ok(Some(h)) = handle::get(registry.store(), id)
+        && h.withdrawn_at.is_none()
+    {
+        c.handles.insert(id.to_string(), h.grain);
+    }
+    let catalog: &Catalog = &catalog.as_ref().expect("the catalog is built").1;
+    let reader: &mut Store = reader.as_mut().expect("the reader is open");
+    let pack_version = pack.as_ref().map(|p| p.version.to_string());
     let id_at = |i: usize| -> Result<i64, Reply> {
         segs.get(i)
             .and_then(|s| s.parse::<i64>().ok())
@@ -811,6 +828,276 @@ fn answer(
             v["declaration"] = json!(declaration);
             Ok(Reply::ok(v))
         }
+        ["api", "ask", "start"] if post => {
+            // Wave 5 §12.1, §7.1: anything a person may start from becomes the
+            // opening set of a document, with its count and the sessions under it
+            let from = &doc["from"];
+            let mut sets = serde_json::Map::new();
+            let mut params = serde_json::Map::new();
+            let mut values_decl = serde_json::Map::new();
+            let mut whole: Option<Ask> = None;
+            let set_name;
+            let grain: Grain;
+            if let Some(list) = from["cohorts"].as_array() {
+                let names: Vec<&str> = list.iter().filter_map(Value::as_str).collect();
+                if names.is_empty() {
+                    return Err(Reply::error(400, "from.cohorts: a list of cohort names"));
+                }
+                params.insert("cohorts".into(), json!({"type": "list", "value": names}));
+                sets.insert(
+                    "scope".into(),
+                    json!({"grain": "cohort", "where": [["in", {}, ["field", {}, "name"], ["param", {}, "cohorts"]]]}),
+                );
+                sets.insert("people".into(), json!({"grain": "subject", "of": "scope"}));
+                set_name = "people".to_string();
+                grain = Grain::Subject;
+            } else if let Some(spec) = from["selection"].as_str() {
+                let (name, version) = match spec.rsplit_once('@') {
+                    Some((n, v)) => (n, v.parse::<u64>().ok()),
+                    None => (spec, None),
+                };
+                let saved = selection::get(registry.store(), name, version)
+                    .map_err(|e| Reply::error(500, e.to_string()))?
+                    .ok_or_else(|| Reply::error(404, format!("no selection {spec}")))?;
+                let g = saved
+                    .ask
+                    .sets
+                    .get(&saved.ask.out.set)
+                    .map(|s| s.grain)
+                    .unwrap_or(Grain::Subject);
+                sets.insert(
+                    "start".into(),
+                    json!({"grain": g.name(), "from": format!("selection:{name}@{}", saved.version)}),
+                );
+                set_name = "start".to_string();
+                grain = g;
+            } else if let Some(id) = from["handle"].as_i64() {
+                let h = handle::get(registry.store(), id)
+                    .map_err(|e| Reply::error(500, e.to_string()))?
+                    .ok_or_else(|| Reply::error(404, format!("no handle {id}")))?;
+                handle_within_scope(&h, &scope, id)?;
+                sets.insert(
+                    "start".into(),
+                    json!({"grain": h.grain.name(), "from": format!("handle:{id}")}),
+                );
+                set_name = "start".to_string();
+                grain = h.grain;
+            } else if let Some(id) = from["document"].as_i64() {
+                let d = document::get(registry.store(), id)
+                    .map_err(|e| Reply::error(500, e.to_string()))?
+                    .ok_or_else(|| Reply::error(404, format!("no document {id}")))?;
+                grain = d
+                    .ask
+                    .sets
+                    .get(&d.ask.out.set)
+                    .map(|s| s.grain)
+                    .unwrap_or(Grain::Subject);
+                set_name = d.ask.out.set.clone();
+                whole = Some(d.ask);
+            } else if let Some(upload) = from["values"].as_str() {
+                if !caller.can(Role::Reviewer) {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "starting from an uploaded list asks for the reviewer role; {principal} holds {}",
+                            caller
+                                .roles
+                                .iter()
+                                .map(|r| r.name())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                }
+                values_decl.insert("list".into(), json!({"upload": upload}));
+                sets.insert(
+                    "people".into(),
+                    json!({"grain": "subject", "from": "values:list"}),
+                );
+                set_name = "people".to_string();
+                grain = Grain::Subject;
+            } else if from.is_null() || from.as_object().is_some_and(|o| o.is_empty()) {
+                sets.insert("everyone".into(), json!({"grain": "subject"}));
+                set_name = "everyone".to_string();
+                grain = Grain::Subject;
+            } else {
+                return Err(Reply::error(
+                    400,
+                    "from: {cohorts: [..]} | {selection: name@v} | {handle: id} | {document: id} | {values: upload_id} | {}",
+                ));
+            }
+            // the sessions under the opening set, when the grain has any
+            let under = matches!(grain, Grain::Cohort | Grain::Subject) && whole.is_none();
+            let ask = match whole {
+                Some(a) => a,
+                None => {
+                    if under {
+                        sets.insert(
+                            "sessions_under".into(),
+                            json!({"grain": "session", "of": set_name}),
+                        );
+                    }
+                    let mut d = json!({
+                        "ast_version": 1,
+                        "sets": sets,
+                        "out": {"set": set_name, "level": "count"},
+                    });
+                    if !params.is_empty() {
+                        d["params"] = Value::Object(params);
+                    }
+                    if !values_decl.is_empty() {
+                        d["values"] = Value::Object(values_decl);
+                    }
+                    parse(&d.to_string()).map_err(|e| {
+                        Reply::error(400, format!("the opening document is refused: {e}"))
+                    })?
+                }
+            };
+            let scheme = scheme_of(registry, &ask)?;
+            let opening = ask.clone();
+            let diagnosis = diagnose::diagnose(
+                registry,
+                ask,
+                Vec::new(),
+                catalog,
+                &scope,
+                &scheme,
+                bounds,
+                false,
+                Some(reader),
+            )
+            .map_err(run_err)?;
+            if !diagnosis.valid {
+                return Err(issues_reply(400, "the opening document", &diagnosis.issues));
+            }
+            let stage_of = |name: &str| {
+                diagnosis
+                    .funnel
+                    .iter()
+                    .rfind(|s| s.set == name)
+                    .map(|s| (s.rows, s.subjects))
+            };
+            let (count, subjects) = stage_of(&set_name).unwrap_or((0, 0));
+            let sessions = if under {
+                stage_of("sessions_under").map(|(rows, _)| rows)
+            } else if grain == Grain::Session {
+                Some(count)
+            } else {
+                None
+            };
+            // the sessions helper set is the resolver's, not the document's
+            let mut document = serde_json::to_value(&opening).unwrap_or(Value::Null);
+            if under && let Some(m) = document["sets"].as_object_mut() {
+                m.remove("sessions_under");
+            }
+            Ok(Reply::ok(json!({
+                "document": document,
+                "set": set_name,
+                "grain": grain.name(),
+                "count": count,
+                "subjects": subjects,
+                "sessions": sessions,
+                "epoch": epoch,
+            })))
+        }
+        ["api", "ask", "documents"] if get => {
+            // Wave 5 §12.1: documents folded into lineages by their parent
+            // chain, newest lineage first, each with its last run
+            let limit = query
+                .get("limit")
+                .and_then(|l| l.parse::<usize>().ok())
+                .unwrap_or(100)
+                .clamp(1, caps.page_rows_max as usize);
+            let after = query.get("after").and_then(|a| a.parse::<i64>().ok());
+            let all =
+                document::list(registry.store()).map_err(|e| Reply::error(500, e.to_string()))?;
+            let by_id: HashMap<i64, usize> =
+                all.iter().enumerate().map(|(i, d)| (d.id, i)).collect();
+            let root_of = |mut i: usize| {
+                let mut seen = 0;
+                while let Some(&p) = all[i].parent_id.and_then(|p| by_id.get(&p)) {
+                    i = p;
+                    seen += 1;
+                    if seen > 10_000 {
+                        break;
+                    }
+                }
+                all[i].id
+            };
+            let mut lineages: std::collections::BTreeMap<i64, Vec<usize>> =
+                std::collections::BTreeMap::new();
+            for i in 0..all.len() {
+                lineages.entry(root_of(i)).or_default().push(i);
+            }
+            // the last run of any version: the newest handle whose ask hash is
+            // one of the lineage's hashes
+            let handles = handle::list(registry.store(), true)
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            let mut last_run: HashMap<String, (i64, String)> = HashMap::new();
+            for h in &handles {
+                if let Some(hash) = h.ask_hash() {
+                    last_run
+                        .entry(hash)
+                        .and_modify(|(id, at)| {
+                            if h.id > *id {
+                                *id = h.id;
+                                *at = h.created_at.clone();
+                            }
+                        })
+                        .or_insert((h.id, h.created_at.clone()));
+                }
+            }
+            let mut rows: Vec<Value> = lineages
+                .values()
+                .map(|members| {
+                    let versions: Vec<&document::Document> =
+                        members.iter().map(|&i| &all[i]).collect();
+                    let latest = *versions
+                        .iter()
+                        .max_by_key(|d| d.id)
+                        .expect("a lineage has a member");
+                    let root = versions[0];
+                    let grain = latest
+                        .ask
+                        .sets
+                        .get(&latest.ask.out.set)
+                        .map(|s| s.grain.name().to_string());
+                    let run = versions
+                        .iter()
+                        .filter_map(|d| last_run.get(&d.hash))
+                        .max_by_key(|(id, _)| *id);
+                    json!({
+                        "document": latest.id,
+                        "root": root.id,
+                        "name": latest.ask.name,
+                        "grain": grain,
+                        "out": latest.ask.out.set,
+                        "level": latest.ask.out.level,
+                        "versions": versions.len(),
+                        "author": root.principal,
+                        "created_at": root.created_at,
+                        "updated_at": latest.created_at,
+                        "last_used_at": versions.iter().map(|d| d.last_used_at.as_str()).max(),
+                        "hash": latest.hash,
+                        "last_run": run.map(|(id, at)| json!({"handle": id, "at": at})),
+                    })
+                })
+                .collect();
+            rows.sort_by_key(|r| std::cmp::Reverse(r["document"].as_i64().unwrap_or(0)));
+            let page: Vec<Value> = rows
+                .into_iter()
+                .filter(|r| after.is_none_or(|a| r["document"].as_i64().unwrap_or(0) < a))
+                .take(limit)
+                .collect();
+            let next = if page.len() == limit {
+                page.last().and_then(|r| r["document"].as_i64())
+            } else {
+                None
+            };
+            Ok(Reply::ok(
+                json!({"count": page.len(), "documents": page, "next": next}),
+            ))
+        }
         ["api", "ask", "documents"] if post => {
             let (ask, _) = document_of(registry, &doc)?;
             let scheme = scheme_of(registry, &ask)?;
@@ -1073,6 +1360,8 @@ pub(crate) const DOORS: &[&str] = &[
     "POST /api/ask/diagnose",
     "POST /api/ask/preview",
     "POST /api/ask/describe",
+    "POST /api/ask/start",
+    "GET /api/ask/documents",
     "POST /api/ask/documents",
     "GET /api/ask/documents/{id}",
     "PUT /api/ask/selections/{name}",

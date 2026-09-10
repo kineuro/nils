@@ -1090,6 +1090,29 @@ fn routed(
     match segs.as_slice() {
         ["api", "capabilities"] if get => Ok(Reply::ok(capabilities(doors, registry, caller, ask))),
         ["api", "status"] if get => Ok(Reply::ok(crate::status_doc(&doors.home, registry)?)),
+        ["api", "summary"] if get => {
+            // Wave 5 §12.1: counts only, never a row of a person
+            let since = query.get("since").map(|s| {
+                // a bare date is the start of that day
+                if s.len() == 10 {
+                    format!("{s}T00:00:00Z")
+                } else {
+                    s.clone()
+                }
+            });
+            if let Some(s) = &since
+                && nils_registry::time::secs_of(s).is_none()
+            {
+                return Err(Reply::error(400, format!("since={s} is not an ISO date")));
+            }
+            registry
+                .refresh_meta()
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            Ok(Reply::ok(
+                crate::summary::document(registry, since.as_deref())
+                    .map_err(|e| Reply::error(500, e.to_string()))?,
+            ))
+        }
         ["api", "packs"] if get => {
             let dir = doors
                 .pack_dir
@@ -1809,6 +1832,7 @@ fn capabilities(
     let doors_list: Vec<String> = [
         "GET /api/capabilities",
         "GET /api/status",
+        "GET /api/summary",
         "GET /api/custody",
         "GET /api/audit",
         "GET /api/jobs",
@@ -2582,6 +2606,36 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one description",
             "Describing",
             "Described",
+        ),
+        row(
+            "GET /api/summary",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading what the registry holds",
+            "Read what the registry holds",
+        ),
+        row(
+            "POST /api/ask/start",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Resolving a starting point",
+            "Resolved a starting point",
+        ),
+        row(
+            "GET /api/ask/documents",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "page_rows_max lineages",
+            "Listing the documents",
+            "Listed the documents",
         ),
         row(
             "POST /api/ask/documents",
