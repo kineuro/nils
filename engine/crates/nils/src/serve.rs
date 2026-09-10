@@ -130,15 +130,20 @@ struct Trust {
 impl Trust {
     /// Fetch the keys again, when they come from a URL and the floor has
     /// passed; true when the key list was replaced.
+    ///
+    /// The floor is waived while the engine holds no key at all. That is the
+    /// state it starts in when its issuer was not up yet, and waiting out a
+    /// minute there would refuse every token in the meantime.
     fn refetch(&self, floor: u64) -> bool {
         let Jwks::Url(_) = &self.jwks else {
             return false;
         };
+        let empty = self.keys.lock().map(|k| k.is_empty()).unwrap_or(false);
         let mut fetched = match self.fetched.lock() {
             Ok(f) => f,
             Err(_) => return false,
         };
-        if fetched.elapsed().as_secs() < floor {
+        if !empty && fetched.elapsed().as_secs() < floor {
             return false;
         }
         *fetched = Instant::now();
@@ -376,7 +381,24 @@ impl Auth {
                 }
                 let mut trusts = Vec::new();
                 for (issuer, audience, jwks) in specs {
-                    let keys = load_jwks(&jwks).map_err(usage)?;
+                    // A file that cannot be read is a fault in the
+                    // configuration and stops the engine here. A URL that
+                    // does not answer is a matter of order: the issuer may
+                    // simply not be up yet, and in a container run it often
+                    // is not, so the engine starts holding no key of that
+                    // issuer and fetches when the first token arrives.
+                    let keys = match load_jwks(&jwks) {
+                        Ok(keys) => keys,
+                        Err(e) => match &jwks {
+                            Jwks::File(_) => return Err(usage(e)),
+                            Jwks::Url(_) => {
+                                eprintln!(
+                                    "nils serve: {issuer} did not answer for its keys yet ({e}); the engine starts without them and asks again when a token arrives"
+                                );
+                                Vec::new()
+                            }
+                        },
+                    };
                     let node = issuer
                         .trim_start_matches("https://")
                         .trim_start_matches("http://")
@@ -563,10 +585,14 @@ impl Oidc {
                     Ok(k) => k.clone(),
                     Err(_) => break,
                 };
-                let holds_kid = header
-                    .kid
-                    .as_ref()
-                    .is_none_or(|h| keys.iter().any(|(k, _, _)| k.as_ref() == Some(h)));
+                // An empty list holds nothing, not even a token that names
+                // no key: that is the state the engine starts in when its
+                // issuer was not up yet, and it is what the refetch is for.
+                let holds_kid = !keys.is_empty()
+                    && header
+                        .kid
+                        .as_ref()
+                        .is_none_or(|h| keys.iter().any(|(k, _, _)| k.as_ref() == Some(h)));
                 if holds_kid {
                     for (kid, key, algorithm) in &keys {
                         if let (Some(k), Some(h)) = (kid, &header.kid)
