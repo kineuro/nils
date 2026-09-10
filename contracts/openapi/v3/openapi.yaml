@@ -41,7 +41,7 @@ paths:
   /api/capabilities:
     get:
       summary: What this engine is and speaks (C26)
-      description: The engine version, the contract versions (openapi, review-item, pack), the loaded packs with their versions, the registry id, epoch and schema version, the auth mode, the caller's principal, roles, display name, mail, ceiling and actor, the node, the list of doors, and since version 3 `assist` (the assistant's URL when one is installed), `event_streams` (the cap), `idempotency` (the header, the doors, the hours) and `policy` (one row per door, Wave 4c section 6.5).
+      description: The engine version, the contract versions (openapi, review-item, pack), the loaded packs with their versions, the registry id, epoch, schema version and `synthetic` (the builder's name when `nils synth` made the registry, absent on real data; a desk shows a banner on it), the auth mode, the caller's principal, roles, display name, mail, ceiling and actor, the node, the list of doors, and since version 3 `assist` (the assistant's URL when one is installed), `event_streams` (the cap), `idempotency` (the header, the doors, the hours) and `policy` (one row per door, Wave 4c section 6.5).
       responses:
         "200": {description: The capabilities}
   /api/status:
