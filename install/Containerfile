@@ -1,0 +1,14 @@
+# The engine as an image. The binary is built by the release workflow, one per
+# platform, and copied in; nothing is compiled here.
+# SPDX-License-Identifier: AGPL-3.0-only
+FROM docker.io/library/debian:trixie-slim
+ARG TARGETARCH
+RUN groupadd -g 1500 nils && useradd -u 1500 -g 1500 -M -d /srv/nils nils \
+ && mkdir -p /srv/nils/registry && chown -R nils:nils /srv/nils
+COPY bin/nils-linux-${TARGETARCH} /usr/local/bin/nils
+COPY packs /usr/local/share/nils/packs
+USER nils
+WORKDIR /srv/nils
+EXPOSE 8437
+ENTRYPOINT ["nils"]
+CMD ["serve", "--bind", "0.0.0.0:8437", "--registry", "/srv/nils/registry"]
