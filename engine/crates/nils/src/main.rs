@@ -35,6 +35,7 @@ mod mcp;
 mod places;
 mod pyramid;
 mod serve;
+mod setup;
 mod summary;
 mod supervise;
 mod timeline;
@@ -140,6 +141,9 @@ enum Command {
         #[command(subcommand)]
         command: supervise::SuperviseCommand,
     },
+    /// Install every part and make what they need: an install wizard that
+    /// asks what you want, says what this machine can do, and writes it
+    Setup(setup::SetupArgs),
     /// Replace this binary with the newest release, and the packs with it
     Update(update::UpdateArgs),
     /// What private elements an archive carries, by creator, so an allowlist
@@ -1357,6 +1361,7 @@ fn main() -> ExitCode {
         Command::Ingest(command) => ingest_command(&home, command),
         Command::Serve(args) => serve::serve(&home, *args),
         Command::Supervise { command } => supervise::command(command),
+        Command::Setup(args) => setup::setup(args),
         Command::Update(args) => update::update(&home, args),
         Command::Audit(AuditCommand::List {
             principal,

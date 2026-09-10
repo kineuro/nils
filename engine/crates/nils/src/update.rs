@@ -38,6 +38,19 @@ pub(crate) struct UpdateArgs {
     /// Where releases come from; NILS_RELEASES sets the same thing
     #[arg(long, value_name = "URL")]
     channel: Option<String>,
+    /// Update every part `nils setup` installed, the engine last
+    #[arg(long)]
+    all: bool,
+}
+
+/// The release's name for one part and one target. The engine publishes
+/// `nils-<target>`, the desk `nils-desk-<target>`, and Windows adds `.exe`.
+pub(crate) fn part_file(part: &str, target: &str) -> String {
+    if target.starts_with("windows-") {
+        format!("{part}-{target}.exe")
+    } else {
+        format!("{part}-{target}")
+    }
 }
 
 /// The release's name for a target: the six `engine-build.yml` publishes.
@@ -128,11 +141,28 @@ fn sum_for(sums: &str, name: &str) -> Option<String> {
 }
 
 fn base_of(args: &UpdateArgs) -> String {
-    let base = args
-        .channel
-        .clone()
+    engine_base(args.channel.as_deref())
+}
+
+/// Where the engine's releases come from: what was asked for, else what the
+/// environment names, else GitHub.
+pub(crate) fn engine_base(channel: Option<&str>) -> String {
+    let base = channel
+        .map(str::to_string)
         .or_else(|| std::env::var("NILS_RELEASES").ok())
         .unwrap_or_else(|| RELEASES.to_string());
+    base.trim_end_matches('/').to_string()
+}
+
+/// Where the desk's releases come from. A channel asked for on the command
+/// line covers every part, which is what a deployment publishing its own
+/// wants and what the tests use; otherwise the desk has its own repository.
+pub(crate) fn desk_base(channel: Option<&str>) -> String {
+    let base = channel
+        .map(str::to_string)
+        .or_else(|| std::env::var("NILS_DESK_RELEASES").ok())
+        .or_else(|| std::env::var("NILS_RELEASES").ok())
+        .unwrap_or_else(|| crate::setup::DESK_RELEASES.to_string());
     base.trim_end_matches('/').to_string()
 }
 
@@ -143,7 +173,7 @@ fn asset(base: &str, version: &str, file: &str) -> String {
 
 /// The version the newest release names, from the one line `VERSION` file
 /// it publishes beside its binaries.
-fn latest_version(base: &str) -> Result<String, Exit> {
+pub(crate) fn newest_version(base: &str) -> Result<String, Exit> {
     let url = format!("{base}/latest/download/VERSION");
     match fetch(&url) {
         Ok(bytes) => {
@@ -179,7 +209,7 @@ fn newest_tag(base: &str) -> Option<String> {
 }
 
 /// Fetch one file of a release and check it against that release's sums.
-fn fetch_checked(base: &str, version: &str, file: &str) -> Result<Vec<u8>, Exit> {
+pub(crate) fn fetch_checked(base: &str, version: &str, file: &str) -> Result<Vec<u8>, Exit> {
     let sums = fetch(&asset(base, version, "SHA256SUMS"))
         .map_err(|e| fail(format!("the release names no checksums: {e}")))?;
     let sums = String::from_utf8_lossy(&sums).to_string();
@@ -199,7 +229,7 @@ fn fetch_checked(base: &str, version: &str, file: &str) -> Result<Vec<u8>, Exit>
 }
 
 /// Whether a directory takes a file from this user, asked by writing one.
-fn writable(dir: &Path) -> bool {
+pub(crate) fn writable(dir: &Path) -> bool {
     let probe = dir.join(format!(".nils-write-probe-{}", std::process::id()));
     match std::fs::write(&probe, b"") {
         Ok(()) => {
@@ -212,7 +242,7 @@ fn writable(dir: &Path) -> bool {
 
 /// Put `bytes` at `path`, executable, without a moment where the path is
 /// half a binary: beside it first, then one rename over.
-fn install_binary(path: &Path, bytes: &[u8]) -> Result<(), Exit> {
+pub(crate) fn install_binary(path: &Path, bytes: &[u8]) -> Result<(), Exit> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
     let fresh = dir.join(format!(".nils-update-{}", std::process::id()));
@@ -295,9 +325,14 @@ fn destination(args: &UpdateArgs) -> Result<PathBuf, Exit> {
 
 pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Result<(), Exit> {
     let base = base_of(&args);
+    // Every other part first, each in whatever way it runs; the engine is
+    // last because it replaces the binary doing the replacing.
+    if args.all {
+        crate::setup::update_all(args.channel.as_deref())?;
+    }
     let wanted = match &args.version {
         Some(v) => v.trim().trim_start_matches('v').to_string(),
-        None => latest_version(&base)?,
+        None => newest_version(&base)?,
     };
     let asked = args.version.is_some() || args.to.is_some();
     if !asked && !newer(&wanted, VERSION) {
@@ -364,6 +399,29 @@ mod tests {
         assert_eq!(file_of("windows-x86_64"), "nils-windows-x86_64.exe");
         let target = host_target();
         assert!(!target.contains("aarch64"), "{target} spells arm64");
+    }
+
+    #[test]
+    fn a_part_is_named_after_itself_and_its_target() {
+        assert_eq!(part_file("nils", "linux-x86_64"), "nils-linux-x86_64");
+        assert_eq!(
+            part_file("nils-desk", "macos-arm64"),
+            "nils-desk-macos-arm64"
+        );
+        assert_eq!(
+            part_file("nils-desk", "windows-x86_64"),
+            "nils-desk-windows-x86_64.exe"
+        );
+        // The engine's own name is the same either way.
+        assert_eq!(part_file("nils", "macos-arm64"), file_of("macos-arm64"));
+    }
+
+    #[test]
+    fn the_desks_releases_are_its_own_unless_a_channel_says_otherwise() {
+        assert_eq!(desk_base(Some("file:///tmp/rel/")), "file:///tmp/rel");
+        assert_eq!(engine_base(Some("file:///tmp/rel/")), "file:///tmp/rel");
+        assert_ne!(desk_base(None), engine_base(None));
+        assert!(desk_base(None).ends_with("nils-desk/releases"));
     }
 
     #[test]
