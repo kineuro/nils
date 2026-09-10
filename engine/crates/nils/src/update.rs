@@ -311,6 +311,20 @@ pub(crate) fn refresh_packs(base: &str, version: &str, dir: &Path) -> Result<Str
     }
 }
 
+/// The share directory of the prefix a binary sits in, made if it can be:
+/// `~/.local/share/nils/packs` for `~/.local/bin/nils`, and
+/// `/usr/local/share/nils/packs` for `/usr/local/bin/nils`. Both are places
+/// the engine looks with no flag, which is the whole point of choosing them.
+fn beside_the_binary(binary: &Path) -> Option<PathBuf> {
+    let prefix = binary.parent().and_then(Path::parent)?;
+    let share = prefix.join("share").join("nils");
+    if std::fs::create_dir_all(&share).is_ok() && writable(&share) {
+        Some(share.join("packs"))
+    } else {
+        None
+    }
+}
+
 /// Where this update would write, and whether it may.
 fn destination(args: &UpdateArgs) -> Result<PathBuf, Exit> {
     if let Some(dir) = &args.to {
@@ -363,12 +377,26 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
 
     // The packs go with the binary when the ones in use may be replaced; a
     // deployment that keeps its packs elsewhere is left alone and told so.
+    //
+    // Where there are none at all, they are taken now. An engine installed
+    // before the wizard fetched packs has none, and an update that moves
+    // the binary and leaves it unable to say what a scan is has not
+    // updated much.
     match crate::pack_dir(home, None) {
         Ok(packs) => match refresh_packs(&base, &wanted, &packs) {
             Ok(said) => println!("{said}"),
             Err(why) => println!("the packs were left alone: {why}"),
         },
-        Err(_) => println!("no pack directory is in use, so none was refreshed"),
+        Err(_) => match beside_the_binary(&path) {
+            Some(packs) => match refresh_packs(&base, &wanted, &packs) {
+                Ok(_) => println!(
+                    "the packs are at {}, where there were none",
+                    packs.display()
+                ),
+                Err(why) => println!("there are no packs, and none could be taken: {why}"),
+            },
+            None => println!("there are no packs, and nowhere beside the binary to put them"),
+        },
     }
     Ok(())
 }
