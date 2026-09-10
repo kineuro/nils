@@ -4,6 +4,15 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.4] - 2026-09-10
+
+Two more found the same way as the last four: by taking a path a person takes second rather than first.
+
+### Fixed
+
+- `nils setup --update` left the engine behind. It printed "Updating", listed the newest version in its plan, reapplied the configuration and rewrote the units, and put the engine binary back exactly as it was. On a container run the image is pulled and it was right; on a machine the engine is the binary running the wizard, and nothing above touched it, so "update everything" moved every part except the one a person is most likely to have meant. It moves the binary now, last, which on unix is a rename over an open file that the running process does not notice.
+- An update that left the engine unable to classify. `nils update` refreshes the packs in use, and where there were none it said "no pack directory is in use, so none was refreshed" and stopped. True, and a dead end: an engine installed before the wizard fetched packs has none, and an update that moves the binary and leaves it unable to say what a scan is has not updated much. Where there are none it takes them, into the share directory of the prefix the binary sits in, which is where the wizard puts them and one of the places the engine looks with no flag.
+
 ## [1.0.0-alpha.3] - 2026-09-10
 
 Installing 1.0.0-alpha.2 four ways on a machine that had never held it found four faults in an hour, and not one of them had failed a test. Each was hidden by a fallback that said nothing. This release is those four, and the fallbacks now say what they wanted and what they did instead.
