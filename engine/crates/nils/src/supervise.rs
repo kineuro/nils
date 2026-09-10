@@ -69,7 +69,7 @@ fn beside_file(manifest: &Path, suffix: &str) -> PathBuf {
     manifest.with_file_name(format!("{stem}.{suffix}"))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
 }
 

@@ -408,10 +408,9 @@ struct Local {
 }
 
 fn local(home: &Home, at: &Where) -> Result<Local, Exit> {
-    let dir = at
-        .pack_dir
-        .clone()
-        .ok_or_else(|| usage("--pack-dir DIR, or --server URL to ask a running engine"))?;
+    let dir = crate::pack_dir(home, at.pack_dir.clone()).map_err(|_| {
+        usage("no packs here: pass --pack-dir DIR, or --server URL to ask a running engine")
+    })?;
     let pack = load_pack(&dir, &at.pack)?;
     let mut registry = open(home)?;
     let catalog = Catalog::build(&mut registry, &pack).map_err(|e| fail(e.to_string()))?;
@@ -1240,10 +1239,9 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
         }
         return Ok(());
     }
-    let dir = args
-        .pack_dir
-        .clone()
-        .ok_or_else(|| usage("--pack-dir DIR, or --server URL to run on a running engine"))?;
+    let dir = crate::pack_dir(home, args.pack_dir.clone()).map_err(|_| {
+        usage("no packs here: pass --pack-dir DIR, or --server URL to run on a running engine")
+    })?;
     let mut registry = open(home)?;
     let pack = load_pack(&dir, &args.pack)?;
     let who = principal();
@@ -1543,11 +1541,9 @@ fn draft(home: &Home, args: AskDraftArgs) -> Result<(), Exit> {
         Some(door) => door.post("/api/ask/draft", &json!({"text": text}))?,
         None => {
             let mut registry = open(home)?;
-            let dir = args
-                .at
-                .pack_dir
-                .clone()
-                .ok_or_else(|| usage("--pack-dir DIR, when drafting in process"))?;
+            let dir = crate::pack_dir(home, args.at.pack_dir.clone()).map_err(|_| {
+                usage("no packs here: pass --pack-dir DIR, when drafting in process")
+            })?;
             let pack = load_pack(&dir, &args.at.pack)?;
             let catalog = Catalog::build(&mut registry, &pack).map_err(|e| fail(e.to_string()))?;
             let scope = scope();

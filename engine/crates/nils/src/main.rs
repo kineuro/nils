@@ -38,6 +38,7 @@ mod serve;
 mod summary;
 mod supervise;
 mod timeline;
+mod update;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::day::Day;
 use nils_registry::home::{
@@ -139,6 +140,8 @@ enum Command {
         #[command(subcommand)]
         command: supervise::SuperviseCommand,
     },
+    /// Replace this binary with the newest release, and the packs with it
+    Update(update::UpdateArgs),
     /// What private elements an archive carries, by creator, so an allowlist
     /// is chosen from the data rather than from a chair (§8.4)
     Private(PrivateArgs),
@@ -1354,6 +1357,7 @@ fn main() -> ExitCode {
         Command::Ingest(command) => ingest_command(&home, command),
         Command::Serve(args) => serve::serve(&home, *args),
         Command::Supervise { command } => supervise::command(command),
+        Command::Update(args) => update::update(&home, args),
         Command::Audit(AuditCommand::List {
             principal,
             action,
@@ -1789,21 +1793,57 @@ enum PackCommand {
     },
 }
 
-/// Where packs live: the flag, then the environment, then the registry home.
-fn pack_dir(home: &Home, given: Option<PathBuf>) -> Result<PathBuf, Exit> {
+/// Whether a directory is a pack directory: one that holds at least one
+/// pack, which is a subdirectory with a `pack.yml` in it. An empty
+/// directory is not one, so the search below walks past it.
+fn holds_a_pack(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .any(|e| e.path().join("pack.yml").is_file())
+    })
+}
+
+/// Where packs are looked for when `--pack-dir` is not given, in order: the
+/// registry's own, this user's data directory, the two system ones, and the
+/// share directory beside the binary, which is where an installer that
+/// unpacked into a prefix leaves them.
+pub(crate) fn pack_dir_candidates(home: &Home) -> Vec<PathBuf> {
+    let mut out = vec![home.dir().join("packs")];
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    if let Some(d) = data {
+        out.push(d.join("nils").join("packs"));
+    }
+    out.push(PathBuf::from("/usr/local/share/nils/packs"));
+    out.push(PathBuf::from("/usr/share/nils/packs"));
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(prefix) = exe.parent().and_then(Path::parent)
+    {
+        out.push(prefix.join("share").join("nils").join("packs"));
+    }
+    out
+}
+
+/// Where packs live: the flag, then the environment, then the first of the
+/// candidates that holds a pack. The flag and `NILS_PACK_DIR` are taken as
+/// given, so a typo in either is an error and not a silent fall through.
+pub(crate) fn pack_dir(home: &Home, given: Option<PathBuf>) -> Result<PathBuf, Exit> {
     if let Some(d) = given {
         return Ok(d);
     }
     if let Some(d) = std::env::var_os("NILS_PACK_DIR") {
         return Ok(PathBuf::from(d));
     }
-    let d = home.dir().join("packs");
-    if d.is_dir() {
-        return Ok(d);
+    let candidates = pack_dir_candidates(home);
+    if let Some(d) = candidates.iter().find(|d| holds_a_pack(d)) {
+        return Ok(d.clone());
     }
+    let looked: Vec<String> = candidates.iter().map(|d| d.display().to_string()).collect();
     Err(usage(format!(
-        "no pack directory: pass --pack-dir, set NILS_PACK_DIR, or put packs in {}",
-        d.display()
+        "no pack directory: pass --pack-dir, set NILS_PACK_DIR, or put packs in one of {}",
+        looked.join(", ")
     )))
 }
 
@@ -2381,8 +2421,9 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
             } else if rows.is_empty() {
                 println!("no packs in {}", dir.display());
             } else {
+                println!("packs in {}", dir.display());
                 for (id, m, s, _) in &rows {
-                    println!("{id:24} {m:4} {s}");
+                    println!("  {id:24} {m:4} {s}");
                 }
             }
             Ok(())
