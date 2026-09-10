@@ -550,7 +550,13 @@ fn answer(
                 )
                 .ok();
                 let declaration = described.map(|d| {
-                    nils_ask::describe::declaration(&ask, &d, &scheme.digest(), h.truncated)
+                    nils_ask::describe::declaration(
+                        &ask,
+                        &d,
+                        &scheme.digest(),
+                        h.truncated,
+                        &catalog.locale,
+                    )
                 });
                 let pages = handle::page_count(registry.store(), h.id)
                     .map_err(|e| Reply::error(500, e.to_string()))?;
