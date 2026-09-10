@@ -1587,7 +1587,46 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
         println!("nothing was changed");
         return Ok(());
     }
-    do_it(&plan, console, args, Some(state.clone()), true)
+    do_it(&plan, console, args, Some(state.clone()), true)?;
+    // A container's engine is the image, and `do_it` pulled the new tag. A
+    // machine's engine is this binary, and nothing above touches it, so
+    // "update everything" would have moved every part except the one a
+    // person is most likely to have meant.
+    if !plan.runtime.container() {
+        update_engine_binary(args.channel.as_deref(), console);
+    }
+    Ok(())
+}
+
+/// The engine binary itself, moved to the newest release. It goes last,
+/// because it replaces the binary doing the replacing; on unix that is a
+/// rename over an open file, which the running process does not notice.
+fn update_engine_binary(channel: Option<&str>, console: &mut Console) {
+    let base = update::engine_base(channel);
+    let Ok(wanted) = update::newest_version(&base) else {
+        println!("  the newest engine release could not be read; this binary is left alone");
+        return;
+    };
+    if !update::newer(&wanted, update::VERSION) {
+        console.note(&format!("engine {} is the newest release", update::VERSION));
+        return;
+    }
+    let Ok(me) = std::env::current_exe() else {
+        println!("  this binary cannot say where it is, so it is left alone");
+        return;
+    };
+    let me = std::fs::canonicalize(&me).unwrap_or(me);
+    let file = update::file_of(&update::host_target());
+    match update::fetch_checked(&base, &wanted, &file)
+        .and_then(|bytes| update::install_binary(&me, &bytes))
+    {
+        Ok(()) => console.note(&format!(
+            "engine {wanted} at {} (was {})",
+            me.display(),
+            update::VERSION
+        )),
+        Err(e) => println!("  the engine binary was left alone: {}", e.message),
+    }
 }
 
 /// The menu's last offer: the configuration and the units written again from
