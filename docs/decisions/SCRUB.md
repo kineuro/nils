@@ -26,6 +26,9 @@ pretending the fact was never there.
 | Where the Wave 1 gate's corpus and the two development corpora live, the baseline host as built, and where the v0 pseudonym key is kept | 11 (Wave 1, opened 2026-09-02) | one sentence that says these stay in the private record |
 | The reason the record is private, stated as what it exposes | 10 (repositories), 15 §5 R7 | restated as the operators' detail |
 | Links to rendered pages in a private workspace, and the tooling note | README | removed |
+| The group's deployment of Wave 5: the host, the guest, the mounts and pools, the identity provider's application and group bindings, the portal entry, the deploy path, and the places table of that deployment | 20 §6 | one paragraph that says these stay in the private record; the roles and rules are the specification's |
+| Where the viewer study's corpus lives and which workstations run it | 20 §7 | "the group's own largest scans, on the group's own machines" |
+| The paths of the checkouts read, the site's stylesheet path, the pool named in Q22, and the group's chat channel by name | 20 §2, §3, §5, §10 | "the Metabase checkout", "the 0.5.0 checkout", "the group's site stylesheet", "the group's data", "the group's chat channel" |
 
 The README was also adapted to its new place: links point into this directory,
 and the "private by design" paragraph became the pointer to this file.
