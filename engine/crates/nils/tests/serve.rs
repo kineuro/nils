@@ -1538,19 +1538,6 @@ fn an_adoption_names_the_stacks_that_move_and_the_handles_that_stop_reproducing(
     let server = Server::start(
         &home,
         14,
-/// Wave 5 §12.5 and §10.2: places as registry objects, and the rules at
-/// the doors. A registry place without a backup is refused; a release to
-/// a path outside an export place is refused at the door; a retired place
-/// binds nothing.
-#[test]
-fn places_are_registry_objects_and_the_rules_hold_at_the_doors() {
-    let home = registry();
-    let export = TempDir::new("a4-export");
-    let backup = TempDir::new("a4-backup");
-    let elsewhere = TempDir::new("a4-elsewhere");
-    let server = Server::start(
-        &home,
-        15,
         &[
             "--auth",
             "token",
@@ -1562,7 +1549,6 @@ fn places_are_registry_objects_and_the_rules_hold_at_the_doors() {
             "an-operator-token-of-len=ops@lab:operator",
             "--token",
             "an-admin-token-of-length=adm@lab:admin",
-            "an-operator-token-of-len=ops@lab:operator",
         ],
         &[],
     );
@@ -1706,6 +1692,54 @@ fn places_are_registry_objects_and_the_rules_hold_at_the_doors() {
         "POST",
         &format!("/api/ask/handles/{handle}/promote"),
         Some(r#"{"cohort": "x"}"#),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("a stale answer is not promoted"),
+        "{refused}"
+    );
+    let (status, refused) = server.request(
+        "GET",
+        &format!("/api/ask/handles/{handle}/rows?purpose=export"),
+        None,
+        reader,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("stale"),
+        "{refused}"
+    );
+    server.finish();
+}
+
+/// Wave 5 §12.5 and §10.2: places as registry objects, and the rules at
+/// the doors. A registry place without a backup is refused; a release to
+/// a path outside an export place is refused at the door; a retired place
+/// binds nothing.
+#[test]
+fn places_are_registry_objects_and_the_rules_hold_at_the_doors() {
+    let home = registry();
+    let export = TempDir::new("a4-export");
+    let backup = TempDir::new("a4-backup");
+    let elsewhere = TempDir::new("a4-elsewhere");
+    let server = Server::start(
+        &home,
+        15,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
     let ops = Some("an-operator-token-of-len");
     // before any place is declared, nothing is enforced and the door says so
     let (status, caps) = server.request("GET", "/api/capabilities", None, reader);
@@ -1756,21 +1790,6 @@ fn places_are_registry_objects_and_the_rules_hold_at_the_doors() {
         refused["error"]
             .as_str()
             .unwrap()
-            .contains("a stale answer is not promoted"),
-        "{refused}"
-    );
-    let (status, refused) = server.request(
-        "GET",
-        &format!("/api/ask/handles/{handle}/rows?purpose=export"),
-        None,
-        reader,
-    );
-    assert_eq!(status, 409, "{refused}");
-    assert!(
-        refused["error"].as_str().unwrap().contains("stale"),
-        "{refused}"
-    );
-    server.finish();
             .contains("without a backup"),
         "{refused}"
     );

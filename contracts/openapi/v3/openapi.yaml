@@ -332,7 +332,7 @@ paths:
         "409": {description: "stale_options: the list came from another document, epoch or scope"}
   /api/ask/diagnose:
     post:
-      summary: The issues, the funnel, the drops, the ties, the coarse rows, the cost class, a zero row explanation; `by: clause` keys the funnel by set and clause group (Wave 5 section 12.3)
+      summary: "The issues, the funnel, the drops, the ties, the coarse rows, the cost class, a zero row explanation; `by: clause` keys the funnel by set and clause group (Wave 5 section 12.3)"
       requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, keys: {type: boolean}, by: {type: string, enum: [set, clause], default: set}}}}}}
       responses:
         "200": {description: "The diagnosis; under by: clause, `groups` holds one row per set and group in the language's order (source, near, attach, has, where, pick, out), each with the clauses it folds, the rows and subjects kept and the rows lost, so a set's source less its losses is its answer"}

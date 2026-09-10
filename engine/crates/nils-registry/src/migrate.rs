@@ -476,6 +476,7 @@ fn a_handle_may_be_invalidated(store: &mut Store, kind: Kind) -> Result<(), Erro
         return Ok(());
     }
     add_tables(store, kind, &["handle_invalidation"])
+}
 
 /// Wave 5 §12.5: a place as a registry object, so that every path the
 /// engine takes is bound to a role and the rules of §10.2 are checked at
