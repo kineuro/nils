@@ -164,6 +164,11 @@ enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// The registry's settings: the timezone and the week start its dates are read under (Wave 5 section 12.6)
+    Settings {
+        #[command(subcommand)]
+        command: SettingsCommand,
+    },
     /// A synthetic registry, made up by design and deterministic from a seed, into an empty registry (docs/specs/wave4b-the-ask.md, section 13.1)
     Synth(SynthArgs),
     /// The ask (Wave 4b): run a document to a handle, promote a handle, time the fixtures
@@ -472,6 +477,22 @@ struct ServeArgs {
     /// Stop after serving this many requests (for tests)
     #[arg(long, hide = true)]
     requests: Option<usize>,
+}
+
+#[derive(Debug, Subcommand)]
+enum SettingsCommand {
+    /// The settings as they stand
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set one: `timezone` (UTC or an IANA name) or `week_start` (monday, sunday, saturday); the epoch moves
+    Set {
+        #[arg(value_name = "KEY")]
+        key: String,
+        #[arg(value_name = "VALUE")]
+        value: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1209,6 +1230,7 @@ fn main() -> ExitCode {
         Command::Clinical(command) => clinical_command(&home, command),
         Command::Select(args) => select_preview(&home, args),
         Command::Jobs(command) => jobs_command(&home, command),
+        Command::Settings { command } => settings_command(&home, command),
         Command::Login(args) => login_command(args),
         Command::Logout => {
             if login::logout() {
@@ -2405,6 +2427,55 @@ fn print_report(report: &Report, json: bool) -> Result<(), Exit> {
 
 /// The registry of the home, with a word about where to look when there is
 /// none.
+/// `nils settings`: the registry's reading of dates, shown or set. A set
+/// moves the epoch, so every open catalog is rebuilt and every hash taken
+/// after it carries the new locale.
+fn settings_command(home: &Home, command: SettingsCommand) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    match command {
+        SettingsCommand::Show { json } => {
+            let meta = registry.meta();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"timezone": meta.timezone, "week_start": meta.week_start, "epoch": meta.epoch})
+                );
+            } else {
+                println!("timezone    {}", meta.timezone);
+                println!("week_start  {}", meta.week_start);
+            }
+            Ok(())
+        }
+        SettingsCommand::Set { key, value } => {
+            let mut locale = nils_ask::hash::Locale {
+                timezone: registry.meta().timezone.clone(),
+                week_start: registry.meta().week_start.clone(),
+            };
+            match key.as_str() {
+                "timezone" => locale.timezone = value.clone(),
+                "week_start" => locale.week_start = value.to_lowercase(),
+                other => {
+                    return Err(usage(format!(
+                        "{other} is not a setting; timezone or week_start"
+                    )));
+                }
+            }
+            locale.check().map_err(usage)?;
+            let store = registry.store();
+            store.begin()?;
+            registry.set_meta("timezone", &locale.timezone)?;
+            registry.set_meta("week_start", &locale.week_start)?;
+            let epoch = registry.next_epoch()?;
+            registry.store().commit()?;
+            println!(
+                "timezone {}, week_start {}; epoch {epoch}",
+                locale.timezone, locale.week_start
+            );
+            Ok(())
+        }
+    }
+}
+
 fn open(home: &Home) -> Result<Registry, Exit> {
     if !home.exists() {
         return Err(usage(format!(

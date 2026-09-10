@@ -231,6 +231,45 @@ fn the_yardstick_desugars_into_the_named_sets_of_the_spec() {
     let mut other_decl = ask.clone();
     other_decl.params.remove("age_from");
     assert_ne!(content_hash(&ask), content_hash(&other_decl));
+    // the registry's locale is part of the core (Wave 5 section 12.6): the
+    // default hashes as before, another timezone or week start is another
+    // question
+    use nils_ask::hash::{Locale, content_hash_under};
+    assert_eq!(
+        content_hash(&ask),
+        content_hash_under(&ask, &Locale::default())
+    );
+    let stockholm = Locale {
+        timezone: "Europe/Stockholm".into(),
+        week_start: "monday".into(),
+    };
+    let sunday = Locale {
+        timezone: "UTC".into(),
+        week_start: "sunday".into(),
+    };
+    assert_ne!(content_hash(&ask), content_hash_under(&ask, &stockholm));
+    assert_ne!(content_hash(&ask), content_hash_under(&ask, &sunday));
+    assert_ne!(
+        content_hash_under(&ask, &stockholm),
+        content_hash_under(&ask, &sunday)
+    );
+    assert!(stockholm.check().is_ok());
+    assert!(
+        Locale {
+            timezone: "Stockholm".into(),
+            week_start: "monday".into()
+        }
+        .check()
+        .is_err()
+    );
+    assert!(
+        Locale {
+            timezone: "UTC".into(),
+            week_start: "tuesday".into()
+        }
+        .check()
+        .is_err()
+    );
 }
 
 fn doc(sets: Value, out: Value) -> Value {

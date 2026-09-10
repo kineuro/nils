@@ -82,6 +82,11 @@ pub trait Names {
     fn handle(&self, id: &str) -> Option<Grain>;
     fn upload(&self, id: &str) -> bool;
     fn derived(&self, name: &str) -> Option<DerivedInfo>;
+    /// The registry's reading of dates (Wave 5 section 12.6); a fixture
+    /// answers the default.
+    fn locale(&self) -> crate::hash::Locale {
+        crate::hash::Locale::default()
+    }
     /// The column a field reads, for the compiler; a catalog that has no
     /// columns (a fixture) answers none, and compiling refuses the field.
     fn column(&self, level: &str, path: &str) -> Option<ColumnRef> {

@@ -185,6 +185,8 @@ fn issues_reply(status: u16, what: &str, issues: &[nils_ask::validate::Issue]) -
         status,
         body: json!({
             "error": what,
+            // taxonomy issues name paths of the document, never a row
+            "disclosure": "safe",
             "issues": issues,
             "next": issues.iter().map(|i| i.next.clone()).collect::<Vec<_>>(),
         }),
@@ -514,7 +516,13 @@ fn answer(
                 .collect();
             let n = out.answer.rows.len();
             let declaration = described.map(|d| {
-                nils_ask::describe::declaration(&asked, &d, &scheme.digest(), out.answer.truncated)
+                nils_ask::describe::declaration(
+                    &asked,
+                    &d,
+                    &scheme.digest(),
+                    out.answer.truncated,
+                    &catalog.locale,
+                )
             });
             Ok(Reply::ok(json!({
                 "handle": out.handle.id,
@@ -760,6 +768,7 @@ fn answer(
         ["api", "ask", "diagnose"] if post => {
             let (ask, _) = document_of(registry, &doc)?;
             let scheme = scheme_of(registry, &ask)?;
+            let out_set = ask.out.set.clone();
             let d = diagnose::diagnose(
                 registry,
                 ask,
@@ -772,6 +781,16 @@ fn answer(
                 Some(reader),
             )
             .map_err(run_err)?;
+            let d = match doc["by"].as_str() {
+                None | Some("set") => d,
+                Some("clause") => d.by_clause(&out_set),
+                Some(other) => {
+                    return Err(Reply::error(
+                        400,
+                        format!("by: {other} is not a keying of the funnel; set or clause"),
+                    ));
+                }
+            };
             Ok(Reply::ok(serde_json::to_value(d).unwrap_or(Value::Null)))
         }
         ["api", "ask", "preview"] if post => {
@@ -791,9 +810,15 @@ fn answer(
                 .min(caps.page_rows_max);
             let p = affordance::preview(registry, &ask, rows, &s, Some(reader))
                 .map_err(affordance_err)?;
-            let declaration = affordance::describe(&ask, &s)
-                .ok()
-                .map(|d| nils_ask::describe::declaration(&ask, &d, &scheme.digest(), p.truncated));
+            let declaration = affordance::describe(&ask, &s).ok().map(|d| {
+                nils_ask::describe::declaration(
+                    &ask,
+                    &d,
+                    &scheme.digest(),
+                    p.truncated,
+                    &catalog.locale,
+                )
+            });
             let mut v = serde_json::to_value(p).unwrap_or(Value::Null);
             v["declaration"] = json!(declaration);
             Ok(Reply::ok(v))
@@ -823,7 +848,8 @@ fn answer(
                 ));
             }
             let d = affordance::describe(&ask, &s).map_err(affordance_err)?;
-            let declaration = nils_ask::describe::declaration(&ask, &d, &scheme.digest(), false);
+            let declaration =
+                nils_ask::describe::declaration(&ask, &d, &scheme.digest(), false, &catalog.locale);
             let mut v = serde_json::to_value(d).unwrap_or(Value::Null);
             v["declaration"] = json!(declaration);
             Ok(Reply::ok(v))

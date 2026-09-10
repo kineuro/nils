@@ -20,6 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nils_ask::ast::Grain;
+use nils_ask::hash::Locale;
 use nils_ask::validate::{
     Class, ColumnRef, DerivedInfo, FieldInfo, KindInfo, LevelSpec, Names, Scope,
 };
@@ -224,6 +225,8 @@ pub struct Catalog {
     pub selections: BTreeMap<String, u64>,
     pub handles: BTreeMap<String, Grain>,
     pub uploads: BTreeSet<String>,
+    /// The registry's reading of dates (Wave 5 section 12.6).
+    pub locale: Locale,
     pub caps: Caps,
     pub schema_digest: String,
 }
@@ -1096,6 +1099,10 @@ impl Catalog {
     /// Build the catalog from a registry and its pack.
     pub fn build(registry: &mut Registry, pack: &Pack) -> Result<Catalog, Error> {
         let epoch = registry.meta().epoch;
+        let locale = Locale {
+            timezone: registry.meta().timezone.clone(),
+            week_start: registry.meta().week_start.clone(),
+        };
         let store = registry.store();
         let mut fields: BTreeMap<(String, String), Field> = BTreeMap::new();
 
@@ -1355,6 +1362,7 @@ impl Catalog {
         }
         Ok(Catalog {
             epoch,
+            locale,
             pack: pack.name.clone(),
             pack_version: pack.version.to_string(),
             grains: grains(),
@@ -1512,6 +1520,9 @@ pub fn functions() -> Value {
 }
 
 impl Names for Catalog {
+    fn locale(&self) -> Locale {
+        self.locale.clone()
+    }
     fn field(&self, level: &str, path: &str) -> Option<FieldInfo> {
         self.fields
             .get(&(level.to_string(), path.to_string()))
