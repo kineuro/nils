@@ -747,6 +747,12 @@ impl From<nils_registry::Error> for Reply {
     }
 }
 
+impl From<nils_ask::handle::HandleError> for Reply {
+    fn from(e: nils_ask::handle::HandleError) -> Reply {
+        Reply::error(500, e.to_string())
+    }
+}
+
 /// What every handler shares.
 pub(crate) struct Doors {
     pub(crate) home: Home,
@@ -1276,6 +1282,13 @@ fn routed(
                     ),
                 ));
             }
+            // Wave 5 §12.4, §12.8: the closure is computed before anything
+            // moves; the handles it names stop reproducing, and the audit
+            // row keeps the counts.
+            let closure = match crate::depends::of(doors, registry, "overlay", &id.to_string())? {
+                crate::depends::Outcome::Closure(c) => c,
+                _ => return Err(Reply::error(404, format!("no overlay {id}"))),
+            };
             let mut command = vec![
                 "classify".to_string(),
                 "--pack".into(),
@@ -1318,14 +1331,35 @@ fn routed(
                     policy: None,
                     job_id: Some(job),
                     details: Some(
-                        serde_json::json!({"name": o.name, "version": o.version, "pack": o.pack}),
+                        serde_json::json!({"name": o.name, "version": o.version, "pack": o.pack, "closure": closure.counts()}),
                     ),
                 },
             )?;
+            let invalidated = crate::depends::invalidate(
+                registry,
+                &closure,
+                &format!("overlay {} {} adopted as {id}", o.name, o.version),
+                principal,
+            )?;
+            if !invalidated.is_empty() {
+                nils_registry::audit::record(
+                    registry,
+                    &nils_registry::audit::Entry {
+                        principal,
+                        action: nils_registry::audit::Action::HandleInvalidate,
+                        scope: serde_json::json!({"overlay": id, "handles": invalidated.len()}),
+                        policy: None,
+                        job_id: Some(job),
+                        details: Some(serde_json::json!({"handles": invalidated})),
+                    },
+                )?;
+            }
             Ok(Reply::accepted(serde_json::json!({
                 "job": job,
                 "overlay": id,
                 "status": nils_registry::overlay::ADOPTED,
+                "closure": closure.counts(),
+                "invalidated": invalidated,
             })))
         }
         ["api", "ingest", "probe"] if post => {
@@ -1547,6 +1581,28 @@ fn routed(
                     command.extend(["--stack".into(), n.to_string()]);
                 }
             }
+            // Wave 5 §6.6: a handle as the source of a release is refused at
+            // the server when it is stale; a stack handle's keys become the
+            // stacks released.
+            if let Some(hid) = doc["handle"].as_i64() {
+                let h = nils_ask::handle::get(registry.store(), hid)?
+                    .ok_or_else(|| Reply::error(404, format!("no handle {hid}")))?;
+                if let Some(why) = crate::ask_doors::not_reproducible(registry, &h, "released")? {
+                    return Err(Reply::error(409, why));
+                }
+                if h.grain != nils_ask::ast::Grain::Stack {
+                    return Err(Reply::error(
+                        400,
+                        format!(
+                            "handle {hid} is at {} grain; a release from a handle takes a stack handle",
+                            h.grain.name()
+                        ),
+                    ));
+                }
+                for (key, _) in nils_ask::handle::keys(registry.store(), hid)? {
+                    command.extend(["--stack".into(), key.to_string()]);
+                }
+            }
             let id = nils_registry::job::enqueue(
                 registry.store(),
                 &command,
@@ -1717,6 +1773,23 @@ fn routed(
             ))
         }
         // Wave 5 section 12.2: every event on one object, in order.
+        ["api", "depends", kind, id] if get => {
+            match crate::depends::of(doors, registry, kind, id)? {
+                crate::depends::Outcome::Closure(c) => Ok(Reply::ok(
+                    serde_json::to_value(c).unwrap_or(serde_json::Value::Null),
+                )),
+                crate::depends::Outcome::NoKind => Err(Reply::error(
+                    404,
+                    format!(
+                        "{kind} is not a kind the dependency door serves; the kinds are {}",
+                        crate::depends::KINDS.join(", ")
+                    ),
+                )),
+                crate::depends::Outcome::NoObject => {
+                    Err(Reply::error(404, format!("no {kind} {id}")))
+                }
+            }
+        }
         ["api", "timeline", kind, _] if get => {
             let id = id_at(3)?;
             match crate::timeline::of(registry, kind, id).map_err(|e| Reply::error(500, e))? {
@@ -1891,6 +1964,7 @@ fn capabilities(
         "POST /api/decisions/{id}/commit",
         "POST /api/decisions/{id}/withdraw",
         "GET /api/timeline/{kind}/{id}",
+        "GET /api/depends/{kind}/{id}",
         "GET /api/events",
         "GET /api/packs",
         "GET /api/packs/{name}",
@@ -2749,6 +2823,16 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one object's events",
             "Reading a timeline",
             "Read a timeline",
+        ),
+        row(
+            "GET /api/depends/{kind}/{id}",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "one closure: counts, fifty stacks, the handles and releases",
+            "Reading what a change would move",
+            "Read what a change would move",
         ),
         row(
             "GET /api/ask/handles/{id}/rows",

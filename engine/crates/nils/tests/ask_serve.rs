@@ -1672,7 +1672,93 @@ fn the_timeline_door_orders_a_documents_versions_runs_and_promotion() {
     assert_eq!(of_stack["events"][0]["kind"], "landed", "{of_stack}");
     let (status, of_session) = server.request("GET", "/api/timeline/session/1", None, ops);
     assert_eq!(status, 200, "{of_session}");
-    assert_eq!(of_session["events"][0]["kind"], "built", "{of_session}");
+    // the studies that landed and the build may straddle a second, so the
+    // order between them is the clock's; the build is there either way
+    assert!(
+        of_session["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "built"),
+        "{of_session}"
+    );
+    server.finish();
+}
+
+/// Wave 5 §12.8 (slice A5): the content hash as a cache key. A run of a
+/// core that ran before, at the same epoch and pack, answers the existing
+/// handle with its date; `fresh` makes a new one.
+#[test]
+fn running_an_identical_core_twice_answers_one_handle_and_fresh_makes_a_new_one() {
+    let home = synthetic();
+    let server = Server::start(&home, 6, &[]);
+    let (status, first) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(serde_json::json!({"document": yardstick()}))),
+        None,
+    );
+    assert_eq!(status, 200, "{first}");
+    assert!(first["cached"].is_null(), "{first}");
+    let handle = first["handle"].as_i64().unwrap();
+    // the same core again: the same handle, flagged, with when it was produced
+    let (status, second) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(serde_json::json!({"document": yardstick()}))),
+        None,
+    );
+    assert_eq!(status, 200, "{second}");
+    assert_eq!(second["cached"], true, "{second}");
+    assert_eq!(second["handle"], handle, "{second}");
+    assert_eq!(second["content_hash"], first["content_hash"], "{second}");
+    assert_eq!(second["row_count"], first["row_count"], "{second}");
+    assert_eq!(second["rows"], first["rows"], "{second}");
+    assert!(second["produced_at"].is_string(), "{second}");
+    assert!(second["declaration"]["grain"].is_string(), "{second}");
+    // a fresh run is a choice
+    let (status, fresh) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(
+            serde_json::json!({"document": yardstick(), "fresh": true}),
+        )),
+        None,
+    );
+    assert_eq!(status, 200, "{fresh}");
+    assert!(fresh["cached"].is_null(), "{fresh}");
+    assert_ne!(fresh["handle"], handle, "{fresh}");
+    assert_eq!(fresh["content_hash"], first["content_hash"], "{fresh}");
+    // and the newest kept handle answers next
+    let (status, third) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(serde_json::json!({"document": yardstick()}))),
+        None,
+    );
+    assert_eq!(status, 200, "{third}");
+    assert_eq!(third["handle"], fresh["handle"], "{third}");
+    // a different document is not the same core
+    let mut other = yardstick();
+    other["name"] = serde_json::json!("another name is not another core");
+    let (status, named) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(serde_json::json!({"document": other}))),
+        None,
+    );
+    assert_eq!(status, 200, "{named}");
+    // the name is outside the core: it is the same core, cached
+    assert_eq!(named["cached"], true, "{named}");
+    let (status, capped) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(
+            serde_json::json!({"document": yardstick(), "limit": 1}),
+        )),
+        None,
+    );
+    assert_eq!(status, 200, "{capped}");
     server.finish();
 }
 

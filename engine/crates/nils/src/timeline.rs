@@ -383,6 +383,17 @@ fn handle(registry: &mut Registry, id: i64) -> Result<Option<Vec<Event>>, String
         }
     }
     events.extend(handle_events(&h));
+    // Wave 5 §12.8: the invalidation is a row, and an event
+    if let Some(inv) = nils_ask::handle::invalidation(store, id).map_err(err)? {
+        events.push(event(
+            inv.at.clone(),
+            "invalidated",
+            Some(&inv.by),
+            format!("handle {id} stopped reproducing: {}", inv.reason),
+            json!({"kind": inv.kind, "id": inv.reference}),
+            "handle_invalidation",
+        ));
+    }
     // the reads that were audited
     {
         let d = store.dialect();

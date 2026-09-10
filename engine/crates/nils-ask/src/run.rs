@@ -243,6 +243,51 @@ pub fn run(registry: &mut Registry, req: Request<'_>) -> Result<Outcome, RunErro
     run_at(registry, req, 0)
 }
 
+/// Wave 5 §12.8: the content hash as a cache key. The ask is prepared and
+/// its selections inlined exactly as a run would, and when no handle source
+/// has drifted, the newest kept handle of the same core at this epoch,
+/// pack version and scheme is the answer a run would produce again.
+/// `None` when the core has not run, or its answer no longer holds.
+pub fn cached(
+    registry: &mut Registry,
+    ask: Ask,
+    names: &dyn Names,
+    scope: &Scope,
+    pack_version: Option<&str>,
+    scheme: &Scheme,
+) -> Result<Option<(Handle, String)>, RunError> {
+    let prepared = prepare(ask, names, scope)?;
+    let hash = prepared.hash.clone();
+    let mut ask = prepared.ask;
+    inline_selections(registry, &mut ask)?;
+    let epoch_now = registry.meta().epoch;
+    for s in ask.sets.values() {
+        if let Some(Src::Handle { id, .. }) = &s.from {
+            let hid: i64 = id
+                .parse()
+                .map_err(|_| RunError::Message(format!("handle {id} is not a number")))?;
+            let h = handle::get(registry.store(), hid)?.ok_or(HandleError::NotFound(hid))?;
+            if h.withdrawn_at.is_some() || !h.has_rows() || h.epoch != epoch_now {
+                return Ok(None);
+            }
+        }
+    }
+    let core = crate::hash::content_hash(&ask);
+    let digest = scheme.digest();
+    // the same scope: a handle written under another suppression is not
+    // this caller's answer
+    let suppression = json!({"classes": scope.classes});
+    Ok(handle::find_cached(
+        registry.store(),
+        &core,
+        epoch_now,
+        pack_version,
+        Some(&digest),
+        &suppression,
+    )?
+    .map(|h| (h, hash)))
+}
+
 fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Outcome, RunError> {
     if depth > MAX_DEPTH {
         return Err(RunError::Message(

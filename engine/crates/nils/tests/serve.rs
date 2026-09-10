@@ -1527,3 +1527,191 @@ fn login_keeps_a_token_the_server_verbs_read() {
     assert!(out.status.success());
     assert!(!kept.exists());
 }
+
+/// Wave 5 §12.4 and §12.8 (slice A5): adopting an overlay names the stacks
+/// that move and the handles that stop reproducing; the adoption
+/// invalidates them, the invalidation is a row and an event, and a stale
+/// handle is refused at the server with the reason in the desk's order.
+#[test]
+fn an_adoption_names_the_stacks_that_move_and_the_handles_that_stop_reproducing() {
+    let home = knob_registry();
+    let server = Server::start(
+        &home,
+        14,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reviewer",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--token",
+            "an-admin-token-of-length=adm@lab:admin",
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-len");
+    let ops = Some("an-operator-token-of-len");
+    let admin = Some("an-admin-token-of-length");
+
+    // 1: a handle over every stack, its keys named
+    let ask = r#"{"document": {"ast_version": 1, "sets": {"all": {"grain": "stack"}}, "out": {"set": "all", "level": "record"}}, "name": "every stack"}"#;
+    let (status, ran) = server.request("POST", "/api/ask/run", Some(ask), reader);
+    assert_eq!(status, 200, "{ran}");
+    let handle = ran["handle"].as_i64().unwrap();
+    assert_eq!(ran["row_count"], 2, "{ran}");
+
+    // 2-3: a kind the door does not serve, and an object it cannot find
+    let (status, doc) = server.request("GET", "/api/depends/rule/1", None, reader);
+    assert_eq!(status, 404, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("overlay, pack, subject, stack"),
+        "{doc}"
+    );
+    let (status, doc) = server.request("GET", "/api/depends/overlay/99", None, reader);
+    assert_eq!(status, 404, "{doc}");
+
+    // 4-5: the proposal, and its closure before anything moves
+    let body = format!(
+        r#"{{"name": "site words", "overlay": {SITE_OVERLAY}, "scope": "batch:1", "why": "the site's localizer word"}}"#
+    );
+    let (status, proposed) = server.request("POST", "/api/overlays", Some(&body), reviewer);
+    assert_eq!(status, 201, "{proposed}");
+    let id = proposed["overlay"]["id"].as_i64().unwrap();
+    let (status, closure) =
+        server.request("GET", &format!("/api/depends/overlay/{id}"), None, reader);
+    assert_eq!(status, 200, "{closure}");
+    assert_eq!(
+        closure["stacks"]["count"], 1,
+        "one stack carries the word: {closure}"
+    );
+    assert_eq!(
+        closure["stacks"]["sample"].as_array().unwrap().len(),
+        1,
+        "{closure}"
+    );
+    let named: Vec<i64> = closure["handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["handle"].as_i64().unwrap())
+        .collect();
+    assert_eq!(
+        named,
+        vec![handle],
+        "the handle over the stacks stops reproducing: {closure}"
+    );
+    assert!(
+        closure["handles"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("names stacks the overlay moves"),
+        "{closure}"
+    );
+    assert_eq!(
+        closure["releases"].as_array().unwrap().len(),
+        0,
+        "{closure}"
+    );
+
+    // 6: a subject's erasure closes over its stacks and the same handle
+    let (status, subject) = server.request("GET", "/api/depends/subject/1", None, reader);
+    assert_eq!(status, 200, "{subject}");
+    assert!(
+        subject["stacks"]["count"].as_i64().unwrap() >= 1,
+        "{subject}"
+    );
+    assert_eq!(subject["handles"][0]["handle"], handle, "{subject}");
+
+    // 7: the handle reproduces before the adoption
+    let (status, before) =
+        server.request("GET", &format!("/api/ask/handles/{handle}"), None, reader);
+    assert_eq!(status, 200, "{before}");
+    assert_eq!(before["stale"], false, "{before}");
+    assert!(before["invalidated"].is_null(), "{before}");
+
+    // 8: adoption records the closure and invalidates the handle
+    let (status, adopted) = server.request("POST", &format!("/api/overlays/{id}/adopt"), None, ops);
+    assert_eq!(status, 202, "{adopted}");
+    assert_eq!(adopted["closure"]["stacks"], 1, "{adopted}");
+    assert_eq!(
+        adopted["invalidated"],
+        serde_json::json!([handle]),
+        "{adopted}"
+    );
+
+    // 9-10: the handle reads as invalidated, and its timeline says so
+    let (status, after) =
+        server.request("GET", &format!("/api/ask/handles/{handle}"), None, reader);
+    assert_eq!(status, 200, "{after}");
+    assert_eq!(after["stale"], true, "{after}");
+    assert!(
+        after["invalidated"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("adopted"),
+        "{after}"
+    );
+    assert_eq!(after["invalidated"]["kind"], "overlay", "{after}");
+    let (status, timeline) = server.request(
+        "GET",
+        &format!("/api/timeline/handle/{handle}"),
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{timeline}");
+    assert!(
+        timeline["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "invalidated"),
+        "{timeline}"
+    );
+
+    // 11-12: the closure after the adoption names nothing twice; the audit row keeps the counts
+    let (status, again) =
+        server.request("GET", &format!("/api/depends/overlay/{id}"), None, reader);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["handles"].as_array().unwrap().len(), 0, "{again}");
+    let (status, audit) = server.request("GET", "/api/audit?action=overlay.adopt", None, admin);
+    assert_eq!(status, 200, "{audit}");
+    assert_eq!(
+        audit["rows"][0]["details"]["closure"]["handles"], 1,
+        "{audit}"
+    );
+
+    // 13-14: a stale answer is refused at the server: promote, and a page read for an export
+    let (status, refused) = server.request(
+        "POST",
+        &format!("/api/ask/handles/{handle}/promote"),
+        Some(r#"{"cohort": "x"}"#),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("a stale answer is not promoted"),
+        "{refused}"
+    );
+    let (status, refused) = server.request(
+        "GET",
+        &format!("/api/ask/handles/{handle}/rows?purpose=export"),
+        None,
+        reader,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("stale"),
+        "{refused}"
+    );
+    server.finish();
+}
