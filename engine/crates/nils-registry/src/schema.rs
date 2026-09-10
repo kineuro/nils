@@ -780,6 +780,28 @@ fn build_registry() -> Vec<Table> {
         )
         .unique(&["name", "version"])
         .index(&["status"]),
+        // Wave 5 §12.5 and §10.2: a place is a named location with a role
+        // and the guarantees behind it. Every path the engine takes is
+        // bound to a place by role rather than typed; the rules of §10.2
+        // are checked at the doors against these rows. `guarantees` is what
+        // the operator declared, `probed` what the engine measured.
+        Table::new(
+            "place",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("role", Type::Text),
+                req("path", Type::Text),
+                req("guarantees", Type::Json),
+                col("probed", Type::Json),
+                col("probed_at", Type::Timestamp),
+                req("created_at", Type::Timestamp),
+                col("updated_at", Type::Timestamp),
+                col("retired_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["name"])
+        .index(&["role"]),
         Table::new(
             "classification",
             vec![

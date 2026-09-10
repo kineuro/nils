@@ -32,6 +32,7 @@ mod door_client;
 mod gate;
 mod login;
 mod mcp;
+mod places;
 mod serve;
 mod summary;
 mod supervise;
@@ -119,6 +120,11 @@ enum Command {
     /// sample, shapes only (Wave 4c section 6.6)
     #[command(subcommand)]
     Ingest(IngestCommand),
+    /// Places: named locations with a role and the guarantees behind them;
+    /// every path the engine takes is bound to one by role, and the rules
+    /// are checked at the doors (Wave 5 section 10.2)
+    #[command(subcommand)]
+    Place(PlaceCommand),
     /// The audit log: who did what, to which scope, when, under which
     /// policy (Wave 4a section 9.2)
     #[command(subcommand)]
@@ -607,6 +613,67 @@ enum OverlayCommand {
         id: i64,
         #[arg(long)]
         why: Option<String>,
+    },
+}
+
+/// Wave 5 §10.2: the places of a deployment.
+#[derive(Debug, Subcommand)]
+enum PlaceCommand {
+    /// Every place with its role, its guarantees and what the engine measured
+    List {
+        #[arg(long)]
+        json: bool,
+        /// Measure every place again before listing
+        #[arg(long)]
+        probe: bool,
+    },
+    /// Declare a place: a name, a role and a path; the guarantees are what
+    /// the operator declares, the probe what the engine finds
+    Add {
+        /// One word, the name other places and verbs refer to
+        name: String,
+        /// The directory
+        path: PathBuf,
+        /// source, registry, working, export, share, exchange or backup
+        #[arg(long, value_name = "ROLE")]
+        role: String,
+        /// The place that backs this one up (required for the registry role)
+        #[arg(long, value_name = "NAME")]
+        backup: Option<String>,
+        /// The storage keeps snapshots
+        #[arg(long)]
+        snapshots: bool,
+        /// The storage is protected (redundant, and elsewhere from a laptop's one disk)
+        #[arg(long)]
+        protected: bool,
+        /// The storage is fast
+        #[arg(long)]
+        fast: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change a place's path or guarantees
+    Set {
+        id: i64,
+        #[arg(long, value_name = "DIR")]
+        path: Option<PathBuf>,
+        #[arg(long, value_name = "NAME")]
+        backup: Option<String>,
+        #[arg(long)]
+        snapshots: Option<bool>,
+        #[arg(long)]
+        protected: Option<bool>,
+        #[arg(long)]
+        fast: Option<bool>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retire a place: it binds nothing from now on and stays as history
+    Retire { id: i64 },
+    /// The verbs that take a path and the role each needs
+    Bindings {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1253,6 +1320,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         Command::Overlay(command) => overlay_command(&home, command),
+        Command::Place(command) => place_command(&home, command),
         Command::Ingest(command) => ingest_command(&home, command),
         Command::Serve(args) => serve::serve(&home, *args),
         Command::Supervise { command } => supervise::command(command),
@@ -1731,6 +1799,232 @@ fn stored_overlay(home: &Home, id: i64) -> Result<nils_pack::Overlay, Exit> {
 }
 
 /// Wave 4c §6.6: `nils overlay ...`.
+/// Wave 5 §10.2: places at the command line, mirroring the doors.
+fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
+    use nils_registry::place::{self, Role};
+    let mut registry = open(home)?;
+    let guarantees = |backup: Option<&str>, snapshots: bool, protected: bool, fast: bool| {
+        serde_json::json!({
+            "backup": backup,
+            "snapshots": snapshots,
+            "protected": protected,
+            "fast": fast,
+        })
+    };
+    match command {
+        PlaceCommand::List { json, probe } => {
+            let rows = place::list(registry.store()).map_err(|e| fail(e.to_string()))?;
+            let rows = if probe {
+                let mut fresh = Vec::new();
+                for p in rows {
+                    if p.retired_at.is_some() {
+                        fresh.push(p);
+                        continue;
+                    }
+                    let probed = places::probe(Path::new(&p.path));
+                    fresh.push(
+                        place::set(registry.store(), p.id, None, None, Some(&probed))
+                            .map_err(|e| fail(e.to_string()))?,
+                    );
+                }
+                fresh
+            } else {
+                rows
+            };
+            if json {
+                let doc: Vec<_> = rows.iter().map(place::Place::as_json).collect();
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+            } else if rows.is_empty() {
+                println!(
+                    "no places; the rules are not in force. Add one with nils place add NAME DIR --role ROLE"
+                );
+            } else {
+                println!(
+                    "{:>4}  {:<10} {:<16} {:<8} guarantees",
+                    "id", "role", "name", "state"
+                );
+                for p in &rows {
+                    println!(
+                        "{:>4}  {:<10} {:<16} {:<8} {}",
+                        p.id,
+                        p.role.name(),
+                        p.name,
+                        if p.retired_at.is_some() {
+                            "retired"
+                        } else {
+                            "active"
+                        },
+                        p.guarantees
+                    );
+                    println!("      {}", p.path);
+                    if !p.probed.is_null() {
+                        println!("      probed {}", p.probed);
+                    }
+                }
+            }
+            Ok(())
+        }
+        PlaceCommand::Add {
+            name,
+            path,
+            role,
+            backup,
+            snapshots,
+            protected,
+            fast,
+            json,
+        } => {
+            let role = Role::parse(&role).ok_or_else(|| {
+                usage(format!(
+                    "--role is one of {}, not {role}",
+                    Role::ALL
+                        .iter()
+                        .map(|r| r.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?;
+            let path = fs::canonicalize(&path).unwrap_or(path);
+            if !path.is_absolute() {
+                return Err(usage(format!(
+                    "{} is not an absolute directory",
+                    path.display()
+                )));
+            }
+            let probed = places::probe(&path);
+            let id = place::add(
+                registry.store(),
+                &place::New {
+                    name: &name,
+                    role,
+                    path: &path.display().to_string(),
+                    guarantees: guarantees(backup.as_deref(), snapshots, protected, fast),
+                    probed,
+                },
+            )
+            .map_err(|e| fail(e.to_string()))?;
+            audit(
+                &mut registry,
+                nils_registry::audit::Action::PlaceAdd,
+                serde_json::json!({"place": id, "name": name, "role": role.name()}),
+                None,
+            )?;
+            let p = place::show(registry.store(), id)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| fail(format!("no place {id}")))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&p.as_json()).unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "place {}: {} ({}) at {}",
+                    p.id,
+                    p.name,
+                    p.role.name(),
+                    p.path
+                );
+                println!("  probed {}", p.probed);
+            }
+            Ok(())
+        }
+        PlaceCommand::Set {
+            id,
+            path,
+            backup,
+            snapshots,
+            protected,
+            fast,
+            json,
+        } => {
+            let current = place::show(registry.store(), id)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| fail(format!("no place {id}")))?;
+            let g = &current.guarantees;
+            let next =
+                if backup.is_some() || snapshots.is_some() || protected.is_some() || fast.is_some()
+                {
+                    Some(guarantees(
+                        backup.as_deref().or_else(|| g["backup"].as_str()),
+                        snapshots.unwrap_or_else(|| g["snapshots"].as_bool().unwrap_or(false)),
+                        protected.unwrap_or_else(|| g["protected"].as_bool().unwrap_or(false)),
+                        fast.unwrap_or_else(|| g["fast"].as_bool().unwrap_or(false)),
+                    ))
+                } else {
+                    None
+                };
+            let path = path.map(|p| fs::canonicalize(&p).unwrap_or(p));
+            let probed = path.as_deref().map(places::probe);
+            let p = place::set(
+                registry.store(),
+                id,
+                path.as_deref().map(|p| p.display().to_string()).as_deref(),
+                next.as_ref(),
+                probed.as_ref(),
+            )
+            .map_err(|e| fail(e.to_string()))?;
+            audit(
+                &mut registry,
+                nils_registry::audit::Action::PlaceSet,
+                serde_json::json!({"place": id, "name": p.name}),
+                None,
+            )?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&p.as_json()).unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "place {}: {} ({}) at {}",
+                    p.id,
+                    p.name,
+                    p.role.name(),
+                    p.path
+                );
+            }
+            Ok(())
+        }
+        PlaceCommand::Retire { id } => {
+            let p = place::retire(registry.store(), id).map_err(|e| fail(e.to_string()))?;
+            audit(
+                &mut registry,
+                nils_registry::audit::Action::PlaceRetire,
+                serde_json::json!({"place": id, "name": p.name}),
+                None,
+            )?;
+            println!("place {}: {} retired", p.id, p.name);
+            Ok(())
+        }
+        PlaceCommand::Bindings { json } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&places::bindings_doc()).unwrap_or_default()
+                );
+            } else {
+                for b in places::BINDINGS {
+                    println!("{:<22} {}", b.verb, b.role.name());
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The rule of §10.2 at a command line verb that takes a path: refused
+/// with the sentence naming the rule, before anything is written.
+fn require_place(
+    registry: &mut Registry,
+    role: nils_registry::place::Role,
+    path: &Path,
+) -> Result<(), Exit> {
+    places::require(registry.store(), role, path)
+        .map(|_| ())
+        .map_err(|r| fail(r.message))
+}
+
 fn overlay_command(home: &Home, command: OverlayCommand) -> Result<(), Exit> {
     let mut registry = open(home)?;
     match command {
@@ -6117,6 +6411,12 @@ fn handover_run(home: &Home, args: HandoverArgs) -> Result<(), Exit> {
         .map_err(|e| fail(e.to_string()))?;
     let password = nils_release::handover::password(&key);
     let mut registry = open(home)?;
+    // Wave 5 section 10.2: a handover writes only to an exchange place.
+    require_place(
+        &mut registry,
+        nils_registry::place::Role::Exchange,
+        &args.out,
+    )?;
 
     let settings = run::Settings {
         release: &args.release,
@@ -6418,6 +6718,8 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     let pack = nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
 
     let mut registry = open(home)?;
+    // Wave 5 section 10.2: a release writes only to an export place.
+    require_place(&mut registry, nils_registry::place::Role::Export, &out)?;
     // Wave 4a section 8: every item resolved up front, and a refusal that
     // names what did not, rather than a smaller release.
     let chosen = resolve_or_refuse(&mut registry, &items, Some(&pack))?.selection;
@@ -7049,6 +7351,8 @@ pub(crate) fn quarantine_doc(
 fn backup_command(home: &Home, args: BackupArgs) -> Result<(), Exit> {
     let mut registry = open(home)?;
     let dir = args.dir.unwrap_or_else(|| home.dir().join("backups"));
+    // Wave 5 section 10.2: an archive goes only to a backup place.
+    require_place(&mut registry, nils_registry::place::Role::Backup, &dir)?;
     let manifest = backup::backup(home, &mut registry, &dir)?;
     let files = manifest["files"].as_array().map_or(0, Vec::len);
     audit(

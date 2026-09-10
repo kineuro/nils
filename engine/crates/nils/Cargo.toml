@@ -31,6 +31,7 @@ serde-saphyr.workspace = true
 csv.workspace = true
 regex.workspace = true
 serde.workspace = true
+libc.workspace = true
 serde_json.workspace = true
 tiny_http.workspace = true
 jsonwebtoken.workspace = true

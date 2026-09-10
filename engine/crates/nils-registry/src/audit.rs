@@ -50,6 +50,10 @@ pub enum Action {
     /// Wave 5 §12.8: a handle stopped reproducing under a change the
     /// dependency door named.
     HandleInvalidate,
+    /// Wave 5 §12.5: a place added, changed or retired.
+    PlaceAdd,
+    PlaceSet,
+    PlaceRetire,
 }
 
 impl Action {
@@ -77,6 +81,9 @@ impl Action {
             Action::CohortPromote => "cohort.promote",
             Action::SelectionSave => "selection.save",
             Action::HandleInvalidate => "handle.invalidate",
+            Action::PlaceAdd => "place.add",
+            Action::PlaceSet => "place.set",
+            Action::PlaceRetire => "place.retire",
         }
     }
 
@@ -90,6 +97,9 @@ impl Action {
                 | Action::JobsPrune
                 | Action::Backup
                 | Action::OverlayPropose
+                | Action::PlaceAdd
+                | Action::PlaceSet
+                | Action::PlaceRetire
         )
     }
 }

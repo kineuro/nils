@@ -146,7 +146,7 @@ paths:
       responses:
         "202": {description: "{job, state: queued, command}"}
         "400": {description: The handle named is not at stack grain}
-        "409": {description: "The handle named does not reproduce: truncated, stale (the registry moved, or the handle was invalidated) or incomplete, in that order"}
+        "409": {description: "The handle named does not reproduce: truncated, stale (the registry moved, or the handle was invalidated) or incomplete, in that order; or wave 5 section 10.2: out is not under a declared export place, once any place is declared"}
   /api/handovers:
     post:
       summary: Hand a release over, as a queued job (nils handover run)
@@ -162,6 +162,7 @@ paths:
                 key: {type: string}
       responses:
         "202": {description: "{job, state: queued, command}"}
+        "409": {description: "Wave 5 section 10.2: out is not under a declared exchange place, once any place is declared"}
   /api/select:
     post:
       summary: What a selection reaches, without releasing it (nils select); the bounded synchronous path
@@ -331,7 +332,7 @@ paths:
         "409": {description: "stale_options: the list came from another document, epoch or scope"}
   /api/ask/diagnose:
     post:
-      summary: The issues, the funnel, the drops, the ties, the coarse rows, the cost class, a zero row explanation; `by: clause` keys the funnel by set and clause group (Wave 5 section 12.3)
+      summary: "The issues, the funnel, the drops, the ties, the coarse rows, the cost class, a zero row explanation; `by: clause` keys the funnel by set and clause group (Wave 5 section 12.3)"
       requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, keys: {type: boolean}, by: {type: string, enum: [set, clause], default: set}}}}}}
       responses:
         "200": {description: "The diagnosis; under by: clause, `groups` holds one row per set and group in the language's order (source, near, attach, has, where, pick, out), each with the clauses it folds, the rows and subjects kept and the rows lost, so a set's source less its losses is its answer"}
@@ -571,6 +572,30 @@ paths:
       summary: Every apply and every refusal, one row each (Wave 5 section 10.4)
       responses:
         "200": {description: "{rows: [{at, part, from, to, digest, ok, why}]}"}
+  /api/places:
+    get:
+      summary: Every place with its role, its guarantees, what the engine measured and the deployment's paths bound under it (Wave 5 section 12.5, 10.2)
+      description: "A place is a named location with a role (source, registry, working, export, share, exchange, backup) and the guarantees behind it. `?probe=1` measures every active place again first. The reply carries `enforced`, true once any place is declared, and `bindings`, the verbs that take a path and the role each needs. Never a row of a person."
+      responses:
+        "200": {description: "{count, enforced, places[{id, name, role, path, guarantees{backup, snapshots, protected, fast}, probed{exists, directory, writable, free_bytes, mount, snapshots_seen}, probed_at, created_at, updated_at, retired_at, retired, bound[{verb, path}], holds, must}], bindings[{verb, role}]}"}
+    post:
+      summary: Declare a place (Wave 5 section 10.2; operator)
+      description: "The path is probed on creation. The registry role is refused (409) on a place whose guarantees name no backup place, or name one that is not a backup place; the rules of section 10.2 are checked here and at every path-taking door, not documented."
+      requestBody: {content: {application/json: {schema: {type: object, required: [name, role, path], properties: {name: {type: string}, role: {type: string}, path: {type: string}, guarantees: {type: object}}}}}}
+      responses:
+        "201": {description: The place}
+        "400": {description: A missing name, an unknown role or a relative path}
+        "409": {description: The name is taken, or the registry role has no backup place}
+  /api/places/{id}:
+    put:
+      summary: Change a place's path or guarantees, or retire it (Wave 5 section 10.2; operator)
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {path: {type: string}, guarantees: {type: object}, retired: {type: boolean}}}}}}
+      responses:
+        "200": {description: The place}
+        "404": {description: No such place}
+        "409": {description: The registry role would lose its backup}
 components:
   securitySchemes:
     bearer:
