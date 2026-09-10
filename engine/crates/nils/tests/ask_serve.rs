@@ -1310,6 +1310,16 @@ fn the_summary_the_start_from_resolver_and_the_document_list_answer_on_the_synth
     let server = Server::start(
         &home,
         30,
+/// Wave 5 section 12.2, slice A2: the timeline door orders a document's
+/// versions, runs and promotion; a handle's timeline carries its source
+/// document and its promotion; a job's carries what it did; the door
+/// refuses a kind it does not serve and an id no row has.
+#[test]
+fn the_timeline_door_orders_a_documents_versions_runs_and_promotion() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        15,
         &[
             "--auth",
             "token",
@@ -1429,6 +1439,50 @@ fn the_summary_the_start_from_resolver_and_the_document_list_answer_on_the_synth
     assert_eq!(status, 200, "{from_doc}");
     assert_eq!(from_doc["set"], yardstick()["out"]["set"]);
     assert!(from_doc["count"].as_i64().unwrap() > 0, "{from_doc}");
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let ops = Some("an-operator-token-of-len");
+    // a document, then a second version by a move
+    let (status, posted) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(serde_json::json!({"document": yardstick()}))),
+        ops,
+    );
+    assert_eq!(status, 200, "{posted}");
+    let first = posted["document"].as_i64().unwrap();
+    let (status, caps) = server.request("GET", "/api/capabilities", None, ops);
+    assert_eq!(status, 200, "{caps}");
+    let epoch = caps["ask"]["epoch"].as_i64().unwrap();
+    let (status, opts) = server.request(
+        "POST",
+        "/api/ask/options",
+        Some(&body(
+            serde_json::json!({"document_id": first, "set": "good"}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 200, "{opts}");
+    let window = opts["moves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["kind"] == "set_window")
+        .unwrap();
+    let (status, applied) = server.request(
+        "POST",
+        "/api/ask/apply",
+        Some(&body(serde_json::json!({
+            "document_id": first, "epoch": epoch, "token": opts["token"], "set": "good",
+            "moves": [{"move_id": window["id"], "args": {"relation": "near:edss", "preset": "3 months"}}]
+        }))),
+        ops,
+    );
+    assert_eq!(status, 200, "{applied}");
+    let second = applied["document"].as_i64().unwrap();
+    assert_ne!(first, second);
+    // a run of the first version, then its promotion through a worker
     let (status, ran) = server.request(
         "POST",
         "/api/ask/run",
@@ -1490,4 +1544,124 @@ fn the_summary_the_start_from_resolver_and_the_document_list_answer_on_the_synth
             "{door}"
         );
     }
+            serde_json::json!({"document": yardstick(), "name": "timed"}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 200, "{ran}");
+    let handle = ran["handle"].as_i64().unwrap();
+    let (status, queued) = server.request(
+        "POST",
+        &format!("/api/ask/handles/{handle}/promote"),
+        Some(r#"{"cohort": "timed", "create": true}"#),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let job = queued["job"].as_i64().unwrap();
+    let out = run(&home, &["jobs", "work", "--once"], None);
+    assert!(out.contains("promote") || out.contains("job"), "{out}");
+    // the document's timeline: two versions, the run, the promotion, in order
+    let (status, timeline) = server.request(
+        "GET",
+        &format!("/api/timeline/document/{second}"),
+        None,
+        ops,
+    );
+    assert_eq!(status, 200, "{timeline}");
+    let kinds: Vec<&str> = timeline["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["version", "version", "run", "promotion"],
+        "{timeline}"
+    );
+    let stamps: Vec<&str> = timeline["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["at"].as_str())
+        .collect();
+    assert!(stamps.windows(2).all(|w| w[0] <= w[1]), "{stamps:?}");
+    let events = timeline["events"].as_array().unwrap();
+    assert_eq!(events[0]["produced"]["id"], first, "{timeline}");
+    assert_eq!(events[1]["produced"]["id"], second, "{timeline}");
+    assert_eq!(
+        events[2]["produced"],
+        serde_json::json!({"kind": "handle", "id": handle})
+    );
+    assert_eq!(events[3]["produced"]["kind"], "cohort", "{timeline}");
+    assert_eq!(events[3]["actor"], "ops@lab", "{timeline}");
+    assert_eq!(events[3]["source"], "audit");
+    // the first version sees the same chain
+    let (status, from_first) =
+        server.request("GET", &format!("/api/timeline/document/{first}"), None, ops);
+    assert_eq!(status, 200, "{from_first}");
+    assert_eq!(from_first["count"], timeline["count"]);
+    // the handle's timeline: its source document, its run, its promotion
+    let (status, of_handle) =
+        server.request("GET", &format!("/api/timeline/handle/{handle}"), None, ops);
+    assert_eq!(status, 200, "{of_handle}");
+    let kinds: Vec<&str> = of_handle["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .collect();
+    assert_eq!(kinds, vec!["document", "run", "promotion"], "{of_handle}");
+    // the job's: started, what it recorded, finished
+    let (status, of_job) = server.request("GET", &format!("/api/timeline/job/{job}"), None, ops);
+    assert_eq!(status, 200, "{of_job}");
+    let kinds: Vec<&str> = of_job["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"started") && kinds.contains(&"finished"),
+        "{of_job}"
+    );
+    assert!(kinds.contains(&"promotion"), "{of_job}");
+    let finished = of_job["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "finished")
+        .unwrap();
+    assert_eq!(finished["produced"]["kind"], "cohort", "{of_job}");
+    // a subject's, a stack's and a session's: dated events on the synthetic rows
+    let (status, of_subject) = server.request("GET", "/api/timeline/subject/1", None, ops);
+    assert_eq!(status, 200, "{of_subject}");
+    let kinds: Vec<&str> = of_subject["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .collect();
+    for kind in ["arrived", "study", "joined", "session"] {
+        assert!(kinds.contains(&kind), "{kind} missing: {of_subject}");
+    }
+    // a kind the door does not serve, and an id no row has
+    let (status, refused) = server.request("GET", "/api/timeline/nothing/1", None, ops);
+    assert_eq!(status, 404, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("document, handle"),
+        "{refused}"
+    );
+    let (status, missing) = server.request("GET", "/api/timeline/document/999999", None, ops);
+    assert_eq!(status, 404, "{missing}");
+    let (status, of_stack) = server.request("GET", "/api/timeline/stack/1", None, ops);
+    assert_eq!(status, 200, "{of_stack}");
+    assert_eq!(of_stack["events"][0]["kind"], "landed", "{of_stack}");
+    let (status, of_session) = server.request("GET", "/api/timeline/session/1", None, ops);
+    assert_eq!(status, 200, "{of_session}");
+    assert_eq!(of_session["events"][0]["kind"], "built", "{of_session}");
+    server.finish();
 }

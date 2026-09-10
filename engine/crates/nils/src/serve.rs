@@ -1696,6 +1696,25 @@ fn routed(
                 serde_json::json!({ "withdrawn": id, "reopened": reopened }),
             ))
         }
+        // Wave 5 section 12.2: every event on one object, in order.
+        ["api", "timeline", kind, _] if get => {
+            let id = id_at(3)?;
+            match crate::timeline::of(registry, kind, id).map_err(|e| Reply::error(500, e))? {
+                crate::timeline::Outcome::Events(events) => Ok(Reply::ok(serde_json::json!({
+                    "kind": kind, "id": id, "count": events.len(), "events": events,
+                }))),
+                crate::timeline::Outcome::NoKind => Err(Reply::error(
+                    404,
+                    format!(
+                        "{kind} is not a kind the timeline serves; the kinds are {}",
+                        crate::timeline::KINDS.join(", ")
+                    ),
+                )),
+                crate::timeline::Outcome::NoObject => {
+                    Err(Reply::error(404, format!("no {kind} {id}")))
+                }
+            }
+        }
         _ => Err(Reply::error(
             404,
             format!("{method} {path} is not a door; GET /api/capabilities lists them"),
@@ -1849,6 +1868,7 @@ fn capabilities(
         "POST /api/review/{id}/accept",
         "POST /api/decisions/{id}/commit",
         "POST /api/decisions/{id}/withdraw",
+        "GET /api/timeline/{kind}/{id}",
         "GET /api/events",
         "GET /api/packs",
         "GET /api/packs/{name}",
@@ -2696,6 +2716,16 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one handle",
             "Reading a handle",
             "Read a handle",
+        ),
+        row(
+            "GET /api/timeline/{kind}/{id}",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "one object's events",
+            "Reading a timeline",
+            "Read a timeline",
         ),
         row(
             "GET /api/ask/handles/{id}/rows",

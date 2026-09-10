@@ -1394,6 +1394,13 @@ fn ask_promote(home: &Home, args: AskPromoteArgs) -> Result<(), Exit> {
         Ok(p) => {
             job::finish(registry.store(), job, State::Done, None)
                 .map_err(|e| fail(e.to_string()))?;
+            // Wave 4c section 6.1: the job row carries what it produced.
+            job::set_result(
+                registry.store(),
+                job,
+                &serde_json::to_value(&p).unwrap_or_default(),
+            )
+            .map_err(|e| fail(e.to_string()))?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&p).unwrap_or_default());
             } else {
