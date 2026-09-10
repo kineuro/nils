@@ -238,6 +238,16 @@ paths:
       responses:
         "200": {description: "{withdrawn, reopened}"}
         "409": {description: Already withdrawn}
+  /api/timeline/{kind}/{id}:
+    get:
+      summary: Every event on one object in order, typed, each with the object it produced (Wave 5 section 12.2)
+      description: "The kinds are document (its versions through the parent chain, its runs, its promotions and selections), handle (its run, reads, withdrawal, its source document, its promotion), subject (arrival, studies landed, cohort membership, sessions built, releases; dated events, never a clinical value), session (built, its studies, its labels), stack (landed, classified, decisions, review items, picks, releases), job (started, finished, the batches, overlays, review items and classifications it wrote, the audit rows under it), release (started, finished, withdrawn, handovers, the audit rows naming it) and review (opened, decided, accepted, member decisions, the decisions and withdrawals the audit ties to it). Events are sorted by their stamp; equal stamps keep the order they were read in."
+      parameters:
+        - {name: kind, in: path, required: true, schema: {type: string, enum: [document, handle, subject, session, stack, job, release, review]}}
+        - {name: id, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: "{kind, id, count, events: [{at, kind, actor, summary, produced: {kind, id} | {kind, name, ...} | null, source}]}"}
+        "404": {description: Not a kind the door serves, or no object with that id}
   /api/events:
     get:
       summary: Server-sent events with the open jobs and the epoch, every second, for display

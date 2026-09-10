@@ -33,6 +33,7 @@ mod login;
 mod mcp;
 mod serve;
 mod summary;
+mod timeline;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::day::Day;
 use nils_registry::home::{
