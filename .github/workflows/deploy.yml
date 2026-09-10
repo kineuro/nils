@@ -1,0 +1,58 @@
+name: deploy
+# Wave 5 W0 (docs/specs/wave5-the-whole-desk.md, section 4.2): every merge to main
+# builds the engine here, the way a release is built, and puts it on the group's
+# guest through the gateway; the guest's own apply script restarts the part. The
+# group's deployment is the record's, never this repository's: the workflow knows
+# a gateway name, a target name and a secret, and nothing else.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency: deploy
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: the pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' engine/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - name: build
+        working-directory: engine
+        run: |
+          cargo build --release --locked -p nils
+          ./target/release/nils --version
+      - name: stage what the guest takes
+        run: |
+          mkdir -p out/engine && cp engine/target/release/nils out/engine/nils && cp -r packs out/engine/packs
+      - name: through the gateway to the guest, then apply
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 600 /dev/null key; printf '%s\n' "$KEY" > key
+          cat > known_hosts <<'KH'
+          ssh.kineuro.se ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAc27JgEFQrzEDT9X+VschGd2qq5EjoDVbb0tFTyzdfX
+          KH
+          cat > sshcfg <<'CFG'
+          Host nils
+            HostName ssh.kineuro.se
+            User deploy:nils-deploy
+            IdentityFile key
+            IdentitiesOnly yes
+            UserKnownHostsFile known_hosts
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+            ServerAliveCountMax 40
+            ProxyCommand openssl s_client -quiet -verify_return_error -verify 5 -connect ssh.kineuro.se:443 -servername ssh.kineuro.se 2>/dev/null
+          CFG
+          rsync -az --delete -e "ssh -F sshcfg" out/engine/ nils:/srv/nils/incoming/engine/
+          ssh -F sshcfg nils "/srv/nils/bin/apply engine"
