@@ -555,6 +555,117 @@ fn drop_rows(store: &mut Store, id: i64, now: &str) -> Result<(), HandleError> {
     Ok(())
 }
 
+/// Wave 5 §12.8: why a handle stopped reproducing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Invalidation {
+    pub reason: String,
+    /// What kind of change: `overlay`, `pack`, `subject`, `stack`.
+    pub kind: String,
+    /// Which one, as text: an id, or a pack name and version.
+    pub reference: String,
+    pub at: String,
+    pub by: String,
+}
+
+/// Mark a handle as no longer reproducing; the row is the record. A handle
+/// already invalidated keeps its first row.
+pub fn invalidate(
+    store: &mut Store,
+    id: i64,
+    reason: &str,
+    kind: &str,
+    reference: &str,
+    by: &str,
+) -> Result<bool, HandleError> {
+    if invalidation(store, id)?.is_some() {
+        return Ok(false);
+    }
+    let now = now_iso();
+    store.insert(
+        &Insert::new(
+            table("handle_invalidation"),
+            &["handle_id", "reason", "kind", "ref", "at", "by"],
+        ),
+        &[vec![
+            Param::Int(id),
+            Param::from(reason),
+            Param::from(kind),
+            Param::from(reference),
+            Param::from(now.as_str()),
+            Param::from(by),
+        ]],
+    )?;
+    Ok(true)
+}
+
+/// The invalidation of a handle, when there is one.
+pub fn invalidation(store: &mut Store, id: i64) -> Result<Option<Invalidation>, HandleError> {
+    let d = store.dialect();
+    let at = table("handle_invalidation")
+        .column("at")
+        .map(|c| d.text_of(c))
+        .unwrap_or_else(|| "at".to_string());
+    let sql = format!(
+        "SELECT reason, kind, ref, {at}, by FROM {} WHERE handle_id = {} ORDER BY id LIMIT 1",
+        store.qualified("handle_invalidation"),
+        d.param(1, Type::Int)
+    );
+    let Some(r) = store.query_opt(&sql, &[Param::Int(id)])? else {
+        return Ok(None);
+    };
+    Ok(Some(Invalidation {
+        reason: r.text(0)?.to_string(),
+        kind: r.text(1)?.to_string(),
+        reference: r.text(2)?.to_string(),
+        at: r.text(3)?.to_string(),
+        by: r.text(4)?.to_string(),
+    }))
+}
+
+/// Every handle invalidated so far, by id.
+pub fn invalidated(store: &mut Store) -> Result<BTreeSet<i64>, HandleError> {
+    let sql = format!(
+        "SELECT DISTINCT handle_id FROM {}",
+        store.qualified("handle_invalidation")
+    );
+    store
+        .query(&sql, &[])?
+        .iter()
+        .map(|r| Ok(r.int(0)?))
+        .collect()
+}
+
+/// Wave 5 §12.8: the newest kept handle whose stored ask hashes to
+/// `ask_hash` at this epoch, pack version, scheme and scope (the same
+/// suppression), whole (not truncated), with its rows, not withdrawn and
+/// not invalidated: the one a run of the same core answers again.
+pub fn find_cached(
+    store: &mut Store,
+    ask_hash: &str,
+    epoch: i64,
+    pack_version: Option<&str>,
+    scheme_digest: Option<&str>,
+    suppression: &Value,
+) -> Result<Option<Handle>, HandleError> {
+    let out = invalidated(store)?;
+    for h in list(store, false)? {
+        if h.epoch != epoch
+            || h.truncated
+            || !h.has_rows()
+            || h.pack_version.as_deref() != pack_version
+            || h.scheme_digest.as_deref() != scheme_digest
+            || h.suppression != *suppression
+            || out.contains(&h.id)
+        {
+            continue;
+        }
+        if h.ask_hash().as_deref() == Some(ask_hash) {
+            return Ok(Some(h));
+        }
+    }
+    Ok(None)
+}
+
 /// Who pins a handle: a cohort promoted from it, a selection whose ask
 /// reads it. (A release or a job naming a handle is a later wave's column.)
 pub fn pinned_by(store: &mut Store, id: i64) -> Result<Vec<String>, HandleError> {

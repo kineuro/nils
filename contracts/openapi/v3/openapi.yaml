@@ -142,8 +142,11 @@ paths:
                 axes: {type: array, items: {type: string}, description: axis=value}
                 stacks: {type: array, items: {type: integer}}
                 observations: {type: array, items: {type: string}}
+                handle: {type: integer, description: "A stack handle whose keys are the stacks released (Wave 5 section 6.6); refused when its answer no longer reproduces"}
       responses:
         "202": {description: "{job, state: queued, command}"}
+        "400": {description: The handle named is not at stack grain}
+        "409": {description: "The handle named does not reproduce: truncated, stale (the registry moved, or the handle was invalidated) or incomplete, in that order"}
   /api/handovers:
     post:
       summary: Hand a release over, as a queued job (nils handover run)
@@ -252,6 +255,17 @@ paths:
       responses:
         "200": {description: "{kind, id, count, events: [{at, kind, actor, summary, produced: {kind, id} | {kind, name, ...} | null, source}]}"}
         "404": {description: Not a kind the door serves, or no object with that id}
+  /api/depends/{kind}/{id}:
+    get:
+      summary: The closure of a change before it is made (Wave 5 section 12.4)
+      description: "What an adoption (`overlay`), a pack bump (`pack`, the id a name or `name@version`; without a version, the version this engine serves), or an erasure (`subject`, `stack`) would move: the stacks whose classification changes or that the erasure removes, the review items that open and close, the handles that stop being reproducible (a stack handle naming one of the stacks, a handle whose members belong to one of their subjects, a handle run under another version of the pack) and the releases that included them. Counts and ids, never a row of a person. The confirm panels of section 8.2 read it; the adopt door computes it, keeps the counts on its audit row and invalidates the handles it names (section 12.8). A rule change is not a kind yet."
+      parameters:
+        - {name: kind, in: path, required: true, schema: {type: string, enum: [overlay, pack, subject, stack]}}
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: "{kind, id, stacks: {count, sample: [up to fifty ids]}, review: {opens, closes}, handles: [{handle, name, reason}], releases: [{release, name, version}]}"}
+        "404": {description: Not a kind the door serves, or no object with that id}
+        "409": {description: The overlay amends a pack this engine does not serve}
   /api/events:
     get:
       summary: Server-sent events with the open jobs and the epoch, every second, for display
@@ -285,10 +299,10 @@ paths:
   /api/ask/run:
     post:
       summary: "The bounded path, inside the caps (Wave 4b section 11.5): a handle with its first page of rows"
-      description: The document, or a document handle, with a name for the handle, keep, after, limit and purpose; a capped run is flagged truncated and has no hash. Identifiers are projected only by a role that may read them, with an audit row.
-      requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, name: {type: string}, keep: {type: boolean}, after: {type: integer}, limit: {type: integer}, purpose: {type: string}}}}}}
+      description: "The document, or a document handle, with a name for the handle, keep, after, limit and purpose; a capped run is flagged truncated and has no hash. Identifiers are projected only by a role that may read them, with an audit row. Since Wave 5 (section 12.8) the content hash is a cache key: a core that ran before at the same epoch, pack version and scheme, whose handle is kept whole and not invalidated, is answered with that handle again, flagged `cached: true` with `produced_at` and `produced_by`; `fresh: true` in the body forces a new run."
+      requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, name: {type: string}, keep: {type: boolean}, after: {type: integer}, limit: {type: integer}, purpose: {type: string}, fresh: {type: boolean}}}}}}
       responses:
-        "200": {description: "{handle, hash, columns, rows, truncated, pages, measures, drift, kept, identifiers, declaration}; the declaration (Wave 4c section 6.4) names the grain, the session scheme and its digest, the membership reading, the key namespace, the pick rule, the denominator, the disclosure and whether a cap truncated"}
+        "200": {description: "{handle, hash, columns, rows, truncated, pages, measures, drift, kept, identifiers, declaration, epoch} and, on a cached answer, {cached: true, produced_at, produced_by}; the declaration (Wave 4c section 6.4) names the grain, the session scheme and its digest, the membership reading, the key namespace, the pick rule, the denominator, the disclosure and whether a cap truncated"}
         "400": {description: The document is refused}
         "403": {description: The role may not project identifiers}
   /api/ask/jobs:
@@ -382,7 +396,7 @@ paths:
         - {name: withdrawn, in: query, schema: {type: boolean, default: false}, description: Include the withdrawn handles}
         - {name: limit, in: query, schema: {type: integer, default: 100}, description: At most this many, capped at page_rows_max}
       responses:
-        "200": {description: "{count, handles: [{id, name, grain, row_count, content_hash, principal, actor, created_at, epoch, pack_version, disclosure, truncated, limit, kept, last_read_at, withdrawn_at, ask_hash, columns}]}"}
+        "200": {description: "{count, handles: [{id, name, grain, row_count, content_hash, principal, actor, created_at, epoch, pack_version, disclosure, truncated, limit, kept, last_read_at, withdrawn_at, ask_hash, columns, stale, invalidated}]}; since Wave 5 (section 12.8) `invalidated` says whether an adoption, a pack bump or an erasure named the handle, and `stale` whether the answer no longer reproduces (invalidated, or the registry moved on)"}
   /api/ask/handles/{id}:
     get:
       summary: A result handle with its provenance
@@ -390,7 +404,7 @@ paths:
         - {name: id, in: path, required: true, schema: {type: integer}}
       responses:
         "403": {description: The handle holds fields beyond this role's scope (Wave 4c section 6.1)}
-        "200": {description: The handle}
+        "200": {description: "The handle, with pinned_by, reads, pages and, since Wave 5 (section 12.8), stale and invalidated: {reason, kind, reference, at, by} or null"}
         "404": {description: No such handle}
   /api/ask/handles/{id}/rows:
     get:
@@ -398,9 +412,10 @@ paths:
       parameters:
         - {name: id, in: path, required: true, schema: {type: integer}}
         - {name: page, in: query, schema: {type: integer, default: 0}}
-        - {name: purpose, in: query, schema: {type: string}, description: Why, written on the read audit row}
+        - {name: purpose, in: query, schema: {type: string}, description: "Why, written on the read audit row; export, promote, release and pin are refused on an answer that no longer reproduces (Wave 5 section 6.6)"}
       responses:
         "200": {description: "{handle, page, pages, columns, rows}"}
+        "409": {description: "The purpose is export, promote, release or pin and the answer does not reproduce: truncated, stale (the registry moved, or the handle was invalidated) or incomplete, in that order"}
         "403": {description: The handle holds fields beyond this role's scope}
         "404": {description: No such page, or the rows were dropped by retention}
   /api/ask/handles/{id}/promote:
@@ -409,6 +424,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, required: [cohort], properties: {cohort: {type: string}, create: {type: boolean}, reason: {type: string}}}}}}
       responses:
         "202": {description: "{job, state}"}
+        "409": {description: "The answer does not reproduce and is not promoted (Wave 5 section 6.6): truncated, stale (the registry moved, or the handle was invalidated) or incomplete, in that order"}
   /api/ask/values:
     post:
       summary: An identifier upload, resolved through the linkage store on arrival; the shape comes back, never a value (reviewer since Wave 5)

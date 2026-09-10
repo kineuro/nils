@@ -1375,6 +1375,22 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .unique(&["handle_id", "page"]),
+        // Wave 5 §12.8: an adoption, a pack bump or an erasure invalidates the
+        // handles the dependency door names, and the invalidation is a row:
+        // the handle, why, by what kind of change and which one, when, who.
+        Table::new(
+            "handle_invalidation",
+            vec![
+                col("id", Type::Id),
+                req("handle_id", Type::Int),
+                req("reason", Type::Text),
+                req("kind", Type::Text),
+                req("ref", Type::Text),
+                req("at", Type::Timestamp),
+                req("by", Type::Text),
+            ],
+        )
+        .index(&["handle_id"]),
         // Wave 4b §4.3 (C41): an uploaded identifier list goes by reference.
         // The upload's rows die on resolution; what stays is the source,
         // its digest and the resolved keys. No identifier is ever here.

@@ -122,6 +122,51 @@ pub(crate) fn may_project_raw_of_roles(roles: &[Role]) -> bool {
 /// Wave 4c §6.1: a handle's pages carry the classes the producing scope
 /// allowed, recorded on the handle; a caller whose own scope is narrower is
 /// refused, whoever produced it.
+/// Wave 5 §6.6: why a handle's answer is not `what` (hashed, exported,
+/// released, pinned, promoted), in the order the desk shows: truncated,
+/// stale (the registry moved, or the handle was invalidated), incomplete
+/// (its rows dropped). None when it reproduces. Withdrawn is refused before
+/// any of these by the doors that read rows.
+pub(crate) fn not_reproducible(
+    registry: &mut Registry,
+    h: &handle::Handle,
+    what: &str,
+) -> Result<Option<String>, Reply> {
+    if h.withdrawn_at.is_some() {
+        return Ok(Some(format!(
+            "handle {} was withdrawn and is not {what}",
+            h.id
+        )));
+    }
+    if h.truncated {
+        return Ok(Some(format!(
+            "a truncated answer is not {what}; narrow the question or run it as a job"
+        )));
+    }
+    let epoch = registry.meta().epoch;
+    if let Some(inv) = handle::invalidation(registry.store(), h.id)
+        .map_err(|e| Reply::error(500, e.to_string()))?
+    {
+        return Ok(Some(format!(
+            "a stale answer is not {what}; handle {} was invalidated at {}: {}",
+            h.id, inv.at, inv.reason
+        )));
+    }
+    if h.epoch != epoch {
+        return Ok(Some(format!(
+            "a stale answer is not {what}; the registry moved to epoch {epoch} since handle {} ran at {}",
+            h.id, h.epoch
+        )));
+    }
+    if !h.has_rows() {
+        return Ok(Some(format!(
+            "an incomplete answer is not {what}; the rows of handle {} were dropped by retention",
+            h.id
+        )));
+    }
+    Ok(None)
+}
+
 fn handle_within_scope(h: &handle::Handle, scope: &Scope, id: i64) -> Result<(), Reply> {
     let classes: BTreeSet<Class> =
         serde_json::from_value(h.suppression["classes"].clone()).unwrap_or_default();
@@ -470,6 +515,81 @@ fn answer(
         ["api", "ask", "run"] if post => {
             let (ask, _) = document_of(registry, &doc)?;
             let scheme = scheme_of(registry, &ask)?;
+            // Wave 5 §12.8: the content hash as a cache key. A core that ran
+            // at this epoch and pack answers its handle again, unless the
+            // caller asks for a fresh run.
+            // A named or kept run, or a paged or capped one, is a new
+            // artefact by request and never the cache's.
+            let plain = doc["name"].is_null()
+                && !doc["keep"].as_bool().unwrap_or(false)
+                && doc["after"].is_null()
+                && doc["limit"].is_null();
+            if plain
+                && !doc["fresh"].as_bool().unwrap_or(false)
+                && let Some((h, hash)) = run::cached(
+                    registry,
+                    ask.clone(),
+                    catalog,
+                    &scope,
+                    pack_version.as_deref(),
+                    &scheme,
+                )
+                .map_err(run_err)?
+            {
+                handle_within_scope(&h, &scope, h.id)?;
+                let described = affordance::describe(
+                    &ask,
+                    &Setting {
+                        names: catalog,
+                        scope: &scope,
+                        scheme: &scheme,
+                        principal,
+                        bounds,
+                        values_cap: caps.options_values as usize,
+                    },
+                )
+                .ok();
+                let declaration = described.map(|d| {
+                    nils_ask::describe::declaration(
+                        &ask,
+                        &d,
+                        &scheme.digest(),
+                        h.truncated,
+                        &catalog.locale,
+                    )
+                });
+                let pages = handle::page_count(registry.store(), h.id)
+                    .map_err(|e| Reply::error(500, e.to_string()))?;
+                let rows = handle::page(registry.store(), h.id, 0)
+                    .map_err(|e| Reply::error(500, e.to_string()))?
+                    .unwrap_or_default();
+                handle::touch(registry.store(), h.id)
+                    .map_err(|e| Reply::error(500, e.to_string()))?;
+                let page_rows = caps.page_rows.max(1) as usize;
+                return Ok(Reply::ok(json!({
+                    "handle": h.id,
+                    "hash": hash,
+                    "grain": h.grain,
+                    "row_count": h.row_count,
+                    "declaration": declaration,
+                    "content_hash": h.content_hash,
+                    "truncated": h.truncated,
+                    "columns": h.columns,
+                    "rows": rows,
+                    "page_rows": page_rows,
+                    "pages": pages,
+                    "measures": Value::Null,
+                    "drift": [],
+                    "kept": [],
+                    "identifiers": [],
+                    "inlined": [],
+                    "epoch": epoch,
+                    "cached": true,
+                    "produced_at": h.created_at,
+                    "produced_by": h.principal,
+                    "fresh": "POST again with fresh: true for a new run",
+                })));
+            }
             // Wave 4c §6.4: the declaration block travels with the answer.
             let described = affordance::describe(
                 &ask,
@@ -1203,12 +1323,16 @@ fn answer(
                 .clamp(1, caps.page_rows_max as usize);
             let all = handle::list(registry.store(), withdrawn)
                 .map_err(|e| Reply::error(500, e.to_string()))?;
+            let out = handle::invalidated(registry.store())
+                .map_err(|e| Reply::error(500, e.to_string()))?;
             let mine: Vec<Value> = all
                 .iter()
                 .filter(|h| handle_within_scope(h, &scope, h.id).is_ok())
                 .take(limit)
                 .map(|h| {
                     json!({
+                        "invalidated": out.contains(&h.id),
+                        "stale": out.contains(&h.id) || h.epoch != epoch,
                         "id": h.id, "name": h.name, "grain": h.grain, "row_count": h.row_count,
                         "content_hash": h.content_hash, "principal": h.principal, "actor": h.actor,
                         "created_at": h.created_at, "epoch": h.epoch, "pack_version": h.pack_version,
@@ -1232,6 +1356,12 @@ fn answer(
                 .map_err(|e| Reply::error(500, e.to_string()))?;
             let mut v = serde_json::to_value(&h).unwrap_or(Value::Null);
             v["pinned_by"] = json!(pins);
+            // Wave 5 §12.8: the invalidation, when there is one, and what
+            // it means for the answer
+            let inv = handle::invalidation(registry.store(), id)
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            v["stale"] = json!(inv.is_some() || h.epoch != epoch);
+            v["invalidated"] = serde_json::to_value(inv).unwrap_or(Value::Null);
             v["reads"] = json!(
                 handle::read_count(registry.store(), id)
                     .map_err(|e| Reply::error(500, e.to_string()))?
@@ -1254,6 +1384,14 @@ fn answer(
             handle_within_scope(&h, &scope, id)?;
             if !h.has_rows() {
                 return Err(Reply::error(404, HandleError::Expired(id).to_string()));
+            }
+            // Wave 5 §6.6: a page read for an export or a promotion is
+            // refused at the server when the answer no longer reproduces
+            if let Some(purpose) = query.get("purpose").map(String::as_str)
+                && matches!(purpose, "export" | "promote" | "release" | "pin")
+                && let Some(why) = not_reproducible(registry, &h, &format!("{purpose}d"))?
+            {
+                return Err(Reply::error(409, why));
             }
             let pages = handle::page_count(registry.store(), id)
                 .map_err(|e| Reply::error(500, e.to_string()))?;
@@ -1282,9 +1420,14 @@ fn answer(
             let cohort = doc["cohort"]
                 .as_str()
                 .ok_or_else(|| Reply::error(400, "cohort is required"))?;
-            handle::get(registry.store(), id)
+            let h = handle::get(registry.store(), id)
                 .map_err(|e| Reply::error(500, e.to_string()))?
                 .ok_or_else(|| Reply::error(404, format!("no handle {id}")))?;
+            // Wave 5 §6.6: a stale answer is not promoted, and the reason
+            // comes in the desk's order
+            if let Some(why) = not_reproducible(registry, &h, "promoted")? {
+                return Err(Reply::error(409, why));
+            }
             let mut command = vec![
                 "ask".to_string(),
                 "promote".to_string(),

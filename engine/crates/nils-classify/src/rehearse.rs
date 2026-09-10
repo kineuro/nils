@@ -117,6 +117,39 @@ pub fn run(
     }))
 }
 
+/// Wave 5 §12.4: the stacks an overlay moves, by id. The same pass as
+/// `run`, keeping the stack instead of counting it; the closure the
+/// dependency door names. The sample is bounded like a rehearsal's.
+pub fn moved_stacks(
+    store: &mut Store,
+    before: &Pack,
+    after: &Pack,
+    scope: &Scope,
+    sample: usize,
+) -> Result<Vec<i64>, Error> {
+    let sample = sample.clamp(1, SAMPLE_MAX);
+    let (sql, params) = scoped_select(store, &before.modality, scope, sample);
+    let rows = store.query(&sql, &params)?;
+    let mut moved = Vec::new();
+    for r in &rows {
+        let id = r.int(0)?;
+        let (_, stack, private) =
+            to_stack(r, false, before).map_err(|e| Error::Message(e.to_string()))?;
+        let was = Evaluated::with_private(before, &stack, private.clone()).classify();
+        let now = Evaluated::with_private(after, &stack, private).classify();
+        let mut axes: Vec<&str> = was.axes.iter().map(|a| a.axis.as_str()).collect();
+        for a in &now.axes {
+            if !axes.contains(&a.axis.as_str()) {
+                axes.push(&a.axis);
+            }
+        }
+        if axes.iter().any(|axis| was.stored(axis) != now.stored(axis)) {
+            moved.push(id);
+        }
+    }
+    Ok(moved)
+}
+
 /// The sample size a caller asked for, bounded.
 pub fn sample_of(asked: Option<i64>) -> usize {
     match asked {

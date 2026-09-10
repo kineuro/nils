@@ -47,6 +47,9 @@ pub enum Action {
     CohortMemberRemove,
     CohortPromote,
     SelectionSave,
+    /// Wave 5 §12.8: a handle stopped reproducing under a change the
+    /// dependency door named.
+    HandleInvalidate,
 }
 
 impl Action {
@@ -73,6 +76,7 @@ impl Action {
             Action::CohortMemberRemove => "cohort.member.remove",
             Action::CohortPromote => "cohort.promote",
             Action::SelectionSave => "selection.save",
+            Action::HandleInvalidate => "handle.invalidate",
         }
     }
 
