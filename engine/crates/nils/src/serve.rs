@@ -821,6 +821,10 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         }
     }
     let auth = Auth::parse(&args)?;
+    // §12: a fresh install has no --pack-dir, so the packs are looked for
+    // where an installer leaves them; without any, the engine still serves
+    // and the doors that need a pack say so.
+    let pack_dir = crate::pack_dir(home, args.pack_dir.clone()).ok();
     let server = tiny_http::Server::http(&args.bind)
         .map_err(|e| fail(format!("cannot listen on {}: {e}", args.bind)))?;
     let bound = server
@@ -829,10 +833,14 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         .map(|a| a.to_string())
         .unwrap_or_else(|| args.bind.clone());
     println!(
-        "nils serve   {bound}   auth {}   workers {}   registry {}",
+        "nils serve   {bound}   auth {}   workers {}   registry {}   packs {}",
         auth.name(),
         args.workers.max(1),
-        home.dir().display()
+        home.dir().display(),
+        pack_dir
+            .as_ref()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| "none".to_string())
     );
     let ask_caps = match &args.ask_caps {
         Some(text) => {
@@ -849,7 +857,7 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     let doors = Arc::new(Doors {
         home: home.clone(),
         auth,
-        pack_dir: args.pack_dir.clone(),
+        pack_dir: pack_dir.clone(),
         node: nils_registry::job::hostname(),
         started: Instant::now(),
         served: AtomicUsize::new(0),

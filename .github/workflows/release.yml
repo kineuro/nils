@@ -1,7 +1,7 @@
 name: release
 # On a version tag: build `nils` for the six targets (engine-build.yml, the same
 # build as ci.yml), check that the binary carries the tag's version, and publish a
-# GitHub release with the binaries, their checksums, and the matching section of
+# GitHub release with the binaries, the packs, their checksums, and the matching section of
 # CHANGELOG.md as the notes, in the form Bifrost uses (docs/decisions/15, R4).
 on:
   push:
@@ -24,13 +24,16 @@ jobs:
           pattern: nils-*
           path: bin
           merge-multiple: true
-      - name: the binaries carry the tag's version
+      - name: the binaries carry the tag's version, and the packs go with them
         run: |
           v=${GITHUB_REF_NAME#v}
           chmod +x bin/nils-*
           got=$(bin/nils-linux-x86_64 --version)
           [ "$got" = "nils $v" ] || { echo "tag says $v, the binary says '$got': raise version in engine/Cargo.toml first"; exit 1; }
-          (cd bin && sha256sum nils-* > SHA256SUMS && echo "$v" > VERSION && ls -la)
+          # the rule sets travel with the binary: one tarball holding `packs/`,
+          # which is what the installer unpacks and `nils update` swaps.
+          tar -czf bin/packs.tar.gz packs
+          (cd bin && sha256sum nils-* packs.tar.gz > SHA256SUMS && echo "$v" > VERSION && ls -la)
       - name: release notes from the changelog
         run: |
           v=${GITHUB_REF_NAME#v}
@@ -43,5 +46,6 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             bin/nils-*
+            bin/packs.tar.gz
             bin/SHA256SUMS
             bin/VERSION
