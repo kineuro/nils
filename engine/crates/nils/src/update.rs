@@ -145,12 +145,37 @@ fn asset(base: &str, version: &str, file: &str) -> String {
 /// it publishes beside its binaries.
 fn latest_version(base: &str) -> Result<String, Exit> {
     let url = format!("{base}/latest/download/VERSION");
-    let bytes = fetch(&url).map_err(|e| fail(format!("no release to update to: {e}")))?;
-    let text = String::from_utf8_lossy(&bytes).trim().to_string();
-    if text.is_empty() || text.lines().count() > 1 {
-        return Err(fail(format!("{url} does not hold a version on one line")));
+    match fetch(&url) {
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes).trim().to_string();
+            if text.is_empty() || text.lines().count() > 1 {
+                return Err(fail(format!("{url} does not hold a version on one line")));
+            }
+            Ok(text.trim_start_matches('v').to_string())
+        }
+        // GitHub's own `latest` skips a pre-release, and a pre-release is all
+        // there is before 1.0.0, so ask the API for the newest tag instead.
+        Err(e) => newest_tag(base).ok_or_else(|| fail(format!("no release to update to: {e}"))),
     }
-    Ok(text.trim_start_matches('v').to_string())
+}
+
+/// The newest tag of a GitHub repository, pre-release or not, from the API.
+/// `None` for a channel that is not GitHub, whose own `VERSION` is the answer.
+fn newest_tag(base: &str) -> Option<String> {
+    let repo = base
+        .strip_prefix("https://github.com/")?
+        .strip_suffix("/releases")?;
+    let body = fetch(&format!(
+        "https://api.github.com/repos/{repo}/releases?per_page=10"
+    ))
+    .ok()?;
+    let text = String::from_utf8_lossy(&body);
+    let at = text.find("\"tag_name\"")?;
+    let rest = &text[at + "\"tag_name\"".len()..];
+    let open = rest.find('"')? + 1;
+    let close = rest[open..].find('"')? + open;
+    let tag = rest[open..close].trim_start_matches('v').to_string();
+    (!tag.is_empty()).then_some(tag)
 }
 
 /// Fetch one file of a release and check it against that release's sums.
