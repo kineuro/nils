@@ -272,7 +272,7 @@ pub(crate) fn install_binary(path: &Path, bytes: &[u8]) -> Result<(), Exit> {
 /// The packs the release carries, over the directory in use. The tarball
 /// holds one `packs/` directory, so it is unpacked beside the old one and
 /// the two are swapped.
-fn refresh_packs(base: &str, version: &str, dir: &Path) -> Result<String, String> {
+pub(crate) fn refresh_packs(base: &str, version: &str, dir: &Path) -> Result<String, String> {
     let parent = dir.parent().ok_or("the pack directory has no parent")?;
     if !writable(parent) {
         return Err(format!("{} is not writable by this user", parent.display()));
