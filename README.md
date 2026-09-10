@@ -4,6 +4,21 @@
 
 > **Pre-alpha.** This repository is the v1 rewrite of NILS, developed in the open from its first commit on 2026-09-02; nothing here runs yet. NILS v0, the 0.x line in daily use in our group, lives in the private repository `kineuro/nils_private`; its public mirror is archived at [kineuro/nils-legacy](https://github.com/kineuro/nils-legacy).
 
+## Installing
+
+One command installs every part, makes what they need and says what it did:
+
+```
+nils setup
+```
+
+It is a wizard: what to install, on the machine or in containers, where it
+lives, the registry and its key, who may sign in and who may reach the desk,
+what this machine's graphics card can serve, and how it is kept running.
+`--print` says what it would do and changes nothing; `--yes` takes every
+default, which is what a piped run does. [`docs/guides/setup.md`](docs/guides/setup.md)
+is the guide, and `nils update --all` is the other half.
+
 ## Where things are
 
 | | |
