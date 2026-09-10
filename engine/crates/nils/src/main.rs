@@ -33,6 +33,7 @@ mod gate;
 mod login;
 mod mcp;
 mod places;
+mod pyramid;
 mod serve;
 mod summary;
 mod supervise;
@@ -177,6 +178,11 @@ enum Command {
     Session {
         #[command(subcommand)]
         command: SessionCommand,
+    },
+    /// The viewing pyramid of a stack: four levels of HTJ2K tiles into a working place (Wave 5 section 12.7)
+    Pyramid {
+        #[command(subcommand)]
+        command: PyramidCommand,
     },
     /// The registry's settings: the timezone and the week start its dates are read under (Wave 5 section 12.6)
     Settings {
@@ -510,6 +516,29 @@ enum SettingsCommand {
         key: String,
         #[arg(value_name = "VALUE")]
         value: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PyramidCommand {
+    /// Build the pyramid of one stack: every slice at four in-plane levels, 256 by 256 tiles, reversible HTJ2K
+    Build {
+        /// The stack's id in the registry
+        #[arg(long, value_name = "ID")]
+        stack: i64,
+        /// The working place to write under; the first working place when absent
+        #[arg(long, value_name = "NAME")]
+        place: Option<String>,
+        /// Planes encoded at once; the machine's cores when absent
+        #[arg(long, value_name = "N")]
+        workers: Option<usize>,
+    },
+    /// The pyramids a working place holds
+    List {
+        #[arg(long, value_name = "NAME")]
+        place: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1310,6 +1339,7 @@ fn main() -> ExitCode {
         Command::Select(args) => select_preview(&home, args),
         Command::Jobs(command) => jobs_command(&home, command),
         Command::Settings { command } => settings_command(&home, command),
+        Command::Pyramid { command } => pyramid_command(&home, command),
         Command::Login(args) => login_command(args),
         Command::Logout => {
             if login::logout() {
@@ -2737,6 +2767,66 @@ fn print_report(report: &Report, json: bool) -> Result<(), Exit> {
 /// `nils settings`: the registry's reading of dates, shown or set. A set
 /// moves the epoch, so every open catalog is rebuilt and every hash taken
 /// after it carries the new locale.
+/// Wave 5 §12.7: the pyramid job and its listing.
+fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    match command {
+        PyramidCommand::Build {
+            stack,
+            place,
+            workers,
+        } => {
+            let working =
+                crate::pyramid::working_place(registry.store(), place.as_deref()).map_err(usage)?;
+            let root = crate::pyramid::dir(std::path::Path::new(&working.path), stack);
+            let volume = crate::pyramid::read_volume(registry.store(), stack).map_err(fail)?;
+            let workers = workers.unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4)
+            });
+            let m = crate::pyramid::build(&volume, stack, &root, workers, None).map_err(fail)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "stack": stack, "place": working.name, "root": root.display().to_string(),
+                    "shape": m.shape, "levels": m.levels, "codec": m.codec,
+                    "bytes_per_level": m.bytes_per_level, "raw_bytes": m.precompute.raw_bytes,
+                    "wall_seconds": m.precompute.wall_seconds, "workers": m.precompute.workers,
+                })
+            );
+            Ok(())
+        }
+        PyramidCommand::List { place, json } => {
+            let working =
+                crate::pyramid::working_place(registry.store(), place.as_deref()).map_err(usage)?;
+            let built = crate::pyramid::built(std::path::Path::new(&working.path));
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&built).unwrap_or_default()
+                );
+            } else {
+                for (stack, m) in &built {
+                    println!(
+                        "stack {stack}: {}x{}x{} at {} levels, {} bytes, built {}",
+                        m.shape[0],
+                        m.shape[1],
+                        m.shape[2],
+                        m.levels,
+                        m.bytes_per_level.iter().sum::<u64>(),
+                        m.built_at
+                    );
+                }
+                if built.is_empty() {
+                    println!("no pyramid under the working place {}", working.name);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 fn settings_command(home: &Home, command: SettingsCommand) -> Result<(), Exit> {
     let mut registry = open(home)?;
     match command {
@@ -7291,13 +7381,22 @@ pub(crate) fn batch_doc(
     let report = row
         .opt_text(4)?
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    let started_at = row.opt_text(2)?.map(str::to_string);
+    let finished_at = row.opt_text(3)?.map(str::to_string);
+    let (state, name) = (row.text(0)?.to_string(), row.text(1)?.to_string());
+    // Wave 5 §12.7: the pyramid is offered as a follow-on when a working place is bound
+    let working = crate::pyramid::working_place(store, None).ok();
     Ok(Some(serde_json::json!({
         "id": id,
-        "state": row.text(0)?,
-        "name": row.text(1)?,
-        "started_at": row.opt_text(2)?,
-        "finished_at": row.opt_text(3)?,
+        "state": state,
+        "name": name,
+        "started_at": started_at,
+        "finished_at": finished_at,
         "report": report,
+        "pyramid": working.map(|w| serde_json::json!({
+            "offered": true, "place": w.name,
+            "command": ["pyramid", "build", "--stack", "<stack id>"],
+        })),
     })))
 }
 

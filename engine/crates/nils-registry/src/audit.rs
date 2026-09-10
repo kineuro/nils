@@ -50,6 +50,9 @@ pub enum Action {
     /// Wave 5 §12.8: a handle stopped reproducing under a change the
     /// dependency door named.
     HandleInvalidate,
+    /// Wave 5 §12.7: a person opened a stack's pixels through the instance
+    /// door; one row per stack opened, not per tile.
+    InstanceOpen,
     /// Wave 5 §12.5: a place added, changed or retired.
     PlaceAdd,
     PlaceSet,
@@ -81,6 +84,7 @@ impl Action {
             Action::CohortPromote => "cohort.promote",
             Action::SelectionSave => "selection.save",
             Action::HandleInvalidate => "handle.invalidate",
+            Action::InstanceOpen => "instance.open",
             Action::PlaceAdd => "place.add",
             Action::PlaceSet => "place.set",
             Action::PlaceRetire => "place.retire",
@@ -97,6 +101,7 @@ impl Action {
                 | Action::JobsPrune
                 | Action::Backup
                 | Action::OverlayPropose
+                | Action::InstanceOpen
                 | Action::PlaceAdd
                 | Action::PlaceSet
                 | Action::PlaceRetire

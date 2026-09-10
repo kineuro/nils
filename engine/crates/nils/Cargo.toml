@@ -46,6 +46,9 @@ toml.workspace = true
 # Wave 4c §6.8: the gate seeds a synthetic tree of its own.
 dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
+dicom-object.workspace = true
+openjph-core = "0.1.0"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [dev-dependencies]
 
