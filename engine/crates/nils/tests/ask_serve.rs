@@ -198,6 +198,8 @@ fn the_ask_doors_run_a_document_to_a_handle_and_its_affordances_answer() {
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
     assert_eq!(caps["contracts"]["openapi"], "3");
+    // the synthetic marker: `nils synth` set it, a desk shows a banner on it
+    assert_eq!(caps["registry"]["synthetic"], "nils-synth", "{caps}");
     let ask = &caps["ask"];
     assert_eq!(ask["caps"]["sync_max_rows"], 5000, "{ask}");
     assert_eq!(ask["move_kinds_cap"], 30);

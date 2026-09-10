@@ -768,6 +768,10 @@ pub fn build(registry: &mut Registry, plan: &Plan) -> Result<Manifest, Error> {
     registry
         .next_epoch()
         .map_err(|e| Error::Message(e.to_string()))?;
+    // the marker a desk reads to say "made-up data" on every page
+    registry
+        .set_meta("synthetic", "nils-synth")
+        .map_err(|e| Error::Message(e.to_string()))?;
     registry.store().commit()?;
     Ok(manifest)
 }

@@ -77,6 +77,9 @@ pub struct Meta {
     pub display_length: usize,
     /// JSON, as written.
     pub session_scheme: String,
+    /// Set when the registry was built by `nils synth`: the name of the
+    /// builder. A desk shows a banner on it; real data never carries it.
+    pub synthetic: Option<String>,
 }
 
 /// What `nils init` takes.
@@ -324,6 +327,7 @@ impl Home {
             pseudonym_key: opts.key.clone(),
             display_length: opts.display_length,
             session_scheme,
+            synthetic: None,
         };
         store.begin()?;
         for (k, v) in meta.rows() {
@@ -466,6 +470,7 @@ fn read_meta(store: &mut Store) -> Result<Meta, HomeError> {
             .get("session_scheme")
             .cloned()
             .unwrap_or_else(|| DEFAULT_SESSION_SCHEME.to_string()),
+        synthetic: map.get("synthetic").cloned(),
     })
 }
 

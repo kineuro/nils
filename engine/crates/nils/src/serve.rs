@@ -1853,7 +1853,7 @@ fn capabilities(
             "pack": PACK_CONTRACT_VERSION.trim(),
         },
         "packs": packs,
-        "registry": { "id": meta.registry_id, "epoch": meta.epoch, "schema_version": meta.schema_version },
+        "registry": { "id": meta.registry_id, "epoch": meta.epoch, "schema_version": meta.schema_version, "synthetic": meta.synthetic },
         "auth": doors.auth.name(),
         "principal": caller.principal,
         "roles": caller.roles.iter().map(|r| r.name()).collect::<Vec<_>>(),
