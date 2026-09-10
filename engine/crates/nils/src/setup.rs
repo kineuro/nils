@@ -37,6 +37,18 @@ pub(crate) const DESK_RELEASES: &str = "https://github.com/kineuro/nils-desk/rel
 const ENGINE_IMAGE: &str = "ghcr.io/kineuro/nils";
 const DESK_IMAGE: &str = "ghcr.io/kineuro/nils-desk";
 
+/// The tag a published image carries, for a version. A release names its
+/// images after its git tag, which begins with a v; every version this
+/// wizard holds has had that v taken off, so it goes back on here. One
+/// place, because a tag that does not match is a silent local build.
+fn image_tag(version: &str) -> String {
+    if version.starts_with('v') {
+        version.to_string()
+    } else {
+        format!("v{version}")
+    }
+}
+
 /// Where the two Node parts come from.
 const KVASIR_REPO: &str = "https://github.com/kineuro/kvasir";
 const ASSISTANT_REPO: &str = "https://github.com/kineuro/nils-assistant";
@@ -675,6 +687,11 @@ impl Plan {
         self.desk_dir().join("nils-desk.toml")
     }
 
+    /// The tag the published images carry, for the version this plan holds.
+    fn tag(&self) -> String {
+        image_tag(&self.version)
+    }
+
     fn has(&self, part: Part) -> bool {
         self.parts.contains(&part)
     }
@@ -938,7 +955,7 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
         engine,
         " -v {}:/srv/nils/backups:U {ENGINE_IMAGE}:{} {}",
         plan.dir.join("backups").display(),
-        plan.version,
+        plan.tag(),
         engine_args(plan, IN_REGISTRY, "/srv/nils/backups").join(" ")
     );
     out.push(engine);
@@ -946,7 +963,7 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
         out.push(format!(
             "podman run -d --pod nils --name nils-desk -v {}:{IN_DESK}:U {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
             plan.desk_dir().display(),
-            plan.version
+            plan.tag()
         ));
     }
     out
@@ -971,7 +988,7 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
         engine,
         " -v {}:/srv/nils/backups {ENGINE_IMAGE}:{} {}",
         plan.dir.join("backups").display(),
-        plan.version,
+        plan.tag(),
         engine_args(plan, IN_REGISTRY, "/srv/nils/backups").join(" ")
     );
     out.push(engine);
@@ -979,7 +996,7 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
         out.push(format!(
             "docker run -d --network nils --name nils-desk -p {publish} -v {}:{IN_DESK} {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
             plan.desk_dir().display(),
-            plan.version
+            plan.tag()
         ));
     }
     out
@@ -989,7 +1006,7 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
 pub(crate) fn docker_compose(plan: &Plan) -> String {
     let mut out = String::from("# Written by nils setup.\nservices:\n");
     let _ = writeln!(out, "  engine:");
-    let _ = writeln!(out, "    image: {ENGINE_IMAGE}:{}", plan.version);
+    let _ = writeln!(out, "    image: {ENGINE_IMAGE}:{}", plan.tag());
     let _ = writeln!(out, "    container_name: nils-engine");
     let _ = writeln!(out, "    restart: unless-stopped");
     let _ = writeln!(
@@ -1013,7 +1030,7 @@ pub(crate) fn docker_compose(plan: &Plan) -> String {
             Reach::Network(_) => format!("{p}:{p}", p = plan.ports.desk),
         };
         let _ = writeln!(out, "  desk:");
-        let _ = writeln!(out, "    image: {DESK_IMAGE}:{}", plan.version);
+        let _ = writeln!(out, "    image: {DESK_IMAGE}:{}", plan.tag());
         let _ = writeln!(out, "    container_name: nils-desk");
         let _ = writeln!(out, "    restart: unless-stopped");
         let _ = writeln!(out, "    depends_on: [engine]");
@@ -1039,7 +1056,7 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
         ),
     )];
     let mut engine = String::from("[Unit]\nDescription=NILS engine\n\n[Container]\n");
-    let _ = writeln!(engine, "Image={ENGINE_IMAGE}:{}", plan.version);
+    let _ = writeln!(engine, "Image={ENGINE_IMAGE}:{}", plan.tag());
     let _ = writeln!(engine, "Pod=nils.pod");
     let _ = writeln!(
         engine,
@@ -1063,7 +1080,7 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
     out.push(("nils-engine.container".to_string(), engine));
     if plan.has(Part::Desk) {
         let mut desk = String::from("[Unit]\nDescription=NILS desk\n\n[Container]\n");
-        let _ = writeln!(desk, "Image={DESK_IMAGE}:{}", plan.version);
+        let _ = writeln!(desk, "Image={DESK_IMAGE}:{}", plan.tag());
         let _ = writeln!(desk, "Pod=nils.pod");
         let _ = writeln!(desk, "Volume={}:{IN_DESK}:U", plan.desk_dir().display());
         let _ = writeln!(desk, "Exec=serve --config {IN_DESK}/nils-desk.toml");
@@ -1770,7 +1787,7 @@ fn do_it(
         PartState {
             version: update::VERSION.to_string(),
             path: if plan.runtime.container() {
-                format!("{ENGINE_IMAGE}:{}", plan.version)
+                format!("{ENGINE_IMAGE}:{}", plan.tag())
             } else {
                 me.display().to_string()
             },
@@ -1811,7 +1828,7 @@ fn do_it(
                 "desk".to_string(),
                 PartState {
                     version: plan.version.clone(),
-                    path: format!("{DESK_IMAGE}:{}", plan.version),
+                    path: format!("{DESK_IMAGE}:{}", plan.tag()),
                     kind: plan.runtime.name().to_string(),
                 },
             );
@@ -1922,7 +1939,7 @@ fn pull_or_build(
     binary: &Path,
 ) -> Result<(), Exit> {
     let engine = plan.runtime.name();
-    let tag = format!("{image}:{}", plan.version);
+    let tag = format!("{image}:{}", plan.tag());
     let pulled = Command::new(engine)
         .args(["pull", &tag])
         .status()
@@ -2003,7 +2020,7 @@ fn make_registry(
                 ""
             }
         );
-        let tag = format!("{ENGINE_IMAGE}:{}", plan.version);
+        let tag = format!("{ENGINE_IMAGE}:{}", plan.tag());
         let mut child = Command::new(engine)
             .args(["run", "--rm", "-i", "-v", &mount, &tag])
             .args(["--registry", IN_REGISTRY, "key", "add", "nils"])
@@ -2800,7 +2817,7 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<(), Exit> {
                     .path
                     .rsplit_once(':')
                     .map_or(part.path.as_str(), |(i, _)| i);
-                let tag = format!("{image}:{version}");
+                let tag = format!("{image}:{}", image_tag(version));
                 let pulled = Command::new(&part.kind)
                     .args(["pull", &tag])
                     .status()
@@ -2965,11 +2982,11 @@ mod tests {
             "{engine}"
         );
         assert!(
-            engine.contains("ghcr.io/kineuro/nils:1.0.0-alpha.2"),
+            engine.contains("ghcr.io/kineuro/nils:v1.0.0-alpha.2"),
             "{engine}"
         );
         assert!(engine.contains("--bind 0.0.0.0:8437"), "{engine}");
-        assert!(commands[2].contains("ghcr.io/kineuro/nils-desk:1.0.0-alpha.2"));
+        assert!(commands[2].contains("ghcr.io/kineuro/nils-desk:v1.0.0-alpha.2"));
     }
 
     #[test]
@@ -2980,7 +2997,7 @@ mod tests {
         assert!(!commands[1].contains(":U"), "docker owns its own mounts");
         assert!(commands[2].contains("-p 127.0.0.1:7200:7200"));
         let compose = docker_compose(&plan(Runtime::Docker));
-        assert!(compose.contains("image: ghcr.io/kineuro/nils:1.0.0-alpha.2"));
+        assert!(compose.contains("image: ghcr.io/kineuro/nils:v1.0.0-alpha.2"));
         assert!(compose.contains("container_name: nils-desk"));
         assert!(compose.contains("/data/source:/data/source:ro"));
     }
@@ -2998,9 +3015,20 @@ mod tests {
         assert!(
             files[1]
                 .1
-                .contains("Image=ghcr.io/kineuro/nils:1.0.0-alpha.2")
+                .contains("Image=ghcr.io/kineuro/nils:v1.0.0-alpha.2")
         );
         assert!(files[1].1.contains(":U"), "a rootless mount is owned");
+    }
+
+    #[test]
+    fn an_image_is_named_by_the_tag_the_release_pushed() {
+        // The release pushes ghcr.io/kineuro/nils:<git tag>, and a git tag
+        // begins with a v. Every version this wizard holds has had that v
+        // taken off by the updater, so a name built from the version alone
+        // asks for a tag that was never pushed: the pull fails, the wizard
+        // falls back to a local build, and nobody is told why.
+        assert_eq!(image_tag("1.0.0-alpha.2"), "v1.0.0-alpha.2");
+        assert_eq!(image_tag("v1.0.0-alpha.2"), "v1.0.0-alpha.2");
     }
 
     #[test]

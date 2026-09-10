@@ -688,6 +688,20 @@ fn oidc_refuses_a_misconfiguration_before_it_listens() {
 fn serve_jwks(doc: std::sync::Arc<std::sync::Mutex<String>>) -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    serve_jwks_listener(listener, doc);
+    port
+}
+
+/// The same, on a port already chosen, for an issuer that starts late.
+fn serve_jwks_on(port: u16, doc: std::sync::Arc<std::sync::Mutex<String>>) {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    serve_jwks_listener(listener, doc);
+}
+
+fn serve_jwks_listener(
+    listener: std::net::TcpListener,
+    doc: std::sync::Arc<std::sync::Mutex<String>>,
+) {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { break };
@@ -703,7 +717,6 @@ fn serve_jwks(doc: std::sync::Arc<std::sync::Mutex<String>>) -> u16 {
             );
         }
     });
-    port
 }
 
 /// Wave 4c §5.3 and §5.9: a trust list of two issuers, each with its own
@@ -835,6 +848,71 @@ fn a_trust_list_verifies_two_issuers_and_refetches_a_rotated_key_by_url() {
     );
     assert_eq!(caps["ceiling"], "reviewer", "{caps}");
     assert_eq!(caps["actor"]["ceiling"], "reviewer", "{caps}");
+    server.finish();
+}
+
+/// An issuer that is not up when the engine starts is a matter of order,
+/// not a fault in the configuration. In a container run the desk that mints
+/// the tokens usually comes up after the engine that trusts it, and an
+/// engine that exits there never comes back on its own. So the engine
+/// starts holding no key of that issuer, says so, and asks again when the
+/// first token arrives, without waiting out the refetch floor.
+#[test]
+fn an_issuer_that_is_not_up_yet_does_not_stop_the_engine() {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/oidc");
+    let key = EncodingKey::from_rsa_pem(&std::fs::read(fixtures.join("signing-key.pem")).unwrap())
+        .unwrap();
+    // A port with nothing behind it: the issuer this engine trusts has not
+    // started yet.
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = held.local_addr().unwrap().port();
+    drop(held);
+    let iss = "https://id.example.org/application/o/nils/";
+    let home = registry();
+    let trust = format!("issuer={iss},audience=nils,jwks=http://127.0.0.1:{port}/jwks");
+    // Server::start panics when the engine dies before it listens, so
+    // reaching the next line is half of what this test says.
+    // Two requests, which is what this server is told to serve: one while
+    // the issuer is down, one after it comes up.
+    let server = Server::start(
+        &home,
+        2,
+        &[
+            "--auth",
+            "oidc",
+            "--oidc-trust",
+            &trust,
+            "--role",
+            "students=reader",
+        ],
+        &[],
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some("test-2026".to_string());
+    let token = encode(
+        &header,
+        &serde_json::json!({"iss": iss, "aud": "nils", "sub": "anna", "groups": ["students"], "exp": now + 600, "iat": now}),
+        &key,
+    )
+    .unwrap();
+    // The issuer is still down: the token is refused, and the engine is the
+    // one refusing it, which is the point.
+    let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&token));
+    assert_eq!(status, 401, "{doc}");
+    // The issuer comes up. The next token is verified without waiting out
+    // the refetch floor, which this engine never lowered.
+    let served = std::sync::Arc::new(std::sync::Mutex::new(
+        std::fs::read_to_string(fixtures.join("jwks.json")).unwrap(),
+    ));
+    serve_jwks_on(port, served);
+    let (status, caps) = server.request("GET", "/api/capabilities", None, Some(&token));
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(caps["principal"], "anna@id.example.org", "{caps}");
     server.finish();
 }
 

@@ -355,8 +355,8 @@ fn podman_is_one_pod_that_publishes_only_the_desk() {
         dir.join("registry").display()
     ));
     o.says(&format!("-v {0}:{0}:ro", source.display()));
-    o.says("ghcr.io/kineuro/nils:");
-    o.says("ghcr.io/kineuro/nils-desk:");
+    o.says("ghcr.io/kineuro/nils:v");
+    o.says("ghcr.io/kineuro/nils-desk:v");
     // local mode: the engine trusts the desk to say who the person is
     o.says("--auth oidc --oidc-trust issuer=http://127.0.0.1:7200");
     // the quadlets, which is how podman comes back after a restart
@@ -412,7 +412,7 @@ fn docker_is_a_network_and_a_compose_file_and_owns_no_mounts() {
     with_login.says("jwks=http://nils-desk:7200/.well-known/jwks.json");
     o.says("-p 127.0.0.1:7200:7200");
     o.says("compose.yaml");
-    o.says("image: ghcr.io/kineuro/nils:");
+    o.says("image: ghcr.io/kineuro/nils:v");
     o.says("container_name: nils-desk");
     o.says("depends_on: [engine]");
     assert!(

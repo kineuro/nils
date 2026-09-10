@@ -99,9 +99,11 @@ checked against the release's checksums and installed beside the running
 `nils` or in `<dir>/bin` where that directory is not writable. `--channel`
 (or `NILS_RELEASES`) points the whole thing at a deployment's own release
 directory. In a container run the images are
-`ghcr.io/kineuro/nils` and `ghcr.io/kineuro/nils-desk`; where an image
-cannot be pulled, a Containerfile is written beside the base directory and
-the image is built there from the release binary already downloaded.
+`ghcr.io/kineuro/nils` and `ghcr.io/kineuro/nils-desk`, tagged as the
+release is tagged, so version 1.0.0-alpha.2 is the image `v1.0.0-alpha.2`.
+Both are public and pull without an account. Where an image cannot be
+pulled, a Containerfile is written beside the base directory and the image
+is built there from the release binary already downloaded.
 
 The assistant and the gateway ship no binary: they are cloned from
 [`kineuro/kvasir`](https://github.com/kineuro/kvasir) and
@@ -162,7 +164,7 @@ path = "/home/you/nils/registry"
 
 [parts.engine]
 version = "1.0.0-alpha.2"
-path = "ghcr.io/kineuro/nils:1.0.0-alpha.2"
+path = "ghcr.io/kineuro/nils:v1.0.0-alpha.2"
 kind = "podman"
 ```
 
