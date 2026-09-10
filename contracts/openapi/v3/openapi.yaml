@@ -24,7 +24,11 @@ info:
   version: "3"
   description: >-
     The one door of the engine (decision record 05 section 1). Every answer
-    is JSON; an error is {"error": "..."} with the status that says why: 400
+    is JSON; an error is {"error": "...", "disclosure": "safe" | "gated" | "internal"}
+    (Wave 5 section 12.6: safe when the text is built from document, set,
+    field and door names and counts; gated when it may carry a value of a
+    person, which a desk renders through the projection door with its audit
+    row; internal for a 5xx) with the status that says why: 400
     a bad request, 401 no or unknown token, 404 no such door or id, 409 a
     refusal (a job of that kind is running, a decision of a higher rank
     holds, the registry moved on since a decision was staged), 500 the
@@ -313,10 +317,11 @@ paths:
         "409": {description: "stale_options: the list came from another document, epoch or scope"}
   /api/ask/diagnose:
     post:
-      summary: The issues, the funnel, the drops, the ties, the coarse rows, the cost class, a zero row explanation
-      requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, keys: {type: boolean}}}}}}
+      summary: The issues, the funnel, the drops, the ties, the coarse rows, the cost class, a zero row explanation; `by: clause` keys the funnel by set and clause group (Wave 5 section 12.3)
+      requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, keys: {type: boolean}, by: {type: string, enum: [set, clause], default: set}}}}}}
       responses:
-        "200": {description: The diagnosis}
+        "200": {description: "The diagnosis; under by: clause, `groups` holds one row per set and group in the language's order (source, near, attach, has, where, pick, out), each with the clauses it folds, the rows and subjects kept and the rows lost, so a set's source less its losses is its answer"}
+        "400": {description: "by names a keying that is not set or clause"}
   /api/ask/preview:
     post:
       summary: Ten rows, or the count, by level
@@ -324,9 +329,9 @@ paths:
         "200": {description: "{level, columns, rows, truncated}"}
   /api/ask/describe:
     post:
-      summary: One sentence per set, the conventions, the denominators, the mechanisms, the disclosure
+      summary: One sentence per set, the conventions, the denominators, the mechanisms, the disclosure; the declaration carries the registry's timezone and week start (Wave 5 section 12.6), never the browser's
       responses:
-        "200": {description: The description}
+        "200": {description: "The description, with the declaration: grain, session scheme, membership, key namespace, pick rule, denominator, disclosure, truncated, timezone, week_start; the timezone and the week start are part of the content hash when they are not UTC and monday"}
   /api/ask/start:
     post:
       summary: Resolve what a person may start from into the opening set of a document (Wave 5 section 7.1, 12.1)
