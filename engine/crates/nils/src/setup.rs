@@ -42,6 +42,7 @@ const DESK_IMAGE: &str = "ghcr.io/kineuro/nils-desk";
 /// neither: a container running as the image's own user cannot write a
 /// directory this account owns, and the first thing it tries to write is
 /// the registry's key. So every docker run is told to be this account.
+#[cfg(unix)]
 #[allow(
     unsafe_code,
     reason = "getuid and getgid read this process and cannot fail"
@@ -50,6 +51,24 @@ fn as_this_account() -> String {
     // SAFETY: neither call takes a pointer, touches memory, or can fail.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     format!("{uid}:{gid}")
+}
+
+/// Windows names no such account, and the wizard refuses Windows long
+/// before a container runs; this is here so the binary builds there.
+#[cfg(not(unix))]
+fn as_this_account() -> String {
+    String::new()
+}
+
+/// `--user <this account> ` for a docker run, and nothing where there is no
+/// account to name.
+fn docker_user() -> String {
+    let account = as_this_account();
+    if account.is_empty() {
+        String::new()
+    } else {
+        format!("--user {account} ")
+    }
 }
 
 /// The tag a published image carries, for a version. A release names its
@@ -993,8 +1012,8 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
     };
     let mut out = vec!["docker network create nils".to_string()];
     let mut engine = format!(
-        "docker run -d --network nils --name nils-engine --user {} -v {}:{IN_REGISTRY}",
-        as_this_account(),
+        "docker run -d --network nils --name nils-engine {}-v {}:{IN_REGISTRY}",
+        docker_user(),
         plan.registry().display()
     );
     if let Some(source) = &plan.source {
@@ -1010,8 +1029,8 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
     out.push(engine);
     if plan.has(Part::Desk) {
         out.push(format!(
-            "docker run -d --network nils --name nils-desk --user {} -p {publish} -v {}:{IN_DESK} {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
-            as_this_account(),
+            "docker run -d --network nils --name nils-desk {}-p {publish} -v {}:{IN_DESK} {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
+            docker_user(),
             plan.desk_dir().display(),
             plan.tag()
         ));
@@ -1025,7 +1044,9 @@ pub(crate) fn docker_compose(plan: &Plan) -> String {
     let _ = writeln!(out, "  engine:");
     let _ = writeln!(out, "    image: {ENGINE_IMAGE}:{}", plan.tag());
     let _ = writeln!(out, "    container_name: nils-engine");
-    let _ = writeln!(out, "    user: \"{}\"", as_this_account());
+    if !as_this_account().is_empty() {
+        let _ = writeln!(out, "    user: \"{}\"", as_this_account());
+    }
     let _ = writeln!(out, "    restart: unless-stopped");
     let _ = writeln!(
         out,
@@ -1050,7 +1071,9 @@ pub(crate) fn docker_compose(plan: &Plan) -> String {
         let _ = writeln!(out, "  desk:");
         let _ = writeln!(out, "    image: {DESK_IMAGE}:{}", plan.tag());
         let _ = writeln!(out, "    container_name: nils-desk");
-        let _ = writeln!(out, "    user: \"{}\"", as_this_account());
+        if !as_this_account().is_empty() {
+            let _ = writeln!(out, "    user: \"{}\"", as_this_account());
+        }
         let _ = writeln!(out, "    restart: unless-stopped");
         let _ = writeln!(out, "    depends_on: [engine]");
         let _ = writeln!(out, "    command: serve --config {IN_DESK}/nils-desk.toml");
@@ -2044,8 +2067,9 @@ fn make_registry(
         let tag = format!("{ENGINE_IMAGE}:{}", plan.tag());
         // Docker does not remap the user, so the container has to be told
         // to be this account or it cannot write the directory it mounts.
-        let user: Vec<String> = if plan.runtime == Runtime::Docker {
-            vec!["--user".to_string(), as_this_account()]
+        let account = as_this_account();
+        let user: Vec<String> = if plan.runtime == Runtime::Docker && !account.is_empty() {
+            vec!["--user".to_string(), account]
         } else {
             Vec::new()
         };
@@ -3068,6 +3092,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn docker_runs_a_network_and_does_not_remap_the_user() {
         let commands = docker_commands(&plan(Runtime::Docker));
         assert_eq!(commands[0], "docker network create nils");
@@ -3079,6 +3104,7 @@ mod tests {
         // is the registry's key. Every docker run is told to be this
         // account instead.
         let me = as_this_account();
+        assert!(!me.is_empty(), "a unix account is a uid and a gid");
         assert!(
             commands[1].contains(&format!("--user {me}")),
             "{}",
