@@ -640,6 +640,90 @@ with its own tests and its gate.
 | D3 | **Teaching** | §9.5 on C1 and the bench. | Bar 7. |
 | W1 | **The site** | The mark and the desk's page on the group's site, the guide linked from the portal. | The record's, not this document's. |
 
+**As built (2026-09-10).** The wave was built in one day across five
+repositories, one pull request per slice, every one merged green and live on the
+group's deployment within the hour of its merge.
+
+- A0 (nils #103) the record and this specification. W0: the deployment, the
+  synthetic marker (nils #105) and the desk's banner (nils-desk #13), deploy on
+  merge in every part (nils #104, nils-desk #12, nils-assistant #16, kvasir #9).
+- B1 (nils-desk #14): `web/src/ui/theme.css` with the twin token tables, the
+  three faces served from the desk's own origin, the mark and the favicon, the
+  lint that refuses a literal colour outside the theme file.
+- A1 (nils #106): `GET /api/summary`, `POST /api/ask/start`,
+  `GET /api/ask/documents`; the values upload asks for reviewer.
+- A2 (nils #107): `GET /api/timeline/{kind}/{id}` over document, handle,
+  subject, session, stack, job, release and review.
+- B2 (nils-desk #15): Home's four bands, the sections of §6.2, object pages at
+  stable addresses with one timeline each, the rail with typed context, the
+  wait, the failure and the empty, the stale veil and the blocked control, the
+  shortcut registry, print.
+- A3 (nils #108): `diagnose by: clause`, `disclosure` on every error,
+  `timezone` and `week_start` in the declaration and in the core hash when they
+  are not the defaults, `nils settings show|set`.
+- B3 (nils-desk #16): the workbench of §7; `web/scripts/headless.mjs` runs an
+  authored corpus through the desk's own path against a live engine and compares
+  it with the station's documents.
+- D1 (nils-assistant #17): conversations keyed by lineage, the typed context
+  admitted by the assistant, a proposal on a document that moved refused as
+  stale.
+- B4 (nils-desk #17): the batch page's stage strip, pack pages, the review queue
+  by cost with bulk decisions one audit row each and refused for items that need
+  reading, the closure panel on adoption, the release form's facts and export
+  place.
+- A4 (nils #111): places as registry objects with probes, `nils place`, the
+  bindings of the path-taking verbs to roles, the rules of §10.2 at the doors.
+- A5 (nils #109): `GET /api/depends/{kind}/{id}`, the content hash as a cache
+  key on run with `fresh: true` to force a new one, invalidation rows, stale
+  refused at the server on promote, rows and releases.
+- B5 (nils-desk #18): Settings as the operator's console, Parts with the update
+  button behind its closure panel and the command beside it, Places, Database,
+  Audit by person, door, object and month, Identity; the desk proxies the
+  supervisor under `/supervise/` for admins.
+- E1 (nils #110): `nils supervise` with keygen, pack, sign, verify, run and
+  update; the artifact format and the verifier; the channel; the guide in
+  `docs/guides/supervise.md`.
+- D2 (nils-assistant #18, desk nils-desk #20): rungs from the engine's policy
+  rows, standing grants, the `operator` station whose verdict is a plan, the
+  scheduler on engine events, the inbox; the ladder test in CI.
+- S1: the viewer study, in the record. Every candidate scrolled at frame rate
+  once its bytes were in the browser; the wire and the memory were the limits.
+  Review is built on cornerstone3D with an evicting slab loader, HTJ2K tiles
+  decoded in a worker pool, a server render as the first picture and the gated
+  path.
+- C1 (kvasir #11): the model lifecycle, registered, admitted, promoted, retired;
+  promotion refused without a passed admission.
+- D3 (nils-assistant #19, desk nils-desk #22): corrections curated into sets, a
+  fine-tune as a job (dry where torch and peft are absent, the recipe recorded),
+  admission and the bench beside each other, promotion refused until both are
+  green.
+- A6 (nils #112): the pyramid job, `nils pyramid build`, HTJ2K in process
+  through a pure Rust port of OpenJPH, four levels of 256 pixel tiles written to
+  a `working` place with a manifest; `GET /api/instances/{stack}/manifest`,
+  `tiles/{level}/{z}` as one response per plane, `slab/{level}/{z0}-{z1}` up to
+  32 planes, `render/{level}/{z}` as JPEG; one audit row per stack opened per
+  person in ten minutes; a reader is refused; burned-in annotation held below
+  operator and blanked in the render.
+- B6 (nils-desk #23): cornerstone3D with the desk's own slab loader, HTJ2K
+  decoded in a worker, six planes ahead in the direction of travel, a capped
+  cache, the server render as the first picture; level by viewport; the coronal
+  and sagittal planes through the render door; the viewer on the review item's
+  page and the stack's page with its own numbers in the footer;
+  `web/scripts/viewer-bench.mjs` as the harness. Over the gateway from a laptop
+  the first image came in under a second and the scroll sat at the frame rate on
+  HTJ2K tiles; a slab-fed volume viewport for MPR in the browser remains.
+- W1: the site's page, the mark, the guide, the portal link (the record's).
+
+**What the closing bars found** (§13). 1: the rig is the laptop install, the
+deployment updated on merge from the first slice. 2: the scene ran headless
+through the workbench on the rig (an authored corpus of 36 questions, 34 with the
+station's content hash, one the same rows, one without a station document) and
+by hand on the deployment. 3: the ladder test in CI. 4 and 5: the tests of A4
+and E1. 6: the report in the record; Review built on what it chose. 7: the loop
+ran on the bench with a dry fine-tune where the card's tooling is absent. 8: the
+theme lint and the context test in CI, and a sweep of the four repositories for
+the group's own names found none.
+
 ## 16. Open questions carried into the wave
 
 - `20 Q21`: the rune's glyph on the mark, settled by Nima against the drawing.
