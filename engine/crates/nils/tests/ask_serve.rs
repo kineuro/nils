@@ -1302,3 +1302,192 @@ fn validate_the_documents_door_and_the_draft_door_refuse_what_run_would() {
     assert!(drafted["document"].is_number(), "{drafted}");
     server.finish();
 }
+
+#[test]
+fn the_summary_the_start_from_resolver_and_the_document_list_answer_on_the_synthetic_home() {
+    // Wave 5 §12.1 (slice A1)
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        30,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=lou@lab:reader",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let operator = Some("an-operator-token-of-len");
+    // the summary: counts, by cohort, never a row
+    let (status, summary) = server.request("GET", "/api/summary", None, reader);
+    assert_eq!(status, 200, "{summary}");
+    let subjects = summary["subjects"]["total"].as_i64().unwrap();
+    let sessions = summary["sessions"]["total"].as_i64().unwrap();
+    let stacks = summary["stacks"]["total"].as_i64().unwrap();
+    assert_eq!(subjects, 48, "{summary}");
+    assert!(sessions > 0 && stacks > 0, "{summary}");
+    assert!(summary["epoch"].as_i64().unwrap() >= 1);
+    assert!(summary["cohorts"].as_i64().unwrap() >= 1, "{summary}");
+    let by_cohort = summary["subjects"]["by_cohort"].as_object().unwrap();
+    assert!(!by_cohort.is_empty(), "{summary}");
+    let membership: i64 = by_cohort.values().map(|v| v.as_i64().unwrap()).sum();
+    assert!(membership >= 1 && by_cohort.values().all(|v| v.as_i64().unwrap() <= subjects));
+    assert!(
+        summary["stacks"]["by_pack_version"].is_object(),
+        "{summary}"
+    );
+    assert!(
+        summary["synthetic"].is_null() || summary["synthetic"] == "nils-synth",
+        "{summary}"
+    );
+    // what arrived since a date: everything, then nothing, then a refusal
+    let (status, s) = server.request("GET", "/api/summary?since=2000-01-01", None, reader);
+    assert_eq!(status, 200, "{s}");
+    assert_eq!(s["since"]["subjects"], subjects, "{s}");
+    assert_eq!(s["since"]["stacks"], stacks, "{s}");
+    let (status, s) = server.request(
+        "GET",
+        "/api/summary?since=2999-01-01T00:00:00Z",
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{s}");
+    assert_eq!(s["since"]["subjects"], 0, "{s}");
+    assert_eq!(s["since"]["handles"], 0, "{s}");
+    let (status, _) = server.request("GET", "/api/summary?since=yesterday", None, reader);
+    assert_eq!(status, 400);
+    // start from nothing: everyone, with the sessions under them
+    let (status, all) = server.request(
+        "POST",
+        "/api/ask/start",
+        Some(&body(serde_json::json!({"from": {}}))),
+        reader,
+    );
+    assert_eq!(status, 200, "{all}");
+    assert_eq!(all["grain"], "subject");
+    assert_eq!(all["count"], subjects, "{all}");
+    assert_eq!(all["sessions"], sessions, "{all}");
+    assert_eq!(all["document"]["out"]["set"], "everyone");
+    assert!(all["document"]["sets"]["sessions_under"].is_null(), "{all}");
+    // start from a cohort: fewer people, the summary's own number
+    let (cohort, n) = by_cohort.iter().next().unwrap();
+    let (status, one) = server.request(
+        "POST",
+        "/api/ask/start",
+        Some(&body(serde_json::json!({"from": {"cohorts": [cohort]}}))),
+        reader,
+    );
+    assert_eq!(status, 200, "{one}");
+    assert_eq!(one["set"], "people");
+    assert_eq!(one["count"], n.as_i64().unwrap(), "{one}");
+    assert!(one["count"].as_i64().unwrap() < subjects, "{one}");
+    assert!(one["sessions"].as_i64().unwrap() <= sessions, "{one}");
+    assert_eq!(one["document"]["params"]["cohorts"]["value"][0], *cohort);
+    // an uploaded list under a reader is refused before anything resolves
+    let (status, refused) = server.request(
+        "POST",
+        "/api/ask/start",
+        Some(&body(serde_json::json!({"from": {"values": "nowhere"}}))),
+        reader,
+    );
+    assert_eq!(status, 403, "{refused}");
+    let (status, refused) = server.request(
+        "POST",
+        "/api/ask/values",
+        Some(&body(
+            serde_json::json!({"namespace": "x", "values": ["1"]}),
+        )),
+        reader,
+    );
+    assert_eq!(status, 403, "{refused}");
+    // under an operator the same start reaches the resolver, which has no such upload
+    let (status, gone) = server.request(
+        "POST",
+        "/api/ask/start",
+        Some(&body(serde_json::json!({"from": {"values": "nowhere"}}))),
+        operator,
+    );
+    assert_eq!(status, 400, "{gone}");
+    // a stored document, run once, is listed with its run
+    let (status, stored) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(serde_json::json!({"document": yardstick()}))),
+        reader,
+    );
+    assert_eq!(status, 200, "{stored}");
+    let id = stored["document"].as_i64().unwrap();
+    let (status, from_doc) = server.request(
+        "POST",
+        "/api/ask/start",
+        Some(&body(serde_json::json!({"from": {"document": id}}))),
+        reader,
+    );
+    assert_eq!(status, 200, "{from_doc}");
+    assert_eq!(from_doc["set"], yardstick()["out"]["set"]);
+    assert!(from_doc["count"].as_i64().unwrap() > 0, "{from_doc}");
+    let (status, ran) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(
+            serde_json::json!({"document_id": id, "name": "listed"}),
+        )),
+        reader,
+    );
+    assert_eq!(status, 200, "{ran}");
+    let handle = ran["handle"].as_i64().unwrap();
+    let (status, from_handle) = server.request(
+        "POST",
+        "/api/ask/start",
+        Some(&body(serde_json::json!({"from": {"handle": handle}}))),
+        reader,
+    );
+    assert_eq!(status, 200, "{from_handle}");
+    assert_eq!(from_handle["grain"], ran["grain"]);
+    assert_eq!(
+        from_handle["document"]["sets"]["start"]["from"],
+        format!("handle:{handle}")
+    );
+    let (status, listed) = server.request("GET", "/api/ask/documents", None, reader);
+    assert_eq!(status, 200, "{listed}");
+    let row = listed["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["document"] == id)
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(row["versions"], 1);
+    assert_eq!(row["author"], "lou@lab");
+    assert_eq!(row["grain"], ran["grain"]);
+    assert_eq!(row["last_run"]["handle"], handle, "{row}");
+    // paging by the latest document id
+    let (status, page) = server.request("GET", "/api/ask/documents?limit=1", None, reader);
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["count"], 1);
+    if listed["count"].as_i64().unwrap() > 1 {
+        assert!(page["next"].is_number(), "{page}");
+    }
+    // the three doors are in the capabilities and the policy
+    let (_, caps) = server.request("GET", "/api/capabilities", None, reader);
+    for door in [
+        "GET /api/summary",
+        "POST /api/ask/start",
+        "GET /api/ask/documents",
+    ] {
+        assert!(
+            caps["doors"].as_array().unwrap().iter().any(|d| d == door),
+            "{door}"
+        );
+        assert!(
+            caps["policy"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["door"] == door),
+            "{door}"
+        );
+    }
+}

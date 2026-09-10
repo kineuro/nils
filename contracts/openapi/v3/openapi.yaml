@@ -44,6 +44,15 @@ paths:
       description: The engine version, the contract versions (openapi, review-item, pack), the loaded packs with their versions, the registry id, epoch, schema version and `synthetic` (the builder's name when `nils synth` made the registry, absent on real data; a desk shows a banner on it), the auth mode, the caller's principal, roles, display name, mail, ceiling and actor, the node, the list of doors, and since version 3 `assist` (the assistant's URL when one is installed), `event_streams` (the cap), `idempotency` (the header, the doors, the hours) and `policy` (one row per door, Wave 4c section 6.5).
       responses:
         "200": {description: The capabilities}
+  /api/summary:
+    get:
+      summary: What the registry holds, as counts (Wave 5 section 12.1)
+      description: Subjects, sessions and stacks, each a total and by cohort; subjects and stacks by pack version; the cohorts; the epoch; `synthetic`, the builder's name when `nils synth` made the registry; and with `since`, what arrived after that date. Never a row of a person.
+      parameters:
+        - {name: since, in: query, schema: {type: string}, description: "An ISO date or instant; the `since` block counts subjects, sessions, stacks, handles and releases created after it"}
+      responses:
+        "200": {description: "{epoch, synthetic, cohorts, subjects: {total, by_cohort, by_pack_version}, sessions: {total, by_cohort, window_days}, stacks: {total, by_cohort, by_pack_version}, since: {date, subjects, sessions, stacks, handles, releases} | null}"}
+        "400": {description: since is not a date}
   /api/status:
     get:
       summary: The registry, the running jobs, the last batches (nils status --json)
@@ -308,7 +317,24 @@ paths:
       summary: One sentence per set, the conventions, the denominators, the mechanisms, the disclosure
       responses:
         "200": {description: The description}
+  /api/ask/start:
+    post:
+      summary: Resolve what a person may start from into the opening set of a document (Wave 5 section 7.1, 12.1)
+      description: "`from` is one of `{cohorts: [names]}`, `{selection: name@version}`, `{handle: id}`, `{document: id}`, `{values: upload_id}` or `{}` for everyone. The answer is a document with one set at the right grain, the count of that set, the subjects in it, and the sessions under it when the grain has any. Nothing is stored and no handle is written. Starting from an uploaded list asks for the reviewer role; a handle or document beyond the caller's scope is refused as the handle doors refuse it."
+      requestBody: {content: {application/json: {schema: {type: object, properties: {from: {type: object}}}}}}
+      responses:
+        "200": {description: "{document, set, grain, count, subjects, sessions, epoch}"}
+        "400": {description: The starting point does not resolve}
+        "403": {description: An uploaded list under a reader, or a handle beyond the scope}
+        "404": {description: No such selection, handle or document}
   /api/ask/documents:
+    get:
+      summary: The documents, folded into lineages by their parent chain, newest first (Wave 5 section 12.1)
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, default: 100}, description: At most this many lineages, capped at page_rows_max}
+        - {name: after, in: query, schema: {type: integer}, description: Lineages whose latest document id is below this, for the next page}
+      responses:
+        "200": {description: "{count, documents: [{document, root, name, grain, out, level, versions, author, created_at, updated_at, last_used_at, hash, last_run: {handle, at} | null}], next}"}
     post:
       summary: Store a document and get its handle
       responses:
@@ -370,7 +396,7 @@ paths:
         "202": {description: "{job, state}"}
   /api/ask/values:
     post:
-      summary: An identifier upload, resolved through the linkage store on arrival; the shape comes back, never a value
+      summary: An identifier upload, resolved through the linkage store on arrival; the shape comes back, never a value (reviewer since Wave 5)
       requestBody: {content: {application/json: {schema: {type: object, required: [namespace, values], properties: {namespace: {type: string}, values: {type: array, items: {type: string}}}}}}}
       responses:
         "200": {description: "{upload_id, namespace, n, unresolved, subjects}"}
