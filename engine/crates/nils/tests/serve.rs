@@ -904,12 +904,16 @@ fn an_issuer_that_is_not_up_yet_does_not_stop_the_engine() {
     // one refusing it, which is the point.
     let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&token));
     assert_eq!(status, 401, "{doc}");
-    // The issuer comes up. The next token is verified without waiting out
-    // the refetch floor, which this engine never lowered.
+    // The issuer comes up. The engine asks again on its own, without the
+    // sixty second floor this engine was given, because it holds no key of
+    // that issuer at all. It does wait the short floor that replaces it,
+    // which is what keeps an issuer that stays down from costing every
+    // request a fetch of its own.
     let served = std::sync::Arc::new(std::sync::Mutex::new(
         std::fs::read_to_string(fixtures.join("jwks.json")).unwrap(),
     ));
     serve_jwks_on(port, served);
+    std::thread::sleep(std::time::Duration::from_millis(5_200));
     let (status, caps) = server.request("GET", "/api/capabilities", None, Some(&token));
     assert_eq!(status, 200, "{caps}");
     assert_eq!(caps["principal"], "anna@id.example.org", "{caps}");

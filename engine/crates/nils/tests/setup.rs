@@ -608,8 +608,11 @@ fn a_setup_that_is_there_is_named_and_update_needs_one() {
     // Now it opens with what is installed, where, in what mode and how it runs.
     let again = setup(&nils.path(), config.path(), &["--print"]);
     assert!(again.ok, "{}", again.stderr);
+    // The version this binary carries, not a literal, so that raising it
+    // for a release is one line in one file.
     again.says(&format!(
-        "engine 1.0.0-alpha.2 in {}, off mode, on the machine",
+        "engine {} in {}, off mode, on the machine",
+        env!("CARGO_PKG_VERSION"),
         dir.display()
     ));
     again.says("started by hand");

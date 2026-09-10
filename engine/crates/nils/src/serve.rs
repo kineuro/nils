@@ -127,26 +127,43 @@ struct Trust {
     fetched: std::sync::Mutex<Instant>,
 }
 
+/// How long the engine waits between asking an issuer for keys it holds
+/// none of. Short, so the first token after the issuer comes up is
+/// verified; not nothing, so an issuer that stays down does not cost every
+/// request a fetch of its own. Longer than a fetch can take, so two are
+/// never in flight at once.
+const EMPTY_FLOOR: u64 = 5;
+
 impl Trust {
     /// Fetch the keys again, when they come from a URL and the floor has
     /// passed; true when the key list was replaced.
     ///
-    /// The floor is waived while the engine holds no key at all. That is the
-    /// state it starts in when its issuer was not up yet, and waiting out a
-    /// minute there would refuse every token in the meantime.
+    /// The floor drops to `EMPTY_FLOOR` while the engine holds no key at
+    /// all. That is the state it starts in when its issuer was not up yet,
+    /// and waiting out a minute there would refuse every token meanwhile.
+    /// It drops rather than goes, because an issuer that stays down would
+    /// otherwise cost every request a fetch of its own.
     fn refetch(&self, floor: u64) -> bool {
         let Jwks::Url(_) = &self.jwks else {
             return false;
         };
-        let empty = self.keys.lock().map(|k| k.is_empty()).unwrap_or(false);
+        let floor = if self.keys.lock().map(|k| k.is_empty()).unwrap_or(false) {
+            floor.min(EMPTY_FLOOR)
+        } else {
+            floor
+        };
         let mut fetched = match self.fetched.lock() {
             Ok(f) => f,
             Err(_) => return false,
         };
-        if !empty && fetched.elapsed().as_secs() < floor {
+        if fetched.elapsed().as_secs() < floor {
             return false;
         }
+        // Stamped before the fetch and unlocked before it too, so that a
+        // request arriving while an issuer is being asked reads the stamp
+        // and is refused at once, rather than queueing behind the network.
         *fetched = Instant::now();
+        drop(fetched);
         match load_jwks(&self.jwks) {
             Ok(keys) => {
                 if let Ok(mut held) = self.keys.lock() {
@@ -174,7 +191,16 @@ fn load_jwks(jwks: &Jwks) -> Result<Vec<Key>, String> {
             path.display().to_string(),
         ),
         Jwks::Url(url) => {
-            let mut response = ureq::get(url).call().map_err(|e| format!("{url}: {e}"))?;
+            // Bounded on purpose. This runs on a request handler when the
+            // engine holds no key of an issuer, and an issuer that is down
+            // must cost that request a moment, not the connect timeout of
+            // whatever the default happens to be.
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .timeout_connect(Some(std::time::Duration::from_secs(2)))
+                .timeout_global(Some(std::time::Duration::from_secs(4)))
+                .build()
+                .into();
+            let mut response = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
             (
                 response
                     .body_mut()
