@@ -2559,11 +2559,12 @@ fn pull_or_build(
         .map_err(|e| fail(format!("{}: {e}", binary.display())))?;
     std::fs::write(context.join("Containerfile"), containerfile(part))
         .map_err(|e| fail(format!("{}: {e}", context.display())))?;
+    // the file named, since docker looks only for a Dockerfile on its own
     console.task(
         &format!("building {tag}"),
         &context,
         engine,
-        &["build", "-t", &tag, "."],
+        &["build", "-f", "Containerfile", "-t", &tag, "."],
     )?;
     console.note(&format!("built {tag} from {}", context.display()));
     Ok(())
@@ -3743,11 +3744,12 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Str
             quietly("systemctl", &["--user", "daemon-reload"]);
             // A quadlet's unit is generated, so it is never enabled: the
             // [Install] section of the file is what systemd reads. The pod
-            // is restarted first, since what it publishes and how it is
-            // networked are its own and a container restart keeps the old
-            // ones; restarting a container then starts it again in the new
-            // pod, from its new image tag. The assistant reads a key the
-            // gateway makes, so it starts last, as on the machine.
+            // is restarted, since what it publishes and how it is networked
+            // are its own, and restarting it starts every container in it
+            // again, from its new image tag and with rebuilt code. Each is
+            // then started, which does nothing to one that is up. The
+            // assistant's quadlet waits for the key the gateway makes, so it
+            // is started once that is made, as on the machine.
             quietly("systemctl", &["--user", "restart", "nils-pod"]);
             let mut units = vec!["nils-engine".to_string()];
             if plan.has(Part::Desk) {
@@ -3757,11 +3759,11 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Str
                 units.push("nils-kvasir".to_string());
             }
             for unit in &units {
-                quietly("systemctl", &["--user", "restart", unit]);
+                quietly("systemctl", &["--user", "start", unit]);
             }
             if plan.has(Part::Assistant) {
                 mint_assistant_key(plan, console);
-                quietly("systemctl", &["--user", "restart", "nils-assistant"]);
+                quietly("systemctl", &["--user", "start", "nils-assistant"]);
                 units.push("nils-assistant".to_string());
             }
             linger();
