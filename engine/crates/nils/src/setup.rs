@@ -1034,6 +1034,13 @@ fn port_taken(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
 }
 
+/// Where a part should listen: `None` when its port is free, else the next
+/// port that nothing on this machine holds and no other part was given.
+fn settle_port(port: u16, chosen: &[u16], taken: &dyn Fn(u16) -> bool) -> Option<u16> {
+    let held = |p: u16| taken(p) || chosen.contains(&p);
+    held(port).then(|| next_free_port(port.saturating_add(1), &held))
+}
+
 /// The first free port at or after `start`, asking `taken` about each.
 pub(crate) fn next_free_port(start: u16, taken: &dyn Fn(u16) -> bool) -> u16 {
     let mut port = start;
@@ -1825,19 +1832,6 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         }
     }
 
-    // ports
-    let mut ports = existing.as_ref().map(|s| s.ports).unwrap_or_default();
-    for (name, port) in [
-        ("the engine", &mut ports.engine),
-        ("the desk", &mut ports.desk),
-    ] {
-        if port_taken(*port) {
-            let free = next_free_port(*port + 1, &port_taken);
-            console.note(&format!("port {} is taken, so {name} takes {free}", *port));
-            *port = free;
-        }
-    }
-
     // 6. the assistant, and what this machine can do
     console.step(6, steps, "What this machine can do");
     let card = probe_card();
@@ -1880,6 +1874,44 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             console.note(&note);
         }
         answers.model = Some(chosen);
+    }
+
+    // ports, once the parts are settled: each part this machine will listen
+    // for, and none this setup already holds, since its own running service
+    // is what holds it
+    let mut ports = existing.as_ref().map(|s| s.ports).unwrap_or_default();
+    let ours = |part: &str| {
+        existing
+            .as_ref()
+            .is_some_and(|s| s.parts.contains_key(part))
+    };
+    let assistant = parts.contains(&Part::Assistant);
+    let mut chosen: Vec<u16> = Vec::new();
+    for (name, part, port, listens) in [
+        ("the engine", "engine", &mut ports.engine, true),
+        (
+            "the desk",
+            "desk",
+            &mut ports.desk,
+            parts.contains(&Part::Desk),
+        ),
+        ("the gateway", "kvasir", &mut ports.kvasir, assistant),
+        // in a container the assistant is published nowhere
+        (
+            "the assistant",
+            "assistant",
+            &mut ports.assistant,
+            assistant && !runtime.container(),
+        ),
+    ] {
+        if listens
+            && !ours(part)
+            && let Some(free) = settle_port(*port, &chosen, &port_taken)
+        {
+            console.note(&format!("port {} is taken, so {name} takes {free}", *port));
+            *port = free;
+        }
+        chosen.push(*port);
     }
 
     // 7. services
@@ -5404,6 +5436,20 @@ mod tests {
         let taken = |p: u16| p < 7203;
         assert_eq!(next_free_port(7200, &taken), 7203);
         assert_eq!(next_free_port(7300, &taken), 7300);
+    }
+
+    #[test]
+    fn a_part_moves_off_a_taken_port_and_never_onto_another_part_s() {
+        let taken = |p: u16| p == 7100 || p == 7101;
+        assert_eq!(settle_port(7300, &[], &taken), None, "free, so it stays");
+        assert_eq!(settle_port(7100, &[], &taken), Some(7102));
+        // the gateway would take 7102, which the desk was just given
+        assert_eq!(settle_port(7100, &[7102, 7200], &taken), Some(7103));
+        assert_eq!(
+            settle_port(7200, &[7200], &|_| false),
+            Some(7201),
+            "two parts are never given one port"
+        );
     }
 
     #[test]
