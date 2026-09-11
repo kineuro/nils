@@ -1,52 +1,56 @@
 # NILS
 
-**Neuroimaging Intelligent Linked System.** NILS digests DICOM into a registry, classifies every series with versioned modality packs, answers questions over the registry in one query language, and exports BIDS with provenance. It is one binary that runs on a laptop or a server, with optional apps for query, review and agents on top, and it can join a federation of nodes where the compute travels and the data stays. Every judgement it makes is a knob you can inspect, and every store it keeps is listed on one page.
+**Neuroimaging Intelligent Linked System.** NILS reads DICOM into a registry, classifies every scan with a rule pack, answers questions over the registry, and writes releases out as BIDS with their provenance.
 
-> **Pre-alpha.** This repository is the v1 rewrite of NILS, developed in the open from its first commit on 2026-09-02. It installs and runs, and the interfaces are still moving: take a release, not a promise of stability. NILS v0, the 0.x line in daily use in our group, lives in the private repository `kineuro/nils_private`; its public mirror is archived at [kineuro/nils-legacy](https://github.com/kineuro/nils-legacy).
+This repository is the engine: the `nils` command, the registry and the rule packs, and the setup wizard that installs every part of NILS.
 
-## Installing
+> **Pre-alpha.** NILS installs and runs, and its interfaces still change between releases. NILS v0, the 0.x line, is archived at [kineuro/nils-legacy](https://github.com/kineuro/nils-legacy).
 
-One line, on Linux or macOS:
+## Install
 
-```
+On Linux or macOS:
+
+```sh
 curl -fsSL https://nils.kineuro.se/get | sh
 ```
 
-It fetches the binary for this machine, checks it against the release's checksums, and hands over to the wizard. Where `nils` is already on the machine, the wizard is the same thing on its own:
+This puts `nils` on the machine and starts `nils setup`, which asks what to install and where, then installs it and keeps it running. Later:
 
+```sh
+nils update --all    # the newest release of every part
+nils uninstall       # remove NILS, keeping the data or not
 ```
-nils setup
-```
 
-It is a wizard: what to install, on the machine or in containers, where it
-lives, the registry and its key, who may sign in and who may reach the desk,
-what this machine's graphics card can serve, and how it is kept running.
-`--print` says what it would do and changes nothing; `--yes` takes every
-default, which is what a piped run does. [`docs/guides/setup.md`](docs/guides/setup.md)
-is the guide, and `nils update --all` is the other half.
+## Documentation
 
-## Where things are
+**[kineuro.se/nils/docs](https://kineuro.se/nils/docs/)**
+
+- [What NILS is](https://kineuro.se/nils/docs/intro/what-nils-is/)
+- [Install and get started](https://kineuro.se/nils/docs/intro/install/)
+- [The engine on its own](https://kineuro.se/nils/docs/engine/install/), without the wizard
+
+## The parts of NILS
+
+| Repository | Part |
+|---|---|
+| **kineuro/nils** | The engine: the registry, the rule packs, the `nils` command and the setup wizard. Everything else talks to it. |
+| [kineuro/nils-desk](https://github.com/kineuro/nils-desk) | The desk: the web application over the engine, and where people sign in. |
+| [kineuro/nils-assistant](https://github.com/kineuro/nils-assistant) | The assistant: turns a question in words into one the engine answers. |
+| [kineuro/kvasir](https://github.com/kineuro/kvasir) | The model gateway: every call the assistant makes to a model goes through it. |
+
+The engine works on its own. The desk and the assistant are optional, and the gateway comes with the assistant.
+
+## In this repository
 
 | | |
 |---|---|
-| [`docs/decisions/`](docs/) | The design record: what NILS v1 is, and why, decision by decision. Start there. |
-| [`engine/`](engine/) | The engine: one Cargo workspace, four crates, one binary, `nils`. Building and testing it is described there. |
-| [`docs/specs/`](docs/specs/) | One specification per wave of the build, written before the wave's code. Wave 1, parse and digest, is the first. |
-| [`contracts/`](contracts/) | The interfaces others build against: the query AST schema, the pack specification and vocabulary, the OpenAPI description, the MCP schemas, the federation protocol, `nils.job.yml`. Apache-2.0. |
-| [`packs/mri/`](packs/mri/) | The first-party MRI modality pack. |
-| [`spikes/`](spikes/) | Throwaway code behind decisions. The language spike, which chose Rust, reports in [`spikes/lang/`](spikes/lang/). |
-| [`evals/`](evals/) | The gold tasks and the scoring for the query language and the agent. |
-| [`tools/synth/`](tools/synth/) | The synthetic corpus generator behind the tests and the CI benchmark; nothing real. |
-| [`tools/v0-compare/`](tools/v0-compare/) | The compare tool of the Wave 1 gate: a v1 registry measured against the v0 one it replaces, in counts and shapes only. |
-
-The engine is being built in the order of the Wave 1 specification ([`docs/specs/wave1-parse-and-digest.md`](docs/specs/wave1-parse-and-digest.md), §14): the skeleton, the reader and the walker, the schema and the writer, identity, stacks, jobs and custody, and the compare tool are in; the gate runs against the live registry and the budget are what remains before the first tag.
+| [`engine/`](engine/) | The Rust workspace that builds `nils`, and how to build and test it. |
+| [`packs/`](packs/) | The first-party rule packs, MRI and clinical. |
+| [`contracts/`](contracts/) | The interfaces the other parts build against: the pack format, the OpenAPI description, the MCP schemas and the suite every part is tested with. |
+| [`docs/`](docs/) | The design record, the specification of each stage of the build, and reference pages checked against the code. |
 
 ## License
 
-The engine, the apps and the first-party packs are [AGPL-3.0-only](LICENSE). The contracts and the client libraries are [Apache-2.0](contracts/LICENSE), so that anything can implement or consume them. The documentation is [CC BY 4.0](docs/LICENSE). Contributions to the engine need a signed [contributor license agreement](CLA.md); contributions to the contracts carry a [Developer Certificate of Origin](CONTRIBUTING.md#the-contracts-dco) sign-off. The name is a trademark: see [TRADEMARKS.md](TRADEMARKS.md).
-
-## Contributing and security
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request and [SECURITY.md](SECURITY.md) before reporting a vulnerability. Issues are open now; the code follows.
+The engine and the first-party packs are [AGPL-3.0-only](LICENSE), the contracts [Apache-2.0](contracts/LICENSE), and the documentation [CC BY 4.0](docs/LICENSE). Contributing needs a signed [contributor license agreement](CLA.md): see [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md) for reporting a vulnerability. The name is a trademark: see [TRADEMARKS.md](TRADEMARKS.md).
 
 Built by [kineuro](https://github.com/kineuro), Experimental Neuroradiology Research at Karolinska Institutet, Stockholm.
