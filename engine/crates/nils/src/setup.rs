@@ -1299,6 +1299,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
                     ("Change something", "the mode, the ports, what is installed"),
                     ("Add a part", "the desk or the assistant"),
                     ("Repair", "write the configuration and the services again"),
+                    ("Remove", "NILS alone and keep your data, or everything"),
                 ],
                 0,
             )
@@ -1308,6 +1309,14 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         match choice {
             0 => return update_parts(state, &args, &mut console),
             3 => return repair(state, &args, &mut console),
+            4 => {
+                return uninstall(UninstallArgs {
+                    keep_data: false,
+                    purge: false,
+                    yes: false,
+                    print: args.print,
+                });
+            }
             _ => {}
         }
     } else if args.update {
@@ -3110,6 +3119,26 @@ fn repair_kvasir(plan: &Plan, console: &mut Console) -> Result<(), Exit> {
     Ok(())
 }
 
+/// After `nils update` moves this binary, the setup record says so. The
+/// wizard opens by naming what is installed, and it named the version the
+/// install began with until something rewrote the record.
+pub(crate) fn record_engine_version(path: &Path, version: &str) {
+    let Some(mut state) = read_state() else {
+        return;
+    };
+    let Some(engine) = state.parts.get_mut("engine") else {
+        return;
+    };
+    let recorded =
+        std::fs::canonicalize(&engine.path).unwrap_or_else(|_| PathBuf::from(&engine.path));
+    let moved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if engine.kind != "binary" || recorded != moved {
+        return;
+    }
+    engine.version = version.to_string();
+    let _ = write_state(&state);
+}
+
 /// Everything the assistant reads from its environment, in one file its
 /// service reads. Nothing here is a secret: the gateway's key is a path.
 fn write_assistant_env(plan: &Plan) -> Result<(), Exit> {
@@ -3750,6 +3779,651 @@ fn update_binary_part(name: &str, path: &str, base: &str) -> Result<(String, Str
     Ok((version.clone(), format!("{version} at {path}")))
 }
 
+// ----------------------------------------------------------- the uninstall
+
+#[derive(Debug, Args)]
+pub(crate) struct UninstallArgs {
+    /// Remove NILS and keep the data: the registry and its key, the backups,
+    /// the desk's people and the assistant's history stay where they are
+    #[arg(long, conflicts_with = "purge")]
+    keep_data: bool,
+    /// Remove NILS and every file it made, the registry's key included
+    #[arg(long)]
+    purge: bool,
+    /// Go ahead without asking; with --purge this also skips typing the name
+    #[arg(long, short = 'y')]
+    yes: bool,
+    /// Say what would be removed and what kept, and change nothing
+    #[arg(long)]
+    print: bool,
+}
+
+/// The first-party packs a release carries. A pack directory holding only
+/// these was put there by an install; any other pack is a person's own and
+/// is never removed.
+const FIRST_PARTY_PACKS: [&str; 2] = ["mri", "clinical"];
+
+/// Everything an uninstall would touch, gathered before anything is.
+struct Removal {
+    dir: PathBuf,
+    runtime: String,
+    /// Unit names to stop and disable, and the files that define them.
+    units: Vec<String>,
+    unit_files: Vec<PathBuf>,
+    /// Container names and image references, for podman or docker.
+    containers: Vec<String>,
+    images: Vec<String>,
+    /// Programs other than this one, then this one, removed last.
+    programs: Vec<PathBuf>,
+    me: Option<PathBuf>,
+    /// First-party packs to remove, and a pack directory kept because it
+    /// also holds a person's own.
+    packs: Vec<PathBuf>,
+    packs_kept: Option<PathBuf>,
+    /// What building the gateway and the assistant made.
+    built: Vec<PathBuf>,
+    state: PathBuf,
+}
+
+/// What an uninstall takes: NILS alone, or NILS and its data.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Leaving {
+    KeepData,
+    Purge,
+}
+
+pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
+    let mut console = Console::new(args.yes);
+    println!("{}", console.bold("NILS uninstall"));
+    let Some(state) = read_state() else {
+        return Err(fail(format!(
+            "no setup is recorded at {}, so there is nothing this knows it installed; the \
+             documentation says how to remove a hand made install: \
+             https://kineuro.se/nils/docs/intro/install/",
+            state_path().display()
+        )));
+    };
+    println!("  {}", describe_state(&state));
+
+    let leaving = if args.purge {
+        Leaving::Purge
+    } else if args.keep_data || !console.interactive() {
+        Leaving::KeepData
+    } else {
+        let dir = state.dir.clone();
+        match console.choice(
+            "What should go?",
+            &[
+                (
+                    "NILS, keeping your data",
+                    &format!(
+                        "the services, the programs and the packs; the registry and its key, the \
+                         backups, the desk's people and the assistant's history stay in {dir}"
+                    ),
+                ),
+                (
+                    "Everything",
+                    &format!(
+                        "all of that and {dir} itself; the registry's key cannot be recovered"
+                    ),
+                ),
+            ],
+            0,
+        ) {
+            0 => Leaving::KeepData,
+            _ => Leaving::Purge,
+        }
+    };
+
+    let me = std::env::current_exe()
+        .ok()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
+    let removal = gather_removal(&state, me, leaving);
+
+    if leaving == Leaving::Purge
+        && let Err(why) = safe_to_purge(&removal.dir, home_dir().as_deref())
+    {
+        return Err(fail(format!(
+            "{} will not be removed: {why}; run nils uninstall --keep-data, and remove \
+                 what is left by hand",
+            removal.dir.display()
+        )));
+    }
+
+    println!();
+    print!("{}", removal_text(&removal, leaving, &console));
+    if args.print {
+        println!();
+        println!("nothing was changed");
+        return Ok(());
+    }
+
+    let go = match leaving {
+        Leaving::KeepData => args.yes || console.yes_no("Do it?", false),
+        Leaving::Purge if args.yes => true,
+        Leaving::Purge => {
+            if !console.interactive() {
+                false
+            } else {
+                console.note(
+                    "this cannot be undone: without the registry's key the same subject can never \
+                     be given the same code again",
+                );
+                let name = removal
+                    .dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let typed = console.line(&format!("Type {name} to remove everything"), "");
+                typed.trim() == name && !name.is_empty()
+            }
+        }
+    };
+    if !go {
+        println!("  nothing was changed");
+        if !console.interactive() {
+            println!("  add --yes to go ahead");
+        }
+        return Ok(());
+    }
+
+    carry_out(&removal, leaving, &console);
+    println!();
+    println!("{}", console.bold("Removed"));
+    match leaving {
+        Leaving::KeepData => {
+            println!(
+                "  NILS is gone from this machine; your data is still in {}",
+                removal.dir.display()
+            );
+            println!("  to install again and pick it up:");
+            println!(
+                "    curl -fsSL https://nils.kineuro.se/get | sh -s -- --dir {}",
+                removal.dir.display()
+            );
+        }
+        Leaving::Purge => println!("  NILS and everything it made are gone from this machine"),
+    }
+    Ok(())
+}
+
+/// The setup on one line, the same words the wizard opens with.
+fn describe_state(state: &State) -> String {
+    let parts: Vec<String> = state
+        .parts
+        .iter()
+        .map(|(name, part)| match part.kind.as_str() {
+            "node" => format!("{name} from source"),
+            _ => format!("{name} {}", part.version),
+        })
+        .collect();
+    format!(
+        "{} in {}, {} mode, {}",
+        parts.join(", "),
+        state.dir,
+        state.mode,
+        match state.runtime.as_str() {
+            "podman" => "in podman containers",
+            "docker" => "in docker containers",
+            _ => "on the machine",
+        }
+    )
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Whether a directory may be removed whole. It must be absolute, must not
+/// be the root, the home directory or anything above it, and must look like
+/// what an install made. A state file edited by hand, or a --dir given as
+/// the home directory, should cost a refusal and not a home directory.
+fn safe_to_purge(dir: &Path, home: Option<&Path>) -> Result<(), String> {
+    if !dir.is_absolute() {
+        return Err("it is not an absolute path".to_string());
+    }
+    if dir.parent().is_none() {
+        return Err("it is the root of the file system".to_string());
+    }
+    if let Some(home) = home
+        && home.starts_with(dir)
+    {
+        return Err("it is the home directory, or holds it".to_string());
+    }
+    let made_here = dir.join("registry").join("nils.toml").exists()
+        || dir.join("desk").join("nils-desk.toml").exists();
+    if !made_here {
+        return Err("it holds neither a registry nor a desk that an install made".to_string());
+    }
+    Ok(())
+}
+
+/// Gather what an uninstall would remove, looking at what is really there.
+fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Removal {
+    let dir = PathBuf::from(&state.dir);
+    let mut removal = Removal {
+        dir: dir.clone(),
+        runtime: state.runtime.clone(),
+        units: Vec::new(),
+        unit_files: Vec::new(),
+        containers: Vec::new(),
+        images: Vec::new(),
+        programs: Vec::new(),
+        me: None,
+        packs: Vec::new(),
+        packs_kept: None,
+        built: Vec::new(),
+        state: state_path(),
+    };
+
+    // services
+    match state.runtime.as_str() {
+        "podman" => {
+            for (unit, file) in [
+                ("nils-desk", "nils-desk.container"),
+                ("nils-engine", "nils-engine.container"),
+                ("nils-pod", "nils.pod"),
+            ] {
+                let path = quadlet_dir().join(file);
+                if path.exists() {
+                    removal.units.push(unit.to_string());
+                    removal.unit_files.push(path);
+                }
+            }
+            removal.containers = vec!["nils".to_string()];
+        }
+        "docker" => {
+            // Named containers only. A compose project named for the
+            // directory can share its name with another project on the same
+            // machine, and bringing that down would take the other with it.
+            removal.containers = vec!["nils-desk".to_string(), "nils-engine".to_string()];
+        }
+        _ if cfg!(target_os = "macos") => {
+            if let Some(home) = home_dir() {
+                for file in ["se.kineuro.nils-engine.plist", "se.kineuro.nils-desk.plist"] {
+                    let path = home.join("Library").join("LaunchAgents").join(file);
+                    if path.exists() {
+                        removal.unit_files.push(path);
+                    }
+                }
+            }
+        }
+        _ => {
+            for unit in ["nils-assistant", "kvasir", "nils-desk", "nils-engine"] {
+                let path = units_dir().join(format!("{unit}.service"));
+                if path.exists() {
+                    removal.units.push(unit.to_string());
+                    removal.unit_files.push(path);
+                }
+            }
+        }
+    }
+    if matches!(state.runtime.as_str(), "podman" | "docker") {
+        let engine = state.runtime.as_str();
+        let listed = run_quiet(engine, &["images", "--format", "{{.Repository}}:{{.Tag}}"])
+            .unwrap_or_default();
+        removal.images = listed
+            .lines()
+            .map(str::trim)
+            .filter(|image| {
+                image.starts_with(&format!("{ENGINE_IMAGE}:"))
+                    || image.starts_with(&format!("{DESK_IMAGE}:"))
+            })
+            .map(str::to_string)
+            .collect();
+    }
+
+    // programs, this one last
+    for part in state.parts.values() {
+        let path = PathBuf::from(&part.path);
+        if part.kind == "binary" && path.exists() && Some(&path) != me.as_ref() {
+            removal.programs.push(path);
+        }
+    }
+    // Only what the record names: a nils-desk that happens to sit beside
+    // this program may be someone else's build.
+    removal.me = me.clone();
+
+    // packs, beside the program, never a person's own
+    if let Some(prefix) = me.as_deref().and_then(Path::parent).and_then(Path::parent) {
+        let packs = prefix.join("share").join("nils").join("packs");
+        if let Ok(entries) = std::fs::read_dir(&packs) {
+            let mut others = false;
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if FIRST_PARTY_PACKS.contains(&name.as_str()) {
+                    removal.packs.push(entry.path());
+                } else {
+                    others = true;
+                }
+            }
+            if others {
+                removal.packs_kept = Some(packs);
+            }
+        }
+    }
+
+    // what building the gateway and the assistant made; the rest of those
+    // directories holds their data and their configuration
+    for part in state.parts.values().filter(|p| p.kind == "node") {
+        let path = PathBuf::from(&part.path);
+        let outside = !path.starts_with(&dir);
+        if leaving == Leaving::Purge && outside {
+            removal.built.push(path);
+            continue;
+        }
+        if leaving == Leaving::KeepData {
+            for sub in ["node_modules", "dist"] {
+                if path.join(sub).exists() {
+                    removal.built.push(path.join(sub));
+                }
+            }
+        }
+    }
+    removal
+}
+
+/// What will go and what will stay, in the plan's own form.
+fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> String {
+    let mut out = String::new();
+    let row = |out: &mut String, key: &str, value: String| {
+        let _ = writeln!(out, "  {} {value}", console.dim(&format!("{key:<12}")));
+    };
+    let _ = writeln!(out, "  {}", console.bold("Removing"));
+    if !removal.units.is_empty() {
+        row(&mut out, "services", removal.units.join(", "));
+    } else if !removal.unit_files.is_empty() {
+        row(
+            &mut out,
+            "services",
+            removal
+                .unit_files
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    if !removal.containers.is_empty() {
+        let what = if removal.runtime == "podman" {
+            format!("the {} pod", removal.containers.join(", "))
+        } else {
+            removal.containers.join(", ")
+        };
+        row(&mut out, "containers", what);
+    }
+    if !removal.images.is_empty() {
+        row(&mut out, "images", removal.images.join(", "));
+    }
+    let mut programs: Vec<String> = removal
+        .programs
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    if let Some(me) = &removal.me {
+        programs.push(me.display().to_string());
+    }
+    if !programs.is_empty() {
+        row(&mut out, "programs", programs.join(", "));
+    }
+    if !removal.packs.is_empty() {
+        row(
+            &mut out,
+            "packs",
+            removal
+                .packs
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    if !removal.built.is_empty() {
+        row(
+            &mut out,
+            "built parts",
+            removal
+                .built
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    row(
+        &mut out,
+        "setup record",
+        removal.state.display().to_string(),
+    );
+    if leaving == Leaving::Purge {
+        row(
+            &mut out,
+            "data",
+            format!("{} and everything in it", removal.dir.display()),
+        );
+        for line in data_summary(&removal.dir) {
+            let _ = writeln!(out, "  {:<12} {}", "", console.dim(&line));
+        }
+    }
+    let _ = writeln!(out, "  {}", console.bold("Keeping"));
+    match leaving {
+        Leaving::KeepData => {
+            row(&mut out, "data", removal.dir.display().to_string());
+            for line in data_summary(&removal.dir) {
+                let _ = writeln!(out, "  {:<12} {}", "", console.dim(&line));
+            }
+        }
+        Leaving::Purge => row(&mut out, "nothing", "that this setup made".to_string()),
+    }
+    if let Some(kept) = &removal.packs_kept {
+        row(
+            &mut out,
+            "packs",
+            format!("{}, which also holds packs of your own", kept.display()),
+        );
+    }
+    out
+}
+
+/// A few lines saying what a data directory holds, without walking a
+/// working directory that may hold a whole archive.
+fn data_summary(dir: &Path) -> Vec<String> {
+    let size_of = |path: &Path| -> u64 {
+        std::fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.metadata().ok())
+            .filter(|m| m.is_file())
+            .map(|m| m.len())
+            .sum()
+    };
+    let count = |path: &Path| std::fs::read_dir(path).map(|e| e.count()).unwrap_or(0);
+    let mut out = Vec::new();
+    let registry = dir.join("registry");
+    if registry.join("nils.toml").exists() {
+        out.push(format!(
+            "the registry, {}, with its key",
+            human_size(size_of(&registry))
+        ));
+    }
+    let backups = count(&dir.join("backups"));
+    if backups > 0 {
+        out.push(format!("{backups} backup file(s)"));
+    }
+    if dir.join("desk").join("nils-desk.sqlite").exists() {
+        out.push("the desk's people and their passwords".to_string());
+    }
+    if dir.join("assistant").join("assistant.sqlite").exists() {
+        out.push("the assistant's conversations".to_string());
+    }
+    for sub in ["working", "export"] {
+        let n = count(&dir.join(sub));
+        if n > 0 {
+            out.push(format!("{n} item(s) in {sub}"));
+        }
+    }
+    out
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+/// Do what the removal says, in the order that leaves nothing holding a file
+/// open: services, containers, built parts, packs, programs, the record, the
+/// data, and this program last. Every step says what it did; a step that
+/// fails says so and the rest still run.
+fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
+    let say = |text: String| println!("  {text}");
+
+    if !removal.units.is_empty() && removal.runtime != "docker" {
+        let mut args = vec!["--user", "disable", "--now"];
+        args.extend(removal.units.iter().map(String::as_str));
+        quietly("systemctl", &args);
+    }
+    if cfg!(target_os = "macos") {
+        for file in &removal.unit_files {
+            let _ = Command::new("launchctl")
+                .args(["unload", "-w"])
+                .arg(file)
+                .output();
+        }
+    }
+    for file in &removal.unit_files {
+        let _ = std::fs::remove_file(file);
+    }
+    if !removal.unit_files.is_empty() && !cfg!(target_os = "macos") {
+        quietly("systemctl", &["--user", "daemon-reload"]);
+        let mut args = vec!["--user", "reset-failed"];
+        args.extend(removal.units.iter().map(String::as_str));
+        quietly("systemctl", &args);
+        say(format!(
+            "stopped and removed {}",
+            if removal.units.is_empty() {
+                "the services".to_string()
+            } else {
+                removal.units.join(", ")
+            }
+        ));
+    }
+
+    match removal.runtime.as_str() {
+        "podman" => {
+            if quietly("podman", &["pod", "rm", "-f", "nils"]) {
+                say("removed the nils pod".to_string());
+            }
+        }
+        "docker" => {
+            let mut args = vec!["rm", "-f"];
+            args.extend(removal.containers.iter().map(String::as_str));
+            quietly("docker", &args);
+            quietly("docker", &["network", "rm", "nils"]);
+            say(format!("removed {}", removal.containers.join(", ")));
+            if leaving == Leaving::KeepData {
+                let _ = std::fs::remove_file(removal.dir.join("compose.yaml"));
+            }
+        }
+        _ => {}
+    }
+    if !removal.images.is_empty() {
+        let engine = removal.runtime.as_str();
+        let mut args = vec!["rmi", "-f"];
+        args.extend(removal.images.iter().map(String::as_str));
+        if quietly(engine, &args) {
+            say(format!("removed {}", removal.images.join(", ")));
+        }
+    }
+
+    for path in &removal.built {
+        match remove_path(path, &removal.runtime) {
+            Ok(()) => say(format!("removed {}", path.display())),
+            Err(e) => say(format!("{} was not removed: {e}", path.display())),
+        }
+    }
+    for path in &removal.packs {
+        if remove_path(path, &removal.runtime).is_ok() {
+            say(format!(
+                "removed the {} pack",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+        }
+    }
+    if removal.packs_kept.is_none()
+        && let Some(packs) = removal.packs.first().and_then(|p| p.parent())
+    {
+        let _ = std::fs::remove_dir(packs);
+        if let Some(share) = packs.parent() {
+            let _ = std::fs::remove_dir(share);
+        }
+    }
+    for path in &removal.programs {
+        match std::fs::remove_file(path) {
+            Ok(()) => say(format!("removed {}", path.display())),
+            Err(e) => say(format!("{} was not removed: {e}", path.display())),
+        }
+    }
+    if std::fs::remove_file(&removal.state).is_ok() {
+        say(format!("removed {}", removal.state.display()));
+        // the directory the record lived in, when nothing else lives there
+        if let Some(parent) = removal.state.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+    if leaving == Leaving::Purge {
+        match remove_path(&removal.dir, &removal.runtime) {
+            Ok(()) => say(format!(
+                "removed {} and everything in it",
+                removal.dir.display()
+            )),
+            Err(e) => say(format!("{} was not removed: {e}", removal.dir.display())),
+        }
+    }
+    if let Some(me) = &removal.me {
+        match std::fs::remove_file(me) {
+            Ok(()) => say(format!("removed {}", me.display())),
+            Err(e) => say(format!("{} was not removed: {e}", me.display())),
+        }
+    }
+    let _ = console;
+}
+
+/// A file or a directory, gone. A rootless podman container owns what it
+/// wrote to its mounts, so where this account may not remove a directory,
+/// podman removes it from inside the same user namespace.
+fn remove_path(path: &Path, runtime: &str) -> Result<(), String> {
+    let first = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match first {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && runtime == "podman" => {
+            let ok = Command::new("podman")
+                .args(["unshare", "rm", "-rf"])
+                .arg(path)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if ok { Ok(()) } else { Err(e.to_string()) }
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3933,6 +4607,56 @@ mod tests {
             None,
             "nothing answering is None"
         );
+    }
+
+    #[test]
+    fn removing_everything_refuses_what_an_install_did_not_make() {
+        let home = scratch("purge-home");
+        let made = home.join("nils");
+        std::fs::create_dir_all(made.join("registry")).unwrap();
+        std::fs::write(made.join("registry").join("nils.toml"), "").unwrap();
+        assert!(
+            safe_to_purge(&made, Some(&home)).is_ok(),
+            "an install's own directory"
+        );
+
+        let why = |dir: &Path| safe_to_purge(dir, Some(&home)).unwrap_err();
+        assert!(why(&home).contains("home directory"), "{}", why(&home));
+        assert!(
+            why(Path::new("/")).contains("root"),
+            "{}",
+            why(Path::new("/"))
+        );
+        assert!(why(Path::new("nils")).contains("absolute"));
+        let stranger = home.join("photos");
+        std::fs::create_dir_all(&stranger).unwrap();
+        assert!(
+            why(&stranger).contains("neither a registry nor a desk"),
+            "a directory named in a hand edited record, holding someone's photos"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_data_is_summarised_without_walking_an_archive() {
+        let dir = scratch("summary");
+        std::fs::create_dir_all(dir.join("registry")).unwrap();
+        std::fs::write(dir.join("registry").join("nils.toml"), "x").unwrap();
+        std::fs::write(dir.join("registry").join("registry.db"), vec![0u8; 2048]).unwrap();
+        std::fs::create_dir_all(dir.join("backups")).unwrap();
+        std::fs::write(dir.join("backups").join("a.tar.zst"), "b").unwrap();
+        std::fs::create_dir_all(dir.join("desk")).unwrap();
+        std::fs::write(dir.join("desk").join("nils-desk.sqlite"), "").unwrap();
+        let lines = data_summary(&dir).join(" | ");
+        assert!(
+            lines.contains("the registry, 2.0 KB, with its key"),
+            "{lines}"
+        );
+        assert!(lines.contains("1 backup file(s)"), "{lines}");
+        assert!(lines.contains("the desk's people"), "{lines}");
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(5 * 1024 * 1024), "5.0 MB");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

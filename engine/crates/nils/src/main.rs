@@ -146,6 +146,8 @@ enum Command {
     Setup(setup::SetupArgs),
     /// Replace this binary with the newest release, and the packs with it
     Update(update::UpdateArgs),
+    /// Remove what nils setup installed: NILS alone and keep the data, or everything
+    Uninstall(setup::UninstallArgs),
     /// What private elements an archive carries, by creator, so an allowlist
     /// is chosen from the data rather than from a chair (§8.4)
     Private(PrivateArgs),
@@ -1363,6 +1365,7 @@ fn main() -> ExitCode {
         Command::Supervise { command } => supervise::command(command),
         Command::Setup(args) => setup::setup(args),
         Command::Update(args) => update::update(&home, args),
+        Command::Uninstall(args) => setup::uninstall(args),
         Command::Audit(AuditCommand::List {
             principal,
             action,

@@ -374,6 +374,7 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
     let bytes = fetch_checked(&base, &wanted, &file)?;
     install_binary(&path, &bytes)?;
     println!("nils {wanted} at {} (was {VERSION})", path.display());
+    crate::setup::record_engine_version(&path, &wanted);
 
     // The packs go with the binary when the ones in use may be replaced; a
     // deployment that keeps its packs elsewhere is left alone and told so.
