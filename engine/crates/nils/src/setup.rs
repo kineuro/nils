@@ -1848,9 +1848,19 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         println!("  {line}");
     }
     let served = card.as_ref().map(|c| c.memory_gb).unwrap_or(0.0) >= 12.0;
+    // An assistant already installed is kept unless a person says otherwise:
+    // a change that took every default dropped it on a machine with no card.
+    let had_assistant = existing
+        .as_ref()
+        .is_some_and(|s| s.parts.contains_key("assistant"));
     if args.parts.is_none() {
         if parts.contains(&Part::Assistant) {
-            if !console.yes_no("Install the assistant anyway?", served) {
+            let question = if had_assistant {
+                "Keep the assistant?"
+            } else {
+                "Install the assistant anyway?"
+            };
+            if !console.yes_no(question, served || had_assistant) {
                 parts.retain(|p| *p != Part::Assistant);
             }
         } else if console.yes_no("Add the assistant as well?", false) {
