@@ -4,6 +4,31 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.7] - 2026-09-11
+
+Everything with containers, and an update that takes effect. Found by removing the laptop install and getting ready to run it again with podman and docker.
+
+### Added
+
+- The gateway and the assistant run in containers when the engine and the desk do. They are still built on the machine, then run in Node's image with their directories mounted at the same paths.
+  - **Podman:** they join the pod, where every part shares one loopback. With pasta, the pod gets this machine's loopback, so a model server on `127.0.0.1` is reached as `host.containers.internal`.
+  - **Docker:** each container is reached by its name. A model server on this machine has to listen on docker's bridge, which the wizard says when you choose one.
+  - **Both:** the gateway is published on this machine's loopback alone, and the assistant nowhere. The gateway starts, the key is made, and the assistant starts last. The wizard says which containers are running.
+
+### Changed
+
+- `nils update --all` restarts the services when anything changed, in the wizard's order, and says which are running. The same happens when `nils update` replaces the engine binary the setup record names. Until now every part kept running the old version until the next boot.
+- A slow step of `nils update` is one line with a timer, with no git, npm, podman or docker output unless it fails. The same goes for the wizard's image pulls, builds and registry commands in a container.
+- Source whose commit did not move is not rebuilt, and a desk that is already the newest is not fetched again.
+- The assistant's service starts the assistant's own entry, which listens on loopback and exits cleanly when stopped. Flue's entry listened on every interface.
+
+### Fixed
+
+- A change that took every default dropped an assistant that was already installed, on a machine with no card worth serving. The question is now "Keep the assistant?", defaulting to yes.
+- Docker could not build an image it could not pull. The wizard writes a `Containerfile`, which docker does not look for on its own.
+- `nils update --all --check` updated the parts it was only asked about.
+- A container install's engine image was left out of `nils update --all`.
+
 ## [1.0.0-alpha.6] - 2026-09-11
 
 A way out. After the first real install was repaired, the next thing asked for was removing it, in two forms: NILS alone, with the data kept, or everything.
