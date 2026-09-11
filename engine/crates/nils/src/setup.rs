@@ -933,6 +933,67 @@ pub(crate) struct Plan {
     pub(crate) host_loopback: bool,
 }
 
+/// The ways the parts can run here, in the order they are offered: the
+/// machine always, then each container runtime this machine has.
+fn runtime_choices(podman: bool, docker: bool) -> Vec<(Runtime, &'static str, &'static str)> {
+    let mut out = vec![(
+        Runtime::Machine,
+        "On this machine",
+        "two small binaries and a directory",
+    )];
+    if podman {
+        out.push((
+            Runtime::Podman,
+            "In containers (podman)",
+            "one pod holding every part, run as you, kept running by systemd",
+        ));
+    }
+    if docker {
+        out.push((
+            Runtime::Docker,
+            "In containers (docker)",
+            "one container per part on a docker network, kept running by docker",
+        ));
+    }
+    out
+}
+
+/// Whether docker here is docker and answers. A `docker` command that is
+/// podman's compatibility wrapper is podman, which is offered as itself; one
+/// whose daemon is not running, or that this account may not use, would fail
+/// at the first pull.
+fn docker_answers() -> Result<(), DockerAbsent> {
+    let Some(version) = run_quiet("docker", &["--version"]) else {
+        return Err(DockerAbsent::NotInstalled);
+    };
+    if version.to_lowercase().contains("podman") {
+        return Err(DockerAbsent::PodmanWrapper);
+    }
+    match run_quiet("docker", &["version", "--format", "{{.Server.Version}}"]) {
+        Some(server) if !server.trim().is_empty() => Ok(()),
+        _ => Err(DockerAbsent::NoDaemon),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DockerAbsent {
+    NotInstalled,
+    PodmanWrapper,
+    NoDaemon,
+}
+
+/// Why docker is not among the choices, when that is worth a sentence.
+fn docker_absent_reason(docker: Result<(), DockerAbsent>) -> Option<String> {
+    match docker {
+        Err(DockerAbsent::NoDaemon) => Some(
+            "docker is here but does not answer, so it is not offered: its daemon is not \
+             running, or this account may not use it (the docker group)"
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 /// Whether podman here networks a rootless pod through pasta, which is what
 /// can hand the pod this machine's loopback.
 fn podman_has_pasta() -> bool {
@@ -1604,47 +1665,37 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     // 2. where it runs
     console.step(2, steps, "Where it runs");
     let podman = have("podman");
-    let docker = have("docker");
+    let docker = docker_answers();
     let runtime = match &args.runtime {
         Some(r) => Runtime::parse(r).map_err(usage)?,
         None => {
-            if !podman && !docker {
+            if let Some(why) = docker_absent_reason(docker) {
+                console.note(&why);
+            }
+            let choices = runtime_choices(podman, docker.is_ok());
+            if choices.len() == 1 {
                 console.note(
                     "no podman and no docker here, so the parts run on the machine; \
-                     install podman if you would rather have containers",
+                     install either if you would rather have containers",
                 );
                 Runtime::Machine
             } else {
-                let container = if podman { "podman" } else { "docker" };
-                let choices = [
-                    ("On this machine", "two small binaries and a directory"),
-                    (
-                        if podman {
-                            "In containers (podman)"
-                        } else {
-                            "In containers (docker)"
-                        },
-                        "one image per part, the registry on a volume",
-                    ),
-                ];
+                let shown: Vec<(&str, &str)> = choices
+                    .iter()
+                    .map(|(_, label, said)| (*label, *said))
+                    .collect();
                 let default = existing
                     .as_ref()
-                    .map(|s| usize::from(s.runtime == "podman" || s.runtime == "docker"))
+                    .and_then(|s| choices.iter().position(|(r, _, _)| r.name() == s.runtime))
                     .unwrap_or(0);
-                if console.choice("How should the parts run?", &choices, default) == 0 {
-                    Runtime::Machine
-                } else if container == "podman" {
-                    Runtime::Podman
-                } else {
-                    Runtime::Docker
-                }
+                choices[console.choice("How should the parts run?", &shown, default)].0
             }
         }
     };
     let engine_here = match runtime {
         Runtime::Machine => true,
         Runtime::Podman => podman,
-        Runtime::Docker => docker,
+        Runtime::Docker => docker.is_ok(),
     };
     if !engine_here {
         if !args.print {
@@ -2005,10 +2056,10 @@ fn what_is_there(state: &State) -> String {
         .map(|(name, p)| format!("{name} {}", p.version))
         .collect::<Vec<_>>()
         .join(", ");
-    let runtime = if state.runtime.is_empty() {
-        "machine"
-    } else {
-        &state.runtime
+    let runtime = match state.runtime.as_str() {
+        "podman" => "in podman containers",
+        "docker" => "in docker containers",
+        _ => "on the machine",
     };
     let service = if state.service.is_empty() || state.service == "none" {
         "started by hand".to_string()
@@ -2016,7 +2067,7 @@ fn what_is_there(state: &State) -> String {
         format!("kept running by {}", state.service)
     };
     format!(
-        "{parts} in {}, {} mode, on the {runtime}, {service}",
+        "{parts} in {}, {} mode, {runtime}, {service}",
         state.dir, state.mode
     )
 }
@@ -5436,6 +5487,28 @@ mod tests {
         let taken = |p: u16| p < 7203;
         assert_eq!(next_free_port(7200, &taken), 7203);
         assert_eq!(next_free_port(7300, &taken), 7300);
+    }
+
+    #[test]
+    fn every_runtime_this_machine_has_is_offered() {
+        let names = |podman, docker| {
+            runtime_choices(podman, docker)
+                .iter()
+                .map(|(r, _, _)| r.name())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(false, false), vec!["machine"]);
+        assert_eq!(names(true, false), vec!["machine", "podman"]);
+        assert_eq!(names(false, true), vec!["machine", "docker"]);
+        assert_eq!(
+            names(true, true),
+            vec!["machine", "podman", "docker"],
+            "both, when both are here, not podman in docker's place"
+        );
+        assert!(docker_absent_reason(Err(DockerAbsent::NoDaemon)).is_some());
+        assert!(docker_absent_reason(Err(DockerAbsent::NotInstalled)).is_none());
+        assert!(docker_absent_reason(Err(DockerAbsent::PodmanWrapper)).is_none());
+        assert!(docker_absent_reason(Ok(())).is_none());
     }
 
     #[test]
