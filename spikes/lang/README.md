@@ -40,6 +40,15 @@ Toolchains on the host: rustc 1.98.0 (stable, 2026-08-18), go 1.26.8, pydicom 3.
 
 **mix** (planned 2026-09-02, Nima's suggestion): a small, deliberately diverse sample of the live v0 archive in production, which holds 37.5 million instances from 16 manufacturer labels and 86 scanner models, study years 2001 to 2026, four transfer syntaxes (JPEG 2000 lossless for 85 percent of the instances, explicit VR little endian, JPEG lossless in two flavours), 1,567 enhanced multi-frame MR series and a handful of CT series. The selection is made in SQL against the v0 metadata database, read-only, whole series only: up to two series per (manufacturer, model, study year, SOP class, transfer syntax, multi-frame or not, implementation version) stratum, every series of the manufacturers with fewer than 200 series in total, every CT series, three multi-stack series per manufacturer, and the three largest series of the archive (the selection script lives with the private record). It travels from production over the usual transfer path like every other dataset and lands beside nmosd with a `MANIFEST.tsv` of strata and counts. Together with nmosd, and another cohort from the storage server when the one-million-instance run is due, it gives criterion 2 the vendor spread nmosd lacks.
 
+## A finding, 2026-09-11
+
+`dbcheck` no longer builds for windows-arm64 on the hosted runner. DuckDB's
+bundled sources reach an assembler that rejects the arm64 assembly it is
+given, on the same native arm64 image that built it in September, so what
+changed is the toolchain the image offers and not this spike. The other five
+targets still build and run. Recorded rather than chased: the criterion it
+serves was answered in September and the answer does not turn on this.
+
 ## Results so far
 
 ### nmosd, the development container, 2026-09-02
