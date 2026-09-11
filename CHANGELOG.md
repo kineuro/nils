@@ -4,6 +4,26 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.5] - 2026-09-11
+
+The first install on a real machine with every part, in local mode. The wizard said it had finished while the gateway and the assistant were crashing in a loop. Everything that install showed is fixed here.
+
+### Changed
+
+- Nothing is asked after "Do it". The registry's passphrase is asked at the registry step, the first person at the sign-in step, and the model at the step that reads the graphics card, and all three are on the plan. After that there is only work to watch.
+- The model is a choice a person can answer without knowing what an OpenAI compatible address is: a model server on this machine, one on another machine of theirs, a commercial provider, or decide later. Each says what to type, with the addresses SGLang, vLLM, llama.cpp and Ollama listen on. Where the address answers, the server is asked which models it serves and the name is picked from that list. A provider's key is asked for hidden and kept in a file readable by nobody else.
+- The slow steps are one line each with a running timer. Git, npm and systemd output stays out of sight, and the end of a failing step's output is shown when it fails.
+
+### Fixed
+
+- The first person's password was read by the desk from the terminal with no prompt and echoed as it was typed. The wizard asks for it, hidden and twice, and hands it to the desk on its standard input.
+- The gateway died at start. Its configuration kept the example's key file path, `/etc/kvasir/card.key`, and the example's two commercial backends that nobody chose. It now holds one backend, the one named.
+- Three of the assistant's stations would have been refused: the gateway refuses a purpose it was not told of, the example declared three and the assistant uses seven. Every purpose is read from the stations themselves.
+- The assistant died at start looking for a key the gateway had not made yet. On systemd the gateway starts first, the key is made once it answers, and the assistant starts last.
+- The closing report named all four services as though they ran. Each unit is looked at twice, two seconds apart, and one that is not running is named with the line of its log that says why.
+- The commands printed for an install without services left out the port the setup had moved to and the trust local mode needs.
+- Repair now mends an install like the one that found all this: a key file that is not there and keyless remote backends are dropped, missing purposes are declared, and the assistant's key is made. A named model is never touched.
+
 ## [1.0.0-alpha.4] - 2026-09-10
 
 Two more found the same way as the last four: by taking a path a person takes second rather than first.
