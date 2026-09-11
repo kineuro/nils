@@ -2276,14 +2276,18 @@ fn install_packs(plan: &Plan, me: &Path, console: &mut Console) -> Result<(), Ex
             console.note(&format!("packs at {}", dir.display()));
             Ok(())
         }
-        // Not fatal: the engine runs without packs and says so, and a person
-        // can point at a pack directory later. But it is the difference
-        // between an engine that can read a study and one that cannot, so
-        // it is said plainly rather than noted.
+        // Not fatal: the engine runs, digests and answers questions without
+        // packs; what it cannot do is say what a scan is. That is worth a
+        // plain sentence rather than a note, and worth being accurate
+        // about, since an install that can still read a study is not a
+        // broken one.
         Err(e) => {
             println!("  the rule packs were not installed: {e}");
-            println!("  without them the engine cannot digest anything; put a packs directory at");
-            println!("  {} or pass --pack-dir", dir.display());
+            println!("  the engine still runs and digests; what it cannot do is classify.");
+            println!(
+                "  put a packs directory at {} or pass --pack-dir",
+                dir.display()
+            );
             Ok(())
         }
     }
