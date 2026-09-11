@@ -509,11 +509,17 @@ impl Console {
 
     /// A line of text, with a default. An empty default may come back empty.
     fn line(&mut self, question: &str, default: &str) -> String {
+        // An empty default is no default, and `[]` says nothing.
+        let hint = if default.is_empty() {
+            ":".to_string()
+        } else {
+            format!(" [{default}]")
+        };
         if !self.interactive() {
-            println!("  {question} {}", self.dim(&format!("[{default}]")));
+            println!("  {question}{}", self.dim(&hint));
             return default.to_string();
         }
-        print!("  {question} [{default}] ");
+        print!("  {question}{hint} ");
         let _ = std::io::stdout().flush();
         match self.read_line() {
             Some(answer) if !answer.is_empty() => answer,
@@ -3938,7 +3944,7 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     }
 
     let go = match leaving {
-        Leaving::KeepData => args.yes || console.yes_no("Do it?", false),
+        Leaving::KeepData => args.yes || (console.interactive() && console.yes_no("Do it?", false)),
         Leaving::Purge if args.yes => true,
         Leaving::Purge => {
             if !console.interactive() {
@@ -3966,6 +3972,7 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
         return Ok(());
     }
 
+    println!();
     carry_out(&removal, leaving, &console);
     println!();
     println!("{}", console.bold("Removed"));
@@ -4189,7 +4196,7 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
     let row = |out: &mut String, key: &str, value: String| {
         let _ = writeln!(out, "  {} {value}", console.dim(&format!("{key:<12}")));
     };
-    let _ = writeln!(out, "  {}", console.bold("Removing"));
+    let _ = writeln!(out, "{}", console.bold("Removing"));
     if !removal.units.is_empty() {
         row(&mut out, "services", removal.units.join(", "));
     } else if !removal.unit_files.is_empty() {
@@ -4265,7 +4272,7 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
             let _ = writeln!(out, "  {:<12} {}", "", console.dim(&line));
         }
     }
-    let _ = writeln!(out, "  {}", console.bold("Keeping"));
+    let _ = writeln!(out, "\n{}", console.bold("Keeping"));
     match leaving {
         Leaving::KeepData => {
             row(&mut out, "data", removal.dir.display().to_string());
@@ -4323,7 +4330,7 @@ fn data_summary(dir: &Path) -> Vec<String> {
         out.push(format!("{backups} backup file(s)"));
     }
     if dir.join("desk").join("nils-desk.sqlite").exists() {
-        out.push("the desk's people and their passwords".to_string());
+        out.push("the desk's database, with the people it keeps".to_string());
     }
     if dir.join("assistant").join("assistant.sqlite").exists() {
         out.push("the assistant's conversations".to_string());
@@ -4806,7 +4813,7 @@ mod tests {
             "{lines}"
         );
         assert!(lines.contains("1 backup file(s)"), "{lines}");
-        assert!(lines.contains("the desk's people"), "{lines}");
+        assert!(lines.contains("the desk's database"), "{lines}");
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(5 * 1024 * 1024), "5.0 MB");
         let _ = std::fs::remove_dir_all(&dir);
