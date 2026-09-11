@@ -20,10 +20,15 @@ struct Installed {
 }
 
 impl Installed {
+    /// The binary in a `bin` directory of its own, which is where the one
+    /// line installer puts it: `~/.local/bin` for a person, `/usr/local/bin`
+    /// for root. The prefix above it is where the packs go.
     fn new(name: &str) -> Installed {
         let dir = TempDir::new(name);
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
         let to = dir
             .path()
+            .join("bin")
             .join(if cfg!(windows) { "nils.exe" } else { "nils" });
         std::fs::copy(env!("CARGO_BIN_EXE_nils"), &to).expect("the binary copies");
         #[cfg(unix)]
@@ -37,6 +42,7 @@ impl Installed {
     fn path(&self) -> PathBuf {
         self.dir
             .path()
+            .join("bin")
             .join(if cfg!(windows) { "nils.exe" } else { "nils" })
     }
 }
@@ -135,6 +141,11 @@ impl Releases {
             std::fs::write(into.join(&name), &body).unwrap();
             sums.push_str(&format!("{}  {name}\n", sha256_hex(body.as_bytes())));
         }
+        // The rule packs travel with the binaries, in one tarball holding a
+        // `packs/` directory, which is what a machine install unpacks.
+        let packs = tar_gz_of_one_pack();
+        std::fs::write(into.join("packs.tar.gz"), &packs).unwrap();
+        sums.push_str(&format!("{}  packs.tar.gz\n", sha256_hex(&packs)));
         std::fs::write(into.join("SHA256SUMS"), sums).unwrap();
         let latest = releases.dir.path().join("latest").join("download");
         std::fs::create_dir_all(&latest).unwrap();
@@ -145,6 +156,26 @@ impl Releases {
     fn url(&self) -> String {
         format!("file://{}", self.dir.path().display())
     }
+}
+
+/// A `packs.tar.gz` of one pack, shaped the way the release's is: a `packs/`
+/// directory holding one pack directory with a `pack.toml` in it.
+fn tar_gz_of_one_pack() -> Vec<u8> {
+    let toml = b"name = \"mri\"\nversion = \"0.0.1\"\ncontract = 4\n";
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    {
+        let mut builder = tar::Builder::new(&mut gz);
+        builder.mode(tar::HeaderMode::Deterministic);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(toml.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "packs/mri/pack.toml", &toml[..])
+            .unwrap();
+        builder.finish().unwrap();
+    }
+    gz.finish().unwrap()
 }
 
 fn state_of(config: &Path) -> String {
@@ -266,6 +297,53 @@ fn yes_makes_a_registry_and_a_state_file_and_a_second_run_changes_nothing() {
         state.lines().find(|l| l.starts_with("places =")),
         "the second run declared different places"
     );
+}
+
+/// A machine install carries no rule packs in the binary, so it has to take
+/// them from the release. Without them the engine starts saying `packs none`
+/// and refuses to digest anything, which is the whole of what it is for.
+/// They go where the engine looks by default, not only where the service
+/// this wizard wrote would look.
+#[test]
+fn a_machine_install_puts_the_packs_where_the_engine_looks() {
+    let releases = Releases::new("99.0.0");
+    let nils = Installed::new("nils-setup-packs");
+    let config = TempDir::new("nils-setup-packs-config");
+    let base = TempDir::new("nils-setup-packs-base");
+    let dir = base.path().join("nils");
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--channel",
+            &releases.url(),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    // The binary sits in a bin directory, so the packs sit in the share
+    // directory of the same prefix: one of the places the engine looks with
+    // no flag at all.
+    let prefix = nils
+        .path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let packs = prefix.join("share").join("nils").join("packs");
+    assert!(
+        packs.join("mri").join("pack.toml").is_file(),
+        "no pack at {}:\n{}",
+        packs.display(),
+        o.stdout
+    );
+    o.says("packs at");
 }
 
 #[test]

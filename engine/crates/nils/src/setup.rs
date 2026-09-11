@@ -1780,6 +1780,8 @@ fn do_it(
                 .unwrap_or_else(|_| into.join("nils-desk"));
             pull_or_build(plan, console, "nils-desk", DESK_IMAGE, &desk_binary)?;
         }
+    } else {
+        install_packs(plan, &me, console)?;
     }
 
     state.parts.insert(
@@ -2199,6 +2201,52 @@ fn install_desk(into: &Path, channel: Option<&str>) -> Result<(String, PathBuf),
     let path = into.join(name);
     update::install_binary(&path, &bytes)?;
     Ok((version, path))
+}
+
+/// The rule packs, which a machine install has no other way of getting: the
+/// binary carries none and the release keeps them in one tarball beside it.
+/// A container run needs none of this, because the image holds them.
+///
+/// They go where the engine looks by default, so that `nils digest` finds
+/// them with no flag whoever runs it, not only the service this wizard
+/// wrote.
+fn install_packs(plan: &Plan, me: &Path, console: &mut Console) -> Result<(), Exit> {
+    let dir = pack_destination(plan, me);
+    let base = update::engine_base(plan.channel.as_deref());
+    let version = update::newest_version(&base).unwrap_or_else(|_| update::VERSION.to_string());
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| fail(format!("{}: {e}", parent.display())))?;
+    }
+    match update::refresh_packs(&base, &version, &dir) {
+        Ok(_) => {
+            console.note(&format!("packs at {}", dir.display()));
+            Ok(())
+        }
+        // Not fatal: the engine runs without packs and says so, and a person
+        // can point at a pack directory later. But it is the difference
+        // between an engine that can read a study and one that cannot, so
+        // it is said plainly rather than noted.
+        Err(e) => {
+            println!("  the rule packs were not installed: {e}");
+            println!("  without them the engine cannot digest anything; put a packs directory at");
+            println!("  {} or pass --pack-dir", dir.display());
+            Ok(())
+        }
+    }
+}
+
+/// Where the packs go: the share directory of the prefix the engine binary
+/// sits in, which is the place the engine looks at whoever runs it. Where
+/// that prefix cannot be written, the registry's own directory, which the
+/// engine looks at first of all.
+fn pack_destination(plan: &Plan, me: &Path) -> PathBuf {
+    if let Some(prefix) = me.parent().and_then(Path::parent) {
+        let share = prefix.join("share").join("nils");
+        if std::fs::create_dir_all(&share).is_ok() && update::writable(&share) {
+            return share.join("packs");
+        }
+    }
+    plan.registry().join("packs")
 }
 
 /// The desk's configuration for the mode chosen, and the tables for the
