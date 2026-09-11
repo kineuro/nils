@@ -541,13 +541,22 @@ impl Console {
 
     /// A passphrase, twice, without echoing it.
     fn secret(&mut self, question: &str) -> Option<String> {
+        self.hidden_twice(question, "a passphrase")
+    }
+
+    /// A password, twice, without echoing it.
+    fn password(&mut self, question: &str) -> Option<String> {
+        self.hidden_twice(question, "a password")
+    }
+
+    fn hidden_twice(&mut self, question: &str, noun: &str) -> Option<String> {
         if !self.interactive() {
             return None;
         }
         loop {
             let first = self.secret_once(question)?;
             if first.is_empty() {
-                println!("  {}", self.dim("a passphrase is needed"));
+                println!("  {}", self.dim(&format!("{noun} is needed")));
                 continue;
             }
             let again = self.secret_once("and again")?;
@@ -556,6 +565,104 @@ impl Console {
             }
             println!("  {}", self.dim("those differ; once more"));
         }
+    }
+
+    /// Once, hidden: a key a provider gave, which is pasted rather than
+    /// chosen, so asking for it twice would only invite a second paste.
+    fn hidden_once(&mut self, question: &str) -> Option<String> {
+        if !self.interactive() {
+            return None;
+        }
+        self.secret_once(question).filter(|s| !s.is_empty())
+    }
+
+    /// A slow thing, said in one line with a timer that runs while it
+    /// works. Its own output is kept out of sight: a person installing NILS
+    /// does not need a clone's object counts or a package manager's
+    /// deprecation notices, and a fresh install should not open on a screen
+    /// of warnings. When it fails, the end of that output is the first thing
+    /// shown, because then it is the whole story.
+    fn task(&self, label: &str, dir: &Path, program: &str, args: &[&str]) -> Result<(), Exit> {
+        use std::sync::{Arc, Mutex};
+        let started = std::time::Instant::now();
+        let live = std::io::stdout().is_terminal();
+        let mut child = Command::new(program)
+            .args(args)
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| fail(format!("{program}: {e}")))?;
+        let heard = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut readers = Vec::new();
+        for stream in [
+            child
+                .stdout
+                .take()
+                .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+            child
+                .stderr
+                .take()
+                .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let heard = Arc::clone(&heard);
+            readers.push(std::thread::spawn(move || {
+                let mut stream = stream;
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = std::io::Read::read(&mut stream, &mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    if let Ok(mut all) = heard.lock() {
+                        all.extend_from_slice(&chunk[..n]);
+                    }
+                }
+            }));
+        }
+        if !live {
+            println!("  {label}");
+        }
+        let status = loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                break status;
+            }
+            if live {
+                print!(
+                    "\r  {label} {}",
+                    self.dim(&format!("{}s", started.elapsed().as_secs()))
+                );
+                let _ = std::io::stdout().flush();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        };
+        for reader in readers {
+            let _ = reader.join();
+        }
+        let took = started.elapsed().as_secs();
+        if status.success() {
+            if live {
+                print!("\r\x1b[2K");
+            }
+            println!("  {label} {}", self.dim(&format!("done in {took}s")));
+            return Ok(());
+        }
+        if live {
+            print!("\r\x1b[2K");
+        }
+        println!("  {label} {}", self.dim(&format!("failed after {took}s")));
+        let text = heard
+            .lock()
+            .map(|all| String::from_utf8_lossy(&all).to_string())
+            .unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        for line in &lines[lines.len().saturating_sub(25)..] {
+            println!("    {line}");
+        }
+        Err(fail(format!("{program} {} failed", args.join(" "))))
     }
 
     fn secret_once(&mut self, question: &str) -> Option<String> {
@@ -691,6 +798,19 @@ fn write_state(state: &State) -> Result<PathBuf, Exit> {
 }
 
 // --------------------------------------------------------------- the plan
+
+/// What a person answered that is not the shape of the install: the first
+/// person and the model. Asked with every other question and shown on the
+/// plan, so that once the person says "Do it" there is only work to watch.
+/// Asked in the middle of the work instead, a person who had walked away
+/// came back to a prompt, and one who stayed could not tell a question from
+/// a hang.
+#[derive(Default)]
+struct Answers {
+    first: Option<(String, String)>,
+    model: Option<ModelChoice>,
+    passphrase: Option<String>,
+}
 
 /// What the wizard decided, before it does any of it.
 pub(crate) struct Plan {
@@ -1386,6 +1506,10 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             BackendChoice::Postgres { dsn, schema }
         }
     };
+    let mut answers = Answers::default();
+    if !registry_exists && args.key_file.is_none() && console.interactive() {
+        answers.passphrase = console.secret("A passphrase for the registry's key");
+    }
 
     // 5. who may sign in, and who may reach the desk
     console.step(5, steps, "Who may sign in");
@@ -1457,6 +1581,20 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         }
     }
 
+    // the first person, for a desk that keeps its own and has none yet
+    let store_exists = dir.join("desk").join("nils-desk.sqlite").exists();
+    if mode == Mode::Local
+        && parts.contains(&Part::Desk)
+        && !store_exists
+        && console.interactive()
+        && console.yes_no("Add the first person now, who may do everything?", true)
+    {
+        let name = console.line("A username for them", "admin");
+        if let Some(password) = console.password(&format!("A password for {name}")) {
+            answers.first = Some((name, password));
+        }
+    }
+
     // ports
     let mut ports = existing.as_ref().map(|s| s.ports).unwrap_or_default();
     for (name, port) in [
@@ -1492,6 +1630,9 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     }
     if parts.contains(&Part::Assistant) && runtime.container() {
         console.note("the assistant and the gateway are built from source, on the machine");
+    }
+    if parts.contains(&Part::Assistant) && !dir.join("kvasir").join("kvasir.json").exists() {
+        answers.model = Some(choose_model(&mut console, served));
     }
 
     // 7. services
@@ -1533,6 +1674,33 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     // 8. the summary, then the work
     console.step(8, steps, "The plan");
     print!("{}", plan_text(&plan, &console));
+    if let Some((name, _)) = &answers.first {
+        println!(
+            "  {} {name}, who may do everything",
+            console.dim(&format!("{:<12}", "first person"))
+        );
+    }
+    if let Some(model) = &answers.model {
+        let said = if model.later {
+            "none named yet".to_string()
+        } else {
+            format!(
+                "{} at {}{}",
+                if model.model.is_empty() {
+                    "the default model"
+                } else {
+                    &model.model
+                },
+                model.url,
+                if model.local {
+                    ""
+                } else {
+                    " (the prompt leaves your systems)"
+                }
+            )
+        };
+        println!("  {} {said}", console.dim(&format!("{:<12}", "model")));
+    }
     if args.print {
         print!("{}", commands_text(&plan, &console));
         println!();
@@ -1544,7 +1712,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         return Ok(());
     }
 
-    do_it(&plan, &mut console, &args, existing, false)
+    do_it(&plan, &mut console, &args, existing, false, &answers)
 }
 
 /// What is installed, where, in what mode and how it runs, on one line.
@@ -1587,7 +1755,14 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
         println!("nothing was changed");
         return Ok(());
     }
-    do_it(&plan, console, args, Some(state.clone()), true)?;
+    do_it(
+        &plan,
+        console,
+        args,
+        Some(state.clone()),
+        true,
+        &Answers::default(),
+    )?;
     // A container's engine is the image, and `do_it` pulled the new tag. A
     // machine's engine is this binary, and nothing above touches it, so
     // "update everything" would have moved every part except the one a
@@ -1650,15 +1825,36 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         write_desk_config(&plan, true)?;
         println!("  {}", plan.desk_config().display());
     }
+    // The gateway's file is mended, not rewritten, and the assistant's
+    // environment is written where it is missing; the key is made during the
+    // start-up below, once the gateway answers.
+    if plan.has(Part::Assistant) {
+        if let Err(e) = configure_kvasir(&plan, console, None) {
+            println!(
+                "  the gateway's configuration was not mended: {}",
+                e.message
+            );
+        }
+        if let Err(e) = write_assistant_env(&plan) {
+            println!(
+                "  the assistant's environment was not written: {}",
+                e.message
+            );
+        }
+    }
     if plan.service {
-        match start_everything(&plan, state) {
-            Ok(what) => println!("  services: {what}"),
+        match start_everything(&plan, state, console) {
+            Ok(what) => print!("{what}"),
             Err(e) => println!("  no services were written: {}", e.message),
         }
     } else {
         for line in container_commands(&plan) {
             println!("  run: {line}");
         }
+    }
+    let systemd = plan.runtime == Runtime::Machine && !cfg!(target_os = "macos");
+    if plan.has(Part::Assistant) && !(plan.service && systemd) {
+        mint_assistant_key(&plan, console);
     }
     summary(&plan, console);
     Ok(())
@@ -1683,7 +1879,7 @@ fn service_manager(runtime: Runtime) -> Option<&'static str> {
 fn plan_text(plan: &Plan, console: &Console) -> String {
     let mut out = String::new();
     let mut row = |key: &str, value: String| {
-        let _ = writeln!(out, "  {:<16} {value}", console.dim(key));
+        let _ = writeln!(out, "  {} {value}", console.dim(&format!("{key:<12}")));
     };
     row("directory", plan.dir.display().to_string());
     row(
@@ -1814,6 +2010,7 @@ fn do_it(
     args: &SetupArgs,
     existing: Option<State>,
     only_update: bool,
+    answers: &Answers,
 ) -> Result<(), Exit> {
     for sub in ["registry", "desk", "backups", "working", "export"] {
         let path = plan.dir.join(sub);
@@ -1886,7 +2083,7 @@ fn do_it(
     // The registry, made by the engine wherever it runs.
     let home = Home::new(plan.registry());
     if !plan.registry_exists && !only_update {
-        make_registry(plan, &home, console, args)?;
+        make_registry(plan, &home, console, args, answers.passphrase.as_deref())?;
     }
 
     // The desk.
@@ -1919,7 +2116,12 @@ fn do_it(
         write_desk_config(plan, false)?;
         println!("  {}", plan.desk_config().display());
         if plan.mode == Mode::Local {
-            add_first_admin(plan, console);
+            let desk = state
+                .parts
+                .get("desk")
+                .filter(|p| p.kind == "binary")
+                .map(|p| PathBuf::from(&p.path));
+            add_first_admin(plan, desk, answers.first.as_ref());
         }
         if plan.mode == Mode::Oidc {
             println!("  register the desk at your provider with:");
@@ -1933,11 +2135,9 @@ fn do_it(
     }
 
     // The assistant and its gateway, which are built rather than downloaded.
-    let mut gateway_admin = None;
     if plan.has(Part::Assistant) {
-        match install_node_parts(plan, console) {
-            Ok((paths, admin)) => {
-                gateway_admin = Some(admin);
+        match install_node_parts(plan, console, answers.model.as_ref()) {
+            Ok(paths) => {
                 for (name, path) in paths {
                     println!("  {name} at {}", path.display());
                     state.parts.insert(
@@ -1963,8 +2163,8 @@ fn do_it(
 
     // Start it.
     if plan.service {
-        match start_everything(plan, &state) {
-            Ok(what) => println!("  services: {what}"),
+        match start_everything(plan, &state, console) {
+            Ok(what) => print!("{what}"),
             Err(e) => println!("  no services were written: {}", e.message),
         }
     } else if plan.runtime.container() {
@@ -1981,10 +2181,18 @@ fn do_it(
         }
     }
 
-    // The assistant's key comes from the gateway, so it is asked for once
-    // the gateway is up; where it is not, the command is printed instead.
-    if let Some(admin) = &gateway_admin {
-        mint_assistant_key(plan, admin);
+    // The assistant's key comes from the gateway. On systemd the start-up
+    // itself makes it, between the gateway and the assistant; everywhere
+    // else it is made here, once the gateway answers.
+    let systemd = plan.runtime == Runtime::Machine && !cfg!(target_os = "macos");
+    if plan.has(Part::Assistant) && plan.service && !systemd {
+        mint_assistant_key(plan, console);
+    }
+    if plan.has(Part::Assistant) && !plan.service {
+        console.note(
+            "with no services, start the gateway yourself; then nils setup and repair makes \
+             the assistant's key",
+        );
     }
 
     let path = write_state(&state)?;
@@ -2060,11 +2268,13 @@ fn make_registry(
     home: &Home,
     console: &mut Console,
     args: &SetupArgs,
+    asked: Option<&str>,
 ) -> Result<(), Exit> {
-    let passphrase = match &args.key_file {
-        Some(path) => std::fs::read_to_string(path)
+    let passphrase = match (&args.key_file, asked) {
+        (Some(path), _) => std::fs::read_to_string(path)
             .map_err(|e| usage(format!("--key-file {}: {e}", path.display())))?,
-        None => match console.secret("A passphrase for the registry's key") {
+        (None, Some(asked)) => asked.to_string(),
+        (None, None) => match console.secret("A passphrase for the registry's key") {
             Some(secret) => secret,
             None => {
                 let generated = generated_passphrase();
@@ -2408,43 +2618,57 @@ fn write_desk_config(plan: &Plan, force: bool) -> Result<(), Exit> {
 /// In local mode the desk keeps the people, and an empty desk has nobody to
 /// let in. The offer is made once, and the desk's own command asks for the
 /// password, so nothing here ever holds one.
-fn add_first_admin(plan: &Plan, console: &mut Console) {
+fn add_first_admin(plan: &Plan, desk: Option<PathBuf>, first: Option<&(String, String)>) {
     let by_hand = format!(
         "nils-desk user add <name> --admin --config {}",
         plan.desk_config().display()
     );
-    if !console.interactive() {
+    let Some((name, password)) = first else {
         println!("  add the first person with: {by_hand}");
         return;
-    }
-    if !console.yes_no("Add the first person, who may do everything?", true) {
-        println!("  when you want one: {by_hand}");
-        return;
-    }
-    let name = console.line("Their username", "admin");
-    let beside = plan.dir.join("bin").join("nils-desk");
-    let desk = if beside.exists() {
-        beside
-    } else {
-        PathBuf::from("nils-desk")
     };
-    let ran = Command::new(&desk)
-        .args(["user", "add", &name, "--admin", "--config"])
+    let desk = desk
+        .filter(|d| d.exists())
+        .or_else(|| Some(plan.dir.join("bin").join("nils-desk")).filter(|d| d.exists()))
+        .unwrap_or_else(|| PathBuf::from("nils-desk"));
+    // The password was asked for with the other questions, hidden and twice,
+    // and goes to the desk on its standard input. Handing the desk the
+    // terminal instead left a person at an empty line with no prompt, and
+    // what they typed was shown as they typed it.
+    let child = Command::new(&desk)
+        .args(["user", "add", name, "--admin", "--config"])
         .arg(plan.desk_config())
-        .status();
-    match ran {
-        Ok(status) if status.success() => println!("  {name} may sign in and do everything"),
-        _ => println!("  that did not work here; the command is: {by_hand}"),
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let done = child.and_then(|mut child| {
+        if let Some(mut stdin) = child.stdin.take() {
+            writeln!(stdin, "{password}")?;
+        }
+        child.wait_with_output()
+    });
+    match done {
+        Ok(out) if out.status.success() => println!("  {name} may sign in and do everything"),
+        Ok(out) => {
+            let why = String::from_utf8_lossy(&out.stderr);
+            println!(
+                "  {name} was not added: {}",
+                why.lines().last().unwrap_or("the desk refused")
+            );
+            println!("  the command is: {by_hand}");
+        }
+        Err(e) => println!("  {name} was not added ({e}); the command is: {by_hand}"),
     }
 }
 
 /// The gateway and the assistant: cloned and built, since neither ships a
 /// binary. Anything missing is said rather than guessed at.
-#[allow(clippy::type_complexity, reason = "two parts and one token, said once")]
 fn install_node_parts(
     plan: &Plan,
     console: &mut Console,
-) -> Result<(Vec<(&'static str, PathBuf)>, String), Exit> {
+    model: Option<&ModelChoice>,
+) -> Result<Vec<(&'static str, PathBuf)>, Exit> {
     let node = run_quiet("node", &["--version"]).unwrap_or_default();
     let major: u32 = node
         .trim()
@@ -2463,57 +2687,287 @@ fn install_node_parts(
     }
 
     let mut out = Vec::new();
-    for (name, repo) in [("kvasir", KVASIR_REPO), ("assistant", ASSISTANT_REPO)] {
+    for (name, said, repo) in [
+        ("kvasir", "the gateway", KVASIR_REPO),
+        ("assistant", "the assistant", ASSISTANT_REPO),
+    ] {
         let into = plan.dir.join(name);
         if into.exists() {
-            console.note(&format!("{} is already there; pulling", into.display()));
-            run_in(&into, "git", &["pull", "--ff-only"])?;
+            console.task(
+                &format!("updating {said}'s source"),
+                &into,
+                "git",
+                &["pull", "--ff-only"],
+            )?;
         } else {
-            run_in(
+            console.task(
+                &format!("fetching {said}"),
                 &plan.dir,
                 "git",
                 &["clone", "--depth", "1", repo, &into.display().to_string()],
             )?;
         }
-        run_in(&into, "npm", &["ci", "--no-audit", "--no-fund"])?;
-        run_in(&into, "npm", &["run", "build"])?;
+        console.task(
+            &format!("installing {said}'s packages"),
+            &into,
+            "npm",
+            &["ci", "--no-audit", "--no-fund", "--loglevel=error"],
+        )?;
+        console.task(&format!("building {said}"), &into, "npm", &["run", "build"])?;
         out.push((name, into));
     }
 
-    let admin = configure_kvasir(plan, console)?;
+    configure_kvasir(plan, console, model)?;
     write_assistant_env(plan)?;
-    Ok((out, admin))
+    Ok(out)
 }
 
-/// The five purposes the assistant asks the gateway for, which is what its
-/// key is minted against.
-const PURPOSES: [&str; 5] = [
-    "assistant.ask-help",
-    "assistant.concierge",
-    "assistant.keyword-tune",
-    "assistant.identity-check",
-    "assistant.title",
-];
+/// What the assistant will talk to, chosen by a person who may not know
+/// what an OpenAI compatible address is.
+struct ModelChoice {
+    url: String,
+    local: bool,
+    key: Option<String>,
+    model: String,
+    later: bool,
+}
 
-/// The gateway's configuration from its own example: the port this setup
-/// chose, an admin token made here, and the address the model answers on.
-/// The file holds that token, so it is written readable by nobody else.
-fn configure_kvasir(plan: &Plan, console: &mut Console) -> Result<String, Exit> {
+/// The model the gateway is given when nobody has named one: the one the
+/// assistant's stations were written against, on SGLang's own port.
+const DEFAULT_MODEL_URL: &str = "http://127.0.0.1:30000/v1";
+
+/// That model's name, as the gateway's own example gives it.
+const EXAMPLE_MODEL_ID: &str = "qwen38-27b";
+
+/// Ask what the assistant should talk to, and what to type for it. Where the
+/// address answers, the server is asked which models it serves, so the name
+/// is picked from a list rather than remembered.
+fn choose_model(console: &mut Console, served: bool) -> ModelChoice {
+    let example_model = EXAMPLE_MODEL_ID;
+    println!();
+    println!("  {}", console.bold("The model"));
+    console.note(
+        "the assistant talks to a model through the gateway, over the OpenAI chat API, which \
+         almost every model server and provider speaks",
+    );
+    let pick = console.choice(
+        "What should it talk to?",
+        &[
+            (
+                "A model server on this machine",
+                "SGLang, vLLM, llama.cpp or Ollama, already running here",
+            ),
+            (
+                "A model server on another machine of yours",
+                "the same, reached over your network; the prompt stays inside your own systems",
+            ),
+            (
+                "A commercial provider",
+                "OpenAI, OpenRouter, MiniMax or another; the prompt leaves your systems",
+            ),
+            (
+                "Decide later",
+                "install it without a model now; run nils setup again to name one",
+            ),
+        ],
+        if served { 0 } else { 3 },
+    );
+
+    if pick == 3 {
+        console.note(&format!(
+            "the gateway is pointed at {DEFAULT_MODEL_URL} for now; the assistant answers once a \
+             model runs there, or once you run nils setup and name another"
+        ));
+        return ModelChoice {
+            url: DEFAULT_MODEL_URL.to_string(),
+            local: true,
+            key: None,
+            model: example_model.to_string(),
+            later: true,
+        };
+    }
+
+    let (url, local) = match pick {
+        0 => {
+            console.note(
+                "SGLang listens on http://127.0.0.1:30000/v1, vLLM on :8000/v1, llama.cpp on \
+                 :8080/v1 and Ollama on :11434/v1",
+            );
+            (ask_address(console, DEFAULT_MODEL_URL), true)
+        }
+        1 => {
+            console.note(
+                "the address of that server as this machine reaches it, for example \
+                 http://192.168.1.20:30000/v1",
+            );
+            (ask_address(console, ""), true)
+        }
+        _ => {
+            console.note(
+                "its OpenAI compatible address: https://api.openai.com/v1, \
+                 https://openrouter.ai/api/v1 or https://api.minimax.io/v1, among others",
+            );
+            (ask_address(console, "https://api.openai.com/v1"), false)
+        }
+    };
+
+    let key = if local {
+        if console.yes_no("Does that server need a key?", false) {
+            console.hidden_once("Its key")
+        } else {
+            None
+        }
+    } else {
+        let key = console.hidden_once("Your key from that provider");
+        if key.is_none() {
+            console.note("no key was given; the provider will refuse the gateway until one is");
+        }
+        key
+    };
+
+    let model = match list_models(&url, key.as_deref()) {
+        Some(ids) if ids.len() == 1 => {
+            console.note(&format!("{url} answered, serving {}", ids[0]));
+            ids[0].clone()
+        }
+        Some(ids) if !ids.is_empty() => {
+            console.note(&format!("{url} answered"));
+            let shown: Vec<(&str, &str)> =
+                ids.iter().take(12).map(|id| (id.as_str(), "")).collect();
+            let at = console.choice("Which model?", &shown, 0);
+            ids[at].clone()
+        }
+        _ => {
+            console.note(&format!(
+                "nothing answered at {url} yet; the gateway will reach it once it is running"
+            ));
+            let default = if local { example_model } else { "" };
+            loop {
+                let named = console.line("The model's name, as the server lists it", default);
+                if !named.trim().is_empty() || !console.interactive() {
+                    break named.trim().to_string();
+                }
+                console.note("a model's name is needed, for example gpt-4.1-mini");
+            }
+        }
+    };
+
+    if !local {
+        console.note(
+            "the gateway keeps your registry's rows on your own systems unless you decide \
+             otherwise, so questions that read the registry are refused by this provider until \
+             you open them: https://kineuro.se/nils/docs/assistant/kvasir/",
+        );
+    }
+    ModelChoice {
+        url,
+        local,
+        key,
+        model,
+        later: false,
+    }
+}
+
+/// An http or https address, asked until one is given.
+fn ask_address(console: &mut Console, default: &str) -> String {
+    loop {
+        let url = console
+            .line("Its address", default)
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
+        if url.starts_with("http://") || url.starts_with("https://") {
+            return url;
+        }
+        if !console.interactive() {
+            return DEFAULT_MODEL_URL.to_string();
+        }
+        console.note("an address starting with http:// or https://");
+    }
+}
+
+/// The models an OpenAI compatible server lists, when it answers at all.
+fn list_models(url: &str, key: Option<&str>) -> Option<Vec<String>> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_secs(2)))
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .build()
+        .into();
+    let mut request = agent.get(&format!("{url}/models"));
+    if let Some(key) = key {
+        request = request.header("authorization", &format!("Bearer {key}"));
+    }
+    let text = request.call().ok()?.body_mut().read_to_string().ok()?;
+    let answer: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let ids: Vec<String> = answer["data"]
+        .as_array()?
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(str::to_string))
+        .collect();
+    Some(ids)
+}
+
+/// The purposes the assistant uses: the host's own, from the gateway's
+/// example, and one for each station the assistant ships, read from that
+/// station's own file. The gateway refuses a purpose it was not told of, so
+/// a station missing here is a station that never answers.
+fn assistant_purposes(plan: &Plan, declared: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = declared.as_array().cloned().unwrap_or_default();
+    let stations = plan.dir.join("assistant").join("stations");
+    let mut found: Vec<(String, String)> = std::fs::read_dir(&stations)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let text = std::fs::read_to_string(entry.path().join("station.yml")).ok()?;
+            let field = |key: &str| {
+                text.lines().find_map(|line| {
+                    line.strip_prefix(key)
+                        .and_then(|rest| rest.strip_prefix(':'))
+                        .map(|value| value.trim().trim_matches('"').to_string())
+                })
+            };
+            Some((
+                field("purpose")?,
+                field("content").unwrap_or_else(|| "rows".to_string()),
+            ))
+        })
+        .collect();
+    found.sort();
+    for (id, content) in found {
+        if out.iter().any(|p| p["id"] == id.as_str()) {
+            continue;
+        }
+        out.push(serde_json::json!({
+            "id": id,
+            "app": "nils-assistant",
+            "content": content,
+            "kind": "foreground",
+        }));
+    }
+    out
+}
+
+/// The gateway's configuration: the port this setup chose, an admin token
+/// made here, one backend for the model the person named, and every purpose
+/// the assistant uses. The file holds that token and a provider's key path,
+/// so it is written readable by nobody else.
+///
+/// An existing file is repaired rather than rewritten, because a person may
+/// have named their model in it by hand. What is repaired is what an earlier
+/// version of this wizard got wrong: a key file copied from the example that
+/// is not on this machine, which stops the gateway at start; the example's
+/// commercial backends, which nobody chose and which have no key; and
+/// purposes the assistant's stations use and the file never declared.
+fn configure_kvasir(
+    plan: &Plan,
+    console: &mut Console,
+    chosen: Option<&ModelChoice>,
+) -> Result<(), Exit> {
     let dir = plan.dir.join("kvasir");
     let config = dir.join("kvasir.json");
-    let admin = generated_passphrase();
     if config.exists() {
-        console.note(&format!(
-            "{} is already there and was left alone",
-            config.display()
-        ));
-        let text = std::fs::read_to_string(&config).unwrap_or_default();
-        let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-        let token = value["auth"]["tokens"]
-            .as_object()
-            .and_then(|t| t.keys().next().cloned())
-            .unwrap_or(admin);
-        return Ok(token);
+        return repair_kvasir(plan, console);
     }
     let example = dir.join("kvasir.example.json");
     let text = std::fs::read_to_string(&example)
@@ -2523,26 +2977,126 @@ fn configure_kvasir(plan: &Plan, console: &mut Console) -> Result<String, Exit> 
 
     value["bind"] = serde_json::json!(format!("127.0.0.1:{}", plan.ports.kvasir));
     value["origin"] = serde_json::json!(format!("http://127.0.0.1:{}", plan.ports.kvasir));
+    let admin = generated_passphrase();
     value["auth"] = serde_json::json!({
         "mode": "token",
-        "tokens": { admin.clone(): "nils-setup:admin" },
+        "tokens": { admin: "nils-setup:admin" },
     });
 
-    let url = console.line(
-        "Where does the model answer? (an OpenAI compatible /v1 address)",
-        "http://127.0.0.1:30000/v1",
-    );
-    let url = url.trim().to_string();
-    let local = url.contains("://127.0.0.1") || url.contains("://localhost");
-    if let Some(first) = value["backends"].as_array_mut().and_then(|b| b.first_mut()) {
-        first["baseUrl"] = serde_json::json!(url);
-        first["locality"] = serde_json::json!(if local { "local" } else { "remote" });
+    let template = value["backends"][0].clone();
+    let example_model = template["models"][0]["id"]
+        .as_str()
+        .unwrap_or(EXAMPLE_MODEL_ID)
+        .to_string();
+    // Nobody was asked (a run with no terminal, or --yes): the gateway gets
+    // the example's model on SGLang's port, and the plan already said so.
+    let later = ModelChoice {
+        url: DEFAULT_MODEL_URL.to_string(),
+        local: true,
+        key: None,
+        model: example_model.clone(),
+        later: true,
+    };
+    let chosen = chosen.unwrap_or(&later);
+    let model_id = if chosen.model.is_empty() {
+        example_model.clone()
+    } else {
+        chosen.model.clone()
+    };
+
+    let mut backend = template;
+    if let Some(fields) = backend.as_object_mut() {
+        fields.remove("keyFile");
+        fields.remove("key");
+        fields.remove("provider");
     }
-    if !local {
-        console.note(
-            "that backend is not on this machine, so the gateway marks it remote and the \
-             prompt leaves the machine",
-        );
+    backend["id"] = serde_json::json!("model");
+    backend["baseUrl"] = serde_json::json!(chosen.url);
+    backend["locality"] = serde_json::json!(if chosen.local { "local" } else { "remote" });
+    backend["models"][0]["id"] = serde_json::json!(model_id);
+    backend["models"][0]["name"] = serde_json::json!(model_id);
+    if let Some(key) = &chosen.key {
+        let path = dir.join("model.key");
+        write_secret(&path, key)?;
+        backend["keyFile"] = serde_json::json!(path.display().to_string());
+    }
+    value["backends"] = serde_json::json!([backend]);
+    value["purposes"] = serde_json::json!(assistant_purposes(plan, &value["purposes"]));
+
+    write_secret_bytes(
+        &config,
+        serde_json::to_string_pretty(&value)
+            .unwrap_or(text)
+            .as_bytes(),
+    )?;
+    if chosen.later {
+        console.note(&format!(
+            "{} is written, with no model named yet",
+            config.display()
+        ));
+    } else {
+        console.note(&format!(
+            "{} sends the assistant to {} at {}",
+            config.display(),
+            model_id,
+            chosen.url
+        ));
+    }
+    Ok(())
+}
+
+/// Mend what an earlier version of this wizard wrote, and say what changed.
+fn repair_kvasir(plan: &Plan, console: &mut Console) -> Result<(), Exit> {
+    let config = plan.dir.join("kvasir").join("kvasir.json");
+    let text =
+        std::fs::read_to_string(&config).map_err(|e| fail(format!("{}: {e}", config.display())))?;
+    let mut value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| fail(format!("{}: {e}", config.display())))?;
+    let mut mended: Vec<String> = Vec::new();
+
+    if let Some(backends) = value["backends"].as_array_mut() {
+        for backend in backends.iter_mut() {
+            let missing = backend["keyFile"]
+                .as_str()
+                .is_some_and(|path| !Path::new(path).exists());
+            if missing {
+                let path = backend["keyFile"].as_str().unwrap_or_default().to_string();
+                if let Some(fields) = backend.as_object_mut() {
+                    fields.remove("keyFile");
+                }
+                mended.push(format!(
+                    "dropped a key file that is not on this machine ({path})"
+                ));
+            }
+        }
+        let before = backends.len();
+        backends.retain(|b| {
+            let keyless = b.get("keyFile").is_none() && b.get("key").is_none();
+            !(b["locality"] == "remote" && keyless)
+        });
+        if backends.len() < before {
+            mended.push(format!(
+                "dropped {} remote backend(s) with no key, which nobody chose",
+                before - backends.len()
+            ));
+        }
+    }
+    let purposes = assistant_purposes(plan, &value["purposes"]);
+    let had = value["purposes"].as_array().map_or(0, Vec::len);
+    if purposes.len() > had {
+        mended.push(format!(
+            "declared {} purpose(s) the assistant's stations use",
+            purposes.len() - had
+        ));
+        value["purposes"] = serde_json::json!(purposes);
+    }
+
+    if mended.is_empty() {
+        console.note(&format!(
+            "{} is already there and was left alone",
+            config.display()
+        ));
+        return Ok(());
     }
     write_secret_bytes(
         &config,
@@ -2550,11 +3104,10 @@ fn configure_kvasir(plan: &Plan, console: &mut Console) -> Result<String, Exit> 
             .unwrap_or(text)
             .as_bytes(),
     )?;
-    console.note(&format!(
-        "{} names the model and holds this setup's admin token",
-        config.display()
-    ));
-    Ok(admin)
+    for line in mended {
+        console.note(&format!("{}: {line}", config.display()));
+    }
+    Ok(())
 }
 
 /// Everything the assistant reads from its environment, in one file its
@@ -2611,45 +3164,103 @@ fn write_assistant_env(plan: &Plan) -> Result<(), Exit> {
     std::fs::write(&path, text).map_err(|e| fail(format!("{}: {e}", path.display())))
 }
 
-/// The assistant's key at the gateway, minted once the gateway answers. A
-/// gateway that is not running yet is not an error: the command that mints
-/// it is printed instead, and the assistant reads the file when it is there.
-fn mint_assistant_key(plan: &Plan, admin: &str) {
+/// The token this setup made for the gateway, read back from its own file.
+fn gateway_admin_token(plan: &Plan) -> Option<String> {
+    let text = std::fs::read_to_string(plan.dir.join("kvasir").join("kvasir.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value["auth"]["tokens"].as_object()?.keys().next().cloned()
+}
+
+/// Whether the gateway answers its health door, waiting for it a while. A
+/// service that was started a moment ago is not up yet, and asking it once
+/// and giving up is how an install ended by printing a command to run by
+/// hand instead of doing the thing.
+fn gateway_up(plan: &Plan, console: &Console, seconds: u64) -> bool {
+    let url = format!("http://127.0.0.1:{}/healthz", plan.ports.kvasir);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(1)))
+        .build()
+        .into();
+    let started = std::time::Instant::now();
+    let live = std::io::stdout().is_terminal();
+    let up = loop {
+        if agent.get(&url).call().is_ok() {
+            break true;
+        }
+        if started.elapsed().as_secs() >= seconds {
+            break false;
+        }
+        if live {
+            print!(
+                "\r  waiting for the gateway {}",
+                console.dim(&format!("{}s", started.elapsed().as_secs()))
+            );
+            let _ = std::io::stdout().flush();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    };
+    if live {
+        print!("\r\x1b[2K");
+        let _ = std::io::stdout().flush();
+    }
+    up
+}
+
+/// The assistant's key at the gateway, for every purpose the gateway
+/// declares for it. Waits for the gateway first; where it never comes up,
+/// the reason is the gateway's own and is shown with the services, so this
+/// says only what did not happen and how it will.
+fn mint_assistant_key(plan: &Plan, console: &Console) -> bool {
     let path = plan.dir.join("kvasir").join("assistant.key");
     if path.exists() {
-        return;
+        return true;
     }
-    let url = format!("http://127.0.0.1:{}/v1/keys", plan.ports.kvasir);
+    let Some(admin) = gateway_admin_token(plan) else {
+        return false;
+    };
+    if !gateway_up(plan, console, 30) {
+        println!("  the gateway did not come up, so the assistant has no key yet");
+        println!("  once it runs, nils setup and then repair makes the key");
+        return false;
+    }
+    let purposes: Vec<String> =
+        std::fs::read_to_string(plan.dir.join("kvasir").join("kvasir.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|c| {
+                c["purposes"].as_array().map(|all| {
+                    all.iter()
+                        .filter_map(|p| p["id"].as_str())
+                        .filter(|id| id.starts_with("assistant."))
+                        .map(str::to_string)
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
     let body = serde_json::json!({
         "principal": "nils-assistant",
-        "purposes": PURPOSES,
+        "purposes": purposes,
         "max_class": "rows",
     });
-    let asked = ureq::post(&url)
+    let minted = ureq::post(&format!("http://127.0.0.1:{}/v1/keys", plan.ports.kvasir))
         .header("authorization", &format!("Bearer {admin}"))
         .header("content-type", "application/json")
         .send(body.to_string())
         .ok()
-        .and_then(|mut r| r.body_mut().read_to_string().ok());
-    let minted = asked.and_then(|text| {
-        let answer: serde_json::Value = serde_json::from_str(&text).ok()?;
-        Some(answer.get("key")?.as_str()?.to_string())
-    });
+        .and_then(|mut r| r.body_mut().read_to_string().ok())
+        .and_then(|text| {
+            let answer: serde_json::Value = serde_json::from_str(&text).ok()?;
+            Some(answer.get("key")?.as_str()?.to_string())
+        });
     match minted {
-        Some(key) => {
-            if write_secret(&path, &key).is_ok() {
-                println!("  the assistant's key is at {}", path.display());
-            }
+        Some(key) if write_secret(&path, &key).is_ok() => {
+            console.note(&format!("the assistant's key is at {}", path.display()));
+            true
         }
-        None => {
-            println!(
-                "  the gateway did not answer, so the assistant's key was not minted; once it is up:"
-            );
-            println!(
-                "    curl -sf -X POST {url} -H 'authorization: Bearer <the token in kvasir.json>' \\\n      -H 'content-type: application/json' -d '{}' > {}",
-                serde_json::to_string(&body).unwrap_or_default(),
-                path.display()
-            );
+        _ => {
+            println!("  the gateway would not make the assistant's key");
+            println!("  nils setup and then repair asks it again");
+            false
         }
     }
 }
@@ -2687,7 +3298,7 @@ fn quadlet_dir() -> PathBuf {
 }
 
 /// Whatever this machine and runtime use to keep the parts running.
-fn start_everything(plan: &Plan, state: &State) -> Result<String, Exit> {
+fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<String, Exit> {
     match (plan.runtime, cfg!(target_os = "macos")) {
         (Runtime::Podman, _) => {
             let dir = quadlet_dir();
@@ -2713,7 +3324,11 @@ fn start_everything(plan: &Plan, state: &State) -> Result<String, Exit> {
                     .status();
             }
             linger();
-            Ok(format!("{} in {}", names.join(", "), dir.display()))
+            Ok(format!(
+                "  services: {} in {}\n",
+                names.join(", "),
+                dir.display()
+            ))
         }
         (Runtime::Docker, _) => {
             let path = plan.dir.join("compose.yaml");
@@ -2724,7 +3339,7 @@ fn start_everything(plan: &Plan, state: &State) -> Result<String, Exit> {
                 .current_dir(&plan.dir)
                 .status();
             Ok(format!(
-                "{} (docker compose up -d; add it to your machine's own start up)",
+                "  services: {} (docker compose up -d; add it to your machine's own start up)\n",
                 path.display()
             ))
         }
@@ -2744,7 +3359,11 @@ fn start_everything(plan: &Plan, state: &State) -> Result<String, Exit> {
                     .status();
                 names.push(name);
             }
-            Ok(format!("{} in {}", names.join(", "), dir.display()))
+            Ok(format!(
+                "  services: {} in {}\n",
+                names.join(", "),
+                dir.display()
+            ))
         }
         (Runtime::Machine, false) => {
             let dir = units_dir();
@@ -2755,18 +3374,95 @@ fn start_everything(plan: &Plan, state: &State) -> Result<String, Exit> {
                     .map_err(|e| fail(format!("{}: {e}", dir.display())))?;
                 names.push(name.trim_end_matches(".service").to_string());
             }
-            let _ = Command::new("systemctl")
-                .args(["--user", "daemon-reload"])
-                .status();
+            quietly("systemctl", &["--user", "daemon-reload"]);
+            // Enabling prints a line for every link it makes, which is
+            // systemd's business and not the person's.
             for unit in &names {
-                let _ = Command::new("systemctl")
-                    .args(["--user", "enable", "--now", unit])
-                    .status();
+                quietly("systemctl", &["--user", "enable", unit]);
+            }
+            // The assistant reads a key the gateway makes, so everything
+            // else starts first, the key is made once the gateway answers,
+            // and the assistant starts last. Started together, the
+            // assistant died looking for a key that did not exist yet.
+            let (assistant, rest): (Vec<&String>, Vec<&String>) =
+                names.iter().partition(|u| u.as_str() == "nils-assistant");
+            for unit in &rest {
+                quietly("systemctl", &["--user", "restart", unit]);
+            }
+            if !assistant.is_empty() {
+                mint_assistant_key(plan, console);
+                for unit in &assistant {
+                    quietly("systemctl", &["--user", "restart", unit]);
+                }
             }
             linger();
-            Ok(names.join(", "))
+            Ok(unit_report(&names, console))
         }
     }
+}
+
+/// Run something for its effect, keeping its output to itself.
+fn quietly(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Which units are running, said plainly, with the reason for any that is
+/// not. Each is looked at twice, two seconds apart: a service that fails at
+/// start is active for an instant and then restarting, and a single look
+/// at that instant reported it running while it crashed in a loop.
+fn unit_report(names: &[String], console: &Console) -> String {
+    let look = |unit: &str| {
+        run_quiet("systemctl", &["--user", "is-active", unit]).is_some_and(|s| s.trim() == "active")
+    };
+    console.note("checking that the services came up");
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let first: Vec<bool> = names.iter().map(|u| look(u)).collect();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let mut running = Vec::new();
+    let mut stopped = Vec::new();
+    for (unit, was) in names.iter().zip(first) {
+        if was && look(unit) {
+            running.push(unit.as_str());
+        } else {
+            stopped.push(unit.as_str());
+        }
+    }
+    let mut out = String::new();
+    if !running.is_empty() {
+        let _ = writeln!(out, "  running: {}", running.join(", "));
+    }
+    for unit in stopped {
+        let _ = writeln!(out, "  not running: {unit}");
+        if let Some(why) = last_error(unit) {
+            let _ = writeln!(out, "    it said: {why}");
+        }
+        let _ = writeln!(out, "    its log: journalctl --user -u {unit}");
+    }
+    out
+}
+
+/// The line of a unit's log most likely to say why it stopped.
+fn last_error(unit: &str) -> Option<String> {
+    let log = run_quiet(
+        "journalctl",
+        &["--user", "-u", unit, "-n", "80", "--no-pager", "-o", "cat"],
+    )?;
+    let lines: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).collect();
+    let telling = |line: &&&str| {
+        let lower = line.to_lowercase();
+        [
+            "error", "enoent", "refused", "panicked", "cannot", "no such",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
+    };
+    let pick = lines.iter().rev().find(telling).or_else(|| lines.last())?;
+    let text: String = pick.trim().chars().take(160).collect();
+    Some(text)
 }
 
 fn linger() {
@@ -2906,16 +3602,35 @@ fn summary(plan: &Plan, console: &Console) {
     println!("  the engine on port {}", plan.ports.engine);
     println!();
     if !plan.service && plan.runtime == Runtime::Machine {
+        // The same arguments the services would have been given, so a port
+        // this setup moved and the trust a desk that keeps its own people
+        // needs are in the command a person copies, not only in a unit.
         println!("{}", console.bold("Start it"));
+        let registry = plan.registry().display().to_string();
+        let backups = plan.dir.join("backups").display().to_string();
         println!(
-            "  nils serve --registry {} --backup-dir {}",
-            plan.registry().display(),
-            plan.dir.join("backups").display()
+            "  nils {}",
+            engine_args(plan, &registry, &backups).join(" ")
         );
         if plan.has(Part::Desk) {
             println!(
                 "  nils-desk serve --config {}",
                 plan.desk_config().display()
+            );
+        }
+        if plan.has(Part::Assistant) {
+            println!(
+                "  (cd {} && node dist/main.js --config kvasir.json)",
+                plan.dir.join("kvasir").display()
+            );
+            println!(
+                "  (cd {} && set -a && . ./assistant.env && node dist/app/server.mjs)",
+                plan.dir.join("assistant").display()
+            );
+            println!(
+                "  {}",
+                console
+                    .dim("once the gateway runs, nils setup and repair makes the assistant's key")
             );
         }
         println!();
@@ -3012,8 +3727,9 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<(), Exit> {
         fresh.version = newest
             .clone()
             .unwrap_or_else(|| update::VERSION.to_string());
-        match start_everything(&fresh, &state) {
-            Ok(what) => println!("services: {what}"),
+        let console = Console::new(true);
+        match start_everything(&fresh, &state, &console) {
+            Ok(what) => print!("{what}"),
             Err(e) => println!("the services were left alone: {}", e.message),
         }
     }
@@ -3053,6 +3769,170 @@ mod tests {
             channel: None,
             version: "1.0.0-alpha.2".to_string(),
         }
+    }
+
+    /// A directory of its own under the system's temporary directory.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nils-setup-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn station(dir: &Path, name: &str, purpose: &str, content: &str) {
+        let at = dir.join("assistant").join("stations").join(name);
+        std::fs::create_dir_all(&at).unwrap();
+        std::fs::write(
+            at.join("station.yml"),
+            format!("id: {name}\npurpose: {purpose}\ncontent: {content}\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn every_station_s_purpose_is_declared_to_the_gateway() {
+        // The gateway refuses a purpose it was not told of. The example
+        // declared three; the assistant's stations use more, so on a fresh
+        // install three of them would have answered nothing but a refusal.
+        let dir = scratch("purposes");
+        station(&dir, "ask-help", "assistant.ask-help", "rows");
+        station(&dir, "concierge", "assistant.concierge", "rows");
+        station(&dir, "operator", "assistant.operator", "catalog");
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        let declared = serde_json::json!([
+            {"id": "assistant.ask-help", "app": "nils-assistant", "content": "rows", "kind": "foreground"},
+            {"id": "assistant.title", "app": "nils-assistant", "content": "catalog", "kind": "background"},
+        ]);
+        let all = assistant_purposes(&plan, &declared);
+        let ids: Vec<&str> = all.iter().filter_map(|p| p["id"].as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "assistant.ask-help",
+                "assistant.title",
+                "assistant.concierge",
+                "assistant.operator"
+            ],
+            "declared ones kept first, each station added once"
+        );
+        let operator = all
+            .iter()
+            .find(|p| p["id"] == "assistant.operator")
+            .unwrap();
+        assert_eq!(
+            operator["content"], "catalog",
+            "the station's own class is kept"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repair_mends_what_the_first_wizard_wrote_and_nothing_else() {
+        // What alpha.4 left: the example's key file path, which is not on a
+        // laptop and stopped the gateway at start; two commercial backends
+        // with no key, which nobody chose; purposes missing for stations.
+        let dir = scratch("repair");
+        station(&dir, "concierge", "assistant.concierge", "rows");
+        let kvasir = dir.join("kvasir");
+        std::fs::create_dir_all(&kvasir).unwrap();
+        let written = serde_json::json!({
+            "auth": {"mode": "token", "tokens": {"tok": "nils-setup:admin"}},
+            "backends": [
+                {"id": "card", "baseUrl": "http://127.0.0.1:30000/v1", "locality": "local",
+                 "keyFile": "/etc/kvasir/card.key", "models": [{"id": "m"}]},
+                {"id": "minimax-openai", "baseUrl": "https://api.minimax.io/v1", "locality": "remote",
+                 "provider": "minimax", "models": [{"id": "x"}]},
+                {"id": "kept", "baseUrl": "https://api.example.org/v1", "locality": "remote",
+                 "key": "a key someone put there", "models": [{"id": "y"}]}
+            ],
+            "purposes": [{"id": "assistant.ask-help", "app": "nils-assistant", "content": "rows", "kind": "foreground"}]
+        });
+        std::fs::write(kvasir.join("kvasir.json"), written.to_string()).unwrap();
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        let mut console = Console::new(true);
+        assert!(repair_kvasir(&plan, &mut console).is_ok());
+
+        let mended: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(kvasir.join("kvasir.json")).unwrap())
+                .unwrap();
+        let backends = mended["backends"].as_array().unwrap();
+        let ids: Vec<&str> = backends.iter().filter_map(|b| b["id"].as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["card", "kept"],
+            "the keyless remote one goes, a keyed one stays"
+        );
+        assert!(
+            backends[0].get("keyFile").is_none(),
+            "a key file that is not there is dropped"
+        );
+        assert_eq!(
+            backends[0]["baseUrl"], "http://127.0.0.1:30000/v1",
+            "the model named is untouched"
+        );
+        let purposes: Vec<&str> = mended["purposes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["id"].as_str())
+            .collect();
+        assert!(purposes.contains(&"assistant.concierge"), "{purposes:?}");
+        assert_eq!(gateway_admin_token(&plan).as_deref(), Some("tok"));
+
+        // and a second repair has nothing left to do
+        let before = std::fs::read_to_string(kvasir.join("kvasir.json")).unwrap();
+        assert!(repair_kvasir(&plan, &mut console).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(kvasir.join("kvasir.json")).unwrap(),
+            before
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_model_server_is_asked_which_models_it_serves() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let asked = String::from_utf8_lossy(&buf[..n]).to_string();
+                let body = if asked.contains("authorization: Bearer sk-test")
+                    || !asked.contains("authorization")
+                {
+                    r#"{"object":"list","data":[{"id":"qwen-small"},{"id":"qwen-large"}]}"#
+                } else {
+                    "{}"
+                };
+                let _ = s.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/v1");
+        assert_eq!(
+            list_models(&url, None),
+            Some(vec!["qwen-small".to_string(), "qwen-large".to_string()])
+        );
+        assert_eq!(
+            list_models(&url, Some("sk-test")).map(|ids| ids.len()),
+            Some(2),
+            "a key is sent as a bearer"
+        );
+        assert_eq!(
+            list_models("http://127.0.0.1:1/v1", None),
+            None,
+            "nothing answering is None"
+        );
     }
 
     #[test]
