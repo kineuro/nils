@@ -1461,7 +1461,8 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
         out.push((
             "nils-assistant.container".to_string(),
             format!(
-                "[Unit]\nDescription=NILS assistant\nAfter=nils-kvasir.service nils-engine.service\n\n\
+                "[Unit]\nDescription=NILS assistant\nAfter=nils-kvasir.service nils-engine.service\n\
+                 ConditionPathExists={k}/assistant.key\n\n\
                  [Container]\nImage={NODE_IMAGE}\nPod=nils.pod\nEnvironmentFile={a}/assistant.env\n\
                  Volume={a}:{a}\nVolume={k}:{k}:ro\nWorkingDir={a}\nExec=node {}\n\n\
                  [Install]\nWantedBy=default.target\n",
@@ -2535,13 +2536,18 @@ fn pull_or_build(
 ) -> Result<(), Exit> {
     let engine = plan.runtime.name();
     let tag = format!("{image}:{}", plan.tag());
-    let pulled = Command::new(engine)
-        .args(["pull", &tag])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    // one line with a timer, as every slow step; a pull that fails is not
+    // an error yet, since the image is then built here
+    let pulled = quietly(engine, &["image", "exists", &tag])
+        || console
+            .task(
+                &format!("taking {tag}"),
+                &plan.dir,
+                engine,
+                &["pull", "--quiet", &tag],
+            )
+            .is_ok();
     if pulled {
-        console.note(&format!("pulled {tag}"));
         return Ok(());
     }
     console.note(&format!(
@@ -2553,14 +2559,12 @@ fn pull_or_build(
         .map_err(|e| fail(format!("{}: {e}", binary.display())))?;
     std::fs::write(context.join("Containerfile"), containerfile(part))
         .map_err(|e| fail(format!("{}: {e}", context.display())))?;
-    let status = Command::new(engine)
-        .args(["build", "-t", &tag, "."])
-        .current_dir(&context)
-        .status()
-        .map_err(|e| fail(format!("{engine}: {e}")))?;
-    if !status.success() {
-        return Err(fail(format!("{engine} build of {tag} failed")));
-    }
+    console.task(
+        &format!("building {tag}"),
+        &context,
+        engine,
+        &["build", "-t", &tag, "."],
+    )?;
     console.note(&format!("built {tag} from {}", context.display()));
     Ok(())
 }
@@ -2632,24 +2636,39 @@ fn make_registry(
             .args(["-v", &mount, &tag])
             .args(["--registry", IN_REGISTRY, "key", "add", "nils"])
             .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| fail(format!("{engine}: {e}")))?;
         if let Some(mut stdin) = child.stdin.take() {
             let _ = writeln!(stdin, "{passphrase}");
         }
-        let status = child.wait().map_err(|e| fail(e.to_string()))?;
-        if !status.success() {
-            return Err(fail("the key could not be added inside the container"));
+        // The engine's own lines about the key and the registry are the
+        // machine install's too, which says them in one line; they are shown
+        // only when a step fails.
+        let said = |out: &std::process::Output| {
+            let text = String::from_utf8_lossy(&out.stderr);
+            text.lines().last().unwrap_or_default().to_string()
+        };
+        let added = child.wait_with_output().map_err(|e| fail(e.to_string()))?;
+        if !added.status.success() {
+            return Err(fail(format!(
+                "the key could not be added inside the container: {}",
+                said(&added)
+            )));
         }
-        let status = Command::new(engine)
+        let made = Command::new(engine)
             .args(["run", "--rm"])
             .args(&user)
             .args(["-v", &mount, &tag])
             .args(["--registry", IN_REGISTRY, "init", "--key", "nils"])
-            .status()
+            .output()
             .map_err(|e| fail(format!("{engine}: {e}")))?;
-        if !status.success() {
-            return Err(fail("the registry could not be made inside the container"));
+        if !made.status.success() {
+            return Err(fail(format!(
+                "the registry could not be made inside the container: {}",
+                said(&made)
+            )));
         }
         println!("  registry at {}", plan.registry().display());
         return Ok(());
@@ -5678,6 +5697,13 @@ mod tests {
         assert!(
             assistant.contains("After=nils-kvasir.service"),
             "{assistant}"
+        );
+        assert!(
+            assistant.contains(&format!(
+                "ConditionPathExists={}/assistant.key",
+                k.display()
+            )),
+            "the pod starts its containers, so the assistant waits for its key: {assistant}"
         );
         // without the assistant, the pod is what it was
         plan.parts.retain(|p| *p != Part::Assistant);
