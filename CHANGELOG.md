@@ -4,6 +4,25 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.6] - 2026-09-11
+
+A way out. After the first real install was repaired, the next thing asked for was removing it, in two forms: NILS alone, with the data kept, or everything.
+
+### Added
+
+- `nils uninstall`, which is also the last choice in the `nils setup` menu. **NILS, keeping your data** removes the services, the programs, the first-party packs, what building the gateway and the assistant made, and the setup record. The base directory stays whole, so installing again with the same `--dir` picks it up. **Everything** removes the base directory as well, and asks for that directory's name to be typed first, because a registry's key that is gone means the same subject is never given the same code again. It shows what goes and what stays before touching anything, and `--print` stops there. Without a terminal it asks nothing and needs `--yes` to act.
+- What it refuses:
+  - a program the setup record does not name, itself included;
+  - a pack that is not first-party;
+  - a base directory that is relative, the root, the home directory or above it, or holds neither a registry nor a desk an install made;
+  - bringing a docker compose project down, since another project on the same machine can share its name.
+- The setup record names the programs a container install puts on the machine: the `nils` that set it up and the `nils-desk` its image was made from. A record written before this names neither, and uninstalling such an install leaves `nils` in place and says so.
+
+### Fixed
+
+- `nils update` did not write the version it installed into the setup record, so the wizard kept opening with the version the install began with.
+- A question with no default showed an empty `[]`.
+
 ## [1.0.0-alpha.5] - 2026-09-11
 
 The first install on a real machine with every part, in local mode. The wizard said it had finished while the gateway and the assistant were crashing in a loop. Everything that install showed is fixed here.
