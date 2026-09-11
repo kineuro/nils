@@ -91,6 +91,86 @@ const ASSISTANT_REPO: &str = "https://github.com/kineuro/nils-assistant";
 const IN_REGISTRY: &str = "/srv/nils/registry";
 const IN_DESK: &str = "/srv/nils/desk";
 
+/// What the gateway and the assistant run in beside the engine and the desk.
+/// Neither has an image of its own: both are built on this machine, and their
+/// directories are mounted into Node's image at the same paths, so every path
+/// their configuration names means the same inside as out.
+const NODE_IMAGE: &str = "docker.io/library/node:22-trixie-slim";
+
+/// The address a rootless podman pod reaches this machine's own loopback at,
+/// through pasta, and so a model server listening on 127.0.0.1 here.
+const HOST_LOOPBACK_IN_POD: &str = "169.254.1.2";
+
+/// How a container names this machine: podman maps it for the pod, docker's
+/// is its bridge, which a server listening only on 127.0.0.1 does not answer.
+fn host_from_container(runtime: Runtime) -> Option<&'static str> {
+    match runtime {
+        Runtime::Podman => Some("host.containers.internal"),
+        Runtime::Docker => Some("host.docker.internal"),
+        Runtime::Machine => None,
+    }
+}
+
+/// A model address as the gateway must dial it from where it runs: on this
+/// machine as it was typed, in a container with this machine's loopback named
+/// the way a container reaches it.
+fn model_address_for(runtime: Runtime, url: &str) -> String {
+    let Some(host) = host_from_container(runtime) else {
+        return url.to_string();
+    };
+    for loopback in ["127.0.0.1", "localhost", "[::1]"] {
+        for scheme in ["http://", "https://"] {
+            let prefix = format!("{scheme}{loopback}");
+            if let Some(rest) = url.strip_prefix(&prefix)
+                && (rest.is_empty() || rest.starts_with(':') || rest.starts_with('/'))
+            {
+                return format!("{scheme}{host}{rest}");
+            }
+        }
+    }
+    url.to_string()
+}
+
+/// What a person should know when the gateway runs in a container and the
+/// model server is on this machine's loopback: how it will be reached, or
+/// why it will not be. Nothing when the gateway runs on the machine or the
+/// server is somewhere else.
+fn model_reach_note(runtime: Runtime, url: &str, pasta: fn() -> bool) -> Option<String> {
+    let dialled = model_address_for(runtime, url);
+    if dialled == url {
+        return None;
+    }
+    Some(match runtime {
+        Runtime::Podman if pasta() => format!(
+            "the gateway runs in the pod and reaches this machine's own {url} as {dialled}, \
+             which podman hands the pod"
+        ),
+        Runtime::Podman => format!(
+            "podman here does not network through pasta, so the pod cannot reach this \
+             machine's 127.0.0.1; start the model server on an address the pod reaches, and \
+             the gateway dials {dialled}"
+        ),
+        _ => format!(
+            "the gateway runs in a container and dials {dialled}, which is this machine on \
+             docker's bridge; a server listening only on 127.0.0.1 does not answer there, so \
+             start it on 0.0.0.0 or on the bridge's address"
+        ),
+    })
+}
+
+/// The same address the other way: what a person typed, from what the
+/// gateway dials, for a machine run after a container one.
+fn model_address_on_machine(url: &str) -> String {
+    for host in ["host.containers.internal", "host.docker.internal"] {
+        for scheme in ["http://", "https://"] {
+            if let Some(rest) = url.strip_prefix(&format!("{scheme}{host}")) {
+                return format!("{scheme}127.0.0.1{rest}");
+            }
+        }
+    }
+    url.to_string()
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct SetupArgs {
     /// What to install, as a list: engine, desk, assistant
@@ -847,6 +927,20 @@ pub(crate) struct Plan {
     pub(crate) service: bool,
     pub(crate) channel: Option<String>,
     pub(crate) version: String,
+    /// Whether the pod is given this machine's loopback, so a gateway inside
+    /// it reaches a model server listening on 127.0.0.1 here. Rootless podman
+    /// with pasta, and only with the assistant.
+    pub(crate) host_loopback: bool,
+}
+
+/// Whether podman here networks a rootless pod through pasta, which is what
+/// can hand the pod this machine's loopback.
+fn podman_has_pasta() -> bool {
+    run_quiet(
+        "podman",
+        &["info", "--format", "{{.Host.Pasta.Executable}}"],
+    )
+    .is_some_and(|s| !s.trim().is_empty())
 }
 
 impl Plan {
@@ -911,6 +1005,9 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
         service: !state.service.is_empty() && state.service != "none",
         channel: channel.map(str::to_string),
         version: update::VERSION.to_string(),
+        host_loopback: state.runtime == "podman"
+            && state.parts.contains_key("assistant")
+            && podman_has_pasta(),
     }
 }
 
@@ -1118,7 +1215,18 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
         Reach::Loopback => format!("127.0.0.1:{p}:{p}", p = plan.ports.desk),
         Reach::Network(_) => format!("{p}:{p}", p = plan.ports.desk),
     };
-    let mut out = vec![format!("podman pod create --name nils -p {publish}")];
+    let mut pod = format!("podman pod create --name nils -p {publish}");
+    if plan.has(Part::Assistant) {
+        // the gateway, on this machine's loopback only, for the key setup makes
+        let _ = write!(pod, " -p 127.0.0.1:{p}:{p}", p = plan.ports.kvasir);
+        if plan.host_loopback {
+            let _ = write!(
+                pod,
+                " --network pasta:--map-host-loopback={HOST_LOOPBACK_IN_POD}"
+            );
+        }
+    }
+    let mut out = vec![pod];
     let mut engine = format!(
         "podman run -d --pod nils --name nils-engine -v {}:{IN_REGISTRY}:U",
         plan.registry().display()
@@ -1139,6 +1247,19 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
             "podman run -d --pod nils --name nils-desk -v {}:{IN_DESK}:U {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
             plan.desk_dir().display(),
             plan.tag()
+        ));
+    }
+    if plan.has(Part::Assistant) {
+        let (kvasir, assistant) = (plan.dir.join("kvasir"), plan.dir.join("assistant"));
+        out.push(format!(
+            "podman run -d --pod nils --name nils-kvasir -v {k}:{k} -w {k} {NODE_IMAGE} node dist/main.js --config kvasir.json",
+            k = kvasir.display()
+        ));
+        out.push(format!(
+            "podman run -d --pod nils --name nils-assistant --env-file {a}/assistant.env -v {a}:{a} -v {k}:{k}:ro -w {a} {NODE_IMAGE} node {entry}",
+            a = assistant.display(),
+            k = kvasir.display(),
+            entry = assistant_entry(&assistant)
         ));
     }
     out
@@ -1174,6 +1295,22 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
             docker_user(),
             plan.desk_dir().display(),
             plan.tag()
+        ));
+    }
+    if plan.has(Part::Assistant) {
+        let (kvasir, assistant) = (plan.dir.join("kvasir"), plan.dir.join("assistant"));
+        out.push(format!(
+            "docker run -d --network nils --name nils-kvasir {user}-p 127.0.0.1:{p}:{p} --add-host host.docker.internal:host-gateway -v {k}:{k} -w {k} {NODE_IMAGE} node dist/main.js --config kvasir.json",
+            user = docker_user(),
+            p = plan.ports.kvasir,
+            k = kvasir.display()
+        ));
+        out.push(format!(
+            "docker run -d --network nils --name nils-assistant {user}--env-file {a}/assistant.env -v {a}:{a} -v {k}:{k}:ro -w {a} {NODE_IMAGE} node {entry}",
+            user = docker_user(),
+            a = assistant.display(),
+            k = kvasir.display(),
+            entry = assistant_entry(&assistant)
         ));
     }
     out
@@ -1223,6 +1360,40 @@ pub(crate) fn docker_compose(plan: &Plan) -> String {
         let _ = writeln!(out, "    volumes:");
         let _ = writeln!(out, "      - {}:{IN_DESK}", plan.desk_dir().display());
     }
+    if plan.has(Part::Assistant) {
+        let (kvasir, assistant) = (plan.dir.join("kvasir"), plan.dir.join("assistant"));
+        let (k, a) = (kvasir.display(), assistant.display());
+        let user = as_this_account();
+        let _ = writeln!(out, "  kvasir:");
+        let _ = writeln!(out, "    image: {NODE_IMAGE}");
+        let _ = writeln!(out, "    container_name: nils-kvasir");
+        if !user.is_empty() {
+            let _ = writeln!(out, "    user: \"{user}\"");
+        }
+        let _ = writeln!(out, "    restart: unless-stopped");
+        let _ = writeln!(out, "    working_dir: {k}");
+        let _ = writeln!(out, "    command: node dist/main.js --config kvasir.json");
+        let _ = writeln!(out, "    ports:");
+        let _ = writeln!(out, "      - \"127.0.0.1:{p}:{p}\"", p = plan.ports.kvasir);
+        let _ = writeln!(out, "    extra_hosts:");
+        let _ = writeln!(out, "      - \"host.docker.internal:host-gateway\"");
+        let _ = writeln!(out, "    volumes:");
+        let _ = writeln!(out, "      - {k}:{k}");
+        let _ = writeln!(out, "  assistant:");
+        let _ = writeln!(out, "    image: {NODE_IMAGE}");
+        let _ = writeln!(out, "    container_name: nils-assistant");
+        if !user.is_empty() {
+            let _ = writeln!(out, "    user: \"{user}\"");
+        }
+        let _ = writeln!(out, "    restart: unless-stopped");
+        let _ = writeln!(out, "    depends_on: [engine, kvasir]");
+        let _ = writeln!(out, "    working_dir: {a}");
+        let _ = writeln!(out, "    command: node {}", assistant_entry(&assistant));
+        let _ = writeln!(out, "    env_file: {a}/assistant.env");
+        let _ = writeln!(out, "    volumes:");
+        let _ = writeln!(out, "      - {a}:{a}");
+        let _ = writeln!(out, "      - {k}:{k}:ro");
+    }
     out
 }
 
@@ -1232,12 +1403,18 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
         Reach::Loopback => format!("127.0.0.1:{p}:{p}", p = plan.ports.desk),
         Reach::Network(_) => format!("{p}:{p}", p = plan.ports.desk),
     };
-    let mut out = vec![(
-        "nils.pod".to_string(),
-        format!(
-            "[Pod]\nPodName=nils\nPublishPort={publish}\n\n[Install]\nWantedBy=default.target\n"
-        ),
-    )];
+    let mut pod = format!("[Pod]\nPodName=nils\nPublishPort={publish}\n");
+    if plan.has(Part::Assistant) {
+        let _ = writeln!(pod, "PublishPort=127.0.0.1:{p}:{p}", p = plan.ports.kvasir);
+        if plan.host_loopback {
+            let _ = writeln!(
+                pod,
+                "Network=pasta:--map-host-loopback={HOST_LOOPBACK_IN_POD}"
+            );
+        }
+    }
+    let _ = write!(pod, "\n[Install]\nWantedBy=default.target\n");
+    let mut out = vec![("nils.pod".to_string(), pod)];
     let mut engine = String::from("[Unit]\nDescription=NILS engine\n\n[Container]\n");
     let _ = writeln!(engine, "Image={ENGINE_IMAGE}:{}", plan.tag());
     let _ = writeln!(engine, "Pod=nils.pod");
@@ -1269,6 +1446,29 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
         let _ = writeln!(desk, "Exec=serve --config {IN_DESK}/nils-desk.toml");
         let _ = write!(desk, "\n[Install]\nWantedBy=default.target\n");
         out.push(("nils-desk.container".to_string(), desk));
+    }
+    if plan.has(Part::Assistant) {
+        let (kvasir, assistant) = (plan.dir.join("kvasir"), plan.dir.join("assistant"));
+        let (k, a) = (kvasir.display(), assistant.display());
+        out.push((
+            "nils-kvasir.container".to_string(),
+            format!(
+                "[Unit]\nDescription=Kvasir, the model gateway\n\n[Container]\n\
+                 Image={NODE_IMAGE}\nPod=nils.pod\nVolume={k}:{k}\nWorkingDir={k}\n\
+                 Exec=node dist/main.js --config kvasir.json\n\n[Install]\nWantedBy=default.target\n"
+            ),
+        ));
+        out.push((
+            "nils-assistant.container".to_string(),
+            format!(
+                "[Unit]\nDescription=NILS assistant\nAfter=nils-kvasir.service nils-engine.service\n\
+                 ConditionPathExists={k}/assistant.key\n\n\
+                 [Container]\nImage={NODE_IMAGE}\nPod=nils.pod\nEnvironmentFile={a}/assistant.env\n\
+                 Volume={a}:{a}\nVolume={k}:{k}:ro\nWorkingDir={a}\nExec=node {}\n\n\
+                 [Install]\nWantedBy=default.target\n",
+                assistant_entry(&assistant)
+            ),
+        ));
     }
     out
 }
@@ -1649,9 +1849,19 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         println!("  {line}");
     }
     let served = card.as_ref().map(|c| c.memory_gb).unwrap_or(0.0) >= 12.0;
+    // An assistant already installed is kept unless a person says otherwise:
+    // a change that took every default dropped it on a machine with no card.
+    let had_assistant = existing
+        .as_ref()
+        .is_some_and(|s| s.parts.contains_key("assistant"));
     if args.parts.is_none() {
         if parts.contains(&Part::Assistant) {
-            if !console.yes_no("Install the assistant anyway?", served) {
+            let question = if had_assistant {
+                "Keep the assistant?"
+            } else {
+                "Install the assistant anyway?"
+            };
+            if !console.yes_no(question, served || had_assistant) {
                 parts.retain(|p| *p != Part::Assistant);
             }
         } else if console.yes_no("Add the assistant as well?", false) {
@@ -1659,10 +1869,17 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         }
     }
     if parts.contains(&Part::Assistant) && runtime.container() {
-        console.note("the assistant and the gateway are built from source, on the machine");
+        console.note(&format!(
+            "the assistant and the gateway are built from source on this machine, which needs Node \
+             22, and run in {NODE_IMAGE} beside the others"
+        ));
     }
     if parts.contains(&Part::Assistant) && !dir.join("kvasir").join("kvasir.json").exists() {
-        answers.model = Some(choose_model(&mut console, served));
+        let chosen = choose_model(&mut console, served);
+        if let Some(note) = model_reach_note(runtime, &chosen.url, podman_has_pasta) {
+            console.note(&note);
+        }
+        answers.model = Some(chosen);
     }
 
     // 7. services
@@ -1686,6 +1903,8 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         }
     };
 
+    let host_loopback =
+        runtime == Runtime::Podman && parts.contains(&Part::Assistant) && podman_has_pasta();
     let plan = Plan {
         dir,
         parts,
@@ -1696,6 +1915,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         reach,
         source,
         registry_exists,
+        host_loopback,
         service,
         channel: args.channel.clone(),
         version: update::VERSION.to_string(),
@@ -1882,8 +2102,10 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
             println!("  run: {line}");
         }
     }
+    // systemd, podman and docker make the key as they start, between the
+    // gateway and the assistant
     let systemd = plan.runtime == Runtime::Machine && !cfg!(target_os = "macos");
-    if plan.has(Part::Assistant) && !(plan.service && systemd) {
+    if plan.has(Part::Assistant) && !(plan.service && (systemd || plan.runtime.container())) {
         mint_assistant_key(&plan, console);
     }
     summary(&plan, console);
@@ -1928,6 +2150,14 @@ fn plan_text(plan: &Plan, console: &Console) -> String {
             Runtime::Docker => format!("in docker containers, images {ENGINE_IMAGE}"),
         },
     );
+    if plan.runtime.container() && plan.has(Part::Assistant) {
+        row(
+            "gateway",
+            format!(
+                "and the assistant built here and run in {NODE_IMAGE}, their directories mounted"
+            ),
+        );
+    }
     row(
         "registry",
         format!(
@@ -2088,6 +2318,18 @@ fn do_it(
     if plan.runtime.container() {
         state.keep_program(&me);
         pull_or_build(plan, console, "nils", ENGINE_IMAGE, &me)?;
+        // Taken now rather than by the first start, which a slow pull would
+        // run past the time systemd gives a service to come up.
+        if plan.has(Part::Assistant)
+            && let Err(e) = console.task(
+                "taking Node's image, for the gateway and the assistant",
+                &plan.dir,
+                plan.runtime.name(),
+                &["pull", NODE_IMAGE],
+            )
+        {
+            println!("  {NODE_IMAGE} could not be pulled: {}", e.message);
+        }
         if plan.has(Part::Desk) {
             let desk_binary = match install_desk(&into, plan.channel.as_deref()) {
                 Ok((_, path)) => {
@@ -2210,25 +2452,36 @@ fn do_it(
     } else if plan.runtime.container() {
         // No unit files were asked for, but a container still has to be
         // started, or the person is left with images and nothing running.
-        for line in container_commands(plan) {
-            match run_line(&line) {
-                Ok(()) => println!("  {}", short(&line)),
-                Err(e) => {
-                    println!("  that failed: {e}");
-                    println!("  run: {line}");
-                }
+        // The assistant's starts once the gateway has made its key.
+        let (assistant, rest): (Vec<String>, Vec<String>) = container_commands(plan)
+            .into_iter()
+            .partition(|line| line.contains("--name nils-assistant"));
+        let run = |line: &str| match run_line(line) {
+            Ok(()) => println!("  {}", short(line)),
+            Err(e) => {
+                println!("  that failed: {e}");
+                println!("  run: {line}");
             }
+        };
+        for line in &rest {
+            run(line);
+        }
+        if !assistant.is_empty() {
+            mint_assistant_key(plan, console);
+        }
+        for line in &assistant {
+            run(line);
         }
     }
 
-    // The assistant's key comes from the gateway. On systemd the start-up
-    // itself makes it, between the gateway and the assistant; everywhere
-    // else it is made here, once the gateway answers.
+    // The assistant's key comes from the gateway. systemd, podman and docker
+    // make it as they start, between the gateway and the assistant, and so
+    // did the containers just above; launchd has no gateway to wait for.
     let systemd = plan.runtime == Runtime::Machine && !cfg!(target_os = "macos");
-    if plan.has(Part::Assistant) && plan.service && !systemd {
+    if plan.has(Part::Assistant) && plan.service && !systemd && !plan.runtime.container() {
         mint_assistant_key(plan, console);
     }
-    if plan.has(Part::Assistant) && !plan.service {
+    if plan.has(Part::Assistant) && !plan.service && !plan.runtime.container() {
         console.note(
             "with no services, start the gateway yourself; then nils setup and repair makes \
              the assistant's key",
@@ -2283,13 +2536,18 @@ fn pull_or_build(
 ) -> Result<(), Exit> {
     let engine = plan.runtime.name();
     let tag = format!("{image}:{}", plan.tag());
-    let pulled = Command::new(engine)
-        .args(["pull", &tag])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    // one line with a timer, as every slow step; a pull that fails is not
+    // an error yet, since the image is then built here
+    let pulled = quietly(engine, &["image", "exists", &tag])
+        || console
+            .task(
+                &format!("taking {tag}"),
+                &plan.dir,
+                engine,
+                &["pull", "--quiet", &tag],
+            )
+            .is_ok();
     if pulled {
-        console.note(&format!("pulled {tag}"));
         return Ok(());
     }
     console.note(&format!(
@@ -2301,14 +2559,13 @@ fn pull_or_build(
         .map_err(|e| fail(format!("{}: {e}", binary.display())))?;
     std::fs::write(context.join("Containerfile"), containerfile(part))
         .map_err(|e| fail(format!("{}: {e}", context.display())))?;
-    let status = Command::new(engine)
-        .args(["build", "-t", &tag, "."])
-        .current_dir(&context)
-        .status()
-        .map_err(|e| fail(format!("{engine}: {e}")))?;
-    if !status.success() {
-        return Err(fail(format!("{engine} build of {tag} failed")));
-    }
+    // the file named, since docker looks only for a Dockerfile on its own
+    console.task(
+        &format!("building {tag}"),
+        &context,
+        engine,
+        &["build", "-f", "Containerfile", "-t", &tag, "."],
+    )?;
     console.note(&format!("built {tag} from {}", context.display()));
     Ok(())
 }
@@ -2380,24 +2637,39 @@ fn make_registry(
             .args(["-v", &mount, &tag])
             .args(["--registry", IN_REGISTRY, "key", "add", "nils"])
             .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| fail(format!("{engine}: {e}")))?;
         if let Some(mut stdin) = child.stdin.take() {
             let _ = writeln!(stdin, "{passphrase}");
         }
-        let status = child.wait().map_err(|e| fail(e.to_string()))?;
-        if !status.success() {
-            return Err(fail("the key could not be added inside the container"));
+        // The engine's own lines about the key and the registry are the
+        // machine install's too, which says them in one line; they are shown
+        // only when a step fails.
+        let said = |out: &std::process::Output| {
+            let text = String::from_utf8_lossy(&out.stderr);
+            text.lines().last().unwrap_or_default().to_string()
+        };
+        let added = child.wait_with_output().map_err(|e| fail(e.to_string()))?;
+        if !added.status.success() {
+            return Err(fail(format!(
+                "the key could not be added inside the container: {}",
+                said(&added)
+            )));
         }
-        let status = Command::new(engine)
+        let made = Command::new(engine)
             .args(["run", "--rm"])
             .args(&user)
             .args(["-v", &mount, &tag])
             .args(["--registry", IN_REGISTRY, "init", "--key", "nils"])
-            .status()
+            .output()
             .map_err(|e| fail(format!("{engine}: {e}")))?;
-        if !status.success() {
-            return Err(fail("the registry could not be made inside the container"));
+        if !made.status.success() {
+            return Err(fail(format!(
+                "the registry could not be made inside the container: {}",
+                said(&made)
+            )));
         }
         println!("  registry at {}", plan.registry().display());
         return Ok(());
@@ -2656,10 +2928,20 @@ fn write_desk_config(plan: &Plan, force: bool) -> Result<(), Exit> {
     let _ = writeln!(text, "\n[engine]");
     let _ = writeln!(text, "url = \"{engine_url}\"");
     if plan.has(Part::Assistant) {
+        // In a pod every part shares one loopback; on a docker network each
+        // container is reached by its name.
+        let (kvasir, assistant) = match plan.runtime {
+            Runtime::Docker => ("nils-kvasir", "nils-assistant"),
+            _ => ("127.0.0.1", "127.0.0.1"),
+        };
         let _ = writeln!(text, "\n[kvasir]");
-        let _ = writeln!(text, "url = \"http://127.0.0.1:{}\"", plan.ports.kvasir);
+        let _ = writeln!(text, "url = \"http://{kvasir}:{}\"", plan.ports.kvasir);
         let _ = writeln!(text, "\n[assistant]");
-        let _ = writeln!(text, "url = \"http://127.0.0.1:{}\"", plan.ports.assistant);
+        let _ = writeln!(
+            text,
+            "url = \"http://{assistant}:{}\"",
+            plan.ports.assistant
+        );
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
@@ -3027,7 +3309,7 @@ fn configure_kvasir(
     let mut value: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| fail(format!("{}: {e}", example.display())))?;
 
-    value["bind"] = serde_json::json!(format!("127.0.0.1:{}", plan.ports.kvasir));
+    value["bind"] = serde_json::json!(gateway_bind(plan));
     value["origin"] = serde_json::json!(format!("http://127.0.0.1:{}", plan.ports.kvasir));
     let admin = generated_passphrase();
     value["auth"] = serde_json::json!({
@@ -3063,7 +3345,7 @@ fn configure_kvasir(
         fields.remove("provider");
     }
     backend["id"] = serde_json::json!("model");
-    backend["baseUrl"] = serde_json::json!(chosen.url);
+    backend["baseUrl"] = serde_json::json!(model_address_for(plan.runtime, &chosen.url));
     backend["locality"] = serde_json::json!(if chosen.local { "local" } else { "remote" });
     backend["models"][0]["id"] = serde_json::json!(model_id);
     backend["models"][0]["name"] = serde_json::json!(model_id);
@@ -3095,6 +3377,18 @@ fn configure_kvasir(
         ));
     }
     Ok(())
+}
+
+/// Where the gateway listens. On the machine, loopback. In a container,
+/// every address of the container's own network, which is what a published
+/// port and the other containers reach; the port is published on this
+/// machine's loopback alone.
+fn gateway_bind(plan: &Plan) -> String {
+    if plan.runtime.container() {
+        format!("0.0.0.0:{}", plan.ports.kvasir)
+    } else {
+        format!("127.0.0.1:{}", plan.ports.kvasir)
+    }
 }
 
 /// Mend what an earlier version of this wizard wrote, and say what changed.
@@ -3133,6 +3427,27 @@ fn repair_kvasir(plan: &Plan, console: &mut Console) -> Result<(), Exit> {
             ));
         }
     }
+    // Where the gateway listens and how it names this machine follow where
+    // it runs, so a setup changed from the machine to containers, or back,
+    // is mended here too.
+    let bind = gateway_bind(plan);
+    if value["bind"].as_str() != Some(bind.as_str()) {
+        mended.push(format!("listens on {bind}, for where it runs"));
+        value["bind"] = serde_json::json!(bind);
+    }
+    if let Some(backends) = value["backends"].as_array_mut() {
+        for backend in backends.iter_mut() {
+            let Some(url) = backend["baseUrl"].as_str() else {
+                continue;
+            };
+            let dialled = model_address_for(plan.runtime, &model_address_on_machine(url));
+            if dialled != url {
+                mended.push(format!("dials the model at {dialled}, for where it runs"));
+                backend["baseUrl"] = serde_json::json!(dialled);
+            }
+        }
+    }
+
     let purposes = assistant_purposes(plan, &value["purposes"]);
     let had = value["purposes"].as_array().map_or(0, Vec::len);
     if purposes.len() > had {
@@ -3189,7 +3504,31 @@ pub(crate) fn record_engine_version(path: &Path, version: &str) -> bool {
 fn write_assistant_env(plan: &Plan) -> Result<(), Exit> {
     let dir = plan.dir.join("assistant");
     let path = dir.join("assistant.env");
-    if path.exists() {
+    // How the assistant reaches the engine and the gateway, and where it
+    // listens, follow where it runs: a pod shares one loopback, a docker
+    // network names each container, and the desk in another container
+    // reaches the assistant only if it listens beyond its own loopback.
+    let (engine, kvasir, host) = match plan.runtime {
+        Runtime::Docker => (
+            format!("http://nils-engine:{}", plan.ports.engine),
+            format!("http://nils-kvasir:{}", plan.ports.kvasir),
+            Some("0.0.0.0"),
+        ),
+        _ => (
+            format!("http://127.0.0.1:{}", plan.ports.engine),
+            format!("http://127.0.0.1:{}", plan.ports.kvasir),
+            None,
+        ),
+    };
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        set_env_line(&mut lines, "NILS_URL", Some(&engine));
+        set_env_line(&mut lines, "KVASIR_URL", Some(&kvasir));
+        set_env_line(&mut lines, "HOST", host);
+        let mended = format!("{}\n", lines.join("\n"));
+        if mended != text {
+            std::fs::write(&path, mended).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+        }
         return Ok(());
     }
     let (_, origin, _) = desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
@@ -3206,8 +3545,8 @@ fn write_assistant_env(plan: &Plan) -> Result<(), Exit> {
     if let Some(model) = model {
         let _ = writeln!(text, "ASSISTANT_MODEL={model}");
     }
-    let _ = writeln!(text, "NILS_URL=http://127.0.0.1:{}", plan.ports.engine);
-    let _ = writeln!(text, "KVASIR_URL=http://127.0.0.1:{}", plan.ports.kvasir);
+    let _ = writeln!(text, "NILS_URL={engine}");
+    let _ = writeln!(text, "KVASIR_URL={kvasir}");
     let _ = writeln!(
         text,
         "KVASIR_KEY_FILE={}",
@@ -3235,7 +3574,25 @@ fn write_assistant_env(plan: &Plan) -> Result<(), Exit> {
     );
     let _ = writeln!(text, "DESK_ORIGIN={origin}");
     let _ = writeln!(text, "PORT={}", plan.ports.assistant);
+    if let Some(host) = host {
+        let _ = writeln!(text, "HOST={host}");
+    }
     std::fs::write(&path, text).map_err(|e| fail(format!("{}: {e}", path.display())))
+}
+
+/// One `KEY=value` line of an environment file set, added or taken out,
+/// leaving every other line as it was.
+fn set_env_line(lines: &mut Vec<String>, key: &str, value: Option<&str>) {
+    let prefix = format!("{key}=");
+    let at = lines.iter().position(|line| line.starts_with(&prefix));
+    match (at, value) {
+        (Some(i), Some(value)) => lines[i] = format!("{key}={value}"),
+        (None, Some(value)) => lines.push(format!("{key}={value}")),
+        (Some(i), None) => {
+            lines.remove(i);
+        }
+        (None, None) => {}
+    }
 }
 
 /// The token this setup made for the gateway, read back from its own file.
@@ -3365,45 +3722,93 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Str
         (Runtime::Podman, _) => {
             let dir = quadlet_dir();
             std::fs::create_dir_all(&dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
-            let mut names = Vec::new();
-            for (name, text) in quadlets(plan) {
-                std::fs::write(dir.join(&name), text)
+            let written = quadlets(plan);
+            for (name, text) in &written {
+                std::fs::write(dir.join(name), text)
                     .map_err(|e| fail(format!("{}: {e}", dir.display())))?;
-                names.push(name);
             }
-            let _ = Command::new("systemctl")
-                .args(["--user", "daemon-reload"])
-                .status();
-            // A quadlet's unit is generated, so it is never enabled: the
-            // [Install] section of the file is what systemd reads. Restart
-            // starts a stopped one and takes up a new image tag.
-            for unit in ["nils-engine", "nils-desk"] {
-                if unit == "nils-desk" && !plan.has(Part::Desk) {
-                    continue;
+            // a part this plan no longer has leaves no quadlet behind to start
+            for name in [
+                "nils-desk.container",
+                "nils-kvasir.container",
+                "nils-assistant.container",
+            ] {
+                if !written.iter().any(|(n, _)| n == name) && dir.join(name).exists() {
+                    quietly(
+                        "systemctl",
+                        &["--user", "stop", name.trim_end_matches(".container")],
+                    );
+                    let _ = std::fs::remove_file(dir.join(name));
                 }
-                let _ = Command::new("systemctl")
-                    .args(["--user", "restart", unit])
-                    .status();
+            }
+            quietly("systemctl", &["--user", "daemon-reload"]);
+            // A quadlet's unit is generated, so it is never enabled: the
+            // [Install] section of the file is what systemd reads. The pod
+            // is restarted, since what it publishes and how it is networked
+            // are its own, and restarting it starts every container in it
+            // again, from its new image tag and with rebuilt code. Each is
+            // then started, which does nothing to one that is up. The
+            // assistant's quadlet waits for the key the gateway makes, so it
+            // is started once that is made, as on the machine.
+            quietly("systemctl", &["--user", "restart", "nils-pod"]);
+            let mut units = vec!["nils-engine".to_string()];
+            if plan.has(Part::Desk) {
+                units.push("nils-desk".to_string());
+            }
+            if plan.has(Part::Assistant) {
+                units.push("nils-kvasir".to_string());
+            }
+            for unit in &units {
+                quietly("systemctl", &["--user", "start", unit]);
+            }
+            if plan.has(Part::Assistant) {
+                mint_assistant_key(plan, console);
+                quietly("systemctl", &["--user", "start", "nils-assistant"]);
+                units.push("nils-assistant".to_string());
             }
             linger();
-            Ok(format!(
-                "  services: {} in {}\n",
-                names.join(", "),
-                dir.display()
-            ))
+            Ok(unit_report(&units, console, Watcher::Systemd))
         }
         (Runtime::Docker, _) => {
             let path = plan.dir.join("compose.yaml");
             std::fs::write(&path, docker_compose(plan))
                 .map_err(|e| fail(format!("{}: {e}", path.display())))?;
-            let _ = Command::new("docker")
-                .args(["compose", "up", "-d"])
-                .current_dir(&plan.dir)
-                .status();
-            Ok(format!(
-                "  services: {} (docker compose up -d; add it to your machine's own start up)\n",
-                path.display()
-            ))
+            // Recreated, not only brought up: a gateway or an assistant built
+            // again has the same configuration and would otherwise keep
+            // running the old code. The assistant starts once the gateway has
+            // made its key.
+            let mut services = vec!["engine"];
+            if plan.has(Part::Desk) {
+                services.push("desk");
+            }
+            if plan.has(Part::Assistant) {
+                services.push("kvasir");
+            }
+            let mut args = vec!["compose", "up", "-d", "--force-recreate"];
+            args.extend(&services);
+            console.task("starting the containers", &plan.dir, "docker", &args)?;
+            let mut containers: Vec<String> =
+                services.iter().map(|s| format!("nils-{s}")).collect();
+            if plan.has(Part::Assistant) {
+                mint_assistant_key(plan, console);
+                console.task(
+                    "starting the assistant",
+                    &plan.dir,
+                    "docker",
+                    &["compose", "up", "-d", "--force-recreate", "assistant"],
+                )?;
+                containers.push("nils-assistant".to_string());
+            }
+            let mut said = unit_report(&containers, console, Watcher::Docker);
+            let _ = writeln!(
+                said,
+                "  {}",
+                console.dim(&format!(
+                    "{} brings them back after a restart of docker",
+                    path.display()
+                ))
+            );
+            Ok(said)
         }
         (Runtime::Machine, true) => {
             let dir = std::env::var_os("HOME")
@@ -3465,7 +3870,7 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Str
                 }
             }
             linger();
-            Ok(unit_report(&names, console))
+            Ok(unit_report(&names, console, Watcher::Systemd))
         }
     }
 }
@@ -3483,9 +3888,20 @@ fn quietly(program: &str, args: &[&str]) -> bool {
 /// not. Each is looked at twice, two seconds apart: a service that fails at
 /// start is active for an instant and then restarting, and a single look
 /// at that instant reported it running while it crashed in a loop.
-fn unit_report(names: &[String], console: &Console) -> String {
-    let look = |unit: &str| {
-        run_quiet("systemctl", &["--user", "is-active", unit]).is_some_and(|s| s.trim() == "active")
+/// What watches the services: systemd, for units on the machine and podman's
+/// quadlets, or docker, for its containers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Watcher {
+    Systemd,
+    Docker,
+}
+
+fn unit_report(names: &[String], console: &Console, watcher: Watcher) -> String {
+    let look = |unit: &str| match watcher {
+        Watcher::Systemd => run_quiet("systemctl", &["--user", "is-active", unit])
+            .is_some_and(|s| s.trim() == "active"),
+        Watcher::Docker => run_quiet("docker", &["inspect", "-f", "{{.State.Running}}", unit])
+            .is_some_and(|s| s.trim() == "true"),
     };
     console.note("checking that the services came up");
     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -3506,20 +3922,47 @@ fn unit_report(names: &[String], console: &Console) -> String {
     }
     for unit in stopped {
         let _ = writeln!(out, "  not running: {unit}");
-        if let Some(why) = last_error(unit) {
+        if let Some(why) = last_error(unit, watcher) {
             let _ = writeln!(out, "    it said: {why}");
+            // A container in a pod that did not start says only that; the
+            // reason is the pod's.
+            if why.contains("result 'dependency'")
+                && let Some(pod) = last_error("nils-pod", watcher)
+            {
+                let _ = writeln!(out, "    the pod said: {pod}");
+            }
         }
-        let _ = writeln!(out, "    its log: journalctl --user -u {unit}");
+        match watcher {
+            Watcher::Systemd => {
+                let _ = writeln!(out, "    its log: journalctl --user -u {unit}");
+            }
+            Watcher::Docker => {
+                let _ = writeln!(out, "    its log: docker logs {unit}");
+            }
+        }
     }
     out
 }
 
 /// The line of a unit's log most likely to say why it stopped.
-fn last_error(unit: &str) -> Option<String> {
-    let log = run_quiet(
-        "journalctl",
-        &["--user", "-u", unit, "-n", "80", "--no-pager", "-o", "cat"],
-    )?;
+fn last_error(unit: &str, watcher: Watcher) -> Option<String> {
+    let log = match watcher {
+        Watcher::Systemd => run_quiet(
+            "journalctl",
+            &["--user", "-u", unit, "-n", "80", "--no-pager", "-o", "cat"],
+        )?,
+        Watcher::Docker => {
+            let out = Command::new("docker")
+                .args(["logs", "--tail", "80", unit])
+                .output()
+                .ok()?;
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        }
+    };
     let lines: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).collect();
     let telling = |line: &&&str| {
         let lower = line.to_lowercase();
@@ -3534,12 +3977,15 @@ fn last_error(unit: &str) -> Option<String> {
     Some(text)
 }
 
+/// Keep this account's services running after it logs out. Where that is
+/// not allowed the services still run while the person is logged in, and
+/// loginctl's refusal is not the person's business.
 fn linger() {
     if let Some(user) = std::env::var_os("USER") {
         let _ = Command::new("loginctl")
             .arg("enable-linger")
             .arg(user)
-            .status();
+            .output();
     }
 }
 
@@ -3609,7 +4055,8 @@ pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)>
 /// cleanly; Flue's, which a checkout from before it had, listens on every
 /// interface.
 fn assistant_entry(dir: &Path) -> &'static str {
-    if dir.join("bin").join("serve.mjs").exists() {
+    // A checkout not made yet will be made from main, which has the entry.
+    if !dir.exists() || dir.join("bin").join("serve.mjs").exists() {
         "bin/serve.mjs"
     } else {
         "dist/app/server.mjs"
@@ -4141,6 +4588,8 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
     match state.runtime.as_str() {
         "podman" => {
             for (unit, file) in [
+                ("nils-assistant", "nils-assistant.container"),
+                ("nils-kvasir", "nils-kvasir.container"),
                 ("nils-desk", "nils-desk.container"),
                 ("nils-engine", "nils-engine.container"),
                 ("nils-pod", "nils.pod"),
@@ -4157,7 +4606,11 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
             // Named containers only. A compose project named for the
             // directory can share its name with another project on the same
             // machine, and bringing that down would take the other with it.
-            removal.containers = vec!["nils-desk".to_string(), "nils-engine".to_string()];
+            removal.containers = ["nils-assistant", "nils-kvasir", "nils-desk", "nils-engine"]
+                .iter()
+                .filter(|name| run_quiet("docker", &["inspect", "-f", "{{.Name}}", name]).is_some())
+                .map(|name| (*name).to_string())
+                .collect();
         }
         _ if cfg!(target_os = "macos") => {
             if let Some(home) = home_dir() {
@@ -4478,11 +4931,24 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
             }
         }
         "docker" => {
-            let mut args = vec!["rm", "-f"];
-            args.extend(removal.containers.iter().map(String::as_str));
-            quietly("docker", &args);
+            if !removal.containers.is_empty() {
+                let mut args = vec!["rm", "-f"];
+                args.extend(removal.containers.iter().map(String::as_str));
+                quietly("docker", &args);
+                say(format!("removed {}", removal.containers.join(", ")));
+            }
+            // the network docker run made, and the one compose made for the
+            // directory; docker refuses either while anything still uses it
             quietly("docker", &["network", "rm", "nils"]);
-            say(format!("removed {}", removal.containers.join(", ")));
+            if let Some(project) = removal.dir.file_name() {
+                let project: String = project
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                quietly("docker", &["network", "rm", &format!("{project}_default")]);
+            }
             if leaving == Leaving::KeepData {
                 let _ = std::fs::remove_file(removal.dir.join("compose.yaml"));
             }
@@ -4594,6 +5060,7 @@ mod tests {
             service: true,
             channel: None,
             version: "1.0.0-alpha.2".to_string(),
+            host_loopback: false,
         }
     }
 
@@ -5144,6 +5611,156 @@ mod tests {
             after.contains("ExecStart=/usr/bin/env node bin/serve.mjs"),
             "{after}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_model_on_this_machine_is_dialled_the_way_a_container_reaches_it() {
+        let local = "http://127.0.0.1:30000/v1";
+        assert_eq!(model_address_for(Runtime::Machine, local), local);
+        assert_eq!(
+            model_address_for(Runtime::Podman, local),
+            "http://host.containers.internal:30000/v1"
+        );
+        assert_eq!(
+            model_address_for(Runtime::Docker, "http://localhost:8000/v1"),
+            "http://host.docker.internal:8000/v1"
+        );
+        // somewhere else is dialled as it was typed, wherever the gateway runs
+        for url in [
+            "http://192.168.1.20:30000/v1",
+            "https://api.openai.com/v1",
+            "http://127.0.0.10:1/v1",
+            "http://localhost.example.org/v1",
+        ] {
+            assert_eq!(model_address_for(Runtime::Podman, url), url);
+        }
+        // and back, for a setup moved from containers to the machine
+        assert_eq!(
+            model_address_on_machine("http://host.containers.internal:30000/v1"),
+            local
+        );
+        assert!(model_reach_note(Runtime::Machine, local, || true).is_none());
+        assert!(model_reach_note(Runtime::Docker, "https://api.openai.com/v1", || true).is_none());
+        let docker = model_reach_note(Runtime::Docker, local, || true).unwrap();
+        assert!(docker.contains("0.0.0.0"), "{docker}");
+        let no_pasta = model_reach_note(Runtime::Podman, local, || false).unwrap();
+        assert!(no_pasta.contains("pasta"), "{no_pasta}");
+    }
+
+    #[test]
+    fn in_a_pod_the_gateway_and_the_assistant_run_beside_the_others() {
+        let dir = scratch("pod-assistant");
+        let mut plan = plan(Runtime::Podman);
+        plan.dir = dir.clone();
+        plan.parts.push(Part::Assistant);
+        plan.host_loopback = true;
+        let files = quadlets(&plan);
+        let named = |name: &str| {
+            files
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
+        let pod = named("nils.pod");
+        assert!(pod.contains("PublishPort=127.0.0.1:7200:7200"), "{pod}");
+        assert!(
+            pod.contains("PublishPort=127.0.0.1:7100:7100"),
+            "the gateway on this machine's loopback, for the key: {pod}"
+        );
+        assert!(
+            pod.contains("Network=pasta:--map-host-loopback=169.254.1.2"),
+            "{pod}"
+        );
+        assert!(
+            !pod.contains("7300"),
+            "the assistant is the desk's alone: {pod}"
+        );
+        let kvasir = named("nils-kvasir.container");
+        let k = dir.join("kvasir");
+        assert!(kvasir.contains(&format!("Image={NODE_IMAGE}")), "{kvasir}");
+        assert!(kvasir.contains("Pod=nils.pod"), "{kvasir}");
+        assert!(
+            kvasir.contains(&format!("Volume={0}:{0}\n", k.display())),
+            "mounted at the same path, so kvasir.json means the same: {kvasir}"
+        );
+        assert!(kvasir.contains("Exec=node dist/main.js --config kvasir.json"));
+        let assistant = named("nils-assistant.container");
+        let a = dir.join("assistant");
+        assert!(
+            assistant.contains(&format!("EnvironmentFile={}/assistant.env", a.display())),
+            "{assistant}"
+        );
+        assert!(
+            assistant.contains(&format!("Volume={0}:{0}:ro", k.display())),
+            "the key, read only: {assistant}"
+        );
+        assert!(
+            assistant.contains("After=nils-kvasir.service"),
+            "{assistant}"
+        );
+        assert!(
+            assistant.contains(&format!(
+                "ConditionPathExists={}/assistant.key",
+                k.display()
+            )),
+            "the pod starts its containers, so the assistant waits for its key: {assistant}"
+        );
+        // without the assistant, the pod is what it was
+        plan.parts.retain(|p| *p != Part::Assistant);
+        plan.host_loopback = false;
+        let pod = quadlets(&plan).remove(0).1;
+        assert!(!pod.contains("7100") && !pod.contains("Network="), "{pod}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn on_docker_each_part_is_reached_by_its_name() {
+        let dir = scratch("docker-assistant");
+        let mut plan = plan(Runtime::Docker);
+        plan.dir = dir.clone();
+        plan.parts.push(Part::Assistant);
+        let compose = docker_compose(&plan);
+        for want in [
+            "container_name: nils-kvasir",
+            "container_name: nils-assistant",
+            &format!("image: {NODE_IMAGE}"),
+            "\"127.0.0.1:7100:7100\"",
+            "\"host.docker.internal:host-gateway\"",
+            "depends_on: [engine, kvasir]",
+        ] {
+            assert!(compose.contains(want), "{want} is not in:\n{compose}");
+        }
+        assert!(
+            !compose.contains(":7300"),
+            "the assistant is published nowhere:\n{compose}"
+        );
+
+        assert!(write_desk_config(&plan, true).is_ok());
+        let desk = std::fs::read_to_string(plan.desk_config()).unwrap();
+        assert!(desk.contains("url = \"http://nils-kvasir:7100\""), "{desk}");
+        assert!(
+            desk.contains("url = \"http://nils-assistant:7300\""),
+            "{desk}"
+        );
+
+        std::fs::create_dir_all(dir.join("assistant")).unwrap();
+        assert!(write_assistant_env(&plan).is_ok());
+        let env_path = dir.join("assistant").join("assistant.env");
+        let env = std::fs::read_to_string(&env_path).unwrap();
+        assert!(env.contains("NILS_URL=http://nils-engine:8437"), "{env}");
+        assert!(env.contains("KVASIR_URL=http://nils-kvasir:7100"), "{env}");
+        assert!(env.contains("HOST=0.0.0.0"), "{env}");
+
+        // the same setup moved to a pod: the addresses follow, the rest stays
+        std::fs::write(&env_path, format!("{env}ASSISTANT_MODEL=mine\n")).unwrap();
+        plan.runtime = Runtime::Podman;
+        assert!(write_assistant_env(&plan).is_ok());
+        let moved = std::fs::read_to_string(&env_path).unwrap();
+        assert!(moved.contains("NILS_URL=http://127.0.0.1:8437"), "{moved}");
+        assert!(!moved.contains("HOST="), "{moved}");
+        assert!(moved.contains("ASSISTANT_MODEL=mine"), "{moved}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
