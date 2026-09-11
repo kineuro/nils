@@ -1148,7 +1148,7 @@ Settled while building jobs and custody (slice 6):
   interrupted by a real SIGINT resumes to the same subjects, studies, series,
   stacks, instances, source-file statuses and identity rows as an uninterrupted
   run, on SQLite and on Postgres.
-- On CT 110 the same holds over nmosd (508,045 files, 32 workers, SQLite):
+- On the development container the same holds over nmosd (508,045 files, 32 workers, SQLite):
   a run killed after 40 commits (5 s in), one killed inside the 61st
   transaction (8 s), one stopped by SIGINT after 80 commits (18 s, exit 130)
   and one aborted after 20 (3 s) each resume to the uninterrupted run's 44
@@ -1591,7 +1591,7 @@ they share the schema.
 6. **Jobs, resume, status, custody.** *Done when:* a digest killed at any point
    resumes to the same counts as an uninterrupted one, and `nils custody` lists
    every file the tests created. Landed: the kill-and-resume tests of §10 hold
-   on SQLite and Postgres and over nmosd on CT 110, the CLI test finds every
+   on SQLite and Postgres and over nmosd on the development container, the
    file under the home in `custody --json`, and the second pass over an
    unchanged tree went from 25.8 s to 4.7 s on nmosd (§9.2).
 7. **The compare tool and the gate runs** on the baseline host: the spike's

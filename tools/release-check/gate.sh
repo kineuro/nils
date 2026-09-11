@@ -9,7 +9,7 @@
 # are checked in beside it, which is what lets the gate assert rather than
 # eyeball.
 #
-#     tools/release-check/gate.sh /scratch/nils/release-gate
+#     tools/release-check/gate.sh /data/working/release-gate
 #
 # The first bar, the repairs, is `tools/repair-check/gate.sh` and runs
 # separately: it is about digest and this is about release.

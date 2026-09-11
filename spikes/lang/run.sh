@@ -9,7 +9,7 @@
 # asked. Everything printed is a count or a rate; the outputs stay on the host.
 set -euo pipefail
 cd "$(dirname "$0")"
-root=""; label=""; workers="8"; runs=2; out="/scratch/nils/spike"; referee=0
+root=""; label=""; workers="8"; runs=2; out="/data/working/spike"; referee=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) root=$2; shift 2 ;;

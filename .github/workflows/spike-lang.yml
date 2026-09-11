@@ -5,7 +5,13 @@ name: spike-lang
 # is a finding, not a broken build, so the matrix never stops early.
 on:
   pull_request:
-    paths: ["spikes/lang/**", ".github/workflows/spike-lang.yml"]
+    # Only what decides the answer. The notes and the measurement scripts do
+    # not change what a binary links, and a six-target native build is not
+    # worth re-running to correct a sentence.
+    paths:
+      - "spikes/lang/rust/**"
+      - "spikes/lang/go/**"
+      - ".github/workflows/spike-lang.yml"
   workflow_dispatch:
 
 permissions:

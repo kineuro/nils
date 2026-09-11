@@ -16,7 +16,7 @@
 //! grammar shows up as a difference rather than moving with the code.
 //!
 //! ```sh
-//! cargo run --release -p nils-dicom --example reference -- --out /scratch/nils/reference
+//! cargo run --release -p nils-dicom --example reference -- --out /data/working/reference
 //! ```
 
 use std::fs;

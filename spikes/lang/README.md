@@ -24,27 +24,36 @@ Two programs with the same contract, `rust/parse` on `dicom-object` 0.10.0 and `
 
 Failure classes: `not_dicom`, `parse_error`, `truncated`, `unsupported_ts`, `missing_sop` (parsed, but no SOP Instance UID), `io_error`. Megabytes per second is the corpus size divided by wall time, so it is the rate at which a corpus is worked through, not the bytes a library actually reads (the Rust side reads headers only, the Go side has to read the pixel data too, see the findings).
 
-`synthetic.py` (now `tools/synth/synthetic.py`, the seed of the engine's synthetic generator) writes a nine-file corpus with no library and no real data (a Part 10 file, the same without preamble, a raw data set, a truncated file, a file without SOP Instance UID, a Finder file, an empty file, a text file, a copy in a subdirectory); `smoke.sh` runs both harnesses over it and checks the class counts and that the rows both sides produce are identical. `referee.py` is the judge for the real corpora: for every file either side failed, pydicom (`force=True`, `stop_before_pixels=True`) says whether it can read a SOP Instance UID out of it; a file pydicom reads and a library rejects is that library's miss, a file nobody reads is bad on disk. It then compares the rows both sides produced tag by tag (numbers as numbers, multi-values element-wise). `run.sh` is the measurement protocol: for each worker count, Rust then Go, twice each, into `/scratch/nils/spike/<label>/`, then the referee on the last pair and a `results.json` of counts and rates.
+`synthetic.py` (now `tools/synth/synthetic.py`, the seed of the engine's synthetic generator) writes a nine-file corpus with no library and no real data (a Part 10 file, the same without preamble, a raw data set, a truncated file, a file without SOP Instance UID, a Finder file, an empty file, a text file, a copy in a subdirectory); `smoke.sh` runs both harnesses over it and checks the class counts and that the rows both sides produce are identical. `referee.py` is the judge for the real corpora: for every file either side failed, pydicom (`force=True`, `stop_before_pixels=True`) says whether it can read a SOP Instance UID out of it; a file pydicom reads and a library rejects is that library's miss, a file nobody reads is bad on disk. It then compares the rows both sides produced tag by tag (numbers as numbers, multi-values element-wise). `run.sh` is the measurement protocol: for each worker count, Rust then Go, twice each, into a working directory per label, then the referee on the last pair and a `results.json` of counts and rates.
 
 `rust/dbcheck` and `go/cmd/dbcheck` are criterion 3: one binary that opens an in-memory SQLite and an in-memory DuckDB, runs a query on each and prints the versions. `.github/workflows/spike-lang.yml` builds and runs both on the six release targets, natively on each runner, and checks with `ldd` and `otool` that no database library is linked dynamically.
 
 ## Hosts and toolchains
 
-The first runs (2026-09-02) were made on CT 110 `nils` on Asgard: an LXC container with 64 cores and 256 GB, the corpus on the NVMe pool `fast` (RAIDZ1, lz4, record size 1M) mounted at `/scratch/nils`. The baseline host of C6 is CT 111 `baseline` on the same pool: 8 cores, 64 GB, an LXC container rather than a virtual machine, which I note as a deviation from the criteria; the network-storage case of the criteria is the same corpus read from the tank over NFS (`/data/source`), and the spike runs both.
+The first runs (2026-09-02) were made on the development container: 64 cores and 256 GB, the corpus on a local NVMe pool (RAIDZ1, lz4, record size 1M). The baseline host of C6 is a second container on the same pool: 8 cores and 64 GB, a container rather than a virtual machine, which I note as a deviation from the criteria; the network-storage case of the criteria is the same corpus read from the storage server over NFS, and the spike runs both.
 
 Toolchains on the host: rustc 1.98.0 (stable, 2026-08-18), go 1.26.8, pydicom 3.0.2 as the referee. Both harnesses are built on the host from the same commit (`cargo build --release`, `go build`).
 
 ## Corpora
 
-**nmosd** (2026-09-02): the raw DICOM tree of one study copied from the tank to `/scratch/nils/source/nmosd`: 44 subject folders, 508,045 files, 64.1 GB as the sum of file sizes (about 32 GB on disk after lz4). Every DICOM file in it is Part 10, explicit VR little endian, from one vendor and one decade; 124 files are Finder metadata (`.DS_Store`), 10 are DICOM files without a SOP Instance UID. Clean and homogeneous, so it measures throughput, not vendor tolerance.
+**nmosd** (2026-09-02): the raw DICOM tree of one study copied from the storage server to the working pool: 44 subject folders, 508,045 files, 64.1 GB as the sum of file sizes (about 32 GB on disk after lz4). Every DICOM file in it is Part 10, explicit VR little endian, from one vendor and one decade; 124 files are Finder metadata (`.DS_Store`), 10 are DICOM files without a SOP Instance UID. Clean and homogeneous, so it measures throughput, not vendor tolerance.
 
-**mix** (planned 2026-09-02, Nima's suggestion): a small, deliberately diverse sample of the live v0 archive on fg, which holds 37.5 million instances from 16 manufacturer labels and 86 scanner models, study years 2001 to 2026, four transfer syntaxes (JPEG 2000 lossless for 85 percent of the instances, explicit VR little endian, JPEG lossless in two flavours), 1,567 enhanced multi-frame MR series and a handful of CT series. The selection is made in SQL against the v0 metadata database, read-only, whole series only: up to two series per (manufacturer, model, study year, SOP class, transfer syntax, multi-frame or not, implementation version) stratum, every series of the manufacturers with fewer than 200 series in total, every CT series, three multi-stack series per manufacturer, and the three largest series of the archive (`helpers/spike-mix-select.sh` in the server design record). It travels fg to Asgard over Bifrost like every other transfer and lands at `/scratch/nils/source/mix` with a `MANIFEST.tsv` of strata and counts. Together with nmosd, and ctrl or longtbi from the tank when the one-million-instance run is due, it gives criterion 2 the vendor spread nmosd lacks.
+**mix** (planned 2026-09-02, Nima's suggestion): a small, deliberately diverse sample of the live v0 archive in production, which holds 37.5 million instances from 16 manufacturer labels and 86 scanner models, study years 2001 to 2026, four transfer syntaxes (JPEG 2000 lossless for 85 percent of the instances, explicit VR little endian, JPEG lossless in two flavours), 1,567 enhanced multi-frame MR series and a handful of CT series. The selection is made in SQL against the v0 metadata database, read-only, whole series only: up to two series per (manufacturer, model, study year, SOP class, transfer syntax, multi-frame or not, implementation version) stratum, every series of the manufacturers with fewer than 200 series in total, every CT series, three multi-stack series per manufacturer, and the three largest series of the archive (the selection script lives with the private record). It travels from production over the usual transfer path like every other dataset and lands beside nmosd with a `MANIFEST.tsv` of strata and counts. Together with nmosd, and another cohort from the storage server when the one-million-instance run is due, it gives criterion 2 the vendor spread nmosd lacks.
+
+## A finding, 2026-09-11
+
+`dbcheck` no longer builds for windows-arm64 on the hosted runner. DuckDB's
+bundled sources reach an assembler that rejects the arm64 assembly it is
+given, on the same native arm64 image that built it in September, so what
+changed is the toolchain the image offers and not this spike. The other five
+targets still build and run. Recorded rather than chased: the criterion it
+serves was answered in September and the answer does not turn on this.
 
 ## Results so far
 
-### nmosd, CT 110, 2026-09-02
+### nmosd, the development container, 2026-09-02
 
-Warm cache (the corpus had been written an hour earlier, the host has 3 TB of RAM), 8 workers, two runs per side:
+Warm cache (the corpus had been written an hour earlier, so the page cache was warm), 8 workers, two runs per side:
 
 | side | wall | files/s | CPU (user+sys) | peak RSS | parsed | failed |
 |---|---|---|---|---|---|---|
@@ -94,6 +103,6 @@ Every binary that built ran its query on SQLite 3.53 and DuckDB 1.5.5 from insid
 
 ## Open
 
-- The 8-core baseline host (CT 111) and the NFS case.
+- The 8-core baseline host and the NFS case.
 - The mix corpus (transfer pending), then the one-million-instance run.
 - Criterion 4: the two harnesses are the same size (449 lines of Rust, 433 of Go for `parse`; 36 and 50 for `dbcheck`); the judgment is written in the report.

@@ -75,10 +75,10 @@ non-zero on any disagreement.
 
 ## Hosts and data
 
-CT 110 `nils` on Asgard (an LXC container, 64 cores, 256 GB, the corpus on the
-NVMe pool `fast`), rustc 1.98.0, Python 3.13. The data is a read-only export of
-the two tables v0's classifier reads and writes, `stack_fingerprint` and
-`series_classification_cache`, from the live v0 metadata database on `fg`:
+The development container (64 cores, 256 GB, the corpus on a local NVMe pool),
+rustc 1.98.0, Python 3.13. The data is a read-only export of the two tables
+v0's classifier reads and writes, `stack_fingerprint` and
+`series_classification_cache`, from the live v0 metadata database in production:
 **518,365 stacks**, 386,468 MR series, one site, five vendors, a decade.
 
 The vote is measured against the cache as it stands *now*, which is v0's state

@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn the_default_name_is_basename_and_date() {
-        let name = default_name(Path::new("/scratch/nils/source/nmosd"));
+        let name = default_name(Path::new("/data/source/nmosd"));
         assert!(name.starts_with("nmosd-20"));
         assert_eq!(name.len(), "nmosd-".len() + 10);
         assert!(default_name(Path::new("/")).starts_with("root-"));

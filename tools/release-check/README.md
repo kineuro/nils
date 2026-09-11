@@ -5,7 +5,7 @@ tree of DICOM to an encrypted archive somebody could actually be sent, asserted
 rather than eyeballed.
 
 ```sh
-tools/release-check/gate.sh /scratch/nils/release-gate
+tools/release-check/gate.sh /data/working/release-gate
 ```
 
 It builds its own registry from its own corpus and refuses to write into a
