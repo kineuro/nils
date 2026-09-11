@@ -3893,6 +3893,13 @@ fn unit_report(names: &[String], console: &Console, watcher: Watcher) -> String 
         let _ = writeln!(out, "  not running: {unit}");
         if let Some(why) = last_error(unit, watcher) {
             let _ = writeln!(out, "    it said: {why}");
+            // A container in a pod that did not start says only that; the
+            // reason is the pod's.
+            if why.contains("result 'dependency'")
+                && let Some(pod) = last_error("nils-pod", watcher)
+            {
+                let _ = writeln!(out, "    the pod said: {pod}");
+            }
         }
         match watcher {
             Watcher::Systemd => {
@@ -3939,12 +3946,15 @@ fn last_error(unit: &str, watcher: Watcher) -> Option<String> {
     Some(text)
 }
 
+/// Keep this account's services running after it logs out. Where that is
+/// not allowed the services still run while the person is logged in, and
+/// loginctl's refusal is not the person's business.
 fn linger() {
     if let Some(user) = std::env::var_os("USER") {
         let _ = Command::new("loginctl")
             .arg("enable-linger")
             .arg(user)
-            .status();
+            .output();
     }
 }
 
