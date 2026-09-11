@@ -750,6 +750,21 @@ pub(crate) struct State {
     pub(crate) places: Vec<PlaceState>,
     #[serde(default)]
     pub(crate) parts: BTreeMap<String, PartState>,
+    /// Programs this install put on the machine that no part names: the nils
+    /// that set up a container install, the nils-desk its image was made
+    /// from, and a binary a part ran from before it moved into a container.
+    /// An uninstall removes these and the parts' own, and nothing else.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) programs: Vec<String>,
+}
+
+impl State {
+    fn keep_program(&mut self, path: &Path) {
+        let path = path.display().to_string();
+        if !self.programs.contains(&path) {
+            self.programs.push(path);
+        }
+    }
 }
 
 /// One place the wizard declared, kept so a repair knows what it made.
@@ -2050,7 +2065,12 @@ fn do_it(
             .as_ref()
             .map(|s| s.parts.clone())
             .unwrap_or_default(),
+        programs: existing
+            .as_ref()
+            .map(|s| s.programs.clone())
+            .unwrap_or_default(),
     };
+    let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
 
     // The engine: the running binary, or an image.
@@ -2060,11 +2080,16 @@ fn do_it(
     let into = binary_dir(&me, plan);
 
     if plan.runtime.container() {
+        state.keep_program(&me);
         pull_or_build(plan, console, "nils", ENGINE_IMAGE, &me)?;
         if plan.has(Part::Desk) {
-            let desk_binary = install_desk(&into, plan.channel.as_deref())
-                .map(|(_, path)| path)
-                .unwrap_or_else(|_| into.join("nils-desk"));
+            let desk_binary = match install_desk(&into, plan.channel.as_deref()) {
+                Ok((_, path)) => {
+                    state.keep_program(&path);
+                    path
+                }
+                Err(_) => into.join("nils-desk"),
+            };
             pull_or_build(plan, console, "nils-desk", DESK_IMAGE, &desk_binary)?;
         }
     } else {
@@ -2203,6 +2228,18 @@ fn do_it(
              the assistant's key",
         );
     }
+
+    // A binary a part ran from before this run moved it into a container is
+    // still on the machine, and still this install's to remove.
+    for (name, before) in &previous_parts {
+        let now = state.parts.get(name).map(|p| p.path.as_str());
+        if before.kind == "binary" && now != Some(before.path.as_str()) {
+            state.keep_program(Path::new(&before.path));
+        }
+    }
+    // and one that is a part's own again is not listed twice
+    let own: Vec<String> = state.parts.values().map(|p| p.path.clone()).collect();
+    state.programs.retain(|p| !own.contains(p));
 
     let path = write_state(&state)?;
     println!("  {}", path.display());
@@ -3816,6 +3853,8 @@ struct Removal {
     /// Programs other than this one, then this one, removed last.
     programs: Vec<PathBuf>,
     me: Option<PathBuf>,
+    /// This program, when the record does not name it and so it stays.
+    me_kept: Option<PathBuf>,
     /// First-party packs to remove, and a pack directory kept because it
     /// also holds a person's own.
     packs: Vec<PathBuf>,
@@ -4010,6 +4049,7 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         images: Vec::new(),
         programs: Vec::new(),
         me: None,
+        me_kept: None,
         packs: Vec::new(),
         packs_kept: None,
         built: Vec::new(),
@@ -4073,19 +4113,39 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
             .collect();
     }
 
-    // programs, this one last
-    for part in state.parts.values() {
-        let path = PathBuf::from(&part.path);
-        if part.kind == "binary" && path.exists() && Some(&path) != me.as_ref() {
-            removal.programs.push(path);
+    // Programs, this one last. Only what the record names: a nils-desk beside
+    // this program, or this program run from somewhere else, may be someone
+    // else's build.
+    let recorded: Vec<PathBuf> = state
+        .parts
+        .values()
+        .filter(|part| part.kind == "binary")
+        .map(|part| part.path.as_str())
+        .chain(state.programs.iter().map(String::as_str))
+        .map(|path| {
+            let path = PathBuf::from(path);
+            std::fs::canonicalize(&path).unwrap_or(path)
+        })
+        .collect();
+    for path in &recorded {
+        if path.exists() && Some(path) != me.as_ref() && !removal.programs.contains(path) {
+            removal.programs.push(path.clone());
         }
     }
-    // Only what the record names: a nils-desk that happens to sit beside
-    // this program may be someone else's build.
-    removal.me = me.clone();
+    match me {
+        Some(me) if recorded.contains(&me) => removal.me = Some(me),
+        Some(me) => removal.me_kept = Some(me),
+        None => {}
+    }
 
-    // packs, beside the program, never a person's own
-    if let Some(prefix) = me.as_deref().and_then(Path::parent).and_then(Path::parent) {
+    // packs, beside the nils this install put there, never a person's own
+    let installed_nils = recorded
+        .iter()
+        .find(|path| path.file_name().is_some_and(|name| name == "nils"));
+    if let Some(prefix) = installed_nils
+        .and_then(|p| p.parent())
+        .and_then(Path::parent)
+    {
         let packs = prefix.join("share").join("nils").join("packs");
         if let Ok(entries) = std::fs::read_dir(&packs) {
             let mut others = false;
@@ -4220,6 +4280,17 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
             &mut out,
             "packs",
             format!("{}, which also holds packs of your own", kept.display()),
+        );
+    }
+    if let Some(me) = &removal.me_kept {
+        row(
+            &mut out,
+            "program",
+            format!(
+                "{}, which the setup record does not name; remove it yourself if nothing \
+                 else put it there",
+                me.display()
+            ),
         );
     }
     out
@@ -4635,6 +4706,88 @@ mod tests {
             "a directory named in a hand edited record, holding someone's photos"
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_uninstall_removes_the_programs_the_record_names_and_no_other() {
+        let root = scratch("programs");
+        let bin = root.join("prefix").join("bin");
+        let packs = root.join("prefix").join("share").join("nils").join("packs");
+        let elsewhere = root.join("build").join("nils");
+        for dir in [&bin, &packs.join("mri"), &packs.join("mine")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        for file in [bin.join("nils"), bin.join("nils-desk"), elsewhere.clone()] {
+            std::fs::write(file, "").unwrap();
+        }
+        let bin = std::fs::canonicalize(&bin).unwrap();
+        let packs = std::fs::canonicalize(&packs).unwrap();
+        let elsewhere = std::fs::canonicalize(&elsewhere).unwrap();
+        let part = |path: &Path, kind: &str| PartState {
+            version: "1".to_string(),
+            path: path.display().to_string(),
+            kind: kind.to_string(),
+        };
+
+        // On the machine: the parts name both programs. This program, run
+        // from a build somewhere else, is not the one the install put there.
+        let mut state = State {
+            dir: root.join("data").display().to_string(),
+            runtime: "machine".to_string(),
+            ..State::default()
+        };
+        state
+            .parts
+            .insert("engine".to_string(), part(&bin.join("nils"), "binary"));
+        state
+            .parts
+            .insert("desk".to_string(), part(&bin.join("nils-desk"), "binary"));
+        let removal = gather_removal(&state, Some(elsewhere.clone()), Leaving::KeepData);
+        assert_eq!(
+            removal.programs,
+            vec![bin.join("nils-desk"), bin.join("nils")]
+        );
+        assert_eq!(removal.me, None, "a build the record does not name stays");
+        assert_eq!(removal.me_kept, Some(elsewhere.clone()));
+        assert_eq!(
+            removal.packs,
+            vec![packs.join("mri")],
+            "beside the installed nils"
+        );
+        assert_eq!(
+            removal.packs_kept,
+            Some(packs.clone()),
+            "mine is a person's own"
+        );
+
+        // In containers: the parts are images, and the record's programs
+        // name the nils that set it up and the nils-desk the image came from.
+        let mut state = State {
+            dir: root.join("data").display().to_string(),
+            runtime: "machine".to_string(),
+            programs: vec![
+                bin.join("nils").display().to_string(),
+                bin.join("nils-desk").display().to_string(),
+            ],
+            ..State::default()
+        };
+        state.parts.insert(
+            "engine".to_string(),
+            part(Path::new("ghcr.io/kineuro/nils:v1"), "podman"),
+        );
+        let removal = gather_removal(&state, Some(bin.join("nils")), Leaving::KeepData);
+        assert_eq!(removal.programs, vec![bin.join("nils-desk")]);
+        assert_eq!(removal.me, Some(bin.join("nils")), "this one, last");
+        assert_eq!(removal.me_kept, None);
+
+        // A record from before programs were kept names no program at all.
+        state.programs.clear();
+        let removal = gather_removal(&state, Some(bin.join("nils")), Leaving::KeepData);
+        assert!(removal.programs.is_empty());
+        assert_eq!(removal.me, None);
+        assert!(removal.packs.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
