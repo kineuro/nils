@@ -4,6 +4,20 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.8] - 2026-09-11
+
+Asked for after alpha.7's first container install. It also carries a port fix found getting ready for that install.
+
+### Changed
+
+- Step 2 offers every runtime this machine has: on the machine, podman, and docker. Before, docker was offered only when podman was not installed, and otherwise needed `--runtime docker`. Docker is offered only when it answers. A `docker` command that is podman's wrapper counts as podman, and a docker whose daemon is not running, or that this account may not use, is left out with a sentence saying why.
+
+### Fixed
+
+- Only the engine's and the desk's ports were checked. A gateway or an assistant whose port something else held failed at start. Every part this machine will listen for is checked now, and no two parts are given the same port.
+- "Change something" on a running install checked the install's own ports, which its services hold, and moved them. A part the setup already has keeps its port.
+- The wizard's opening line said a podman install ran "on the podman".
+
 ## [1.0.0-alpha.7] - 2026-09-11
 
 Everything with containers, and an update that takes effect. Found by removing the laptop install and getting ready to run it again with podman and docker.
