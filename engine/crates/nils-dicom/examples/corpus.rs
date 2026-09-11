@@ -6,7 +6,7 @@
 //!
 //! ```sh
 //! cargo run --release -p nils-dicom --example corpus -- \
-//!     --out /scratch/nils/synth --instances 1000000 --seed 1 > synth-manifest.json
+//!     --out /data/working/synth --instances 1000000 --seed 1 > synth-manifest.json
 //! ```
 //!
 //! What the tree holds, so a digest of it exercises every path the spec

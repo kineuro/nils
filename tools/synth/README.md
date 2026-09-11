@@ -8,7 +8,7 @@ The engine's tests and benchmarks run on data that never existed: files written 
 
 ```sh
 cargo run --release -p nils-dicom --example corpus -- \
-    --out /scratch/nils/synth --instances 1000000 --seed 1 > synth-manifest.json
+    --out /data/working/synth --instances 1000000 --seed 1 > synth-manifest.json
 ```
 
 | Flag | Default | What it sets |

@@ -957,9 +957,9 @@ What proves each bar:
    who are also in other cohorts sit under the other cohorts' roots
    (128,880 instances, excused by name), the 82 studies and 2,165 series
    here are the 82 and 2,165 both sides hold, and the one subject more is
-   the folder Wave 1 moved aside on the tank (10,820 instances, a name
+   the folder Wave 1 moved aside on the storage server (10,820 instances, a
    shaped like a code that matches no identifier), still under the archive
-   host's own root; the baseline host, reading the tank, counts 43.
+   host's own root; the baseline host, over the network, counts 43.
 2. Slice 1's measurement, §4.4: the release's bookkeeping at 150,000 and
    1,000,000 files in both layouts, flat, and a re-run writing nothing; the
    reference gate's bar 9 and the cohort gate's re-runs keep it so. On the

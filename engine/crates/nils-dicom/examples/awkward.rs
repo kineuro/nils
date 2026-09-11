@@ -5,7 +5,7 @@
 //!
 //! ```sh
 //! cargo run --release -p nils-dicom --example awkward -- \
-//!     --out /scratch/nils/awkward > awkward-manifest.json
+//!     --out /data/working/awkward > awkward-manifest.json
 //! ```
 //!
 //! The `corpus` example beside this one writes a well-formed archive at scale.
