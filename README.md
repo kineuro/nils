@@ -2,11 +2,17 @@
 
 **Neuroimaging Intelligent Linked System.** NILS digests DICOM into a registry, classifies every series with versioned modality packs, answers questions over the registry in one query language, and exports BIDS with provenance. It is one binary that runs on a laptop or a server, with optional apps for query, review and agents on top, and it can join a federation of nodes where the compute travels and the data stays. Every judgement it makes is a knob you can inspect, and every store it keeps is listed on one page.
 
-> **Pre-alpha.** This repository is the v1 rewrite of NILS, developed in the open from its first commit on 2026-09-02; nothing here runs yet. NILS v0, the 0.x line in daily use in our group, lives in the private repository `kineuro/nils_private`; its public mirror is archived at [kineuro/nils-legacy](https://github.com/kineuro/nils-legacy).
+> **Pre-alpha.** This repository is the v1 rewrite of NILS, developed in the open from its first commit on 2026-09-02. It installs and runs, and the interfaces are still moving: take a release, not a promise of stability. NILS v0, the 0.x line in daily use in our group, lives in the private repository `kineuro/nils_private`; its public mirror is archived at [kineuro/nils-legacy](https://github.com/kineuro/nils-legacy).
 
 ## Installing
 
-One command installs every part, makes what they need and says what it did:
+One line, on Linux or macOS:
+
+```
+curl -fsSL https://nils.kineuro.se/get | sh
+```
+
+It fetches the binary for this machine, checks it against the release's checksums, and hands over to the wizard. Where `nils` is already on the machine, the wizard is the same thing on its own:
 
 ```
 nils setup
