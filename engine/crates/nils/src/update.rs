@@ -341,9 +341,11 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
     let base = base_of(&args);
     // Every other part first, each in whatever way it runs; the engine is
     // last because it replaces the binary doing the replacing.
-    if args.all {
-        crate::setup::update_all(args.channel.as_deref())?;
-    }
+    let changed = if args.all && !args.check {
+        crate::setup::update_all(args.channel.as_deref())?
+    } else {
+        false
+    };
     let wanted = match &args.version {
         Some(v) => v.trim().trim_start_matches('v').to_string(),
         None => newest_version(&base)?,
@@ -351,6 +353,9 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
     let asked = args.version.is_some() || args.to.is_some();
     if !asked && !newer(&wanted, VERSION) {
         println!("nils {VERSION} is the newest release");
+        if changed {
+            crate::setup::restart_after_update(args.channel.as_deref());
+        }
         return Ok(());
     }
     let target = host_target();
@@ -374,7 +379,7 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
     let bytes = fetch_checked(&base, &wanted, &file)?;
     install_binary(&path, &bytes)?;
     println!("nils {wanted} at {} (was {VERSION})", path.display());
-    crate::setup::record_engine_version(&path, &wanted);
+    let serves = crate::setup::record_engine_version(&path, &wanted);
 
     // The packs go with the binary when the ones in use may be replaced; a
     // deployment that keeps its packs elsewhere is left alone and told so.
@@ -398,6 +403,13 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
             },
             None => println!("there are no packs, and nowhere beside the binary to put them"),
         },
+    }
+
+    // A running engine keeps the binary it started with until it is
+    // restarted, and so does every other part, so an update that stopped here
+    // would change nothing until the next boot.
+    if changed || serves {
+        crate::setup::restart_after_update(args.channel.as_deref());
     }
     Ok(())
 }
