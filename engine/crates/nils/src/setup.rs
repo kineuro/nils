@@ -3164,22 +3164,24 @@ fn repair_kvasir(plan: &Plan, console: &mut Console) -> Result<(), Exit> {
 
 /// After `nils update` moves this binary, the setup record says so. The
 /// wizard opens by naming what is installed, and it named the version the
-/// install began with until something rewrote the record.
-pub(crate) fn record_engine_version(path: &Path, version: &str) {
+/// install began with until something rewrote the record. Only the binary
+/// the record names is written, and the answer is whether it was that one.
+pub(crate) fn record_engine_version(path: &Path, version: &str) -> bool {
     let Some(mut state) = read_state() else {
-        return;
+        return false;
     };
     let Some(engine) = state.parts.get_mut("engine") else {
-        return;
+        return false;
     };
     let recorded =
         std::fs::canonicalize(&engine.path).unwrap_or_else(|_| PathBuf::from(&engine.path));
     let moved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if engine.kind != "binary" || recorded != moved {
-        return;
+        return false;
     }
     engine.version = version.to_string();
     let _ = write_state(&state);
+    true
 }
 
 /// Everything the assistant reads from its environment, in one file its
@@ -3337,18 +3339,6 @@ fn mint_assistant_key(plan: &Plan, console: &Console) -> bool {
     }
 }
 
-fn run_in(dir: &Path, program: &str, args: &[&str]) -> Result<(), Exit> {
-    let status = Command::new(program)
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .map_err(|e| fail(format!("{program}: {e}")))?;
-    if !status.success() {
-        return Err(fail(format!("{program} {} failed", args.join(" "))));
-    }
-    Ok(())
-}
-
 // ------------------------------------------------------------- the services
 
 fn units_dir() -> PathBuf {
@@ -3423,12 +3413,19 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Str
             let mut names = Vec::new();
             for (name, text) in launchd_plists(plan, state) {
                 let path = dir.join(&name);
+                // An agent that is loaded already is not started again by a
+                // load, so it is unloaded first; one that is not says so,
+                // quietly.
+                let _ = Command::new("launchctl")
+                    .args(["unload"])
+                    .arg(&path)
+                    .output();
                 std::fs::write(&path, text)
                     .map_err(|e| fail(format!("{}: {e}", path.display())))?;
                 let _ = Command::new("launchctl")
                     .args(["load", "-w"])
                     .arg(&path)
-                    .status();
+                    .output();
                 names.push(name);
             }
             Ok(format!(
@@ -3597,14 +3594,26 @@ pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)>
             format!(
                 "[Unit]\nDescription=NILS assistant\nAfter=nils-engine.service kvasir.service\n\n\
                  [Service]\nEnvironmentFile={}\n\
-                 ExecStart=/usr/bin/env node dist/app/server.mjs\n\
+                 ExecStart=/usr/bin/env node {}\n\
                  WorkingDirectory={}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
                 dir.join("assistant.env").display(),
+                assistant_entry(&dir),
                 dir.display()
             ),
         ));
     }
     out
+}
+
+/// What starts the assistant. Its own entry listens on loopback and stops
+/// cleanly; Flue's, which a checkout from before it had, listens on every
+/// interface.
+fn assistant_entry(dir: &Path) -> &'static str {
+    if dir.join("bin").join("serve.mjs").exists() {
+        "bin/serve.mjs"
+    } else {
+        "dist/app/server.mjs"
+    }
 }
 
 /// The same, as launchd agents, for a machine with no systemd.
@@ -3695,9 +3704,11 @@ fn summary(plan: &Plan, console: &Console) {
                 "  (cd {} && node dist/main.js --config kvasir.json)",
                 plan.dir.join("kvasir").display()
             );
+            let assistant = plan.dir.join("assistant");
             println!(
-                "  (cd {} && set -a && . ./assistant.env && node dist/app/server.mjs)",
-                plan.dir.join("assistant").display()
+                "  (cd {} && set -a && . ./assistant.env && node {})",
+                assistant.display(),
+                assistant_entry(&assistant)
             );
             println!(
                 "  {}",
@@ -3716,26 +3727,29 @@ fn summary(plan: &Plan, console: &Console) {
 // -------------------------------------------------------------- the update
 
 /// Every part the state file names, brought up to date in whatever way that
-/// part runs: a binary is replaced, a container is a pull of the new tag and
-/// a restart of its unit, a Node part is a fetch and a rebuild. One line
-/// each. The engine is not among them: `nils update` replaces the binary
-/// doing the replacing, and it goes last.
-pub(crate) fn update_all(channel: Option<&str>) -> Result<(), Exit> {
+/// part runs: a binary is replaced, a container is a pull of the new tag, a
+/// Node part is a fetch and a rebuild. One line each, and a slow step is one
+/// line with a timer, as in the wizard. The engine's binary is not among
+/// them: `nils update` replaces the binary doing the replacing, last, and
+/// then [`restart_after_update`] starts everything again from what is there.
+/// The answer is whether any part changed.
+pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
     let mut state = read_state().ok_or_else(|| {
         fail(format!(
             "no setup is recorded at {}; nils update takes the engine alone",
             state_path().display()
         ))
     })?;
-    let plan = plan_from_state(&state, channel);
     let newest = update::newest_version(&update::engine_base(channel)).ok();
-    let mut units = false;
+    let console = Console::new(true);
+    let mut changed = false;
 
     let names: Vec<String> = state
         .parts
-        .keys()
-        .filter(|n| n.as_str() != "engine")
-        .cloned()
+        .iter()
+        // the engine's binary is replaced by nils update itself; its image is not
+        .filter(|(name, part)| name.as_str() != "engine" || part.kind != "binary")
+        .map(|(name, _)| name.clone())
         .collect();
     for name in names {
         let part = state.parts[&name].clone();
@@ -3750,12 +3764,15 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<(), Exit> {
                     .rsplit_once(':')
                     .map_or(part.path.as_str(), |(i, _)| i);
                 let tag = format!("{image}:{}", image_tag(version));
-                let pulled = Command::new(&part.kind)
-                    .args(["pull", &tag])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                if !pulled {
+                if part.path == tag {
+                    println!("{name}: {tag} is the newest");
+                    continue;
+                }
+                let dir = PathBuf::from(&state.dir);
+                if console
+                    .task(&format!("taking {tag}"), &dir, &part.kind, &["pull", &tag])
+                    .is_err()
+                {
                     println!("{name}: {tag} could not be pulled");
                     continue;
                 }
@@ -3767,22 +3784,60 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<(), Exit> {
                         ..part
                     },
                 );
-                units = true;
                 println!("{name}: {tag}");
+                changed = true;
             }
             "node" => {
                 let dir = PathBuf::from(&part.path);
-                let built = run_in(&dir, "git", &["pull", "--ff-only"])
-                    .and_then(|()| run_in(&dir, "npm", &["ci", "--no-audit", "--no-fund"]))
-                    .and_then(|()| run_in(&dir, "npm", &["run", "build"]));
+                let said = match name.as_str() {
+                    "kvasir" => "the gateway",
+                    "assistant" => "the assistant",
+                    other => other,
+                };
+                let head = |dir: &Path| {
+                    run_quiet(
+                        "git",
+                        &["-C", &dir.display().to_string(), "rev-parse", "HEAD"],
+                    )
+                };
+                let before = head(&dir);
+                if let Err(e) = console.task(
+                    &format!("updating {said}'s source"),
+                    &dir,
+                    "git",
+                    &["pull", "--ff-only", "--quiet"],
+                ) {
+                    println!("{name}: {}", e.message);
+                    continue;
+                }
+                // Source that did not move is not built again; nils setup and
+                // repair builds it regardless.
+                if before.is_some() && head(&dir) == before && dir.join("dist").exists() {
+                    println!("{name}: the newest source is the one built");
+                    continue;
+                }
+                let built = console
+                    .task(
+                        &format!("installing {said}'s packages"),
+                        &dir,
+                        "npm",
+                        &["ci", "--no-audit", "--no-fund", "--loglevel=error"],
+                    )
+                    .and_then(|()| {
+                        console.task(&format!("building {said}"), &dir, "npm", &["run", "build"])
+                    });
                 match built {
-                    Ok(()) => println!("{name}: fetched and rebuilt in {}", dir.display()),
+                    Ok(()) => {
+                        println!("{name}: fetched and rebuilt in {}", dir.display());
+                        changed = true;
+                    }
                     Err(e) => println!("{name}: {}", e.message),
                 }
             }
-            _ => match update_binary_part(&name, &part.path, &update::desk_base(channel)) {
+            _ => match update_binary_part(&name, &part, &update::desk_base(channel)) {
                 Ok((version, said)) => {
                     println!("{name}: {said}");
+                    changed |= version != part.version;
                     state
                         .parts
                         .insert(name.clone(), PartState { version, ..part });
@@ -3792,30 +3847,49 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<(), Exit> {
         }
     }
 
-    // A container's unit names the tag, so the units are written again with
-    // the new one and the parts restarted from them.
-    if units {
-        let mut fresh = plan;
-        fresh.version = newest
-            .clone()
-            .unwrap_or_else(|| update::VERSION.to_string());
-        let console = Console::new(true);
-        match start_everything(&fresh, &state, &console) {
-            Ok(what) => print!("{what}"),
-            Err(e) => println!("the services were left alone: {}", e.message),
-        }
-    }
     state.at = nils_registry::time::now_iso();
     write_state(&state)?;
-    Ok(())
+    Ok(changed)
+}
+
+/// After an update the services run what is now installed. The units are
+/// written again, since a container's names its image tag and the
+/// assistant's names its entry, and everything is restarted in the order the
+/// wizard starts it, with which of them are running said. An install made
+/// with no services is left for the person to restart.
+pub(crate) fn restart_after_update(channel: Option<&str>) {
+    let Some(state) = read_state() else {
+        return;
+    };
+    if state.service.is_empty() || state.service == "none" {
+        println!("no services were written for this setup, so restart what you run yourself");
+        return;
+    }
+    let mut plan = plan_from_state(&state, channel);
+    if let Some(engine) = state.parts.get("engine") {
+        plan.version = engine.version.clone();
+    }
+    let console = Console::new(true);
+    println!("restarting the services");
+    match start_everything(&plan, &state, &console) {
+        Ok(what) => print!("{what}"),
+        Err(e) => println!("the services were left alone: {}", e.message),
+    }
 }
 
 /// One binary part from its own releases, when a newer one is published.
-fn update_binary_part(name: &str, path: &str, base: &str) -> Result<(String, String), Exit> {
+fn update_binary_part(name: &str, part: &PartState, base: &str) -> Result<(String, String), Exit> {
     if name != "desk" {
         return Err(fail(format!("{name} is not a part this can update")));
     }
     let version = update::newest_version(base)?;
+    let path = &part.path;
+    if !update::newer(&version, &part.version) && Path::new(path).exists() {
+        return Ok((
+            part.version.clone(),
+            format!("{} is the newest", part.version),
+        ));
+    }
     let file = update::part_file("nils-desk", &update::host_target());
     let bytes = update::fetch_checked(base, &version, &file)?;
     update::install_binary(Path::new(path), &bytes)?;
@@ -5040,6 +5114,37 @@ mod tests {
                 .iter()
                 .all(|(_, t)| t.contains("WantedBy=default.target"))
         );
+    }
+
+    #[test]
+    fn the_assistant_starts_from_its_own_entry_when_the_checkout_has_one() {
+        let dir = scratch("assistant-entry");
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        let state = state_of(&plan, &[("engine", "binary"), ("assistant", "node")]);
+        let unit = |plan: &Plan| {
+            systemd_units(plan, &state)
+                .into_iter()
+                .find(|(n, _)| n == "nils-assistant.service")
+                .map(|(_, t)| t)
+                .unwrap()
+        };
+        // a checkout from before the entry: Flue's, which is all there is
+        std::fs::create_dir_all(dir.join("assistant")).unwrap();
+        let before = unit(&plan);
+        assert!(
+            before.contains("ExecStart=/usr/bin/env node dist/app/server.mjs"),
+            "{before}"
+        );
+        // one with it: the entry that listens on loopback and stops cleanly
+        std::fs::create_dir_all(dir.join("assistant").join("bin")).unwrap();
+        std::fs::write(dir.join("assistant").join("bin").join("serve.mjs"), "").unwrap();
+        let after = unit(&plan);
+        assert!(
+            after.contains("ExecStart=/usr/bin/env node bin/serve.mjs"),
+            "{after}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
