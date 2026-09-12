@@ -4,6 +4,12 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.12] - 2026-09-12
+
+### Fixed
+
+- `nils update` said 1.0.0-alpha.9 was the newest release after 1.0.0-alpha.11 was out, so every install stayed at alpha.9. With every release a pre-release, GitHub has no `latest` release, and the updater took the first release the API listed, which is not in version order. It now takes the highest version listed, drafts left out. An install from before this still asks the old way once: `nils update --version 1.0.0-alpha.12`.
+
 ## [1.0.0-alpha.11] - 2026-09-12
 
 ### Added
