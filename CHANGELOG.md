@@ -4,6 +4,17 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.13] - 2026-09-12
+
+### Changed
+
+- In a terminal, `nils setup` asks one step at a time on a screen of its own: the NILS wordmark at the top, the eight steps down the side with the answers given, the arrow keys to choose, Enter to go on, and Left or Esc to go back and change an earlier answer, which is offered again as it was left. In a narrow window the steps are a line above the question. Ctrl-C puts the terminal back and changes nothing.
+- While it installs, the plan's stages are a checklist with one bar, each ticked with its time as it is done. What needs reading, such as a warning or a command to run, is shown under it.
+- It ends on a card: where the desk and the engine answer, where the registry is kept, what the assistant talks to and how everything runs, each service marked as running or not, then what to run next and where the documentation is.
+- Step 6 is named "What it can do".
+
+Output that is not a terminal, and `--print`, are as before.
+
 ## [1.0.0-alpha.12] - 2026-09-12
 
 ### Fixed
