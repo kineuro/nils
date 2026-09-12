@@ -25,8 +25,8 @@ use std::process::{Command, Stdio};
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-use crate::update;
 use crate::{Exit, fail, usage};
+use crate::{tui, update};
 use nils_registry::home::{Home, InitOptions};
 use nils_registry::{Backend, Scheme};
 
@@ -624,6 +624,173 @@ fn run_line(line: &str) -> Result<(), String> {
     Err(why.lines().last().unwrap_or("it failed").to_string())
 }
 
+// ------------------------------------------------------------- the screens
+
+/// The wizard's steps, as it names them.
+const STEPS: [&str; 8] = [
+    "What to install",
+    "Where it runs",
+    "Where it lives",
+    "The registry",
+    "Who may sign in",
+    "What it can do",
+    "Keeping it running",
+    "The plan",
+];
+
+/// What this machine has, asked once. The screens run the questions again
+/// after every answer, and asking podman, docker and the card each time made
+/// every key wait for them.
+struct Facts {
+    podman: bool,
+    docker: Result<(), DockerAbsent>,
+    card: Option<Card>,
+}
+
+impl Facts {
+    fn probe() -> Facts {
+        Facts {
+            podman: have("podman"),
+            docker: docker_answers(),
+            card: probe_card(),
+        }
+    }
+}
+
+/// What the questions came to.
+enum Flow {
+    Install(Box<(Plan, Answers)>),
+    Update(State),
+    Repair(State),
+    Remove,
+    /// `--print` said the plan and changed nothing.
+    Printed,
+    /// The plan was declined.
+    Declined,
+}
+
+/// Why the questions stopped short: an error of their own, or a question
+/// with no answer yet, which the screens then ask.
+enum Stop {
+    Exit(Exit),
+    Ask(Question),
+}
+
+impl From<Exit> for Stop {
+    fn from(e: Exit) -> Stop {
+        Stop::Exit(e)
+    }
+}
+
+impl Stop {
+    fn into_exit(self) -> Exit {
+        match self {
+            Stop::Exit(e) => e,
+            Stop::Ask(question) => fail(format!(
+                "\"{}\" was asked with nothing to answer it on",
+                question.text
+            )),
+        }
+    }
+}
+
+/// A question as the screens ask it.
+struct Question {
+    text: String,
+    ask: tui::Ask,
+}
+
+/// An answer given on a screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Answer {
+    Pick(usize),
+    Text(String),
+}
+
+/// The answers given on the screens, and what the run of the questions under
+/// way has used of them and shown.
+#[derive(Default)]
+struct Replay {
+    answers: Vec<(String, Answer)>,
+    /// Answers taken back, by where they were given, offered again when the
+    /// same question comes up there.
+    offered: BTreeMap<usize, (String, Answer)>,
+    /// What each probe found, by how many answers had been used when it was
+    /// made.
+    probes: Vec<(usize, String, Box<dyn std::any::Any>)>,
+    at: usize,
+    step: usize,
+    said: Vec<tui::Said>,
+    summaries: Vec<Option<String>>,
+}
+
+impl Replay {
+    /// Ready for the questions to be run again from the start.
+    fn restart(&mut self) {
+        self.at = 0;
+        self.step = 0;
+        self.said.clear();
+        self.summaries = vec![None; STEPS.len()];
+    }
+
+    /// The answer given to this question when it was asked here before. A
+    /// different question here means the questions went another way, and the
+    /// answers from here on are no longer theirs.
+    fn next(&mut self, question: &str) -> Option<Answer> {
+        match self.answers.get(self.at) {
+            Some((asked, answer)) if asked == question => {
+                let answer = answer.clone();
+                self.at += 1;
+                Some(answer)
+            }
+            Some(_) => {
+                self.forget_from(self.at);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// The answer just used, which did not fit its question, taken away.
+    fn unanswer(&mut self) {
+        self.at = self.at.saturating_sub(1);
+        self.forget_from(self.at);
+    }
+
+    /// The answers from `position` on taken away, with what was probed for
+    /// them.
+    fn forget_from(&mut self, position: usize) {
+        self.answers.truncate(position);
+        self.probes.retain(|(at, _, _)| *at <= position);
+    }
+}
+
+/// A question with the answer taken back from it given again, to keep or to
+/// change.
+fn offer(ask: tui::Ask, answer: &Answer) -> tui::Ask {
+    match (ask, answer) {
+        (tui::Ask::Pick { options, .. }, Answer::Pick(at)) if *at < options.len() => {
+            tui::Ask::Pick { options, at: *at }
+        }
+        (
+            tui::Ask::Text {
+                hidden,
+                default,
+                required,
+                ..
+            },
+            Answer::Text(text),
+        ) => tui::Ask::Text {
+            text: text.clone(),
+            cursor: text.chars().count(),
+            hidden,
+            default,
+            required,
+        },
+        (ask, _) => ask,
+    }
+}
+
 // ------------------------------------------------------------- the console
 
 /// The terminal, when there is one. A piped run has no prompt and takes
@@ -633,6 +800,19 @@ struct Console {
     stdin: bool,
     colour: bool,
     yes: bool,
+    /// Whether output is a terminal wide enough to draw the checklist and
+    /// the card on.
+    live: bool,
+    palette: tui::Palette,
+    /// The checklist while an install draws one, with the stage each of its
+    /// rows is.
+    checklist: Option<(tui::Live, Vec<Stage>)>,
+    /// What was said under the checklist that a person should read, shown
+    /// once it is finished.
+    later: std::cell::RefCell<Vec<String>>,
+    /// The answers given on the screens, while the questions are asked on
+    /// them.
+    screens: Option<std::cell::RefCell<Replay>>,
 }
 
 impl Console {
@@ -647,17 +827,26 @@ impl Console {
             std::fs::File::open("/dev/tty").ok().map(BufReader::new)
         };
         let colour = std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal();
+        let terminal = !blind && std::io::stdout().is_terminal();
+        let live = terminal
+            && std::env::var("TERM").ok().is_none_or(|t| t != "dumb")
+            && tui::width(1) >= tui::CHECKLIST_WIDTH + 8;
         Console {
             tty,
             stdin,
             colour,
             yes,
+            live,
+            palette: tui::Palette::detect(terminal),
+            checklist: None,
+            later: std::cell::RefCell::new(Vec::new()),
+            screens: None,
         }
     }
 
     /// Whether a person can be asked anything at all.
     fn interactive(&self) -> bool {
-        !self.yes && (self.stdin || self.tty.is_some())
+        !self.yes && (self.stdin || self.tty.is_some() || self.screens.is_some())
     }
 
     fn bold(&self, text: &str) -> String {
@@ -684,17 +873,533 @@ impl Console {
         }
     }
 
-    fn step(&self, n: usize, of: usize, title: &str) {
-        println!();
-        println!(
-            "{} {}",
-            self.accent(&format!("[{n}/{of}]")),
-            self.bold(title)
-        );
+    /// A step begun: its heading on lines, a fresh screen on the screens.
+    fn step(&self, n: usize) {
+        match &self.screens {
+            Some(replay) => {
+                let mut replay = replay.borrow_mut();
+                replay.step = n;
+                replay.said.clear();
+            }
+            None => {
+                println!();
+                println!(
+                    "{} {}",
+                    self.accent(&format!("[{n}/{}]", STEPS.len())),
+                    self.bold(STEPS.get(n.wrapping_sub(1)).copied().unwrap_or_default())
+                );
+            }
+        }
+    }
+
+    /// What a step was answered with, for the steps down the side.
+    fn said(&self, summary: &str) {
+        if let Some(replay) = &self.screens {
+            let mut replay = replay.borrow_mut();
+            let step = replay.step;
+            if let Some(slot) = step
+                .checked_sub(1)
+                .and_then(|i| replay.summaries.get_mut(i))
+            {
+                *slot = Some(summary.to_string());
+            }
+        }
+    }
+
+    /// A row of the plan.
+    fn row(&self, key: &str, value: &str) {
+        match &self.screens {
+            Some(replay) => replay
+                .borrow_mut()
+                .said
+                .push(tui::Said::Row(key.to_string(), value.to_string())),
+            None => println!("  {} {value}", self.dim(&format!("{key:<12}"))),
+        }
+    }
+
+    /// A heading inside a step; on a screen, the step's screen begun again
+    /// under it.
+    fn heading(&self, text: &str) {
+        match &self.screens {
+            Some(replay) => {
+                let mut replay = replay.borrow_mut();
+                replay.said.clear();
+                replay.said.push(tui::Said::Text(text.to_string()));
+            }
+            None => {
+                println!();
+                println!("  {}", self.bold(text));
+            }
+        }
     }
 
     fn note(&self, text: &str) {
-        println!("  {}", self.dim(text));
+        if let Some(replay) = &self.screens {
+            replay
+                .borrow_mut()
+                .said
+                .push(tui::Said::Note(text.to_string()));
+        } else if self.checklist.is_none() {
+            // under a checklist, its tick says it
+            println!("  {}", self.dim(text));
+        }
+    }
+
+    /// A step of the work done, said as it happens; under a checklist, its
+    /// tick says it.
+    fn progress(&self, text: &str) {
+        if self.checklist.is_none() {
+            println!("  {text}");
+        }
+    }
+
+    /// What the work is doing now: a note, or under a checklist the running
+    /// row's few words.
+    fn doing(&self, text: &str) {
+        match &self.checklist {
+            Some((live, _)) => live.detail(text),
+            None => self.note(text),
+        }
+    }
+
+    /// A line a person should read, kept until the checklist is finished.
+    fn say(&self, text: &str) {
+        if let Some(replay) = &self.screens {
+            replay
+                .borrow_mut()
+                .said
+                .push(tui::Said::Text(text.to_string()));
+        } else if self.checklist.is_some() {
+            self.later.borrow_mut().push(format!("  {text}"));
+        } else {
+            println!("  {text}");
+        }
+    }
+
+    /// Something that did not happen, which marks the checklist's running
+    /// row; the install goes on.
+    fn warn(&self, text: &str) {
+        match &self.checklist {
+            Some((live, _)) => {
+                live.falter();
+                self.later
+                    .borrow_mut()
+                    .push(format!(" {} {text}", self.palette.bad("!")));
+            }
+            None => println!("  {text}"),
+        }
+    }
+
+    /// A wait with nothing to run, said with its timer on a terminal.
+    fn waiting(&self, label: &str, since: std::time::Instant) {
+        match &self.checklist {
+            Some((live, _)) => live.detail(label),
+            None if std::io::stdout().is_terminal() => {
+                print!(
+                    "\r  {label} {}",
+                    self.dim(&format!("{}s", since.elapsed().as_secs()))
+                );
+                let _ = std::io::stdout().flush();
+            }
+            None => {}
+        }
+    }
+
+    /// The end of a wait, its line cleared.
+    fn waited(&self) {
+        if self.checklist.is_none() && std::io::stdout().is_terminal() {
+            print!("\r\x1b[2K");
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    /// Draw the checklist for these stages, on a terminal that can show it.
+    fn start_checklist(&mut self, title: &str, stages: Vec<(Stage, String)>) {
+        if !self.live {
+            return;
+        }
+        println!();
+        let (keys, names): (Vec<Stage>, Vec<String>) = stages.into_iter().unzip();
+        self.checklist = Some((tui::Live::start(self.palette, title, names), keys));
+    }
+
+    /// A stage under way, when the checklist lists it.
+    fn begin(&self, stage: Stage) {
+        if let Some((live, stages)) = &self.checklist
+            && let Some(at) = stages.iter().position(|s| *s == stage)
+        {
+            live.begin(at);
+        }
+    }
+
+    /// The checklist's last drawing, then what was kept for after it.
+    fn finish_checklist(&mut self, ok: bool, title: &str) {
+        let Some((live, _)) = self.checklist.take() else {
+            return;
+        };
+        live.finish(ok, title);
+        let later = std::mem::take(self.later.get_mut());
+        if !later.is_empty() {
+            println!();
+            for line in later {
+                println!("{line}");
+            }
+        }
+    }
+
+    /// Whether the questions can be asked on screens: a person at a terminal
+    /// with room for them.
+    fn can_draw_screens(&self) -> bool {
+        if !self.interactive() || !self.live {
+            return false;
+        }
+        let (cols, rows) = tui::size(1);
+        cols >= 60 && rows >= 18
+    }
+
+    /// Where keys come from: the terminal opened for a piped run, or
+    /// standard input.
+    #[cfg(unix)]
+    fn input_fd(&self) -> i32 {
+        use std::os::fd::AsRawFd as _;
+        self.tty.as_ref().map_or(0, |tty| tty.get_ref().as_raw_fd())
+    }
+
+    #[cfg(not(unix))]
+    fn input_fd(&self) -> i32 {
+        0
+    }
+
+    /// One of a list: by number on lines, with the arrow keys on a screen.
+    fn ask_choice(
+        &mut self,
+        question: &str,
+        options: &[(&str, &str)],
+        default: usize,
+    ) -> Result<usize, Stop> {
+        let Some(replay) = &self.screens else {
+            return Ok(self.choice(question, options, default));
+        };
+        let mut replay = replay.borrow_mut();
+        match replay.next(question) {
+            Some(Answer::Pick(n)) if n < options.len() => {
+                replay.said.push(tui::Said::Answer(
+                    question.to_string(),
+                    options[n].0.to_string(),
+                ));
+                Ok(n)
+            }
+            answered => {
+                if answered.is_some() {
+                    replay.unanswer();
+                }
+                Err(Stop::Ask(Question {
+                    text: question.to_string(),
+                    ask: tui::Ask::Pick {
+                        options: options
+                            .iter()
+                            .map(|(title, hint)| (title.to_string(), hint.to_string()))
+                            .collect(),
+                        at: default.min(options.len().saturating_sub(1)),
+                    },
+                }))
+            }
+        }
+    }
+
+    fn ask_yes_no(&mut self, question: &str, default: bool) -> Result<bool, Stop> {
+        if self.screens.is_none() {
+            return Ok(self.yes_no(question, default));
+        }
+        let no = usize::from(!default);
+        Ok(self.ask_choice(question, &[("Yes", ""), ("No", "")], no)? == 0)
+    }
+
+    fn ask_line(&mut self, question: &str, default: &str) -> Result<String, Stop> {
+        if self.screens.is_none() {
+            return Ok(self.line(question, default));
+        }
+        self.ask_text(question, default, false, false)
+    }
+
+    /// A passphrase, twice and hidden.
+    fn ask_secret(&mut self, question: &str) -> Result<Option<String>, Stop> {
+        if self.screens.is_none() {
+            return Ok(self.secret(question));
+        }
+        self.ask_twice(question)
+    }
+
+    /// A password, twice and hidden.
+    fn ask_password(&mut self, question: &str) -> Result<Option<String>, Stop> {
+        if self.screens.is_none() {
+            return Ok(self.password(question));
+        }
+        self.ask_twice(question)
+    }
+
+    /// A key a provider gave, once and hidden; empty for none.
+    fn ask_hidden_once(&mut self, question: &str) -> Result<Option<String>, Stop> {
+        if self.screens.is_none() {
+            return Ok(self.hidden_once(question));
+        }
+        let text = self.ask_text(question, "", true, false)?;
+        Ok(Some(text).filter(|t| !t.is_empty()))
+    }
+
+    fn ask_twice(&mut self, question: &str) -> Result<Option<String>, Stop> {
+        loop {
+            let first = self.ask_text(question, "", true, true)?;
+            let again = self.ask_text("and again", "", true, true)?;
+            if first == again {
+                return Ok(Some(first));
+            }
+            self.note("those differ; once more");
+        }
+    }
+
+    /// Text on a screen: the default already typed, to keep or change, or
+    /// hidden and typed afresh.
+    fn ask_text(
+        &mut self,
+        question: &str,
+        default: &str,
+        hidden: bool,
+        required: bool,
+    ) -> Result<String, Stop> {
+        let Some(replay) = &self.screens else {
+            return Ok(self.line(question, default));
+        };
+        let mut replay = replay.borrow_mut();
+        match replay.next(question) {
+            Some(Answer::Text(text)) => {
+                let text = if text.is_empty() {
+                    default.to_string()
+                } else {
+                    text
+                };
+                let shown = if text.is_empty() {
+                    "none".to_string()
+                } else if hidden {
+                    "•".repeat(text.chars().count().min(12))
+                } else {
+                    text.clone()
+                };
+                replay
+                    .said
+                    .push(tui::Said::Answer(question.to_string(), shown));
+                Ok(text)
+            }
+            answered => {
+                if answered.is_some() {
+                    replay.unanswer();
+                }
+                let text = if hidden {
+                    String::new()
+                } else {
+                    default.to_string()
+                };
+                Err(Stop::Ask(Question {
+                    text: question.to_string(),
+                    ask: tui::Ask::Text {
+                        cursor: text.chars().count(),
+                        text,
+                        hidden,
+                        default: default.to_string(),
+                        required,
+                    },
+                }))
+            }
+        }
+    }
+
+    /// Something asked of the world for the answers so far, such as whether a
+    /// database answers: on lines once, and on the screens once for those
+    /// answers, however often the questions are run again.
+    fn probe<T: Clone + 'static>(&self, key: &str, make: impl FnOnce() -> T) -> T {
+        let Some(replay) = &self.screens else {
+            return make();
+        };
+        let at = replay.borrow().at;
+        let found = replay
+            .borrow()
+            .probes
+            .iter()
+            .find(|(when, what, _)| *when == at && what == key)
+            .and_then(|(_, _, value)| value.downcast_ref::<T>().cloned());
+        if let Some(found) = found {
+            return found;
+        }
+        let value = make();
+        replay
+            .borrow_mut()
+            .probes
+            .push((at, key.to_string(), Box::new(value.clone())));
+        value
+    }
+
+    /// Ask the questions one screen at a time, and say what each step was
+    /// answered with. Where the terminal cannot be put in raw mode, they are
+    /// asked on lines.
+    fn screens<T>(
+        &mut self,
+        mut questions: impl FnMut(&mut Console) -> Result<T, Stop>,
+    ) -> Result<(T, Vec<String>), Exit> {
+        let raw = tui::Raw::on(self.input_fd());
+        if !raw.active() {
+            drop(raw);
+            println!(
+                "{}",
+                self.bold("NILS setup: the engine, the desk and the assistant")
+            );
+            return questions(self)
+                .map(|value| (value, Vec::new()))
+                .map_err(Stop::into_exit);
+        }
+        let screen = tui::Screen::enter();
+        let mut tty = self.tty.take();
+        let outcome = self.drive(
+            questions,
+            &mut || match tty.as_mut() {
+                Some(tty) => tui::read_keys(tty.get_mut()),
+                None => tui::read_keys(&mut std::io::stdin().lock()),
+            },
+            &mut |lines| screen.draw(&lines),
+            &|| tui::size(1),
+        );
+        self.tty = tty;
+        drop(screen);
+        drop(raw);
+        outcome
+    }
+
+    /// The screens, with the keys, the drawing and the terminal's size given.
+    /// The questions are run from the start with the answers so far until one
+    /// has none; that one is drawn and answered, and they are run again.
+    /// Going back takes the last answer away, and offers it again when the
+    /// same question comes up in the same place.
+    fn drive<T>(
+        &mut self,
+        mut questions: impl FnMut(&mut Console) -> Result<T, Stop>,
+        keys: &mut dyn FnMut() -> Vec<tui::Key>,
+        draw: &mut dyn FnMut(Vec<String>),
+        size: &dyn Fn() -> (usize, usize),
+    ) -> Result<(T, Vec<String>), Exit> {
+        self.screens = Some(std::cell::RefCell::new(Replay::default()));
+        let mut pending = std::collections::VecDeque::new();
+        let outcome = loop {
+            if let Some(replay) = &self.screens {
+                replay.borrow_mut().restart();
+            }
+            let Question { text, ask } = match questions(self) {
+                Ok(value) => break Ok(value),
+                Err(Stop::Exit(e)) => break Err(e),
+                Err(Stop::Ask(question)) => question,
+            };
+            let Some(replay) = &self.screens else {
+                break Err(fail("the screens closed with a question open"));
+            };
+            let position = replay.borrow().answers.len();
+            let mut ask = match replay.borrow().offered.get(&position) {
+                Some((asked, answer)) if *asked == text => offer(ask, answer),
+                _ => ask,
+            };
+            let taken = loop {
+                {
+                    let replay = replay.borrow();
+                    let steps: Vec<(&str, Option<String>)> = STEPS
+                        .iter()
+                        .copied()
+                        .zip(replay.summaries.iter().cloned())
+                        .collect();
+                    draw(tui::screen(
+                        self.palette,
+                        size(),
+                        &tui::View {
+                            steps: &steps,
+                            current: replay.step,
+                            said: &replay.said,
+                            question: &text,
+                            ask: &ask,
+                            back: !replay.answers.is_empty(),
+                        },
+                    ));
+                }
+                if pending.is_empty() {
+                    pending.extend(keys());
+                }
+                if let Some(key) = pending.pop_front() {
+                    let outcome = ask.key(&key);
+                    if outcome != tui::Outcome::Stay {
+                        break outcome;
+                    }
+                }
+            };
+            let mut replay = replay.borrow_mut();
+            match taken {
+                tui::Outcome::Answer => {
+                    let answer = match &ask {
+                        tui::Ask::Pick { at, .. } => Answer::Pick(*at),
+                        tui::Ask::Text { text, .. } => Answer::Text(text.clone()),
+                    };
+                    // the answer taken back from here, given again, keeps the
+                    // ones taken back after it on offer; another does not
+                    if replay
+                        .offered
+                        .get(&position)
+                        .is_some_and(|(_, was)| *was == answer)
+                    {
+                        replay.offered.remove(&position);
+                    } else {
+                        let _ = replay.offered.split_off(&position);
+                    }
+                    replay.answers.push((text, answer));
+                }
+                tui::Outcome::Back => {
+                    if let Some((asked, answer)) = replay.answers.pop() {
+                        let position = replay.answers.len();
+                        replay.forget_from(position);
+                        replay.offered.insert(position, (asked, answer));
+                    }
+                }
+                tui::Outcome::Quit => {
+                    break Err(Exit {
+                        code: crate::STOPPED,
+                        message: "setup was stopped; nothing was changed".to_string(),
+                    });
+                }
+                tui::Outcome::Stay => {}
+            }
+        };
+        let summaries = self
+            .screens
+            .take()
+            .map(|replay| {
+                replay
+                    .into_inner()
+                    .summaries
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            })
+            .unwrap_or_default();
+        outcome.map(|value| (value, summaries))
+    }
+
+    /// The services as they were found: said as they are, or under a
+    /// checklist, the running row marked when one does not run and what it
+    /// said kept for after.
+    fn report(&self, started: &Started) {
+        if self.checklist.is_none() {
+            print!("{}", started.text);
+            return;
+        }
+        for service in started.services.iter().filter(|s| !s.running) {
+            self.warn(&format!("not running: {}", service.unit));
+            for line in &service.said {
+                self.say(&format!("  {line}"));
+            }
+        }
     }
 
     fn read_line(&mut self) -> Option<String> {
@@ -818,7 +1523,12 @@ impl Console {
     fn task(&self, label: &str, dir: &Path, program: &str, args: &[&str]) -> Result<(), Exit> {
         use std::sync::{Arc, Mutex};
         let started = std::time::Instant::now();
-        let live = std::io::stdout().is_terminal();
+        let drawn = self.checklist.as_ref().map(|(live, _)| live);
+        if let Some(checklist) = drawn {
+            checklist.detail(&brief(label));
+        }
+        // the one line with its timer, where no checklist is drawn
+        let live = drawn.is_none() && std::io::stdout().is_terminal();
         let mut child = Command::new(program)
             .args(args)
             .current_dir(dir)
@@ -856,7 +1566,7 @@ impl Console {
                 }
             }));
         }
-        if !live {
+        if !live && drawn.is_none() {
             println!("  {label}");
         }
         let status = loop {
@@ -877,23 +1587,36 @@ impl Console {
         }
         let took = started.elapsed().as_secs();
         if status.success() {
+            if drawn.is_some() {
+                return Ok(());
+            }
             if live {
                 print!("\r\x1b[2K");
             }
             println!("  {label} {}", self.dim(&format!("done in {took}s")));
             return Ok(());
         }
-        if live {
-            print!("\r\x1b[2K");
-        }
-        println!("  {label} {}", self.dim(&format!("failed after {took}s")));
         let text = heard
             .lock()
             .map(|all| String::from_utf8_lossy(&all).to_string())
             .unwrap_or_default();
         let lines: Vec<&str> = text.lines().collect();
-        for line in &lines[lines.len().saturating_sub(25)..] {
-            println!("    {line}");
+        let tail = &lines[lines.len().saturating_sub(25)..];
+        if drawn.is_some() {
+            let mut later = self.later.borrow_mut();
+            later.push(format!(
+                "  {label} {}",
+                self.dim(&format!("failed after {took}s"))
+            ));
+            later.extend(tail.iter().map(|line| format!("    {line}")));
+        } else {
+            if live {
+                print!("\r\x1b[2K");
+            }
+            println!("  {label} {}", self.dim(&format!("failed after {took}s")));
+            for line in tail {
+                println!("    {line}");
+            }
         }
         Err(fail(format!("{program} {} failed", args.join(" "))))
     }
@@ -1152,11 +1875,15 @@ fn docker_absent_reason(docker: Result<(), DockerAbsent>) -> Option<String> {
 /// Whether podman here networks a rootless pod through pasta, which is what
 /// can hand the pod this machine's loopback.
 fn podman_has_pasta() -> bool {
-    run_quiet(
-        "podman",
-        &["info", "--format", "{{.Host.Pasta.Executable}}"],
-    )
-    .is_some_and(|s| !s.trim().is_empty())
+    // asked once: the screens ask their questions again after every answer
+    static PASTA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PASTA.get_or_init(|| {
+        run_quiet(
+            "podman",
+            &["info", "--format", "{{.Host.Pasta.Executable}}"],
+        )
+        .is_some_and(|s| !s.trim().is_empty())
+    })
 }
 
 impl Plan {
@@ -1750,30 +2477,82 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     }
     let mut console = Console::new(args.yes || args.print);
     let mut existing = read_state();
-
-    println!(
-        "{}",
-        console.bold("NILS setup: the engine, the desk and the assistant")
-    );
-
     // An install that stopped partway is not one to update or repair: it is
     // started again, and its record is what an uninstall would remove.
-    if existing.as_ref().is_some_and(|s| s.unfinished) {
+    let restarted = existing.as_ref().is_some_and(|s| s.unfinished);
+    if restarted {
+        existing = None;
+    }
+    let facts = Facts::probe();
+
+    let flow = if console.can_draw_screens() {
+        let (flow, answered) = console
+            .screens(|console| questions(console, &args, existing.as_ref(), &facts, restarted))?;
+        if matches!(flow, Flow::Install(..)) && !answered.is_empty() {
+            let p = console.palette;
+            println!();
+            println!(" {} {}", p.good("✓"), answered.join(&p.dim(" · ")));
+        }
+        flow
+    } else {
+        println!(
+            "{}",
+            console.bold("NILS setup: the engine, the desk and the assistant")
+        );
+        questions(&mut console, &args, existing.as_ref(), &facts, restarted)
+            .map_err(Stop::into_exit)?
+    };
+
+    match flow {
+        Flow::Install(install) => {
+            let (plan, answers) = *install;
+            let services = do_it(&plan, &mut console, &args, existing, false, &answers)?;
+            summary(&plan, &console, &services);
+            Ok(())
+        }
+        Flow::Update(state) => update_parts(&state, &args, &mut console),
+        Flow::Repair(state) => repair(&state, &args, &mut console),
+        Flow::Remove => uninstall(UninstallArgs {
+            keep_data: false,
+            purge: false,
+            yes: false,
+            print: args.print,
+        }),
+        Flow::Printed => Ok(()),
+        Flow::Declined => {
+            println!("nothing was changed");
+            Ok(())
+        }
+    }
+}
+
+/// What a person wants, asked a step at a time: a plan and the answers to
+/// install it with, or another thing to do with the setup that is there.
+/// Asked on lines, or on screens, which run this again from the start after
+/// every answer; so it changes nothing but what the console shows, and what
+/// it asks of the world it asks through the console's probes.
+fn questions(
+    console: &mut Console,
+    args: &SetupArgs,
+    existing: Option<&State>,
+    facts: &Facts,
+    restarted: bool,
+) -> Result<Flow, Stop> {
+    if restarted {
         console.note(
             "an earlier setup stopped before it finished, so this one starts again; nils \
              uninstall removes what it placed instead",
         );
-        existing = None;
     }
 
     // An install that is already there: say what it is, and offer the four
     // things a person comes back for.
-    if let Some(state) = &existing {
-        println!("  {}", what_is_there(state));
+    if let Some(state) = existing {
+        console.say(&what_is_there(state));
         let choice = if args.update {
             0
         } else if console.interactive() {
-            console.choice(
+            console.ask_choice(
                 "This machine already has a setup. What now?",
                 &[
                     (
@@ -1786,38 +2565,30 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
                     ("Remove", "NILS alone and keep your data, or everything"),
                 ],
                 0,
-            )
+            )?
         } else {
             1
         };
         match choice {
-            0 => return update_parts(state, &args, &mut console),
-            3 => return repair(state, &args, &mut console),
-            4 => {
-                return uninstall(UninstallArgs {
-                    keep_data: false,
-                    purge: false,
-                    yes: false,
-                    print: args.print,
-                });
-            }
+            0 => return Ok(Flow::Update(state.clone())),
+            3 => return Ok(Flow::Repair(state.clone())),
+            4 => return Ok(Flow::Remove),
             _ => {}
         }
     } else if args.update {
         return Err(usage(format!(
             "--update needs a setup to update; none is recorded at {}",
             state_path().display()
-        )));
+        ))
+        .into());
     }
 
     if !console.interactive() && !args.print {
         console.note("no terminal here, so every default is taken");
     }
 
-    let steps = 8;
-
     // 1. what to install
-    console.step(1, steps, "What to install");
+    console.step(1);
     let mut parts = match &args.parts {
         Some(list) => parts_of(list).map_err(usage)?,
         None => {
@@ -1833,7 +2604,6 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
                 ),
             ];
             let default = existing
-                .as_ref()
                 .map(
                     |s| match (s.parts.contains_key("assistant"), s.parts.len()) {
                         (true, _) => 2,
@@ -1842,25 +2612,29 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
                     },
                 )
                 .unwrap_or(1);
-            match console.choice("Which parts?", &choices, default) {
+            match console.ask_choice("Which parts?", &choices, default)? {
                 0 => vec![Part::Engine],
                 1 => vec![Part::Engine, Part::Desk],
                 _ => vec![Part::Engine, Part::Desk, Part::Assistant],
             }
         }
     };
-    console.note(
-        &parts
-            .iter()
-            .map(|p| p.name())
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
+    let named = parts
+        .iter()
+        .map(|p| p.name())
+        .collect::<Vec<_>>()
+        .join(", ");
+    console.note(&named);
+    console.said(if parts.contains(&Part::Assistant) {
+        "everything"
+    } else {
+        &named
+    });
 
     // 2. where it runs
-    console.step(2, steps, "Where it runs");
-    let podman = have("podman");
-    let docker = docker_answers();
+    console.step(2);
+    let podman = facts.podman;
+    let docker = facts.docker;
     let runtime = match &args.runtime {
         Some(r) => Runtime::parse(r).map_err(usage)?,
         None => {
@@ -1880,10 +2654,9 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
                     .map(|(_, label, said)| (*label, *said))
                     .collect();
                 let default = existing
-                    .as_ref()
                     .and_then(|s| choices.iter().position(|(r, _, _)| r.name() == s.runtime))
                     .unwrap_or(0);
-                choices[console.choice("How should the parts run?", &shown, default)].0
+                choices[console.ask_choice("How should the parts run?", &shown, default)?].0
             }
         }
     };
@@ -1897,7 +2670,8 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             return Err(usage(format!(
                 "{} is not on this machine; install it, or run with --runtime machine",
                 runtime.name()
-            )));
+            ))
+            .into());
         }
         console.note(&format!(
             "{} is not on this machine, so this is what it would run",
@@ -1909,17 +2683,21 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         Runtime::Podman => "in podman containers",
         Runtime::Docker => "in docker containers",
     });
+    console.said(match runtime {
+        Runtime::Machine => "this machine",
+        Runtime::Podman => "podman",
+        Runtime::Docker => "docker",
+    });
 
     // 3. where it lives
-    console.step(3, steps, "Where it lives");
+    console.step(3);
     let dir = match &args.dir {
         Some(d) => d.clone(),
         None => {
             let default = existing
-                .as_ref()
                 .map(|s| s.dir.clone())
                 .unwrap_or_else(|| default_dir().display().to_string());
-            expand(&console.line("One directory for everything", &default))
+            expand(&console.ask_line("One directory for everything", &default)?)
         }
     };
     console.note(&format!(
@@ -1931,17 +2709,18 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         },
         dir.display()
     ));
+    console.said(&tilde(&dir));
     let source = match &args.source {
         Some(s) => Some(s.clone()),
         None => {
-            let answer = console.line("A directory of DICOM to read (empty for none)", "");
+            let answer = console.ask_line("A directory of DICOM to read (empty for none)", "")?;
             let answer = answer.trim().to_string();
             (!answer.is_empty()).then(|| expand(&answer))
         }
     };
 
     // 4. the registry and its backend
-    console.step(4, steps, "The registry");
+    console.step(4);
     let home = Home::new(dir.join("registry"));
     let registry_exists = home.exists();
     let managed_here = managed_runtime(runtime, podman, docker.is_ok());
@@ -1951,6 +2730,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             "a registry is already at {}; it is left alone",
             home.dir().display()
         ));
+        console.said("kept as it is");
         // Its own configuration says where it is kept. A Postgres an earlier
         // install set up here, whose data and password were kept, is run
         // again for it; left as SQLite, nothing started it and the engine
@@ -2016,25 +2796,29 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
                     return Err(usage(
                         "no podman or docker here to run Postgres in; give --dsn for a Postgres \
                          you run, or --backend sqlite",
-                    ));
+                    )
+                    .into());
                 }
                 Store::Here
             }
             (Some(other), _) => {
-                return Err(usage(format!(
-                    "{other} is not a backend: sqlite or postgres"
-                )));
+                return Err(usage(format!("{other} is not a backend: sqlite or postgres")).into());
             }
             (None, _) => {
                 let shown: Vec<(&str, &str)> = offered
                     .iter()
                     .map(|(_, label, said)| (label.as_str(), said.as_str()))
                     .collect();
-                offered[console.choice("Where should the registry itself be kept?", &shown, 0)].0
+                offered
+                    [console.ask_choice("Where should the registry itself be kept?", &shown, 0)?]
+                .0
             }
         };
         match store {
-            Store::Sqlite => BackendChoice::Sqlite,
+            Store::Sqlite => {
+                console.said("SQLite");
+                BackendChoice::Sqlite
+            }
             Store::Here => {
                 let rt = managed_here.unwrap_or(Runtime::Podman);
                 postgres = Some(ManagedPostgres { runtime: rt });
@@ -2043,6 +2827,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
                     rt.name(),
                     dir.join("postgres").display()
                 ));
+                console.said("Postgres here");
                 // its connection string is written once its port is settled
                 BackendChoice::Postgres {
                     dsn: String::new(),
@@ -2053,56 +2838,58 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
                 'postgres: {
                     let mut dsn = match &args.dsn {
                         Some(d) => d.clone(),
-                        None => {
-                            console.line("The connection string", "postgres://nils@127.0.0.1/nils")
-                        }
+                        None => console
+                            .ask_line("The connection string", "postgres://nils@127.0.0.1/nils")?,
                     };
                     let schema = match &args.schema {
                         Some(s) => s.clone(),
-                        None => console.line("The schema", "nils"),
+                        None => console.ask_line("The schema", "nils")?,
                     };
                     // Tried now, from this machine, so a database that is not there
                     // is said here rather than after the plan and the images.
                     loop {
-                        match nils_registry::store::Store::connect_postgres(&dsn, &schema) {
-                            Ok(_) => {
-                                console.note(&format!(
-                                    "the database at {} answered",
-                                    crate::redact_dsn(&dsn)
-                                ));
-                                break;
-                            }
-                            Err(e) => {
-                                console.note(&format!(
-                                    "the database at {} did not answer: {}",
-                                    crate::redact_dsn(&dsn),
-                                    with_causes(&e)
-                                ));
-                                if args.print {
-                                    break;
-                                }
-                                if !console.interactive() {
-                                    return Err(usage(
-                                        "start the database, or run with --backend sqlite; nothing \
+                        let refused = console.probe(&format!("postgres {dsn} {schema}"), || {
+                            nils_registry::store::Store::connect_postgres(&dsn, &schema)
+                                .err()
+                                .map(|e| with_causes(&e))
+                        });
+                        let Some(why) = refused else {
+                            console.note(&format!(
+                                "the database at {} answered",
+                                crate::redact_dsn(&dsn)
+                            ));
+                            break;
+                        };
+                        console.note(&format!(
+                            "the database at {} did not answer: {why}",
+                            crate::redact_dsn(&dsn)
+                        ));
+                        if args.print {
+                            break;
+                        }
+                        if !console.interactive() {
+                            return Err(usage(
+                                "start the database, or run with --backend sqlite; nothing \
                                  was written",
-                                    ));
-                                }
-                                if !console.yes_no("Enter another connection string?", true) {
-                                    // Going on with an address that did not answer
-                                    // only fails later, after the plan and the work.
-                                    console.note("the registry is kept in SQLite instead");
-                                    break 'postgres BackendChoice::Sqlite;
-                                }
-                                let again = console.line("The connection string", "");
-                                if !again.trim().is_empty() {
-                                    dsn = again.trim().to_string();
-                                }
-                            }
+                            )
+                            .into());
+                        }
+                        if !console.ask_yes_no("Enter another connection string?", true)? {
+                            // Going on with an address that did not answer
+                            // only fails later, after the plan and the work.
+                            console.note("the registry is kept in SQLite instead");
+                            console.said("SQLite");
+                            break 'postgres BackendChoice::Sqlite;
+                        }
+                        let again = console.ask_line("The connection string", "")?;
+                        if !again.trim().is_empty() {
+                            dsn = again.trim().to_string();
                         }
                     }
                     if let Some(note) = postgres_reach_note(runtime, &dsn, podman_has_pasta) {
                         console.note(&note);
                     }
+                    console.said("your Postgres");
                     BackendChoice::Postgres { dsn, schema }
                 }
             }
@@ -2110,11 +2897,11 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     };
     let mut answers = Answers::default();
     if !registry_exists && args.key_file.is_none() && console.interactive() {
-        answers.passphrase = console.secret("A passphrase for the registry's key");
+        answers.passphrase = console.ask_secret("A passphrase for the registry's key")?;
     }
 
     // 5. who may sign in, and who may reach the desk
-    console.step(5, steps, "Who may sign in");
+    console.step(5);
     let mut mode = match &args.mode {
         Some(m) => Mode::parse(m).map_err(usage)?,
         None => {
@@ -2130,14 +2917,13 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
                 ),
             ];
             let default = existing
-                .as_ref()
                 .and_then(|s| Mode::parse(&s.mode).ok())
                 .map_or(0, |m| match m {
                     Mode::Off => 0,
                     Mode::Local => 1,
                     Mode::Oidc => 2,
                 });
-            match console.choice("How do people reach it?", &choices, default) {
+            match console.ask_choice("How do people reach it?", &choices, default)? {
                 0 => Mode::Off,
                 1 => Mode::Local,
                 _ => Mode::Oidc,
@@ -2153,9 +2939,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         }
         Some(r) if r.trim() == "loopback" => Reach::Loopback,
         Some(other) => {
-            return Err(usage(format!(
-                "{other} is not a reach: loopback or network"
-            )));
+            return Err(usage(format!("{other} is not a reach: loopback or network")).into());
         }
         None if !parts.contains(&Part::Desk) => Reach::Loopback,
         None => {
@@ -2164,7 +2948,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
                 ("Only this machine", "the desk answers on 127.0.0.1"),
                 ("This network", "other machines here can open it"),
             ];
-            if console.choice("Who may open the desk?", &choices, 0) == 0 {
+            if console.ask_choice("Who may open the desk?", &choices, 0)? == 0 {
                 Reach::Loopback
             } else {
                 Reach::Network(address)
@@ -2176,12 +2960,17 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             "off mode has no login, so anyone on that network who finds the port gets the \
              whole registry",
         );
-        if console.yes_no("Keep the people in the desk instead (local mode)?", true) {
+        if console.ask_yes_no("Keep the people in the desk instead (local mode)?", true)? {
             mode = Mode::Local;
         } else if !console.interactive() {
             reach = Reach::Loopback;
         }
     }
+    console.said(match mode {
+        Mode::Off => "no login",
+        Mode::Local => "desk accounts",
+        Mode::Oidc => "a provider",
+    });
 
     // the first person, for a desk that keeps its own and has none yet
     let store_exists = dir.join("desk").join("nils-desk.sqlite").exists();
@@ -2189,30 +2978,28 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         && parts.contains(&Part::Desk)
         && !store_exists
         && console.interactive()
-        && console.yes_no("Add the first person now, who may do everything?", true)
+        && console.ask_yes_no("Add the first person now, who may do everything?", true)?
     {
-        let name = console.line("A username for them", "admin");
-        if let Some(password) = console.password(&format!("A password for {name}")) {
+        let name = console.ask_line("A username for them", "admin")?;
+        if let Some(password) = console.ask_password(&format!("A password for {name}"))? {
             answers.first = Some((name, password));
         }
     }
 
     // 6. the assistant, and what this machine can do
-    console.step(6, steps, "What this machine can do");
-    let card = probe_card();
+    console.step(6);
+    let card = facts.card.clone();
     match &card {
         Some(card) => console.note(&format!("{}, {:.0} GB", card.name, card.memory_gb.round())),
         None => console.note("no graphics card the probe could find"),
     }
     for line in card_advice(card.as_ref().map(|c| c.memory_gb)) {
-        println!("  {line}");
+        console.say(&line);
     }
     let served = card.as_ref().map(|c| c.memory_gb).unwrap_or(0.0) >= 12.0;
     // An assistant already installed is kept unless a person says otherwise:
     // a change that took every default dropped it on a machine with no card.
-    let had_assistant = existing
-        .as_ref()
-        .is_some_and(|s| s.parts.contains_key("assistant"));
+    let had_assistant = existing.is_some_and(|s| s.parts.contains_key("assistant"));
     if args.parts.is_none() {
         if parts.contains(&Part::Assistant) {
             let question = if had_assistant {
@@ -2220,10 +3007,10 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             } else {
                 "Install the assistant anyway?"
             };
-            if !console.yes_no(question, served || had_assistant) {
+            if !console.ask_yes_no(question, served || had_assistant)? {
                 parts.retain(|p| *p != Part::Assistant);
             }
-        } else if console.yes_no("Add the assistant as well?", false) {
+        } else if console.ask_yes_no("Add the assistant as well?", false)? {
             parts.push(Part::Assistant);
         }
     }
@@ -2234,22 +3021,29 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         ));
     }
     if parts.contains(&Part::Assistant) && !dir.join("kvasir").join("kvasir.json").exists() {
-        let chosen = choose_model(&mut console, served);
+        let chosen = choose_model(console, served)?;
         if let Some(note) = model_reach_note(runtime, &chosen.url, podman_has_pasta) {
             console.note(&note);
         }
+        console.said(if chosen.later {
+            "a model later"
+        } else {
+            &chosen.model
+        });
         answers.model = Some(chosen);
+    } else {
+        console.said(if parts.contains(&Part::Assistant) {
+            "the assistant"
+        } else {
+            "no assistant"
+        });
     }
 
     // ports, once the parts are settled: each part this machine will listen
     // for, and none this setup already holds, since its own running service
     // is what holds it
-    let mut ports = existing.as_ref().map(|s| s.ports).unwrap_or_default();
-    let ours = |part: &str| {
-        existing
-            .as_ref()
-            .is_some_and(|s| s.parts.contains_key(part))
-    };
+    let mut ports = existing.map(|s| s.ports).unwrap_or_default();
+    let ours = |part: &str| existing.is_some_and(|s| s.parts.contains_key(part));
     let assistant = parts.contains(&Part::Assistant);
     let mut chosen: Vec<u16> = Vec::new();
     for (name, part, port, listens) in [
@@ -2286,9 +3080,11 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     }
     if postgres.is_some() && !registry_exists {
         // A password kept from an earlier install of this directory, since
-        // its data was made with it; a new one otherwise.
-        let password =
-            postgres_password(&dir.join("postgres.env")).unwrap_or_else(generated_passphrase);
+        // its data was made with it; a new one otherwise. Made once for the
+        // answers so far, however often the questions are run again.
+        let password = console.probe("a password for Postgres", || {
+            postgres_password(&dir.join("postgres.env")).unwrap_or_else(generated_passphrase)
+        });
         backend = BackendChoice::Postgres {
             dsn: format!(
                 "postgres://nils:{password}@127.0.0.1:{}/nils",
@@ -2299,7 +3095,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     }
 
     // 7. services
-    console.step(7, steps, "Keeping it running");
+    console.step(7);
     let manager = service_manager(runtime);
     let service = match (args.no_service, args.service, manager) {
         (true, _, _) => false,
@@ -2309,15 +3105,20 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             false
         }
         (_, _, Some(manager)) => {
-            let before = existing
-                .as_ref()
-                .map(|s| !s.service.is_empty() && s.service != "none");
-            console.yes_no(
+            let before = existing.map(|s| !s.service.is_empty() && s.service != "none");
+            console.ask_yes_no(
                 &format!("Write and start {manager} so it comes back after a restart?"),
                 before.unwrap_or(true),
-            )
+            )?
         }
     };
+    console.said(match (service, runtime) {
+        (false, _) => "by hand",
+        (true, Runtime::Machine) if cfg!(target_os = "macos") => "launchd",
+        (true, Runtime::Machine) => "systemd",
+        (true, Runtime::Podman) => "quadlets",
+        (true, Runtime::Docker) => "compose",
+    });
 
     let postgres_here = matches!(&backend, BackendChoice::Postgres { dsn, .. }
         if dsn_for(Runtime::Podman, dsn) != *dsn);
@@ -2342,13 +3143,12 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     };
 
     // 8. the summary, then the work
-    console.step(8, steps, "The plan");
-    print!("{}", plan_text(&plan, &console));
+    console.step(8);
+    for (key, value) in plan_rows(&plan) {
+        console.row(key, &value);
+    }
     if let Some((name, _)) = &answers.first {
-        println!(
-            "  {} {name}, who may do everything",
-            console.dim(&format!("{:<12}", "first person"))
-        );
+        console.row("first person", &format!("{name}, who may do everything"));
     }
     if let Some(model) = &answers.model {
         let said = if model.later {
@@ -2369,20 +3169,18 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
                 }
             )
         };
-        println!("  {} {said}", console.dim(&format!("{:<12}", "model")));
+        console.row("model", &said);
     }
     if args.print {
-        print!("{}", commands_text(&plan, &console));
+        print!("{}", commands_text(&plan, console));
         println!();
         println!("nothing was changed");
-        return Ok(());
+        return Ok(Flow::Printed);
     }
-    if console.interactive() && !console.yes_no("Do it?", true) {
-        println!("nothing was changed");
-        return Ok(());
+    if console.interactive() && !console.ask_yes_no("Do it?", true)? {
+        return Ok(Flow::Declined);
     }
-
-    do_it(&plan, &mut console, &args, existing, false, &answers)
+    Ok(Flow::Install(Box::new((plan, answers))))
 }
 
 /// What is installed, where, in what mode and how it runs, on one line.
@@ -2425,7 +3223,7 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
         println!("nothing was changed");
         return Ok(());
     }
-    do_it(
+    let services = do_it(
         &plan,
         console,
         args,
@@ -2440,6 +3238,7 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
     if !plan.runtime.container() {
         update_engine_binary(args.channel.as_deref(), console);
     }
+    summary(&plan, console, &services);
     Ok(())
 }
 
@@ -2491,51 +3290,88 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         let path = plan.dir.join(sub);
         std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
     }
-    // A Postgres this setup runs, started again with its data and password.
-    if let Some(pg) = plan.postgres
-        && let Err(e) = start_postgres(&plan, pg, console)
-    {
-        println!("  Postgres was not started: {}", e.message);
+    let mut stages = Vec::new();
+    if plan.postgres.is_some() {
+        stages.push((Stage::Postgres, format!("Postgres {POSTGRES_MAJOR}")));
     }
     if plan.has(Part::Desk) {
-        write_desk_config(&plan, true)?;
-        println!("  {}", plan.desk_config().display());
+        stages.push((Stage::Desk, "desk configuration".to_string()));
+    }
+    if plan.has(Part::Assistant) {
+        stages.push((Stage::Gateway, "gateway configuration".to_string()));
+    }
+    stages.push((Stage::Services, "services".to_string()));
+    console.start_checklist("Repairing", stages);
+    let mended = mend(&plan, state, console);
+    console.finish_checklist(
+        mended.is_ok(),
+        if mended.is_ok() {
+            "Repaired"
+        } else {
+            "Stopped"
+        },
+    );
+    let services = mended?;
+    summary(&plan, console, &services);
+    Ok(())
+}
+
+/// A repair's work: the Postgres this setup runs started again, the desk's
+/// configuration written and the gateway's mended, and the services written
+/// and started.
+fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service>, Exit> {
+    // A Postgres this setup runs, started again with its data and password.
+    if let Some(pg) = plan.postgres {
+        console.begin(Stage::Postgres);
+        if let Err(e) = start_postgres(plan, pg, console) {
+            console.warn(&format!("Postgres was not started: {}", e.message));
+        }
+    }
+    if plan.has(Part::Desk) {
+        console.begin(Stage::Desk);
+        write_desk_config(plan, true)?;
+        console.progress(&plan.desk_config().display().to_string());
     }
     // The gateway's file is mended, not rewritten, and the assistant's
     // environment is written where it is missing; the key is made during the
     // start-up below, once the gateway answers.
     if plan.has(Part::Assistant) {
-        if let Err(e) = configure_kvasir(&plan, console, None) {
-            println!(
-                "  the gateway's configuration was not mended: {}",
+        console.begin(Stage::Gateway);
+        if let Err(e) = configure_kvasir(plan, console, None) {
+            console.warn(&format!(
+                "the gateway's configuration was not mended: {}",
                 e.message
-            );
+            ));
         }
-        if let Err(e) = write_assistant_env(&plan) {
-            println!(
-                "  the assistant's environment was not written: {}",
+        if let Err(e) = write_assistant_env(plan) {
+            console.warn(&format!(
+                "the assistant's environment was not written: {}",
                 e.message
-            );
+            ));
         }
     }
+    console.begin(Stage::Services);
+    let mut services = Vec::new();
     if plan.service {
-        match start_everything(&plan, state, console) {
-            Ok(what) => print!("{what}"),
-            Err(e) => println!("  no services were written: {}", e.message),
+        match start_everything(plan, state, console) {
+            Ok(started) => {
+                console.report(&started);
+                services = started.services;
+            }
+            Err(e) => console.warn(&format!("no services were written: {}", e.message)),
         }
     } else {
-        for line in container_commands(&plan) {
-            println!("  run: {line}");
+        for line in container_commands(plan) {
+            console.say(&format!("run: {line}"));
         }
     }
     // systemd, podman and docker make the key as they start, between the
     // gateway and the assistant
     let systemd = plan.runtime == Runtime::Machine && !cfg!(target_os = "macos");
     if plan.has(Part::Assistant) && !(plan.service && (systemd || plan.runtime.container())) {
-        mint_assistant_key(&plan, console);
+        mint_assistant_key(plan, console);
     }
-    summary(&plan, console);
-    Ok(())
+    Ok(services)
 }
 
 /// Which service manager this machine and runtime use, if any.
@@ -2553,38 +3389,37 @@ fn service_manager(runtime: Runtime) -> Option<&'static str> {
     })
 }
 
-/// The plan as a person reads it before anything happens.
-fn plan_text(plan: &Plan, console: &Console) -> String {
-    let mut out = String::new();
-    let mut row = |key: &str, value: String| {
-        let _ = writeln!(out, "  {} {value}", console.dim(&format!("{key:<12}")));
-    };
-    row("directory", plan.dir.display().to_string());
-    row(
-        "parts",
-        plan.parts
-            .iter()
-            .map(|p| p.name())
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    row(
-        "runs",
-        match plan.runtime {
-            Runtime::Machine => "on this machine".to_string(),
-            Runtime::Podman => format!("in podman containers, images {ENGINE_IMAGE}"),
-            Runtime::Docker => format!("in docker containers, images {ENGINE_IMAGE}"),
-        },
-    );
+/// The plan as a person reads it before anything happens: a row for each
+/// thing it decides.
+fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
+    let mut rows = vec![
+        ("directory", plan.dir.display().to_string()),
+        (
+            "parts",
+            plan.parts
+                .iter()
+                .map(|p| p.name())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        (
+            "runs",
+            match plan.runtime {
+                Runtime::Machine => "on this machine".to_string(),
+                Runtime::Podman => format!("in podman containers, images {ENGINE_IMAGE}"),
+                Runtime::Docker => format!("in docker containers, images {ENGINE_IMAGE}"),
+            },
+        ),
+    ];
     if plan.runtime.container() && plan.has(Part::Assistant) {
-        row(
+        rows.push((
             "gateway",
             format!(
                 "and the assistant built here and run in {NODE_IMAGE}, their directories mounted"
             ),
-        );
+        ));
     }
-    row(
+    rows.push((
         "registry",
         format!(
             "{} {}",
@@ -2595,16 +3430,16 @@ fn plan_text(plan: &Plan, console: &Console) -> String {
                 "(will be made)"
             }
         ),
-    );
-    row(
+    ));
+    rows.push((
         "backend",
         match &plan.backend {
             BackendChoice::Sqlite => "sqlite".to_string(),
             BackendChoice::Postgres { schema, .. } => format!("postgres, schema {schema}"),
         },
-    );
+    ));
     if let Some(pg) = plan.postgres {
-        row(
+        rows.push((
             "postgres",
             format!(
                 "set up here in {}, on 127.0.0.1:{}, its data in {}",
@@ -2612,42 +3447,51 @@ fn plan_text(plan: &Plan, console: &Console) -> String {
                 plan.ports.postgres,
                 plan.postgres_dir().display()
             ),
-        );
+        ));
     }
-    row(
+    rows.push((
         "sign in",
         format!("{} ({})", plan.mode.words(), plan.mode.name()),
-    );
+    ));
     if plan.has(Part::Desk) {
         let (bind, origin, _) =
             desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
-        row("desk", format!("{origin} (binds {bind})"));
-        row(
+        rows.push(("desk", format!("{origin} (binds {bind})")));
+        rows.push((
             "desk config",
             format!("{} (will be written)", plan.desk_config().display()),
-        );
+        ));
     }
-    row("engine port", plan.ports.engine.to_string());
+    rows.push(("engine port", plan.ports.engine.to_string()));
     if let Some(source) = &plan.source {
-        row("reads", format!("{} (read only)", source.display()));
+        rows.push(("reads", format!("{} (read only)", source.display())));
     }
-    row(
+    rows.push((
         "places",
         place_specs(plan)
             .iter()
             .map(|s| format!("{} as {}", s.name, s.role))
             .collect::<Vec<_>>()
             .join(", "),
-    );
-    row(
+    ));
+    rows.push((
         "services",
         if plan.service {
             service_manager(plan.runtime).unwrap_or("none").to_string()
         } else {
             "none; the commands are printed".to_string()
         },
-    );
-    row("state", state_path().display().to_string());
+    ));
+    rows.push(("state", state_path().display().to_string()));
+    rows
+}
+
+/// The plan's rows, as lines.
+fn plan_text(plan: &Plan, console: &Console) -> String {
+    let mut out = String::new();
+    for (key, value) in plan_rows(plan) {
+        let _ = writeln!(out, "  {} {value}", console.dim(&format!("{key:<12}")));
+    }
     out
 }
 
@@ -2700,6 +3544,88 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
     out
 }
 
+/// What an install does, in the order it does it: a row of the checklist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    Engine,
+    NodeImage,
+    DeskImage,
+    Postgres,
+    Registry,
+    Desk,
+    Gateway,
+    Assistant,
+    Places,
+    Services,
+}
+
+/// The rows of the checklist for a plan: every stage the install passes
+/// through, named as a person reads it.
+fn stages(plan: &Plan, only_update: bool) -> Vec<(Stage, String)> {
+    let mut out = Vec::new();
+    if plan.runtime.container() {
+        out.push((Stage::Engine, "engine image".to_string()));
+        if plan.has(Part::Assistant) {
+            out.push((Stage::NodeImage, "Node image".to_string()));
+        }
+        if plan.has(Part::Desk) {
+            out.push((Stage::DeskImage, "desk image".to_string()));
+        }
+    } else {
+        out.push((Stage::Engine, "rule packs".to_string()));
+    }
+    if plan.postgres.is_some() {
+        out.push((Stage::Postgres, format!("Postgres {POSTGRES_MAJOR}")));
+    }
+    if !plan.registry_exists && !only_update {
+        out.push((Stage::Registry, "registry".to_string()));
+    }
+    if plan.has(Part::Desk) {
+        out.push((Stage::Desk, "desk".to_string()));
+    }
+    if plan.has(Part::Assistant) {
+        out.push((Stage::Gateway, "gateway".to_string()));
+        out.push((Stage::Assistant, "assistant".to_string()));
+    }
+    out.push((Stage::Places, "places".to_string()));
+    if plan.service || plan.runtime.container() {
+        out.push((Stage::Services, "services".to_string()));
+    }
+    out
+}
+
+/// A task's label as a row of the checklist has room for: an image by its
+/// own name, without the registry it comes from.
+fn brief(label: &str) -> String {
+    label
+        .replace("ghcr.io/kineuro/", "")
+        .replace("docker.io/library/", "")
+}
+
+/// A service as it was found once started: its unit or container, whether
+/// it runs, and when it does not, what it said and where its log is.
+struct Service {
+    unit: String,
+    running: bool,
+    said: Vec<String>,
+}
+
+/// What starting the services left: each service as found, and the lines
+/// that say so.
+struct Started {
+    services: Vec<Service>,
+    text: String,
+}
+
+impl Started {
+    fn of(services: Vec<Service>) -> Started {
+        Started {
+            text: services_text(&services),
+            services,
+        }
+    }
+}
+
 /// Everything the plan said, in order.
 fn do_it(
     plan: &Plan,
@@ -2708,7 +3634,7 @@ fn do_it(
     existing: Option<State>,
     only_update: bool,
     answers: &Answers,
-) -> Result<(), Exit> {
+) -> Result<Vec<Service>, Exit> {
     let mut state = State {
         dir: plan.dir.display().to_string(),
         mode: plan.mode.name().to_string(),
@@ -2745,6 +3671,12 @@ fn do_it(
     // On record before anything is placed, and again as each thing is, so
     // an install that stops partway can still be removed and started again.
     write_state(&state)?;
+    let (doing, done) = if only_update {
+        ("Updating", "Updated")
+    } else {
+        ("Installing", "Installed")
+    };
+    console.start_checklist(doing, stages(plan, only_update));
     let placed = place(
         plan,
         console,
@@ -2754,14 +3686,21 @@ fn do_it(
         only_update,
         answers,
     );
-    if let Err(e) = placed {
-        let _ = write_state(&state);
-        return Err(fail(format!(
-            "{}\n  what was placed is on record: nils uninstall removes it, and nils setup \
-             starts again",
-            e.message
-        )));
-    }
+    console.finish_checklist(
+        placed.is_ok(),
+        if placed.is_ok() { done } else { "Stopped" },
+    );
+    let services = match placed {
+        Ok(services) => services,
+        Err(e) => {
+            let _ = write_state(&state);
+            return Err(fail(format!(
+                "{}\n  what was placed is on record: nils uninstall removes it, and nils setup \
+                 starts again",
+                e.message
+            )));
+        }
+    };
 
     // A binary a part ran from before this run moved it into a container is
     // still on the machine, and still this install's to remove.
@@ -2777,9 +3716,10 @@ fn do_it(
 
     state.unfinished = false;
     let path = write_state(&state)?;
-    println!("  {}", path.display());
-    summary(plan, console);
-    Ok(())
+    if !console.live {
+        println!("  {}", path.display());
+    }
+    Ok(services)
 }
 
 /// The work of an install, each thing recorded in `state` as it is placed
@@ -2793,7 +3733,7 @@ fn place(
     existing_places: Vec<PlaceState>,
     only_update: bool,
     answers: &Answers,
-) -> Result<(), Exit> {
+) -> Result<Vec<Service>, Exit> {
     let checkpoint = |state: &State| {
         let _ = write_state(state);
     };
@@ -2808,23 +3748,26 @@ fn place(
         .map_err(|e| fail(format!("this binary cannot say where it is: {e}")))?;
     let into = binary_dir(&me, plan);
 
+    console.begin(Stage::Engine);
     if plan.runtime.container() {
         state.keep_program(&me);
         checkpoint(state);
         pull_or_build(plan, console, "nils", ENGINE_IMAGE, &me)?;
         // Taken now rather than by the first start, which a slow pull would
         // run past the time systemd gives a service to come up.
-        if plan.has(Part::Assistant)
-            && let Err(e) = console.task(
-                "taking Node's image, for the gateway and the assistant",
+        if plan.has(Part::Assistant) {
+            console.begin(Stage::NodeImage);
+            if let Err(e) = console.task(
+                "taking Node's image",
                 &plan.dir,
                 plan.runtime.name(),
                 &["pull", NODE_IMAGE],
-            )
-        {
-            println!("  {NODE_IMAGE} could not be pulled: {}", e.message);
+            ) {
+                console.warn(&format!("{NODE_IMAGE} could not be pulled: {}", e.message));
+            }
         }
         if plan.has(Part::Desk) {
+            console.begin(Stage::DeskImage);
             let desk_binary = match install_desk(&into, plan.channel.as_deref()) {
                 Ok((_, path)) => {
                     state.keep_program(&path);
@@ -2855,11 +3798,12 @@ fn place(
             },
         },
     );
-    println!("  engine {} ready", update::VERSION);
+    console.progress(&format!("engine {} ready", update::VERSION));
     checkpoint(state);
 
     // A Postgres this setup runs, up before the registry it holds.
     if let Some(pg) = plan.postgres {
+        console.begin(Stage::Postgres);
         state.parts.insert(
             "postgres".to_string(),
             PartState {
@@ -2875,15 +3819,17 @@ fn place(
     // The registry, made by the engine wherever it runs.
     let home = Home::new(plan.registry());
     if !plan.registry_exists && !only_update {
+        console.begin(Stage::Registry);
         make_registry(plan, &home, console, args, answers.passphrase.as_deref())?;
     }
 
     // The desk.
     if plan.has(Part::Desk) {
+        console.begin(Stage::Desk);
         if !plan.runtime.container() {
             match install_desk(&into, plan.channel.as_deref()) {
                 Ok((version, path)) => {
-                    println!("  desk {version} at {}", path.display());
+                    console.progress(&format!("desk {version} at {}", path.display()));
                     state.parts.insert(
                         "desk".to_string(),
                         PartState {
@@ -2894,7 +3840,7 @@ fn place(
                     );
                     checkpoint(state);
                 }
-                Err(e) => println!("  the desk was not installed: {}", e.message),
+                Err(e) => console.warn(&format!("the desk was not installed: {}", e.message)),
             }
         } else {
             state.parts.insert(
@@ -2907,32 +3853,33 @@ fn place(
             );
         }
         write_desk_config(plan, false)?;
-        println!("  {}", plan.desk_config().display());
+        console.progress(&plan.desk_config().display().to_string());
         if plan.mode == Mode::Local {
             let desk = state
                 .parts
                 .get("desk")
                 .filter(|p| p.kind == "binary")
                 .map(|p| PathBuf::from(&p.path));
-            add_first_admin(plan, desk, answers.first.as_ref());
+            add_first_admin(plan, desk, answers.first.as_ref(), console);
         }
         if plan.mode == Mode::Oidc {
-            println!("  register the desk at your provider with:");
+            console.say("register the desk at your provider with:");
             let (_, origin, _) =
                 desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
-            println!(
-                "    nils-desk register --authentik https://auth.example.org --token ./api-token \\\n      --origin {origin} --allow <group> --bind reader=<group> --secret-file {}",
+            console.say(&format!(
+                "  nils-desk register --authentik https://auth.example.org --token ./api-token \\\n      --origin {origin} --allow <group> --bind reader=<group> --secret-file {}",
                 plan.desk_dir().join("client-secret").display()
-            );
+            ));
         }
     }
 
     // The assistant and its gateway, which are built rather than downloaded.
     if plan.has(Part::Assistant) {
+        console.begin(Stage::Gateway);
         match install_node_parts(plan, console, answers.model.as_ref()) {
             Ok(paths) => {
                 for (name, path) in paths {
-                    println!("  {name} at {}", path.display());
+                    console.progress(&format!("{name} at {}", path.display()));
                     state.parts.insert(
                         name.to_string(),
                         PartState {
@@ -2944,25 +3891,32 @@ fn place(
                 }
                 checkpoint(state);
             }
-            Err(e) => println!("  the assistant was not installed: {}", e.message),
+            Err(e) => console.warn(&format!("the assistant was not installed: {}", e.message)),
         }
     }
 
     // The places, on an engine that keeps them.
+    console.begin(Stage::Places);
     if only_update {
         state.places = existing_places;
     } else {
-        state.places = declare_places(plan, &home);
+        state.places = declare_places(plan, &home, console);
     }
     checkpoint(state);
 
     // Start it.
+    let mut services = Vec::new();
     if plan.service {
+        console.begin(Stage::Services);
         match start_everything(plan, state, console) {
-            Ok(what) => print!("{what}"),
-            Err(e) => println!("  no services were written: {}", e.message),
+            Ok(started) => {
+                console.report(&started);
+                services = started.services;
+            }
+            Err(e) => console.warn(&format!("no services were written: {}", e.message)),
         }
     } else if plan.runtime.container() {
+        console.begin(Stage::Services);
         // No unit files were asked for, but a container still has to be
         // started, or the person is left with images and nothing running.
         // The assistant's starts once the gateway has made its key.
@@ -2970,10 +3924,10 @@ fn place(
             .into_iter()
             .partition(|line| line.contains("--name nils-assistant"));
         let run = |line: &str| match run_line(line) {
-            Ok(()) => println!("  {}", short(line)),
+            Ok(()) => console.progress(&short(line)),
             Err(e) => {
-                println!("  that failed: {e}");
-                println!("  run: {line}");
+                console.warn(&format!("that failed: {e}"));
+                console.say(&format!("run: {line}"));
             }
         };
         for line in &rest {
@@ -2995,13 +3949,13 @@ fn place(
         mint_assistant_key(plan, console);
     }
     if plan.has(Part::Assistant) && !plan.service && !plan.runtime.container() {
-        console.note(
+        console.say(
             "with no services, start the gateway yourself; then nils setup and repair makes \
              the assistant's key",
         );
     }
 
-    Ok(())
+    Ok(services)
 }
 
 fn container_commands(plan: &Plan) -> Vec<String> {
@@ -3224,7 +4178,6 @@ fn start_postgres(plan: &Plan, pg: ManagedPostgres, console: &Console) -> Result
         }
     }
     let started = std::time::Instant::now();
-    let live = std::io::stdout().is_terminal();
     loop {
         if quietly(
             rt,
@@ -3242,30 +4195,20 @@ fn start_postgres(plan: &Plan, pg: ManagedPostgres, console: &Console) -> Result
             break;
         }
         if started.elapsed().as_secs() >= 90 {
-            if live {
-                print!("\r\x1b[2K");
-            }
+            console.waited();
             return Err(fail(format!(
                 "Postgres did not take connections within 90 s; its log: {rt} logs {POSTGRES_CONTAINER}"
             )));
         }
-        if live {
-            print!(
-                "\r  waiting for Postgres {}",
-                console.dim(&format!("{}s", started.elapsed().as_secs()))
-            );
-            let _ = std::io::stdout().flush();
-        }
+        console.waiting("waiting for Postgres", started);
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    if live {
-        print!("\r\x1b[2K");
-    }
-    println!(
-        "  Postgres {POSTGRES_MAJOR} on 127.0.0.1:{}, its data in {}",
+    console.waited();
+    console.progress(&format!(
+        "Postgres {POSTGRES_MAJOR} on 127.0.0.1:{}, its data in {}",
         plan.ports.postgres,
         data.display()
-    );
+    ));
     Ok(())
 }
 
@@ -3288,11 +4231,11 @@ fn make_registry(
                 let generated = generated_passphrase();
                 let path = plan.dir.join("key.passphrase");
                 write_secret(&path, &generated)?;
-                println!(
-                    "  no terminal to ask on, so a passphrase was made and written to {}",
+                console.say(&format!(
+                    "no terminal to ask on, so a passphrase was made and written to {}",
                     path.display()
-                );
-                println!("  move it into your password manager and delete the file");
+                ));
+                console.say("move it into your password manager and delete the file");
                 generated
             }
         },
@@ -3412,7 +4355,7 @@ fn make_registry(
                 said(&made)
             )));
         }
-        println!("  registry at {}", plan.registry().display());
+        console.progress(&format!("registry at {}", plan.registry().display()));
         return Ok(());
     }
 
@@ -3441,14 +4384,14 @@ fn make_registry(
         },
     };
     home.init(&opts).map_err(|e| fail(e.to_string()))?;
-    println!("  registry at {}", home.dir().display());
+    console.progress(&format!("registry at {}", home.dir().display()));
     Ok(())
 }
 
 /// The places the engine now keeps, added in an order that lets the
 /// registry name its backup. A place already there is left as it is, so a
 /// second run of the wizard says the same thing as the first.
-fn declare_places(plan: &Plan, home: &Home) -> Vec<PlaceState> {
+fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Vec<PlaceState> {
     use nils_registry::place::{self, Role};
     let mut registry = match crate::open(home) {
         Ok(registry) => registry,
@@ -3503,11 +4446,11 @@ fn declare_places(plan: &Plan, home: &Home) -> Vec<PlaceState> {
                 );
                 declared.push(row);
             }
-            Err(e) => println!("  the {} place was not declared: {e}", spec.name),
+            Err(e) => console.warn(&format!("the {} place was not declared: {e}", spec.name)),
         }
     }
     if !declared.is_empty() {
-        println!("  places: {}", say_places(&declared));
+        console.progress(&format!("places: {}", say_places(&declared)));
     }
     declared
 }
@@ -3596,12 +4539,12 @@ fn install_packs(plan: &Plan, me: &Path, console: &mut Console) -> Result<(), Ex
         // about, since an install that can still read a study is not a
         // broken one.
         Err(e) => {
-            println!("  the rule packs were not installed: {e}");
-            println!("  the engine still runs and digests; what it cannot do is classify.");
-            println!(
-                "  put a packs directory at {} or pass --pack-dir",
+            console.warn(&format!("the rule packs were not installed: {e}"));
+            console.say("the engine still runs and digests; what it cannot do is classify.");
+            console.say(&format!(
+                "put a packs directory at {} or pass --pack-dir",
                 dir.display()
-            );
+            ));
             Ok(())
         }
     }
@@ -3693,13 +4636,18 @@ fn write_desk_config(plan: &Plan, force: bool) -> Result<(), Exit> {
 /// In local mode the desk keeps the people, and an empty desk has nobody to
 /// let in. The offer is made once, and the desk's own command asks for the
 /// password, so nothing here ever holds one.
-fn add_first_admin(plan: &Plan, desk: Option<PathBuf>, first: Option<&(String, String)>) {
+fn add_first_admin(
+    plan: &Plan,
+    desk: Option<PathBuf>,
+    first: Option<&(String, String)>,
+    console: &Console,
+) {
     let by_hand = format!(
         "nils-desk user add <name> --admin --config {}",
         plan.desk_config().display()
     );
     let Some((name, password)) = first else {
-        println!("  add the first person with: {by_hand}");
+        console.say(&format!("add the first person with: {by_hand}"));
         return;
     };
     let desk = desk
@@ -3724,16 +4672,20 @@ fn add_first_admin(plan: &Plan, desk: Option<PathBuf>, first: Option<&(String, S
         child.wait_with_output()
     });
     match done {
-        Ok(out) if out.status.success() => println!("  {name} may sign in and do everything"),
+        Ok(out) if out.status.success() => {
+            console.progress(&format!("{name} may sign in and do everything"));
+        }
         Ok(out) => {
             let why = String::from_utf8_lossy(&out.stderr);
-            println!(
-                "  {name} was not added: {}",
+            console.warn(&format!(
+                "{name} was not added: {}",
                 why.lines().last().unwrap_or("the desk refused")
-            );
-            println!("  the command is: {by_hand}");
+            ));
+            console.say(&format!("the command is: {by_hand}"));
         }
-        Err(e) => println!("  {name} was not added ({e}); the command is: {by_hand}"),
+        Err(e) => console.warn(&format!(
+            "{name} was not added ({e}); the command is: {by_hand}"
+        )),
     }
 }
 
@@ -3766,6 +4718,9 @@ fn install_node_parts(
         ("kvasir", "the gateway", KVASIR_REPO),
         ("assistant", "the assistant", ASSISTANT_REPO),
     ] {
+        if name == "assistant" {
+            console.begin(Stage::Assistant);
+        }
         let into = plan.dir.join(name);
         if into.exists() {
             console.task(
@@ -3817,15 +4772,14 @@ const EXAMPLE_MODEL_ID: &str = "qwen38-27b";
 /// Ask what the assistant should talk to, and what to type for it. Where the
 /// address answers, the server is asked which models it serves, so the name
 /// is picked from a list rather than remembered.
-fn choose_model(console: &mut Console, served: bool) -> ModelChoice {
+fn choose_model(console: &mut Console, served: bool) -> Result<ModelChoice, Stop> {
     let example_model = EXAMPLE_MODEL_ID;
-    println!();
-    println!("  {}", console.bold("The model"));
+    console.heading("The model");
     console.note(
         "the assistant talks to a model through the gateway, over the OpenAI chat API, which \
          almost every model server and provider speaks",
     );
-    let pick = console.choice(
+    let pick = console.ask_choice(
         "What should it talk to?",
         &[
             (
@@ -3846,20 +4800,20 @@ fn choose_model(console: &mut Console, served: bool) -> ModelChoice {
             ),
         ],
         if served { 0 } else { 3 },
-    );
+    )?;
 
     if pick == 3 {
         console.note(&format!(
             "the gateway is pointed at {DEFAULT_MODEL_URL} for now; the assistant answers once a \
              model runs there, or once you run nils setup and name another"
         ));
-        return ModelChoice {
+        return Ok(ModelChoice {
             url: DEFAULT_MODEL_URL.to_string(),
             local: true,
             key: None,
             model: example_model.to_string(),
             later: true,
-        };
+        });
     }
 
     let (url, local) = match pick {
@@ -3868,39 +4822,42 @@ fn choose_model(console: &mut Console, served: bool) -> ModelChoice {
                 "SGLang listens on http://127.0.0.1:30000/v1, vLLM on :8000/v1, llama.cpp on \
                  :8080/v1 and Ollama on :11434/v1",
             );
-            (ask_address(console, DEFAULT_MODEL_URL), true)
+            (ask_address(console, DEFAULT_MODEL_URL)?, true)
         }
         1 => {
             console.note(
                 "the address of that server as this machine reaches it, for example \
                  http://192.168.1.20:30000/v1",
             );
-            (ask_address(console, ""), true)
+            (ask_address(console, "")?, true)
         }
         _ => {
             console.note(
                 "its OpenAI compatible address: https://api.openai.com/v1, \
                  https://openrouter.ai/api/v1 or https://api.minimax.io/v1, among others",
             );
-            (ask_address(console, "https://api.openai.com/v1"), false)
+            (ask_address(console, "https://api.openai.com/v1")?, false)
         }
     };
 
     let key = if local {
-        if console.yes_no("Does that server need a key?", false) {
-            console.hidden_once("Its key")
+        if console.ask_yes_no("Does that server need a key?", false)? {
+            console.ask_hidden_once("Its key")?
         } else {
             None
         }
     } else {
-        let key = console.hidden_once("Your key from that provider");
+        let key = console.ask_hidden_once("Your key from that provider")?;
         if key.is_none() {
             console.note("no key was given; the provider will refuse the gateway until one is");
         }
         key
     };
 
-    let model = match list_models(&url, key.as_deref()) {
+    let listed = console.probe(&format!("models {url}"), || {
+        list_models(&url, key.as_deref())
+    });
+    let model = match listed {
         Some(ids) if ids.len() == 1 => {
             console.note(&format!("{url} answered, serving {}", ids[0]));
             ids[0].clone()
@@ -3909,7 +4866,7 @@ fn choose_model(console: &mut Console, served: bool) -> ModelChoice {
             console.note(&format!("{url} answered"));
             let shown: Vec<(&str, &str)> =
                 ids.iter().take(12).map(|id| (id.as_str(), "")).collect();
-            let at = console.choice("Which model?", &shown, 0);
+            let at = console.ask_choice("Which model?", &shown, 0)?;
             ids[at].clone()
         }
         _ => {
@@ -3918,7 +4875,8 @@ fn choose_model(console: &mut Console, served: bool) -> ModelChoice {
             ));
             let default = if local { example_model } else { "" };
             loop {
-                let named = console.line("The model's name, as the server lists it", default);
+                let named =
+                    console.ask_line("The model's name, as the server lists it", default)?;
                 if !named.trim().is_empty() || !console.interactive() {
                     break named.trim().to_string();
                 }
@@ -3934,28 +4892,28 @@ fn choose_model(console: &mut Console, served: bool) -> ModelChoice {
              you open them: https://kineuro.se/nils/docs/assistant/kvasir/",
         );
     }
-    ModelChoice {
+    Ok(ModelChoice {
         url,
         local,
         key,
         model,
         later: false,
-    }
+    })
 }
 
 /// An http or https address, asked until one is given.
-fn ask_address(console: &mut Console, default: &str) -> String {
+fn ask_address(console: &mut Console, default: &str) -> Result<String, Stop> {
     loop {
         let url = console
-            .line("Its address", default)
+            .ask_line("Its address", default)?
             .trim()
             .trim_end_matches('/')
             .to_string();
         if url.starts_with("http://") || url.starts_with("https://") {
-            return url;
+            return Ok(url);
         }
         if !console.interactive() {
-            return DEFAULT_MODEL_URL.to_string();
+            return Ok(DEFAULT_MODEL_URL.to_string());
         }
         console.note("an address starting with http:// or https://");
     }
@@ -4354,7 +5312,6 @@ fn gateway_up(plan: &Plan, console: &Console, seconds: u64) -> bool {
         .build()
         .into();
     let started = std::time::Instant::now();
-    let live = std::io::stdout().is_terminal();
     let up = loop {
         if agent.get(&url).call().is_ok() {
             break true;
@@ -4362,19 +5319,10 @@ fn gateway_up(plan: &Plan, console: &Console, seconds: u64) -> bool {
         if started.elapsed().as_secs() >= seconds {
             break false;
         }
-        if live {
-            print!(
-                "\r  waiting for the gateway {}",
-                console.dim(&format!("{}s", started.elapsed().as_secs()))
-            );
-            let _ = std::io::stdout().flush();
-        }
+        console.waiting("waiting for the gateway", started);
         std::thread::sleep(std::time::Duration::from_millis(500));
     };
-    if live {
-        print!("\r\x1b[2K");
-        let _ = std::io::stdout().flush();
-    }
+    console.waited();
     up
 }
 
@@ -4391,8 +5339,8 @@ fn mint_assistant_key(plan: &Plan, console: &Console) -> bool {
         return false;
     };
     if !gateway_up(plan, console, 30) {
-        println!("  the gateway did not come up, so the assistant has no key yet");
-        println!("  once it runs, nils setup and then repair makes the key");
+        console.warn("the gateway did not come up, so the assistant has no key yet");
+        console.say("once it runs, nils setup and then repair makes the key");
         return false;
     }
     let purposes: Vec<String> =
@@ -4430,8 +5378,8 @@ fn mint_assistant_key(plan: &Plan, console: &Console) -> bool {
             true
         }
         _ => {
-            println!("  the gateway would not make the assistant's key");
-            println!("  nils setup and then repair asks it again");
+            console.warn("the gateway would not make the assistant's key");
+            console.say("nils setup and then repair asks it again");
             false
         }
     }
@@ -4458,7 +5406,7 @@ fn quadlet_dir() -> PathBuf {
 }
 
 /// Whatever this machine and runtime use to keep the parts running.
-fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<String, Exit> {
+fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Started, Exit> {
     match (plan.runtime, cfg!(target_os = "macos")) {
         (Runtime::Podman, _) => {
             let dir = quadlet_dir();
@@ -4508,7 +5456,7 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Str
                 units.push("nils-assistant".to_string());
             }
             linger();
-            Ok(unit_report(&units, console, Watcher::Systemd))
+            Ok(Started::of(unit_report(&units, console, Watcher::Systemd)))
         }
         (Runtime::Docker, _) => {
             let path = plan.dir.join("compose.yaml");
@@ -4540,16 +5488,16 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Str
                 )?;
                 containers.push("nils-assistant".to_string());
             }
-            let mut said = unit_report(&containers, console, Watcher::Docker);
+            let mut started = Started::of(unit_report(&containers, console, Watcher::Docker));
             let _ = writeln!(
-                said,
+                started.text,
                 "  {}",
                 console.dim(&format!(
                     "{} brings them back after a restart of docker",
                     path.display()
                 ))
             );
-            Ok(said)
+            Ok(started)
         }
         (Runtime::Machine, true) => {
             let dir = std::env::var_os("HOME")
@@ -4574,11 +5522,10 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Str
                     .output();
                 names.push(name);
             }
-            Ok(format!(
-                "  services: {} in {}\n",
-                names.join(", "),
-                dir.display()
-            ))
+            Ok(Started {
+                services: Vec::new(),
+                text: format!("  services: {} in {}\n", names.join(", "), dir.display()),
+            })
         }
         (Runtime::Machine, false) => {
             let dir = units_dir();
@@ -4611,7 +5558,7 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Str
                 }
             }
             linger();
-            Ok(unit_report(&names, console, Watcher::Systemd))
+            Ok(Started::of(unit_report(&names, console, Watcher::Systemd)))
         }
     }
 }
@@ -4625,10 +5572,6 @@ fn quietly(program: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// Which units are running, said plainly, with the reason for any that is
-/// not. Each is looked at twice, two seconds apart: a service that fails at
-/// start is active for an instant and then restarting, and a single look
-/// at that instant reported it running while it crashed in a loop.
 /// What watches the services: systemd, for units on the machine and podman's
 /// quadlets, or docker, for its containers.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4637,49 +5580,70 @@ enum Watcher {
     Docker,
 }
 
-fn unit_report(names: &[String], console: &Console, watcher: Watcher) -> String {
+/// Which units are running, with the reason for any that is not. Each is
+/// looked at twice, two seconds apart: a service that fails at start is
+/// active for an instant and then restarting, and a single look at that
+/// instant reported it running while it crashed in a loop.
+fn unit_report(names: &[String], console: &Console, watcher: Watcher) -> Vec<Service> {
     let look = |unit: &str| match watcher {
         Watcher::Systemd => run_quiet("systemctl", &["--user", "is-active", unit])
             .is_some_and(|s| s.trim() == "active"),
         Watcher::Docker => run_quiet("docker", &["inspect", "-f", "{{.State.Running}}", unit])
             .is_some_and(|s| s.trim() == "true"),
     };
-    console.note("checking that the services came up");
+    console.doing("checking that the services came up");
     std::thread::sleep(std::time::Duration::from_secs(2));
     let first: Vec<bool> = names.iter().map(|u| look(u)).collect();
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let mut running = Vec::new();
-    let mut stopped = Vec::new();
-    for (unit, was) in names.iter().zip(first) {
-        if was && look(unit) {
-            running.push(unit.as_str());
-        } else {
-            stopped.push(unit.as_str());
-        }
-    }
+    names
+        .iter()
+        .zip(first)
+        .map(|(unit, was)| {
+            let running = was && look(unit);
+            let mut said = Vec::new();
+            if !running {
+                if let Some(why) = last_error(unit, watcher) {
+                    // A container in a pod that did not start says only
+                    // that; the reason is the pod's.
+                    let pod = why
+                        .contains("result 'dependency'")
+                        .then(|| last_error("nils-pod", watcher))
+                        .flatten();
+                    said.push(format!("it said: {why}"));
+                    if let Some(pod) = pod {
+                        said.push(format!("the pod said: {pod}"));
+                    }
+                }
+                said.push(match watcher {
+                    Watcher::Systemd => format!("its log: journalctl --user -u {unit}"),
+                    Watcher::Docker => format!("its log: docker logs {unit}"),
+                });
+            }
+            Service {
+                unit: unit.clone(),
+                running,
+                said,
+            }
+        })
+        .collect()
+}
+
+/// The services in lines: the running ones on one, and each that is not with
+/// what it said.
+fn services_text(services: &[Service]) -> String {
+    let running: Vec<&str> = services
+        .iter()
+        .filter(|s| s.running)
+        .map(|s| s.unit.as_str())
+        .collect();
     let mut out = String::new();
     if !running.is_empty() {
         let _ = writeln!(out, "  running: {}", running.join(", "));
     }
-    for unit in stopped {
-        let _ = writeln!(out, "  not running: {unit}");
-        if let Some(why) = last_error(unit, watcher) {
-            let _ = writeln!(out, "    it said: {why}");
-            // A container in a pod that did not start says only that; the
-            // reason is the pod's.
-            if why.contains("result 'dependency'")
-                && let Some(pod) = last_error("nils-pod", watcher)
-            {
-                let _ = writeln!(out, "    the pod said: {pod}");
-            }
-        }
-        match watcher {
-            Watcher::Systemd => {
-                let _ = writeln!(out, "    its log: journalctl --user -u {unit}");
-            }
-            Watcher::Docker => {
-                let _ = writeln!(out, "    its log: docker logs {unit}");
-            }
+    for service in services.iter().filter(|s| !s.running) {
+        let _ = writeln!(out, "  not running: {}", service.unit);
+        for line in &service.said {
+            let _ = writeln!(out, "    {line}");
         }
     }
     out
@@ -4866,8 +5830,13 @@ pub(crate) fn launchd_plists(plan: &Plan, state: &State) -> Vec<(String, String)
     out
 }
 
-/// The last lines: what is there, where to open it, what to run.
-fn summary(plan: &Plan, console: &Console) {
+/// The last lines: what is there, where to open it, what to run. On a
+/// terminal, a card.
+fn summary(plan: &Plan, console: &Console, services: &[Service]) {
+    if console.live {
+        card_summary(plan, console, services);
+        return;
+    }
     let (_, origin, _) = desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
     println!();
     println!("{}", console.bold("Installed"));
@@ -4878,33 +5847,11 @@ fn summary(plan: &Plan, console: &Console) {
     println!("  the engine on port {}", plan.ports.engine);
     println!();
     if !plan.service && plan.runtime == Runtime::Machine {
-        // The same arguments the services would have been given, so a port
-        // this setup moved and the trust a desk that keeps its own people
-        // needs are in the command a person copies, not only in a unit.
         println!("{}", console.bold("Start it"));
-        let registry = plan.registry().display().to_string();
-        let backups = plan.dir.join("backups").display().to_string();
-        println!(
-            "  nils {}",
-            engine_args(plan, &registry, &backups).join(" ")
-        );
-        if plan.has(Part::Desk) {
-            println!(
-                "  nils-desk serve --config {}",
-                plan.desk_config().display()
-            );
+        for command in start_commands(plan) {
+            println!("  {command}");
         }
         if plan.has(Part::Assistant) {
-            println!(
-                "  (cd {} && node dist/main.js --config kvasir.json)",
-                plan.dir.join("kvasir").display()
-            );
-            let assistant = plan.dir.join("assistant");
-            println!(
-                "  (cd {} && set -a && . ./assistant.env && node {})",
-                assistant.display(),
-                assistant_entry(&assistant)
-            );
             println!(
                 "  {}",
                 console
@@ -4917,6 +5864,175 @@ fn summary(plan: &Plan, console: &Console) {
     println!("  bring data in with: nils digest <a directory of DICOM files>");
     println!("  the documentation is at https://kineuro.se/nils/docs/");
     println!("  the next version, when there is one: nils update --all");
+}
+
+/// The commands that start each part by hand, with the arguments its service
+/// would have been given, so a port this setup moved and the trust a desk
+/// that keeps its own people needs are in what a person copies, not only in
+/// a unit.
+fn start_commands(plan: &Plan) -> Vec<String> {
+    let registry = plan.registry().display().to_string();
+    let backups = plan.dir.join("backups").display().to_string();
+    let mut out = vec![format!(
+        "nils {}",
+        engine_args(plan, &registry, &backups).join(" ")
+    )];
+    if plan.has(Part::Desk) {
+        out.push(format!(
+            "nils-desk serve --config {}",
+            plan.desk_config().display()
+        ));
+    }
+    if plan.has(Part::Assistant) {
+        out.push(format!(
+            "(cd {} && node dist/main.js --config kvasir.json)",
+            plan.dir.join("kvasir").display()
+        ));
+        let assistant = plan.dir.join("assistant");
+        out.push(format!(
+            "(cd {} && set -a && . ./assistant.env && node {})",
+            assistant.display(),
+            assistant_entry(&assistant)
+        ));
+    }
+    out
+}
+
+/// The end on a terminal: the card, how to start what no service starts, and
+/// what to run next.
+fn card_summary(plan: &Plan, console: &Console, services: &[Service]) {
+    let p = console.palette;
+    let title = if services.is_empty() {
+        "NILS is installed"
+    } else if services.iter().all(|s| s.running) {
+        "NILS is running"
+    } else {
+        "NILS is installed, not all of it runs"
+    };
+    // a long path or address is cut rather than wrapped through the frame
+    let room = tui::width(1).saturating_sub(18).max(30);
+    let rows: Vec<(&str, String)> = card_rows(plan)
+        .into_iter()
+        .map(|(key, value)| (key, tui::truncate(&value, room)))
+        .collect();
+    let shown: Vec<(String, bool)> = services
+        .iter()
+        .map(|s| (service_name(&s.unit), s.running))
+        .collect();
+    println!();
+    for line in tui::card(p, title, &rows, &shown) {
+        println!("{line}");
+    }
+    if !plan.service && plan.runtime == Runtime::Machine {
+        println!();
+        println!(" {}", p.bold("Start it"));
+        for command in start_commands(plan) {
+            println!("   {command}");
+        }
+        if plan.has(Part::Assistant) {
+            println!(
+                "   {}",
+                p.dim("once the gateway runs, nils setup and repair makes the assistant's key")
+            );
+        }
+    }
+    println!();
+    let next = [
+        ("Next", "nils digest <dir>", "bring DICOM in"),
+        ("Next", "nils update --all", "take the newest release"),
+        ("Next", "nils uninstall", "remove it"),
+        ("Docs", "https://kineuro.se/nils/docs/", ""),
+    ];
+    for line in tui::next_steps(p, &next) {
+        println!("{line}");
+    }
+    println!();
+}
+
+/// The card's rows: where each part answers, where the registry is kept,
+/// what the assistant talks to, and how it all runs.
+fn card_rows(plan: &Plan) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    if plan.has(Part::Desk) {
+        let (_, origin, _) = desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
+        rows.push(("desk", origin));
+        rows.push(("sign in", plan.mode.words().to_string()));
+    }
+    rows.push((
+        "engine",
+        match plan.runtime {
+            Runtime::Machine => format!("127.0.0.1:{}", plan.ports.engine),
+            Runtime::Podman => format!("port {} inside the pod", plan.ports.engine),
+            Runtime::Docker => format!("nils-engine:{} on the docker network", plan.ports.engine),
+        },
+    ));
+    rows.push((
+        "registry",
+        match (&plan.backend, plan.postgres) {
+            (BackendChoice::Sqlite, _) => format!("SQLite in {}", tilde(&plan.registry())),
+            (BackendChoice::Postgres { .. }, Some(_)) => format!(
+                "Postgres {POSTGRES_MAJOR} in {}",
+                tilde(&plan.postgres_dir())
+            ),
+            (BackendChoice::Postgres { dsn, .. }, None) => {
+                format!("Postgres at {}", crate::redact_dsn(dsn))
+            }
+        },
+    ));
+    if plan.has(Part::Assistant) {
+        rows.push((
+            "assistant",
+            model_on_record(plan).unwrap_or_else(|| "no model named yet".to_string()),
+        ));
+    }
+    rows.push((
+        "runs",
+        match (plan.service, plan.runtime) {
+            (true, Runtime::Machine) if cfg!(target_os = "macos") => {
+                "as launchd agents, back after a restart"
+            }
+            (true, Runtime::Machine) => "as systemd user units, back after a restart",
+            (true, Runtime::Podman) => "in podman, back after a restart",
+            (true, Runtime::Docker) => "in docker, back after a restart",
+            (false, Runtime::Machine) => "started by hand",
+            (false, Runtime::Podman) => "in podman, started by this setup",
+            (false, Runtime::Docker) => "in docker, started by this setup",
+        }
+        .to_string(),
+    ));
+    rows.push(("directory", tilde(&plan.dir)));
+    rows
+}
+
+/// The model the gateway sends the assistant to, as its configuration says:
+/// where it is, or that the prompt leaves this organisation's systems.
+fn model_on_record(plan: &Plan) -> Option<String> {
+    let text = std::fs::read_to_string(plan.dir.join("kvasir").join("kvasir.json")).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let backend = config["backends"].as_array()?.first()?;
+    let model = backend["models"][0]["id"].as_str()?;
+    if backend["locality"] == "remote" {
+        return Some(format!("{model}, the prompt leaves your systems"));
+    }
+    let url = model_address_on_machine(backend["baseUrl"].as_str()?);
+    Some(format!("{model} at {url}"))
+}
+
+/// A unit or a container, by the name of the part it runs.
+fn service_name(unit: &str) -> String {
+    match unit.strip_prefix("nils-").unwrap_or(unit) {
+        "kvasir" => "gateway".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// A path as a person writes it, with `~` for the home directory.
+fn tilde(path: &Path) -> String {
+    match home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
 }
 
 // -------------------------------------------------------------- the update
@@ -5076,7 +6192,7 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     let console = Console::new(true);
     println!("restarting the services");
     match start_everything(&plan, &state, &console) {
-        Ok(what) => print!("{what}"),
+        Ok(started) => print!("{}", started.text),
         Err(e) => println!("the services were left alone: {}", e.message),
     }
 }
@@ -5988,6 +7104,162 @@ mod tests {
             format!("id: {name}\npurpose: {purpose}\ncontent: {content}\n"),
         )
         .unwrap();
+    }
+
+    /// What the screens came to, and every screen they drew.
+    type Screens<T> = (Result<(T, Vec<String>), Exit>, Vec<Vec<String>>);
+
+    /// The screens with no terminal: the keys from a list, every screen kept,
+    /// drawn plain and at one size.
+    fn on_screens<T>(
+        questions: impl FnMut(&mut Console) -> Result<T, Stop>,
+        keys: Vec<tui::Key>,
+    ) -> Screens<T> {
+        let mut console = Console::new(false);
+        console.palette = tui::Palette::Plain;
+        let mut keys = keys.into_iter();
+        let mut drawn = Vec::new();
+        let outcome = console.drive(
+            questions,
+            &mut || {
+                keys.next()
+                    .map_or_else(|| vec![tui::Key::Interrupt], |key| vec![key])
+            },
+            &mut |screen| drawn.push(screen),
+            &|| (100, 40),
+        );
+        (outcome, drawn)
+    }
+
+    #[test]
+    fn the_screens_take_an_answer_back_and_offer_it_again() {
+        use tui::Key::{Backspace, Char, Down, Enter, Escape};
+        let mut dialled = 0;
+        let (outcome, drawn) = on_screens(
+            |console| {
+                console.step(1);
+                let pick =
+                    console.ask_choice("Which?", &[("one", ""), ("two", ""), ("three", "")], 0)?;
+                console.said(["one", "two", "three"][pick]);
+                console.step(2);
+                let name = console.ask_line("A name", "admin")?;
+                let long = console.probe("the name's length", || {
+                    dialled += 1;
+                    name.len()
+                });
+                console.note(&format!("{long} long"));
+                let sure = console.ask_yes_no("Sure?", true)?;
+                Ok((pick, name, sure))
+            },
+            vec![
+                Down,
+                Enter, // two
+                Char('x'),
+                Enter,  // adminx
+                Escape, // back to the name, with adminx on offer
+                Backspace,
+                Enter, // admin
+                Down,
+                Enter, // no
+            ],
+        );
+        let ((pick, name, sure), summaries) = match outcome {
+            Ok(done) => done,
+            Err(e) => panic!("{}", e.message),
+        };
+        assert_eq!((pick, name.as_str(), sure), (1, "admin", false));
+        assert_eq!(summaries, vec!["two".to_string()]);
+        assert_eq!(
+            dialled, 2,
+            "probed once for each name given, not once for each run"
+        );
+        let last = drawn.last().map(|s| s.join("\n")).unwrap_or_default();
+        assert!(
+            last.contains("✓ What to install") && last.contains("two"),
+            "{last}"
+        );
+        assert!(last.contains("▸ Where it runs"), "{last}");
+        assert!(
+            last.contains("✓ A name  admin") && last.contains("5 long"),
+            "{last}"
+        );
+        assert!(last.contains("Sure?") && last.contains("← back"), "{last}");
+    }
+
+    #[test]
+    fn ctrl_c_on_a_screen_stops_the_setup() {
+        let (outcome, _) = on_screens(
+            |console| console.ask_line("A name", ""),
+            vec![tui::Key::Char('a'), tui::Key::Interrupt],
+        );
+        assert_eq!(outcome.err().map(|e| e.code), Some(crate::STOPPED));
+    }
+
+    #[derive(clap::Parser)]
+    struct Wizard {
+        #[command(flatten)]
+        setup: SetupArgs,
+    }
+
+    #[test]
+    fn the_wizard_is_answered_on_screens_with_an_earlier_step_changed() {
+        use clap::Parser as _;
+        use tui::Key::{Char, Enter, Escape, Up};
+        let dir = scratch("screens");
+        let args =
+            Wizard::parse_from(["nils", "--dir", &dir.display().to_string(), "--no-service"]).setup;
+        let facts = Facts {
+            podman: false,
+            docker: Err(DockerAbsent::NotInstalled),
+            card: None,
+        };
+        let (outcome, drawn) = on_screens(
+            |console| questions(console, &args, None, &facts, false),
+            vec![
+                Enter, // the engine and the desk
+                Enter, // no directory of DICOM
+                Escape,
+                Escape, // back past it to the parts
+                Up,
+                Enter, // the engine only
+                Enter, // still no directory of DICOM
+                Enter, // SQLite
+                Char('p'),
+                Enter, // a passphrase
+                Char('p'),
+                Enter, // and again
+                Enter, // nobody signs in
+                Enter, // no assistant
+                Enter, // do it
+            ],
+        );
+        let (flow, summaries) = match outcome {
+            Ok(done) => done,
+            Err(e) => panic!("{}", e.message),
+        };
+        let Flow::Install(install) = flow else {
+            panic!("the questions did not end in an install");
+        };
+        let (plan, answers) = *install;
+        assert!(
+            plan.parts == vec![Part::Engine],
+            "the parts as changed on the way back"
+        );
+        assert_eq!(plan.dir, dir);
+        assert!(matches!(plan.backend, BackendChoice::Sqlite));
+        assert!(plan.mode == Mode::Off && !plan.service);
+        assert_eq!(answers.passphrase.as_deref(), Some("p"));
+        assert_eq!(summaries.first().map(String::as_str), Some("engine"));
+        let last = drawn.last().map(|s| s.join("\n")).unwrap_or_default();
+        assert!(
+            last.contains("Do it?") && last.contains("directory"),
+            "{last}"
+        );
+        assert!(
+            drawn.iter().all(|screen| screen.len() <= 40),
+            "every screen fits its terminal"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
