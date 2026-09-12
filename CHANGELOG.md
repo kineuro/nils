@@ -4,6 +4,13 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.11] - 2026-09-12
+
+### Added
+
+- Step 4 can set up Postgres. "Postgres, set up here" runs Postgres 17 in a container, in podman or docker, beside the other parts. Its data is in `postgres/` in the base directory, its generated password in `postgres.env`, readable by the person alone, and it is published on this machine's loopback. The engine reaches it wherever it runs. It is offered when podman or docker answers, and `--backend postgres` without `--dsn` chooses it. "A Postgres you already run" is the connection string, as before.
+- The engine's service starts after a Postgres the wizard runs in podman. `nils update --all` keeps Postgres's major version, since a new one needs its data upgraded. A repair starts Postgres again with its data and password. Uninstall removes its container, and keeps or removes its data with the base directory.
+
 ## [1.0.0-alpha.10] - 2026-09-12
 
 ### Fixed
