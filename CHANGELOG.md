@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- A job queued at a door, such as a digest or a backup started from the desk, waited for ever: nothing ran the queue unless someone started `nils jobs work`. `nils serve --worker` now runs the queue beside the doors, one job at a time, and every install `nils setup` writes starts the engine with it. A worker whose job runs long keeps saying it is alive, so a long digest no longer reads as a worker that stopped.
+
 ## [1.0.0-alpha.13] - 2026-09-12
 
 ### Changed

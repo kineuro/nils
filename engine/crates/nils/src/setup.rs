@@ -2134,6 +2134,8 @@ fn engine_args(plan: &Plan, registry: &str, backups: &str) -> Vec<String> {
         registry.to_string(),
         "--backup-dir".to_string(),
         backups.to_string(),
+        // the jobs the desk queues, a digest or a backup, run beside the doors
+        "--worker".to_string(),
     ];
     match plan.mode {
         Mode::Off => {

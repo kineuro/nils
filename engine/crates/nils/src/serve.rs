@@ -945,6 +945,16 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     });
     let server = Arc::new(server);
     let limit = args.requests;
+    // A job a door queues runs without anyone starting a worker by hand. A
+    // registry's queue has one worker, so where another already holds it,
+    // this one waits and looks again.
+    let stop_queue = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let queue = args.worker.then(|| {
+        let home = home.clone();
+        let roots = args.ingest_root.clone();
+        let stop = Arc::clone(&stop_queue);
+        std::thread::spawn(move || queue_worker(&home, &roots, &stop))
+    });
     let mut handles = Vec::new();
     for _ in 0..args.workers.max(1) {
         let server = Arc::clone(&server);
@@ -986,7 +996,54 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     for h in handles {
         let _ = h.join();
     }
+    stop_queue.store(true, Ordering::SeqCst);
+    if let Some(queue) = queue {
+        let _ = queue.join();
+    }
     Ok(())
+}
+
+/// The queue's worker beside the doors: it takes the queue when no other
+/// worker holds it and runs what is queued; when another worker has it, or
+/// the registry cannot be opened, it looks again a little later.
+fn queue_worker(home: &Home, roots: &[String], stop: &std::sync::atomic::AtomicBool) {
+    let stopped = || stop.load(Ordering::SeqCst);
+    while !stopped() {
+        let outcome = match home.open() {
+            Ok(mut registry) => {
+                let store = registry.store();
+                match crate::worker::claim(store, false) {
+                    Ok(worker) => crate::worker::run(
+                        home,
+                        store,
+                        worker,
+                        &crate::worker::Options {
+                            once: false,
+                            every: 5,
+                            ingest_roots: roots,
+                            quiet: true,
+                        },
+                        &stopped,
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.message),
+                    Err(nils_registry::job::Error::Busy { .. }) => Ok(()),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(why) = outcome {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "nils serve: the queue's worker: {why}");
+        }
+        for _ in 0..30 {
+            if stopped() {
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
 }
 
 fn respond(request: Request, reply: Reply) -> std::io::Result<()> {
