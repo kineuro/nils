@@ -4,6 +4,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.14] - 2026-09-13
+
 ### Fixed
 
 - A backup as installed could not be made. In a container the engine saw the registry and its backups at paths of its own rather than the ones the registry's places record, so a backup started from the desk was refused as not going to a backup place, and the engine's image had no `pg_dump`, which the backup of a registry kept in Postgres needs. The containers `nils setup` writes now mount the registry and the backups at the paths they have on the machine, the image carries the PostgreSQL client, and an install on the machine itself is told when `pg_dump` is missing. `nils backup` with no `--dir` writes to the backup place the registry's place names.
