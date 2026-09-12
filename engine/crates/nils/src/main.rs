@@ -41,6 +41,7 @@ mod supervise;
 mod timeline;
 mod tui;
 mod update;
+mod worker;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::day::Day;
 use nils_registry::home::{
@@ -508,6 +509,10 @@ struct ServeArgs {
     /// Where the backup job writes its archives (Wave 4c section 6.5)
     #[arg(long, value_name = "DIR")]
     backup_dir: Option<PathBuf>,
+    /// Run the jobs the doors queue, one at a time, beside the doors; without
+    /// it a queued job waits for `nils jobs work`
+    #[arg(long)]
+    worker: bool,
     /// Stop after serving this many requests (for tests)
     #[arg(long, hide = true)]
     requests: Option<usize>,
@@ -5622,18 +5627,7 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             every,
             ingest_root,
         } => {
-            // Wave 4c §6.6: the worker's own registered locations, handed to
-            // a probe by name; the queued command line carries no path.
-            let roots_env = ingest_root.join(";");
-            let worker = job::claim(
-                store,
-                &job::Claim {
-                    kind: "worker",
-                    name: "queue",
-                    args: serde_json::json!({ "once": once }),
-                },
-            )
-            .map_err(|e| match e {
+            let queue = crate::worker::claim(store, once).map_err(|e| match e {
                 job::Error::Busy { .. } => Exit {
                     code: BUSY,
                     message: e.to_string(),
@@ -5641,83 +5635,19 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                 other => fail(other.to_string()),
             })?;
             let cancel = stop_on_signal()?;
-            let mut ran = 0usize;
-            let outcome = loop {
-                if cancel.stop() {
-                    break Ok(());
-                }
-                if job::beat(store, worker, Some(&serde_json::json!({ "ran": ran })))
-                    .map_err(err)?
-                    == job::Asked::Cancel
-                {
-                    break Ok(());
-                }
-                let Some(next) = job::next_queued(store).map_err(err)? else {
-                    if once {
-                        break Ok(());
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(every.max(1)));
-                    continue;
-                };
-                if !job::take(store, next.id).map_err(err)? {
-                    continue;
-                }
-                let argv = next.argv().unwrap_or_default();
-                println!("job {}: nils {}", next.id, argv.join(" "));
-                // Wave 4c section 6.1: the roles the door recorded reach
-                // the verb, which runs under them and never under the
-                // worker's own.
-                let roles = next.args["roles"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str())
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    })
-                    .unwrap_or_default();
-                let raw = if next.args["may_project_raw"].as_bool() == Some(true) {
-                    "1"
-                } else {
-                    "0"
-                };
-                // The queued command line names no registry; the worker's
-                // is the one it runs in.
-                let status = std::process::Command::new(
-                    std::env::current_exe().map_err(|e| fail(e.to_string()))?,
-                )
-                .arg("--registry")
-                .arg(home.dir())
-                .args(&argv)
-                .env(job::ADOPT_VAR, next.id.to_string())
-                .env("NILS_PRINCIPAL", next.principal().unwrap_or(&actor()))
-                .env("NILS_JOB_ROLES", roles)
-                .env("NILS_JOB_RAW", raw)
-                .env("NILS_INGEST_ROOTS", &roots_env)
-                .env(
-                    nils_registry::actor::VAR,
-                    if next.args["actor"].is_object() {
-                        next.args["actor"].to_string()
-                    } else {
-                        nils_registry::actor::absent().to_string()
-                    },
-                )
-                .status();
-                // The verb adopted the row and finished it itself; the
-                // worker writes the outcome only when the verb did not.
-                let (state, error) = match status {
-                    Ok(s) if s.success() => (State::Done, None),
-                    Ok(s) => (State::Failed, Some(format!("exit status {s}"))),
-                    Err(e) => (State::Failed, Some(e.to_string())),
-                };
-                let now_state = job::show(store, next.id).map_err(err)?.map(|j| j.state);
-                if now_state.is_some_and(|s| !s.is_over()) || state == State::Failed {
-                    job::finish(store, next.id, state, error.as_deref()).map_err(err)?;
-                }
-                ran += 1;
-            };
-            let _ = job::finish(store, worker, State::Done, None);
-            outcome
+            crate::worker::run(
+                home,
+                store,
+                queue,
+                &crate::worker::Options {
+                    once,
+                    every,
+                    ingest_roots: &ingest_root,
+                    quiet: false,
+                },
+                &|| cancel.stop(),
+            )
+            .map(|_| ())
         }
     }
 }

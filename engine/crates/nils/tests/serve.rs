@@ -2011,3 +2011,41 @@ fn places_are_registry_objects_and_the_rules_hold_at_the_doors() {
     );
     assert!(audited.contains("\"place.add\""), "{audited}");
 }
+
+#[test]
+fn a_job_queued_at_the_door_runs_when_serve_runs_its_queue() {
+    let home = registry();
+    // every request counts toward the limit, and the ones not spent polling
+    // are spent at the end so the server stops
+    const LIMIT: usize = 90;
+    let server = Server::start(&home, LIMIT, &["--worker"], &[]);
+    let (status, queued) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["fingerprint", "--name", "by-the-worker"], "name": "worker"}"#),
+        None,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let job = queued["job"].as_i64().unwrap();
+    let mut used = 1;
+    let mut shown = serde_json::Value::Null;
+    while used < LIMIT - 1 {
+        let (status, now) = server.request("GET", &format!("/api/jobs/{job}"), None, None);
+        used += 1;
+        assert_eq!(status, 200, "{now}");
+        shown = now;
+        if matches!(shown["state"].as_str(), Some("done" | "failed")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert_eq!(
+        shown["state"], "done",
+        "no worker was started by hand: {shown}"
+    );
+    while used < LIMIT {
+        let _ = server.request("GET", "/api/capabilities", None, None);
+        used += 1;
+    }
+    server.finish();
+}
