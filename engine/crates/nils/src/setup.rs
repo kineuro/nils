@@ -158,6 +158,98 @@ fn model_reach_note(runtime: Runtime, url: &str, pasta: fn() -> bool) -> Option<
     })
 }
 
+/// A Postgres connection string as the engine must use it from where it
+/// runs: on this machine as it was typed, in a container with this
+/// machine's loopback named the way a container reaches it. Both forms the
+/// driver takes are read, a URL and `key=value` pairs; anything else is left
+/// as it was.
+fn dsn_for(runtime: Runtime, dsn: &str) -> String {
+    let Some(alias) = host_from_container(runtime) else {
+        return dsn.to_string();
+    };
+    let loopback = |host: &str| matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1");
+    if let Some(scheme_end) = dsn.find("://") {
+        let (head, rest) = dsn.split_at(scheme_end + 3);
+        let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
+        let (authority, tail) = rest.split_at(authority_end);
+        let (userinfo, hostport) = match authority.rfind('@') {
+            Some(at) => authority.split_at(at + 1),
+            None => ("", authority),
+        };
+        let host = if hostport.starts_with('[') {
+            hostport.find(']').map_or(hostport, |end| &hostport[..=end])
+        } else {
+            hostport.split(':').next().unwrap_or(hostport)
+        };
+        if loopback(host) {
+            return format!("{head}{userinfo}{alias}{}{tail}", &hostport[host.len()..]);
+        }
+        return dsn.to_string();
+    }
+    let mut changed = false;
+    let words: Vec<String> = dsn
+        .split_whitespace()
+        .map(|word| match word.split_once('=') {
+            Some(("host", host)) if loopback(host) => {
+                changed = true;
+                format!("host={alias}")
+            }
+            _ => word.to_string(),
+        })
+        .collect();
+    if changed {
+        words.join(" ")
+    } else {
+        dsn.to_string()
+    }
+}
+
+/// What a person should know when the engine runs in a container and
+/// Postgres is on this machine's loopback: how it is reached, or what
+/// Postgres must allow. Nothing when the engine runs on the machine or the
+/// database is somewhere else.
+fn postgres_reach_note(runtime: Runtime, dsn: &str, pasta: fn() -> bool) -> Option<String> {
+    if dsn_for(runtime, dsn) == dsn {
+        return None;
+    }
+    Some(match runtime {
+        Runtime::Podman if pasta() => "the engine runs in the pod and reaches this machine's \
+             Postgres as host.containers.internal, which podman hands the pod"
+            .to_string(),
+        Runtime::Podman => "podman here does not network through pasta, so the pod cannot \
+             reach this machine's 127.0.0.1; give the connection string an address the pod \
+             reaches"
+            .to_string(),
+        _ => "the engine runs in a container and reaches this machine's Postgres as \
+             host.docker.internal, on docker's bridge: Postgres must listen there \
+             (listen_addresses) and let that network in (pg_hba.conf), not only 127.0.0.1"
+            .to_string(),
+    })
+}
+
+/// The connection string an install wrote into its registry, as the engine
+/// uses it.
+fn registry_dsn(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("registry").join("nils.toml")).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    value.get("dsn")?.as_str().map(str::to_string)
+}
+
+/// An error and every cause under it, on one line: the driver's own
+/// "error connecting to server" says nothing without the refusal beneath.
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut out = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let said = cause.to_string();
+        if !out.contains(&said) {
+            out = format!("{out}: {said}");
+        }
+        source = cause.source();
+    }
+    out
+}
+
 /// The same address the other way: what a person typed, from what the
 /// gateway dials, for a machine run after a container one.
 fn model_address_on_machine(url: &str) -> String {
@@ -927,9 +1019,10 @@ pub(crate) struct Plan {
     pub(crate) service: bool,
     pub(crate) channel: Option<String>,
     pub(crate) version: String,
-    /// Whether the pod is given this machine's loopback, so a gateway inside
-    /// it reaches a model server listening on 127.0.0.1 here. Rootless podman
-    /// with pasta, and only with the assistant.
+    /// Whether the pod is given this machine's loopback, so a gateway or an
+    /// engine inside it reaches a model server or a Postgres listening on
+    /// 127.0.0.1 here. Rootless podman with pasta, and only when something
+    /// in the pod needs it.
     pub(crate) host_loopback: bool,
 }
 
@@ -1047,7 +1140,7 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
         runtime: Runtime::parse(&state.runtime).unwrap_or(Runtime::Machine),
         backend: match state.backend.strip_prefix("postgres:") {
             Some(schema) => BackendChoice::Postgres {
-                dsn: String::new(),
+                dsn: registry_dsn(&dir).unwrap_or_default(),
                 schema: schema.to_string(),
             },
             None => BackendChoice::Sqlite,
@@ -1067,7 +1160,8 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
         channel: channel.map(str::to_string),
         version: update::VERSION.to_string(),
         host_loopback: state.runtime == "podman"
-            && state.parts.contains_key("assistant")
+            && (state.parts.contains_key("assistant")
+                || registry_dsn(&dir).is_some_and(|d| d.contains("host.containers.internal")))
             && podman_has_pasta(),
     }
 }
@@ -1287,12 +1381,12 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
     if plan.has(Part::Assistant) {
         // the gateway, on this machine's loopback only, for the key setup makes
         let _ = write!(pod, " -p 127.0.0.1:{p}:{p}", p = plan.ports.kvasir);
-        if plan.host_loopback {
-            let _ = write!(
-                pod,
-                " --network pasta:--map-host-loopback={HOST_LOOPBACK_IN_POD}"
-            );
-        }
+    }
+    if plan.host_loopback {
+        let _ = write!(
+            pod,
+            " --network pasta:--map-host-loopback={HOST_LOOPBACK_IN_POD}"
+        );
     }
     let mut out = vec![pod];
     let mut engine = format!(
@@ -1342,8 +1436,13 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
     };
     let mut out = vec!["docker network create nils".to_string()];
     let mut engine = format!(
-        "docker run -d --network nils --name nils-engine {}-v {}:{IN_REGISTRY}",
+        "docker run -d --network nils --name nils-engine {}{}-v {}:{IN_REGISTRY}",
         docker_user(),
+        if matches!(plan.backend, BackendChoice::Postgres { .. }) {
+            "--add-host host.docker.internal:host-gateway "
+        } else {
+            ""
+        },
         plan.registry().display()
     );
     if let Some(source) = &plan.source {
@@ -1399,6 +1498,10 @@ pub(crate) fn docker_compose(plan: &Plan) -> String {
         "    command: {}",
         engine_args(plan, IN_REGISTRY, "/srv/nils/backups").join(" ")
     );
+    if matches!(plan.backend, BackendChoice::Postgres { .. }) {
+        let _ = writeln!(out, "    extra_hosts:");
+        let _ = writeln!(out, "      - \"host.docker.internal:host-gateway\"");
+    }
     let _ = writeln!(out, "    volumes:");
     let _ = writeln!(out, "      - {}:{IN_REGISTRY}", plan.registry().display());
     let _ = writeln!(
@@ -1474,12 +1577,12 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
     let mut pod = format!("[Pod]\nPodName=nils\nPublishPort={publish}\n");
     if plan.has(Part::Assistant) {
         let _ = writeln!(pod, "PublishPort=127.0.0.1:{p}:{p}", p = plan.ports.kvasir);
-        if plan.host_loopback {
-            let _ = writeln!(
-                pod,
-                "Network=pasta:--map-host-loopback={HOST_LOOPBACK_IN_POD}"
-            );
-        }
+    }
+    if plan.host_loopback {
+        let _ = writeln!(
+            pod,
+            "Network=pasta:--map-host-loopback={HOST_LOOPBACK_IN_POD}"
+        );
     }
     let _ = write!(pod, "\n[Install]\nWantedBy=default.target\n");
     let mut out = vec![("nils.pod".to_string(), pod)];
@@ -1783,7 +1886,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         if chosen == 0 {
             BackendChoice::Sqlite
         } else {
-            let dsn = match &args.dsn {
+            let mut dsn = match &args.dsn {
                 Some(d) => d.clone(),
                 None => console.line("The connection string", "postgres://nils@127.0.0.1/nils"),
             };
@@ -1791,6 +1894,45 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
                 Some(s) => s.clone(),
                 None => console.line("The schema", "nils"),
             };
+            // Tried now, from this machine, so a database that is not there
+            // is said here rather than after the plan and the images.
+            loop {
+                match nils_registry::store::Store::connect_postgres(&dsn, &schema) {
+                    Ok(_) => {
+                        console.note(&format!(
+                            "the database at {} answered",
+                            crate::redact_dsn(&dsn)
+                        ));
+                        break;
+                    }
+                    Err(e) => {
+                        console.note(&format!(
+                            "the database at {} did not answer: {}",
+                            crate::redact_dsn(&dsn),
+                            with_causes(&e)
+                        ));
+                        if args.print {
+                            break;
+                        }
+                        if !console.interactive() {
+                            return Err(usage(
+                                "start the database, or run with --backend sqlite; nothing \
+                                 was written",
+                            ));
+                        }
+                        if !console.yes_no("Enter another connection string?", true) {
+                            break;
+                        }
+                        let again = console.line("The connection string", "");
+                        if !again.trim().is_empty() {
+                            dsn = again.trim().to_string();
+                        }
+                    }
+                }
+            }
+            if let Some(note) = postgres_reach_note(runtime, &dsn, podman_has_pasta) {
+                console.note(&note);
+            }
             BackendChoice::Postgres { dsn, schema }
         }
     };
@@ -1986,8 +2128,11 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         }
     };
 
-    let host_loopback =
-        runtime == Runtime::Podman && parts.contains(&Part::Assistant) && podman_has_pasta();
+    let postgres_here = matches!(&backend, BackendChoice::Postgres { dsn, .. }
+        if dsn_for(Runtime::Podman, dsn) != *dsn);
+    let host_loopback = runtime == Runtime::Podman
+        && (parts.contains(&Part::Assistant) || postgres_here)
+        && podman_has_pasta();
     let plan = Plan {
         dir,
         parts,
@@ -2687,8 +2832,9 @@ fn make_registry(
         // costs a sentence rather than half a registry.
         if let Err(e) = nils_registry::store::Store::connect_postgres(dsn, schema) {
             return Err(fail(format!(
-                "the database refused the connection: {e}\n  check the connection string, that \
-                 the database exists, and that the role may create a schema"
+                "the database refused the connection: {}\n  check the connection string, that \
+                 the database exists, and that the role may create a schema",
+                with_causes(&e)
             )));
         }
         console.note("the database answered");
@@ -2714,6 +2860,37 @@ fn make_registry(
         } else {
             Vec::new()
         };
+        // Postgres is reached from inside the container, at the address a
+        // container names this machine by, and the registry is made there:
+        // left out, the container made a SQLite registry beside a plan that
+        // said Postgres.
+        let mut network: Vec<String> = Vec::new();
+        let mut backend: Vec<String> = Vec::new();
+        if let BackendChoice::Postgres { dsn, schema } = &plan.backend {
+            backend = vec![
+                "--backend".to_string(),
+                "postgres".to_string(),
+                "--dsn".to_string(),
+                dsn_for(plan.runtime, dsn),
+                "--schema".to_string(),
+                schema.clone(),
+            ];
+            match plan.runtime {
+                Runtime::Docker => {
+                    network = vec![
+                        "--add-host".to_string(),
+                        "host.docker.internal:host-gateway".to_string(),
+                    ];
+                }
+                Runtime::Podman if plan.host_loopback => {
+                    network = vec![
+                        "--network".to_string(),
+                        format!("pasta:--map-host-loopback={HOST_LOOPBACK_IN_POD}"),
+                    ];
+                }
+                _ => {}
+            }
+        }
         let mut child = Command::new(engine)
             .args(["run", "--rm", "-i"])
             .args(&user)
@@ -2744,13 +2921,23 @@ fn make_registry(
         let made = Command::new(engine)
             .args(["run", "--rm"])
             .args(&user)
+            .args(&network)
             .args(["-v", &mount, &tag])
             .args(["--registry", IN_REGISTRY, "init", "--key", "nils"])
+            .args(&backend)
             .output()
             .map_err(|e| fail(format!("{engine}: {e}")))?;
         if !made.status.success() {
+            let reach = match &plan.backend {
+                BackendChoice::Postgres { dsn, .. } => {
+                    postgres_reach_note(plan.runtime, dsn, podman_has_pasta)
+                        .map(|note| format!("\n  {note}"))
+                        .unwrap_or_default()
+                }
+                BackendChoice::Sqlite => String::new(),
+            };
             return Err(fail(format!(
-                "the registry could not be made inside the container: {}",
+                "the registry could not be made inside the container: {}{reach}",
                 said(&made)
             )));
         }
@@ -5880,6 +6067,86 @@ mod tests {
         assert!(moved.contains("NILS_URL=http://127.0.0.1:8437"), "{moved}");
         assert!(!moved.contains("HOST="), "{moved}");
         assert!(moved.contains("ASSISTANT_MODEL=mine"), "{moved}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_postgres_on_this_machine_is_named_the_way_a_container_reaches_it() {
+        let url = "postgres://nils:secret@127.0.0.1:5432/nils?sslmode=disable";
+        assert_eq!(dsn_for(Runtime::Machine, url), url);
+        assert_eq!(
+            dsn_for(Runtime::Docker, url),
+            "postgres://nils:secret@host.docker.internal:5432/nils?sslmode=disable"
+        );
+        assert_eq!(
+            dsn_for(Runtime::Podman, "postgresql://localhost/nils"),
+            "postgresql://host.containers.internal/nils"
+        );
+        assert_eq!(
+            dsn_for(Runtime::Podman, "postgres://nils@[::1]:5433/nils"),
+            "postgres://nils@host.containers.internal:5433/nils"
+        );
+        assert_eq!(
+            dsn_for(
+                Runtime::Docker,
+                "host=localhost port=5432 user=nils dbname=nils"
+            ),
+            "host=host.docker.internal port=5432 user=nils dbname=nils"
+        );
+        // somewhere else, a socket, or a look-alike is left as it was
+        for other in [
+            "postgres://nils@db.example.org/nils",
+            "postgres://127.0.0.1@db.example.org/nils",
+            "postgres://nils@127.0.0.10/nils",
+            "host=/var/run/postgresql user=nils",
+        ] {
+            assert_eq!(dsn_for(Runtime::Docker, other), other);
+        }
+        assert!(postgres_reach_note(Runtime::Machine, url, || true).is_none());
+        let docker = postgres_reach_note(Runtime::Docker, url, || true).unwrap();
+        assert!(docker.contains("pg_hba.conf"), "{docker}");
+        let no_pasta = postgres_reach_note(Runtime::Podman, url, || false).unwrap();
+        assert!(no_pasta.contains("pasta"), "{no_pasta}");
+    }
+
+    #[test]
+    fn a_pod_or_a_container_reaches_a_postgres_on_this_machine() {
+        let mut plan = plan(Runtime::Podman);
+        plan.backend = BackendChoice::Postgres {
+            dsn: "postgres://nils@127.0.0.1/nils".to_string(),
+            schema: "nils".to_string(),
+        };
+        plan.host_loopback = true;
+        let pod = quadlets(&plan).remove(0).1;
+        assert!(
+            pod.contains("Network=pasta:--map-host-loopback=169.254.1.2"),
+            "the pod gets this machine's loopback without the assistant too: {pod}"
+        );
+        assert!(podman_commands(&plan)[0].contains("--network pasta:--map-host-loopback"));
+
+        plan.runtime = Runtime::Docker;
+        let compose = docker_compose(&plan);
+        let engine = compose.split("  desk:").next().unwrap_or_default();
+        assert!(
+            engine.contains("host.docker.internal:host-gateway"),
+            "{compose}"
+        );
+        assert!(docker_commands(&plan)[1].contains("--add-host host.docker.internal:host-gateway"));
+        plan.backend = BackendChoice::Sqlite;
+        assert!(!docker_compose(&plan).contains("host-gateway"));
+
+        // a repair reads back what the install wrote into its registry
+        let dir = scratch("registry-dsn");
+        std::fs::create_dir_all(dir.join("registry")).unwrap();
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            "backend = \"postgres\"\ndsn = \"postgres://nils@host.containers.internal/nils\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            registry_dsn(&dir).as_deref(),
+            Some("postgres://nils@host.containers.internal/nils")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

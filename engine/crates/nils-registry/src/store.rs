@@ -258,7 +258,19 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+/// The driver's error as the source, so what lies under "error connecting
+/// to server" (the refusal, the timeout, the name that did not resolve) can
+/// be said.
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Sqlite(e) => Some(e),
+            Error::Postgres(e) => Some(e),
+            Error::Io(e) => Some(e),
+            Error::Message(_) => None,
+        }
+    }
+}
 
 impl From<rusqlite::Error> for Error {
     fn from(e: rusqlite::Error) -> Error {
