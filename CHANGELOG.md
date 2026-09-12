@@ -8,6 +8,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - A backup as installed could not be made. In a container the engine saw the registry and its backups at paths of its own rather than the ones the registry's places record, so a backup started from the desk was refused as not going to a backup place, and the engine's image had no `pg_dump`, which the backup of a registry kept in Postgres needs. The containers `nils setup` writes now mount the registry and the backups at the paths they have on the machine, the image carries the PostgreSQL client, and an install on the machine itself is told when `pg_dump` is missing. `nils backup` with no `--dir` writes to the backup place the registry's place names.
 - A job queued at a door, such as a digest or a backup started from the desk, waited for ever: nothing ran the queue unless someone started `nils jobs work`. `nils serve --worker` now runs the queue beside the doors, one job at a time, and every install `nils setup` writes starts the engine with it. A worker whose job runs long keeps saying it is alive, so a long digest no longer reads as a worker that stopped.
+- `nils update` replaced the packs directory whole with the release's, so a pack a deployment had written for scans of its own was deleted. Only the packs the release carries are replaced now, and the update says which of the others it kept. `nils setup` puts packs in place the same way, so it keeps them too.
 
 ## [1.0.0-alpha.13] - 2026-09-12
 

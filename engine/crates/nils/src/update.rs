@@ -301,23 +301,61 @@ pub(crate) fn refresh_packs(base: &str, version: &str, dir: &Path) -> Result<Str
         return Err("the release's packs.tar.gz holds no packs directory".to_string());
     }
     let aside = parent.join(format!(".nils-packs-old-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&aside);
+    let swapped = swap_packs(&fresh, dir, &aside);
+    let _ = std::fs::remove_dir_all(&staging);
+    swapped
+}
+
+/// Put the release's packs in `dir`. A pack the release does not carry, one
+/// a deployment wrote for scans of its own, is kept: an update replaces only
+/// the packs it brings. Everything is a rename inside one parent, so nothing
+/// is copied, and what could not be put back is left where it was set aside
+/// and never removed.
+fn swap_packs(fresh: &Path, dir: &Path, aside: &Path) -> Result<String, String> {
+    let _ = std::fs::remove_dir_all(aside);
+    let mut own: Vec<std::ffi::OsString> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.file_name())
+                .filter(|name| std::fs::symlink_metadata(fresh.join(name)).is_err())
+                .collect()
+        })
+        .unwrap_or_default();
+    own.sort();
     if dir.exists() {
-        std::fs::rename(dir, &aside).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::rename(dir, aside).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    match std::fs::rename(&fresh, dir) {
-        Ok(()) => {
-            let _ = std::fs::remove_dir_all(&aside);
-            let _ = std::fs::remove_dir_all(&staging);
-            Ok(format!("the packs in {} are the release's", dir.display()))
+    if let Err(e) = std::fs::rename(fresh, dir) {
+        if aside.exists() {
+            let _ = std::fs::rename(aside, dir);
         }
-        Err(e) => {
-            if aside.exists() {
-                let _ = std::fs::rename(&aside, dir);
-            }
-            let _ = std::fs::remove_dir_all(&staging);
-            Err(format!("{}: {e}", dir.display()))
-        }
+        return Err(format!("{}: {e}", dir.display()));
+    }
+    let names = |list: &[std::ffi::OsString]| {
+        list.iter()
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let stranded: Vec<_> = own
+        .iter()
+        .filter(|name| std::fs::rename(aside.join(name), dir.join(name)).is_err())
+        .cloned()
+        .collect();
+    let said = format!("the packs in {} are the release's", dir.display());
+    if !stranded.is_empty() {
+        return Ok(format!(
+            "{said}; the deployment's own {} could not be put back and are in {}",
+            names(&stranded),
+            aside.display()
+        ));
+    }
+    let _ = std::fs::remove_dir_all(aside);
+    if own.is_empty() {
+        Ok(said)
+    } else {
+        Ok(format!("{said}, and its own are kept: {}", names(&own)))
     }
 }
 
@@ -475,6 +513,44 @@ mod tests {
         assert_eq!(file_of("windows-x86_64"), "nils-windows-x86_64.exe");
         let target = host_target();
         assert!(!target.contains("aarch64"), "{target} spells arm64");
+    }
+
+    #[test]
+    fn an_update_replaces_the_releases_packs_and_keeps_a_deployments_own() {
+        let root = std::env::temp_dir().join(format!("nils-packs-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (fresh, dir, aside) = (root.join("fresh"), root.join("packs"), root.join("aside"));
+        for (path, text) in [
+            (fresh.join("mri/pack.toml"), "the release's"),
+            (fresh.join("clinical/pack.toml"), "the release's"),
+            (dir.join("mri/pack.toml"), "the one before"),
+            (dir.join("mri/gone.toml"), "no longer in the release"),
+            (dir.join("clinical/pack.toml"), "the one before"),
+            (dir.join("lab/pack.toml"), "the deployment's own"),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+        }
+        let said = swap_packs(&fresh, &dir, &aside).unwrap();
+        assert!(said.ends_with("its own are kept: lab"), "{said}");
+        let read = |p: &str| std::fs::read_to_string(dir.join(p)).unwrap();
+        assert_eq!(read("mri/pack.toml"), "the release's");
+        assert_eq!(read("clinical/pack.toml"), "the release's");
+        assert!(
+            !dir.join("mri/gone.toml").exists(),
+            "a pack the release brings is the release's, whole"
+        );
+        assert_eq!(read("lab/pack.toml"), "the deployment's own");
+        assert!(!aside.exists() && !fresh.exists());
+
+        // where there were no packs, the release's are put in place
+        let fresh = root.join("fresh-again");
+        std::fs::create_dir_all(fresh.join("mri")).unwrap();
+        let none = root.join("none");
+        let said = swap_packs(&fresh, &none, &aside).unwrap();
+        assert!(!said.contains("kept"), "{said}");
+        assert!(none.join("mri").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
