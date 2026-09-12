@@ -382,6 +382,84 @@ fn a_rerun_follows_the_source_and_every_source_place_is_read() {
     o.says(&format!("--ingest-root scanner2={}", added.display()));
 }
 
+/// A desk registered at a provider already is named with flags: the desk
+/// gets its [oidc] table and the client's secret beside it, the record keeps
+/// the provider, and a later run gives the engine the provider's trust.
+#[test]
+fn a_provider_named_with_flags_is_written_for_the_desk_and_the_engine() {
+    let releases = Releases::new("99.0.0");
+    let nils = Installed::new("nils-setup-provider");
+    let config = TempDir::new("nils-setup-provider-config");
+    let base = TempDir::new("nils-setup-provider-base");
+    let dir = base.path().join("nils");
+    let secret = base.path().join("secret");
+    std::fs::write(&secret, "s3cret\n").unwrap();
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "desk",
+            "--mode",
+            "oidc",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--oidc-issuer",
+            "https://auth.example.org/application/o/nils/",
+            "--oidc-client-id",
+            "abc123",
+            "--oidc-client-secret-file",
+            secret.to_str().unwrap(),
+            "--oidc-jwks",
+            "https://auth.example.org/application/o/nils/jwks/",
+            "--channel",
+            &releases.url(),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    let desk = std::fs::read_to_string(dir.join("desk").join("nils-desk.toml")).unwrap();
+    assert!(desk.contains("\n[oidc]\n"), "{desk}");
+    assert!(desk.contains("client_id = \"abc123\""), "{desk}");
+    let kept = dir.join("desk").join("client-secret");
+    assert_eq!(std::fs::read_to_string(&kept).unwrap().trim(), "s3cret");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(&kept).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert!(
+        !o.stdout.contains("nils-desk register --authentik"),
+        "{}",
+        o.stdout
+    );
+    let state = state_of(config.path());
+    assert!(state.contains("abc123"), "{state}");
+
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--print",
+            "--runtime",
+            "podman",
+            "--parts",
+            "desk",
+            "--mode",
+            "oidc",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--service",
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    o.says("--oidc-trust issuer=https://auth.example.org/application/o/nils/,audience=abc123");
+}
+
 /// A machine install carries no rule packs in the binary, so it has to take
 /// them from the release. Without them the engine starts saying `packs none`
 /// and refuses to digest anything, which is the whole of what it is for.
