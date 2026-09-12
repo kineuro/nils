@@ -39,6 +39,7 @@ mod setup;
 mod summary;
 mod supervise;
 mod timeline;
+mod tui;
 mod update;
 use nils_digest::{Cancel, Cancelled, DigestError, Filter, Report, Rule, Settings};
 use nils_registry::day::Day;
