@@ -4,6 +4,16 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.9] - 2026-09-12
+
+Postgres with containers, found on the first docker install that chose it.
+
+### Fixed
+
+- A container install made a SQLite registry when Postgres was chosen. The engine's container now makes the registry on Postgres, using this machine's address as a container reaches it: `host.containers.internal` in a pod, handed this machine's loopback, and `host.docker.internal` on docker, where Postgres must listen on the bridge. The engine's container gets the same address when it runs.
+- The Postgres connection string was tried only after the plan was accepted and the images were pulled. Step 4 now tries it as soon as it is given, says whether the database answered, and offers to enter another. Without a terminal it stops there and writes nothing.
+- A connection that failed said only "error connecting to server". The reason under it, such as a refused connection, is now shown.
+
 ## [1.0.0-alpha.8] - 2026-09-11
 
 Asked for after alpha.7's first container install. It also carries a port fix found getting ready for that install.
