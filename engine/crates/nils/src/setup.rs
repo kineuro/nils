@@ -88,7 +88,6 @@ const KVASIR_REPO: &str = "https://github.com/kineuro/kvasir";
 const ASSISTANT_REPO: &str = "https://github.com/kineuro/nils-assistant";
 
 /// Inside a container, everything lives under one prefix.
-const IN_REGISTRY: &str = "/srv/nils/registry";
 const IN_DESK: &str = "/srv/nils/desk";
 
 /// The Postgres a setup runs for the registry when asked to: the official
@@ -2196,19 +2195,22 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
         );
     }
     let mut out = vec![pod];
-    let mut engine = format!(
-        "podman run -d --pod nils --name nils-engine -v {}:{IN_REGISTRY}:U",
-        plan.registry().display()
+    // The registry and the backups are mounted at the paths they have on this
+    // machine, so the places the registry records are paths the engine sees.
+    let (registry, backups) = (
+        plan.registry().display().to_string(),
+        plan.dir.join("backups").display().to_string(),
     );
+    let mut engine =
+        format!("podman run -d --pod nils --name nils-engine -v {registry}:{registry}:U");
     if let Some(source) = &plan.source {
         let _ = write!(engine, " -v {0}:{0}:ro", source.display());
     }
     let _ = write!(
         engine,
-        " -v {}:/srv/nils/backups:U {ENGINE_IMAGE}:{} {}",
-        plan.dir.join("backups").display(),
+        " -v {backups}:{backups}:U {ENGINE_IMAGE}:{} {}",
         plan.tag(),
-        engine_args(plan, IN_REGISTRY, "/srv/nils/backups").join(" ")
+        engine_args(plan, &registry, &backups).join(" ")
     );
     out.push(engine);
     if plan.has(Part::Desk) {
@@ -2242,25 +2244,27 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
         Reach::Network(_) => format!("{p}:{p}", p = plan.ports.desk),
     };
     let mut out = vec!["docker network create nils".to_string()];
+    let (registry, backups) = (
+        plan.registry().display().to_string(),
+        plan.dir.join("backups").display().to_string(),
+    );
     let mut engine = format!(
-        "docker run -d --network nils --name nils-engine {}{}-v {}:{IN_REGISTRY}",
+        "docker run -d --network nils --name nils-engine {}{}-v {registry}:{registry}",
         docker_user(),
         if matches!(plan.backend, BackendChoice::Postgres { .. }) {
             "--add-host host.docker.internal:host-gateway "
         } else {
             ""
         },
-        plan.registry().display()
     );
     if let Some(source) = &plan.source {
         let _ = write!(engine, " -v {0}:{0}:ro", source.display());
     }
     let _ = write!(
         engine,
-        " -v {}:/srv/nils/backups {ENGINE_IMAGE}:{} {}",
-        plan.dir.join("backups").display(),
+        " -v {backups}:{backups} {ENGINE_IMAGE}:{} {}",
         plan.tag(),
-        engine_args(plan, IN_REGISTRY, "/srv/nils/backups").join(" ")
+        engine_args(plan, &registry, &backups).join(" ")
     );
     out.push(engine);
     if plan.has(Part::Desk) {
@@ -2300,22 +2304,22 @@ pub(crate) fn docker_compose(plan: &Plan) -> String {
         let _ = writeln!(out, "    user: \"{}\"", as_this_account());
     }
     let _ = writeln!(out, "    restart: unless-stopped");
+    let (registry, backups) = (
+        plan.registry().display().to_string(),
+        plan.dir.join("backups").display().to_string(),
+    );
     let _ = writeln!(
         out,
         "    command: {}",
-        engine_args(plan, IN_REGISTRY, "/srv/nils/backups").join(" ")
+        engine_args(plan, &registry, &backups).join(" ")
     );
     if matches!(plan.backend, BackendChoice::Postgres { .. }) {
         let _ = writeln!(out, "    extra_hosts:");
         let _ = writeln!(out, "      - \"host.docker.internal:host-gateway\"");
     }
     let _ = writeln!(out, "    volumes:");
-    let _ = writeln!(out, "      - {}:{IN_REGISTRY}", plan.registry().display());
-    let _ = writeln!(
-        out,
-        "      - {}:/srv/nils/backups",
-        plan.dir.join("backups").display()
-    );
+    let _ = writeln!(out, "      - {registry}:{registry}");
+    let _ = writeln!(out, "      - {backups}:{backups}");
     if let Some(source) = &plan.source {
         let _ = writeln!(out, "      - {0}:{0}:ro", source.display());
     }
@@ -2400,23 +2404,19 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
     engine.push_str("\n[Container]\n");
     let _ = writeln!(engine, "Image={ENGINE_IMAGE}:{}", plan.tag());
     let _ = writeln!(engine, "Pod=nils.pod");
-    let _ = writeln!(
-        engine,
-        "Volume={}:{IN_REGISTRY}:U",
-        plan.registry().display()
+    let (registry, backups) = (
+        plan.registry().display().to_string(),
+        plan.dir.join("backups").display().to_string(),
     );
-    let _ = writeln!(
-        engine,
-        "Volume={}:/srv/nils/backups:U",
-        plan.dir.join("backups").display()
-    );
+    let _ = writeln!(engine, "Volume={registry}:{registry}:U");
+    let _ = writeln!(engine, "Volume={backups}:{backups}:U");
     if let Some(source) = &plan.source {
         let _ = writeln!(engine, "Volume={0}:{0}:ro", source.display());
     }
     let _ = writeln!(
         engine,
         "Exec={}",
-        engine_args(plan, IN_REGISTRY, "/srv/nils/backups").join(" ")
+        engine_args(plan, &registry, &backups).join(" ")
     );
     let _ = write!(engine, "\n[Install]\nWantedBy=default.target\n");
     out.push(("nils-engine.container".to_string(), engine));
@@ -2458,10 +2458,17 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
 /// A Containerfile from a binary already downloaded, for a machine that
 /// cannot pull the published image.
 pub(crate) fn containerfile(part: &str) -> String {
+    // the engine backs a Postgres registry up with pg_dump
+    let pg_dump = if part == "nils" {
+        "RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client \\\n\
+         \x20&& rm -rf /var/lib/apt/lists/*\n"
+    } else {
+        ""
+    };
     format!(
         "# Written by nils setup, from the release binary beside it.\n\
          FROM docker.io/library/debian:trixie-slim\n\
-         RUN groupadd -g 1500 nils && useradd -u 1500 -g 1500 -M -d /srv/nils nils \\\n\
+         {pg_dump}RUN groupadd -g 1500 nils && useradd -u 1500 -g 1500 -M -d /srv/nils nils \\\n\
          \x20&& mkdir -p /srv/nils && chown -R nils:nils /srv/nils\n\
          COPY {part} /usr/local/bin/{part}\n\
          USER nils\nWORKDIR /srv/nils\nENTRYPOINT [\"{part}\"]\n"
@@ -3824,6 +3831,17 @@ fn place(
         console.begin(Stage::Registry);
         make_registry(plan, &home, console, args, answers.passphrase.as_deref())?;
     }
+    // A Postgres registry is backed up with pg_dump. The engine's image
+    // carries it; on the machine it has to be there already.
+    if plan.runtime == Runtime::Machine
+        && matches!(plan.backend, BackendChoice::Postgres { .. })
+        && !have("pg_dump")
+    {
+        console.say("the registry's backups need pg_dump, which is not on this machine");
+        console.say(&format!(
+            "install the PostgreSQL {POSTGRES_MAJOR} client: postgresql-client-{POSTGRES_MAJOR} on Debian and Ubuntu"
+        ));
+    }
 
     // The desk.
     if plan.has(Part::Desk) {
@@ -4258,9 +4276,10 @@ fn make_registry(
 
     if plan.runtime.container() {
         let engine = plan.runtime.name();
+        // at the path it has on this machine, as the engine's service mounts it
+        let inside = plan.registry().display().to_string();
         let mount = format!(
-            "{}:{IN_REGISTRY}{}",
-            plan.registry().display(),
+            "{inside}:{inside}{}",
             if plan.runtime == Runtime::Podman {
                 ":U"
             } else {
@@ -4311,7 +4330,7 @@ fn make_registry(
             .args(["run", "--rm", "-i"])
             .args(&user)
             .args(["-v", &mount, &tag])
-            .args(["--registry", IN_REGISTRY, "key", "add", "nils"])
+            .args(["--registry", &inside, "key", "add", "nils"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -4339,7 +4358,7 @@ fn make_registry(
             .args(&user)
             .args(&network)
             .args(["-v", &mount, &tag])
-            .args(["--registry", IN_REGISTRY, "init", "--key", "nils"])
+            .args(["--registry", &inside, "init", "--key", "nils"])
             .args(&backend)
             .output()
             .map_err(|e| fail(format!("{engine}: {e}")))?;
@@ -7640,11 +7659,29 @@ mod tests {
 
     #[test]
     fn podman_runs_a_pod_and_owns_its_mounts() {
-        let commands = podman_commands(&plan(Runtime::Podman));
+        let p = plan(Runtime::Podman);
+        let commands = podman_commands(&p);
         assert!(commands[0].contains("pod create --name nils -p 127.0.0.1:7200:7200"));
         let engine = &commands[1];
         assert!(engine.contains("--pod nils"), "{engine}");
-        assert!(engine.contains(":/srv/nils/registry:U"), "{engine}");
+        // at the paths the registry's places record, so a backup finds its place
+        let (registry, backups) = (p.registry(), p.dir.join("backups"));
+        assert!(
+            engine.contains(&format!("-v {0}:{0}:U", registry.display())),
+            "{engine}"
+        );
+        assert!(
+            engine.contains(&format!("-v {0}:{0}:U", backups.display())),
+            "{engine}"
+        );
+        assert!(
+            engine.contains(&format!(
+                "--registry {} --backup-dir {}",
+                registry.display(),
+                backups.display()
+            )),
+            "{engine}"
+        );
         assert!(
             engine.contains("-v /data/source:/data/source:ro"),
             "{engine}"

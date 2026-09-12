@@ -7226,7 +7226,8 @@ mod tests {
 
 #[derive(Debug, Args)]
 struct BackupArgs {
-    /// Where the archive goes; <home>/backups by default
+    /// Where the archive goes; by default the backup place the registry's
+    /// place names, else <home>/backups
     #[arg(long, value_name = "DIR")]
     dir: Option<PathBuf>,
     #[arg(long)]
@@ -7429,7 +7430,11 @@ pub(crate) fn quarantine_doc(
 
 fn backup_command(home: &Home, args: BackupArgs) -> Result<(), Exit> {
     let mut registry = open(home)?;
-    let dir = args.dir.unwrap_or_else(|| home.dir().join("backups"));
+    let dir = match args.dir {
+        Some(dir) => dir,
+        None => registry_backup_place(&mut registry, home)?
+            .unwrap_or_else(|| home.dir().join("backups")),
+    };
     // Wave 5 section 10.2: an archive goes only to a backup place.
     require_place(&mut registry, nils_registry::place::Role::Backup, &dir)?;
     let manifest = backup::backup(home, &mut registry, &dir)?;
@@ -7453,6 +7458,25 @@ fn backup_command(home: &Home, args: BackupArgs) -> Result<(), Exit> {
         );
     }
     Ok(())
+}
+
+/// The backup place the registry's own place names, where it has one: where
+/// an archive goes when no directory is given.
+fn registry_backup_place(registry: &mut Registry, home: &Home) -> Result<Option<PathBuf>, Exit> {
+    use nils_registry::place::{self, Role};
+    let store = registry.store();
+    let Some(own) =
+        place::holding(store, Role::Registry, home.dir()).map_err(|e| fail(e.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let Some(name) = own.guarantees["backup"].as_str() else {
+        return Ok(None);
+    };
+    Ok(place::by_name(store, name)
+        .map_err(|e| fail(e.to_string()))?
+        .filter(|p| p.retired_at.is_none())
+        .map(|p| PathBuf::from(p.path)))
 }
 
 fn verify_command(args: VerifyArgs) -> Result<(), Exit> {
