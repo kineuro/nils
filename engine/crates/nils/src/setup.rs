@@ -299,6 +299,34 @@ pub(crate) struct SetupArgs {
     /// Who may sign in: off, local or oidc
     #[arg(long, value_name = "off|local|oidc")]
     mode: Option<String>,
+    /// With --mode oidc: the issuer of a provider the desk is registered at
+    #[arg(long, value_name = "URL")]
+    oidc_issuer: Option<String>,
+    /// With --oidc-issuer: the desk's client id there
+    #[arg(long, value_name = "ID")]
+    oidc_client_id: Option<String>,
+    /// With --oidc-issuer: a file holding the client's secret
+    #[arg(long, value_name = "FILE")]
+    oidc_client_secret_file: Option<PathBuf>,
+    /// With --oidc-issuer: where the provider publishes its keys, when its
+    /// discovery document does not say
+    #[arg(long, value_name = "URL")]
+    oidc_jwks: Option<String>,
+    /// With --oidc-issuer: the claim that carries the entitlements
+    #[arg(long, value_name = "NAME")]
+    oidc_roles_claim: Option<String>,
+    /// With --mode oidc: an Authentik to register the desk at
+    #[arg(long, value_name = "URL")]
+    authentik: Option<String>,
+    /// With --authentik: a file holding an API token of it
+    #[arg(long, value_name = "FILE")]
+    authentik_token_file: Option<PathBuf>,
+    /// With --authentik: the group whose members may use NILS
+    #[arg(long, value_name = "GROUP")]
+    authentik_users: Option<String>,
+    /// With --authentik: the group of those who run it, as operators and admins
+    #[arg(long, value_name = "GROUP")]
+    authentik_admins: Option<String>,
     /// Where it runs: machine, podman or docker
     #[arg(long, value_name = "machine|podman|docker")]
     runtime: Option<String>,
@@ -1716,6 +1744,9 @@ pub(crate) struct State {
     /// uninstall and is started again by the next setup.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) unfinished: bool,
+    /// The provider the desk signs people in at, in `oidc` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) oidc: Option<OidcPlan>,
 }
 
 impl State {
@@ -1785,9 +1816,24 @@ struct Answers {
     first: Option<(String, String)>,
     model: Option<ModelChoice>,
     passphrase: Option<String>,
+    provider: Option<Provider>,
+}
+
+/// How the desk comes to be registered at its provider.
+enum Provider {
+    /// Setup registers it at an Authentik, with an API token of it.
+    Authentik {
+        url: String,
+        token: String,
+        users: String,
+        admins: String,
+    },
+    /// Registered already: the client's secret, to keep beside the desk.
+    Registered { secret: Option<String> },
 }
 
 /// What the wizard decided, before it does any of it.
+#[derive(Clone)]
 pub(crate) struct Plan {
     pub(crate) dir: PathBuf,
     pub(crate) parts: Vec<Part>,
@@ -1812,6 +1858,25 @@ pub(crate) struct Plan {
     pub(crate) host_loopback: bool,
     /// The Postgres this setup runs for the registry, when it runs one.
     pub(crate) postgres: Option<ManagedPostgres>,
+    /// The provider the desk signs people in at, in `oidc` mode, once named.
+    pub(crate) oidc: Option<OidcPlan>,
+}
+
+/// The provider the desk signs people in at, as the desk, the engine and the
+/// gateway are each told of it. The client's secret is not here but in a
+/// file beside the desk's configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OidcPlan {
+    pub(crate) issuer: String,
+    pub(crate) client_id: String,
+    /// Where the provider publishes the keys its tokens are signed with.
+    pub(crate) jwks: String,
+    /// The claim that carries the entitlements, by their own names.
+    pub(crate) roles_claim: String,
+    /// The scopes the desk asks for, where not the desk's own, which include
+    /// the entitlements scope that a registration at Authentik makes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) scopes: Option<Vec<String>>,
 }
 
 /// The ways the parts can run here, in the order they are offered: the
@@ -1989,6 +2054,7 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
             .and_then(|p| Runtime::parse(&p.kind).ok())
             .filter(|r| r.container())
             .map(|runtime| ManagedPostgres { runtime }),
+        oidc: state.oidc.clone(),
     }
 }
 
@@ -2208,6 +2274,21 @@ fn engine_args(plan: &Plan, registry: &str, backups: &str) -> Vec<String> {
         Mode::Oidc => {
             argv.push("--auth".to_string());
             argv.push("oidc".to_string());
+            // the provider's tokens, which the desk passes on; with none
+            // named the engine refuses to start, and setup says so
+            if let Some(oidc) = &plan.oidc {
+                argv.push("--oidc-trust".to_string());
+                argv.push(format!(
+                    "issuer={},audience={},jwks={}",
+                    oidc.issuer, oidc.client_id, oidc.jwks
+                ));
+                argv.push("--oidc-groups-claim".to_string());
+                argv.push(oidc.roles_claim.clone());
+                for role in ["reader", "reviewer", "operator", "admin"] {
+                    argv.push("--role".to_string());
+                    argv.push(format!("{role}={role}"));
+                }
+            }
         }
     }
     for (name, path) in plan.read_from() {
@@ -3059,6 +3140,18 @@ fn questions(
         }
     }
 
+    // the provider, for a desk that signs people in through one
+    let oidc = if mode == Mode::Oidc {
+        choose_provider(
+            console,
+            args,
+            existing.and_then(|s| s.oidc.clone()),
+            &mut answers,
+        )?
+    } else {
+        None
+    };
+
     // 6. the assistant, and what this machine can do
     console.step(6);
     let card = facts.card.clone();
@@ -3234,6 +3327,7 @@ fn questions(
         service,
         channel: args.channel.clone(),
         version: update::VERSION.to_string(),
+        oidc,
     };
 
     // 8. the summary, then the work
@@ -3763,6 +3857,7 @@ fn do_it(
             .map(|s| s.programs.clone())
             .unwrap_or_default(),
         unfinished: true,
+        oidc: plan.oidc.clone(),
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
@@ -3962,7 +4057,31 @@ fn place(
                 },
             );
         }
-        write_desk_config(plan, false)?;
+    }
+
+    // The provider, once the desk is on this machine to register itself at
+    // an Authentik: what it answers is what the desk, the engine and the
+    // gateway are told.
+    let registered;
+    let plan = match register_desk(plan, state, answers, console) {
+        Some(oidc) => {
+            registered = Plan {
+                oidc: Some(oidc),
+                ..plan.clone()
+            };
+            &registered
+        }
+        None => plan,
+    };
+    state.oidc = plan.oidc.clone();
+    if plan.has(Part::Desk) {
+        if let Some(Provider::Registered {
+            secret: Some(secret),
+        }) = &answers.provider
+        {
+            write_secret(&plan.desk_dir().join("client-secret"), secret)?;
+        }
+        write_desk_config(plan, desk_config_stale(plan))?;
         console.progress(&plan.desk_config().display().to_string());
         if plan.mode == Mode::Local {
             let desk = state
@@ -3972,8 +4091,13 @@ fn place(
                 .map(|p| PathBuf::from(&p.path));
             add_first_admin(plan, desk, answers.first.as_ref(), console);
         }
-        if plan.mode == Mode::Oidc {
-            console.say("register the desk at your provider with:");
+        if plan.mode == Mode::Oidc && plan.oidc.is_none() {
+            console.warn(
+                "the desk has no provider yet, so nobody can sign in and the engine does not start",
+            );
+            console.say(
+                "run nils setup again and name one, or register the desk at an Authentik with:",
+            );
             let (_, origin, _) =
                 desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
             console.say(&format!(
@@ -4754,17 +4878,32 @@ fn write_desk_config(plan: &Plan, force: bool) -> Result<(), Exit> {
         let _ = writeln!(text, "audience = \"nils\"");
     }
     if plan.mode == Mode::Oidc {
-        let _ = writeln!(
-            text,
-            "\n# nils-desk register --authentik ... prints this table"
-        );
-        let _ = writeln!(text, "# [oidc]");
-        let _ = writeln!(
-            text,
-            "# issuer = \"https://auth.example.org/application/o/nils/\""
-        );
-        let _ = writeln!(text, "# client_id = \"...\"");
-        let _ = writeln!(text, "# client_secret_file = \"client-secret\"");
+        match &plan.oidc {
+            Some(oidc) => {
+                let _ = writeln!(text, "\n[oidc]");
+                let _ = writeln!(text, "issuer = \"{}\"", oidc.issuer);
+                let _ = writeln!(text, "client_id = \"{}\"", oidc.client_id);
+                let _ = writeln!(text, "client_secret_file = \"client-secret\"");
+                let _ = writeln!(text, "roles_claim = \"{}\"", oidc.roles_claim);
+                if let Some(scopes) = &oidc.scopes {
+                    let listed: Vec<String> = scopes.iter().map(|s| format!("\"{s}\"")).collect();
+                    let _ = writeln!(text, "scopes = [{}]", listed.join(", "));
+                }
+            }
+            None => {
+                let _ = writeln!(
+                    text,
+                    "\n# nils-desk register --authentik ... prints this table"
+                );
+                let _ = writeln!(text, "# [oidc]");
+                let _ = writeln!(
+                    text,
+                    "# issuer = \"https://auth.example.org/application/o/nils/\""
+                );
+                let _ = writeln!(text, "# client_id = \"...\"");
+                let _ = writeln!(text, "# client_secret_file = \"client-secret\"");
+            }
+        }
     }
     let _ = writeln!(text, "\n[engine]");
     let _ = writeln!(text, "url = \"{engine_url}\"");
@@ -4844,6 +4983,360 @@ fn add_first_admin(
             "{name} was not added ({e}); the command is: {by_hand}"
         )),
     }
+}
+
+/// Where the desk signs people in, in `oidc` mode: named with the flags, kept
+/// from an earlier install, or asked. An Authentik is registered during the
+/// install, once the desk is on this machine to do it, so this answers no
+/// provider for it yet; a provider the desk is registered at already is
+/// named here with the client's secret.
+fn choose_provider(
+    console: &mut Console,
+    args: &SetupArgs,
+    kept: Option<OidcPlan>,
+    answers: &mut Answers,
+) -> Result<Option<OidcPlan>, Stop> {
+    if let Some(url) = &args.authentik {
+        let token = args
+            .authentik_token_file
+            .as_ref()
+            .and_then(|file| std::fs::read_to_string(file).ok())
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty());
+        match token {
+            Some(token) => {
+                answers.provider = Some(Provider::Authentik {
+                    url: url.trim().trim_end_matches('/').to_string(),
+                    token,
+                    users: args
+                        .authentik_users
+                        .clone()
+                        .unwrap_or_else(|| "nils".into()),
+                    admins: args
+                        .authentik_admins
+                        .clone()
+                        .unwrap_or_else(|| "nils-admins".into()),
+                });
+                return Ok(None);
+            }
+            None => console.note(
+                "--authentik needs --authentik-token-file, a file holding an API token of that \
+                 Authentik",
+            ),
+        }
+    }
+    if let (Some(issuer), Some(client_id)) = (&args.oidc_issuer, &args.oidc_client_id) {
+        let secret = args
+            .oidc_client_secret_file
+            .as_ref()
+            .and_then(|file| std::fs::read_to_string(file).ok())
+            .map(|secret| secret.trim().to_string());
+        let jwks = args.oidc_jwks.clone().or_else(|| discover_jwks(issuer));
+        match jwks {
+            Some(jwks) => {
+                answers.provider = Some(Provider::Registered { secret });
+                return Ok(Some(OidcPlan {
+                    issuer: issuer.trim().to_string(),
+                    client_id: client_id.trim().to_string(),
+                    jwks,
+                    roles_claim: args
+                        .oidc_roles_claim
+                        .clone()
+                        .unwrap_or_else(|| "roles".into()),
+                    scopes: Some(plain_scopes()),
+                }));
+            }
+            None => console.note(&format!(
+                "{issuer} does not say where its keys are; name them with --oidc-jwks"
+            )),
+        }
+    }
+    if let Some(kept) = kept
+        && console.ask_yes_no(
+            &format!("The desk signs people in at {}. Keep it?", kept.issuer),
+            true,
+        )?
+    {
+        return Ok(Some(kept));
+    }
+    if !console.interactive() {
+        return Ok(None);
+    }
+    let pick = console.ask_choice(
+        "Where is the desk registered?",
+        &[
+            (
+                "At an Authentik, by setup",
+                "with an API token of it; setup makes the application and binds your groups",
+            ),
+            (
+                "At a provider already",
+                "you have the issuer, the desk's client id and its secret",
+            ),
+            (
+                "Later",
+                "nobody signs in and the engine does not start until one is named",
+            ),
+        ],
+        0,
+    )?;
+    match pick {
+        0 => {
+            let url = console.ask_line("The Authentik's address", "https://auth.example.org")?;
+            let Some(token) = console.ask_hidden_once("An API token of that Authentik")? else {
+                console.note("no token was given, so the desk is not registered");
+                return Ok(None);
+            };
+            let users = console.ask_line("The group whose members may use NILS", "nils")?;
+            let admins = console.ask_line(
+                "The group of those who run it, as operators and admins",
+                "nils-admins",
+            )?;
+            answers.provider = Some(Provider::Authentik {
+                url: url.trim().trim_end_matches('/').to_string(),
+                token,
+                users: users.trim().to_string(),
+                admins: admins.trim().to_string(),
+            });
+            Ok(None)
+        }
+        1 => {
+            let issuer = console.ask_line("The issuer", "")?.trim().to_string();
+            let client_id = console
+                .ask_line("The desk's client id", "")?
+                .trim()
+                .to_string();
+            let secret = console.ask_hidden_once("Its client secret")?;
+            let roles_claim = console
+                .ask_line("The claim that carries the entitlements", "roles")?
+                .trim()
+                .to_string();
+            let found = console.probe(&format!("jwks {issuer}"), || discover_jwks(&issuer));
+            let jwks = match found {
+                Some(jwks) => {
+                    console.note(&format!("{issuer} publishes its keys at {jwks}"));
+                    jwks
+                }
+                None => console
+                    .ask_line("Where it publishes its keys (the JWKS address)", "")?
+                    .trim()
+                    .to_string(),
+            };
+            if issuer.is_empty() || client_id.is_empty() || jwks.is_empty() {
+                console.note("an issuer, a client id and the keys are needed, so none is named");
+                return Ok(None);
+            }
+            answers.provider = Some(Provider::Registered { secret });
+            Ok(Some(OidcPlan {
+                issuer,
+                client_id,
+                jwks,
+                roles_claim,
+                scopes: Some(plain_scopes()),
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The scopes the desk asks a provider for that has no entitlements scope,
+/// which is one only a registration at Authentik makes.
+fn plain_scopes() -> Vec<String> {
+    ["openid", "profile", "email", "offline_access"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Where a provider publishes its signing keys, as its discovery document
+/// says.
+fn discover_jwks(issuer: &str) -> Option<String> {
+    let url = format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim().trim_end_matches('/')
+    );
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .build()
+        .into();
+    let text = agent
+        .get(&url)
+        .call()
+        .ok()?
+        .body_mut()
+        .read_to_string()
+        .ok()?;
+    let doc: serde_json::Value = serde_json::from_str(&text).ok()?;
+    doc["jwks_uri"].as_str().map(str::to_string)
+}
+
+/// The desk registered at an Authentik by the desk's own register command:
+/// the application, its provider and signing key, and the groups bound to
+/// the entitlements, each made where it is not there yet. The client's
+/// secret goes beside the desk's configuration; the API token is kept only
+/// while the command runs.
+fn register_desk(
+    plan: &Plan,
+    state: &State,
+    answers: &Answers,
+    console: &Console,
+) -> Option<OidcPlan> {
+    let Some(Provider::Authentik {
+        url,
+        token,
+        users,
+        admins,
+    }) = &answers.provider
+    else {
+        return None;
+    };
+    if !plan.has(Part::Desk) {
+        console.note("an Authentik registers the desk, which this setup does not install");
+        return None;
+    }
+    let dir = plan.desk_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let token_file = dir.join("authentik-token");
+    if let Err(e) = write_secret(&token_file, token) {
+        console.warn(&format!("the desk was not registered: {}", e.message));
+        return None;
+    }
+    let (_, origin, _) = desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
+    // in a container the desk's directory is where the desk's own container has it
+    let at = if plan.runtime.container() {
+        PathBuf::from(IN_DESK)
+    } else {
+        dir.clone()
+    };
+    let mut argv: Vec<String> = vec![
+        "register".into(),
+        "--authentik".into(),
+        url.clone(),
+        "--token".into(),
+        at.join("authentik-token").display().to_string(),
+        "--origin".into(),
+        origin,
+        "--secret-file".into(),
+        at.join("client-secret").display().to_string(),
+    ];
+    for group in [users, admins] {
+        argv.push("--allow".into());
+        argv.push(group.clone());
+    }
+    for (entitlement, group) in [
+        ("reader", users),
+        ("reviewer", users),
+        ("assist", users),
+        ("reader", admins),
+        ("reviewer", admins),
+        ("assist", admins),
+        ("operator", admins),
+        ("admin", admins),
+    ] {
+        argv.push("--bind".into());
+        argv.push(format!("{entitlement}={group}"));
+    }
+    let mut command = match plan.runtime {
+        Runtime::Machine => Command::new(
+            state
+                .parts
+                .get("desk")
+                .filter(|p| p.kind == "binary")
+                .map(|p| PathBuf::from(&p.path))
+                .filter(|d| d.exists())
+                .or_else(|| Some(plan.dir.join("bin").join("nils-desk")).filter(|d| d.exists()))
+                .unwrap_or_else(|| PathBuf::from("nils-desk")),
+        ),
+        Runtime::Podman => {
+            let mut c = Command::new("podman");
+            c.args(["run", "--rm", "-v"])
+                .arg(format!("{}:{IN_DESK}:U", dir.display()))
+                .arg(format!("{DESK_IMAGE}:{}", plan.tag()));
+            c
+        }
+        Runtime::Docker => {
+            let mut c = Command::new("docker");
+            c.args(["run", "--rm"]);
+            let account = as_this_account();
+            if !account.is_empty() {
+                c.args(["--user", &account]);
+            }
+            c.arg("-v")
+                .arg(format!("{}:{IN_DESK}", dir.display()))
+                .arg(format!("{DESK_IMAGE}:{}", plan.tag()));
+            c
+        }
+    };
+    console.progress(&format!("registering the desk at {url}"));
+    let ran = command.args(&argv).stdin(Stdio::null()).output();
+    let _ = std::fs::remove_file(&token_file);
+    match ran {
+        Ok(out) if out.status.success() => {
+            match registered_at(&String::from_utf8_lossy(&out.stdout)) {
+                Some(oidc) => {
+                    console.progress(&format!("the desk is registered at {}", oidc.issuer));
+                    Some(oidc)
+                }
+                None => {
+                    console.warn("the desk's registration named no client");
+                    None
+                }
+            }
+        }
+        Ok(out) => {
+            let why = String::from_utf8_lossy(&out.stderr);
+            console.warn(&format!(
+                "the desk was not registered: {}",
+                why.lines().last().unwrap_or("the desk refused")
+            ));
+            None
+        }
+        Err(e) => {
+            console.warn(&format!("the desk was not registered: {e}"));
+            None
+        }
+    }
+}
+
+/// The provider a registration names, from the `[oidc]` table the desk's
+/// register command prints; an Authentik publishes its keys under the
+/// issuer's jwks/.
+fn registered_at(said: &str) -> Option<OidcPlan> {
+    let field = |key: &str| {
+        said.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix(key)?
+                .trim_start()
+                .strip_prefix('=')?
+                .trim()
+                .strip_prefix('"')?
+                .strip_suffix('"')
+                .map(str::to_string)
+        })
+    };
+    let issuer = field("issuer")?;
+    let client_id = field("client_id").filter(|id| !id.is_empty())?;
+    Some(OidcPlan {
+        jwks: format!("{issuer}jwks/"),
+        issuer,
+        client_id,
+        roles_claim: "roles".to_string(),
+        scopes: None,
+    })
+}
+
+/// Whether the desk's configuration names another sign-in than the plan, so
+/// it is written again; one that agrees is left as it is.
+fn desk_config_stale(plan: &Plan) -> bool {
+    let Ok(text) = std::fs::read_to_string(plan.desk_config()) else {
+        return false;
+    };
+    let mode = text.contains(&format!("mode = \"{}\"", plan.mode.name()));
+    let provider = plan
+        .oidc
+        .as_ref()
+        .is_none_or(|o| text.contains(&format!("client_id = \"{}\"", o.client_id)));
+    !(mode && provider)
 }
 
 /// The gateway and the assistant: cloned and built, since neither ships a
@@ -5224,9 +5717,9 @@ const INSTALLER: &str = "nils-setup:admin";
 /// mode nobody signs in. In `local` mode it trusts the tokens the desk signs,
 /// as the engine does, so a person reaches it through the desk under their
 /// own roles; knowing only its own token, it refused every call the desk
-/// passed on. With a provider it keeps its token until the provider's trust
-/// is written. The installer's token is kept in every mode, for what setup
-/// asks of the gateway.
+/// passed on. With a provider it trusts the provider's tokens once the
+/// provider is named, and knows only its token until then. The installer's
+/// token is kept in every mode, for what setup asks of the gateway.
 fn gateway_auth(plan: &Plan, admin: &str) -> serde_json::Value {
     let tokens = serde_json::json!({ admin: INSTALLER });
     match plan.mode {
@@ -5246,7 +5739,21 @@ fn gateway_auth(plan: &Plan, admin: &str) -> serde_json::Value {
                 },
             })
         }
-        Mode::Oidc => serde_json::json!({ "mode": "token", "tokens": tokens }),
+        Mode::Oidc => match &plan.oidc {
+            Some(oidc) => serde_json::json!({
+                "mode": "oidc",
+                "tokens": tokens,
+                "trust": [{ "issuer": oidc.issuer, "audience": oidc.client_id, "jwks": oidc.jwks }],
+                "groupsClaim": oidc.roles_claim,
+                "roles": {
+                    "reader": "reader",
+                    "reviewer": "reviewer",
+                    "operator": "operator",
+                    "admin": "admin",
+                },
+            }),
+            None => serde_json::json!({ "mode": "token", "tokens": tokens }),
+        },
     }
 }
 
@@ -5331,7 +5838,7 @@ fn repair_kvasir(
     }
     // How the gateway knows its callers follows the desk's sign-in; the
     // tokens it holds are kept, the installer's among them.
-    if plan.mode != Mode::Oidc {
+    if plan.mode != Mode::Oidc || plan.oidc.is_some() {
         let mut tokens = value["auth"]["tokens"]
             .as_object()
             .cloned()
@@ -7657,6 +8164,7 @@ mod tests {
             version: "1.0.0-alpha.2".to_string(),
             host_loopback: false,
             postgres: None,
+            oidc: None,
         }
     }
 
@@ -8515,6 +9023,53 @@ mod tests {
                 .any(|(key, value)| *key == "reads" && value.contains("/data/two")),
             "the summary names every directory read"
         );
+    }
+
+    #[test]
+    fn a_provider_is_trusted_by_the_desk_the_engine_and_the_gateway() {
+        let dir = scratch("provider");
+        let mut plan = plan(Runtime::Podman);
+        plan.dir = dir.clone();
+        plan.mode = Mode::Oidc;
+        assert!(
+            !engine_args(&plan, "/r", "/b")
+                .join(" ")
+                .contains("--oidc-trust"),
+            "no provider is named yet"
+        );
+        plan.oidc = registered_at(
+            "the desk's [oidc] table:\n  issuer = \"https://auth.example.org/application/o/nils/\"\n  client_id = \"abc123\"\n  client_secret_file = \"/x/client-secret\"\n",
+        );
+        let oidc = plan.oidc.clone().expect("the table names a provider");
+        assert_eq!(
+            oidc.jwks,
+            "https://auth.example.org/application/o/nils/jwks/"
+        );
+        let engine = engine_args(&plan, "/r", "/b").join(" ");
+        assert!(
+            engine.contains(
+                "--auth oidc --oidc-trust issuer=https://auth.example.org/application/o/nils/,audience=abc123,jwks=https://auth.example.org/application/o/nils/jwks/ --oidc-groups-claim roles --role reader=reader"
+            ),
+            "{engine}"
+        );
+        let auth = gateway_auth(&plan, "tok");
+        assert_eq!(auth["mode"], "oidc", "{auth}");
+        assert_eq!(auth["trust"][0]["audience"], "abc123", "{auth}");
+        assert_eq!(auth["tokens"]["tok"], INSTALLER, "{auth}");
+        assert!(write_desk_config(&plan, true).is_ok());
+        let desk = std::fs::read_to_string(plan.desk_config()).unwrap();
+        assert!(
+            desk.contains("[oidc]\nissuer = \"https://auth.example.org/application/o/nils/\"\nclient_id = \"abc123\"\nclient_secret_file = \"client-secret\""),
+            "{desk}"
+        );
+        assert!(!desk.contains("# [oidc]"), "{desk}");
+        assert!(!desk_config_stale(&plan));
+        plan.oidc = Some(OidcPlan {
+            client_id: "another".into(),
+            ..oidc
+        });
+        assert!(desk_config_stale(&plan), "another client is written again");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
