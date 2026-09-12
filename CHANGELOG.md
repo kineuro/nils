@@ -4,6 +4,14 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.10] - 2026-09-12
+
+### Fixed
+
+- An install that stopped partway could not be uninstalled, because the setup record was written only at the end. The record is now written before anything is placed, updated as each part is, and marked unfinished until the install ends. `nils uninstall` removes such an install, and `nils setup` starts it again.
+- With no record at all, `nils uninstall` now lists what an unfinished setup leaves in the usual places and removes it when told to: this program, the `nils-desk` and first-party packs beside it, and a base directory holding only the empty directories setup makes. Anything holding data is left.
+- Declining another Postgres connection string at step 4 went on with the address that did not answer. The registry is now kept in SQLite instead.
+
 ## [1.0.0-alpha.9] - 2026-09-12
 
 Postgres with containers, found on the first docker install that chose it.
