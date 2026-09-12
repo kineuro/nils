@@ -934,6 +934,11 @@ pub(crate) struct State {
     /// An uninstall removes these and the parts' own, and nothing else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) programs: Vec<String>,
+    /// Set from the moment an install starts placing anything until it
+    /// finishes, so one that stops partway is still on record for an
+    /// uninstall and is started again by the next setup.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) unfinished: bool,
 }
 
 impl State {
@@ -1667,12 +1672,22 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         ));
     }
     let mut console = Console::new(args.yes || args.print);
-    let existing = read_state();
+    let mut existing = read_state();
 
     println!(
         "{}",
         console.bold("NILS setup: the engine, the desk and the assistant")
     );
+
+    // An install that stopped partway is not one to update or repair: it is
+    // started again, and its record is what an uninstall would remove.
+    if existing.as_ref().is_some_and(|s| s.unfinished) {
+        console.note(
+            "an earlier setup stopped before it finished, so this one starts again; nils \
+             uninstall removes what it placed instead",
+        );
+        existing = None;
+    }
 
     // An install that is already there: say what it is, and offer the four
     // things a person comes back for.
@@ -1886,54 +1901,59 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         if chosen == 0 {
             BackendChoice::Sqlite
         } else {
-            let mut dsn = match &args.dsn {
-                Some(d) => d.clone(),
-                None => console.line("The connection string", "postgres://nils@127.0.0.1/nils"),
-            };
-            let schema = match &args.schema {
-                Some(s) => s.clone(),
-                None => console.line("The schema", "nils"),
-            };
-            // Tried now, from this machine, so a database that is not there
-            // is said here rather than after the plan and the images.
-            loop {
-                match nils_registry::store::Store::connect_postgres(&dsn, &schema) {
-                    Ok(_) => {
-                        console.note(&format!(
-                            "the database at {} answered",
-                            crate::redact_dsn(&dsn)
-                        ));
-                        break;
-                    }
-                    Err(e) => {
-                        console.note(&format!(
-                            "the database at {} did not answer: {}",
-                            crate::redact_dsn(&dsn),
-                            with_causes(&e)
-                        ));
-                        if args.print {
-                            break;
-                        }
-                        if !console.interactive() {
-                            return Err(usage(
-                                "start the database, or run with --backend sqlite; nothing \
-                                 was written",
+            'postgres: {
+                let mut dsn = match &args.dsn {
+                    Some(d) => d.clone(),
+                    None => console.line("The connection string", "postgres://nils@127.0.0.1/nils"),
+                };
+                let schema = match &args.schema {
+                    Some(s) => s.clone(),
+                    None => console.line("The schema", "nils"),
+                };
+                // Tried now, from this machine, so a database that is not there
+                // is said here rather than after the plan and the images.
+                loop {
+                    match nils_registry::store::Store::connect_postgres(&dsn, &schema) {
+                        Ok(_) => {
+                            console.note(&format!(
+                                "the database at {} answered",
+                                crate::redact_dsn(&dsn)
                             ));
-                        }
-                        if !console.yes_no("Enter another connection string?", true) {
                             break;
                         }
-                        let again = console.line("The connection string", "");
-                        if !again.trim().is_empty() {
-                            dsn = again.trim().to_string();
+                        Err(e) => {
+                            console.note(&format!(
+                                "the database at {} did not answer: {}",
+                                crate::redact_dsn(&dsn),
+                                with_causes(&e)
+                            ));
+                            if args.print {
+                                break;
+                            }
+                            if !console.interactive() {
+                                return Err(usage(
+                                    "start the database, or run with --backend sqlite; nothing \
+                                 was written",
+                                ));
+                            }
+                            if !console.yes_no("Enter another connection string?", true) {
+                                // Going on with an address that did not answer
+                                // only fails later, after the plan and the work.
+                                console.note("the registry is kept in SQLite instead");
+                                break 'postgres BackendChoice::Sqlite;
+                            }
+                            let again = console.line("The connection string", "");
+                            if !again.trim().is_empty() {
+                                dsn = again.trim().to_string();
+                            }
                         }
                     }
                 }
+                if let Some(note) = postgres_reach_note(runtime, &dsn, podman_has_pasta) {
+                    console.note(&note);
+                }
+                BackendChoice::Postgres { dsn, schema }
             }
-            if let Some(note) = postgres_reach_note(runtime, &dsn, podman_has_pasta) {
-                console.note(&note);
-            }
-            BackendChoice::Postgres { dsn, schema }
         }
     };
     let mut answers = Answers::default();
@@ -2500,11 +2520,6 @@ fn do_it(
     only_update: bool,
     answers: &Answers,
 ) -> Result<(), Exit> {
-    for sub in ["registry", "desk", "backups", "working", "export"] {
-        let path = plan.dir.join(sub);
-        std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
-    }
-
     let mut state = State {
         dir: plan.dir.display().to_string(),
         mode: plan.mode.name().to_string(),
@@ -2533,9 +2548,70 @@ fn do_it(
             .as_ref()
             .map(|s| s.programs.clone())
             .unwrap_or_default(),
+        unfinished: true,
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
+
+    // On record before anything is placed, and again as each thing is, so
+    // an install that stops partway can still be removed and started again.
+    write_state(&state)?;
+    let placed = place(
+        plan,
+        console,
+        args,
+        &mut state,
+        existing_places,
+        only_update,
+        answers,
+    );
+    if let Err(e) = placed {
+        let _ = write_state(&state);
+        return Err(fail(format!(
+            "{}\n  what was placed is on record: nils uninstall removes it, and nils setup \
+             starts again",
+            e.message
+        )));
+    }
+
+    // A binary a part ran from before this run moved it into a container is
+    // still on the machine, and still this install's to remove.
+    for (name, before) in &previous_parts {
+        let now = state.parts.get(name).map(|p| p.path.as_str());
+        if before.kind == "binary" && now != Some(before.path.as_str()) {
+            state.keep_program(Path::new(&before.path));
+        }
+    }
+    // and one that is a part's own again is not listed twice
+    let own: Vec<String> = state.parts.values().map(|p| p.path.clone()).collect();
+    state.programs.retain(|p| !own.contains(p));
+
+    state.unfinished = false;
+    let path = write_state(&state)?;
+    println!("  {}", path.display());
+    summary(plan, console);
+    Ok(())
+}
+
+/// The work of an install, each thing recorded in `state` as it is placed
+/// and the record written again, so that where this stops the record says
+/// what is there.
+fn place(
+    plan: &Plan,
+    console: &mut Console,
+    args: &SetupArgs,
+    state: &mut State,
+    existing_places: Vec<PlaceState>,
+    only_update: bool,
+    answers: &Answers,
+) -> Result<(), Exit> {
+    let checkpoint = |state: &State| {
+        let _ = write_state(state);
+    };
+    for sub in ["registry", "desk", "backups", "working", "export"] {
+        let path = plan.dir.join(sub);
+        std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+    }
 
     // The engine: the running binary, or an image.
     let me = std::env::current_exe()
@@ -2545,6 +2621,7 @@ fn do_it(
 
     if plan.runtime.container() {
         state.keep_program(&me);
+        checkpoint(state);
         pull_or_build(plan, console, "nils", ENGINE_IMAGE, &me)?;
         // Taken now rather than by the first start, which a slow pull would
         // run past the time systemd gives a service to come up.
@@ -2562,6 +2639,7 @@ fn do_it(
             let desk_binary = match install_desk(&into, plan.channel.as_deref()) {
                 Ok((_, path)) => {
                     state.keep_program(&path);
+                    checkpoint(state);
                     path
                 }
                 Err(_) => into.join("nils-desk"),
@@ -2589,6 +2667,7 @@ fn do_it(
         },
     );
     println!("  engine {} ready", update::VERSION);
+    checkpoint(state);
 
     // The registry, made by the engine wherever it runs.
     let home = Home::new(plan.registry());
@@ -2610,6 +2689,7 @@ fn do_it(
                             kind: "binary".to_string(),
                         },
                     );
+                    checkpoint(state);
                 }
                 Err(e) => println!("  the desk was not installed: {}", e.message),
             }
@@ -2659,6 +2739,7 @@ fn do_it(
                         },
                     );
                 }
+                checkpoint(state);
             }
             Err(e) => println!("  the assistant was not installed: {}", e.message),
         }
@@ -2670,10 +2751,11 @@ fn do_it(
     } else {
         state.places = declare_places(plan, &home);
     }
+    checkpoint(state);
 
     // Start it.
     if plan.service {
-        match start_everything(plan, &state, console) {
+        match start_everything(plan, state, console) {
             Ok(what) => print!("{what}"),
             Err(e) => println!("  no services were written: {}", e.message),
         }
@@ -2716,21 +2798,6 @@ fn do_it(
         );
     }
 
-    // A binary a part ran from before this run moved it into a container is
-    // still on the machine, and still this install's to remove.
-    for (name, before) in &previous_parts {
-        let now = state.parts.get(name).map(|p| p.path.as_str());
-        if before.kind == "binary" && now != Some(before.path.as_str()) {
-            state.keep_program(Path::new(&before.path));
-        }
-    }
-    // and one that is a part's own again is not listed twice
-    let own: Vec<String> = state.parts.values().map(|p| p.path.clone()).collect();
-    state.programs.retain(|p| !own.contains(p));
-
-    let path = write_state(&state)?;
-    println!("  {}", path.display());
-    summary(plan, console);
     Ok(())
 }
 
@@ -4672,12 +4739,7 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     let mut console = Console::new(args.yes);
     println!("{}", console.bold("NILS uninstall"));
     let Some(state) = read_state() else {
-        return Err(fail(format!(
-            "no setup is recorded at {}, so there is nothing this knows it installed; the \
-             documentation says how to remove a hand made install: \
-             https://kineuro.se/nils/docs/intro/install/",
-            state_path().display()
-        )));
+        return remove_leftovers(&args, &mut console);
     };
     println!("  {}", describe_state(&state));
 
@@ -4784,6 +4846,86 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     Ok(())
 }
 
+/// With no record, what a setup that stopped before it wrote one leaves in
+/// the places a setup uses: this program when it is `nils`, the `nils-desk`
+/// beside it, the first-party packs beside it, and the base directory only
+/// when it holds nothing but the empty directories setup makes. Anything
+/// holding data is left, since without a record nothing says it is ours.
+pub(crate) fn leftovers(me: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(me) = me.filter(|m| m.file_name().is_some_and(|n| n == "nils")) {
+        if let Some(bin) = me.parent() {
+            let desk = bin.join("nils-desk");
+            if desk.is_file() {
+                out.push(desk);
+            }
+            if let Some(prefix) = bin.parent() {
+                let packs = prefix.join("share").join("nils").join("packs");
+                for pack in FIRST_PARTY_PACKS {
+                    if packs.join(pack).is_dir() {
+                        out.push(packs.join(pack));
+                    }
+                }
+            }
+        }
+        out.push(me.to_path_buf());
+    }
+    if let Some(home) = home {
+        let dir = home.join("nils");
+        if only_empty_setup_dirs(&dir) {
+            out.insert(0, dir);
+        }
+    }
+    out
+}
+
+fn remove_leftovers(args: &UninstallArgs, console: &mut Console) -> Result<(), Exit> {
+    let me = std::env::current_exe()
+        .ok()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
+    let found = leftovers(me.as_deref(), home_dir().as_deref());
+    println!("  no setup is recorded at {}", state_path().display());
+    if found.is_empty() {
+        println!("  and nothing a setup leaves is in the usual places, so nothing was changed");
+        return Ok(());
+    }
+    println!();
+    println!("{}", console.bold("What an unfinished setup left"));
+    for path in &found {
+        println!("  {}", path.display());
+    }
+    if args.print {
+        println!();
+        println!("nothing was changed");
+        return Ok(());
+    }
+    let go = args.yes || (console.interactive() && console.yes_no("Remove these?", false));
+    if !go {
+        println!("  nothing was changed");
+        if !console.interactive() {
+            println!("  add --yes to go ahead");
+        }
+        return Ok(());
+    }
+    println!();
+    for path in &found {
+        match remove_path(path, "") {
+            Ok(()) => println!("  removed {}", path.display()),
+            Err(e) => println!("  {} was not removed: {e}", path.display()),
+        }
+        // the packs directory and its parent, when nothing else is in them
+        if let Some(packs) = path.parent().filter(|p| p.ends_with("share/nils/packs")) {
+            let _ = std::fs::remove_dir(packs);
+            if let Some(share) = packs.parent() {
+                let _ = std::fs::remove_dir(share);
+            }
+        }
+    }
+    println!();
+    println!("{}", console.bold("Removed"));
+    Ok(())
+}
+
 /// The setup on one line, the same words the wizard opens with.
 fn describe_state(state: &State) -> String {
     let parts: Vec<String> = state
@@ -4795,7 +4937,12 @@ fn describe_state(state: &State) -> String {
         })
         .collect();
     format!(
-        "{} in {}, {} mode, {}",
+        "{}{} in {}, {} mode, {}",
+        if state.unfinished {
+            "an install that did not finish: "
+        } else {
+            ""
+        },
         parts.join(", "),
         state.dir,
         state.mode,
@@ -4828,11 +4975,40 @@ fn safe_to_purge(dir: &Path, home: Option<&Path>) -> Result<(), String> {
         return Err("it is the home directory, or holds it".to_string());
     }
     let made_here = dir.join("registry").join("nils.toml").exists()
-        || dir.join("desk").join("nils-desk.toml").exists();
+        || dir.join("desk").join("nils-desk.toml").exists()
+        || only_empty_setup_dirs(dir);
     if !made_here {
         return Err("it holds neither a registry nor a desk that an install made".to_string());
     }
     Ok(())
+}
+
+/// The directories setup makes under a base directory, and nothing else,
+/// every one of them empty: what an install that stopped early leaves, and
+/// nothing a person could lose.
+fn only_empty_setup_dirs(dir: &Path) -> bool {
+    const MADE: [&str; 7] = [
+        "registry",
+        "desk",
+        "backups",
+        "working",
+        "export",
+        "assistant",
+        "kvasir",
+    ];
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut any = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let empty = std::fs::read_dir(entry.path()).is_ok_and(|mut e| e.next().is_none());
+        if !MADE.contains(&name.as_str()) || !entry.path().is_dir() || !empty {
+            return false;
+        }
+        any = true;
+    }
+    any
 }
 
 /// Gather what an uninstall would remove, looking at what is really there.
@@ -6148,6 +6324,101 @@ mod tests {
             Some("postgres://nils@host.containers.internal/nils")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_install_that_did_not_finish_says_so_in_its_record() {
+        let mut state = State {
+            dir: "/home/x/nils".to_string(),
+            mode: "off".to_string(),
+            unfinished: true,
+            ..State::default()
+        };
+        let text = toml::to_string(&state).unwrap();
+        assert!(text.contains("unfinished = true"), "{text}");
+        let read: State = toml::from_str(&text).unwrap();
+        assert!(read.unfinished);
+        assert!(describe_state(&read).starts_with("an install that did not finish"));
+        state.unfinished = false;
+        let text = toml::to_string(&state).unwrap();
+        assert!(
+            !text.contains("unfinished"),
+            "a finished record says nothing: {text}"
+        );
+        let older: State = toml::from_str("dir = \"/x\"\nmode = \"off\"\n").unwrap();
+        assert!(
+            !older.unfinished,
+            "a record from before the marker is finished"
+        );
+    }
+
+    #[test]
+    fn only_the_empty_directories_setup_makes_may_go_without_a_registry() {
+        let home = scratch("empty-setup-dirs");
+        let dir = home.join("nils");
+        for sub in ["registry", "desk", "backups", "working", "export"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        assert!(only_empty_setup_dirs(&dir));
+        assert!(
+            safe_to_purge(&dir, Some(&home)).is_ok(),
+            "nothing in it to lose"
+        );
+
+        std::fs::write(dir.join("working").join("notes.txt"), "mine").unwrap();
+        assert!(
+            !only_empty_setup_dirs(&dir),
+            "a file in one of them is data"
+        );
+        std::fs::remove_file(dir.join("working").join("notes.txt")).unwrap();
+        std::fs::create_dir_all(dir.join("photos")).unwrap();
+        assert!(
+            !only_empty_setup_dirs(&dir),
+            "a directory setup does not make"
+        );
+        assert!(!only_empty_setup_dirs(&home.join("absent")));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn with_no_record_only_what_a_setup_leaves_in_its_places_is_offered() {
+        let root = scratch("leftovers");
+        let home = root.join("home");
+        let bin = root.join("prefix").join("bin");
+        let packs = root.join("prefix").join("share").join("nils").join("packs");
+        for dir in [
+            &bin,
+            &packs.join("mri"),
+            &packs.join("clinical"),
+            &packs.join("mine"),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for sub in ["registry", "desk"] {
+            std::fs::create_dir_all(home.join("nils").join(sub)).unwrap();
+        }
+        std::fs::write(bin.join("nils"), "").unwrap();
+        std::fs::write(bin.join("nils-desk"), "").unwrap();
+
+        let found = leftovers(Some(&bin.join("nils")), Some(&home));
+        assert_eq!(
+            found,
+            vec![
+                home.join("nils"),
+                bin.join("nils-desk"),
+                packs.join("mri"),
+                packs.join("clinical"),
+                bin.join("nils"),
+            ],
+            "the base directory first, this program last, a person's own pack never"
+        );
+
+        // a base directory with data, or a program with another name, is not offered
+        std::fs::write(home.join("nils").join("registry").join("registry.db"), "x").unwrap();
+        std::fs::write(bin.join("other"), "").unwrap();
+        let found = leftovers(Some(&bin.join("other")), Some(&home));
+        assert!(found.is_empty(), "{found:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
