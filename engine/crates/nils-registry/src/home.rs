@@ -396,6 +396,21 @@ impl Home {
             migrated,
         })
     }
+
+    /// The registry's store as it stands, for a reader that must change
+    /// nothing, such as the setup that asks which places it holds while an
+    /// older engine still runs on it: refused, and left as it is, when the
+    /// schema is not this binary's.
+    pub fn open_as_it_stands(&self) -> Result<Store, HomeError> {
+        let config = self.read_config()?;
+        let mut store = self.open_store(&config, Kind::Registry)?;
+        match migrate::standing(&mut store, Kind::Registry)? {
+            Standing::Current => Ok(store),
+            _ => Err(HomeError::Message(format!(
+                "the registry's schema is not version {SCHEMA_VERSION}, so it is not read as it stands"
+            ))),
+        }
+    }
 }
 
 impl Meta {
