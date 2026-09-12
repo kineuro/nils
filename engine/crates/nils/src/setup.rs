@@ -2142,21 +2142,11 @@ fn engine_args(plan: &Plan, registry: &str, backups: &str) -> Vec<String> {
             argv.push("off".to_string());
         }
         Mode::Local => {
-            // The issuer is what the desk writes into its tokens, which is
-            // its own origin; the keys are fetched by the engine, so that
-            // address is one the engine can reach from where it runs.
-            let (_, issuer, _) =
-                desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
-            let keys = match plan.runtime {
-                Runtime::Docker => format!("http://nils-desk:{}", plan.ports.desk),
-                _ => format!("http://127.0.0.1:{}", plan.ports.desk),
-            };
+            let (issuer, jwks) = desk_trust(plan);
             argv.push("--auth".to_string());
             argv.push("oidc".to_string());
             argv.push("--oidc-trust".to_string());
-            argv.push(format!(
-                "issuer={issuer},audience=nils,jwks={keys}/.well-known/jwks.json"
-            ));
+            argv.push(format!("issuer={issuer},audience=nils,jwks={jwks}"));
             argv.push("--oidc-groups-claim".to_string());
             argv.push("roles".to_string());
             for role in ["reader", "reviewer", "operator", "admin"] {
@@ -2174,6 +2164,19 @@ fn engine_args(plan: &Plan, registry: &str, backups: &str) -> Vec<String> {
         argv.push(format!("source={}", source.display()));
     }
     argv
+}
+
+/// The desk as an issuer, for a part that trusts the tokens it signs in
+/// `local` mode. The issuer is what the desk writes into its tokens, which is
+/// its own origin; the keys are fetched by the part, so that address is one a
+/// part reaches from where it runs.
+fn desk_trust(plan: &Plan) -> (String, String) {
+    let (_, issuer, _) = desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
+    let keys = match plan.runtime {
+        Runtime::Docker => format!("http://nils-desk:{}", plan.ports.desk),
+        _ => format!("http://127.0.0.1:{}", plan.ports.desk),
+    };
+    (issuer, format!("{keys}/.well-known/jwks.json"))
 }
 
 /// The commands a podman run is, in order, exactly as a person would type
@@ -3029,7 +3032,21 @@ fn questions(
              22, and run in {NODE_IMAGE} beside the others"
         ));
     }
-    if parts.contains(&Part::Assistant) && !dir.join("kvasir").join("kvasir.json").exists() {
+    // A gateway written before keeps its model unless another is chosen, and
+    // a rerun is how the model is changed.
+    let on_record = if parts.contains(&Part::Assistant) {
+        model_on_record_in(&dir)
+    } else {
+        None
+    };
+    let choose = parts.contains(&Part::Assistant)
+        && match &on_record {
+            Some(model) => {
+                !console.ask_yes_no(&format!("The assistant talks to {model}. Keep it?"), true)?
+            }
+            None => !dir.join("kvasir").join("kvasir.json").exists(),
+        };
+    if choose {
         let chosen = choose_model(console, served)?;
         if let Some(note) = model_reach_note(runtime, &chosen.url, podman_has_pasta) {
             console.note(&note);
@@ -3041,11 +3058,12 @@ fn questions(
         });
         answers.model = Some(chosen);
     } else {
-        console.said(if parts.contains(&Part::Assistant) {
-            "the assistant"
-        } else {
-            "no assistant"
-        });
+        let said = match &on_record {
+            Some(model) => model.clone(),
+            None if parts.contains(&Part::Assistant) => "the assistant".to_string(),
+            None => "no assistant".to_string(),
+        };
+        console.said(&said);
     }
 
     // ports, once the parts are settled: each part this machine will listen
@@ -3352,7 +3370,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
                 e.message
             ));
         }
-        if let Err(e) = write_assistant_env(plan) {
+        if let Err(e) = write_assistant_env(plan, None) {
             console.warn(&format!(
                 "the assistant's environment was not written: {}",
                 e.message
@@ -3378,7 +3396,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     // gateway and the assistant
     let systemd = plan.runtime == Runtime::Machine && !cfg!(target_os = "macos");
     if plan.has(Part::Assistant) && !(plan.service && (systemd || plan.runtime.container())) {
-        mint_assistant_key(plan, console);
+        ready_gateway(plan, console);
     }
     Ok(services)
 }
@@ -3954,7 +3972,7 @@ fn place(
             run(line);
         }
         if !assistant.is_empty() {
-            mint_assistant_key(plan, console);
+            ready_gateway(plan, console);
         }
         for line in &assistant {
             run(line);
@@ -3966,7 +3984,7 @@ fn place(
     // did the containers just above; launchd has no gateway to wait for.
     let systemd = plan.runtime == Runtime::Machine && !cfg!(target_os = "macos");
     if plan.has(Part::Assistant) && plan.service && !systemd && !plan.runtime.container() {
-        mint_assistant_key(plan, console);
+        ready_gateway(plan, console);
     }
     if plan.has(Part::Assistant) && !plan.service && !plan.runtime.container() {
         console.say(
@@ -4769,7 +4787,7 @@ fn install_node_parts(
     }
 
     configure_kvasir(plan, console, model)?;
-    write_assistant_env(plan)?;
+    write_assistant_env(plan, model)?;
     Ok(out)
 }
 
@@ -5021,7 +5039,7 @@ fn configure_kvasir(
     let dir = plan.dir.join("kvasir");
     let config = dir.join("kvasir.json");
     if config.exists() {
-        return repair_kvasir(plan, console);
+        return repair_kvasir(plan, console, chosen);
     }
     let example = dir.join("kvasir.example.json");
     let text = std::fs::read_to_string(&example)
@@ -5031,11 +5049,7 @@ fn configure_kvasir(
 
     value["bind"] = serde_json::json!(gateway_bind(plan));
     value["origin"] = serde_json::json!(format!("http://127.0.0.1:{}", plan.ports.kvasir));
-    let admin = generated_passphrase();
-    value["auth"] = serde_json::json!({
-        "mode": "token",
-        "tokens": { admin: "nils-setup:admin" },
-    });
+    value["auth"] = gateway_auth(plan, &generated_passphrase());
 
     let template = value["backends"][0].clone();
     let example_model = template["models"][0]["id"]
@@ -5058,22 +5072,8 @@ fn configure_kvasir(
         chosen.model.clone()
     };
 
-    let mut backend = template;
-    if let Some(fields) = backend.as_object_mut() {
-        fields.remove("keyFile");
-        fields.remove("key");
-        fields.remove("provider");
-    }
+    let mut backend = model_backend(plan, template, chosen, &model_id)?;
     backend["id"] = serde_json::json!("model");
-    backend["baseUrl"] = serde_json::json!(model_address_for(plan.runtime, &chosen.url));
-    backend["locality"] = serde_json::json!(if chosen.local { "local" } else { "remote" });
-    backend["models"][0]["id"] = serde_json::json!(model_id);
-    backend["models"][0]["name"] = serde_json::json!(model_id);
-    if let Some(key) = &chosen.key {
-        let path = dir.join("model.key");
-        write_secret(&path, key)?;
-        backend["keyFile"] = serde_json::json!(path.display().to_string());
-    }
     value["backends"] = serde_json::json!([backend]);
     value["purposes"] = serde_json::json!(assistant_purposes(plan, &value["purposes"]));
 
@@ -5099,6 +5099,69 @@ fn configure_kvasir(
     Ok(())
 }
 
+/// The name the installer's token carries at the gateway.
+const INSTALLER: &str = "nils-setup:admin";
+
+/// How the gateway knows its callers, following the desk's sign-in. In `off`
+/// mode nobody signs in. In `local` mode it trusts the tokens the desk signs,
+/// as the engine does, so a person reaches it through the desk under their
+/// own roles; knowing only its own token, it refused every call the desk
+/// passed on. With a provider it keeps its token until the provider's trust
+/// is written. The installer's token is kept in every mode, for what setup
+/// asks of the gateway.
+fn gateway_auth(plan: &Plan, admin: &str) -> serde_json::Value {
+    let tokens = serde_json::json!({ admin: INSTALLER });
+    match plan.mode {
+        Mode::Off => serde_json::json!({ "mode": "off", "tokens": tokens }),
+        Mode::Local => {
+            let (issuer, jwks) = desk_trust(plan);
+            serde_json::json!({
+                "mode": "oidc",
+                "tokens": tokens,
+                "trust": [{ "issuer": issuer, "audience": "nils", "jwks": jwks }],
+                "groupsClaim": "roles",
+                "roles": {
+                    "reader": "reader",
+                    "reviewer": "reviewer",
+                    "operator": "operator",
+                    "admin": "admin",
+                },
+            })
+        }
+        Mode::Oidc => serde_json::json!({ "mode": "token", "tokens": tokens }),
+    }
+}
+
+/// A gateway backend for the model a person chose, from a backend of the
+/// same shape: the model's address as the gateway reaches it, whether the
+/// prompt leaves this site, the model's name, and its key, in a file of its
+/// own.
+fn model_backend(
+    plan: &Plan,
+    mut backend: serde_json::Value,
+    chosen: &ModelChoice,
+    model_id: &str,
+) -> Result<serde_json::Value, Exit> {
+    if let Some(fields) = backend.as_object_mut() {
+        fields.remove("keyFile");
+        fields.remove("key");
+        fields.remove("provider");
+    }
+    backend["baseUrl"] = serde_json::json!(model_address_for(plan.runtime, &chosen.url));
+    backend["locality"] = serde_json::json!(if chosen.local { "local" } else { "remote" });
+    if backend["models"].as_array().is_none_or(Vec::is_empty) {
+        backend["models"] = serde_json::json!([{}]);
+    }
+    backend["models"][0]["id"] = serde_json::json!(model_id);
+    backend["models"][0]["name"] = serde_json::json!(model_id);
+    if let Some(key) = &chosen.key {
+        let path = plan.dir.join("kvasir").join("model.key");
+        write_secret(&path, key)?;
+        backend["keyFile"] = serde_json::json!(path.display().to_string());
+    }
+    Ok(backend)
+}
+
 /// Where the gateway listens. On the machine, loopback. In a container,
 /// every address of the container's own network, which is what a published
 /// port and the other containers reach; the port is published on this
@@ -5112,13 +5175,83 @@ fn gateway_bind(plan: &Plan) -> String {
 }
 
 /// Mend what an earlier version of this wizard wrote, and say what changed.
-fn repair_kvasir(plan: &Plan, console: &mut Console) -> Result<(), Exit> {
+fn repair_kvasir(
+    plan: &Plan,
+    console: &mut Console,
+    chosen: Option<&ModelChoice>,
+) -> Result<(), Exit> {
     let config = plan.dir.join("kvasir").join("kvasir.json");
     let text =
         std::fs::read_to_string(&config).map_err(|e| fail(format!("{}: {e}", config.display())))?;
     let mut value: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| fail(format!("{}: {e}", config.display())))?;
     let mut mended: Vec<String> = Vec::new();
+
+    // A model chosen on a rerun takes the place of the one on record.
+    if let Some(chosen) = chosen.filter(|c| !c.later)
+        && let Some(first) = value["backends"]
+            .as_array()
+            .and_then(|all| all.first())
+            .cloned()
+    {
+        let model_id = if chosen.model.is_empty() {
+            first["models"][0]["id"]
+                .as_str()
+                .unwrap_or(EXAMPLE_MODEL_ID)
+                .to_string()
+        } else {
+            chosen.model.clone()
+        };
+        let backend = model_backend(plan, first.clone(), chosen, &model_id)?;
+        if backend != first {
+            mended.push(format!(
+                "sends the assistant to {model_id} at {}",
+                chosen.url
+            ));
+            value["backends"][0] = backend;
+        }
+    }
+    // How the gateway knows its callers follows the desk's sign-in; the
+    // tokens it holds are kept, the installer's among them.
+    if plan.mode != Mode::Oidc {
+        let mut tokens = value["auth"]["tokens"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        let held = tokens
+            .iter()
+            .find(|(_, named)| named.as_str() == Some(INSTALLER))
+            .map(|(token, _)| token.clone());
+        let admin = held.unwrap_or_else(|| {
+            let token = generated_passphrase();
+            tokens.insert(token.clone(), serde_json::json!(INSTALLER));
+            token
+        });
+        let mut auth = gateway_auth(plan, &admin);
+        auth["tokens"] = serde_json::Value::Object(tokens);
+        if value["auth"] != auth {
+            mended.push(format!(
+                "knows its callers the way the desk signs them in ({})",
+                plan.mode.name()
+            ));
+            value["auth"] = auth;
+        }
+    }
+    // the example's own backends, as the first wizard copied them in
+    let example: Vec<(String, String)> =
+        std::fs::read_to_string(plan.dir.join("kvasir").join("kvasir.example.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|e| e["backends"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .map(|b| {
+                (
+                    b["id"].as_str().unwrap_or_default().to_string(),
+                    b["baseUrl"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
 
     if let Some(backends) = value["backends"].as_array_mut() {
         for backend in backends.iter_mut() {
@@ -5135,14 +5268,21 @@ fn repair_kvasir(plan: &Plan, console: &mut Console) -> Result<(), Exit> {
                 ));
             }
         }
+        // The first wizard copied the example's commercial backends in with
+        // no key, which nobody chose, and those go. A remote backend anyone
+        // else wrote stays, keyed or not: a provider's credential is kept in
+        // the gateway, and a key can be given later.
         let before = backends.len();
         backends.retain(|b| {
             let keyless = b.get("keyFile").is_none() && b.get("key").is_none();
-            !(b["locality"] == "remote" && keyless)
+            let the_examples = example
+                .iter()
+                .any(|(id, url)| b["id"] == id.as_str() && b["baseUrl"] == url.as_str());
+            !(b["locality"] == "remote" && keyless && the_examples)
         });
         if backends.len() < before {
             mended.push(format!(
-                "dropped {} remote backend(s) with no key, which nobody chose",
+                "dropped {} of the example's remote backend(s) with no key, which nobody chose",
                 before - backends.len()
             ));
         }
@@ -5221,7 +5361,7 @@ pub(crate) fn record_engine_version(path: &Path, version: &str) -> bool {
 
 /// Everything the assistant reads from its environment, in one file its
 /// service reads. Nothing here is a secret: the gateway's key is a path.
-fn write_assistant_env(plan: &Plan) -> Result<(), Exit> {
+fn write_assistant_env(plan: &Plan, chosen: Option<&ModelChoice>) -> Result<(), Exit> {
     let dir = plan.dir.join("assistant");
     let path = dir.join("assistant.env");
     // How the assistant reaches the engine and the gateway, and where it
@@ -5240,11 +5380,38 @@ fn write_assistant_env(plan: &Plan) -> Result<(), Exit> {
             None,
         ),
     };
+    // The model the assistant asks for is the first one the gateway serves,
+    // and a candidate it teaches is served from the gateway's backend.
+    let gateway = gateway_config(plan);
+    let backend_ids: Vec<&str> = gateway
+        .as_ref()
+        .and_then(|c| c["backends"].as_array())
+        .map(|all| all.iter().filter_map(|b| b["id"].as_str()).collect())
+        .unwrap_or_default();
+    let model = gateway
+        .as_ref()
+        .and_then(|c| c["backends"][0]["models"][0]["id"].as_str());
     if let Ok(text) = std::fs::read_to_string(&path) {
         let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
         set_env_line(&mut lines, "NILS_URL", Some(&engine));
         set_env_line(&mut lines, "KVASIR_URL", Some(&kvasir));
         set_env_line(&mut lines, "HOST", host);
+        // a teaching backend the gateway does not have, such as the
+        // assistant's own default, becomes the gateway's
+        let teaching = lines
+            .iter()
+            .find_map(|line| line.strip_prefix("ASSISTANT_TEACHING_BACKEND="));
+        if teaching.is_none_or(|named| !backend_ids.contains(&named))
+            && let Some(first) = backend_ids.first().copied()
+        {
+            set_env_line(&mut lines, "ASSISTANT_TEACHING_BACKEND", Some(first));
+        }
+        // the model chosen on this run is the one the assistant asks for
+        if chosen.is_some_and(|c| !c.later)
+            && let Some(model) = model
+        {
+            set_env_line(&mut lines, "ASSISTANT_MODEL", Some(model));
+        }
         let mended = format!("{}\n", lines.join("\n"));
         if mended != text {
             std::fs::write(&path, mended).map_err(|e| fail(format!("{}: {e}", path.display())))?;
@@ -5252,18 +5419,12 @@ fn write_assistant_env(plan: &Plan) -> Result<(), Exit> {
         return Ok(());
     }
     let (_, origin, _) = desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
-    // The model the assistant asks for is the first one the gateway serves.
-    let model = std::fs::read_to_string(plan.dir.join("kvasir").join("kvasir.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|c| {
-            c["backends"][0]["models"][0]["id"]
-                .as_str()
-                .map(str::to_string)
-        });
     let mut text = String::from("# Written by nils setup.\n");
     if let Some(model) = model {
         let _ = writeln!(text, "ASSISTANT_MODEL={model}");
+    }
+    if let Some(first) = backend_ids.first() {
+        let _ = writeln!(text, "ASSISTANT_TEACHING_BACKEND={first}");
     }
     let _ = writeln!(text, "NILS_URL={engine}");
     let _ = writeln!(text, "KVASIR_URL={kvasir}");
@@ -5317,9 +5478,19 @@ fn set_env_line(lines: &mut Vec<String>, key: &str, value: Option<&str>) {
 
 /// The token this setup made for the gateway, read back from its own file.
 fn gateway_admin_token(plan: &Plan) -> Option<String> {
+    let config = gateway_config(plan)?;
+    let tokens = config["auth"]["tokens"].as_object()?;
+    tokens
+        .iter()
+        .find(|(_, named)| named.as_str() == Some(INSTALLER))
+        .or_else(|| tokens.iter().next())
+        .map(|(token, _)| token.clone())
+}
+
+/// The gateway's configuration as setup wrote it, where it is there.
+fn gateway_config(plan: &Plan) -> Option<serde_json::Value> {
     let text = std::fs::read_to_string(plan.dir.join("kvasir").join("kvasir.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    value["auth"]["tokens"].as_object()?.keys().next().cloned()
+    serde_json::from_str(&text).ok()
 }
 
 /// Whether the gateway answers its health door, waiting for it a while. A
@@ -5347,61 +5518,316 @@ fn gateway_up(plan: &Plan, console: &Console, seconds: u64) -> bool {
     up
 }
 
-/// The assistant's key at the gateway, for every purpose the gateway
-/// declares for it. Waits for the gateway first; where it never comes up,
-/// the reason is the gateway's own and is shown with the services, so this
-/// says only what did not happen and how it will.
-fn mint_assistant_key(plan: &Plan, console: &Console) -> bool {
+/// The gateway made ready for the assistant, once it answers: a local model
+/// run through the gateway's admission, since the gateway lists no local
+/// model it has not admitted; a commercial provider that is the only model
+/// given the purposes that read no rows, since a purpose goes only to a
+/// local model until it is mapped; and the assistant's key, made again when
+/// the stations' purposes have outgrown it. Waits for the gateway first;
+/// where it never comes up, the reason is the gateway's own and is shown
+/// with the services, so this says only what did not happen and how it
+/// will. Answers whether the assistant has its key.
+fn ready_gateway(plan: &Plan, console: &Console) -> bool {
     let path = plan.dir.join("kvasir").join("assistant.key");
-    if path.exists() {
-        return true;
-    }
     let Some(admin) = gateway_admin_token(plan) else {
-        return false;
+        return path.exists();
     };
     if !gateway_up(plan, console, 30) {
+        if path.exists() {
+            return true;
+        }
         console.warn("the gateway did not come up, so the assistant has no key yet");
         console.say("once it runs, nils setup and then repair makes the key");
         return false;
     }
-    let purposes: Vec<String> =
-        std::fs::read_to_string(plan.dir.join("kvasir").join("kvasir.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|c| {
-                c["purposes"].as_array().map(|all| {
-                    all.iter()
-                        .filter_map(|p| p["id"].as_str())
-                        .filter(|id| id.starts_with("assistant."))
-                        .map(str::to_string)
-                        .collect()
-                })
+    let gateway = Gateway {
+        base: format!("http://127.0.0.1:{}", plan.ports.kvasir),
+        admin,
+    };
+    admit_local_models(plan, &gateway, console);
+    open_to_the_provider(plan, &gateway, console);
+    assistant_key(plan, &gateway, console)
+}
+
+/// The gateway's admin doors, called as the installer.
+#[derive(Clone)]
+struct Gateway {
+    base: String,
+    admin: String,
+}
+
+impl Gateway {
+    /// A door's JSON answer, `null` for an empty one, or None where the door
+    /// refused or did not answer within `seconds`.
+    fn call(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        seconds: u64,
+    ) -> Option<serde_json::Value> {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(seconds)))
+            .build()
+            .into();
+        let url = format!("{}{path}", self.base);
+        let bearer = format!("Bearer {}", self.admin);
+        let sent = body.map(ToString::to_string).unwrap_or_default();
+        let answered = match method {
+            "GET" => agent.get(&url).header("authorization", &bearer).call(),
+            "DELETE" => agent.delete(&url).header("authorization", &bearer).call(),
+            "PUT" => agent
+                .put(&url)
+                .header("authorization", &bearer)
+                .header("content-type", "application/json")
+                .send(sent),
+            _ => agent
+                .post(&url)
+                .header("authorization", &bearer)
+                .header("content-type", "application/json")
+                .send(sent),
+        };
+        let text = answered.ok()?.body_mut().read_to_string().ok()?;
+        if text.trim().is_empty() {
+            return Some(serde_json::Value::Null);
+        }
+        serde_json::from_str(&text).ok()
+    }
+}
+
+/// A local model the gateway does not list yet is run through the gateway's
+/// admission, where the model answers. The suite asks the model itself for
+/// tool calls, a schema and a stream, so it takes a while, and a model that
+/// does not pass stays unlisted, which is said.
+fn admit_local_models(plan: &Plan, gateway: &Gateway, console: &Console) {
+    let Some(config) = gateway_config(plan) else {
+        return;
+    };
+    // what the gateway lists now: a local model once it is admitted, and
+    // every model where its gate is off
+    let Some(catalog) = gateway.call("GET", "/v1/config", None, 10) else {
+        return;
+    };
+    let listed: Vec<&str> = catalog["models"]
+        .as_array()
+        .map(|all| all.iter().filter_map(|m| m["id"].as_str()).collect())
+        .unwrap_or_default();
+    for backend in config["backends"].as_array().into_iter().flatten() {
+        let (Some(id), Some(url)) = (backend["id"].as_str(), backend["baseUrl"].as_str()) else {
+            continue;
+        };
+        if backend["locality"] != "local" {
+            continue;
+        }
+        for name in backend["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m["id"].as_str())
+        {
+            if listed.contains(&name) {
+                continue;
+            }
+            let here = model_address_on_machine(url);
+            let key = backend["keyFile"]
+                .as_str()
+                .and_then(|file| std::fs::read_to_string(file).ok())
+                .map(|key| key.trim().to_string());
+            if list_models(&here, key.as_deref()).is_none() {
+                console.note(&format!(
+                    "{name} does not answer at {here} yet, so the gateway has not admitted it; \
+                     nils setup and then repair admits it once it does"
+                ));
+                continue;
+            }
+            let started = std::time::Instant::now();
+            let asked = gateway.clone();
+            let body = serde_json::json!({ "backend": id, "model": name });
+            let run = std::thread::spawn(move || {
+                asked.call("POST", "/v1/admission/run", Some(&body), 1800)
+            });
+            while !run.is_finished() {
+                console.waiting(&format!("the gateway admitting {name}"), started);
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            console.waited();
+            let record = run
+                .join()
+                .ok()
+                .flatten()
+                .and_then(|answer| answer["records"].as_array()?.first().cloned());
+            match record {
+                Some(r) if r["passed"] == true => {
+                    console.note(&format!("the gateway admitted {name}"));
+                }
+                Some(r) => {
+                    let failed: Vec<&str> = r["checks"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|c| c["passed"] == false)
+                        .filter_map(|c| c["name"].as_str())
+                        .collect();
+                    console.warn(&format!(
+                        "{name} did not pass the gateway's admission: {}",
+                        failed.join(", ")
+                    ));
+                    console.say(
+                        "the gateway does not offer it until it passes; nils setup and then \
+                         repair runs the suite again",
+                    );
+                }
+                None => {
+                    console.warn(&format!("the gateway did not finish admitting {name}"));
+                    console.say("nils setup and then repair runs the suite again");
+                }
+            }
+        }
+    }
+}
+
+/// A commercial provider as the only model: a purpose goes to a local model
+/// unless it is mapped elsewhere, so with no local model every purpose was
+/// refused. The purposes that read no rows of the archive are mapped to the
+/// provider now. Those that read rows stay closed to it until an admin opens
+/// them in the desk's settings, which records under that admin's name that
+/// rows leave the site.
+fn open_to_the_provider(plan: &Plan, gateway: &Gateway, console: &Console) {
+    let Some(config) = gateway_config(plan) else {
+        return;
+    };
+    let backends = config["backends"].as_array().cloned().unwrap_or_default();
+    if backends
+        .iter()
+        .any(|b| b["locality"] == "local" && b["models"].as_array().is_some_and(|m| !m.is_empty()))
+    {
+        return;
+    }
+    let Some(remote) = backends.iter().find(|b| b["locality"] == "remote") else {
+        return;
+    };
+    let Some(id) = remote["id"].as_str() else {
+        return;
+    };
+    let Some(table) = gateway.call("GET", "/v1/purposes", None, 10) else {
+        return;
+    };
+    let mut opened = 0;
+    let mut closed = Vec::new();
+    for row in table["purposes"].as_array().into_iter().flatten() {
+        let Some(purpose) = row["purpose"].as_str() else {
+            continue;
+        };
+        if !row["backend"].is_null() {
+            continue;
+        }
+        match row["content"].as_str() {
+            Some("catalog") => {
+                let mapped = gateway.call(
+                    "PUT",
+                    &format!("/v1/purposes/{purpose}/policy"),
+                    Some(&serde_json::json!({ "backend": id })),
+                    10,
+                );
+                if mapped.is_some() {
+                    opened += 1;
+                }
+            }
+            Some("rows") => closed.push(purpose),
+            _ => {}
+        }
+    }
+    let model = remote["models"][0]["id"].as_str().unwrap_or(id);
+    if opened > 0 {
+        console.note(&format!(
+            "{opened} purpose(s) that read no rows of the archive go to {model}"
+        ));
+    }
+    if !closed.is_empty() {
+        console.note(&format!(
+            "{} read rows of the archive and stay closed to {model} until an admin opens them \
+             in the desk's settings",
+            closed.join(", ")
+        ));
+    }
+}
+
+/// The assistant's key at the gateway, for every purpose the gateway
+/// declares for it. A key made before a station was added lacks that
+/// station's purpose, and the gateway refuses the station, so a key that
+/// does not cover them all, or that the gateway no longer holds, is made
+/// again and the one it replaces is revoked.
+fn assistant_key(plan: &Plan, gateway: &Gateway, console: &Console) -> bool {
+    let path = plan.dir.join("kvasir").join("assistant.key");
+    let purposes: Vec<String> = gateway_config(plan)
+        .and_then(|c| {
+            c["purposes"].as_array().map(|all| {
+                all.iter()
+                    .filter_map(|p| p["id"].as_str())
+                    .filter(|id| id.starts_with("assistant."))
+                    .map(str::to_string)
+                    .collect()
             })
-            .unwrap_or_default();
+        })
+        .unwrap_or_default();
+    // a key names its row: kvs_<id>.<secret>
+    let held = std::fs::read_to_string(&path).ok().and_then(|key| {
+        key.trim()
+            .strip_prefix("kvs_")
+            .and_then(|rest| rest.split_once('.'))
+            .map(|(id, _)| id.to_string())
+    });
+    if path.exists() {
+        let Some(keys) = gateway.call("GET", "/v1/keys", None, 10) else {
+            // a gateway that does not list its keys keeps the one there
+            return true;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+        let row = held.as_deref().and_then(|id| {
+            keys["keys"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|k| k["id"] == id)
+        });
+        let covers = row.is_some_and(|k| {
+            k["revokedAt"].is_null()
+                && k["expiresAt"].as_i64().is_none_or(|at| at > now)
+                && purposes.iter().all(|p| {
+                    k["purposes"]
+                        .as_array()
+                        .is_some_and(|have| have.iter().any(|h| h.as_str() == Some(p.as_str())))
+                })
+        });
+        if covers {
+            return true;
+        }
+    }
     let body = serde_json::json!({
         "principal": "nils-assistant",
         "purposes": purposes,
         "max_class": "rows",
     });
-    let minted = ureq::post(&format!("http://127.0.0.1:{}/v1/keys", plan.ports.kvasir))
-        .header("authorization", &format!("Bearer {admin}"))
-        .header("content-type", "application/json")
-        .send(body.to_string())
-        .ok()
-        .and_then(|mut r| r.body_mut().read_to_string().ok())
-        .and_then(|text| {
-            let answer: serde_json::Value = serde_json::from_str(&text).ok()?;
-            Some(answer.get("key")?.as_str()?.to_string())
-        });
+    let minted = gateway
+        .call("POST", "/v1/keys", Some(&body), 10)
+        .and_then(|answer| answer["key"].as_str().map(str::to_string));
     match minted {
         Some(key) if write_secret(&path, &key).is_ok() => {
-            console.note(&format!("the assistant's key is at {}", path.display()));
+            if let Some(old) = &held {
+                let _ = gateway.call("DELETE", &format!("/v1/keys/{old}"), None, 10);
+                console
+                    .note("the assistant's key is made again, for every purpose its stations use");
+            } else {
+                console.note(&format!("the assistant's key is at {}", path.display()));
+            }
             true
         }
         _ => {
             console.warn("the gateway would not make the assistant's key");
             console.say("nils setup and then repair asks it again");
-            false
+            path.exists()
         }
     }
 }
@@ -5472,8 +5898,9 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Sta
                 quietly("systemctl", &["--user", "start", unit]);
             }
             if plan.has(Part::Assistant) {
-                mint_assistant_key(plan, console);
-                quietly("systemctl", &["--user", "start", "nils-assistant"]);
+                ready_gateway(plan, console);
+                // again, since a key made again replaces the one it read
+                quietly("systemctl", &["--user", "restart", "nils-assistant"]);
                 units.push("nils-assistant".to_string());
             }
             linger();
@@ -5500,7 +5927,7 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Sta
             let mut containers: Vec<String> =
                 services.iter().map(|s| format!("nils-{s}")).collect();
             if plan.has(Part::Assistant) {
-                mint_assistant_key(plan, console);
+                ready_gateway(plan, console);
                 console.task(
                     "starting the assistant",
                     &plan.dir,
@@ -5573,7 +6000,7 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Sta
                 quietly("systemctl", &["--user", "restart", unit]);
             }
             if !assistant.is_empty() {
-                mint_assistant_key(plan, console);
+                ready_gateway(plan, console);
                 for unit in &assistant {
                     quietly("systemctl", &["--user", "restart", unit]);
                 }
@@ -6028,7 +6455,12 @@ fn card_rows(plan: &Plan) -> Vec<(&'static str, String)> {
 /// The model the gateway sends the assistant to, as its configuration says:
 /// where it is, or that the prompt leaves this organisation's systems.
 fn model_on_record(plan: &Plan) -> Option<String> {
-    let text = std::fs::read_to_string(plan.dir.join("kvasir").join("kvasir.json")).ok()?;
+    model_on_record_in(&plan.dir)
+}
+
+/// The model the gateway of a setup directory sends the assistant to.
+fn model_on_record_in(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("kvasir").join("kvasir.json")).ok()?;
     let config: serde_json::Value = serde_json::from_str(&text).ok()?;
     let backend = config["backends"].as_array()?.first()?;
     let model = backend["models"][0]["id"].as_str()?;
@@ -7330,6 +7762,16 @@ mod tests {
         station(&dir, "concierge", "assistant.concierge", "rows");
         let kvasir = dir.join("kvasir");
         std::fs::create_dir_all(&kvasir).unwrap();
+        std::fs::write(
+            kvasir.join("kvasir.example.json"),
+            serde_json::json!({"backends": [
+                {"id": "card", "baseUrl": "http://127.0.0.1:30000/v1", "locality": "local"},
+                {"id": "minimax-openai", "baseUrl": "https://api.minimax.io/v1", "locality": "remote",
+                 "provider": "minimax"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
         let written = serde_json::json!({
             "auth": {"mode": "token", "tokens": {"tok": "nils-setup:admin"}},
             "backends": [
@@ -7337,6 +7779,8 @@ mod tests {
                  "keyFile": "/etc/kvasir/card.key", "models": [{"id": "m"}]},
                 {"id": "minimax-openai", "baseUrl": "https://api.minimax.io/v1", "locality": "remote",
                  "provider": "minimax", "models": [{"id": "x"}]},
+                {"id": "openrouter", "baseUrl": "https://openrouter.ai/api/v1", "locality": "remote",
+                 "provider": "openrouter", "models": [{"id": "z"}]},
                 {"id": "kept", "baseUrl": "https://api.example.org/v1", "locality": "remote",
                  "key": "a key someone put there", "models": [{"id": "y"}]}
             ],
@@ -7346,7 +7790,7 @@ mod tests {
         let mut plan = plan(Runtime::Machine);
         plan.dir = dir.clone();
         let mut console = Console::new(true);
-        assert!(repair_kvasir(&plan, &mut console).is_ok());
+        assert!(repair_kvasir(&plan, &mut console, None).is_ok());
 
         let mended: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(kvasir.join("kvasir.json")).unwrap())
@@ -7355,8 +7799,8 @@ mod tests {
         let ids: Vec<&str> = backends.iter().filter_map(|b| b["id"].as_str()).collect();
         assert_eq!(
             ids,
-            vec!["card", "kept"],
-            "the keyless remote one goes, a keyed one stays"
+            vec!["card", "openrouter", "kept"],
+            "the example's keyless remote one goes; one someone added stays, keyed or not"
         );
         assert!(
             backends[0].get("keyFile").is_none(),
@@ -7374,13 +7818,273 @@ mod tests {
             .collect();
         assert!(purposes.contains(&"assistant.concierge"), "{purposes:?}");
         assert_eq!(gateway_admin_token(&plan).as_deref(), Some("tok"));
+        assert_eq!(mended["auth"]["mode"], "off", "as the desk signs in");
+        assert_eq!(mended["auth"]["tokens"]["tok"], INSTALLER);
 
         // and a second repair has nothing left to do
         let before = std::fs::read_to_string(kvasir.join("kvasir.json")).unwrap();
-        assert!(repair_kvasir(&plan, &mut console).is_ok());
+        assert!(repair_kvasir(&plan, &mut console, None).is_ok());
         assert_eq!(
             std::fs::read_to_string(kvasir.join("kvasir.json")).unwrap(),
             before
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_gateway_knows_callers_the_way_the_desk_signs_them_in() {
+        let mut plan = plan(Runtime::Podman);
+        plan.mode = Mode::Local;
+        let auth = gateway_auth(&plan, "tok");
+        assert_eq!(auth["mode"], "oidc", "{auth}");
+        assert_eq!(auth["tokens"]["tok"], INSTALLER, "{auth}");
+        let (issuer, jwks) = desk_trust(&plan);
+        assert_eq!(jwks, "http://127.0.0.1:7200/.well-known/jwks.json");
+        assert_eq!(auth["trust"][0]["issuer"], issuer.as_str(), "{auth}");
+        assert_eq!(auth["trust"][0]["jwks"], jwks.as_str(), "{auth}");
+        assert_eq!(auth["trust"][0]["audience"], "nils", "{auth}");
+        assert_eq!(auth["groupsClaim"], "roles", "{auth}");
+        assert_eq!(auth["roles"]["admin"], "admin", "{auth}");
+        let engine = engine_args(&plan, "/r", "/b").join(" ");
+        assert!(
+            engine.contains(&format!("issuer={issuer},audience=nils,jwks={jwks}")),
+            "the engine trusts the same issuer: {engine}"
+        );
+        plan.runtime = Runtime::Docker;
+        assert_eq!(
+            desk_trust(&plan).1,
+            "http://nils-desk:7200/.well-known/jwks.json"
+        );
+        plan.mode = Mode::Off;
+        assert_eq!(gateway_auth(&plan, "tok")["mode"], "off");
+    }
+
+    #[test]
+    fn a_rerun_that_chooses_another_model_sends_the_assistant_there() {
+        let dir = scratch("rechoose");
+        let kvasir = dir.join("kvasir");
+        std::fs::create_dir_all(&kvasir).unwrap();
+        let written = serde_json::json!({
+            "auth": {"mode": "off", "tokens": {"tok": "nils-setup:admin"}},
+            "backends": [{"id": "model", "kind": "openai-completions",
+                          "baseUrl": "http://127.0.0.1:30000/v1", "locality": "local",
+                          "models": [{"id": "qwen", "name": "qwen", "contextWindow": 32768}]}],
+            "purposes": []
+        });
+        std::fs::write(kvasir.join("kvasir.json"), written.to_string()).unwrap();
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        let chosen = ModelChoice {
+            url: "https://api.example.org/v1".to_string(),
+            local: false,
+            key: Some("sk-test".to_string()),
+            model: "big".to_string(),
+            later: false,
+        };
+        let mut console = Console::new(true);
+        assert!(repair_kvasir(&plan, &mut console, Some(&chosen)).is_ok());
+        let config = gateway_config(&plan).unwrap();
+        let backend = &config["backends"][0];
+        assert_eq!(backend["id"], "model", "{backend}");
+        assert_eq!(
+            backend["baseUrl"], "https://api.example.org/v1",
+            "{backend}"
+        );
+        assert_eq!(backend["locality"], "remote", "{backend}");
+        assert_eq!(backend["models"][0]["id"], "big", "{backend}");
+        assert_eq!(
+            backend["models"][0]["contextWindow"], 32768,
+            "what the model's entry held is kept"
+        );
+        let key = std::fs::read_to_string(backend["keyFile"].as_str().unwrap()).unwrap();
+        assert_eq!(key.trim(), "sk-test");
+        assert_eq!(
+            model_on_record(&plan).as_deref(),
+            Some("big, the prompt leaves your systems")
+        );
+
+        // the assistant asks for the model chosen, and teaches on the gateway's backend
+        let env = dir.join("assistant");
+        std::fs::create_dir_all(&env).unwrap();
+        let env = env.join("assistant.env");
+        std::fs::write(
+            &env,
+            "ASSISTANT_MODEL=qwen\nASSISTANT_TEACHING_BACKEND=card0\n",
+        )
+        .unwrap();
+        assert!(write_assistant_env(&plan, Some(&chosen)).is_ok());
+        let text = std::fs::read_to_string(&env).unwrap();
+        assert!(text.contains("ASSISTANT_MODEL=big"), "{text}");
+        assert!(text.contains("ASSISTANT_TEACHING_BACKEND=model"), "{text}");
+        // and a run that chose nothing leaves the model the file names
+        std::fs::write(
+            &env,
+            "ASSISTANT_MODEL=mine\nASSISTANT_TEACHING_BACKEND=model\n",
+        )
+        .unwrap();
+        assert!(write_assistant_env(&plan, None).is_ok());
+        let text = std::fs::read_to_string(&env).unwrap();
+        assert!(text.contains("ASSISTANT_MODEL=mine"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A gateway that answers each door from a table, and writes down every
+    /// call it is sent with its body.
+    fn fake_gateway(
+        answer: impl Fn(&str, &str) -> String + Send + 'static,
+    ) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead as _, Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                let mut reader = std::io::BufReader::new(stream);
+                let mut first = String::new();
+                if reader.read_line(&mut first).is_err() {
+                    continue;
+                }
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; length];
+                let _ = reader.read_exact(&mut body);
+                let mut words = first.split_whitespace();
+                let method = words.next().unwrap_or_default().to_string();
+                let path = words.next().unwrap_or_default().to_string();
+                seen.lock().unwrap().push(format!(
+                    "{method} {path} {}",
+                    String::from_utf8_lossy(&body)
+                ));
+                let text = answer(&method, &path);
+                let _ = reader.into_inner().write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                        text.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (port, calls)
+    }
+
+    #[test]
+    fn the_gateway_is_made_ready_for_the_assistant() {
+        let dir = scratch("ready");
+        let kvasir = dir.join("kvasir");
+        std::fs::create_dir_all(&kvasir).unwrap();
+        let (port, calls) = fake_gateway(|method, path| {
+            match (method, path) {
+                ("GET", "/healthz") => r#"{"ok":true}"#,
+                ("GET", "/v1/models") => r#"{"object":"list","data":[{"id":"m"}]}"#,
+                ("GET", "/v1/config") => r#"{"models":[]}"#,
+                ("POST", "/v1/admission/run") => {
+                    r#"{"records":[{"model":"m","passed":true,"checks":[]}]}"#
+                }
+                ("GET", "/v1/keys") => {
+                    r#"{"keys":[
+                        {"id":"k_old","principal":"nils-assistant","purposes":["assistant.ask-help"],"expiresAt":null,"revokedAt":null},
+                        {"id":"k_new","principal":"nils-assistant","purposes":["assistant.ask-help","assistant.operator"],"expiresAt":null,"revokedAt":null}
+                    ]}"#
+                }
+                ("POST", "/v1/keys") => r#"{"id":"k_new","key":"kvs_k_new.fresh"}"#,
+                ("GET", "/v1/purposes") => {
+                    r#"{"purposes":[
+                        {"purpose":"assistant.operator","content":"catalog","backend":null},
+                        {"purpose":"assistant.ask-help","content":"rows","backend":null}
+                    ]}"#
+                }
+                _ => "",
+            }
+            .to_string()
+        });
+        let config = |locality: &str| {
+            serde_json::json!({
+                "auth": {"mode": "off", "tokens": {"tok": "nils-setup:admin"}},
+                "backends": [{"id": "model", "baseUrl": format!("http://127.0.0.1:{port}/v1"),
+                              "locality": locality, "models": [{"id": "m"}]}],
+                "purposes": [
+                    {"id": "assistant.ask-help", "content": "rows"},
+                    {"id": "assistant.operator", "content": "catalog"}
+                ]
+            })
+            .to_string()
+        };
+        std::fs::write(kvasir.join("kvasir.json"), config("local")).unwrap();
+        std::fs::write(kvasir.join("assistant.key"), "kvs_k_old.stale").unwrap();
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.ports.kvasir = port;
+        let console = Console::new(true);
+
+        // a local model not listed yet is admitted; a key made before a
+        // station was added is made again, and the old one revoked
+        assert!(ready_gateway(&plan, &console));
+        let key = std::fs::read_to_string(kvasir.join("assistant.key")).unwrap();
+        assert_eq!(key.trim(), "kvs_k_new.fresh");
+        let seen = calls.lock().unwrap().clone();
+        assert!(
+            seen.iter()
+                .any(|c| c.starts_with("POST /v1/admission/run") && c.contains(r#""model":"m""#)),
+            "{seen:?}"
+        );
+        let minted = seen
+            .iter()
+            .find(|c| c.starts_with("POST /v1/keys"))
+            .unwrap();
+        assert!(
+            minted.contains("assistant.ask-help") && minted.contains("assistant.operator"),
+            "{minted}"
+        );
+        assert!(
+            seen.iter().any(|c| c.starts_with("DELETE /v1/keys/k_old")),
+            "{seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|c| c.starts_with("PUT")),
+            "a local model needs no mapping: {seen:?}"
+        );
+
+        // a commercial provider as the only model: what reads no rows is
+        // mapped to it, and a key that covers every purpose is kept
+        calls.lock().unwrap().clear();
+        std::fs::write(kvasir.join("kvasir.json"), config("remote")).unwrap();
+        assert!(ready_gateway(&plan, &console));
+        let seen = calls.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(
+                |c| c.starts_with("PUT /v1/purposes/assistant.operator/policy")
+                    && c.contains(r#""backend":"model""#)
+            ),
+            "{seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|c| c.contains("assistant.ask-help/policy")),
+            "what reads rows stays closed until an admin opens it: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|c| c.starts_with("POST /v1/admission/run")),
+            "a provider is not admitted: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|c| c.starts_with("POST /v1/keys")),
+            "{seen:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -8001,7 +8705,7 @@ mod tests {
         );
 
         std::fs::create_dir_all(dir.join("assistant")).unwrap();
-        assert!(write_assistant_env(&plan).is_ok());
+        assert!(write_assistant_env(&plan, None).is_ok());
         let env_path = dir.join("assistant").join("assistant.env");
         let env = std::fs::read_to_string(&env_path).unwrap();
         assert!(env.contains("NILS_URL=http://nils-engine:8437"), "{env}");
@@ -8011,7 +8715,7 @@ mod tests {
         // the same setup moved to a pod: the addresses follow, the rest stays
         std::fs::write(&env_path, format!("{env}ASSISTANT_MODEL=mine\n")).unwrap();
         plan.runtime = Runtime::Podman;
-        assert!(write_assistant_env(&plan).is_ok());
+        assert!(write_assistant_env(&plan, None).is_ok());
         let moved = std::fs::read_to_string(&env_path).unwrap();
         assert!(moved.contains("NILS_URL=http://127.0.0.1:8437"), "{moved}");
         assert!(!moved.contains("HOST="), "{moved}");
