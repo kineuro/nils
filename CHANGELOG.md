@@ -16,6 +16,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - A rerun of `nils setup` dropped every remote backend with no key from the gateway's configuration, which removed a provider whose credential is kept in the gateway and a commercial model chosen without a key. Only the example's backends that the first wizard copied in are dropped now.
 - A rerun never asked about the model again, so changing it meant editing files. It now says what the assistant talks to and asks whether to keep it.
 - The assistant's teaching backend was `card0`, which no gateway that setup writes has. It is now the gateway's own backend.
+- A rerun of `nils setup` offered no directory of DICOM, so pressing Enter dropped the directory the install read, and naming another left the source place at its old path while the engine was given the new one. The question now offers the directory read now, and the source place moves with the answer. Every source place the registry holds, such as one added with `nils place add`, is mounted into the engine's container and given to the engine as an ingest root, as the one setup asked for is. Setup reads the places without migrating a registry that an older engine still runs on.
 
 ## [1.0.0-alpha.13] - 2026-09-12
 

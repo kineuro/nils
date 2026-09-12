@@ -299,6 +299,89 @@ fn yes_makes_a_registry_and_a_state_file_and_a_second_run_changes_nothing() {
     );
 }
 
+/// A rerun that names another directory of DICOM moves the source place
+/// there, where the old path stayed and the engine was given the new one;
+/// and a source place added with nils place add is mounted and handed to the
+/// engine like the one setup asked for.
+#[test]
+fn a_rerun_follows_the_source_and_every_source_place_is_read() {
+    let nils = Installed::new("nils-setup-sources");
+    let config = TempDir::new("nils-setup-sources-config");
+    let base = TempDir::new("nils-setup-sources-base");
+    let dir = base.path().join("nils");
+    let registry = dir.join("registry");
+    let (first, moved, added) = (
+        base.path().join("dicom-a"),
+        base.path().join("dicom-b"),
+        base.path().join("scanner-2"),
+    );
+    for d in [&first, &moved, &added] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let run = |source: &Path, more: &[&str]| {
+        let mut args = vec![
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--source",
+            source.to_str().unwrap(),
+        ];
+        args.extend_from_slice(more);
+        setup(&nils.path(), config.path(), &args)
+    };
+
+    let o = run(&first, &["--no-service"]);
+    assert!(o.ok, "{}", o.stderr);
+    let made = output(
+        Command::new(nils.path())
+            .arg("--registry")
+            .arg(&registry)
+            .args(["place", "add", "scanner2"])
+            .arg(&added)
+            .args(["--role", "source"]),
+    );
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+
+    let o = run(&moved, &["--no-service"]);
+    assert!(o.ok, "{}", o.stderr);
+    o.says("the source place is now");
+    let listed = output(
+        Command::new(nils.path())
+            .arg("--registry")
+            .arg(&registry)
+            .args(["place", "list", "--json"]),
+    );
+    let places: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let path_of = |name: &str| {
+        places
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == name)
+            .and_then(|p| p["path"].as_str())
+            .map(PathBuf::from)
+    };
+    assert_eq!(
+        path_of("source"),
+        Some(std::fs::canonicalize(&moved).unwrap()),
+        "{places}"
+    );
+    let state = state_of(config.path());
+    assert!(state.contains("scanner2"), "{state}");
+
+    let o = run(&moved, &["--print", "--runtime", "podman", "--service"]);
+    assert!(o.ok, "{}", o.stderr);
+    o.says(&format!("-v {0}:{0}:ro", moved.display()));
+    o.says(&format!("-v {0}:{0}:ro", added.display()));
+    o.says(&format!("--ingest-root scanner2={}", added.display()));
+}
+
 /// A machine install carries no rule packs in the binary, so it has to take
 /// them from the release. Without them the engine starts saying `packs none`
 /// and refuses to digest anything, which is the whole of what it is for.

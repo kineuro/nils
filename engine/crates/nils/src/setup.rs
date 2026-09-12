@@ -1797,6 +1797,10 @@ pub(crate) struct Plan {
     pub(crate) ports: Ports,
     pub(crate) reach: Reach,
     pub(crate) source: Option<PathBuf>,
+    /// The registry's source places, by name: the directories of DICOM added
+    /// at the desk or with nils place add, which the engine is given as it is
+    /// given the one setup asked for.
+    pub(crate) sources: Vec<(String, PathBuf)>,
     pub(crate) registry_exists: bool,
     pub(crate) service: bool,
     pub(crate) channel: Option<String>,
@@ -1916,6 +1920,23 @@ impl Plan {
     fn has(&self, part: Part) -> bool {
         self.parts.contains(&part)
     }
+
+    /// The directories the engine reads, each by its place's name: the one
+    /// setup asked for first, under the name it declares it by, then the
+    /// registry's other source places.
+    fn read_from(&self) -> Vec<(String, PathBuf)> {
+        let mut out: Vec<(String, PathBuf)> = self
+            .source
+            .iter()
+            .map(|path| ("source".to_string(), path.clone()))
+            .collect();
+        for (name, path) in &self.sources {
+            if !out.iter().any(|(n, p)| n == name || p == path) {
+                out.push((name.clone(), path.clone()));
+            }
+        }
+        out
+    }
 }
 
 /// The plan a recorded setup describes, so `--update` and a repair need ask
@@ -1951,8 +1972,9 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
         source: state
             .places
             .iter()
-            .find(|p| p.role == "source")
+            .find(|p| p.name == "source" && p.role == "source")
             .map(|p| PathBuf::from(&p.path)),
+        sources: registry_sources(&dir).unwrap_or_else(|| recorded_sources(&state.places)),
         registry_exists: true,
         service: !state.service.is_empty() && state.service != "none",
         channel: channel.map(str::to_string),
@@ -1968,6 +1990,35 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
             .filter(|r| r.container())
             .map(|runtime| ManagedPostgres { runtime }),
     }
+}
+
+/// The source places a registry holds, by name, read as the registry stands.
+/// A registry this binary would have to migrate first is not opened, and the
+/// setup's own record stands in for it.
+fn registry_sources(dir: &Path) -> Option<Vec<(String, PathBuf)>> {
+    use nils_registry::place::{self, Role};
+    let home = Home::new(dir.join("registry"));
+    if !home.exists() {
+        return None;
+    }
+    let mut store = home.open_as_it_stands().ok()?;
+    let places = place::active(&mut store).ok()?;
+    Some(
+        places
+            .into_iter()
+            .filter(|p| p.role == Role::Source)
+            .map(|p| (p.name, PathBuf::from(p.path)))
+            .collect(),
+    )
+}
+
+/// The source places a setup recorded when it last declared its places.
+fn recorded_sources(places: &[PlaceState]) -> Vec<(String, PathBuf)> {
+    places
+        .iter()
+        .filter(|p| p.role == "source")
+        .map(|p| (p.name.clone(), PathBuf::from(&p.path)))
+        .collect()
 }
 
 fn default_dir() -> PathBuf {
@@ -2159,9 +2210,9 @@ fn engine_args(plan: &Plan, registry: &str, backups: &str) -> Vec<String> {
             argv.push("oidc".to_string());
         }
     }
-    if let Some(source) = &plan.source {
+    for (name, path) in plan.read_from() {
         argv.push("--ingest-root".to_string());
-        argv.push(format!("source={}", source.display()));
+        argv.push(format!("{name}={}", path.display()));
     }
     argv
 }
@@ -2206,8 +2257,8 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
     );
     let mut engine =
         format!("podman run -d --pod nils --name nils-engine -v {registry}:{registry}:U");
-    if let Some(source) = &plan.source {
-        let _ = write!(engine, " -v {0}:{0}:ro", source.display());
+    for (_, path) in plan.read_from() {
+        let _ = write!(engine, " -v {0}:{0}:ro", path.display());
     }
     let _ = write!(
         engine,
@@ -2260,8 +2311,8 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
             ""
         },
     );
-    if let Some(source) = &plan.source {
-        let _ = write!(engine, " -v {0}:{0}:ro", source.display());
+    for (_, path) in plan.read_from() {
+        let _ = write!(engine, " -v {0}:{0}:ro", path.display());
     }
     let _ = write!(
         engine,
@@ -2323,8 +2374,8 @@ pub(crate) fn docker_compose(plan: &Plan) -> String {
     let _ = writeln!(out, "    volumes:");
     let _ = writeln!(out, "      - {registry}:{registry}");
     let _ = writeln!(out, "      - {backups}:{backups}");
-    if let Some(source) = &plan.source {
-        let _ = writeln!(out, "      - {0}:{0}:ro", source.display());
+    for (_, path) in plan.read_from() {
+        let _ = writeln!(out, "      - {0}:{0}:ro", path.display());
     }
     if plan.has(Part::Desk) {
         let publish = match &plan.reach {
@@ -2413,8 +2464,8 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
     );
     let _ = writeln!(engine, "Volume={registry}:{registry}:U");
     let _ = writeln!(engine, "Volume={backups}:{backups}:U");
-    if let Some(source) = &plan.source {
-        let _ = writeln!(engine, "Volume={0}:{0}:ro", source.display());
+    for (_, path) in plan.read_from() {
+        let _ = writeln!(engine, "Volume={0}:{0}:ro", path.display());
     }
     let _ = writeln!(
         engine,
@@ -2725,7 +2776,17 @@ fn questions(
     let source = match &args.source {
         Some(s) => Some(s.clone()),
         None => {
-            let answer = console.ask_line("A directory of DICOM to read (empty for none)", "")?;
+            // a rerun offers the directory read now, so Enter keeps it
+            let reads = existing
+                .and_then(|s| {
+                    s.places
+                        .iter()
+                        .find(|p| p.name == "source" && p.role == "source")
+                })
+                .map(|p| p.path.clone())
+                .unwrap_or_default();
+            let answer =
+                console.ask_line("A directory of DICOM to read (empty for none)", &reads)?;
             let answer = answer.trim().to_string();
             (!answer.is_empty()).then(|| expand(&answer))
         }
@@ -3152,6 +3213,11 @@ fn questions(
     let host_loopback = runtime == Runtime::Podman
         && (parts.contains(&Part::Assistant) || postgres_here)
         && podman_has_pasta();
+    let sources = registry_sources(&dir).unwrap_or_else(|| {
+        existing
+            .map(|s| recorded_sources(&s.places))
+            .unwrap_or_default()
+    });
     let plan = Plan {
         dir,
         parts,
@@ -3161,6 +3227,7 @@ fn questions(
         ports,
         reach,
         source,
+        sources,
         registry_exists,
         host_loopback,
         postgres,
@@ -3490,8 +3557,13 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
         ));
     }
     rows.push(("engine port", plan.ports.engine.to_string()));
-    if let Some(source) = &plan.source {
-        rows.push(("reads", format!("{} (read only)", source.display())));
+    let reads: Vec<String> = plan
+        .read_from()
+        .iter()
+        .map(|(_, path)| path.display().to_string())
+        .collect();
+    if !reads.is_empty() {
+        rows.push(("reads", format!("{} (read only)", reads.join(", "))));
     }
     rows.push((
         "places",
@@ -4451,6 +4523,38 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Vec<PlaceState
         };
         match place::by_name(registry.store(), spec.name) {
             Ok(Some(there)) => {
+                // A place setup declared follows the answer given now: a
+                // source named on a rerun moves the place, where keeping the
+                // old path left the registry reading a directory the engine
+                // was no longer given.
+                let was = std::fs::canonicalize(&there.path)
+                    .unwrap_or_else(|_| PathBuf::from(&there.path));
+                if there.role == role && there.retired_at.is_none() && was != Path::new(&path) {
+                    let probed = crate::places::probe(Path::new(&path));
+                    match place::set(registry.store(), there.id, Some(&path), None, Some(&probed)) {
+                        Ok(_) => {
+                            let _ = crate::audit(
+                                &mut registry,
+                                nils_registry::audit::Action::PlaceSet,
+                                serde_json::json!({"place": there.id, "name": spec.name, "moved": true}),
+                                None,
+                            );
+                            console.progress(&format!("the {} place is now {path}", spec.name));
+                            declared.push(row);
+                        }
+                        Err(e) => {
+                            console.warn(&format!(
+                                "the {} place was not moved to {path}: {e}",
+                                spec.name
+                            ));
+                            declared.push(PlaceState {
+                                path: there.path,
+                                ..row
+                            });
+                        }
+                    }
+                    continue;
+                }
                 declared.push(PlaceState {
                     path: there.path,
                     ..row
@@ -4486,6 +4590,20 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Vec<PlaceState
                 declared.push(row);
             }
             Err(e) => console.warn(&format!("the {} place was not declared: {e}", spec.name)),
+        }
+    }
+    // Every other source place is kept on record too, so a later update
+    // mounts a directory added at the desk even when it does not read the
+    // registry.
+    if let Ok(active) = place::active(registry.store()) {
+        for p in active.into_iter().filter(|p| p.role == Role::Source) {
+            if !declared.iter().any(|d| d.name == p.name) {
+                declared.push(PlaceState {
+                    name: p.name,
+                    role: Role::Source.name().to_string(),
+                    path: p.path,
+                });
+            }
         }
     }
     if !declared.is_empty() {
@@ -7532,6 +7650,7 @@ mod tests {
             ports: Ports::default(),
             reach: Reach::Loopback,
             source: Some(PathBuf::from("/data/source")),
+            sources: Vec::new(),
             registry_exists: false,
             service: true,
             channel: None,
@@ -8362,6 +8481,43 @@ mod tests {
     }
 
     #[test]
+    fn every_source_place_is_mounted_and_handed_to_the_engine() {
+        let mut p = plan(Runtime::Podman);
+        p.sources = vec![
+            ("source".to_string(), PathBuf::from("/data/before")),
+            ("scanner2".to_string(), PathBuf::from("/data/two")),
+        ];
+        let engine = &podman_commands(&p)[1];
+        assert!(
+            engine.contains("-v /data/source:/data/source:ro"),
+            "{engine}"
+        );
+        assert!(engine.contains("-v /data/two:/data/two:ro"), "{engine}");
+        assert!(
+            !engine.contains("/data/before"),
+            "the directory named now is the source, not the place's old path: {engine}"
+        );
+        assert!(
+            engine.contains("--ingest-root source=/data/source --ingest-root scanner2=/data/two"),
+            "{engine}"
+        );
+        p.runtime = Runtime::Docker;
+        let engine = &docker_commands(&p)[1];
+        assert!(engine.contains("-v /data/two:/data/two:ro"), "{engine}");
+        let compose = docker_compose(&p);
+        assert!(
+            compose.contains("      - /data/two:/data/two:ro"),
+            "{compose}"
+        );
+        assert!(
+            plan_rows(&p)
+                .iter()
+                .any(|(key, value)| *key == "reads" && value.contains("/data/two")),
+            "the summary names every directory read"
+        );
+    }
+
+    #[test]
     fn podman_runs_a_pod_and_owns_its_mounts() {
         let p = plan(Runtime::Podman);
         let commands = podman_commands(&p);
@@ -9092,11 +9248,18 @@ mod tests {
                 engine: 9000,
                 ..Ports::default()
             },
-            places: vec![PlaceState {
-                name: "source".to_string(),
-                role: "source".to_string(),
-                path: "/data/source".to_string(),
-            }],
+            places: vec![
+                PlaceState {
+                    name: "scanner2".to_string(),
+                    role: "source".to_string(),
+                    path: "/data/two".to_string(),
+                },
+                PlaceState {
+                    name: "source".to_string(),
+                    role: "source".to_string(),
+                    path: "/data/source".to_string(),
+                },
+            ],
             ..State::default()
         };
         let plan = plan_from_state(&state, None);
@@ -9105,6 +9268,14 @@ mod tests {
         assert_eq!(plan.reach, Reach::Network("10.0.0.5".to_string()));
         assert_eq!(plan.ports.engine, 9000);
         assert_eq!(plan.source.as_deref(), Some(Path::new("/data/source")));
+        assert_eq!(
+            plan.read_from(),
+            vec![
+                ("source".to_string(), PathBuf::from("/data/source")),
+                ("scanner2".to_string(), PathBuf::from("/data/two")),
+            ],
+            "the source setup asked for first, then every other one on record"
+        );
         assert!(
             plan.service,
             "a state that names a service manager keeps it"
