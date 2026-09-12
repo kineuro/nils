@@ -3,6 +3,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 FROM docker.io/library/debian:trixie-slim
 ARG TARGETARCH
+# pg_dump, which the backup of a registry kept in Postgres needs
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
 RUN groupadd -g 1500 nils && useradd -u 1500 -g 1500 -M -d /srv/nils nils \
  && mkdir -p /srv/nils/registry && chown -R nils:nils /srv/nils
 COPY bin/nils-linux-${TARGETARCH} /usr/local/bin/nils

@@ -3843,3 +3843,39 @@ fn a_laptop_binds_directories_as_places_and_a_release_keeps_to_the_export_one() 
     let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(rows.as_array().unwrap().len(), 2, "{rows}");
 }
+
+/// Wave 5 §10.2: `nils backup` with no directory writes to the backup place
+/// the registry's own place names, the one an install declares, rather than
+/// to a directory of its own that the rule refuses.
+#[test]
+fn a_backup_with_no_directory_goes_to_the_place_the_registry_names() {
+    let home = home();
+    let vault = TempDir::new("cli-backup-vault");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let added = nils()
+        .args(registry)
+        .args(["place", "add", "vault"])
+        .arg(vault.path())
+        .args(["--role", "backup"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr(&added));
+    let added = nils()
+        .args(registry)
+        .args(["place", "add", "reg"])
+        .arg(home.path())
+        .args(["--role", "registry", "--backup", "vault"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    let backed = nils()
+        .args(registry)
+        .args(["backup", "--json"])
+        .output()
+        .unwrap();
+    assert!(backed.status.success(), "{}", stderr(&backed));
+    let manifest: serde_json::Value = serde_json::from_slice(&backed.stdout).unwrap();
+    let archive = manifest["archive"].as_str().unwrap();
+    assert!(vault.path().join(archive).exists(), "{manifest}");
+}

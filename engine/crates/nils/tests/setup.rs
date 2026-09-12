@@ -428,10 +428,7 @@ fn podman_is_one_pod_that_publishes_only_the_desk() {
     assert!(o.ok, "{}", o.stderr);
     o.says("podman pod create --name nils -p 127.0.0.1:7200:7200");
     o.says("--pod nils --name nils-engine");
-    o.says(&format!(
-        "-v {}:/srv/nils/registry:U",
-        dir.join("registry").display()
-    ));
+    o.says(&format!("-v {0}:{0}:U", dir.join("registry").display()));
     o.says(&format!("-v {0}:{0}:ro", source.display()));
     o.says("ghcr.io/kineuro/nils:v");
     o.says("ghcr.io/kineuro/nils-desk:v");
