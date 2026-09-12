@@ -91,6 +91,14 @@ const ASSISTANT_REPO: &str = "https://github.com/kineuro/nils-assistant";
 const IN_REGISTRY: &str = "/srv/nils/registry";
 const IN_DESK: &str = "/srv/nils/desk";
 
+/// The Postgres a setup runs for the registry when asked to: the official
+/// image with its major version pinned, since a new major version needs the
+/// data upgraded, not only a new image.
+const POSTGRES_IMAGE: &str = "docker.io/library/postgres:17-alpine";
+const POSTGRES_MAJOR: &str = "17";
+const POSTGRES_CONTAINER: &str = "nils-postgres";
+const IN_POSTGRES: &str = "/var/lib/postgresql/data";
+
 /// What the gateway and the assistant run in beside the engine and the desk.
 /// Neither has an image of its own: both are built on this machine, and their
 /// directories are mounted into Node's image at the same paths, so every path
@@ -235,6 +243,24 @@ fn registry_dsn(dir: &Path) -> Option<String> {
     value.get("dsn")?.as_str().map(str::to_string)
 }
 
+/// The Postgres a registry is kept in, from its own configuration: the
+/// connection string and the schema. None for a SQLite registry.
+fn registry_backend(dir: &Path) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(dir.join("registry").join("nils.toml")).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    if value.get("backend")?.as_str()? != "postgres" {
+        return None;
+    }
+    Some((
+        value.get("dsn")?.as_str()?.to_string(),
+        value
+            .get("schema")
+            .and_then(|s| s.as_str())
+            .unwrap_or("nils")
+            .to_string(),
+    ))
+}
+
 /// An error and every cause under it, on one line: the driver's own
 /// "error connecting to server" says nothing without the refusal beneath.
 fn with_causes(error: &dyn std::error::Error) -> String {
@@ -277,7 +303,8 @@ pub(crate) struct SetupArgs {
     /// Where it runs: machine, podman or docker
     #[arg(long, value_name = "machine|podman|docker")]
     runtime: Option<String>,
-    /// The registry's backend: sqlite or postgres
+    /// The registry's backend: sqlite, or postgres, set up here in a container,
+    /// or with --dsn one you already run
     #[arg(long, value_name = "sqlite|postgres")]
     backend: Option<String>,
     /// The Postgres connection string, with --backend postgres
@@ -441,6 +468,13 @@ pub(crate) struct Ports {
     pub(crate) desk: u16,
     pub(crate) kvasir: u16,
     pub(crate) assistant: u16,
+    /// The Postgres a setup runs, published on this machine's loopback.
+    #[serde(default = "default_postgres_port")]
+    pub(crate) postgres: u16,
+}
+
+fn default_postgres_port() -> u16 {
+    5432
 }
 
 impl Default for Ports {
@@ -450,7 +484,28 @@ impl Default for Ports {
             desk: 7200,
             kvasir: 7100,
             assistant: 7300,
+            postgres: default_postgres_port(),
         }
+    }
+}
+
+/// A Postgres this setup runs in a container for the registry, and which
+/// runtime runs it. Its port is the plan's; its data and its password live in
+/// the base directory, beside the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ManagedPostgres {
+    pub(crate) runtime: Runtime,
+}
+
+/// Where a Postgres could be run for the registry: in the runtime the parts
+/// use, or on a machine install in podman, else docker. None when neither
+/// answers.
+fn managed_runtime(runtime: Runtime, podman: bool, docker: bool) -> Option<Runtime> {
+    match runtime {
+        Runtime::Podman | Runtime::Docker => Some(runtime),
+        Runtime::Machine if podman => Some(Runtime::Podman),
+        Runtime::Machine if docker => Some(Runtime::Docker),
+        Runtime::Machine => None,
     }
 }
 
@@ -1029,6 +1084,8 @@ pub(crate) struct Plan {
     /// 127.0.0.1 here. Rootless podman with pasta, and only when something
     /// in the pod needs it.
     pub(crate) host_loopback: bool,
+    /// The Postgres this setup runs for the registry, when it runs one.
+    pub(crate) postgres: Option<ManagedPostgres>,
 }
 
 /// The ways the parts can run here, in the order they are offered: the
@@ -1115,6 +1172,16 @@ impl Plan {
         self.desk_dir().join("nils-desk.toml")
     }
 
+    /// The data of a Postgres this setup runs, and its environment, which
+    /// holds the password.
+    fn postgres_dir(&self) -> PathBuf {
+        self.dir.join("postgres")
+    }
+
+    fn postgres_env(&self) -> PathBuf {
+        self.dir.join("postgres.env")
+    }
+
     /// The tag the published images carry, for the version this plan holds.
     fn tag(&self) -> String {
         image_tag(&self.version)
@@ -1168,6 +1235,12 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
             && (state.parts.contains_key("assistant")
                 || registry_dsn(&dir).is_some_and(|d| d.contains("host.containers.internal")))
             && podman_has_pasta(),
+        postgres: state
+            .parts
+            .get("postgres")
+            .and_then(|p| Runtime::parse(&p.kind).ok())
+            .filter(|r| r.container())
+            .map(|runtime| ManagedPostgres { runtime }),
     }
 }
 
@@ -1591,7 +1664,11 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
     }
     let _ = write!(pod, "\n[Install]\nWantedBy=default.target\n");
     let mut out = vec![("nils.pod".to_string(), pod)];
-    let mut engine = String::from("[Unit]\nDescription=NILS engine\n\n[Container]\n");
+    let mut engine = String::from("[Unit]\nDescription=NILS engine\n");
+    if plan.postgres.map(|p| p.runtime) == Some(Runtime::Podman) {
+        engine.push_str("After=nils-postgres.service\nWants=nils-postgres.service\n");
+    }
+    engine.push_str("\n[Container]\n");
     let _ = writeln!(engine, "Image={ENGINE_IMAGE}:{}", plan.tag());
     let _ = writeln!(engine, "Pod=nils.pod");
     let _ = writeln!(
@@ -1867,92 +1944,167 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     console.step(4, steps, "The registry");
     let home = Home::new(dir.join("registry"));
     let registry_exists = home.exists();
-    let backend = if registry_exists {
+    let managed_here = managed_runtime(runtime, podman, docker.is_ok());
+    let mut postgres: Option<ManagedPostgres> = None;
+    let mut backend = if registry_exists {
         console.note(&format!(
             "a registry is already at {}; it is left alone",
             home.dir().display()
         ));
-        BackendChoice::Sqlite
+        // Its own configuration says where it is kept. A Postgres an earlier
+        // install set up here, whose data and password were kept, is run
+        // again for it; left as SQLite, nothing started it and the engine
+        // could not reach its registry.
+        match registry_backend(&dir) {
+            Some((dsn, schema)) => {
+                if dir.join("postgres.env").exists() {
+                    match managed_here {
+                        Some(rt) => {
+                            postgres = Some(ManagedPostgres { runtime: rt });
+                            console.note(&format!(
+                                "the Postgres set up here before is run again in {}, with its data",
+                                rt.name()
+                            ));
+                        }
+                        None => console.note(
+                            "the Postgres set up here before needs podman or docker to run, and \
+                             neither answers",
+                        ),
+                    }
+                }
+                BackendChoice::Postgres { dsn, schema }
+            }
+            None => BackendChoice::Sqlite,
+        }
     } else {
         console.note(
             "pseudonyms are derived from a key: the same subject under the same key gets \
              the same code, so keep its passphrase where you keep passwords",
         );
-        let chosen = match &args.backend {
-            Some(b) if b.trim() == "postgres" => 1,
-            Some(b) if b.trim() == "sqlite" => 0,
-            Some(other) => {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Store {
+            Sqlite,
+            Here,
+            Yours,
+        }
+        let mut offered = vec![(
+            Store::Sqlite,
+            "SQLite".to_string(),
+            "one file in the directory above; a laptop or one server".to_string(),
+        )];
+        if let Some(rt) = managed_here {
+            offered.push((
+                Store::Here,
+                "Postgres, set up here".to_string(),
+                format!(
+                    "run in {} beside the others, its data in {}",
+                    rt.name(),
+                    dir.join("postgres").display()
+                ),
+            ));
+        }
+        offered.push((
+            Store::Yours,
+            "A Postgres you already run".to_string(),
+            "a database server, given by its connection string".to_string(),
+        ));
+        let store = match (&args.backend, &args.dsn) {
+            (Some(b), _) if b.trim() == "sqlite" => Store::Sqlite,
+            (Some(b), Some(_)) if b.trim() == "postgres" => Store::Yours,
+            (Some(b), None) if b.trim() == "postgres" => {
+                if managed_here.is_none() {
+                    return Err(usage(
+                        "no podman or docker here to run Postgres in; give --dsn for a Postgres \
+                         you run, or --backend sqlite",
+                    ));
+                }
+                Store::Here
+            }
+            (Some(other), _) => {
                 return Err(usage(format!(
                     "{other} is not a backend: sqlite or postgres"
                 )));
             }
-            None => console.choice(
-                "Where should the registry itself be kept?",
-                &[
-                    (
-                        "SQLite",
-                        "one file in the directory above; a laptop or one server",
-                    ),
-                    ("Postgres", "a database server, for more than one machine"),
-                ],
-                0,
-            ),
+            (None, _) => {
+                let shown: Vec<(&str, &str)> = offered
+                    .iter()
+                    .map(|(_, label, said)| (label.as_str(), said.as_str()))
+                    .collect();
+                offered[console.choice("Where should the registry itself be kept?", &shown, 0)].0
+            }
         };
-        if chosen == 0 {
-            BackendChoice::Sqlite
-        } else {
-            'postgres: {
-                let mut dsn = match &args.dsn {
-                    Some(d) => d.clone(),
-                    None => console.line("The connection string", "postgres://nils@127.0.0.1/nils"),
-                };
-                let schema = match &args.schema {
-                    Some(s) => s.clone(),
-                    None => console.line("The schema", "nils"),
-                };
-                // Tried now, from this machine, so a database that is not there
-                // is said here rather than after the plan and the images.
-                loop {
-                    match nils_registry::store::Store::connect_postgres(&dsn, &schema) {
-                        Ok(_) => {
-                            console.note(&format!(
-                                "the database at {} answered",
-                                crate::redact_dsn(&dsn)
-                            ));
-                            break;
+        match store {
+            Store::Sqlite => BackendChoice::Sqlite,
+            Store::Here => {
+                let rt = managed_here.unwrap_or(Runtime::Podman);
+                postgres = Some(ManagedPostgres { runtime: rt });
+                console.note(&format!(
+                    "Postgres is run in {}, its data in {}",
+                    rt.name(),
+                    dir.join("postgres").display()
+                ));
+                // its connection string is written once its port is settled
+                BackendChoice::Postgres {
+                    dsn: String::new(),
+                    schema: "nils".to_string(),
+                }
+            }
+            Store::Yours => {
+                'postgres: {
+                    let mut dsn = match &args.dsn {
+                        Some(d) => d.clone(),
+                        None => {
+                            console.line("The connection string", "postgres://nils@127.0.0.1/nils")
                         }
-                        Err(e) => {
-                            console.note(&format!(
-                                "the database at {} did not answer: {}",
-                                crate::redact_dsn(&dsn),
-                                with_causes(&e)
-                            ));
-                            if args.print {
+                    };
+                    let schema = match &args.schema {
+                        Some(s) => s.clone(),
+                        None => console.line("The schema", "nils"),
+                    };
+                    // Tried now, from this machine, so a database that is not there
+                    // is said here rather than after the plan and the images.
+                    loop {
+                        match nils_registry::store::Store::connect_postgres(&dsn, &schema) {
+                            Ok(_) => {
+                                console.note(&format!(
+                                    "the database at {} answered",
+                                    crate::redact_dsn(&dsn)
+                                ));
                                 break;
                             }
-                            if !console.interactive() {
-                                return Err(usage(
-                                    "start the database, or run with --backend sqlite; nothing \
-                                 was written",
+                            Err(e) => {
+                                console.note(&format!(
+                                    "the database at {} did not answer: {}",
+                                    crate::redact_dsn(&dsn),
+                                    with_causes(&e)
                                 ));
-                            }
-                            if !console.yes_no("Enter another connection string?", true) {
-                                // Going on with an address that did not answer
-                                // only fails later, after the plan and the work.
-                                console.note("the registry is kept in SQLite instead");
-                                break 'postgres BackendChoice::Sqlite;
-                            }
-                            let again = console.line("The connection string", "");
-                            if !again.trim().is_empty() {
-                                dsn = again.trim().to_string();
+                                if args.print {
+                                    break;
+                                }
+                                if !console.interactive() {
+                                    return Err(usage(
+                                        "start the database, or run with --backend sqlite; nothing \
+                                 was written",
+                                    ));
+                                }
+                                if !console.yes_no("Enter another connection string?", true) {
+                                    // Going on with an address that did not answer
+                                    // only fails later, after the plan and the work.
+                                    console.note("the registry is kept in SQLite instead");
+                                    break 'postgres BackendChoice::Sqlite;
+                                }
+                                let again = console.line("The connection string", "");
+                                if !again.trim().is_empty() {
+                                    dsn = again.trim().to_string();
+                                }
                             }
                         }
                     }
+                    if let Some(note) = postgres_reach_note(runtime, &dsn, podman_has_pasta) {
+                        console.note(&note);
+                    }
+                    BackendChoice::Postgres { dsn, schema }
                 }
-                if let Some(note) = postgres_reach_note(runtime, &dsn, podman_has_pasta) {
-                    console.note(&note);
-                }
-                BackendChoice::Postgres { dsn, schema }
             }
         }
     };
@@ -2116,6 +2268,12 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             &mut ports.assistant,
             assistant && !runtime.container(),
         ),
+        (
+            "Postgres",
+            "postgres",
+            &mut ports.postgres,
+            postgres.is_some(),
+        ),
     ] {
         if listens
             && !ours(part)
@@ -2125,6 +2283,19 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             *port = free;
         }
         chosen.push(*port);
+    }
+    if postgres.is_some() && !registry_exists {
+        // A password kept from an earlier install of this directory, since
+        // its data was made with it; a new one otherwise.
+        let password =
+            postgres_password(&dir.join("postgres.env")).unwrap_or_else(generated_passphrase);
+        backend = BackendChoice::Postgres {
+            dsn: format!(
+                "postgres://nils:{password}@127.0.0.1:{}/nils",
+                ports.postgres
+            ),
+            schema: "nils".to_string(),
+        };
     }
 
     // 7. services
@@ -2164,6 +2335,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         source,
         registry_exists,
         host_loopback,
+        postgres,
         service,
         channel: args.channel.clone(),
         version: update::VERSION.to_string(),
@@ -2319,6 +2491,12 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         let path = plan.dir.join(sub);
         std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
     }
+    // A Postgres this setup runs, started again with its data and password.
+    if let Some(pg) = plan.postgres
+        && let Err(e) = start_postgres(&plan, pg, console)
+    {
+        println!("  Postgres was not started: {}", e.message);
+    }
     if plan.has(Part::Desk) {
         write_desk_config(&plan, true)?;
         println!("  {}", plan.desk_config().display());
@@ -2425,6 +2603,17 @@ fn plan_text(plan: &Plan, console: &Console) -> String {
             BackendChoice::Postgres { schema, .. } => format!("postgres, schema {schema}"),
         },
     );
+    if let Some(pg) = plan.postgres {
+        row(
+            "postgres",
+            format!(
+                "set up here in {}, on 127.0.0.1:{}, its data in {}",
+                pg.runtime.name(),
+                plan.ports.postgres,
+                plan.postgres_dir().display()
+            ),
+        );
+    }
     row(
         "sign in",
         format!("{} ({})", plan.mode.words(), plan.mode.name()),
@@ -2669,6 +2858,20 @@ fn place(
     println!("  engine {} ready", update::VERSION);
     checkpoint(state);
 
+    // A Postgres this setup runs, up before the registry it holds.
+    if let Some(pg) = plan.postgres {
+        state.parts.insert(
+            "postgres".to_string(),
+            PartState {
+                version: POSTGRES_MAJOR.to_string(),
+                path: POSTGRES_IMAGE.to_string(),
+                kind: pg.runtime.name().to_string(),
+            },
+        );
+        checkpoint(state);
+        start_postgres(plan, pg, console)?;
+    }
+
     // The registry, made by the engine wherever it runs.
     let home = Home::new(plan.registry());
     if !plan.registry_exists && !only_update {
@@ -2862,6 +3065,207 @@ fn pull_or_build(
         &["build", "-f", "Containerfile", "-t", &tag, "."],
     )?;
     console.note(&format!("built {tag} from {}", context.display()));
+    Ok(())
+}
+
+/// The password in a managed Postgres's environment file, when one is there.
+fn postgres_password(env: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(env).ok()?;
+    text.lines()
+        .find_map(|line| line.strip_prefix("POSTGRES_PASSWORD="))
+        .map(str::to_string)
+        .filter(|p| !p.is_empty())
+}
+
+/// The password of a connection string `postgres://user:password@...`.
+fn dsn_password(dsn: &str) -> Option<&str> {
+    let rest = dsn.split_once("://")?.1;
+    let userinfo = &rest[..rest.rfind('@')?];
+    userinfo.split_once(':').map(|(_, password)| password)
+}
+
+/// A managed Postgres's quadlet: standalone, not in the pod, so an engine on
+/// the machine and one in a pod reach it alike on this machine's loopback.
+fn postgres_quadlet(plan: &Plan) -> String {
+    format!(
+        "[Unit]\nDescription=Postgres for the NILS registry\n\n[Container]\n\
+         Image={POSTGRES_IMAGE}\nContainerName={POSTGRES_CONTAINER}\nEnvironmentFile={env}\n\
+         Volume={data}:{IN_POSTGRES}:U\nPublishPort=127.0.0.1:{port}:5432\n\n\
+         [Install]\nWantedBy=default.target\n",
+        env = plan.postgres_env().display(),
+        data = plan.postgres_dir().display(),
+        port = plan.ports.postgres,
+    )
+}
+
+/// The docker run of a managed Postgres, as this account so its data is this
+/// account's, restarted by docker. Published on this machine's loopback, and
+/// on docker's bridge as well when the engine runs in docker and reaches it
+/// there.
+fn postgres_docker_run(plan: &Plan, bridge: Option<&str>) -> Vec<String> {
+    let mut argv: Vec<String> = [
+        "run",
+        "-d",
+        "--name",
+        POSTGRES_CONTAINER,
+        "--restart",
+        "unless-stopped",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let account = as_this_account();
+    if !account.is_empty() {
+        argv.push("--user".to_string());
+        argv.push(account);
+    }
+    argv.push("--env-file".to_string());
+    argv.push(plan.postgres_env().display().to_string());
+    argv.push("-v".to_string());
+    argv.push(format!("{}:{IN_POSTGRES}", plan.postgres_dir().display()));
+    argv.push("-p".to_string());
+    argv.push(format!("127.0.0.1:{}:5432", plan.ports.postgres));
+    if let Some(bridge) = bridge {
+        argv.push("-p".to_string());
+        argv.push(format!("{bridge}:{}:5432", plan.ports.postgres));
+    }
+    argv.push(POSTGRES_IMAGE.to_string());
+    argv
+}
+
+/// Start the Postgres this setup runs and wait until it takes connections:
+/// its environment written once and kept, its image taken, the container
+/// started by the service manager where there is one.
+fn start_postgres(plan: &Plan, pg: ManagedPostgres, console: &Console) -> Result<(), Exit> {
+    let rt = pg.runtime.name();
+    let data = plan.postgres_dir();
+    std::fs::create_dir_all(&data).map_err(|e| fail(format!("{}: {e}", data.display())))?;
+    let env = plan.postgres_env();
+    if !env.exists() {
+        let BackendChoice::Postgres { dsn, .. } = &plan.backend else {
+            return Err(fail("a Postgres to run with no connection string for it"));
+        };
+        let password = dsn_password(dsn).unwrap_or_default();
+        write_secret_bytes(
+            &env,
+            format!(
+                "POSTGRES_USER=nils\nPOSTGRES_DB=nils\nPOSTGRES_PASSWORD={password}\n\
+                 PGDATA={IN_POSTGRES}/pgdata\n"
+            )
+            .as_bytes(),
+        )?;
+    }
+    let present = match pg.runtime {
+        Runtime::Docker => quietly("docker", &["image", "inspect", POSTGRES_IMAGE]),
+        _ => quietly("podman", &["image", "exists", POSTGRES_IMAGE]),
+    };
+    if !present {
+        console.task(
+            "taking Postgres's image",
+            &plan.dir,
+            rt,
+            &["pull", "--quiet", POSTGRES_IMAGE],
+        )?;
+    }
+    let with_systemd = plan.service && service_manager(Runtime::Podman).is_some();
+    match pg.runtime {
+        Runtime::Podman if with_systemd => {
+            let dir = quadlet_dir();
+            std::fs::create_dir_all(&dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
+            std::fs::write(dir.join("nils-postgres.container"), postgres_quadlet(plan))
+                .map_err(|e| fail(format!("{}: {e}", dir.display())))?;
+            quietly("systemctl", &["--user", "daemon-reload"]);
+            quietly("systemctl", &["--user", "restart", "nils-postgres"]);
+        }
+        Runtime::Docker => {
+            quietly("docker", &["rm", "-f", POSTGRES_CONTAINER]);
+            let bridge = (plan.runtime == Runtime::Docker).then(|| {
+                run_quiet(
+                    "docker",
+                    &[
+                        "network",
+                        "inspect",
+                        "bridge",
+                        "--format",
+                        "{{(index .IPAM.Config 0).Gateway}}",
+                    ],
+                )
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "172.17.0.1".to_string())
+            });
+            let argv = postgres_docker_run(plan, bridge.as_deref());
+            let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+            console.task("starting Postgres", &plan.dir, "docker", &args)?;
+        }
+        _ => {
+            quietly("podman", &["rm", "-f", POSTGRES_CONTAINER]);
+            let data_mount = format!("{}:{IN_POSTGRES}:U", data.display());
+            let publish = format!("127.0.0.1:{}:5432", plan.ports.postgres);
+            let env_file = env.display().to_string();
+            console.task(
+                "starting Postgres",
+                &plan.dir,
+                "podman",
+                &[
+                    "run",
+                    "-d",
+                    "--name",
+                    POSTGRES_CONTAINER,
+                    "--env-file",
+                    &env_file,
+                    "-v",
+                    &data_mount,
+                    "-p",
+                    &publish,
+                    POSTGRES_IMAGE,
+                ],
+            )?;
+        }
+    }
+    let started = std::time::Instant::now();
+    let live = std::io::stdout().is_terminal();
+    loop {
+        if quietly(
+            rt,
+            &[
+                "exec",
+                POSTGRES_CONTAINER,
+                "pg_isready",
+                "-h",
+                "127.0.0.1",
+                "-U",
+                "nils",
+                "-q",
+            ],
+        ) {
+            break;
+        }
+        if started.elapsed().as_secs() >= 90 {
+            if live {
+                print!("\r\x1b[2K");
+            }
+            return Err(fail(format!(
+                "Postgres did not take connections within 90 s; its log: {rt} logs {POSTGRES_CONTAINER}"
+            )));
+        }
+        if live {
+            print!(
+                "\r  waiting for Postgres {}",
+                console.dim(&format!("{}s", started.elapsed().as_secs()))
+            );
+            let _ = std::io::stdout().flush();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if live {
+        print!("\r\x1b[2K");
+    }
+    println!(
+        "  Postgres {POSTGRES_MAJOR} on 127.0.0.1:{}, its data in {}",
+        plan.ports.postgres,
+        data.display()
+    );
     Ok(())
 }
 
@@ -4333,10 +4737,17 @@ pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)>
         .get("engine")
         .map(|p| p.path.clone())
         .unwrap_or_else(|| "nils".to_string());
+    // The engine connects to its registry at start, so it starts after a
+    // Postgres this setup runs; a docker one is started by docker instead.
+    let postgres_after = if plan.postgres.map(|p| p.runtime) == Some(Runtime::Podman) {
+        "After=nils-postgres.service\nWants=nils-postgres.service\n"
+    } else {
+        ""
+    };
     let mut out = vec![(
         "nils-engine.service".to_string(),
         format!(
-            "[Unit]\nDescription=NILS engine\nAfter=network-online.target\n\n[Service]\n\
+            "[Unit]\nDescription=NILS engine\nAfter=network-online.target\n{postgres_after}\n[Service]\n\
              ExecStart={engine} {}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
             engine_args(
                 plan,
@@ -4533,6 +4944,15 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
         .iter()
         // the engine's binary is replaced by nils update itself; its image is not
         .filter(|(name, part)| name.as_str() != "engine" || part.kind != "binary")
+        // a new Postgres major version needs its data upgraded, not a pull
+        .filter(|(name, part)| {
+            if name.as_str() == "postgres" {
+                println!("postgres: {} kept, as its data needs", part.version);
+                false
+            } else {
+                true
+            }
+        })
         .map(|(name, _)| name.clone())
         .collect();
     for name in names {
@@ -4726,6 +5146,9 @@ struct Removal {
     /// What building the gateway and the assistant made.
     built: Vec<PathBuf>,
     state: PathBuf,
+    /// The runtime of a Postgres this setup runs, whose container goes; its
+    /// data goes with the base directory, or stays with it.
+    postgres: Option<String>,
 }
 
 /// What an uninstall takes: NILS alone, or NILS and its data.
@@ -4987,7 +5410,7 @@ fn safe_to_purge(dir: &Path, home: Option<&Path>) -> Result<(), String> {
 /// every one of them empty: what an install that stopped early leaves, and
 /// nothing a person could lose.
 fn only_empty_setup_dirs(dir: &Path) -> bool {
-    const MADE: [&str; 7] = [
+    const MADE: [&str; 8] = [
         "registry",
         "desk",
         "backups",
@@ -4995,6 +5418,7 @@ fn only_empty_setup_dirs(dir: &Path) -> bool {
         "export",
         "assistant",
         "kvasir",
+        "postgres",
     ];
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
@@ -5028,7 +5452,24 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         packs_kept: None,
         built: Vec::new(),
         state: state_path(),
+        postgres: None,
     };
+
+    // a Postgres this setup runs, wherever the parts run
+    if let Some(pg) = state
+        .parts
+        .get("postgres")
+        .filter(|p| p.kind == "podman" || p.kind == "docker")
+    {
+        if pg.kind == "podman" {
+            let path = quadlet_dir().join("nils-postgres.container");
+            if path.exists() {
+                removal.units.push("nils-postgres".to_string());
+                removal.unit_files.push(path);
+            }
+        }
+        removal.postgres = Some(pg.kind.clone());
+    }
 
     // services
     match state.runtime.as_str() {
@@ -5184,6 +5625,13 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
                 .join(", "),
         );
     }
+    if removal.postgres.is_some() {
+        row(
+            &mut out,
+            "postgres",
+            format!("the {POSTGRES_CONTAINER} container"),
+        );
+    }
     if !removal.containers.is_empty() {
         let what = if removal.runtime == "podman" {
             format!("the {} pod", removal.containers.join(", "))
@@ -5305,6 +5753,9 @@ fn data_summary(dir: &Path) -> Vec<String> {
     if dir.join("desk").join("nils-desk.sqlite").exists() {
         out.push("the desk's database, with the people it keeps".to_string());
     }
+    if dir.join("postgres.env").exists() {
+        out.push("Postgres's data, with its password".to_string());
+    }
     if dir.join("assistant").join("assistant.sqlite").exists() {
         out.push("the assistant's conversations".to_string());
     }
@@ -5370,6 +5821,11 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
         ));
     }
 
+    if let Some(rt) = removal.postgres.as_deref()
+        && quietly(rt, &["rm", "-f", POSTGRES_CONTAINER])
+    {
+        say(format!("removed the {POSTGRES_CONTAINER} container"));
+    }
     match removal.runtime.as_str() {
         "podman" => {
             if quietly("podman", &["pod", "rm", "-f", "nils"]) {
@@ -5446,7 +5902,12 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
         }
     }
     if leaving == Leaving::Purge {
-        match remove_path(&removal.dir, &removal.runtime) {
+        // data a podman Postgres wrote belongs to its user namespace
+        let owner = match removal.postgres.as_deref() {
+            Some("podman") => "podman",
+            _ => removal.runtime.as_str(),
+        };
+        match remove_path(&removal.dir, owner) {
             Ok(()) => say(format!(
                 "removed {} and everything in it",
                 removal.dir.display()
@@ -5507,6 +5968,7 @@ mod tests {
             channel: None,
             version: "1.0.0-alpha.2".to_string(),
             host_loopback: false,
+            postgres: None,
         }
     }
 
@@ -6419,6 +6881,151 @@ mod tests {
         let found = leftovers(Some(&bin.join("other")), Some(&home));
         assert!(found.is_empty(), "{found:?}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_postgres_is_offered_where_a_container_can_run_it() {
+        assert_eq!(
+            managed_runtime(Runtime::Machine, true, true),
+            Some(Runtime::Podman)
+        );
+        assert_eq!(
+            managed_runtime(Runtime::Machine, false, true),
+            Some(Runtime::Docker)
+        );
+        assert_eq!(managed_runtime(Runtime::Machine, false, false), None);
+        assert_eq!(
+            managed_runtime(Runtime::Docker, true, true),
+            Some(Runtime::Docker)
+        );
+        assert_eq!(
+            managed_runtime(Runtime::Podman, false, false),
+            Some(Runtime::Podman)
+        );
+        assert_eq!(
+            dsn_password("postgres://nils:s3cret@127.0.0.1:5432/nils"),
+            Some("s3cret")
+        );
+        assert_eq!(dsn_password("postgres://nils@127.0.0.1/nils"), None);
+    }
+
+    #[test]
+    fn a_postgres_set_up_here_runs_standalone_with_its_data_in_the_base_directory() {
+        let dir = scratch("managed-postgres");
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.ports.postgres = 5433;
+        plan.postgres = Some(ManagedPostgres {
+            runtime: Runtime::Podman,
+        });
+        let quadlet = postgres_quadlet(&plan);
+        for want in [
+            &format!("Image={POSTGRES_IMAGE}"),
+            "ContainerName=nils-postgres",
+            &format!("EnvironmentFile={}/postgres.env", dir.display()),
+            &format!(
+                "Volume={}/postgres:/var/lib/postgresql/data:U",
+                dir.display()
+            ),
+            "PublishPort=127.0.0.1:5433:5432",
+            "WantedBy=default.target",
+        ] {
+            assert!(quadlet.contains(want), "{want} is not in:\n{quadlet}");
+        }
+        assert!(
+            !quadlet.contains("Pod="),
+            "standalone, reached on loopback: {quadlet}"
+        );
+
+        let state = state_of(&plan, &[("engine", "binary")]);
+        let engine = systemd_units(&plan, &state).remove(0).1;
+        assert!(engine.contains("After=nils-postgres.service"), "{engine}");
+        let mut in_pod = self::plan(Runtime::Podman);
+        in_pod.postgres = plan.postgres;
+        let engine_quadlet = quadlets(&in_pod)
+            .into_iter()
+            .find(|(n, _)| n == "nils-engine.container")
+            .unwrap()
+            .1;
+        assert!(
+            engine_quadlet.contains("Wants=nils-postgres.service"),
+            "{engine_quadlet}"
+        );
+
+        plan.postgres = Some(ManagedPostgres {
+            runtime: Runtime::Docker,
+        });
+        let machine = postgres_docker_run(&plan, None).join(" ");
+        assert!(machine.contains("--restart unless-stopped"), "{machine}");
+        assert!(machine.contains("-p 127.0.0.1:5433:5432"), "{machine}");
+        assert!(!machine.contains("172.17.0.1"), "{machine}");
+        let in_docker = postgres_docker_run(&plan, Some("172.17.0.1")).join(" ");
+        assert!(in_docker.contains("-p 172.17.0.1:5433:5432"), "{in_docker}");
+
+        std::fs::write(
+            dir.join("postgres.env"),
+            "POSTGRES_USER=nils\nPOSTGRES_PASSWORD=kept\n",
+        )
+        .unwrap();
+        assert_eq!(
+            postgres_password(&dir.join("postgres.env")).as_deref(),
+            Some("kept")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_recorded_postgres_is_rebuilt_kept_on_update_and_removed_with_the_rest() {
+        let mut state = State {
+            dir: "/home/x/nils".to_string(),
+            mode: "off".to_string(),
+            runtime: "machine".to_string(),
+            backend: "postgres:nils".to_string(),
+            ..State::default()
+        };
+        state.parts.insert(
+            "postgres".to_string(),
+            PartState {
+                version: POSTGRES_MAJOR.to_string(),
+                path: POSTGRES_IMAGE.to_string(),
+                kind: "docker".to_string(),
+            },
+        );
+        let plan = plan_from_state(&state, None);
+        assert_eq!(
+            plan.postgres,
+            Some(ManagedPostgres {
+                runtime: Runtime::Docker
+            })
+        );
+        let removal = gather_removal(&state, None, Leaving::Purge);
+        assert_eq!(removal.postgres.as_deref(), Some("docker"));
+    }
+
+    #[test]
+    fn a_kept_registry_says_where_it_is_kept() {
+        let dir = scratch("registry-backend");
+        std::fs::create_dir_all(dir.join("registry")).unwrap();
+        assert_eq!(registry_backend(&dir), None, "no registry yet");
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            "backend = \"sqlite\"\n",
+        )
+        .unwrap();
+        assert_eq!(registry_backend(&dir), None);
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            "backend = \"postgres\"\ndsn = \"postgres://nils:k@127.0.0.1:5432/nils\"\nschema = \"nils\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            registry_backend(&dir),
+            Some((
+                "postgres://nils:k@127.0.0.1:5432/nils".to_string(),
+                "nils".to_string()
+            ))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
