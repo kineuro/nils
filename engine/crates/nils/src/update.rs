@@ -196,16 +196,26 @@ fn newest_tag(base: &str) -> Option<String> {
         .strip_prefix("https://github.com/")?
         .strip_suffix("/releases")?;
     let body = fetch(&format!(
-        "https://api.github.com/repos/{repo}/releases?per_page=10"
+        "https://api.github.com/repos/{repo}/releases?per_page=30"
     ))
     .ok()?;
-    let text = String::from_utf8_lossy(&body);
-    let at = text.find("\"tag_name\"")?;
-    let rest = &text[at + "\"tag_name\"".len()..];
-    let open = rest.find('"')? + 1;
-    let close = rest[open..].find('"')? + open;
-    let tag = rest[open..close].trim_start_matches('v').to_string();
-    (!tag.is_empty()).then_some(tag)
+    newest_of(&String::from_utf8_lossy(&body))
+}
+
+/// The highest version among the releases a listing names, drafts left out.
+/// GitHub lists releases in no order a version can rely on: after
+/// 1.0.0-alpha.11 it put alpha.9 first, and taking the first release kept
+/// every install at alpha.9.
+fn newest_of(listing: &str) -> Option<String> {
+    let releases: serde_json::Value = serde_json::from_str(listing).ok()?;
+    releases
+        .as_array()?
+        .iter()
+        .filter(|r| !r["draft"].as_bool().unwrap_or(false))
+        .filter_map(|r| r["tag_name"].as_str())
+        .map(|tag| tag.trim_start_matches('v').to_string())
+        .filter(|tag| !tag.is_empty())
+        .reduce(|best, tag| if newer(&tag, &best) { tag } else { best })
 }
 
 /// Fetch one file of a release and check it against that release's sums.
@@ -417,6 +427,31 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_newest_release_is_the_highest_version_not_the_first_listed() {
+        // the order GitHub gave after 1.0.0-alpha.11 was released
+        let listing = r#"[
+            {"tag_name": "v1.0.0-alpha.9", "draft": false},
+            {"tag_name": "v1.0.0-alpha.11", "draft": false},
+            {"tag_name": "v1.0.0-alpha.10", "draft": false},
+            {"tag_name": "v1.0.0-alpha.8", "draft": false}
+        ]"#;
+        assert_eq!(newest_of(listing).as_deref(), Some("1.0.0-alpha.11"));
+        let with_draft = r#"[
+            {"tag_name": "v1.0.0-alpha.11", "draft": false},
+            {"tag_name": "v1.0.0-alpha.12", "draft": true}
+        ]"#;
+        assert_eq!(
+            newest_of(with_draft).as_deref(),
+            Some("1.0.0-alpha.11"),
+            "a draft is not a release"
+        );
+        let released = r#"[{"tag_name": "v1.0.0-alpha.11"}, {"tag_name": "v1.0.0"}]"#;
+        assert_eq!(newest_of(released).as_deref(), Some("1.0.0"));
+        assert_eq!(newest_of("[]"), None);
+        assert_eq!(newest_of("not json"), None);
+    }
 
     #[test]
     fn a_release_is_newer_by_its_numbers_then_by_its_pre_release() {
