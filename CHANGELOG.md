@@ -4,6 +4,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- `nils setup` run again to change an install left a desk that keeps its own people with nobody to let in. It asked for the first person only when the desk had no store yet, and a desk that ran with nobody signing in has one. It now asks whenever the desk keeps nobody, and where nobody is added it says so at the end, with the command that adds the first.
+- `nils setup` wrote the desk's configuration again only when the mode, the provider or the supervisor changed, so a desk opened to the network kept its old address, and one given the assistant never reached the gateway; in local mode the engine then refused the desk's tokens. It now sets everything setup writes whenever any of it differs, keeps the keys a person set by hand, and removes the gateway's and the assistant's tables with them. A repair does the same, and writes a file that no longer reads again whole.
+
 ## [1.0.0-alpha.16] - 2026-09-13
 
 ### Added
