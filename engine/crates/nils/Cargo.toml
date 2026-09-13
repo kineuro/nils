@@ -38,6 +38,7 @@ jsonwebtoken.workspace = true
 ureq.workspace = true
 blake2.workspace = true
 hex.workspace = true
+jiff.workspace = true
 ctrlc.workspace = true
 tar.workspace = true
 flate2.workspace = true

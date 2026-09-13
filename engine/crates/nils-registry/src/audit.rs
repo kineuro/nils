@@ -57,6 +57,11 @@ pub enum Action {
     PlaceAdd,
     PlaceSet,
     PlaceRetire,
+    /// Wave 5 §10.3: the registry's timezone or week start changed, which
+    /// moves the epoch, since every dated answer is read under them.
+    SettingsSet,
+    /// Wave 5 §10.3: the backup schedule set.
+    BackupSchedule,
 }
 
 impl Action {
@@ -88,6 +93,8 @@ impl Action {
             Action::PlaceAdd => "place.add",
             Action::PlaceSet => "place.set",
             Action::PlaceRetire => "place.retire",
+            Action::SettingsSet => "settings.set",
+            Action::BackupSchedule => "backup.schedule",
         }
     }
 
@@ -105,6 +112,7 @@ impl Action {
                 | Action::PlaceAdd
                 | Action::PlaceSet
                 | Action::PlaceRetire
+                | Action::BackupSchedule
         )
     }
 }

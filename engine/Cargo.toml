@@ -45,6 +45,9 @@ dicom-object = "0.10"
 dicom-transfer-syntax-registry = "0.10"
 glob = "0.3"
 hex = "0.4"
+# Wave 5 section 10.3: a backup schedule is kept in the registry's own timezone; the
+# timezone database is bundled, so a container without one reads the same hour.
+jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
 libc = "0.2"
 lru = "0.18"
 nix = { version = "0.31", features = ["signal"] }
