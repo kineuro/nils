@@ -1054,6 +1054,208 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
     assert!(status.contains("registry_id"), "{status}");
 }
 
+/// Wave 5 §10.3: the archives are listed, kept to a number and rehearsed; the
+/// schedule and the registry's calendar are an admin's, and the schedule is
+/// read in the registry's timezone.
+#[test]
+fn backups_are_listed_kept_and_rehearsed_and_the_schedule_and_the_calendar_are_an_admins() {
+    let home = registry();
+    let backups = TempDir::new("w5-backups");
+    let dir = backups.path().to_str().unwrap();
+    let flags = [
+        "--auth",
+        "token",
+        "--token",
+        "a-reader-token-of-length=reader@lab:reader",
+        "--token",
+        "an-admin-token-of-length=admin@lab:operator,admin",
+        "--backup-dir",
+        dir,
+    ];
+    let reader = Some("a-reader-token-of-length");
+    let admin = Some("an-admin-token-of-length");
+    let server = Server::start(&home, 12, &flags, &[]);
+    let (status, _) = server.request("GET", "/api/backups", None, reader);
+    assert_eq!(status, 403);
+    let (status, doc) = server.request("GET", "/api/backups", None, admin);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["count"], 0, "{doc}");
+    assert_eq!(doc["schedule"]["every"], "off", "{doc}");
+    assert!(doc["schedule"]["next"].is_null(), "{doc}");
+    let (status, _) = server.request(
+        "PUT",
+        "/api/backups/schedule",
+        Some(r#"{"every": "day"}"#),
+        reader,
+    );
+    assert_eq!(status, 403);
+    let (status, refused) = server.request(
+        "PUT",
+        "/api/backups/schedule",
+        Some(r#"{"every": "hourly"}"#),
+        admin,
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, schedule) = server.request(
+        "PUT",
+        "/api/backups/schedule",
+        Some(r#"{"every": "day", "at": "02:00", "keep": 2}"#),
+        admin,
+    );
+    assert_eq!(status, 200, "{schedule}");
+    assert_eq!(schedule["keep"], 2, "{schedule}");
+    assert!(
+        schedule["next_local"]
+            .as_str()
+            .is_some_and(|n| n.ends_with("T02:00")),
+        "{schedule}"
+    );
+    let (status, refused) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["backup", "--everything"]}"#),
+        admin,
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, queued) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["backup", "--keep", "2", "--rehearse"]}"#),
+        admin,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let job = queued["job"].as_i64().unwrap();
+    let (status, calendar) = server.request("GET", "/api/settings", None, reader);
+    assert_eq!(status, 200, "{calendar}");
+    assert_eq!(calendar["timezone"], "UTC", "{calendar}");
+    assert!(
+        calendar["timezones"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|z| z == "Europe/Stockholm"),
+        "{calendar}"
+    );
+    let epoch = calendar["epoch"].as_i64().unwrap();
+    let (status, _) = server.request(
+        "PUT",
+        "/api/settings",
+        Some(r#"{"timezone": "Europe/Stockholm"}"#),
+        reader,
+    );
+    assert_eq!(status, 403);
+    let (status, refused) = server.request(
+        "PUT",
+        "/api/settings",
+        Some(r#"{"timezone": "Mars/Olympus_Mons"}"#),
+        admin,
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, calendar) = server.request(
+        "PUT",
+        "/api/settings",
+        Some(r#"{"timezone": "Europe/Stockholm", "week_start": "sunday"}"#),
+        admin,
+    );
+    assert_eq!(status, 200, "{calendar}");
+    assert_eq!(calendar["timezone"], "Europe/Stockholm", "{calendar}");
+    assert_eq!(calendar["week_start"], "sunday", "{calendar}");
+    assert_eq!(calendar["epoch"], epoch + 1, "{calendar}");
+    let (status, doc) = server.request("GET", "/api/backups", None, admin);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["schedule"]["timezone"], "Europe/Stockholm", "{doc}");
+    assert!(
+        doc["schedule"]["next_local"]
+            .as_str()
+            .is_some_and(|n| n.ends_with("T02:00")),
+        "{doc}"
+    );
+    server.finish();
+
+    // the worker runs the queued backup; two more by hand keep the newest two
+    run(&home, &["jobs", "work", "--once"], None);
+    for _ in 0..2 {
+        // an archive is named to the second
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        run(
+            &home,
+            &[
+                "backup",
+                "--dir",
+                dir,
+                "--keep",
+                "2",
+                "--rehearse",
+                "--json",
+            ],
+            None,
+        );
+    }
+    let archives: Vec<_> = std::fs::read_dir(backups.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(archives.len(), 2, "{archives:?}");
+    for archive in &archives {
+        let checked: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(archive.join("checked.json")).unwrap())
+                .unwrap();
+        assert_eq!(checked["ok"], true, "{checked}");
+        assert_eq!(checked["rehearsed"], true, "{checked}");
+    }
+    let rehearsed = run(
+        &home,
+        &[
+            "verify",
+            archives[0].to_str().unwrap(),
+            "--rehearse",
+            "--json",
+        ],
+        None,
+    );
+    let rehearsed: serde_json::Value = serde_json::from_str(&rehearsed).unwrap();
+    let opened = rehearsed["opened"].as_array().unwrap();
+    assert_eq!(opened.len(), 2, "{rehearsed}");
+    assert!(opened.iter().all(|o| o["state"] == "opens"), "{rehearsed}");
+    for action in ["backup.schedule", "settings.set"] {
+        let audited = run(
+            &home,
+            &["audit", "list", "--action", action, "--json"],
+            None,
+        );
+        assert!(audited.contains(action), "{audited}");
+    }
+    let out = nils()
+        .arg("--registry")
+        .arg(home.path())
+        .args(["settings", "set", "timezone", "Mars/Olympus_Mons"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let server = Server::start(&home, 2, &flags, &[]);
+    let (status, doc) = server.request("GET", "/api/backups", None, admin);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["count"], 2, "{doc}");
+    let newest = &doc["archives"][0];
+    assert_eq!(newest["ours"], true, "{doc}");
+    assert_eq!(newest["checked"]["rehearsed"], true, "{doc}");
+    assert!(
+        newest["bytes"].as_u64().is_some_and(|b| b > 0) && newest["seconds"].is_u64(),
+        "{doc}"
+    );
+    let (status, shown) = server.request("GET", &format!("/api/jobs/{job}"), None, admin);
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(shown["result"]["checked"]["ok"], true, "{shown}");
+    server.finish();
+}
+
 /// A registry of two stacks whose sequence names differ by a site word, so
 /// that an overlay adding the word to the localizer bucket moves exactly one.
 fn knob_registry() -> TempDir {

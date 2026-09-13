@@ -34,6 +34,7 @@ mod login;
 mod mcp;
 mod places;
 mod pyramid;
+mod schedule;
 mod serve;
 mod setup;
 mod summary;
@@ -1342,7 +1343,7 @@ fn main() -> ExitCode {
         Command::Pack { command } => pack_command(&home, command),
         Command::Status(args) => status(&home, args),
         Command::Backup(args) => backup_command(&home, args),
-        Command::Verify(args) => verify_command(args),
+        Command::Verify(args) => verify_command(&home, args),
         Command::Restore(args) => restore_command(&home, args),
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
@@ -2912,16 +2913,23 @@ fn settings_command(home: &Home, command: SettingsCommand) -> Result<(), Exit> {
                     )));
                 }
             }
-            locale.check().map_err(usage)?;
-            let store = registry.store();
-            store.begin()?;
-            registry.set_meta("timezone", &locale.timezone)?;
-            registry.set_meta("week_start", &locale.week_start)?;
-            let epoch = registry.next_epoch()?;
-            registry.store().commit()?;
+            // Wave 5 §10.3: a timezone the engine knows, the change audited,
+            // and the epoch moved once with it
+            let changed = schedule::set_calendar(&mut registry, &locale, &actor()).map_err(
+                |(code, message)| {
+                    if code == 400 {
+                        usage(message)
+                    } else {
+                        fail(message)
+                    }
+                },
+            )?;
             println!(
-                "timezone {}, week_start {}; epoch {epoch}",
-                locale.timezone, locale.week_start
+                "timezone {}, week_start {}; epoch {}{}",
+                locale.timezone,
+                locale.week_start,
+                registry.meta().epoch,
+                if changed { "" } else { ", unchanged" }
             );
             Ok(())
         }
@@ -4159,12 +4167,12 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "what": "an archive of the registry and the linkage store with a manifest (Wave 4c section 6.5), written by nils backup or the backup job; the key store is never in one and is copied on its own",
             "where": "the directory nils backup --dir or nils serve --backup-dir names; <home>/backups by default; <home>/backups-before-restore before a restore",
             "files": [],
-            "holds": ["everything the registry and the linkage store hold, at the moment of the archive", "technical: the manifest, with sizes and digests"],
+            "holds": ["everything the registry and the linkage store hold, at the moment of the archive", "technical: the manifest, with sizes and digests, and the last check of the archive"],
             "counts": {},
-            "kept": "until removed; the operator's rotation",
+            "kept": "until removed; the newest N of the registry when a backup runs with --keep N, as a scheduled backup does",
             "commands": {
-                "read": ["nils verify <archive>"],
-                "change": ["nils backup [--dir <dir>]", "nils restore <archive> --yes (with nils serve stopped)"],
+                "read": ["nils verify <archive> [--rehearse]", "GET /api/backups"],
+                "change": ["nils backup [--dir <dir>] [--keep N] [--rehearse]", "PUT /api/backups/schedule", "nils restore <archive> --yes (with nils serve stopped)"],
                 "export": ["copy the archive directory"],
                 "delete": "remove the archive directory",
             },
@@ -7230,6 +7238,14 @@ struct BackupArgs {
     /// place names, else <home>/backups
     #[arg(long, value_name = "DIR")]
     dir: Option<PathBuf>,
+    /// Keep the newest N archives of this registry in the directory and
+    /// remove the others
+    #[arg(long, value_name = "N")]
+    keep: Option<usize>,
+    /// Rehearse a restore of the archive once it is written: every file
+    /// checked and every store opened, nothing applied
+    #[arg(long)]
+    rehearse: bool,
     #[arg(long)]
     json: bool,
 }
@@ -7238,6 +7254,10 @@ struct BackupArgs {
 struct VerifyArgs {
     /// The archive directory
     archive: PathBuf,
+    /// Open every store as a restore would, without applying it, as well as
+    /// checking every file
+    #[arg(long)]
+    rehearse: bool,
     #[arg(long)]
     json: bool,
 }
@@ -7429,6 +7449,9 @@ pub(crate) fn quarantine_doc(
 }
 
 fn backup_command(home: &Home, args: BackupArgs) -> Result<(), Exit> {
+    if args.keep == Some(0) {
+        return Err(usage("--keep N keeps at least one archive"));
+    }
     let mut registry = open(home)?;
     let dir = match args.dir {
         Some(dir) => dir,
@@ -7437,14 +7460,61 @@ fn backup_command(home: &Home, args: BackupArgs) -> Result<(), Exit> {
     };
     // Wave 5 section 10.2: an archive goes only to a backup place.
     require_place(&mut registry, nils_registry::place::Role::Backup, &dir)?;
-    let manifest = backup::backup(home, &mut registry, &dir)?;
+    let mut manifest = backup::backup(home, &mut registry, &dir)?;
     let files = manifest["files"].as_array().map_or(0, Vec::len);
+    let archive = PathBuf::from(manifest["archive"].as_str().unwrap_or_default());
+    // Wave 5 section 10.3: the restore rehearsed and the check kept beside
+    // the archive; the older archives are removed only once the new one
+    // passes it
+    let checked = match args.rehearse {
+        true => {
+            let doc = backup::rehearse(&archive)?;
+            backup::record(&archive, &doc)?;
+            Some(serde_json::json!({"ok": doc["ok"], "rehearsed": true, "opened": doc["opened"]}))
+        }
+        false => None,
+    };
+    let passed = checked.as_ref().is_none_or(|c| c["ok"] == true);
+    let pruned = match args.keep {
+        Some(keep) if passed => backup::prune(&dir, &registry.meta().registry_id, keep, &archive)?,
+        _ => Vec::new(),
+    };
     audit(
         &mut registry,
         nils_registry::audit::Action::Backup,
-        serde_json::json!({"archive": manifest["archive"], "files": files}),
+        serde_json::json!({
+            "archive": manifest["archive"],
+            "files": files,
+            "rehearsed": checked.as_ref().map(|c| c["ok"].clone()),
+            "pruned": pruned,
+        }),
         None,
     )?;
+    let secs = |key: &str| {
+        manifest[key]
+            .as_str()
+            .and_then(nils_registry::time::secs_of)
+    };
+    let seconds = match (secs("started_at"), secs("created_at")) {
+        (Some(a), Some(b)) if b >= a => Some(b - a),
+        _ => None,
+    };
+    let bytes: u64 = manifest["files"]
+        .as_array()
+        .map_or(0, |f| f.iter().filter_map(|x| x["bytes"].as_u64()).sum());
+    record_result(
+        home,
+        &serde_json::json!({
+            "archive": archive.file_name().map(|n| n.to_string_lossy().into_owned()),
+            "files": files,
+            "bytes": bytes,
+            "seconds": seconds,
+            "checked": checked,
+            "pruned": pruned,
+        }),
+    )?;
+    manifest["checked"] = serde_json::json!(checked);
+    manifest["pruned"] = serde_json::json!(pruned);
     if args.json {
         println!(
             "{}",
@@ -7456,6 +7526,27 @@ fn backup_command(home: &Home, args: BackupArgs) -> Result<(), Exit> {
             manifest["archive"].as_str().unwrap_or_default(),
             manifest["epoch"]
         );
+        if checked.is_some() {
+            println!(
+                "  rehearsed   {}",
+                if passed {
+                    "every store opens"
+                } else {
+                    "A STORE DOES NOT OPEN"
+                }
+            );
+        }
+        if !pruned.is_empty() {
+            println!("  removed     {}", pruned.join(", "));
+        }
+    }
+    if !passed {
+        return Err(Exit {
+            code: FAILED,
+            message:
+                "the archive was written, and its rehearsal failed; no older archive was removed"
+                    .into(),
+        });
     }
     Ok(())
 }
@@ -7479,15 +7570,56 @@ fn registry_backup_place(registry: &mut Registry, home: &Home) -> Result<Option<
         .map(|p| PathBuf::from(p.path)))
 }
 
-fn verify_command(args: VerifyArgs) -> Result<(), Exit> {
-    let doc = backup::verify(&args.archive)?;
+/// What a verb produced, on the job row it runs under when a worker started
+/// it (Wave 4c §6.1); nothing when it runs by hand.
+fn record_result(home: &Home, result: &serde_json::Value) -> Result<(), Exit> {
+    let Some(job) = std::env::var(nils_registry::job::ADOPT_VAR)
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+    else {
+        return Ok(());
+    };
+    let mut registry = open(home)?;
+    nils_registry::job::set_result(registry.store(), job, result).map_err(|e| fail(e.to_string()))
+}
+
+fn verify_command(home: &Home, args: VerifyArgs) -> Result<(), Exit> {
+    let doc = if args.rehearse {
+        backup::rehearse(&args.archive)?
+    } else {
+        backup::verify(&args.archive)?
+    };
+    // Wave 5 §10.3: the check is kept beside the archive for the list of
+    // archives; an archive on a medium that takes no writes is still checked
+    if let Err(e) = backup::record(&args.archive, &doc) {
+        eprintln!(
+            "nils verify: the check is not kept beside the archive: {}",
+            e.message
+        );
+    }
+    record_result(
+        home,
+        &serde_json::json!({
+            "archive": args.archive.file_name().map(|n| n.to_string_lossy().into_owned()),
+            "ok": doc["ok"],
+            "rehearsed": args.rehearse,
+        }),
+    )?;
+    let differs = doc["files"]
+        .as_array()
+        .is_some_and(|files| files.iter().any(|f| f["state"] != "ok"));
     if args.json {
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
     } else {
+        let said = match (doc["ok"] == true, args.rehearse) {
+            (true, true) => "ok, rehearsed",
+            (true, false) => "ok",
+            (false, _) if differs => "DIFFERS",
+            (false, _) => "DOES NOT OPEN",
+        };
         println!(
-            "nils verify   {}   {}",
-            doc["archive"].as_str().unwrap_or_default(),
-            if doc["ok"] == true { "ok" } else { "DIFFERS" }
+            "nils verify   {}   {said}",
+            doc["archive"].as_str().unwrap_or_default()
         );
     }
     if doc["ok"] == true {
@@ -7495,7 +7627,11 @@ fn verify_command(args: VerifyArgs) -> Result<(), Exit> {
     } else {
         Err(Exit {
             code: FAILED,
-            message: "the archive does not match its manifest".into(),
+            message: if differs {
+                "the archive does not match its manifest".into()
+            } else {
+                "a store in the archive does not open".into()
+            },
         })
     }
 }

@@ -955,6 +955,13 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         let stop = Arc::clone(&stop_queue);
         std::thread::spawn(move || queue_worker(&home, &roots, &stop))
     });
+    // Wave 5 §10.3: the backup schedule beside the queue that runs what it
+    // queues, where there is a directory to write to.
+    let schedule = args.backup_dir.clone().filter(|_| args.worker).map(|dir| {
+        let home = home.clone();
+        let stop = Arc::clone(&stop_queue);
+        std::thread::spawn(move || crate::schedule::run(&home, &dir, &stop))
+    });
     let mut handles = Vec::new();
     for _ in 0..args.workers.max(1) {
         let server = Arc::clone(&server);
@@ -999,6 +1006,9 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     stop_queue.store(true, Ordering::SeqCst);
     if let Some(queue) = queue {
         let _ = queue.join();
+    }
+    if let Some(schedule) = schedule {
+        let _ = schedule.join();
     }
     Ok(())
 }
@@ -1231,6 +1241,11 @@ fn routed(
             Role::Operator
         }
         ("POST", ["api", "places"]) | ("PUT", ["api", "places", _]) => Role::Operator,
+        // Wave 5 §10.3: the archives, their schedule and the registry's
+        // calendar are an admin's to read and change.
+        ("GET", ["api", "backups"])
+        | ("PUT", ["api", "backups", "schedule"])
+        | ("PUT", ["api", "settings"]) => Role::Admin,
         ("POST", ["api", "jobs"])
         | ("POST", ["api", "jobs", _, "cancel"])
         | ("POST", ["api", "releases"])
@@ -1353,6 +1368,87 @@ fn routed(
         // Wave 5 §12.7: the gated instance door, shaped by the viewer study.
         ["api", "instances", stack, rest @ ..] if get => {
             crate::pyramid::door(registry, caller, stack, rest, query)
+        }
+        ["api", "backups"] if get => {
+            // Wave 5 §10.3: the archives in the backup directory, each with
+            // what it holds, how long it took and its last check, beside the
+            // schedule, read in the registry's timezone.
+            registry
+                .refresh_meta()
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            let schedule = crate::schedule::document(registry, jiff::Timestamp::now());
+            let Some(dir) = doors.backup_dir.as_ref() else {
+                return Ok(Reply::ok(serde_json::json!({
+                    "dir": null,
+                    "place": null,
+                    "count": 0,
+                    "archives": [],
+                    "schedule": schedule,
+                })));
+            };
+            let place = nils_registry::place::holding(
+                registry.store(),
+                nils_registry::place::Role::Backup,
+                dir,
+            )?
+            .map(|p| serde_json::json!({"id": p.id, "name": p.name, "guarantees": p.guarantees}));
+            let archives = crate::backup::archives(dir, &registry.meta().registry_id);
+            Ok(Reply::ok(serde_json::json!({
+                "dir": dir.display().to_string(),
+                "place": place,
+                "count": archives.len(),
+                "archives": archives,
+                "schedule": schedule,
+            })))
+        }
+        ["api", "backups", "schedule"] if put => {
+            let doc = json_body(body)?;
+            let schedule = crate::schedule::Schedule::parse(
+                doc["every"].as_str().unwrap_or(""),
+                doc["at"].as_str(),
+                doc["day"].as_str(),
+                doc["keep"].as_i64(),
+            )
+            .map_err(|m| Reply::error(400, m))?;
+            if schedule.every != crate::schedule::Every::Off && doors.backup_dir.is_none() {
+                return Err(Reply::error(
+                    409,
+                    "no backup directory: start nils serve with --backup-dir",
+                ));
+            }
+            registry
+                .refresh_meta()
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            let now = jiff::Timestamp::now();
+            crate::schedule::set(registry, &schedule, principal, now)
+                .map_err(|m| Reply::error(500, m))?;
+            Ok(Reply::ok(crate::schedule::document(registry, now)))
+        }
+        ["api", "settings"] if get => {
+            registry
+                .refresh_meta()
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            Ok(Reply::ok(crate::schedule::calendar(registry)))
+        }
+        ["api", "settings"] if put => {
+            // Wave 5 §10.3: the registry's calendar, which every dated
+            // answer is read under; a change moves the epoch.
+            let doc = json_body(body)?;
+            registry
+                .refresh_meta()
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            let meta = registry.meta();
+            let locale = nils_ask::hash::Locale {
+                timezone: doc["timezone"]
+                    .as_str()
+                    .map_or_else(|| meta.timezone.clone(), str::to_string),
+                week_start: doc["week_start"]
+                    .as_str()
+                    .map_or_else(|| meta.week_start.clone(), str::to_lowercase),
+            };
+            crate::schedule::set_calendar(registry, &locale, principal)
+                .map_err(|(code, m)| Reply::error(code, m))?;
+            Ok(Reply::ok(crate::schedule::calendar(registry)))
         }
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
@@ -2336,6 +2432,10 @@ fn capabilities(
         "GET /api/places",
         "POST /api/places",
         "PUT /api/places/{id}",
+        "GET /api/backups",
+        "PUT /api/backups/schedule",
+        "GET /api/settings",
+        "PUT /api/settings",
         "GET /api/instances/{stack}/manifest",
         "GET /api/instances/{stack}/tiles/{level}/{z}",
         "GET /api/instances/{stack}/slab/{level}/{z0}-{z1}",
@@ -2526,11 +2626,39 @@ fn located(doors: &Doors, command: Vec<String>) -> Result<Vec<String>, Reply> {
                     "no backup directory: start nils serve with --backup-dir",
                 )
             })?;
-            return Ok(vec![
-                "backup".into(),
-                "--dir".into(),
+            // Wave 5 §10.3: how many archives to keep, and a rehearsal; nothing
+            // else a caller composes
+            let mut out = vec![
+                "backup".to_string(),
+                "--dir".to_string(),
                 dir.display().to_string(),
-            ]);
+            ];
+            let mut rest = command.iter().skip(1);
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--rehearse" => out.push(arg.clone()),
+                    "--keep" => {
+                        let keep = rest
+                            .next()
+                            .and_then(|n| n.parse::<usize>().ok())
+                            .filter(|n| (1..=1000).contains(n))
+                            .ok_or_else(|| {
+                                Reply::error(
+                                    400,
+                                    "backup --keep N: how many archives to keep, 1 to 1000",
+                                )
+                            })?;
+                        out.extend(["--keep".to_string(), keep.to_string()]);
+                    }
+                    other => {
+                        return Err(Reply::error(
+                            400,
+                            format!("backup takes --keep N and --rehearse, not {other}"),
+                        ));
+                    }
+                }
+            }
+            return Ok(out);
         }
         "verify" => {
             let dir = doors.backup_dir.as_ref().ok_or_else(|| {
@@ -2545,7 +2673,17 @@ fn located(doors: &Doors, command: Vec<String>) -> Result<Vec<String>, Reply> {
             if name.contains('/') || name.contains("..") || name.is_empty() {
                 return Err(Reply::error(400, "verify NAME: a name, not a path"));
             }
-            return Ok(vec!["verify".into(), dir.join(name).display().to_string()]);
+            let mut out = vec!["verify".to_string(), dir.join(name).display().to_string()];
+            for arg in command.iter().skip(2) {
+                if arg != "--rehearse" {
+                    return Err(Reply::error(
+                        400,
+                        format!("verify NAME takes --rehearse, not {arg}"),
+                    ));
+                }
+                out.push(arg.clone());
+            }
+            return Ok(out);
         }
         _ => {}
     }
@@ -2946,6 +3084,46 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one place",
             "Changing a place",
             "Changed a place",
+        ),
+        row(
+            "GET /api/backups",
+            "admin",
+            false,
+            false,
+            "bounded",
+            "every archive in the backup directory",
+            "Reading the backups",
+            "Read the backups",
+        ),
+        row(
+            "PUT /api/backups/schedule",
+            "admin",
+            true,
+            true,
+            "free",
+            "one schedule",
+            "Setting the backup schedule",
+            "Set the backup schedule",
+        ),
+        row(
+            "GET /api/settings",
+            "reader",
+            false,
+            false,
+            "free",
+            "one document",
+            "Reading the registry's calendar",
+            "Read the registry's calendar",
+        ),
+        row(
+            "PUT /api/settings",
+            "admin",
+            true,
+            true,
+            "free",
+            "one document",
+            "Changing the registry's calendar",
+            "Changed the registry's calendar",
         ),
         row(
             "GET /api/overlays",

@@ -87,7 +87,7 @@ paths:
         "200": {description: "{count, jobs}"}
     post:
       summary: Queue a command line for a worker (nils jobs enqueue)
-      description: The one way anything heavy runs through the door. The verb is one of digest, fingerprint, classify, pick, release, handover; the caller's principal is carried to the verb.
+      description: "The one way anything heavy runs through the door. The verb is one the door queues, such as digest, classify, release or backup; the caller's principal is carried to the verb. A backup goes to the directory --backup-dir names and takes --keep N and --rehearse; verify NAME checks one archive there and takes --rehearse."
       requestBody:
         content:
           application/json:
@@ -693,6 +693,33 @@ paths:
         "200": {description: The place}
         "404": {description: No such place}
         "409": {description: The registry role would lose its backup}
+  /api/backups:
+    get:
+      summary: The archives in the backup directory, and the backup schedule (Wave 5 section 10.3; admin)
+      description: "Newest first. Each archive says its size, how long it took, whether it is this registry's, and its last check as nils verify kept it. The schedule is read in the registry's timezone and says when it next comes round, as an instant and as the registry's clock reads it. Without --backup-dir, dir and place are null and there are no archives."
+      responses:
+        "200": {description: "{dir, place{id, name, guarantees}, count, archives[{name, created_at, seconds, bytes, files, epoch, schema_version, backend, ours, checked{at, ok, rehearsed, files, opened}}], schedule{every, at, day, keep, timezone, next, next_local, last}}"}
+  /api/backups/schedule:
+    put:
+      summary: Set the backup schedule (Wave 5 section 10.3; admin)
+      description: "Kept in the registry and audited as backup.schedule. A nils serve that runs the queue and has a backup directory queues a backup, rehearsed and keeping the newest keep, each time the schedule comes round; what came round before the schedule was set is not owed."
+      requestBody: {content: {application/json: {schema: {type: object, required: [every], properties: {every: {type: string, enum: ["off", "day", "week"]}, at: {type: string, description: "HH:MM in the registry's timezone; 02:00 when absent"}, day: {type: string, description: "The day of a week, for every week"}, keep: {type: integer, minimum: 1, maximum: 1000}}}}}}
+      responses:
+        "200": {description: "The schedule, as GET /api/backups says it"}
+        "400": {description: A schedule that cannot be read}
+        "409": {description: No backup directory to write to}
+  /api/settings:
+    get:
+      summary: The registry's calendar, its timezone and the day its week starts on, with the choices (Wave 5 section 10.3)
+      responses:
+        "200": {description: "{timezone, week_start, epoch, week_starts[], timezones[]}"}
+    put:
+      summary: Change the registry's calendar (Wave 5 section 10.3; admin)
+      description: "Audited as settings.set. The epoch moves, since every dated answer is read under the calendar; the same calendar again changes nothing."
+      requestBody: {content: {application/json: {schema: {type: object, properties: {timezone: {type: string}, week_start: {type: string, enum: ["monday", "sunday", "saturday"]}}}}}}
+      responses:
+        "200": {description: "The calendar, as GET /api/settings says it"}
+        "400": {description: A timezone this engine does not know, or a day a week does not start on}
 components:
   securitySchemes:
     bearer:

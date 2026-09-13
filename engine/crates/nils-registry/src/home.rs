@@ -632,6 +632,19 @@ impl Registry {
         Ok(())
     }
 
+    /// One `registry_meta` row the typed [`Meta`] does not carry, such as
+    /// the backup schedule kept beside the calendar (Wave 5 §10.3); none
+    /// where the registry has no such row.
+    pub fn meta_value(&mut self, key: &str) -> Result<Option<String>, HomeError> {
+        let table = self.store.qualified("registry_meta");
+        let sql = format!(
+            "SELECT value FROM {table} WHERE key = {}",
+            self.store.dialect().param(1, crate::schema::Type::Text)
+        );
+        let row = self.store.query_opt(&sql, &[Param::from(key)])?;
+        Ok(row.map(|r| r.text(0).map(str::to_string)).transpose()?)
+    }
+
     /// Bump the epoch (§4.2) inside the caller's transaction and return the
     /// new value.
     pub fn next_epoch(&mut self) -> Result<i64, HomeError> {
