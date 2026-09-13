@@ -7,6 +7,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Added
 
 - `POST /api/ask/documents` takes a `parent`: a document stored under another is that document's next version. A document already stored with no parent, such as a draft the assistant proposed, is adopted into the line the first time it is stored under one, and never into a line that follows it, so a person who accepts a proposal on a card keeps the card's versions in one line.
+- `POST /api/ask/profile` profiles one set of a query for the desk's charts: how many subjects, sessions and stacks are under it, its stacks by their base, the values of one stack field, the sex and the age by decade of its subjects, and the kinds of their clinical events. Each part is a preview of a small query added to a copy of the document under the caller's own scope and caps, so nothing is stored. Sex and age are quasi-identifying and are withheld below the reviewer role, and a sensitive kind of event is left out below the operator role, which the answer says whether or not the set holds one. Every number counts a member once, however many of the set's paths reach it. A part that cannot be answered says why, and the others still stand.
 
 ## [1.0.0-alpha.18] - 2026-09-13
 

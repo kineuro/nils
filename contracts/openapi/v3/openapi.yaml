@@ -342,6 +342,15 @@ paths:
       summary: Ten rows, or the count, by level
       responses:
         "200": {description: "{level, columns, rows, truncated}"}
+  /api/ask/profile:
+    post:
+      summary: "The profile of one set of a document, for charts: its subjects, sessions and stacks, its stacks by base, one stack field by value, and by role the sex and age of its subjects and the kinds of their clinical events"
+      description: "`set` names the set, the document's answer when none is named; `field` names a stack field to count by value, one the role may read and never an identifying one. Each part is a preview of a small query added to a copy of the document, under the caller's scope and caps, so nothing is stored and no handle is written. Sex and age are quasi-identifying and are withheld below the reviewer role; a sensitive kind of event is left out below the operator role, and the answer says so whether or not the set holds one. Every number counts a member once, however many paths reach it, such as a subject in two of the cohorts a set starts from. A part that cannot be answered carries `refused` with the reason, and the others still stand."
+      requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, set: {type: string}, field: {type: string}}}}}}
+      responses:
+        "200": {description: "{set, grain, counts: {subjects, sessions, stacks}, stack_types: [{value, count, subjects}], field: {name, values, truncated} | null, demographics: {sex, age_decades} | {withheld}, clinical: {kinds, sensitive_withheld}}; each list is [{value, count, subjects}], and a part is null where the set's grain has none"}
+        "400": {description: The document is refused}
+        "404": {description: No such set in the document}
   /api/ask/describe:
     post:
       summary: One sentence per set, the conventions, the denominators, the mechanisms, the disclosure; the declaration carries the registry's timezone and week start (Wave 5 section 12.6), never the browser's

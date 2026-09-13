@@ -3364,6 +3364,16 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Previewed",
         ),
         row(
+            "POST /api/ask/profile",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "a preview per part",
+            "Profiling",
+            "Profiled",
+        ),
+        row(
             "POST /api/ask/describe",
             "reader",
             false,
