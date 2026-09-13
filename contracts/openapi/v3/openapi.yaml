@@ -677,16 +677,24 @@ paths:
         "200": {description: "image/jpeg"}
         "403": {description: The reader role does not open pixels (gated)}
         "404": {description: No pyramid, or no such level}
+  /api/sources:
+    get:
+      summary: Every place with the source role, how it is handled, its digests and its totals, for the desk's Data page
+      description: "A source's roots are the ingest roots under the place's path. Its subjects, studies, sessions and stacks are the ones its digests created first, so something seen from two sources counts under the first. The newest digests are given in full: the files seen, new, changed, unchanged and refused, the subjects and stacks each added, how many of those stacks are classified and how many wait for a person. Never a row of a person: every number is a count."
+      parameters:
+        - {name: recent, in: query, schema: {type: integer, default: 12, minimum: 1, maximum: 100}}
+      responses:
+        "200": {description: "{count, window_days, sources[{place fields, handling{arrives, on_release{dates, uids, deface}}, handling_declared, roots, digests{count, first, last, recent[{id, name, state, started_at, finished_at, job_id, files{seen, new, changed, unchanged, refused}, subjects_added, stacks_added, classified, to_sort}]}, totals{subjects, studies, sessions, stacks, refused_files, to_sort}}]}"}
   /api/places:
     get:
       summary: Every place with its role, its guarantees, what the engine measured and the deployment's paths bound under it (Wave 5 section 12.5, 10.2)
       description: "A place is a named location with a role (source, registry, working, export, share, exchange, backup) and the guarantees behind it. `?probe=1` measures every active place again first. The reply carries `enforced`, true once any place is declared, and `bindings`, the verbs that take a path and the role each needs. Never a row of a person."
       responses:
-        "200": {description: "{count, enforced, places[{id, name, role, path, guarantees{backup, snapshots, protected, fast}, probed{exists, directory, writable, free_bytes, mount, snapshots_seen}, probed_at, created_at, updated_at, retired_at, retired, bound[{verb, path}], holds, must}], bindings[{verb, role}]}"}
+        "200": {description: "{count, enforced, places[{id, name, role, path, guarantees{backup, snapshots, protected, fast}, probed{exists, directory, writable, free_bytes, mount, snapshots_seen}, probed_at, created_at, updated_at, retired_at, retired, handling{arrives, on_release{dates, uids, deface}}, handling_declared, bound[{verb, path}], holds, must}], bindings[{verb, role}]}"}
     post:
       summary: Declare a place (Wave 5 section 10.2; operator)
       description: "The path is probed on creation. The registry role is refused (409) on a place whose guarantees name no backup place, or name one that is not a backup place; the rules of section 10.2 are checked here and at every path-taking door, not documented."
-      requestBody: {content: {application/json: {schema: {type: object, required: [name, role, path], properties: {name: {type: string}, role: {type: string}, path: {type: string}, guarantees: {type: object}}}}}}
+      requestBody: {content: {application/json: {schema: {type: object, required: [name, role, path], properties: {name: {type: string}, role: {type: string}, path: {type: string}, guarantees: {type: object}, handling: {type: object, description: "How what comes in through it is handled: {arrives: identified|deidentified, on_release: {dates: keep|shift|year, uids: remap|preserve, deface: boolean}}; a key not given takes its default, and dates that move with UIDs preserved are refused"}}}}}}
       responses:
         "201": {description: The place}
         "400": {description: A missing name, an unknown role or a relative path}
@@ -696,9 +704,10 @@ paths:
       summary: Change a place's path or guarantees, or retire it (Wave 5 section 10.2; operator)
       parameters:
         - {name: id, in: path, required: true, schema: {type: integer}}
-      requestBody: {content: {application/json: {schema: {type: object, properties: {path: {type: string}, guarantees: {type: object}, retired: {type: boolean}}}}}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {path: {type: string}, guarantees: {type: object}, handling: {type: object}, retired: {type: boolean}}}}}}
       responses:
         "200": {description: The place}
+        "400": {description: A handling that is not one, with the choices}
         "404": {description: No such place}
         "409": {description: The registry role would lose its backup}
   /api/backups:

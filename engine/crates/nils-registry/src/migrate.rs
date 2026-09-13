@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 37;
+pub const SCHEMA_VERSION: i64 = 38;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +201,10 @@ pub static MIGRATIONS: &[Migration] = &[
     Migration {
         version: 37,
         apply: a_place_is_a_registry_object,
+    },
+    Migration {
+        version: 38,
+        apply: a_place_declares_how_it_is_handled,
     },
 ];
 
@@ -486,6 +490,15 @@ fn a_place_is_a_registry_object(store: &mut Store, kind: Kind) -> Result<(), Err
         return Ok(());
     }
     add_tables(store, kind, &["place"])
+}
+
+/// A place declares how what comes in through it is handled: whether it
+/// arrives identified, and what a release does to it on the way out.
+fn a_place_declares_how_it_is_handled(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "place", &["handling"])
 }
 
 /// Wave 4a §13.1: a release is the history of what left and is never
