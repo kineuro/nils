@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- `POST /api/ask/documents` takes a `parent`: a document stored under another is that document's next version. A document already stored with no parent, such as a draft the assistant proposed, is adopted into the line the first time it is stored under one, and never into a line that follows it, so a person who accepts a proposal on a card keeps the card's versions in one line.
+
 ## [1.0.0-alpha.18] - 2026-09-13
 
 ### Added

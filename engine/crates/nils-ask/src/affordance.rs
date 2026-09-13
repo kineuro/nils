@@ -109,11 +109,13 @@ pub fn options(
     .map_err(|i| AffordanceError::Ask(AskError::Invalid(vec![i])))
 }
 
-/// Store a document and return its handle.
+/// Store a document and return its handle; stored under a parent, it is that
+/// document's next version.
 pub fn post(
     registry: &mut Registry,
     ask: &Ask,
     s: &Setting<'_>,
+    parent: Option<i64>,
 ) -> Result<Document, AffordanceError> {
     let prepared = prepare(ask.clone(), s.names, s.scope)?;
     let issues = compile_issues(registry, ask, s);
@@ -125,7 +127,7 @@ pub fn post(
         ask,
         &prepared.hash,
         s.principal,
-        None,
+        parent,
     )?)
 }
 

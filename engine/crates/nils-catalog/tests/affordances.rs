@@ -248,7 +248,7 @@ fn apply_returns_a_handle_and_refuses_a_stale_list() {
                 bounds: bounds(),
                 values_cap: 50,
             };
-            affordance::post(&mut l.registry, &ask, &s).unwrap()
+            affordance::post(&mut l.registry, &ask, &s, None).unwrap()
         };
         let s = Setting {
             names: &l.catalog,
@@ -447,7 +447,7 @@ fn apply_returns_a_handle_and_refuses_a_stale_list() {
         assert_eq!(stored.ask.out.columns.len(), 7);
         assert_eq!(stored.ask.out.order.len(), 2);
         // the same text posted twice is one handle
-        let again = affordance::post(&mut l.registry, &ask, &s).unwrap();
+        let again = affordance::post(&mut l.registry, &ask, &s, None).unwrap();
         assert_eq!(again.id, doc.id);
     }
 }
@@ -776,7 +776,7 @@ fn an_outdated_selection_gets_its_move() {
             .find(|m| m.kind == Kind::UpdateSelection)
             .expect("the update move");
         assert_eq!(update.holes[0].fillers, vec![json!("r")]);
-        let doc = affordance::post(&mut l.registry, &reader, &s).unwrap();
+        let doc = affordance::post(&mut l.registry, &reader, &s, None).unwrap();
         let applied = affordance::apply(
             &mut l.registry,
             doc.id,

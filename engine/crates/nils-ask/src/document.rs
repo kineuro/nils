@@ -105,14 +105,27 @@ pub fn put(
     );
     if let Some(r) = store.query_opt(&sql, &[Param::from(d.as_str())])? {
         let existing = document_of(&r)?;
-        store.update_by_id(
-            table("ask_document"),
-            &[("last_used_at", Param::from(now.as_str()))],
-            "id",
-            existing.id,
-        )?;
+        // A document stored with no parent, such as a draft the assistant
+        // proposed, is adopted as the next version of the one it is stored
+        // under: once, and never into its own line.
+        let adopted = match parent {
+            Some(p)
+                if existing.parent_id.is_none()
+                    && p != existing.id
+                    && !descends_from(store, p, existing.id)? =>
+            {
+                Some(p)
+            }
+            _ => None,
+        };
+        let mut sets = vec![("last_used_at", Param::from(now.as_str()))];
+        if let Some(p) = adopted {
+            sets.push(("parent_id", Param::Int(p)));
+        }
+        store.update_by_id(table("ask_document"), &sets, "id", existing.id)?;
         return Ok(Document {
             last_used_at: now,
+            parent_id: adopted.or(existing.parent_id),
             ..existing
         });
     }
@@ -156,6 +169,30 @@ pub fn put(
         last_used_at: now,
         parent_id: parent,
     })
+}
+
+/// Whether the document `id` is `ancestor` or follows it through its parents.
+/// A chain longer than any a person makes is taken as following, so nothing
+/// is adopted into it.
+fn descends_from(store: &mut Store, id: i64, ancestor: i64) -> Result<bool, DocumentError> {
+    let sql = format!(
+        "SELECT parent_id FROM {} WHERE id = {}",
+        store.qualified("ask_document"),
+        store.dialect().param(1, Type::Int)
+    );
+    let mut at = Some(id);
+    let mut steps = 0;
+    while let Some(current) = at {
+        if current == ancestor || steps > 1000 {
+            return Ok(true);
+        }
+        steps += 1;
+        at = match store.query_opt(&sql, &[Param::Int(current)])? {
+            Some(r) => r.opt_int(0)?,
+            None => None,
+        };
+    }
+    Ok(false)
 }
 
 /// A document by handle; a read moves its last use.

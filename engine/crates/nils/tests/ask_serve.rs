@@ -1910,3 +1910,95 @@ fn the_clause_funnel_sums_and_errors_disclose_and_the_timezone_is_the_registrys(
     assert_ne!(stored["hash"].as_str().unwrap(), utc);
     server.finish();
 }
+
+/// An accepted proposal joins the card's line: a document stored under a
+/// parent is that document's next version, a draft stored on its own is
+/// adopted once, and a line is never folded into what follows it.
+#[test]
+fn a_document_stored_under_a_parent_is_its_next_version() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        7,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let ops = Some("an-operator-token-of-len");
+    // a card, and a draft stored on its own, as the assistant stores what it proposes
+    let (status, first) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(serde_json::json!({"document": yardstick()}))),
+        ops,
+    );
+    assert_eq!(status, 200, "{first}");
+    let card = first["document"].as_i64().unwrap();
+    let mut draft = yardstick();
+    draft["name"] = serde_json::json!("a proposed version");
+    let (status, alone) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(serde_json::json!({"document": draft}))),
+        ops,
+    );
+    assert_eq!(status, 200, "{alone}");
+    assert!(alone["parent"].is_null(), "{alone}");
+    // accepted: stored again under the card, the draft becomes its next version
+    let (status, adopted) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(
+            serde_json::json!({"document": draft, "parent": card}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 200, "{adopted}");
+    assert_eq!(adopted["document"], alone["document"], "{adopted}");
+    assert_eq!(adopted["parent"], card, "{adopted}");
+    // the card stored under its own next version would close a loop, so it keeps no parent
+    let (status, looped) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(
+            serde_json::json!({"document": yardstick(), "parent": alone["document"]}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 200, "{looped}");
+    assert!(looped["parent"].is_null(), "{looped}");
+    // a parent that is no document is refused
+    let (status, missing) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(
+            serde_json::json!({"document": draft, "parent": 999_999}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 404, "{missing}");
+    let (status, wrong) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(
+            serde_json::json!({"document": draft, "parent": "the card"}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 400, "{wrong}");
+    // the two are one line of two versions
+    let (status, listed) = server.request("GET", "/api/ask/documents", None, ops);
+    assert_eq!(status, 200, "{listed}");
+    let row = listed["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["root"] == card)
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(row["versions"], 2, "{row}");
+    assert_eq!(row["document"], alone["document"], "{row}");
+    server.finish();
+}
