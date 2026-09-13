@@ -618,6 +618,14 @@ paths:
       responses:
         "200": {description: What the folder holds}
         "400": {description: Not an absolute path}
+  /api/supervise/folders:
+    post:
+      summary: The folders inside a folder on the host, for a path browser, or where one starts
+      description: "With a path: {path, parent, exists, directory, readable, mount, folders: [{name, readable, hidden, link, mount, unmounted}], files, partial, timed_out}. `mount` is {point, fs, source, network, free_bytes, total_bytes}: the disk the folder is on, or, for a folder inside, the disk mounted at it. `unmounted` is {fs, source, network}: a disk /etc/fstab names for a folder inside that nothing is mounted for. `readable` says whether the supervisor's account may open the folder, `link` that it is a link to a folder, and `hidden` that its name starts with a dot. At most 500 folders are listed and 10,000 files counted, and `partial` says there were more. Without a path: {path: null, roots: [{path, kind: root | home | mount | fstab, mount, unmounted}], timed_out}, the root, the supervisor's home folder, every disk mounted that holds data, then every disk /etc/fstab names that is not mounted. The disk is read for at most five seconds, since the supervisor serves one call at a time; past them `timed_out` is true and the answer holds only what was known without the disk, with exists, directory and readable null."
+      requestBody: {content: {application/json: {schema: {type: object, properties: {path: {type: string}}}}}}
+      responses:
+        "200": {description: The folders inside the folder, or where a browser starts}
+        "400": {description: A path that is not absolute}
   /api/instances/{stack}/manifest:
     get:
       summary: The viewing pyramid of a stack, as its manifest (Wave 5 section 12.7)

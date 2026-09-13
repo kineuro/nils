@@ -29,6 +29,7 @@ mod assist_cli;
 mod backup;
 mod depends;
 mod door_client;
+mod folders;
 mod gate;
 mod login;
 mod mcp;

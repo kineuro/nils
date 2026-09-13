@@ -681,4 +681,25 @@ fn the_door_reports_the_install_restarts_apart_and_looks_inside_a_folder() {
         token,
     );
     assert_eq!(status, 400);
+
+    // the folders inside, for a path browser, and where a browser starts
+    let (status, listed) = s.call("POST", "/api/supervise/folders", Some(&body), token);
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["folders"][0]["name"], "mri-3t", "{listed}");
+    assert_eq!(listed["folders"][1]["name"], "notes", "{listed}");
+    assert_eq!(listed["files"], 1, "{listed}");
+    assert_eq!(listed["readable"], true, "{listed}");
+    assert_eq!(listed["timed_out"], false, "{listed}");
+    let (status, start) = s.call("POST", "/api/supervise/folders", Some("{}"), token);
+    assert_eq!(status, 200, "{start}");
+    assert_eq!(start["path"], serde_json::Value::Null, "{start}");
+    assert_eq!(start["roots"][0]["path"], "/", "{start}");
+    assert_eq!(start["roots"][0]["kind"], "root", "{start}");
+    let (status, _) = s.call(
+        "POST",
+        "/api/supervise/folders",
+        Some(r#"{"path":"relative"}"#),
+        token,
+    );
+    assert_eq!(status, 400);
 }
