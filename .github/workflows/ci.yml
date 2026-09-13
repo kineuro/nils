@@ -3,8 +3,8 @@ name: ci
 # the sign-offs; "engine" formats, lints and tests the engine on both registry
 # backends; "v0-compare" tests the compare tool over a synthetic registry on both
 # backends; "build" is the six-target build of engine-build.yml, the way a release
-# is made. Main requires all of them (docs/decisions/15, R8;
-# docs/specs/wave1-parse-and-digest.md, §12.6).
+# is made, whose binaries a release on main takes. Main requires all of them
+# (docs/decisions/15, R8; docs/specs/wave1-parse-and-digest.md, §12.6).
 on:
   pull_request:
   push:
@@ -12,6 +12,11 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  # a newer push to a pull request stops the run it replaces; a run on main is never stopped
+  group: ci-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   ci:
@@ -86,9 +91,9 @@ jobs:
       - name: lint
         working-directory: engine
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # every test binary beside the others, each on a Postgres database of its own
       - name: test on SQLite and Postgres 16
-        working-directory: engine
-        run: cargo test --workspace --locked
+        run: scripts/test-engine.sh
       # Wave 4b §13: the gate is a node local job with its fixtures, its
       # canonicals and its outcomes in the repository. It runs on a registry
       # the generator writes, on both backends, and the canonicals are the
