@@ -1,8 +1,10 @@
 name: release
-# On a version tag: build `nils` for the six targets (engine-build.yml, the same
-# build as ci.yml), check that the binary carries the tag's version, and publish a
-# GitHub release with the binaries, the packs, their checksums, and the matching section of
-# CHANGELOG.md as the notes, in the form Bifrost uses (docs/decisions/15, R4).
+# On a version tag: the binaries for the six targets, checked to carry the tag's
+# version, published as a GitHub release with the packs, their checksums, and the
+# matching section of CHANGELOG.md as the notes, in the form Bifrost uses
+# (docs/decisions/15, R4). A tag goes on a commit once ci passed on main, and that
+# run built the six binaries with engine-build.yml, so the release takes them from
+# it; where no run on main kept them, they are built here the same way.
 on:
   push:
     tags: ['v*']
@@ -10,13 +12,35 @@ on:
 permissions:
   contents: write
   packages: write
+  actions: read
 
 jobs:
+  built:
+    name: the binaries ci built
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.find.outputs.run }}
+    steps:
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&branch=main&event=push&status=success" --jq '.workflow_runs[0].id // empty')
+          if [ -n "$run" ]; then
+            kept=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts?per_page=100" --jq '[.artifacts[] | select(.expired | not) | select(.name | startswith("nils-"))] | length')
+            [ "$kept" -ge 6 ] || run=""
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          if [ -n "$run" ]; then echo "the binaries ci run $run built"; else echo "no run on main kept this commit's binaries, so they are built here"; fi
+
   build:
+    needs: built
+    if: needs.built.outputs.run == ''
     uses: ./.github/workflows/engine-build.yml
 
   release:
-    needs: build
+    needs: [built, build]
+    if: ${{ !cancelled() && needs.built.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -25,6 +49,8 @@ jobs:
           pattern: nils-*
           path: bin
           merge-multiple: true
+          run-id: ${{ needs.built.outputs.run || github.run_id }}
+          github-token: ${{ github.token }}
       - name: the binaries carry the tag's version, and the packs go with them
         run: |
           v=${GITHUB_REF_NAME#v}
@@ -54,7 +80,8 @@ jobs:
   image:
     # The same binaries, in an image for the two Linux architectures, so that
     # `nils setup` can put the engine in a container without building one.
-    needs: build
+    needs: [built, build]
+    if: ${{ !cancelled() && needs.built.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -63,6 +90,8 @@ jobs:
           pattern: nils-linux-*
           path: bin
           merge-multiple: true
+          run-id: ${{ needs.built.outputs.run || github.run_id }}
+          github-token: ${{ github.token }}
       - name: the names the Containerfile expects
         run: |
           mv bin/nils-linux-x86_64 bin/nils-linux-amd64

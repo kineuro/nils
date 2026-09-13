@@ -1,9 +1,11 @@
 name: engine-build
 # The six release targets of the language spike (docs/decisions/15, C1): `nils` is
-# built natively on each runner, the way a release is, `nils --version` proves it
-# runs, and the binary is kept as an artifact. ci.yml calls this on every pull
-# request and release.yml on every tag, so the two can never drift. A failing target
-# is a finding on its own; the matrix never stops early.
+# built for each, the way a release is, `nils --version` proves it runs, and the
+# binary is kept as an artifact. ci.yml calls this on every pull request and on
+# main, and release.yml takes the binaries main built for the commit it tags, so the
+# two can never drift. Each target is built on its own kind of machine except the
+# Intel Mac, which is built on Apple silicon in half the time and runs there under
+# Rosetta. A failing target is a finding on its own; the matrix never stops early.
 on:
   workflow_call:
 
@@ -19,12 +21,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: linux-x86_64, runner: ubuntu-latest, exe: "" }
-          - { target: linux-arm64, runner: ubuntu-24.04-arm, exe: "" }
-          - { target: macos-x86_64, runner: macos-15-intel, exe: "" }
-          - { target: macos-arm64, runner: macos-latest, exe: "" }
-          - { target: windows-x86_64, runner: windows-latest, exe: ".exe" }
-          - { target: windows-arm64, runner: windows-11-arm, exe: ".exe" }
+          - { target: linux-x86_64, runner: ubuntu-latest, exe: "", triple: "" }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm, exe: "", triple: "" }
+          - { target: macos-x86_64, runner: macos-latest, exe: "", triple: x86_64-apple-darwin }
+          - { target: macos-arm64, runner: macos-latest, exe: "", triple: "" }
+          - { target: windows-x86_64, runner: windows-latest, exe: ".exe", triple: "" }
+          - { target: windows-arm64, runner: windows-11-arm, exe: ".exe", triple: "" }
     defaults:
       run:
         shell: bash
@@ -36,18 +38,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: ${{ matrix.triple }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
+          # the two Mac builds run on the same kind of machine, so each keeps a cache of its own
+          key: ${{ matrix.triple }}
       - name: build
         working-directory: engine
-        run: cargo build --release --locked -p nils
+        run: cargo build --release --locked -p nils ${{ matrix.triple && format('--target {0}', matrix.triple) || '' }}
       - name: nils --version
         working-directory: engine
         run: |
-          ./target/release/nils${{ matrix.exe }} --version
+          built=target/release
+          run=""
+          if [ -n "${{ matrix.triple }}" ]; then
+            built=target/${{ matrix.triple }}/release
+            # an Intel binary on Apple silicon runs under Rosetta, installed where the image lacks it
+            arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license > /dev/null
+            run="arch -x86_64"
+          fi
+          $run ./$built/nils${{ matrix.exe }} --version
           mkdir -p ../bin
-          cp ./target/release/nils${{ matrix.exe }} ../bin/nils-${{ matrix.target }}${{ matrix.exe }}
+          cp ./$built/nils${{ matrix.exe }} ../bin/nils-${{ matrix.target }}${{ matrix.exe }}
       - uses: actions/upload-artifact@v7
         with:
           name: nils-${{ matrix.target }}
