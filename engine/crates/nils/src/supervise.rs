@@ -859,6 +859,7 @@ pub(crate) fn capabilities(config: &Config, node: &str) -> Value {
             "POST /api/supervise/update-all",
             "GET /api/supervise/runs/{id}",
             "POST /api/supervise/look",
+            "POST /api/supervise/folders",
         ],
         "log": log_rows(&config.log, 5),
     })
@@ -1323,6 +1324,19 @@ fn handle(config: &Config, node: &str, busy: &Mutex<()>, runs: &Runs, mut reques
             {
                 Some(p) => (200, look(Path::new(p))),
                 None => error(400, "path: an absolute path on this machine"),
+            }
+        }
+        (Method::Post, "/api/supervise/folders") => {
+            let doc = body_json(&mut request);
+            match &doc["path"] {
+                Value::Null => (200, crate::folders::answer(None)),
+                path => match path.as_str().and_then(|p| crate::places::plain(p.trim())) {
+                    Some(p) => (200, crate::folders::answer(Some(&p))),
+                    None => error(
+                        400,
+                        "path: an absolute path on this machine, or none for where to start",
+                    ),
+                },
             }
         }
         (Method::Post, "/api/supervise/update") => {

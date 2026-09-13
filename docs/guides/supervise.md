@@ -146,6 +146,15 @@ install and acts on it, from the setup record of the account it runs as
 - `POST /api/supervise/look` says what a folder holds before it is added:
   each folder inside with its files, how many of a sample are DICOM, and
   their modalities and scanners.
+- `POST /api/supervise/folders` lists the folders inside a folder, for a path
+  browser: each with whether this account may open it, whether a disk is
+  mounted there, and whether `/etc/fstab` names a disk there that nothing is
+  mounted for, beside the disk the folder is on with its free and total room.
+  With no path it says where to start: the root, the home folder, every disk
+  mounted that holds data, and every disk `/etc/fstab` names that is not
+  mounted. The supervisor serves one call at a time, so a folder that takes
+  more than five seconds to read, as a network mount that does not answer
+  may, is answered without its listing, and the answer says so.
 
 A restart, a reapply and an update run apart from the call that started them,
 one at a time, and `GET /api/supervise/runs/{id}` says how each went, with the

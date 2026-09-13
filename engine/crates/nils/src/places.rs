@@ -8,7 +8,7 @@
 //! a registry from before this slice, or a laptop that has declared none,
 //! keeps the flags it had, and the capabilities say so.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use nils_registry::place::{self, Place, Role};
 use nils_registry::store::Store;
@@ -183,27 +183,280 @@ fn writable(dir: &Path) -> bool {
 /// readable; the longest mount prefix wins.
 fn mount_of(path: &Path) -> Option<String> {
     let real = std::fs::canonicalize(path).ok()?;
-    let table = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
-    let mut best: Option<String> = None;
-    for line in table.lines() {
-        // mount id, parent, major:minor, root, mount point, ...
-        let Some(point) = line.split_whitespace().nth(4) else {
-            continue;
-        };
-        let point = point.replace("\\040", " ");
-        if real.starts_with(&point) && best.as_ref().is_none_or(|b| point.len() > b.len()) {
-            best = Some(point);
-        }
-    }
-    best
+    holding(&mount_table(), &real).map(|m| m.point.clone())
 }
 
+/// A disk mounted, or named in /etc/fstab: where it is mounted, its
+/// filesystem, and what it is a mount of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Mount {
+    pub point: String,
+    pub fs: String,
+    pub source: String,
+}
+
+/// Filesystems reached over a network.
+const NETWORK: &[&str] = &[
+    "nfs",
+    "nfs4",
+    "cifs",
+    "smb3",
+    "smbfs",
+    "fuse.sshfs",
+    "sshfs",
+    "ceph",
+    "glusterfs",
+    "fuse.glusterfs",
+    "lustre",
+    "beegfs",
+    "9p",
+    "afs",
+    "davfs",
+    "fuse.rclone",
+];
+
+/// Filesystems the system keeps for itself, which hold no one's data.
+const PSEUDO: &[&str] = &[
+    "proc",
+    "sysfs",
+    "devtmpfs",
+    "devpts",
+    "tmpfs",
+    "cgroup",
+    "cgroup2",
+    "securityfs",
+    "pstore",
+    "bpf",
+    "debugfs",
+    "tracefs",
+    "configfs",
+    "fusectl",
+    "mqueue",
+    "hugetlbfs",
+    "overlay",
+    "squashfs",
+    "nsfs",
+    "efivarfs",
+    "binfmt_misc",
+    "rpc_pipefs",
+    "ramfs",
+    "selinuxfs",
+    "fuse.gvfsd-fuse",
+    "fuse.portal",
+    "fuse.lxcfs",
+    "fuse.snapfuse",
+    "nfsd",
+    "rootfs",
+    "devfs",
+    "swap",
+    "none",
+];
+
+/// Where the system mounts what it keeps for itself.
+const SYSTEM: &[&str] = &[
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/boot",
+    "/snap",
+    "/var/lib/docker",
+    "/var/lib/containers",
+    "/var/snap",
+];
+
+impl Mount {
+    /// Whether the disk is reached over a network.
+    pub fn network(&self) -> bool {
+        NETWORK.contains(&self.fs.as_str())
+    }
+
+    /// Whether the filesystem is one the system keeps for itself.
+    pub fn pseudo(&self) -> bool {
+        PSEUDO.contains(&self.fs.as_str())
+    }
+
+    /// Whether the mount point is one the system keeps for itself.
+    pub fn system(&self) -> bool {
+        SYSTEM.iter().any(|s| Path::new(&self.point).starts_with(s))
+    }
+}
+
+/// The kernel's mount table and /etc/fstab, read where the system keeps
+/// them, on Linux; elsewhere both are empty.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Tables {
+    pub mounts: Vec<Mount>,
+    pub fstab: Vec<Mount>,
+}
+
+impl Tables {
+    pub fn read() -> Tables {
+        Tables {
+            mounts: mount_table(),
+            fstab: fstab_table(),
+        }
+    }
+
+    /// The mount a canonical path lives on: the longest mount point it
+    /// starts with.
+    pub fn holding(&self, path: &Path) -> Option<&Mount> {
+        holding(&self.mounts, path)
+    }
+
+    /// What is mounted at exactly this point, if anything.
+    pub fn at(&self, point: &Path) -> Option<&Mount> {
+        in_force(self.mounts.iter().filter(|m| Path::new(&m.point) == point))
+    }
+
+    /// The disk /etc/fstab names for a point when nothing is mounted there.
+    pub fn unmounted_at(&self, point: &Path) -> Option<&Mount> {
+        if self.at(point).is_some() {
+            return None;
+        }
+        self.fstab
+            .iter()
+            .find(|m| Path::new(&m.point) == point && !m.pseudo())
+    }
+}
+
+fn mount_table() -> Vec<Mount> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    std::fs::read_to_string("/proc/self/mountinfo")
+        .map(|t| parse_mountinfo(&t))
+        .unwrap_or_default()
+}
+
+fn fstab_table() -> Vec<Mount> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    std::fs::read_to_string("/etc/fstab")
+        .map(|t| parse_fstab(&t))
+        .unwrap_or_default()
+}
+
+/// Of mounts stacked on one point, the one in force: the last mounted, and a
+/// real disk over an automount's placeholder.
+fn in_force<'a>(mounts: impl Iterator<Item = &'a Mount>) -> Option<&'a Mount> {
+    mounts.fold(None, |best, m| match best {
+        Some(b) if m.fs == "autofs" && b.fs != "autofs" => Some(b),
+        _ => Some(m),
+    })
+}
+
+fn holding<'a>(mounts: &'a [Mount], path: &Path) -> Option<&'a Mount> {
+    let under = |m: &&Mount| path.starts_with(&m.point);
+    let longest = mounts.iter().filter(under).map(|m| m.point.len()).max()?;
+    in_force(
+        mounts
+            .iter()
+            .filter(under)
+            .filter(|m| m.point.len() == longest),
+    )
+}
+
+/// The kernel's mount table, `/proc/self/mountinfo`: the mount point is the
+/// fifth field, and the filesystem and its source follow the `-` that ends
+/// the optional fields.
+pub(crate) fn parse_mountinfo(text: &str) -> Vec<Mount> {
+    text.lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let point = fields.get(4)?;
+            let dash = 6 + fields.get(6..)?.iter().position(|f| *f == "-")?;
+            Some(Mount {
+                point: unescape(point),
+                fs: (*fields.get(dash + 1)?).to_string(),
+                source: fields
+                    .get(dash + 2)
+                    .map(|s| unescape(s))
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// /etc/fstab: a source, a mount point and a filesystem on each line that is
+/// not a comment. Swap, and anything not mounted on a path, are left out.
+pub(crate) fn parse_fstab(text: &str) -> Vec<Mount> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let mut fields = line.split_whitespace();
+            let source = unescape(fields.next()?);
+            let point = plain(&unescape(fields.next()?))?;
+            let fs = fields.next()?.to_string();
+            (fs != "swap").then(|| Mount {
+                point: point.display().to_string(),
+                fs,
+                source,
+            })
+        })
+        .collect()
+}
+
+/// A field of the mount table or of fstab with its octal escapes undone:
+/// `\040` is a space, `\011` a tab, `\012` a newline and `\134` a backslash.
+pub(crate) fn unescape(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes
+            .get(i + 1..i + 4)
+            .filter(|d| bytes[i] == b'\\' && d.iter().all(|b| (b'0'..=b'7').contains(b)))
+            .and_then(|d| {
+                let value = d.iter().fold(0u32, |n, b| n * 8 + u32::from(b - b'0'));
+                u8::try_from(value).ok()
+            });
+        match byte {
+            Some(b) => {
+                out.push(b);
+                i += 4;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// An absolute path made plain without touching the disk: `.` dropped, `..`
+/// taking the folder before it and never going above the root, and no
+/// trailing slash but the root's. None for a path that is not absolute.
+pub(crate) fn plain(path: &str) -> Option<PathBuf> {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    Some(out)
+}
+
+/// The free and the total bytes of the filesystem a path is on.
 #[cfg(unix)]
 #[allow(
     unsafe_code,
     reason = "statvfs fills a plain struct through the pointer it is given"
 )]
-fn free_bytes(path: &Path) -> Option<i64> {
+pub(crate) fn space(path: &Path) -> Option<(i64, i64)> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     let c = CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -216,14 +469,40 @@ fn free_bytes(path: &Path) -> Option<i64> {
     }
     // SAFETY: statvfs returned 0, so the struct is initialised.
     let stat = unsafe { stat.assume_init() };
-    i64::try_from(stat.f_bavail)
-        .ok()?
-        .checked_mul(i64::try_from(stat.f_frsize).ok()?)
+    let block = i64::try_from(stat.f_frsize).ok()?;
+    let free = i64::try_from(stat.f_bavail).ok()?.checked_mul(block)?;
+    let total = i64::try_from(stat.f_blocks).ok()?.checked_mul(block)?;
+    Some((free, total))
 }
 
 #[cfg(not(unix))]
-fn free_bytes(_path: &Path) -> Option<i64> {
+pub(crate) fn space(_path: &Path) -> Option<(i64, i64)> {
     None
+}
+
+fn free_bytes(path: &Path) -> Option<i64> {
+    space(path).map(|(free, _)| free)
+}
+
+/// Whether this account may list a folder and go inside it.
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "access reads the NUL-terminated path it is given and nothing else"
+)]
+pub(crate) fn may_enter(path: &Path) -> bool {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c` is a valid NUL-terminated path that lives for the whole call.
+    unsafe { libc::access(c.as_ptr(), libc::R_OK | libc::X_OK) == 0 }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn may_enter(path: &Path) -> bool {
+    std::fs::read_dir(path).is_ok()
 }
 
 /// The paths a running engine has bound, for the listing: which of the
