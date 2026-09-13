@@ -498,10 +498,17 @@ pub(crate) struct Ports {
     /// The Postgres a setup runs, published on this machine's loopback.
     #[serde(default = "default_postgres_port")]
     pub(crate) postgres: u16,
+    /// The supervisor on this host, which the desk asks about the install.
+    #[serde(default = "default_supervisor_port")]
+    pub(crate) supervisor: u16,
 }
 
 fn default_postgres_port() -> u16 {
     5432
+}
+
+fn default_supervisor_port() -> u16 {
+    8470
 }
 
 impl Default for Ports {
@@ -512,6 +519,7 @@ impl Default for Ports {
             kvasir: 7100,
             assistant: 7300,
             postgres: default_postgres_port(),
+            supervisor: default_supervisor_port(),
         }
     }
 }
@@ -2046,6 +2054,7 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
         version: update::VERSION.to_string(),
         host_loopback: state.runtime == "podman"
             && (state.parts.contains_key("assistant")
+                || state.parts.contains_key("desk")
                 || registry_dsn(&dir).is_some_and(|d| d.contains("host.containers.internal")))
             && podman_has_pasta(),
         postgres: state
@@ -2404,7 +2413,7 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
     out.push(engine);
     if plan.has(Part::Desk) {
         out.push(format!(
-            "docker run -d --network nils --name nils-desk {}-p {publish} -v {}:{IN_DESK} {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
+            "docker run -d --network nils --name nils-desk {}-p {publish} --add-host host.docker.internal:host-gateway -v {}:{IN_DESK} {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
             docker_user(),
             plan.desk_dir().display(),
             plan.tag()
@@ -2471,6 +2480,9 @@ pub(crate) fn docker_compose(plan: &Plan) -> String {
         }
         let _ = writeln!(out, "    restart: unless-stopped");
         let _ = writeln!(out, "    depends_on: [engine]");
+        // the supervisor listens on the host, which a container reaches by this name
+        let _ = writeln!(out, "    extra_hosts:");
+        let _ = writeln!(out, "      - \"host.docker.internal:host-gateway\"");
         let _ = writeln!(out, "    command: serve --config {IN_DESK}/nils-desk.toml");
         let _ = writeln!(out, "    ports:");
         let _ = writeln!(out, "      - \"{publish}\"");
@@ -3227,6 +3239,8 @@ fn questions(
     let ours = |part: &str| existing.is_some_and(|s| s.parts.contains_key(part));
     let assistant = parts.contains(&Part::Assistant);
     let mut chosen: Vec<u16> = Vec::new();
+    // a supervisor this setup started holds its own port on a rerun
+    let supervised = dir.join("supervise").join("supervise.toml").exists();
     for (name, part, port, listens) in [
         ("the engine", "engine", &mut ports.engine, true),
         (
@@ -3249,9 +3263,11 @@ fn questions(
             &mut ports.postgres,
             postgres.is_some(),
         ),
+        ("the supervisor", "supervisor", &mut ports.supervisor, true),
     ] {
         if listens
             && !ours(part)
+            && !(part == "supervisor" && supervised)
             && let Some(free) = settle_port(*port, &chosen, &port_taken)
         {
             console.note(&format!("port {} is taken, so {name} takes {free}", *port));
@@ -3303,8 +3319,9 @@ fn questions(
 
     let postgres_here = matches!(&backend, BackendChoice::Postgres { dsn, .. }
         if dsn_for(Runtime::Podman, dsn) != *dsn);
+    // the desk in the pod reaches the supervisor on this host's loopback
     let host_loopback = runtime == Runtime::Podman
-        && (parts.contains(&Part::Assistant) || postgres_here)
+        && (parts.contains(&Part::Assistant) || parts.contains(&Part::Desk) || postgres_here)
         && podman_has_pasta();
     let sources = registry_sources(&dir).unwrap_or_else(|| {
         existing
@@ -3517,6 +3534,9 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     }
     if plan.has(Part::Desk) {
         console.begin(Stage::Desk);
+        if let Err(e) = write_supervisor(plan) {
+            console.warn(&format!("the supervisor was not set up: {}", e.message));
+        }
         write_desk_config(plan, true)?;
         console.progress(&plan.desk_config().display().to_string());
     }
@@ -3559,6 +3579,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     if plan.has(Part::Assistant) && !(plan.service && (systemd || plan.runtime.container())) {
         ready_gateway(plan, console);
     }
+    start_supervisor(plan, state, console);
     Ok(services)
 }
 
@@ -4081,6 +4102,9 @@ fn place(
         {
             write_secret(&plan.desk_dir().join("client-secret"), secret)?;
         }
+        if let Err(e) = write_supervisor(plan) {
+            console.warn(&format!("the supervisor was not set up: {}", e.message));
+        }
         write_desk_config(plan, desk_config_stale(plan))?;
         console.progress(&plan.desk_config().display().to_string());
         if plan.mode == Mode::Local {
@@ -4188,6 +4212,7 @@ fn place(
              the assistant's key",
         );
     }
+    start_supervisor(plan, state, console);
 
     Ok(services)
 }
@@ -4907,6 +4932,12 @@ fn write_desk_config(plan: &Plan, force: bool) -> Result<(), Exit> {
     }
     let _ = writeln!(text, "\n[engine]");
     let _ = writeln!(text, "url = \"{engine_url}\"");
+    // the supervisor on this host, which Settings reach through the desk
+    if let (Some(url), Some(token)) = (supervisor_url(plan), supervisor_token(plan)) {
+        let _ = writeln!(text, "\n[supervisor]");
+        let _ = writeln!(text, "url = \"{url}\"");
+        let _ = writeln!(text, "token = \"{token}\"");
+    }
     if plan.has(Part::Assistant) {
         // In a pod every part shares one loopback; on a docker network each
         // container is reached by its name.
@@ -4926,7 +4957,8 @@ fn write_desk_config(plan: &Plan, force: bool) -> Result<(), Exit> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
     }
-    std::fs::write(&path, text).map_err(|e| fail(format!("{}: {e}", path.display())))
+    // it holds the supervisor's token, so only this account reads it
+    write_secret_bytes(&path, text.as_bytes())
 }
 
 /// In local mode the desk keeps the people, and an empty desk has nobody to
@@ -5336,7 +5368,10 @@ fn desk_config_stale(plan: &Plan) -> bool {
         .oidc
         .as_ref()
         .is_none_or(|o| text.contains(&format!("client_id = \"{}\"", o.client_id)));
-    !(mode && provider)
+    let supervised = supervisor_url(plan).is_none()
+        || supervisor_token(plan).is_none()
+        || text.contains("[supervisor]");
+    !(mode && provider && supervised)
 }
 
 /// The gateway and the assistant: cloned and built, since neither ships a
@@ -7273,6 +7308,8 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
         Ok(started) => print!("{}", started.text),
         Err(e) => println!("the services were left alone: {}", e.message),
     }
+    // and the supervisor, from the binary that is installed now
+    start_supervisor(&plan, &state, &console);
 }
 
 // ------------------------------------------------------- for the supervisor
@@ -7585,6 +7622,185 @@ pub(crate) fn reapply_engine(state: &State) -> Result<(), Exit> {
     }
     println!("the engine reads the registry's places and was started again");
     Ok(())
+}
+
+/// Where the supervisor listens: this machine's loopback, or for docker the
+/// bridge's own address, since a container reaches the host there and a
+/// server on the loopback alone does not answer it.
+fn supervisor_bind(plan: &Plan) -> String {
+    let host = match plan.runtime {
+        Runtime::Docker => docker_bridge(),
+        _ => "127.0.0.1".to_string(),
+    };
+    format!("{host}:{}", plan.ports.supervisor)
+}
+
+/// The address of docker's own bridge on this host.
+fn docker_bridge() -> String {
+    run_quiet(
+        "docker",
+        &[
+            "network",
+            "inspect",
+            "bridge",
+            "-f",
+            "{{(index .IPAM.Config 0).Gateway}}",
+        ],
+    )
+    .map(|s| s.trim().to_string())
+    .filter(|s| s.parse::<std::net::IpAddr>().is_ok())
+    .unwrap_or_else(|| "172.17.0.1".to_string())
+}
+
+/// How the desk reaches the supervisor from where the desk runs; none from
+/// a pod that is not given this host's loopback.
+fn supervisor_url(plan: &Plan) -> Option<String> {
+    let port = plan.ports.supervisor;
+    match plan.runtime {
+        Runtime::Machine => Some(format!("http://127.0.0.1:{port}")),
+        Runtime::Podman => plan
+            .host_loopback
+            .then(|| format!("http://{HOST_LOOPBACK_IN_POD}:{port}")),
+        Runtime::Docker => Some(format!("http://host.docker.internal:{port}")),
+    }
+}
+
+fn supervisor_config(plan: &Plan) -> PathBuf {
+    plan.dir.join("supervise").join("supervise.toml")
+}
+
+/// The token the desk shows the supervisor, as the supervisor's file holds it.
+fn supervisor_token(plan: &Plan) -> Option<String> {
+    let text = std::fs::read_to_string(supervisor_config(plan)).ok()?;
+    let table: toml::Table = toml::from_str(&text).ok()?;
+    table.get("tokens")?.as_table()?.keys().next().cloned()
+}
+
+/// The supervisor's file: where it listens, the one token it answers, which
+/// is the desk's, and where its log and its runs go. A token made before is
+/// kept, so a desk configured with it still reaches the supervisor.
+fn write_supervisor(plan: &Plan) -> Result<String, Exit> {
+    let path = supervisor_config(plan);
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    std::fs::create_dir_all(&dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
+    let token = supervisor_token(plan).unwrap_or_else(generated_passphrase);
+    let trust = dir.join("trust.pub");
+    if !trust.exists() {
+        std::fs::write(&trust, "").map_err(|e| fail(format!("{}: {e}", trust.display())))?;
+    }
+    let text = format!(
+        "# Written by nils setup. The supervisor reports this install to the desk's\n\
+         # settings and restarts its parts; it answers the one token below, the desk's.\n\
+         bind = \"{}\"\n\
+         trust = \"trust.pub\"\n\
+         log = \"supervise.log\"\n\n\
+         [tokens]\n\
+         \"{token}\" = \"nils-desk\"\n",
+        supervisor_bind(plan)
+    );
+    write_secret_bytes(&path, text.as_bytes())?;
+    Ok(token)
+}
+
+/// The binary a supervisor runs from: the engine's own on the machine, and
+/// otherwise the nils that made the container install.
+fn supervisor_binary(state: &State) -> String {
+    state
+        .parts
+        .get("engine")
+        .filter(|p| p.kind == "binary")
+        .map(|p| p.path.clone())
+        .or_else(|| {
+            state
+                .programs
+                .iter()
+                .find(|p| Path::new(p).file_name().is_some_and(|n| n == "nils"))
+                .cloned()
+        })
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .map(|p| p.display().to_string())
+        })
+        .unwrap_or_else(|| "nils".to_string())
+}
+
+/// The supervisor as a service of its own, on this host and outside every
+/// container, since it restarts them.
+fn supervisor_service(plan: &Plan, state: &State) -> (String, String) {
+    let nils = supervisor_binary(state);
+    let config = supervisor_config(plan).display().to_string();
+    if cfg!(target_os = "macos") {
+        let dir = plan.dir.join("supervise").display().to_string();
+        return (
+            "se.kineuro.nils-supervise.plist".to_string(),
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n\
+                 \x20 <key>Label</key><string>se.kineuro.nils-supervise</string>\n\
+                 \x20 <key>ProgramArguments</key>\n  <array>\n    <string>{nils}</string>\n    <string>supervise</string>\n    <string>run</string>\n    <string>--config</string>\n    <string>{config}</string>\n  </array>\n\
+                 \x20 <key>WorkingDirectory</key><string>{dir}</string>\n\
+                 \x20 <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n\
+                 </dict>\n</plist>\n"
+            ),
+        );
+    }
+    (
+        "nils-supervise.service".to_string(),
+        format!(
+            "[Unit]\nDescription=NILS supervisor\nAfter=network-online.target\n\n[Service]\n\
+             ExecStart={nils} supervise run --config {config}\nRestart=on-failure\nRestartSec=5\n\
+             # a run it started, an update among them, outlives a restart of the supervisor\n\
+             KillMode=process\n\n[Install]\nWantedBy=default.target\n"
+        ),
+    )
+}
+
+/// The supervisor written and started: its file, then its service, or the
+/// command that runs it where this setup writes no services.
+fn start_supervisor(plan: &Plan, state: &State, console: &Console) {
+    if let Err(e) = write_supervisor(plan) {
+        console.warn(&format!("the supervisor was not set up: {}", e.message));
+        return;
+    }
+    if !plan.service {
+        console.say(&format!(
+            "run the supervisor, which the desk's settings read: {} supervise run --config {}",
+            supervisor_binary(state),
+            supervisor_config(plan).display()
+        ));
+        return;
+    }
+    let (name, unit) = supervisor_service(plan, state);
+    if cfg!(target_os = "macos") {
+        let Some(dir) =
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library").join("LaunchAgents"))
+        else {
+            return;
+        };
+        let path = dir.join(&name);
+        let _ = Command::new("launchctl").arg("unload").arg(&path).output();
+        if std::fs::write(&path, unit).is_ok() {
+            let _ = Command::new("launchctl")
+                .args(["load", "-w"])
+                .arg(&path)
+                .output();
+        }
+        return;
+    }
+    let dir = units_dir();
+    if let Err(e) =
+        std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(&name), unit))
+    {
+        console.warn(&format!("the supervisor's unit was not written: {e}"));
+        return;
+    }
+    quietly("systemctl", &["--user", "daemon-reload"]);
+    quietly("systemctl", &["--user", "enable", "nils-supervise"]);
+    if quietly("systemctl", &["--user", "restart", "nils-supervise"]) {
+        console.progress(&format!("the supervisor on {}", supervisor_bind(plan)));
+    } else {
+        console.warn("the supervisor did not start; its log: journalctl --user -u nils-supervise");
+    }
 }
 
 /// One binary part from its own releases, when a newer one is published.
@@ -8023,6 +8239,24 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
                     removal.unit_files.push(path);
                 }
             }
+        }
+    }
+    // the supervisor runs on the host, whichever runtime the parts use
+    if cfg!(target_os = "macos") {
+        if let Some(home) = home_dir() {
+            let path = home
+                .join("Library")
+                .join("LaunchAgents")
+                .join("se.kineuro.nils-supervise.plist");
+            if path.exists() {
+                removal.unit_files.push(path);
+            }
+        }
+    } else {
+        let path = units_dir().join("nils-supervise.service");
+        if path.exists() {
+            removal.units.push("nils-supervise".to_string());
+            removal.unit_files.push(path);
         }
     }
     if matches!(state.runtime.as_str(), "podman" | "docker") {
@@ -9465,6 +9699,86 @@ mod tests {
     }
 
     #[test]
+    fn the_supervisor_is_written_for_the_desk_to_reach_from_where_the_desk_runs() {
+        let dir = scratch("supervisor");
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        let token = write_supervisor(&plan).unwrap_or_else(|e| panic!("{}", e.message));
+        let path = dir.join("supervise").join("supervise.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("bind = \"127.0.0.1:8470\""), "{text}");
+        assert!(
+            text.contains(&format!("\"{token}\" = \"nils-desk\"")),
+            "{text}"
+        );
+        assert!(dir.join("supervise").join("trust.pub").exists());
+        assert_eq!(
+            write_supervisor(&plan).unwrap_or_else(|e| panic!("{}", e.message)),
+            token,
+            "a token made before is kept"
+        );
+        assert_eq!(
+            supervisor_url(&plan).as_deref(),
+            Some("http://127.0.0.1:8470")
+        );
+
+        assert!(write_desk_config(&plan, true).is_ok());
+        let desk = std::fs::read_to_string(plan.desk_config()).unwrap();
+        assert!(
+            desk.contains(&format!(
+                "[supervisor]\nurl = \"http://127.0.0.1:8470\"\ntoken = \"{token}\""
+            )),
+            "{desk}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for file in [&path, &plan.desk_config()] {
+                assert_eq!(
+                    std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+                    0o600,
+                    "{}",
+                    file.display()
+                );
+            }
+        }
+        assert!(!desk_config_stale(&plan));
+
+        plan.runtime = Runtime::Docker;
+        assert_eq!(
+            supervisor_url(&plan).as_deref(),
+            Some("http://host.docker.internal:8470")
+        );
+        let compose = docker_compose(&plan);
+        let desk_service = &compose[compose.find("  desk:").unwrap()..];
+        assert!(
+            desk_service.contains("host.docker.internal:host-gateway"),
+            "{compose}"
+        );
+        plan.runtime = Runtime::Podman;
+        plan.host_loopback = false;
+        assert_eq!(
+            supervisor_url(&plan),
+            None,
+            "a pod without this host's loopback does not reach it"
+        );
+        plan.host_loopback = true;
+        assert_eq!(
+            supervisor_url(&plan).as_deref(),
+            Some("http://169.254.1.2:8470")
+        );
+        if !cfg!(target_os = "macos") {
+            let (name, unit) = supervisor_service(&plan, &State::default());
+            assert_eq!(name, "nils-supervise.service");
+            assert!(
+                unit.contains("supervise run --config") && unit.contains("KillMode=process"),
+                "{unit}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn podman_runs_a_pod_and_owns_its_mounts() {
         let p = plan(Runtime::Podman);
         let commands = podman_commands(&p);
@@ -9889,7 +10203,12 @@ mod tests {
         );
         assert!(docker_commands(&plan)[1].contains("--add-host host.docker.internal:host-gateway"));
         plan.backend = BackendChoice::Sqlite;
-        assert!(!docker_compose(&plan).contains("host-gateway"));
+        let compose = docker_compose(&plan);
+        let engine = compose.split("  desk:").next().unwrap_or_default();
+        assert!(
+            !engine.contains("host-gateway"),
+            "the engine reaches the host only for its Postgres; the desk does, for the supervisor: {compose}"
+        );
 
         // a repair reads back what the install wrote into its registry
         let dir = scratch("registry-dsn");

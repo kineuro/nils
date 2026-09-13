@@ -545,6 +545,12 @@ fn the_mode_writes_the_configuration_that_mode_asks_for() {
         assert!(text.contains(wanted), "{mode}: {text}");
         assert!(!text.contains(absent), "{mode}: {text}");
         assert!(text.contains("[engine]"), "{mode}: {text}");
+        // every install runs the supervisor, which the desk's settings read
+        assert!(text.contains("[supervisor]"), "{mode}: {text}");
+        assert!(
+            dir.join("supervise").join("supervise.toml").is_file(),
+            "{mode}: no supervisor was written"
+        );
         // The desk that was asked for came from the release, checked.
         assert!(
             dir.join("desk").exists() && nils.path().with_file_name("nils-desk").is_file(),
