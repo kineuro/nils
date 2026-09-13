@@ -367,8 +367,12 @@ paths:
         "200": {description: "{count, documents: [{document, root, name, grain, out, level, versions, author, created_at, updated_at, last_used_at, hash, last_run: {handle, at} | null}], next}"}
     post:
       summary: Store a document and get its handle
+      description: "Stored under a parent, the document is that document's next version: a document already stored with no parent, such as a draft an assistant proposed, is adopted into the line once, and never into a line that follows it. The same text is one document."
+      requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, parent: {type: integer, description: The id of the document this one follows}}}}}}
       responses:
-        "200": {description: "{document, hash, digest}"}
+        "200": {description: "{document, hash, digest, parent}"}
+        "400": {description: A document that is refused, or a parent that is not a document id}
+        "404": {description: No document with that parent id}
   /api/ask/documents/{id}:
     get:
       summary: A document by handle

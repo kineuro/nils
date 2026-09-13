@@ -1248,6 +1248,20 @@ fn answer(
         }
         ["api", "ask", "documents"] if post => {
             let (ask, _) = document_of(registry, &doc)?;
+            // stored under another document, it is that document's next
+            // version: an accepted proposal joins the line it was proposed for
+            let parent = match doc.get("parent") {
+                None | Some(Value::Null) => None,
+                Some(v) => {
+                    let p = v.as_i64().ok_or_else(|| {
+                        Reply::error(400, "parent: the id of the document this one follows")
+                    })?;
+                    document::get(registry.store(), p)
+                        .map_err(|e| Reply::error(500, e.to_string()))?
+                        .ok_or_else(|| Reply::error(404, format!("no document {p}")))?;
+                    Some(p)
+                }
+            };
             let scheme = scheme_of(registry, &ask)?;
             let s = Setting {
                 names: catalog,
@@ -1257,7 +1271,7 @@ fn answer(
                 bounds,
                 values_cap: caps.options_values as usize,
             };
-            let d = affordance::post(registry, &ask, &s).map_err(affordance_err)?;
+            let d = affordance::post(registry, &ask, &s, parent).map_err(affordance_err)?;
             Ok(Reply::ok(
                 json!({"document": d.id, "hash": d.hash, "digest": d.digest, "parent": d.parent_id}),
             ))
