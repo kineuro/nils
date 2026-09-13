@@ -4,6 +4,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.17] - 2026-09-13
+
 ### Fixed
 
 - `nils setup` run again to change an install left a desk that keeps its own people with nobody to let in. It asked for the first person only when the desk had no store yet, and a desk that ran with nobody signing in has one. It now asks whenever the desk keeps nobody, and where nobody is added it says so at the end, with the command that adds the first. It no longer tells a person to add the first to a desk that keeps someone already.
