@@ -572,6 +572,52 @@ paths:
       summary: Every apply and every refusal, one row each (Wave 5 section 10.4)
       responses:
         "200": {description: "{rows: [{at, part, from, to, digest, ok, why}]}"}
+  /api/supervise/install:
+    get:
+      summary: The install nils setup made, as the supervisor on its host sees it
+      description: "{record, dir, runtime, service, reach, backend, mode, at, ports, parts: {name: {version, kind, path}}, places, oidc: {issuer, client_id} | null, addresses: [{part, address, reach}], services: [{part, unit, watcher, running}], unfinished, release: {installed, newest, newer, error, command}, machine: {card: {name, memory_gb} | null, advice}}. The record is the setup's own file on the host and holds no secret. The newest release and the card are looked at once in a while, not on every call."
+      responses:
+        "200": {description: The install}
+        "401": {description: No token the supervisor knows}
+        "404": {description: No setup is recorded on this host}
+  /api/supervise/restart:
+    post:
+      summary: Restart one part of the install, or every part in the order they start, apart from the call
+      requestBody: {content: {application/json: {schema: {type: object, properties: {part: {type: string, enum: [engine, desk, gateway, assistant, postgres, all]}}}}}}
+      responses:
+        "202": {description: "A run: {id, what, command, state, pid, started_at}, read at GET /api/supervise/runs/{id}"}
+        "400": {description: Not a part}
+        "409": {description: A run is still going; one at a time}
+  /api/supervise/reapply:
+    post:
+      summary: Make the install follow the registry, apart from the call
+      description: "With `part: engine` the engine's unit, quadlet or compose service is written again from the setup record with every source place the registry holds, and only the engine is started again; without it every part's is, as after an update."
+      requestBody: {content: {application/json: {schema: {type: object, properties: {part: {type: string, enum: [engine, all]}}}}}}
+      responses:
+        "202": {description: A run}
+        "409": {description: A run is still going}
+  /api/supervise/update-all:
+    post:
+      summary: Bring every part up to date as `nils update --all` does, apart from the call
+      responses:
+        "202": {description: A run}
+        "409": {description: A run is still going}
+  /api/supervise/runs/{id}:
+    get:
+      summary: A run the supervisor started, with the last lines of its output
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: "{id, what, command, state: running | done | failed | ended, pid, started_at, finished_at, exit, tail}"}
+        "404": {description: No run by that id}
+  /api/supervise/look:
+    post:
+      summary: What a folder on the host holds, before it is added as a source
+      description: "{path, exists, directory, readable, folders: [{name, files, capped, sampled, dicom, modalities, scanners}], here, partial}. Files are counted to 50,000 a folder and a sample of sixteen is sniffed; only the equipment fields of a header are read, links are not followed, and the look stops at twenty seconds."
+      requestBody: {content: {application/json: {schema: {type: object, required: [path], properties: {path: {type: string}}}}}}
+      responses:
+        "200": {description: What the folder holds}
+        "400": {description: Not an absolute path}
   /api/instances/{stack}/manifest:
     get:
       summary: The viewing pyramid of a stack, as its manifest (Wave 5 section 12.7)

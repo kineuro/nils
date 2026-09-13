@@ -413,7 +413,12 @@ struct Service {
 
 impl Service {
     fn start(config: &Path) -> Service {
+        Service::start_with(config, &[])
+    }
+
+    fn start_with(config: &Path, env: &[(&str, &str)]) -> Service {
         let mut child = nils()
+            .envs(env.iter().copied())
             .args([
                 "supervise",
                 "run",
@@ -549,4 +554,131 @@ fn the_door_reports_what_is_installed_and_updates_a_part_under_a_token() {
     assert_eq!(status, 200);
     assert_eq!(log["rows"].as_array().unwrap().len(), 1);
     assert_eq!(log["rows"][0]["digest"], caps["parts"][0]["digest"]);
+}
+
+/// The install door (the desk's Settings read it): an install nils setup
+/// recorded is reported as recorded; a restart runs apart from the door and
+/// ends with its reason; and a folder is looked inside before it is added,
+/// by what its files are.
+#[test]
+fn the_door_reports_the_install_restarts_apart_and_looks_inside_a_folder() {
+    use nils_dicom::synth::{self, MetaFields};
+    let c = Channel::new();
+    let install = c.dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("VERSION"), "1.0.0\n").unwrap();
+    let config = c.config("engine", &install, "true");
+    let home = TempDir::new("supervise-install");
+    let settings = home.path().join("config");
+    std::fs::create_dir_all(settings.join("nils")).unwrap();
+    std::fs::write(
+        settings.join("nils").join("setup.toml"),
+        format!(
+            "dir = \"{}\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"none\"\nreach = \"loopback\"\nbackend = \"sqlite\"\nat = \"2026-09-13T00:00:00Z\"\n\n[ports]\nengine = 8437\ndesk = 7200\nkvasir = 7100\nassistant = 7300\n\n[parts.engine]\nversion = \"1.0.0-alpha.14\"\npath = \"/usr/local/bin/nils\"\n\n[parts.desk]\nversion = \"1.0.0-alpha.14\"\npath = \"/usr/local/bin/nils-desk\"\n",
+            home.path().join("nils").display()
+        ),
+    )
+    .unwrap();
+    let s = Service::start_with(
+        &config,
+        &[
+            ("XDG_CONFIG_HOME", settings.to_str().unwrap()),
+            // a channel that refuses at once, so the release check says so and nothing waits
+            ("NILS_RELEASES", "http://127.0.0.1:9/releases"),
+        ],
+    );
+    let token = Some("a-supervisor-token-of-length");
+
+    let (status, _) = s.call("GET", "/api/supervise/install", None, None);
+    assert_eq!(status, 401);
+    let (status, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["runtime"], "machine", "{doc}");
+    assert_eq!(doc["parts"]["engine"]["version"], "1.0.0-alpha.14", "{doc}");
+    assert_eq!(
+        doc["services"],
+        serde_json::json!([]),
+        "no services, so none to look at"
+    );
+    let engine = doc["addresses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["part"] == "engine")
+        .unwrap();
+    assert_eq!(engine["address"], "127.0.0.1:8437", "{doc}");
+    assert_eq!(engine["reach"], "this machine only", "{doc}");
+    assert_eq!(doc["release"]["newer"], serde_json::Value::Null, "{doc}");
+    assert_eq!(doc["release"]["command"], "nils update --all", "{doc}");
+
+    let (status, run) = s.call(
+        "POST",
+        "/api/supervise/restart",
+        Some(r#"{"part":"engine"}"#),
+        token,
+    );
+    assert_eq!(status, 202, "{run}");
+    let id = run["id"].as_str().unwrap().to_string();
+    let mut ended = serde_json::Value::Null;
+    for _ in 0..100 {
+        let (status, doc) = s.call("GET", &format!("/api/supervise/runs/{id}"), None, token);
+        assert_eq!(status, 200, "{doc}");
+        if doc["state"] != "running" {
+            ended = doc;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(ended["state"], "failed", "{ended}");
+    assert!(
+        ended["tail"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l.as_str().unwrap_or("").contains("runs no services")),
+        "{ended}"
+    );
+    let (status, refused) = s.call(
+        "POST",
+        "/api/supervise/restart",
+        Some(r#"{"part":"everything"}"#),
+        token,
+    );
+    assert_eq!(status, 400, "{refused}");
+
+    let incoming = home.path().join("incoming");
+    for (i, sop) in ["1.2.3.1.1.1", "1.2.3.1.1.2"].iter().enumerate() {
+        let mr = synth::minimal_mr("1.2.3", "1.2.3.1", sop);
+        std::fs::create_dir_all(incoming.join("mri-3t").join("a")).unwrap();
+        std::fs::write(
+            incoming.join("mri-3t").join("a").join(format!("IM_{i}")),
+            synth::part10(&MetaFields::mr(sop), &mr, true),
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(incoming.join("notes")).unwrap();
+    std::fs::write(incoming.join("notes").join("readme.txt"), "not dicom").unwrap();
+    std::fs::write(incoming.join("list.csv"), "a,b").unwrap();
+    let body = serde_json::json!({ "path": incoming.display().to_string() }).to_string();
+    let (status, seen) = s.call("POST", "/api/supervise/look", Some(&body), token);
+    assert_eq!(status, 200, "{seen}");
+    assert_eq!(seen["folders"][0]["name"], "mri-3t", "{seen}");
+    assert_eq!(seen["folders"][0]["files"], 2, "{seen}");
+    assert_eq!(seen["folders"][0]["dicom"], 2, "{seen}");
+    assert_eq!(seen["folders"][0]["modalities"]["MR"], 2, "{seen}");
+    assert_eq!(seen["folders"][1]["name"], "notes", "{seen}");
+    assert_eq!(seen["folders"][1]["dicom"], 0, "{seen}");
+    assert_eq!(seen["here"]["files"], 1, "{seen}");
+    let missing = serde_json::json!({ "path": home.path().join("nowhere").display().to_string() })
+        .to_string();
+    let (status, none) = s.call("POST", "/api/supervise/look", Some(&missing), token);
+    assert_eq!(status, 200, "{none}");
+    assert_eq!(none["exists"], false, "{none}");
+    let (status, _) = s.call(
+        "POST",
+        "/api/supervise/look",
+        Some(r#"{"path":"relative"}"#),
+        token,
+    );
+    assert_eq!(status, 400);
 }

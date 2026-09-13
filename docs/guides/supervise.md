@@ -126,6 +126,32 @@ restart command and waits for the part to answer with the new version. A
 part that does not come back is rolled back from `.previous` and restarted
 again, and the log row says so.
 
+## The install
+
+A supervisor on a host where `nils setup` made the install also reports that
+install and acts on it, from the setup record of the account it runs as
+(`~/.config/nils/setup.toml`):
+
+- `GET /api/supervise/install` says where everything lives and how it runs,
+  each part's version, where each part answers and who can reach it there,
+  whether each service runs, whether a newer release is out, and the
+  machine's card.
+- `POST /api/supervise/restart` restarts one part, or every part in the order
+  they start.
+- `POST /api/supervise/reapply` writes the engine's unit or container again
+  from the record, with every source place the registry holds, and starts
+  only the engine again. A container sees only what was mounted when it
+  started, so a folder added as a source needs this.
+- `POST /api/supervise/update-all` runs `nils update --all`.
+- `POST /api/supervise/look` says what a folder holds before it is added:
+  each folder inside with its files, how many of a sample are DICOM, and
+  their modalities and scanners.
+
+A restart, a reapply and an update run apart from the call that started them,
+one at a time, and `GET /api/supervise/runs/{id}` says how each went, with the
+last lines of its output. By hand they are `nils supervise restart --part
+engine`, `nils supervise reapply --part engine` and `nils update --all`.
+
 ## The same steps by hand
 
 Without a supervisor, or to see what one does, the four steps are these,
