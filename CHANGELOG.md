@@ -4,6 +4,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.18] - 2026-09-13
+
 ### Added
 
 - `GET /api/sources` lists every place with the source role for the desk's Data page: how what comes in through it is handled, how many digests have read it with the first and the last, the newest of them in full (files seen, new, changed, unchanged and refused, the subjects and stacks each added, how many of those stacks are classified and how many wait for a person), and the source's totals of subjects, studies, sessions, stacks, refused files and stacks to sort. A source's subjects and stacks are the ones its digests created first, so something seen from two sources counts under the first. `?recent=` sets how many digests are given in full (12 by default).
