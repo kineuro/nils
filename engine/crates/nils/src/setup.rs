@@ -3538,7 +3538,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
         if let Err(e) = write_supervisor(plan) {
             console.warn(&format!("the supervisor was not set up: {}", e.message));
         }
-        write_desk_config(plan, true)?;
+        write_desk_config(plan)?;
         console.progress(&plan.desk_config().display().to_string());
     }
     // The gateway's file is mended, not rewritten, and the assistant's
@@ -3669,7 +3669,11 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
         rows.push(("desk", format!("{origin} (binds {bind})")));
         rows.push((
             "desk config",
-            format!("{} (will be written)", plan.desk_config().display()),
+            format!(
+                "{} ({})",
+                plan.desk_config().display(),
+                desk_config_fate(plan).words()
+            ),
         ));
     }
     rows.push(("engine port", plan.ports.engine.to_string()));
@@ -4106,7 +4110,7 @@ fn place(
         if let Err(e) = write_supervisor(plan) {
             console.warn(&format!("the supervisor was not set up: {}", e.message));
         }
-        write_desk_config(plan, desk_config_stale(plan))?;
+        write_desk_config(plan)?;
         console.progress(&plan.desk_config().display().to_string());
         if plan.mode == Mode::Local {
             let desk = state
@@ -4871,13 +4875,10 @@ fn pack_destination(plan: &Plan, me: &Path) -> PathBuf {
     plan.registry().join("packs")
 }
 
-/// The desk's configuration for the mode chosen, and the tables for the
-/// parts that were installed beside it.
 /// The desk's configuration once a plan is set: written whole where there is
-/// none, and otherwise the file on disk with what setup writes set in it,
-/// keeping what a person set by hand. A file that no longer reads as TOML is
-/// written again whole only when `force` asks, as a repair does.
-fn write_desk_config(plan: &Plan, force: bool) -> Result<(), Exit> {
+/// none or where the file no longer reads as TOML, and otherwise the file on
+/// disk with what setup writes set in it, keeping what a person set by hand.
+fn write_desk_config(plan: &Plan) -> Result<(), Exit> {
     let path = plan.desk_config();
     let written = desk_config_text(plan);
     let text = match std::fs::read_to_string(&path) {
@@ -4885,8 +4886,7 @@ fn write_desk_config(plan: &Plan, force: bool) -> Result<(), Exit> {
         Ok(existing) => match desk_config_merged(&existing, &written) {
             Ok(Some(merged)) => merged,
             Ok(None) => return Ok(()),
-            Err(()) if force => written,
-            Err(()) => return Ok(()),
+            Err(()) => written,
         },
     };
     if let Some(dir) = path.parent() {
@@ -4976,7 +4976,8 @@ fn desk_has_people(dir: &Path) -> bool {
     .is_ok_and(|n| n != 0)
 }
 
-/// The desk's configuration as setup writes it for a plan.
+/// The desk's configuration as setup writes it for a plan: the mode chosen,
+/// and the tables for the parts installed beside it.
 fn desk_config_text(plan: &Plan) -> String {
     let (bind, origin, also) = desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
     let engine_url = match plan.runtime {
@@ -5059,22 +5060,22 @@ fn desk_config_text(plan: &Plan) -> String {
 }
 
 /// In local mode the desk keeps the people, and an empty desk has nobody to
-/// let in. The offer is made once, and the desk's own command asks for the
-/// password, so nothing here ever holds one.
+/// let in. The first person is added with the password asked for with the
+/// other questions; with nobody named here, the summary says how to add one
+/// when the desk still keeps nobody.
 fn add_first_admin(
     plan: &Plan,
     desk: Option<PathBuf>,
     first: Option<&(String, String)>,
     console: &Console,
 ) {
+    let Some((name, password)) = first else {
+        return;
+    };
     let by_hand = format!(
         "nils-desk user add <name> --admin --config {}",
         plan.desk_config().display()
     );
-    let Some((name, password)) = first else {
-        console.say(&format!("add the first person with: {by_hand}"));
-        return;
-    };
     let desk = desk
         .filter(|d| d.exists())
         .or_else(|| Some(plan.dir.join("bin").join("nils-desk")).filter(|d| d.exists()))
@@ -5454,17 +5455,40 @@ fn registered_at(said: &str) -> Option<OidcPlan> {
     })
 }
 
-/// Whether the desk's configuration names another sign-in than the plan, so
-/// it is written again; one that agrees is left as it is.
-fn desk_config_stale(plan: &Plan) -> bool {
-    // anything setup writes that differs, or a file that no longer reads; a
-    // desk with no configuration is written whatever this says
+/// What setup does with the desk's configuration it finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeskConfigFate {
+    /// there is none, so it is written whole
+    New,
+    /// everything setup writes in it agrees with the plan
+    Kept,
+    /// what setup writes is set again, and what a person set by hand stays
+    Updated,
+    /// it no longer reads as TOML, so it is written whole again
+    Replaced,
+}
+
+impl DeskConfigFate {
+    fn words(self) -> &'static str {
+        match self {
+            DeskConfigFate::New => "will be written",
+            DeskConfigFate::Kept => "kept as it is",
+            DeskConfigFate::Updated => "updated, keeping what was set by hand",
+            DeskConfigFate::Replaced => "written again, since it does not read as TOML",
+        }
+    }
+}
+
+/// What `write_desk_config` will do with the file on disk, said in the plan
+/// before anything is changed.
+fn desk_config_fate(plan: &Plan) -> DeskConfigFate {
     match std::fs::read_to_string(plan.desk_config()) {
-        Ok(existing) => !matches!(
-            desk_config_merged(&existing, &desk_config_text(plan)),
-            Ok(None)
-        ),
-        Err(_) => false,
+        Err(_) => DeskConfigFate::New,
+        Ok(existing) => match desk_config_merged(&existing, &desk_config_text(plan)) {
+            Ok(None) => DeskConfigFate::Kept,
+            Ok(Some(_)) => DeskConfigFate::Updated,
+            Err(()) => DeskConfigFate::Replaced,
+        },
     }
 }
 
@@ -7032,8 +7056,6 @@ pub(crate) fn launchd_plists(plan: &Plan, state: &State) -> Vec<(String, String)
     out
 }
 
-/// The last lines: what is there, where to open it, what to run. On a
-/// terminal, a card.
 /// What to say when a desk that keeps its own people has nobody to let in
 /// yet: the command that adds the first, since without one the desk opens on
 /// a login nobody can pass.
@@ -7046,6 +7068,8 @@ fn nobody_yet(plan: &Plan) -> Option<String> {
     })
 }
 
+/// The last lines: what is there, where to open it, what to run. On a
+/// terminal, a card.
 fn summary(plan: &Plan, console: &Console, services: &[Service]) {
     if console.live {
         card_summary(plan, console, services);
@@ -9718,19 +9742,23 @@ mod tests {
         assert_eq!(auth["mode"], "oidc", "{auth}");
         assert_eq!(auth["trust"][0]["audience"], "abc123", "{auth}");
         assert_eq!(auth["tokens"]["tok"], INSTALLER, "{auth}");
-        assert!(write_desk_config(&plan, true).is_ok());
+        assert!(write_desk_config(&plan).is_ok());
         let desk = std::fs::read_to_string(plan.desk_config()).unwrap();
         assert!(
             desk.contains("[oidc]\nissuer = \"https://auth.example.org/application/o/nils/\"\nclient_id = \"abc123\"\nclient_secret_file = \"client-secret\""),
             "{desk}"
         );
         assert!(!desk.contains("# [oidc]"), "{desk}");
-        assert!(!desk_config_stale(&plan));
+        assert_eq!(desk_config_fate(&plan), DeskConfigFate::Kept);
         plan.oidc = Some(OidcPlan {
             client_id: "another".into(),
             ..oidc
         });
-        assert!(desk_config_stale(&plan), "another client is written again");
+        assert_eq!(
+            desk_config_fate(&plan),
+            DeskConfigFate::Updated,
+            "another client is written again"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9791,8 +9819,15 @@ mod tests {
         );
         assert_eq!(table["session_hours"].as_integer(), Some(4), "{without}");
 
-        // a file that no longer reads is a fault for a repair, not a change
+        // a file that no longer reads is written again whole, and the plan says
+        // so before anything is changed
         assert_eq!(desk_config_merged("mode = ", &off), Err(()));
+        assert_eq!(desk_config_fate(&p), DeskConfigFate::New, "no file yet");
+        std::fs::create_dir_all(p.desk_dir()).unwrap();
+        std::fs::write(p.desk_config(), "mode = ").unwrap();
+        assert_eq!(desk_config_fate(&p), DeskConfigFate::Replaced);
+        assert!(write_desk_config(&p).is_ok());
+        assert_eq!(desk_config_fate(&p), DeskConfigFate::Kept);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9931,7 +9966,7 @@ mod tests {
             Some("http://127.0.0.1:8470")
         );
 
-        assert!(write_desk_config(&plan, true).is_ok());
+        assert!(write_desk_config(&plan).is_ok());
         let desk = std::fs::read_to_string(plan.desk_config()).unwrap();
         assert!(
             desk.contains(&format!(
@@ -9951,7 +9986,7 @@ mod tests {
                 );
             }
         }
-        assert!(!desk_config_stale(&plan));
+        assert_eq!(desk_config_fate(&plan), DeskConfigFate::Kept);
 
         plan.runtime = Runtime::Docker;
         assert_eq!(
@@ -10322,7 +10357,7 @@ mod tests {
             "the assistant is published nowhere:\n{compose}"
         );
 
-        assert!(write_desk_config(&plan, true).is_ok());
+        assert!(write_desk_config(&plan).is_ok());
         let desk = std::fs::read_to_string(plan.desk_config()).unwrap();
         assert!(desk.contains("url = \"http://nils-kvasir:7100\""), "{desk}");
         assert!(
