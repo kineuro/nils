@@ -4,6 +4,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.16] - 2026-09-13
+
 ### Added
 
 - `POST /api/supervise/folders` lists the folders inside a folder on the host, so the desk can offer a path browser. Each folder says whether the supervisor's account may open it, whether a disk is mounted there, and whether `/etc/fstab` names a disk there that nothing is mounted for, beside the disk the folder itself is on with its free and total room. With no path it says where to start: the root, the home folder, every disk mounted that holds data, and every disk `/etc/fstab` names that is not mounted. The supervisor serves one call at a time, so a folder that takes more than five seconds to read, as a network mount that does not answer may, is answered without its listing, and the answer says so.
