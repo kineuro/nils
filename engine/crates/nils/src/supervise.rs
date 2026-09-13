@@ -14,11 +14,12 @@
 //! it was built, the files it holds) and `<name>.sig` (an ed25519 signature
 //! over the manifest bytes, hex). The channel is one directory per part
 //! with a `latest.json` naming the version and the three URLs.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Subcommand};
 use ring::signature::{self, Ed25519KeyPair, KeyPair};
@@ -848,7 +849,17 @@ pub(crate) fn capabilities(config: &Config, node: &str) -> Value {
     json!({
         "supervisor": { "version": VERSION, "target": target, "node": node, "poll_seconds": config.poll_seconds },
         "parts": parts,
-        "doors": ["GET /api/supervise/capabilities", "POST /api/supervise/update", "GET /api/supervise/log"],
+        "doors": [
+            "GET /api/supervise/capabilities",
+            "POST /api/supervise/update",
+            "GET /api/supervise/log",
+            "GET /api/supervise/install",
+            "POST /api/supervise/restart",
+            "POST /api/supervise/reapply",
+            "POST /api/supervise/update-all",
+            "GET /api/supervise/runs/{id}",
+            "POST /api/supervise/look",
+        ],
         "log": log_rows(&config.log, 5),
     })
 }
@@ -879,7 +890,382 @@ fn principal(config: &Config, request: &Request) -> Option<String> {
     config.tokens.get(token).cloned()
 }
 
-fn handle(config: &Config, node: &str, busy: &Mutex<()>, mut request: Request) {
+// ---------------------------------------------------------------------
+// the install: what nils setup made, restarted and kept up to date
+
+/// Work the supervisor starts and does not wait for: a restart, the engine
+/// made to follow the registry, an update of everything. Each is a process
+/// of its own with its output in a file, so a restart of the desk that asked
+/// for it does not cut it short, and the desk reads how it went afterwards.
+struct Runs {
+    dir: PathBuf,
+    children: Mutex<HashMap<String, Child>>,
+}
+
+impl Runs {
+    fn start(&self, what: &str, args: &[String]) -> Result<Value, (u16, String)> {
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|_| (500, "the runs are held".to_string()))?;
+        let mut going = None;
+        for (id, child) in children.iter_mut() {
+            if matches!(child.try_wait(), Ok(None)) {
+                going = Some(id.clone());
+                break;
+            }
+        }
+        if let Some(id) = going {
+            return Err((409, format!("run {id} is still going; one run at a time")));
+        }
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| (500, format!("{}: {e}", self.dir.display())))?;
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        let id = format!("r{millis}");
+        let doc = json!({
+            "id": id,
+            "what": what,
+            "command": args,
+            "state": "running",
+            "pid": null,
+            "started_at": nils_registry::time::now_iso(),
+            "finished_at": null,
+            "exit": null,
+        });
+        write_run(&self.dir, &id, &doc);
+        // the recorder runs the command and writes down how it ended, so the
+        // ending is kept even when this service is restarted meanwhile
+        let mut recorder = vec![
+            "supervise".to_string(),
+            "record".to_string(),
+            "--dir".to_string(),
+            self.dir.display().to_string(),
+            "--id".to_string(),
+            id.clone(),
+            "--".to_string(),
+        ];
+        recorder.extend(args.iter().cloned());
+        let me = std::env::current_exe().map_err(|e| (500, e.to_string()))?;
+        let child = Command::new(me)
+            .args(&recorder)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| (500, format!("{what}: {e}")))?;
+        children.insert(id, child);
+        Ok(doc)
+    }
+
+    /// A run as it stands, with the last lines of its output.
+    fn show(&self, id: &str) -> Option<Value> {
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        let path = self.dir.join(format!("{id}.json"));
+        let read = || -> Option<Value> { serde_json::from_slice(&std::fs::read(&path).ok()?).ok() };
+        let mut doc = read()?;
+        if doc["state"] == "running" {
+            let mut children = self.children.lock().ok()?;
+            let gone = match children.get_mut(id).map(Child::try_wait) {
+                Some(Ok(Some(_))) => {
+                    children.remove(id);
+                    true
+                }
+                Some(Ok(None)) => false,
+                // a run from before this service started: its recorder says whether it still runs
+                _ => !doc["pid"]
+                    .as_u64()
+                    .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists()),
+            };
+            if gone {
+                // the recorder wrote the ending before it exited
+                doc = read()?;
+                if doc["state"] == "running" {
+                    doc["state"] = json!("ended");
+                    doc["finished_at"] = json!(nils_registry::time::now_iso());
+                    write_run(&self.dir, id, &doc);
+                }
+            }
+        }
+        let log = std::fs::read_to_string(self.dir.join(format!("{id}.log"))).unwrap_or_default();
+        let lines: Vec<&str> = log.lines().collect();
+        doc["tail"] = json!(lines[lines.len().saturating_sub(40)..].to_vec());
+        Some(doc)
+    }
+}
+
+/// Run one command of this binary for a run the service started, and write
+/// down how it ended. The recorder writes the ending rather than the
+/// service, so a run that outlives a restart of the service still says how
+/// it went.
+fn record(dir: &Path, id: &str, command: &[String]) -> Result<(), Exit> {
+    let path = dir.join(format!("{id}.json"));
+    let read = || -> Value {
+        std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_else(|| json!({ "id": id }))
+    };
+    let mut doc = read();
+    doc["pid"] = json!(std::process::id());
+    write_run(dir, id, &doc);
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("{id}.log")))
+        .map_err(|e| fail(e.to_string()))?;
+    let err = log.try_clone().map_err(|e| fail(e.to_string()))?;
+    let me = std::env::current_exe().map_err(|e| fail(e.to_string()))?;
+    let status = Command::new(me)
+        .args(command)
+        .stdin(Stdio::null())
+        .stdout(log)
+        .stderr(err)
+        .status();
+    let mut doc = read();
+    match status {
+        Ok(s) => {
+            doc["state"] = json!(if s.success() { "done" } else { "failed" });
+            doc["exit"] = json!(s.code());
+        }
+        Err(e) => {
+            doc["state"] = json!("failed");
+            doc["error"] = json!(e.to_string());
+        }
+    }
+    doc["finished_at"] = json!(nils_registry::time::now_iso());
+    write_run(dir, id, &doc);
+    Ok(())
+}
+
+fn write_run(dir: &Path, id: &str, doc: &Value) {
+    let _ = std::fs::write(
+        dir.join(format!("{id}.json")),
+        serde_json::to_vec_pretty(doc).unwrap_or_default(),
+    );
+}
+
+type Slot = OnceLock<Mutex<Option<(Instant, Value)>>>;
+static NEWEST: Slot = OnceLock::new();
+static MACHINE: Slot = OnceLock::new();
+
+/// A slow look kept for a while: the newest release, the card.
+fn cached(slot: &'static Slot, every: Duration, make: impl FnOnce() -> Value) -> Value {
+    let held = slot.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = held.lock()
+        && let Some((at, value)) = guard.as_ref()
+        && at.elapsed() < every
+    {
+        return value.clone();
+    }
+    let value = make();
+    if let Ok(mut guard) = held.lock() {
+        *guard = Some((Instant::now(), value.clone()));
+    }
+    value
+}
+
+/// The install door: the setup record, each service with whether it runs,
+/// the newest release beside the one installed, and the machine's card.
+fn install(config: &Config) -> (u16, Value) {
+    let Some(state) = crate::setup::read_state() else {
+        return error(
+            404,
+            format!(
+                "no setup is recorded at {}; this door reports an install nils setup made",
+                crate::setup::state_path().display()
+            ),
+        );
+    };
+    let mut doc = crate::setup::install_doc(&state);
+    let every = Duration::from_secs(config.poll_seconds.max(60));
+    let newest = cached(&NEWEST, every, || {
+        match crate::update::newest_version(&crate::update::engine_base(None)) {
+            Ok(v) => json!({ "version": v }),
+            Err(e) => json!({ "error": e.message }),
+        }
+    });
+    let installed = state.parts.get("engine").map(|p| p.version.clone());
+    let newer = match (newest["version"].as_str(), installed.as_deref()) {
+        (Some(n), Some(have)) if crate::update::newer(n, have) => json!(n),
+        _ => Value::Null,
+    };
+    doc["release"] = json!({
+        "installed": installed,
+        "newest": newest["version"],
+        "newer": newer,
+        "error": newest["error"],
+        "command": "nils update --all",
+    });
+    doc["machine"] = cached(&MACHINE, Duration::from_secs(3600), || {
+        let card = crate::setup::probe_card();
+        json!({
+            "card": card.as_ref().map(|c| json!({ "name": c.name, "memory_gb": c.memory_gb })),
+            "advice": crate::setup::card_advice(card.as_ref().map(|c| c.memory_gb)),
+        })
+    });
+    (200, doc)
+}
+
+const LOOK_FOLDERS: usize = 64;
+const LOOK_COUNT_TO: usize = 50_000;
+const LOOK_SAMPLE: usize = 16;
+
+/// What a folder holds, before it is added as a source: each folder inside
+/// with how many files it has, how many of a sample are DICOM, and what those
+/// are by modality and scanner. Only the equipment fields of a header are
+/// read, never a person's, and links are not followed.
+pub(crate) fn look(path: &Path) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let shown = path.display().to_string();
+    let meta = std::fs::metadata(path);
+    if !meta.as_ref().is_ok_and(|m| m.is_dir()) {
+        return json!({ "path": shown, "exists": meta.is_ok(), "directory": false, "readable": false, "folders": [], "here": null, "partial": false });
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return json!({ "path": shown, "exists": true, "directory": true, "readable": false, "folders": [], "here": null, "partial": false });
+    };
+    let (mut dirs, mut files) = (Vec::new(), Vec::new());
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            dirs.push(entry.path());
+        } else if kind.is_file() {
+            files.push(entry.path());
+        }
+    }
+    dirs.sort();
+    files.sort();
+    let mut partial = dirs.len() > LOOK_FOLDERS;
+    let mut folders = Vec::new();
+    for dir in dirs.iter().take(LOOK_FOLDERS) {
+        if Instant::now() > deadline {
+            partial = true;
+            break;
+        }
+        let (listed, capped) = files_of(dir, deadline);
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        folders.push(describe(&name, &listed, capped));
+    }
+    json!({
+        "path": shown,
+        "exists": true,
+        "directory": true,
+        "readable": true,
+        "folders": folders,
+        "here": describe("", &files, false),
+        "partial": partial,
+    })
+}
+
+/// The files under a folder, links not followed, to a count and a deadline.
+fn files_of(root: &Path, deadline: Instant) -> (Vec<PathBuf>, bool) {
+    let mut out = Vec::new();
+    let mut queue = vec![root.to_path_buf()];
+    while let Some(dir) = queue.pop() {
+        if Instant::now() > deadline {
+            return (out, true);
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut here: Vec<_> = entries.flatten().collect();
+        here.sort_by_key(|e| e.file_name());
+        for entry in here {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                queue.push(entry.path());
+            } else if kind.is_file() {
+                out.push(entry.path());
+                if out.len() >= LOOK_COUNT_TO {
+                    return (out, true);
+                }
+            }
+        }
+    }
+    (out, false)
+}
+
+/// One folder in the words a person decides by: its files, a sample sniffed
+/// for DICOM, and what the DICOM in the sample is.
+fn describe(name: &str, files: &[PathBuf], capped: bool) -> Value {
+    use dicom_dictionary_std::tags;
+    let step = (files.len() / LOOK_SAMPLE).max(1);
+    let sample: Vec<&PathBuf> = files.iter().step_by(step).take(LOOK_SAMPLE).collect();
+    let mut dicom = 0u64;
+    let mut modalities: BTreeMap<String, u64> = BTreeMap::new();
+    let mut scanners: BTreeSet<String> = BTreeSet::new();
+    for file in &sample {
+        match nils_dicom::sniff::sniff(file) {
+            nils_dicom::sniff::Sniff::Part10 => {}
+            nils_dicom::sniff::Sniff::BareDataset => {
+                dicom += 1;
+                continue;
+            }
+            _ => continue,
+        }
+        dicom += 1;
+        let Ok(object) = dicom_object::OpenFileOptions::new()
+            .read_until(tags::PIXEL_DATA)
+            .open_file(file)
+        else {
+            continue;
+        };
+        let word = |tag| {
+            object
+                .element(tag)
+                .ok()
+                .and_then(|e| e.to_str().ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        *modalities
+            .entry(word(tags::MODALITY).unwrap_or_else(|| "unknown".to_string()))
+            .or_default() += 1;
+        let scanner = format!(
+            "{} {}",
+            word(tags::MANUFACTURER).unwrap_or_default(),
+            word(tags::MANUFACTURER_MODEL_NAME).unwrap_or_default()
+        );
+        if !scanner.trim().is_empty() {
+            scanners.insert(scanner.trim().to_string());
+        }
+    }
+    json!({
+        "name": name,
+        "files": files.len(),
+        "capped": capped,
+        "sampled": sample.len(),
+        "dicom": dicom,
+        "modalities": modalities,
+        "scanners": scanners.len(),
+    })
+}
+
+fn body_json(request: &mut Request) -> Value {
+    let mut text = String::new();
+    let _ = request.as_reader().read_to_string(&mut text);
+    serde_json::from_str(&text).unwrap_or(Value::Null)
+}
+
+fn started(result: Result<Value, (u16, String)>) -> (u16, Value) {
+    match result {
+        Ok(doc) => (202, doc),
+        Err((status, why)) => error(status, why),
+    }
+}
+
+fn handle(config: &Config, node: &str, busy: &Mutex<()>, runs: &Runs, mut request: Request) {
     let method = request.method().clone();
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or("").to_string();
@@ -890,6 +1276,55 @@ fn handle(config: &Config, node: &str, busy: &Mutex<()>, mut request: Request) {
     let (status, body) = match (method.clone(), path.as_str()) {
         (Method::Get, "/api/supervise/capabilities") => (200, capabilities(config, node)),
         (Method::Get, "/api/supervise/log") => (200, json!({ "rows": log_rows(&config.log, 200) })),
+        (Method::Get, "/api/supervise/install") => install(config),
+        (Method::Post, "/api/supervise/restart") => {
+            let doc = body_json(&mut request);
+            let mut args = vec!["supervise".to_string(), "restart".to_string()];
+            if let Some(part) = doc["part"].as_str() {
+                if !["engine", "desk", "gateway", "assistant", "postgres", "all"].contains(&part) {
+                    let (s, b) = error(
+                        400,
+                        "part: engine, desk, gateway, assistant, postgres or all",
+                    );
+                    return reply(request, s, b);
+                }
+                args.extend(["--part".to_string(), part.to_string()]);
+            }
+            started(runs.start("restart", &args))
+        }
+        (Method::Post, "/api/supervise/reapply") => {
+            let doc = body_json(&mut request);
+            let mut args = vec!["supervise".to_string(), "reapply".to_string()];
+            match doc["part"].as_str() {
+                None | Some("all") => {}
+                Some("engine") => args.extend(["--part".to_string(), "engine".to_string()]),
+                Some(_) => {
+                    let (s, b) = error(400, "part: engine, or none for every part");
+                    return reply(request, s, b);
+                }
+            }
+            started(runs.start("reapply", &args))
+        }
+        (Method::Post, "/api/supervise/update-all") => {
+            started(runs.start("update", &["update".to_string(), "--all".to_string()]))
+        }
+        (Method::Get, p) if p.starts_with("/api/supervise/runs/") => {
+            match runs.show(&p["/api/supervise/runs/".len()..]) {
+                Some(doc) => (200, doc),
+                None => error(404, "no run by that id"),
+            }
+        }
+        (Method::Post, "/api/supervise/look") => {
+            let doc = body_json(&mut request);
+            match doc["path"]
+                .as_str()
+                .map(str::trim)
+                .filter(|p| p.starts_with('/'))
+            {
+                Some(p) => (200, look(Path::new(p))),
+                None => error(400, "path: an absolute path on this machine"),
+            }
+        }
         (Method::Post, "/api/supervise/update") => {
             let mut text = String::new();
             let _ = request.as_reader().read_to_string(&mut text);
@@ -949,6 +1384,14 @@ pub(crate) fn run(config_path: &Path, bind: Option<String>) -> Result<(), Exit> 
         config.trust.display()
     );
     let node = nils_registry::job::hostname();
+    let runs = Runs {
+        dir: config_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default()
+            .join("runs"),
+        children: Mutex::new(HashMap::new()),
+    };
     let config = Arc::new(config);
     let busy = Arc::new(Mutex::new(()));
     {
@@ -969,7 +1412,7 @@ pub(crate) fn run(config_path: &Path, bind: Option<String>) -> Result<(), Exit> 
         });
     }
     for request in server.incoming_requests() {
-        handle(&config, &node, &busy, request);
+        handle(&config, &node, &busy, &runs, request);
     }
     Ok(())
 }
@@ -1001,6 +1444,29 @@ pub(crate) enum SuperviseCommand {
         /// Overrides the config's bind; port 0 picks a free one and prints it
         #[arg(long, value_name = "ADDR")]
         bind: Option<String>,
+    },
+    /// Restart one part of the install nils setup made, or every part in order
+    #[command(hide = true)]
+    Restart {
+        #[arg(long)]
+        part: Option<String>,
+    },
+    /// Make the install follow the registry: the engine's unit or container
+    /// written again with every source place, or every part's
+    #[command(hide = true)]
+    Reapply {
+        #[arg(long)]
+        part: Option<String>,
+    },
+    /// Run a command of this binary for a run the service started, and record how it ended
+    #[command(hide = true)]
+    Record {
+        #[arg(long)]
+        dir: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
     },
     /// One update by hand, without the service: what the door does for a part
     Update {
@@ -1048,6 +1514,16 @@ pub(crate) struct VerifyArtifactArgs {
     pub installed: Option<PathBuf>,
     #[arg(long)]
     pub allow_contract_change: bool,
+}
+
+/// The install nils setup recorded, for the commands that act on it.
+fn recorded() -> Result<crate::setup::State, Exit> {
+    crate::setup::read_state().ok_or_else(|| {
+        usage(format!(
+            "no setup is recorded at {}",
+            crate::setup::state_path().display()
+        ))
+    })
 }
 
 pub(crate) fn command(command: SuperviseCommand) -> Result<(), Exit> {
@@ -1117,6 +1593,22 @@ pub(crate) fn command(command: SuperviseCommand) -> Result<(), Exit> {
             }
         }
         SuperviseCommand::Run { config, bind } => run(&config, bind),
+        SuperviseCommand::Record { dir, id, command } => record(&dir, &id, &command),
+        SuperviseCommand::Restart { part } => {
+            let state = recorded()?;
+            crate::setup::restart_units(&state, part.as_deref()).map(|_| ())
+        }
+        SuperviseCommand::Reapply { part } => {
+            let state = recorded()?;
+            match part.as_deref() {
+                Some("engine") => crate::setup::reapply_engine(&state),
+                None | Some("all") => {
+                    crate::setup::restart_after_update(None);
+                    Ok(())
+                }
+                Some(other) => Err(usage(format!("{other}: reapply takes engine or all"))),
+            }
+        }
         SuperviseCommand::Update {
             config,
             part,

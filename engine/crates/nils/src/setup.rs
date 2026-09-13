@@ -7275,6 +7275,318 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     }
 }
 
+// ------------------------------------------------------- for the supervisor
+
+/// A part as its service manager knows it: the unit or the container, and
+/// what watches it.
+pub(crate) struct Unit {
+    pub(crate) part: &'static str,
+    pub(crate) name: String,
+    /// `systemd`, `docker` or `launchd`.
+    pub(crate) watcher: &'static str,
+}
+
+/// The unit each part of a recorded install runs under, in the order the
+/// parts start: Postgres, the engine, the desk, the gateway, the assistant.
+/// An install that runs no services has none.
+pub(crate) fn service_units(state: &State) -> Vec<Unit> {
+    if state.service.is_empty() || state.service == "none" {
+        return Vec::new();
+    }
+    let runtime = Runtime::parse(&state.runtime).unwrap_or(Runtime::Machine);
+    let mut out = Vec::new();
+    let mut push = |part: &'static str, name: &str, watcher: &'static str| {
+        out.push(Unit {
+            part,
+            name: name.to_string(),
+            watcher,
+        });
+    };
+    match state.parts.get("postgres").map(|p| p.kind.as_str()) {
+        Some("podman") => push("postgres", "nils-postgres", "systemd"),
+        Some("docker") => push("postgres", "nils-postgres", "docker"),
+        _ => {}
+    }
+    let has = |name: &str| state.parts.contains_key(name);
+    let desk_binary = state.parts.get("desk").is_some_and(|d| d.kind == "binary");
+    match (runtime, cfg!(target_os = "macos")) {
+        (Runtime::Docker, _) => {
+            push("engine", "nils-engine", "docker");
+            if has("desk") {
+                push("desk", "nils-desk", "docker");
+            }
+            if has("kvasir") {
+                push("gateway", "nils-kvasir", "docker");
+            }
+            if has("assistant") {
+                push("assistant", "nils-assistant", "docker");
+            }
+        }
+        (Runtime::Podman, _) => {
+            push("engine", "nils-engine", "systemd");
+            if has("desk") {
+                push("desk", "nils-desk", "systemd");
+            }
+            if has("kvasir") {
+                push("gateway", "nils-kvasir", "systemd");
+            }
+            if has("assistant") {
+                push("assistant", "nils-assistant", "systemd");
+            }
+        }
+        (Runtime::Machine, true) => {
+            push("engine", "se.kineuro.nils-engine", "launchd");
+            if desk_binary {
+                push("desk", "se.kineuro.nils-desk", "launchd");
+            }
+        }
+        (Runtime::Machine, false) => {
+            push("engine", "nils-engine", "systemd");
+            if desk_binary {
+                push("desk", "nils-desk", "systemd");
+            }
+            if has("kvasir") {
+                push("gateway", "kvasir", "systemd");
+            }
+            if has("assistant") {
+                push("assistant", "nils-assistant", "systemd");
+            }
+        }
+    }
+    out
+}
+
+/// Whether a unit runs now: one look, for a page rather than a start.
+pub(crate) fn unit_running(unit: &Unit) -> bool {
+    match unit.watcher {
+        "docker" => run_quiet(
+            "docker",
+            &["inspect", "-f", "{{.State.Running}}", &unit.name],
+        )
+        .is_some_and(|s| s.trim() == "true"),
+        "launchd" => {
+            run_quiet("launchctl", &["list", &unit.name]).is_some_and(|s| s.contains("\"PID\""))
+        }
+        _ => run_quiet("systemctl", &["--user", "is-active", &unit.name])
+            .is_some_and(|s| s.trim() == "active"),
+    }
+}
+
+/// Where each part of a recorded install answers, and who can reach it there.
+pub(crate) fn addresses(state: &State) -> Vec<serde_json::Value> {
+    let runtime = Runtime::parse(&state.runtime).unwrap_or(Runtime::Machine);
+    let reach = match state.reach.as_str() {
+        "" | "loopback" => Reach::Loopback,
+        address => Reach::Network(address.to_string()),
+    };
+    let ports = state.ports;
+    let inside = match runtime {
+        Runtime::Docker => "inside docker only",
+        Runtime::Podman => "inside the pod only",
+        Runtime::Machine => "this machine only",
+    };
+    let named = |container: &str, port: u16| match runtime {
+        Runtime::Docker => format!("{container}:{port}"),
+        _ => format!("127.0.0.1:{port}"),
+    };
+    let mut out = Vec::new();
+    if state.parts.contains_key("desk") {
+        let (_, origin, _) = desk_binding(&reach, ports.desk, runtime.container());
+        let who = match reach {
+            Reach::Loopback => "this machine only",
+            Reach::Network(_) => "this network",
+        };
+        out.push(serde_json::json!({ "part": "desk", "address": origin, "reach": who }));
+    }
+    out.push(
+        serde_json::json!({ "part": "engine", "address": named("nils-engine", ports.engine), "reach": inside }),
+    );
+    if state.parts.contains_key("kvasir") {
+        out.push(serde_json::json!({ "part": "gateway", "address": format!("127.0.0.1:{}", ports.kvasir), "reach": "this machine only" }));
+    }
+    if state.parts.contains_key("assistant") {
+        out.push(serde_json::json!({ "part": "assistant", "address": named("nils-assistant", ports.assistant), "reach": inside }));
+    }
+    if state.parts.contains_key("postgres") {
+        out.push(serde_json::json!({ "part": "postgres", "address": format!("127.0.0.1:{}", ports.postgres), "reach": "this machine only" }));
+    }
+    out
+}
+
+/// The install as the supervisor reports it: the setup record without its
+/// secrets, the parts, where each answers, and each service with whether it
+/// runs.
+pub(crate) fn install_doc(state: &State) -> serde_json::Value {
+    let parts: serde_json::Map<String, serde_json::Value> = state
+        .parts
+        .iter()
+        .map(|(name, p)| {
+            (
+                name.clone(),
+                serde_json::json!({ "version": p.version, "kind": p.kind, "path": p.path }),
+            )
+        })
+        .collect();
+    let services: Vec<serde_json::Value> = service_units(state)
+        .iter()
+        .map(|u| {
+            serde_json::json!({ "part": u.part, "unit": u.name, "watcher": u.watcher, "running": unit_running(u) })
+        })
+        .collect();
+    serde_json::json!({
+        "record": state_path().display().to_string(),
+        "dir": state.dir,
+        "runtime": state.runtime,
+        "service": state.service,
+        "reach": state.reach,
+        "backend": state.backend,
+        "mode": state.mode,
+        "at": state.at,
+        "ports": state.ports,
+        "parts": parts,
+        "places": state.places,
+        "oidc": state.oidc.as_ref().map(|o| serde_json::json!({ "issuer": o.issuer, "client_id": o.client_id })),
+        "addresses": addresses(state),
+        "services": services,
+        "unfinished": state.unfinished,
+    })
+}
+
+/// Restart one part of a recorded install, or every part in the order they
+/// start. A digest that was running resumes when the engine is back.
+pub(crate) fn restart_units(state: &State, part: Option<&str>) -> Result<Vec<String>, Exit> {
+    let units = service_units(state);
+    if units.is_empty() {
+        return Err(fail(
+            "this install runs no services, so restart what you run yourself",
+        ));
+    }
+    let chosen: Vec<&Unit> = match part {
+        None | Some("all") => units.iter().collect(),
+        Some(name) => {
+            let found: Vec<&Unit> = units.iter().filter(|u| u.part == name).collect();
+            if found.is_empty() {
+                let runs: Vec<&str> = units.iter().map(|u| u.part).collect();
+                return Err(usage(format!(
+                    "{name} is not a part this install runs; it runs {}",
+                    runs.join(", ")
+                )));
+            }
+            found
+        }
+    };
+    let uid = run_quiet("id", &["-u"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let mut done: Vec<String> = Vec::new();
+    for unit in chosen {
+        let ok = match unit.watcher {
+            "docker" => quietly("docker", &["restart", &unit.name]),
+            "launchd" => quietly(
+                "launchctl",
+                &["kickstart", "-k", &format!("gui/{uid}/{}", unit.name)],
+            ),
+            _ => quietly("systemctl", &["--user", "restart", &unit.name]),
+        };
+        if !ok {
+            return Err(fail(format!(
+                "{} did not restart; before it, {}",
+                unit.name,
+                if done.is_empty() {
+                    "nothing was restarted".to_string()
+                } else {
+                    format!("{} restarted", done.join(", "))
+                }
+            )));
+        }
+        println!("restarted {}", unit.name);
+        done.push(unit.name.clone());
+    }
+    Ok(done)
+}
+
+/// The engine made to follow the registry: its unit or container written
+/// again from the record, with every source place mounted, and only the
+/// engine started again, so the desk, the gateway and the assistant keep
+/// running. A container sees only what was mounted when it started, so a
+/// folder added as a source needs this before the engine can read it.
+pub(crate) fn reapply_engine(state: &State) -> Result<(), Exit> {
+    if state.service.is_empty() || state.service == "none" {
+        return Err(fail(
+            "this install runs no services; start the engine again yourself, with the folders it reads",
+        ));
+    }
+    let mut plan = plan_from_state(state, None);
+    if let Some(engine) = state.parts.get("engine") {
+        plan.version = engine.version.clone();
+    }
+    match (plan.runtime, cfg!(target_os = "macos")) {
+        (Runtime::Podman, _) => {
+            let dir = quadlet_dir();
+            let (name, unit) = quadlets(&plan)
+                .into_iter()
+                .find(|(n, _)| n == "nils-engine.container")
+                .ok_or_else(|| fail("no quadlet names the engine"))?;
+            std::fs::write(dir.join(&name), unit)
+                .map_err(|e| fail(format!("{}: {e}", dir.display())))?;
+            quietly("systemctl", &["--user", "daemon-reload"]);
+            if !quietly("systemctl", &["--user", "restart", "nils-engine"]) {
+                return Err(fail(
+                    "the engine's container did not start again; its log: journalctl --user -u nils-engine",
+                ));
+            }
+        }
+        (Runtime::Docker, _) => {
+            let path = plan.dir.join("compose.yaml");
+            std::fs::write(&path, docker_compose(&plan))
+                .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+            let recreated = Command::new("docker")
+                .args(["compose", "up", "-d", "--force-recreate", "engine"])
+                .current_dir(&plan.dir)
+                .status()
+                .is_ok_and(|s| s.success());
+            if !recreated {
+                return Err(fail(
+                    "the engine's container was not made again; its log: docker logs nils-engine",
+                ));
+            }
+        }
+        (Runtime::Machine, true) => {
+            let dir = std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join("Library").join("LaunchAgents"))
+                .ok_or_else(|| fail("no home directory"))?;
+            let (name, agent) = launchd_plists(&plan, state)
+                .into_iter()
+                .find(|(n, _)| n == "se.kineuro.nils-engine.plist")
+                .ok_or_else(|| fail("no agent names the engine"))?;
+            let path = dir.join(name);
+            let _ = Command::new("launchctl").arg("unload").arg(&path).output();
+            std::fs::write(&path, agent).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+            let _ = Command::new("launchctl")
+                .args(["load", "-w"])
+                .arg(&path)
+                .output();
+        }
+        (Runtime::Machine, false) => {
+            let dir = units_dir();
+            let (name, unit) = systemd_units(&plan, state)
+                .into_iter()
+                .find(|(n, _)| n == "nils-engine.service")
+                .ok_or_else(|| fail("no unit names the engine"))?;
+            std::fs::write(dir.join(&name), unit)
+                .map_err(|e| fail(format!("{}: {e}", dir.display())))?;
+            quietly("systemctl", &["--user", "daemon-reload"]);
+            if !quietly("systemctl", &["--user", "restart", "nils-engine"]) {
+                return Err(fail(
+                    "the engine did not start again; its log: journalctl --user -u nils-engine",
+                ));
+            }
+        }
+    }
+    println!("the engine reads the registry's places and was started again");
+    Ok(())
+}
+
 /// One binary part from its own releases, when a newer one is published.
 fn update_binary_part(name: &str, part: &PartState, base: &str) -> Result<(String, String), Exit> {
     if name != "desk" {
@@ -9070,6 +9382,86 @@ mod tests {
         });
         assert!(desk_config_stale(&plan), "another client is written again");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_supervisor_names_each_part_by_its_unit_and_says_where_it_answers() {
+        let mut state = State {
+            dir: "/home/x/nils".to_string(),
+            mode: "local".to_string(),
+            runtime: "docker".to_string(),
+            service: "a compose file".to_string(),
+            reach: "10.0.0.5".to_string(),
+            backend: "postgres:nils".to_string(),
+            ports: Ports::default(),
+            ..State::default()
+        };
+        for (name, kind) in [
+            ("engine", "docker"),
+            ("desk", "docker"),
+            ("kvasir", "node"),
+            ("assistant", "node"),
+            ("postgres", "docker"),
+        ] {
+            state.parts.insert(
+                name.to_string(),
+                PartState {
+                    version: "1.0.0-alpha.14".to_string(),
+                    path: "a path".to_string(),
+                    kind: kind.to_string(),
+                },
+            );
+        }
+        let units: Vec<(&str, String, &str)> = service_units(&state)
+            .into_iter()
+            .map(|u| (u.part, u.name, u.watcher))
+            .collect();
+        assert_eq!(
+            units,
+            vec![
+                ("postgres", "nils-postgres".to_string(), "docker"),
+                ("engine", "nils-engine".to_string(), "docker"),
+                ("desk", "nils-desk".to_string(), "docker"),
+                ("gateway", "nils-kvasir".to_string(), "docker"),
+                ("assistant", "nils-assistant".to_string(), "docker"),
+            ],
+            "in the order the parts start"
+        );
+        let at = addresses(&state);
+        let of = |at: &[serde_json::Value], part: &str| {
+            at.iter().find(|a| a["part"] == part).cloned().unwrap()
+        };
+        assert_eq!(of(&at, "engine")["address"], "nils-engine:8437");
+        assert_eq!(of(&at, "engine")["reach"], "inside docker only");
+        assert_eq!(of(&at, "gateway")["address"], "127.0.0.1:7100");
+        assert_eq!(of(&at, "desk")["reach"], "this network");
+        assert!(
+            of(&at, "desk")["address"]
+                .as_str()
+                .unwrap()
+                .contains("10.0.0.5"),
+            "{at:?}"
+        );
+
+        state.runtime = "podman".to_string();
+        let units: Vec<String> = service_units(&state)
+            .into_iter()
+            .map(|u| format!("{} {}", u.name, u.watcher))
+            .collect();
+        assert!(
+            units.contains(&"nils-kvasir systemd".to_string()),
+            "{units:?}"
+        );
+        let at = addresses(&state);
+        assert_eq!(of(&at, "engine")["address"], "127.0.0.1:8437");
+        assert_eq!(of(&at, "assistant")["reach"], "inside the pod only");
+
+        state.service = "none".to_string();
+        assert!(service_units(&state).is_empty());
+        assert!(
+            restart_units(&state, None).is_err(),
+            "no services, nothing to restart"
+        );
     }
 
     #[test]
