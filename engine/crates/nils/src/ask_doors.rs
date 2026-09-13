@@ -945,6 +945,28 @@ fn answer(
             v["declaration"] = json!(declaration);
             Ok(Reply::ok(v))
         }
+        ["api", "ask", "profile"] if post => {
+            let (ask, _) = document_of(registry, &doc)?;
+            let scheme = scheme_of(registry, &ask)?;
+            let s = Setting {
+                names: catalog,
+                scope: &scope,
+                scheme: &scheme,
+                principal,
+                bounds,
+                values_cap: caps.options_values as usize,
+            };
+            let profile = crate::profile::document(
+                registry,
+                reader,
+                &s,
+                &ask,
+                doc["set"].as_str(),
+                doc["field"].as_str(),
+            )
+            .map_err(|why| Reply::error(404, why))?;
+            Ok(Reply::ok(profile))
+        }
         ["api", "ask", "describe"] if post => {
             let (ask, _) = document_of(registry, &doc)?;
             let scheme = scheme_of(registry, &ask)?;
@@ -1544,6 +1566,7 @@ pub(crate) const DOORS: &[&str] = &[
     "POST /api/ask/apply",
     "POST /api/ask/diagnose",
     "POST /api/ask/preview",
+    "POST /api/ask/profile",
     "POST /api/ask/describe",
     "POST /api/ask/start",
     "GET /api/ask/documents",

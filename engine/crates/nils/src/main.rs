@@ -34,6 +34,7 @@ mod gate;
 mod login;
 mod mcp;
 mod places;
+mod profile;
 mod pyramid;
 mod schedule;
 mod serve;

@@ -2002,3 +2002,115 @@ fn a_document_stored_under_a_parent_is_its_next_version() {
     assert_eq!(row["document"], alone["document"], "{row}");
     server.finish();
 }
+
+/// The profile of a query for the desk's charts: the subjects, sessions and
+/// stacks under a set, its stacks by base, a stack field by value, the kinds
+/// of clinical events, and the sex and age of its subjects only for a role
+/// that may read them.
+#[test]
+fn a_profile_counts_what_is_under_a_set_and_withholds_what_the_role_may_not_read() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        4,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "a-reviewer-token-of-leng=reviewer@lab:reviewer",
+        ],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let reviewer = Some("a-reviewer-token-of-leng");
+    let mut doc = plain("profiled");
+    doc["sets"]["visits"] = serde_json::json!({"grain": "session", "of": "people"});
+    // a reader: the counts, the stack types and the event kinds, no demographics
+    let (status, p) = server.request(
+        "POST",
+        "/api/ask/profile",
+        Some(&body(serde_json::json!({"document": doc}))),
+        reader,
+    );
+    assert_eq!(status, 200, "{p}");
+    assert_eq!(p["set"], "people", "{p}");
+    assert_eq!(p["grain"], "subject", "{p}");
+    let subjects = p["counts"]["subjects"].as_i64().unwrap();
+    let stacks = p["counts"]["stacks"].as_i64().unwrap();
+    assert!(subjects > 0 && stacks > 0, "{p}");
+    assert!(p["counts"]["sessions"].as_i64().unwrap() > 0, "{p}");
+    let typed: i64 = p["stack_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["count"].as_i64().unwrap())
+        .sum();
+    assert_eq!(typed, stacks, "every stack is under one base or none: {p}");
+    assert!(p["demographics"]["withheld"].is_string(), "{p}");
+    assert!(p["demographics"].get("sex").is_none(), "{p}");
+    assert!(
+        !p["clinical"]["kinds"].as_array().unwrap().is_empty(),
+        "{p}"
+    );
+    assert_eq!(p["clinical"]["sensitive_withheld"], true, "{p}");
+    assert!(p["field"].is_null(), "{p}");
+    // a reviewer: the sex and the age decades as well
+    let (status, p) = server.request(
+        "POST",
+        "/api/ask/profile",
+        Some(&body(serde_json::json!({"document": doc}))),
+        reviewer,
+    );
+    assert_eq!(status, 200, "{p}");
+    let by_sex: i64 = p["demographics"]["sex"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["count"].as_i64().unwrap())
+        .sum();
+    assert_eq!(
+        by_sex, subjects,
+        "every subject is under one sex or none: {p}"
+    );
+    // a subject in both cohorts is reached twice, and each session is still counted once
+    let by_decade: i64 = p["demographics"]["age_decades"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["count"].as_i64().unwrap())
+        .sum();
+    assert_eq!(
+        by_decade,
+        p["counts"]["sessions"].as_i64().unwrap(),
+        "every session is under one decade or none: {p}"
+    );
+    // the sessions of the document, with their stacks by manufacturer
+    let (status, p) = server.request(
+        "POST",
+        "/api/ask/profile",
+        Some(&body(
+            serde_json::json!({"document": doc, "set": "visits", "field": "manufacturer"}),
+        )),
+        reader,
+    );
+    assert_eq!(status, 200, "{p}");
+    assert_eq!(p["grain"], "session", "{p}");
+    assert_eq!(p["field"]["name"], "manufacturer", "{p}");
+    assert_eq!(p["field"]["truncated"], false, "{p}");
+    let by_maker: i64 = p["field"]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["count"].as_i64().unwrap())
+        .sum();
+    assert_eq!(by_maker, p["counts"]["stacks"].as_i64().unwrap(), "{p}");
+    // a set the document does not have
+    let (status, refused) = server.request(
+        "POST",
+        "/api/ask/profile",
+        Some(&body(serde_json::json!({"document": doc, "set": "nobody"}))),
+        reader,
+    );
+    assert_eq!(status, 404, "{refused}");
+}
