@@ -3138,11 +3138,12 @@ fn questions(
         Mode::Oidc => "a provider",
     });
 
-    // the first person, for a desk that keeps its own and has none yet
-    let store_exists = dir.join("desk").join("nils-desk.sqlite").exists();
+    // the first person, for a desk that keeps its own and has none yet; a
+    // desk that ran with nobody signing in has its store already, and no one
+    // in it
     if mode == Mode::Local
         && parts.contains(&Part::Desk)
-        && !store_exists
+        && !desk_has_people(&dir)
         && console.interactive()
         && console.ask_yes_no("Add the first person now, who may do everything?", true)?
     {
@@ -3537,7 +3538,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
         if let Err(e) = write_supervisor(plan) {
             console.warn(&format!("the supervisor was not set up: {}", e.message));
         }
-        write_desk_config(plan, true)?;
+        write_desk_config(plan)?;
         console.progress(&plan.desk_config().display().to_string());
     }
     // The gateway's file is mended, not rewritten, and the assistant's
@@ -3668,7 +3669,11 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
         rows.push(("desk", format!("{origin} (binds {bind})")));
         rows.push((
             "desk config",
-            format!("{} (will be written)", plan.desk_config().display()),
+            format!(
+                "{} ({})",
+                plan.desk_config().display(),
+                desk_config_fate(plan).words()
+            ),
         ));
     }
     rows.push(("engine port", plan.ports.engine.to_string()));
@@ -4105,7 +4110,7 @@ fn place(
         if let Err(e) = write_supervisor(plan) {
             console.warn(&format!("the supervisor was not set up: {}", e.message));
         }
-        write_desk_config(plan, desk_config_stale(plan))?;
+        write_desk_config(plan)?;
         console.progress(&plan.desk_config().display().to_string());
         if plan.mode == Mode::Local {
             let desk = state
@@ -4870,13 +4875,110 @@ fn pack_destination(plan: &Plan, me: &Path) -> PathBuf {
     plan.registry().join("packs")
 }
 
-/// The desk's configuration for the mode chosen, and the tables for the
-/// parts that were installed beside it.
-fn write_desk_config(plan: &Plan, force: bool) -> Result<(), Exit> {
+/// The desk's configuration once a plan is set: written whole where there is
+/// none or where the file no longer reads as TOML, and otherwise the file on
+/// disk with what setup writes set in it, keeping what a person set by hand.
+fn write_desk_config(plan: &Plan) -> Result<(), Exit> {
     let path = plan.desk_config();
-    if path.exists() && !force {
-        return Ok(());
+    let written = desk_config_text(plan);
+    let text = match std::fs::read_to_string(&path) {
+        Err(_) => written,
+        Ok(existing) => match desk_config_merged(&existing, &written) {
+            Ok(Some(merged)) => merged,
+            Ok(None) => return Ok(()),
+            Err(()) => written,
+        },
+    };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
     }
+    // it holds the supervisor's token, so only this account reads it
+    write_secret_bytes(&path, text.as_bytes())
+}
+
+/// What setup keeps in the desk's configuration: the keys and the tables it
+/// writes. Anything else in the file is a person's, and stays.
+const DESK_MANAGED: [&str; 11] = [
+    "bind",
+    "origin",
+    "also_origins",
+    "mode",
+    "store",
+    "local",
+    "oidc",
+    "engine",
+    "supervisor",
+    "kvasir",
+    "assistant",
+];
+
+/// The desk's configuration on disk with a plan's set in it: each key setup
+/// writes replaced, each table it writes set key by key so a person's other
+/// keys in it stay, and the gateway's and the assistant's tables removed
+/// with them. A `[local]` or an `[oidc]` table stays for a desk that goes
+/// back, and every key setup does not write is kept, though not the file's
+/// comments. `Ok(None)` when nothing setup writes has changed; an error when
+/// either text does not read as TOML.
+fn desk_config_merged(existing: &str, written: &str) -> Result<Option<String>, ()> {
+    let mut have: toml::Table = toml::from_str(existing).map_err(|_| ())?;
+    let want: toml::Table = toml::from_str(written).map_err(|_| ())?;
+    let mut changed = false;
+    for key in DESK_MANAGED {
+        match (have.get(key).cloned(), want.get(key)) {
+            (Some(toml::Value::Table(mut mine)), Some(toml::Value::Table(theirs))) => {
+                for (k, v) in theirs {
+                    if mine.get(k) != Some(v) {
+                        mine.insert(k.clone(), v.clone());
+                        changed = true;
+                    }
+                }
+                have.insert(key.to_string(), toml::Value::Table(mine));
+            }
+            (mine, Some(value)) => {
+                if mine.as_ref() != Some(value) {
+                    have.insert(key.to_string(), value.clone());
+                    changed = true;
+                }
+            }
+            (Some(_), None) if matches!(key, "kvasir" | "assistant") => {
+                have.remove(key);
+                changed = true;
+            }
+            _ => {}
+        }
+    }
+    if !changed {
+        return Ok(None);
+    }
+    let body = toml::to_string(&have).map_err(|_| ())?;
+    Ok(Some(format!(
+        "# Written by nils setup. The documentation is at\n\
+         # https://kineuro.se/nils/docs/desk/configuration/\n{body}"
+    )))
+}
+
+/// Whether the desk under a directory keeps anyone who signs in with a
+/// password, read from its store without changing it. A store that is not
+/// there, or does not read, keeps nobody.
+fn desk_has_people(dir: &Path) -> bool {
+    let store = dir.join("desk").join("nils-desk.sqlite");
+    if !store.exists() {
+        return false;
+    }
+    let Ok(conn) =
+        rusqlite::Connection::open_with_flags(&store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return false;
+    };
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM user)", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .is_ok_and(|n| n != 0)
+}
+
+/// The desk's configuration as setup writes it for a plan: the mode chosen,
+/// and the tables for the parts installed beside it.
+fn desk_config_text(plan: &Plan) -> String {
     let (bind, origin, also) = desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
     let engine_url = match plan.runtime {
         Runtime::Docker => format!("http://nils-engine:{}", plan.ports.engine),
@@ -4954,30 +5056,26 @@ fn write_desk_config(plan: &Plan, force: bool) -> Result<(), Exit> {
             plan.ports.assistant
         );
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
-    }
-    // it holds the supervisor's token, so only this account reads it
-    write_secret_bytes(&path, text.as_bytes())
+    text
 }
 
 /// In local mode the desk keeps the people, and an empty desk has nobody to
-/// let in. The offer is made once, and the desk's own command asks for the
-/// password, so nothing here ever holds one.
+/// let in. The first person is added with the password asked for with the
+/// other questions; with nobody named here, the summary says how to add one
+/// when the desk still keeps nobody.
 fn add_first_admin(
     plan: &Plan,
     desk: Option<PathBuf>,
     first: Option<&(String, String)>,
     console: &Console,
 ) {
+    let Some((name, password)) = first else {
+        return;
+    };
     let by_hand = format!(
         "nils-desk user add <name> --admin --config {}",
         plan.desk_config().display()
     );
-    let Some((name, password)) = first else {
-        console.say(&format!("add the first person with: {by_hand}"));
-        return;
-    };
     let desk = desk
         .filter(|d| d.exists())
         .or_else(|| Some(plan.dir.join("bin").join("nils-desk")).filter(|d| d.exists()))
@@ -5357,21 +5455,41 @@ fn registered_at(said: &str) -> Option<OidcPlan> {
     })
 }
 
-/// Whether the desk's configuration names another sign-in than the plan, so
-/// it is written again; one that agrees is left as it is.
-fn desk_config_stale(plan: &Plan) -> bool {
-    let Ok(text) = std::fs::read_to_string(plan.desk_config()) else {
-        return false;
-    };
-    let mode = text.contains(&format!("mode = \"{}\"", plan.mode.name()));
-    let provider = plan
-        .oidc
-        .as_ref()
-        .is_none_or(|o| text.contains(&format!("client_id = \"{}\"", o.client_id)));
-    let supervised = supervisor_url(plan).is_none()
-        || supervisor_token(plan).is_none()
-        || text.contains("[supervisor]");
-    !(mode && provider && supervised)
+/// What setup does with the desk's configuration it finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeskConfigFate {
+    /// there is none, so it is written whole
+    New,
+    /// everything setup writes in it agrees with the plan
+    Kept,
+    /// what setup writes is set again, and what a person set by hand stays
+    Updated,
+    /// it no longer reads as TOML, so it is written whole again
+    Replaced,
+}
+
+impl DeskConfigFate {
+    fn words(self) -> &'static str {
+        match self {
+            DeskConfigFate::New => "will be written",
+            DeskConfigFate::Kept => "kept as it is",
+            DeskConfigFate::Updated => "updated, keeping what was set by hand",
+            DeskConfigFate::Replaced => "written again, since it does not read as TOML",
+        }
+    }
+}
+
+/// What `write_desk_config` will do with the file on disk, said in the plan
+/// before anything is changed.
+fn desk_config_fate(plan: &Plan) -> DeskConfigFate {
+    match std::fs::read_to_string(plan.desk_config()) {
+        Err(_) => DeskConfigFate::New,
+        Ok(existing) => match desk_config_merged(&existing, &desk_config_text(plan)) {
+            Ok(None) => DeskConfigFate::Kept,
+            Ok(Some(_)) => DeskConfigFate::Updated,
+            Err(()) => DeskConfigFate::Replaced,
+        },
+    }
 }
 
 /// The gateway and the assistant: cloned and built, since neither ships a
@@ -6938,6 +7056,18 @@ pub(crate) fn launchd_plists(plan: &Plan, state: &State) -> Vec<(String, String)
     out
 }
 
+/// What to say when a desk that keeps its own people has nobody to let in
+/// yet: the command that adds the first, since without one the desk opens on
+/// a login nobody can pass.
+fn nobody_yet(plan: &Plan) -> Option<String> {
+    (plan.mode == Mode::Local && plan.has(Part::Desk) && !desk_has_people(&plan.dir)).then(|| {
+        format!(
+            "add the first person, who may do everything: nils-desk user add <name> --admin --config {}",
+            plan.desk_config().display()
+        )
+    })
+}
+
 /// The last lines: what is there, where to open it, what to run. On a
 /// terminal, a card.
 fn summary(plan: &Plan, console: &Console, services: &[Service]) {
@@ -6954,6 +7084,11 @@ fn summary(plan: &Plan, console: &Console, services: &[Service]) {
     }
     println!("  the engine on port {}", plan.ports.engine);
     println!();
+    if let Some(line) = nobody_yet(plan) {
+        println!("{}", console.bold("Nobody can sign in yet"));
+        println!("  {line}");
+        println!();
+    }
     if !plan.service && plan.runtime == Runtime::Machine {
         println!("{}", console.bold("Start it"));
         for command in start_commands(plan) {
@@ -7030,6 +7165,11 @@ fn card_summary(plan: &Plan, console: &Console, services: &[Service]) {
     println!();
     for line in tui::card(p, title, &rows, &shown) {
         println!("{line}");
+    }
+    if let Some(line) = nobody_yet(plan) {
+        println!();
+        println!(" {}", p.bold("Nobody can sign in yet"));
+        println!("   {line}");
     }
     if !plan.service && plan.runtime == Runtime::Machine {
         println!();
@@ -9602,19 +9742,123 @@ mod tests {
         assert_eq!(auth["mode"], "oidc", "{auth}");
         assert_eq!(auth["trust"][0]["audience"], "abc123", "{auth}");
         assert_eq!(auth["tokens"]["tok"], INSTALLER, "{auth}");
-        assert!(write_desk_config(&plan, true).is_ok());
+        assert!(write_desk_config(&plan).is_ok());
         let desk = std::fs::read_to_string(plan.desk_config()).unwrap();
         assert!(
             desk.contains("[oidc]\nissuer = \"https://auth.example.org/application/o/nils/\"\nclient_id = \"abc123\"\nclient_secret_file = \"client-secret\""),
             "{desk}"
         );
         assert!(!desk.contains("# [oidc]"), "{desk}");
-        assert!(!desk_config_stale(&plan));
+        assert_eq!(desk_config_fate(&plan), DeskConfigFate::Kept);
         plan.oidc = Some(OidcPlan {
             client_id: "another".into(),
             ..oidc
         });
-        assert!(desk_config_stale(&plan), "another client is written again");
+        assert_eq!(
+            desk_config_fate(&plan),
+            DeskConfigFate::Updated,
+            "another client is written again"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_change_sets_what_setup_writes_in_the_desks_configuration_and_keeps_the_rest() {
+        let dir = scratch("desk-config-merge");
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        let off = desk_config_text(&p);
+        assert_eq!(desk_config_merged(&off, &off), Ok(None), "nothing changed");
+
+        // a person set a key of their own, and the desk moves to keeping its people
+        let hand = format!("session_hours = 4\n{off}");
+        p.mode = Mode::Local;
+        let local = desk_config_merged(&hand, &desk_config_text(&p))
+            .unwrap()
+            .expect("the mode changed");
+        let table: toml::Table = toml::from_str(&local).unwrap();
+        assert_eq!(table["mode"].as_str(), Some("local"), "{local}");
+        assert_eq!(table["local"]["audience"].as_str(), Some("nils"), "{local}");
+        assert_eq!(table["session_hours"].as_integer(), Some(4), "{local}");
+        assert_eq!(
+            desk_config_merged(&local, &desk_config_text(&p)),
+            Ok(None),
+            "written again with nothing more changed"
+        );
+
+        // opened to the network: where it binds and where it answers move with it
+        p.reach = Reach::Network("lab.example.org".to_string());
+        let open = desk_config_merged(&local, &desk_config_text(&p))
+            .unwrap()
+            .expect("the reach changed");
+        let table: toml::Table = toml::from_str(&open).unwrap();
+        assert_eq!(
+            table["origin"].as_str(),
+            Some("http://lab.example.org:7200")
+        );
+        assert_eq!(table["bind"].as_str(), Some("0.0.0.0:7200"));
+
+        // the assistant added and taken away: its tables come and go with it
+        p.parts.push(Part::Assistant);
+        let with = desk_config_merged(&open, &desk_config_text(&p))
+            .unwrap()
+            .expect("the assistant came");
+        let table: toml::Table = toml::from_str(&with).unwrap();
+        assert!(
+            table.contains_key("kvasir") && table.contains_key("assistant"),
+            "{with}"
+        );
+        p.parts.retain(|part| *part != Part::Assistant);
+        let without = desk_config_merged(&with, &desk_config_text(&p))
+            .unwrap()
+            .expect("the assistant went");
+        let table: toml::Table = toml::from_str(&without).unwrap();
+        assert!(
+            !table.contains_key("kvasir") && !table.contains_key("assistant"),
+            "{without}"
+        );
+        assert_eq!(table["session_hours"].as_integer(), Some(4), "{without}");
+
+        // a file that no longer reads is written again whole, and the plan says
+        // so before anything is changed
+        assert_eq!(desk_config_merged("mode = ", &off), Err(()));
+        assert_eq!(desk_config_fate(&p), DeskConfigFate::New, "no file yet");
+        std::fs::create_dir_all(p.desk_dir()).unwrap();
+        std::fs::write(p.desk_config(), "mode = ").unwrap();
+        assert_eq!(desk_config_fate(&p), DeskConfigFate::Replaced);
+        assert!(write_desk_config(&p).is_ok());
+        assert_eq!(desk_config_fate(&p), DeskConfigFate::Kept);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_desk_keeps_people_only_once_one_is_added() {
+        let dir = scratch("desk-people");
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Local;
+        assert!(!desk_has_people(&dir), "no store, nobody");
+        std::fs::create_dir_all(dir.join("desk")).unwrap();
+        let conn = rusqlite::Connection::open(dir.join("desk").join("nils-desk.sqlite")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE user (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, display TEXT NOT NULL, entitlements TEXT NOT NULL DEFAULT '[]', admin INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        // the store a desk that ran with nobody signing in has: there, and empty
+        assert!(!desk_has_people(&dir));
+        assert!(
+            nobody_yet(&p).is_some_and(|line| line.contains("nils-desk user add <name> --admin")),
+            "the end of setup says how to add the first"
+        );
+        conn.execute(
+            "INSERT INTO user VALUES ('anna', 'x', 'Anna', '[]', 1, '2026-09-13T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        assert!(desk_has_people(&dir));
+        assert!(nobody_yet(&p).is_none());
+        p.mode = Mode::Off;
+        drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9722,7 +9966,7 @@ mod tests {
             Some("http://127.0.0.1:8470")
         );
 
-        assert!(write_desk_config(&plan, true).is_ok());
+        assert!(write_desk_config(&plan).is_ok());
         let desk = std::fs::read_to_string(plan.desk_config()).unwrap();
         assert!(
             desk.contains(&format!(
@@ -9742,7 +9986,7 @@ mod tests {
                 );
             }
         }
-        assert!(!desk_config_stale(&plan));
+        assert_eq!(desk_config_fate(&plan), DeskConfigFate::Kept);
 
         plan.runtime = Runtime::Docker;
         assert_eq!(
@@ -10113,7 +10357,7 @@ mod tests {
             "the assistant is published nowhere:\n{compose}"
         );
 
-        assert!(write_desk_config(&plan, true).is_ok());
+        assert!(write_desk_config(&plan).is_ok());
         let desk = std::fs::read_to_string(plan.desk_config()).unwrap();
         assert!(desk.contains("url = \"http://nils-kvasir:7100\""), "{desk}");
         assert!(

@@ -1706,6 +1706,7 @@ dependencies = [
  "openjph-core",
  "regex",
  "ring",
+ "rusqlite",
  "serde",
  "serde-saphyr",
  "serde_json",

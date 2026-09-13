@@ -44,6 +44,8 @@ tar.workspace = true
 flate2.workspace = true
 ring.workspace = true
 toml.workspace = true
+# nils setup asks the desk's own store whether it keeps anyone yet
+rusqlite.workspace = true
 # Wave 4c §6.8: the gate seeds a synthetic tree of its own.
 dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
