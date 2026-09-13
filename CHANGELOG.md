@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- `nils supervise` reports the install `nils setup` made and acts on it, for the desk's Home and Settings. `GET /api/supervise/install` says where the install lives, how it runs, each part's version, address and service, whether a newer release is out, and the machine's card. `POST /api/supervise/restart` restarts one part, or all in order; `POST /api/supervise/reapply` has the engine mount every source place the registry holds and starts only the engine again; `POST /api/supervise/update-all` runs `nils update --all`; and `POST /api/supervise/look` says what a folder holds before it is added. A restart, a reapply or an update runs apart from the call and records how it ended, which `GET /api/supervise/runs/{id}` reads.
+
 ## [1.0.0-alpha.14] - 2026-09-13
 
 ### Fixed

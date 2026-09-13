@@ -924,29 +924,37 @@ impl Runs {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
         let id = format!("r{millis}");
-        let log = self.dir.join(format!("{id}.log"));
-        let out =
-            std::fs::File::create(&log).map_err(|e| (500, format!("{}: {e}", log.display())))?;
-        let err = out.try_clone().map_err(|e| (500, e.to_string()))?;
-        let me = std::env::current_exe().map_err(|e| (500, e.to_string()))?;
-        let child = Command::new(me)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(out)
-            .stderr(err)
-            .spawn()
-            .map_err(|e| (500, format!("{what}: {e}")))?;
         let doc = json!({
             "id": id,
             "what": what,
             "command": args,
             "state": "running",
-            "pid": child.id(),
+            "pid": null,
             "started_at": nils_registry::time::now_iso(),
             "finished_at": null,
             "exit": null,
         });
         write_run(&self.dir, &id, &doc);
+        // the recorder runs the command and writes down how it ended, so the
+        // ending is kept even when this service is restarted meanwhile
+        let mut recorder = vec![
+            "supervise".to_string(),
+            "record".to_string(),
+            "--dir".to_string(),
+            self.dir.display().to_string(),
+            "--id".to_string(),
+            id.clone(),
+            "--".to_string(),
+        ];
+        recorder.extend(args.iter().cloned());
+        let me = std::env::current_exe().map_err(|e| (500, e.to_string()))?;
+        let child = Command::new(me)
+            .args(&recorder)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| (500, format!("{what}: {e}")))?;
         children.insert(id, child);
         Ok(doc)
     }
@@ -957,28 +965,28 @@ impl Runs {
             return None;
         }
         let path = self.dir.join(format!("{id}.json"));
-        let mut doc: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+        let read = || -> Option<Value> { serde_json::from_slice(&std::fs::read(&path).ok()?).ok() };
+        let mut doc = read()?;
         if doc["state"] == "running" {
             let mut children = self.children.lock().ok()?;
-            match children.get_mut(id).map(Child::try_wait) {
-                Some(Ok(Some(status))) => {
-                    doc["state"] = json!(if status.success() { "done" } else { "failed" });
-                    doc["exit"] = json!(status.code());
-                    doc["finished_at"] = json!(nils_registry::time::now_iso());
+            let gone = match children.get_mut(id).map(Child::try_wait) {
+                Some(Ok(Some(_))) => {
                     children.remove(id);
-                    write_run(&self.dir, id, &doc);
+                    true
                 }
-                Some(Ok(None)) => {}
-                // a run from before this supervisor started: its process says whether it still runs
-                _ => {
-                    let alive = doc["pid"]
-                        .as_u64()
-                        .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists());
-                    if !alive {
-                        doc["state"] = json!("ended");
-                        doc["finished_at"] = json!(nils_registry::time::now_iso());
-                        write_run(&self.dir, id, &doc);
-                    }
+                Some(Ok(None)) => false,
+                // a run from before this service started: its recorder says whether it still runs
+                _ => !doc["pid"]
+                    .as_u64()
+                    .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists()),
+            };
+            if gone {
+                // the recorder wrote the ending before it exited
+                doc = read()?;
+                if doc["state"] == "running" {
+                    doc["state"] = json!("ended");
+                    doc["finished_at"] = json!(nils_registry::time::now_iso());
+                    write_run(&self.dir, id, &doc);
                 }
             }
         }
@@ -987,6 +995,50 @@ impl Runs {
         doc["tail"] = json!(lines[lines.len().saturating_sub(40)..].to_vec());
         Some(doc)
     }
+}
+
+/// Run one command of this binary for a run the service started, and write
+/// down how it ended. The recorder writes the ending rather than the
+/// service, so a run that outlives a restart of the service still says how
+/// it went.
+fn record(dir: &Path, id: &str, command: &[String]) -> Result<(), Exit> {
+    let path = dir.join(format!("{id}.json"));
+    let read = || -> Value {
+        std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_else(|| json!({ "id": id }))
+    };
+    let mut doc = read();
+    doc["pid"] = json!(std::process::id());
+    write_run(dir, id, &doc);
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("{id}.log")))
+        .map_err(|e| fail(e.to_string()))?;
+    let err = log.try_clone().map_err(|e| fail(e.to_string()))?;
+    let me = std::env::current_exe().map_err(|e| fail(e.to_string()))?;
+    let status = Command::new(me)
+        .args(command)
+        .stdin(Stdio::null())
+        .stdout(log)
+        .stderr(err)
+        .status();
+    let mut doc = read();
+    match status {
+        Ok(s) => {
+            doc["state"] = json!(if s.success() { "done" } else { "failed" });
+            doc["exit"] = json!(s.code());
+        }
+        Err(e) => {
+            doc["state"] = json!("failed");
+            doc["error"] = json!(e.to_string());
+        }
+    }
+    doc["finished_at"] = json!(nils_registry::time::now_iso());
+    write_run(dir, id, &doc);
+    Ok(())
 }
 
 fn write_run(dir: &Path, id: &str, doc: &Value) {
@@ -1406,6 +1458,16 @@ pub(crate) enum SuperviseCommand {
         #[arg(long)]
         part: Option<String>,
     },
+    /// Run a command of this binary for a run the service started, and record how it ended
+    #[command(hide = true)]
+    Record {
+        #[arg(long)]
+        dir: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
     /// One update by hand, without the service: what the door does for a part
     Update {
         #[arg(long, value_name = "FILE")]
@@ -1531,6 +1593,7 @@ pub(crate) fn command(command: SuperviseCommand) -> Result<(), Exit> {
             }
         }
         SuperviseCommand::Run { config, bind } => run(&config, bind),
+        SuperviseCommand::Record { dir, id, command } => record(&dir, &id, &command),
         SuperviseCommand::Restart { part } => {
             let state = recorded()?;
             crate::setup::restart_units(&state, part.as_deref()).map(|_| ())
