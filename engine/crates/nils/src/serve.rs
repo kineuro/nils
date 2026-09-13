@@ -1450,6 +1450,18 @@ fn routed(
                 .map_err(|(code, m)| Reply::error(code, m))?;
             Ok(Reply::ok(crate::schedule::calendar(registry)))
         }
+        ["api", "sources"] if get => {
+            // the Data page: each source place, how it is handled, its digests and totals
+            let recent = query
+                .get("recent")
+                .and_then(|l| l.parse::<usize>().ok())
+                .unwrap_or(12)
+                .clamp(1, 100);
+            Ok(Reply::ok(
+                crate::sources::document(registry, recent)
+                    .map_err(|e| Reply::error(500, e.to_string()))?,
+            ))
+        }
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
             // the deployment's paths bound under it. `?probe=1` measures
@@ -1551,6 +1563,7 @@ fn routed(
                     path: &path.display().to_string(),
                     guarantees,
                     probed,
+                    handling: doc["handling"].clone(),
                 },
             )
             .map_err(|e| match e {
@@ -1606,8 +1619,14 @@ fn routed(
             let guarantees = doc["guarantees"]
                 .is_object()
                 .then(|| doc["guarantees"].clone());
+            // how what comes in through the place is handled: checked here,
+            // so a value that is not a handling is refused before anything is written
+            let handling = match doc.get("handling") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(h) => Some(place::handling_of(h).map_err(|m| Reply::error(400, m))?),
+            };
             let probed = path.as_deref().map(crate::places::probe);
-            let p = place::set(
+            let mut p = place::set(
                 registry.store(),
                 id,
                 path.as_deref().map(|p| p.display().to_string()).as_deref(),
@@ -1618,6 +1637,12 @@ fn routed(
                 nils_registry::store::Error::Message(m) => Reply::error(409, m),
                 other => Reply::error(500, other.to_string()),
             })?;
+            if let Some(h) = &handling {
+                p = place::set_handling(registry.store(), id, h).map_err(|e| match e {
+                    nils_registry::store::Error::Message(m) => Reply::error(409, m),
+                    other => Reply::error(500, other.to_string()),
+                })?;
+            }
             nils_registry::audit::record(
                 registry,
                 &nils_registry::audit::Entry {
@@ -1626,7 +1651,9 @@ fn routed(
                     scope: serde_json::json!({"place": id, "name": current.name}),
                     policy: None,
                     job_id: None,
-                    details: None,
+                    details: handling.as_ref().map(|h| {
+                        serde_json::json!({"handling": {"before": current.as_json()["handling"], "after": h}})
+                    }),
                 },
             )?;
             Ok(Reply::ok(p.as_json()))
@@ -2429,6 +2456,7 @@ fn capabilities(
         "GET /api/overlays/{id}",
         "POST /api/overlays/{id}/adopt",
         "POST /api/ingest/probe",
+        "GET /api/sources",
         "GET /api/places",
         "POST /api/places",
         "PUT /api/places/{id}",
@@ -3064,6 +3092,16 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "every place",
             "Reading the places",
             "Read the places",
+        ),
+        row(
+            "GET /api/sources",
+            "reader",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading the sources",
+            "Read the sources",
         ),
         row(
             "POST /api/places",

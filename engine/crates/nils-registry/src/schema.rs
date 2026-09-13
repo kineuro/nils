@@ -798,6 +798,10 @@ fn build_registry() -> Vec<Table> {
                 req("created_at", Type::Timestamp),
                 col("updated_at", Type::Timestamp),
                 col("retired_at", Type::Timestamp),
+                // How what comes in through a source is handled, as the
+                // operator declared it: whether it arrives identified, and
+                // what a release does to it on the way out.
+                col("handling", Type::Json),
             ],
         )
         .unique(&["name"])

@@ -4,6 +4,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- `GET /api/sources` lists every place with the source role for the desk's Data page: how what comes in through it is handled, how many digests have read it with the first and the last, the newest of them in full (files seen, new, changed, unchanged and refused, the subjects and stacks each added, how many of those stacks are classified and how many wait for a person), and the source's totals of subjects, studies, sessions, stacks, refused files and stacks to sort. A source's subjects and stacks are the ones its digests created first, so something seen from two sources counts under the first. `?recent=` sets how many digests are given in full (12 by default).
+- A place declares how what comes in through it is handled: whether it arrives identified or de-identified, and what a release does on the way out (dates kept, shifted or cut to the year, UIDs remapped or preserved, faces removed). `POST /api/places` and `PUT /api/places/{id}` take it as `handling`, refuse an unknown value with the choices, and refuse dates that move with UIDs preserved, as a release's policy does; a change is audited with what it was before. A place that declared nothing reads as arriving identified, dates kept, UIDs remapped and no defacing. The registry's schema is at version 38.
+
 ## [1.0.0-alpha.17] - 2026-09-13
 
 ### Fixed

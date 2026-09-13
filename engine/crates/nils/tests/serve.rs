@@ -2251,3 +2251,133 @@ fn a_job_queued_at_the_door_runs_when_serve_runs_its_queue() {
     }
     server.finish();
 }
+
+/// The Data page's door: a source place lists its digests, what they added
+/// and how it is handled, and a handling that is not one is refused.
+#[test]
+fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
+    let home = TempDir::new("sources-home");
+    let dir = TempDir::new("sources-src");
+    for (study, sop) in [("1.2.3.A", "1.2.3.A.1.1"), ("1.2.3.B", "1.2.3.B.1.1")] {
+        let mut e = synth::minimal_mr(study, &format!("{study}.1"), sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, "P1"));
+        e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+        dir.file(
+            &format!("{study}/{sop}"),
+            &synth::part10(&MetaFields::mr(sop), &e, true),
+        );
+    }
+    let tree = dir.path().to_str().unwrap();
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    run(
+        &home,
+        &["place", "add", "incoming", tree, "--role", "source"],
+        None,
+    );
+    run(
+        &home,
+        &["digest", "--name", "first", "--no-private", tree],
+        None,
+    );
+    run(&home, &["fingerprint"], None);
+    run(
+        &home,
+        &[
+            "classify",
+            "--review-below",
+            "1.0",
+            "--pack-dir",
+            packs().to_str().unwrap(),
+        ],
+        None,
+    );
+    let server = Server::start(
+        &home,
+        6,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let ops = Some("an-operator-token-of-len");
+
+    let (status, doc) = server.request("GET", "/api/sources", None, reader);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["count"], 1, "{doc}");
+    let source = &doc["sources"][0];
+    assert_eq!(source["name"], "incoming", "{doc}");
+    assert_eq!(source["handling"]["arrives"], "identified", "{doc}");
+    assert_eq!(source["handling_declared"], false, "{doc}");
+    assert_eq!(source["digests"]["count"], 1, "{doc}");
+    assert_eq!(source["digests"]["last"]["name"], "first", "{doc}");
+    let digest = &source["digests"]["recent"][0];
+    assert_eq!(digest["files"]["seen"], 2, "{doc}");
+    assert_eq!(digest["stacks_added"], 2, "{doc}");
+    assert_eq!(digest["classified"], 2, "{doc}");
+    assert_eq!(source["totals"]["stacks"], 2, "{doc}");
+    assert_eq!(source["totals"]["studies"], 2, "{doc}");
+    assert_eq!(source["totals"]["subjects"], 1, "{doc}");
+    let id = source["id"].as_i64().unwrap();
+    let path = format!("/api/places/{id}");
+
+    // a reader reads the sources and declares nothing
+    let (status, refused) = server.request(
+        "PUT",
+        &path,
+        Some(r#"{"handling": {"arrives": "deidentified"}}"#),
+        reader,
+    );
+    assert_eq!(status, 403, "{refused}");
+    // dates that move cannot keep the original UIDs
+    let (status, refused) = server.request(
+        "PUT",
+        &path,
+        Some(r#"{"handling": {"on_release": {"dates": "shift", "uids": "preserve"}}}"#),
+        ops,
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, place) = server.request(
+        "PUT",
+        &path,
+        Some(r#"{"handling": {"arrives": "deidentified", "on_release": {"dates": "year"}}}"#),
+        ops,
+    );
+    assert_eq!(status, 200, "{place}");
+    assert_eq!(
+        place["handling"],
+        serde_json::json!({"arrives": "deidentified", "on_release": {"dates": "year", "uids": "remap", "deface": false}}),
+        "{place}"
+    );
+    assert_eq!(place["handling_declared"], true, "{place}");
+    let (_, doc) = server.request("GET", "/api/sources", None, reader);
+    assert_eq!(
+        doc["sources"][0]["handling"]["arrives"], "deidentified",
+        "{doc}"
+    );
+    let (status, caps) = server.request("GET", "/api/capabilities", None, reader);
+    assert_eq!(status, 200, "{caps}");
+    assert!(
+        caps["doors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == "GET /api/sources"),
+        "{caps}"
+    );
+    assert!(
+        caps["policy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["door"] == "GET /api/sources"),
+        "{caps}"
+    );
+    server.finish();
+}

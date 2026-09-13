@@ -38,6 +38,7 @@ mod pyramid;
 mod schedule;
 mod serve;
 mod setup;
+mod sources;
 mod summary;
 mod supervise;
 mod timeline;
@@ -1986,6 +1987,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     path: &path.display().to_string(),
                     guarantees: guarantees(backup.as_deref(), snapshots, protected, fast),
                     probed,
+                    handling: serde_json::Value::Null,
                 },
             )
             .map_err(|e| fail(e.to_string()))?;

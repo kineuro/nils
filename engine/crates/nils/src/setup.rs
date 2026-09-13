@@ -4731,6 +4731,7 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Vec<PlaceState
                     "fast": false,
                 }),
                 probed: crate::places::probe(Path::new(&path)),
+                handling: serde_json::Value::Null,
             },
         );
         match made {

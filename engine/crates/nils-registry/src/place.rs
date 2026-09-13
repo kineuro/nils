@@ -98,6 +98,9 @@ pub struct Place {
     pub created_at: String,
     pub updated_at: Option<String>,
     pub retired_at: Option<String>,
+    /// How what comes in through it is handled, as the operator declared it;
+    /// null until declared, which reads as the defaults.
+    pub handling: Value,
 }
 
 impl Place {
@@ -114,6 +117,8 @@ impl Place {
             "updated_at": self.updated_at,
             "retired_at": self.retired_at,
             "retired": self.retired_at.is_some(),
+            "handling": handling_of(&self.handling).unwrap_or_else(|_| default_handling()),
+            "handling_declared": self.handling.is_object(),
         })
     }
 
@@ -193,6 +198,8 @@ pub struct New<'a> {
     pub path: &'a str,
     pub guarantees: Value,
     pub probed: Value,
+    /// Null takes the defaults; an object is checked by `handling_of`.
+    pub handling: Value,
 }
 
 pub fn add(store: &mut Store, p: &New<'_>) -> Result<i64, Error> {
@@ -208,6 +215,11 @@ pub fn add(store: &mut Store, p: &New<'_>) -> Result<i64, Error> {
         )));
     }
     check_registry_rule(store, p.role, &p.guarantees)?;
+    let handling = if p.handling.is_null() {
+        Value::Null
+    } else {
+        handling_of(&p.handling).map_err(Error::Message)?
+    };
     let now = now_iso();
     let rows = store.insert(
         &Insert::new(
@@ -220,6 +232,7 @@ pub fn add(store: &mut Store, p: &New<'_>) -> Result<i64, Error> {
                 "probed",
                 "probed_at",
                 "created_at",
+                "handling",
             ],
         )
         .returning(&["id"]),
@@ -231,6 +244,11 @@ pub fn add(store: &mut Store, p: &New<'_>) -> Result<i64, Error> {
             Param::from(p.probed.to_string()),
             Param::from(now.as_str()),
             Param::from(now.as_str()),
+            if handling.is_null() {
+                Param::Null
+            } else {
+                Param::from(handling.to_string())
+            },
         ]],
     )?;
     rows.first()
@@ -315,6 +333,82 @@ pub fn set(
     show(store, id)?.ok_or_else(|| Error::Message(format!("no place {id}")))
 }
 
+/// How what comes in through a place is handled, as the operator declares it:
+/// whether it arrives identified, and what a release does to it on the way
+/// out. A key not given takes its default; a value not known is refused with
+/// the choices. Moving dates while preserving UIDs is refused, as a release's
+/// policy refuses it.
+pub fn handling_of(doc: &Value) -> Result<Value, String> {
+    fn pick(v: &Value, key: &str, choices: &[&str], default: &str) -> Result<String, String> {
+        match v.get(key) {
+            None | Some(Value::Null) => Ok(default.to_string()),
+            Some(Value::String(s)) if choices.contains(&s.as_str()) => Ok(s.clone()),
+            Some(other) => Err(format!(
+                "{key} is one of {}, not {other}",
+                choices.join(", ")
+            )),
+        }
+    }
+    if !(doc.is_object() || doc.is_null()) {
+        return Err("handling is an object: {arrives, on_release: {dates, uids, deface}}".into());
+    }
+    let arrives = pick(
+        doc,
+        "arrives",
+        &["identified", "deidentified"],
+        "identified",
+    )?;
+    let release = doc.get("on_release").cloned().unwrap_or(Value::Null);
+    if !(release.is_object() || release.is_null()) {
+        return Err("on_release is an object: {dates, uids, deface}".into());
+    }
+    let dates = pick(&release, "dates", &["keep", "shift", "year"], "keep")?;
+    let uids = pick(&release, "uids", &["remap", "preserve"], "remap")?;
+    let deface = match release.get("deface") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(other) => return Err(format!("deface is true or false, not {other}")),
+    };
+    if dates != "keep" && uids == "preserve" {
+        return Err(
+            "dates that move cannot keep the original UIDs: preserve UIDs only with dates kept"
+                .into(),
+        );
+    }
+    Ok(json!({
+        "arrives": arrives,
+        "on_release": {"dates": dates, "uids": uids, "deface": deface},
+    }))
+}
+
+/// The handling a place has until one is declared.
+pub fn default_handling() -> Value {
+    handling_of(&Value::Null).expect("the defaults are a handling")
+}
+
+/// Declare how what comes in through a place is handled; the value is checked
+/// and stored whole.
+pub fn set_handling(store: &mut Store, id: i64, handling: &Value) -> Result<Place, Error> {
+    let checked = handling_of(handling).map_err(Error::Message)?;
+    let d = store.dialect();
+    let now = now_iso();
+    store.execute(
+        &format!(
+            "UPDATE {} SET handling = {}, updated_at = {} WHERE id = {}",
+            store.qualified("place"),
+            d.param(1, Type::Json),
+            d.param(2, Type::Timestamp),
+            d.param(3, Type::Int)
+        ),
+        &[
+            Param::from(checked.to_string()),
+            Param::from(now.as_str()),
+            Param::Int(id),
+        ],
+    )?;
+    show(store, id)?.ok_or_else(|| Error::Message(format!("no place {id}")))
+}
+
 /// Retire a place: it stays as history, binds nothing, and its name is free
 /// to refuse a clash with, never to reuse.
 pub fn retire(store: &mut Store, id: i64) -> Result<Place, Error> {
@@ -337,13 +431,14 @@ fn select_sql(store: &Store, filter: &str) -> String {
     let t = table("place");
     let text = |c: &str| d.text_of(t.column(c).expect("place column"));
     format!(
-        "SELECT id, name, role, path, {}, {}, {}, {}, {}, {} FROM {}{filter} ORDER BY id",
+        "SELECT id, name, role, path, {}, {}, {}, {}, {}, {}, {} FROM {}{filter} ORDER BY id",
         text("guarantees"),
         text("probed"),
         text("probed_at"),
         text("created_at"),
         text("updated_at"),
         text("retired_at"),
+        text("handling"),
         store.qualified("place"),
     )
 }
@@ -366,6 +461,7 @@ fn of(r: &crate::store::Row) -> Result<Place, Error> {
         created_at: r.text(7)?.to_string(),
         updated_at: r.opt_text(8)?.map(str::to_string),
         retired_at: r.opt_text(9)?.map(str::to_string),
+        handling: json(r.opt_text(10)?),
     })
 }
 
@@ -413,4 +509,46 @@ pub fn holding(store: &mut Store, role: Role, path: &Path) -> Result<Option<Plac
 /// Any place in force that holds a path, whatever its role.
 pub fn any_holding(store: &mut Store, path: &Path) -> Result<Option<Place>, Error> {
     Ok(active(store)?.into_iter().find(|p| p.holds_path(path)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_handling, handling_of};
+    use serde_json::json;
+
+    #[test]
+    fn a_handling_not_declared_arrives_identified_keeps_dates_and_remaps_uids() {
+        assert_eq!(
+            default_handling(),
+            json!({"arrives": "identified", "on_release": {"dates": "keep", "uids": "remap", "deface": false}})
+        );
+        assert_eq!(handling_of(&json!({})).unwrap(), default_handling());
+    }
+
+    #[test]
+    fn a_handling_fills_what_it_does_not_name_and_refuses_what_it_does_not_know() {
+        let h = handling_of(
+            &json!({"arrives": "deidentified", "on_release": {"dates": "shift", "deface": true}}),
+        )
+        .unwrap();
+        assert_eq!(h["arrives"], "deidentified");
+        assert_eq!(
+            h["on_release"],
+            json!({"dates": "shift", "uids": "remap", "deface": true})
+        );
+        let why = handling_of(&json!({"arrives": "maybe"})).unwrap_err();
+        assert!(why.contains("identified, deidentified"), "{why}");
+        assert!(handling_of(&json!({"on_release": {"deface": "yes"}})).is_err());
+        assert!(handling_of(&json!("identified")).is_err());
+    }
+
+    #[test]
+    fn dates_that_move_cannot_keep_the_original_uids() {
+        for dates in ["shift", "year"] {
+            let why = handling_of(&json!({"on_release": {"dates": dates, "uids": "preserve"}}))
+                .unwrap_err();
+            assert!(why.contains("preserve UIDs only with dates kept"), "{why}");
+        }
+        assert!(handling_of(&json!({"on_release": {"dates": "keep", "uids": "preserve"}})).is_ok());
+    }
 }
