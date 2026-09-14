@@ -290,12 +290,37 @@ def bar_traceable(work: Path, db: sqlite3.Connection) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+MINTED_UID_ARC = b"2.25."
+
+
+def carries(data: bytes, value: bytes) -> bool:
+    """Whether a released file carries a source value other than by chance
+    inside a UID the release minted.
+
+    A minted UID is `2.25.` and a keyed hash in decimal, so its digits are
+    random under each run's key, and a six-digit source time such as 081500
+    turns up inside one now and then (the reference release mints 264 UIDs a
+    run). That is chance, not a leak. A hit anywhere else counts, inside a
+    longer number such as a date and time, or inside a source UID, included.
+    """
+    start = 0
+    while (at := data.find(value, start)) >= 0:
+        start = at + 1
+        lo = at
+        while lo > 0 and data[lo - 1] in b"0123456789.":
+            lo -= 1
+        if not data.startswith(MINTED_UID_ARC, lo):
+            return True
+    return False
+
+
 def bar_deidentified(work: Path) -> list[str]:
     """Read the bytes, not the report.
 
     A byte scan rather than a tag walk, because the claim is about what leaves:
     no value the source carried appears in anything released, wherever it might
-    have been copied to.
+    have been copied to, except by chance inside a UID the release minted (see
+    `carries`).
     """
     bad = []
     for tree, shifted in (("descriptive", False), ("shifted", True)):
@@ -315,7 +340,7 @@ def bar_deidentified(work: Path) -> list[str]:
             seen.add(directory)
             data = (root / path).read_bytes()
             for value in SOURCE_VALUES:
-                if value in data:
+                if carries(data, value):
                     bad.append(f"{tree}: a released file still carries {value.decode()}")
             if SOURCE_UID_ROOT in data:
                 bad.append(f"{tree}: a released file still carries a source UID")
