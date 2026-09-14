@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.24] - 2026-09-14
+
+Released beside nils-desk 1.0.0-alpha.24 so the two stay in step. The engine itself is unchanged since 1.0.0-alpha.23.
+
 ## [1.0.0-alpha.23] - 2026-09-14
 
 Released beside nils-desk 1.0.0-alpha.23 so the two stay in step, and with Kvasir 1.0.0-alpha.4 and nils-assistant 1.0.0-alpha.23, which `nils setup` now takes at those tags.
