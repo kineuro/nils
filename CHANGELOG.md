@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.23] - 2026-09-14
+
+Released beside nils-desk 1.0.0-alpha.23 so the two stay in step, and with Kvasir 1.0.0-alpha.4 and nils-assistant 1.0.0-alpha.23, which `nils setup` now takes at those tags.
+
 ### Added
 
 - `POST /api/ingest/folders` and `POST /api/ingest/look` let an operator choose what to digest from the engine's own ingest locations, where no supervisor answers. The first lists the locations, each with the place that holds it, or a page of the folders inside a folder named as `@root/relative`, filtered by name and paged after a name, at most 1,000 a page, each folder with whether it can be opened and the place that holds it. A folder's names are kept for a minute while it does not change, so a folder of a hundred thousand folders is read once for all its pages. The second says what a few folders hold: a sample of sixteen files each, read breadth first and sniffed for DICOM with their modalities and scanners, within a budget the folders share, and a folder the budget did not reach says so, to be asked for again. Nothing outside the ingest locations is listed: a parent step, a leading slash and a link that leaves its location are refused, links inside are left out as the digest leaves them out, and a listing reads the disk for at most five seconds.
