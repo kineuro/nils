@@ -4,6 +4,15 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- `nils setup` does not finish an install that would not work. Before anything is placed, the plan names what the machine lacks for it (Node 22, git and npm for the assistant; podman or docker for their runtime). While installing, a failure that leaves a chosen part unusable stops the install with the reason and exit status 1, where it was a warning under a card saying NILS was running: the desk not installed or nobody added to it, a registration at the provider not made, a place not declared, the rule packs, the assistant, its image, its gateway, its model's admission or its key, and a service that does not start. `nils uninstall` removes what was placed. An update or a repair still says these and goes on.
+- A model named in `nils setup` is sent one short chat request with its address, key and name, and taken only once it answers. Otherwise the wizard says why (nothing answered, the key was refused, no such model) and asks again, or leaves the model for later.
+
+### Fixed
+
+- The first person `nils setup` adds to a desk is held to the desk's rules as the name and the password are typed: a username of letters, digits, dots, dashes and underscores, and a password of at least eight characters. A shorter password was taken, the desk refused it at the end, and nobody could sign in. A password typed on lines keeps its spaces, as the desk's sign-in does.
+
 ## [1.0.0-alpha.22] - 2026-09-14
 
 Released beside nils-desk 1.0.0-alpha.22 so the two stay in step. The engine itself is unchanged since 1.0.0-alpha.21.
