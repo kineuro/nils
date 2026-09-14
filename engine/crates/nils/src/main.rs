@@ -27,6 +27,7 @@ mod ask_cli;
 mod ask_doors;
 mod assist_cli;
 mod backup;
+mod browse;
 mod depends;
 mod door_client;
 mod folders;

@@ -1237,9 +1237,12 @@ fn routed(
         ("GET", ["api", "classify", "signals"])
         | ("POST", ["api", "classify", "try"])
         | ("POST", ["api", "overlays"]) => Role::Reviewer,
-        ("POST", ["api", "overlays", _, "adopt"]) | ("POST", ["api", "ingest", "probe"]) => {
-            Role::Operator
-        }
+        // The ingest probe, and the desk's picker: the folders of the ingest
+        // roots and a look inside them.
+        ("POST", ["api", "overlays", _, "adopt"])
+        | ("POST", ["api", "ingest", "probe"])
+        | ("POST", ["api", "ingest", "folders"])
+        | ("POST", ["api", "ingest", "look"]) => Role::Operator,
         ("POST", ["api", "places"]) | ("PUT", ["api", "places", _]) => Role::Operator,
         // Wave 5 §10.3: the archives, their schedule and the registry's
         // calendar are an admin's to read and change.
@@ -1822,6 +1825,17 @@ fn routed(
                 "closure": closure.counts(),
                 "invalidated": invalidated,
             })))
+        }
+        // The desk's picker: the folders inside a folder of an ingest root, a
+        // page at a time, and what a few of them hold, each named as
+        // @root/relative and never outside the roots.
+        ["api", "ingest", "folders"] if post => {
+            let doc = json_body(body)?;
+            crate::browse::folders_door(&doors.ingest_roots, registry.store(), &doc)
+        }
+        ["api", "ingest", "look"] if post => {
+            let doc = json_body(body)?;
+            crate::browse::look_door(&doors.ingest_roots, &doc)
         }
         ["api", "ingest", "probe"] if post => {
             let doc = json_body(body)?;
@@ -2456,6 +2470,8 @@ fn capabilities(
         "GET /api/overlays/{id}",
         "POST /api/overlays/{id}/adopt",
         "POST /api/ingest/probe",
+        "POST /api/ingest/folders",
+        "POST /api/ingest/look",
         "GET /api/sources",
         "GET /api/places",
         "POST /api/places",
@@ -3212,6 +3228,26 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one job",
             "Probing identity rules",
             "Probed identity rules",
+        ),
+        row(
+            "POST /api/ingest/folders",
+            "operator",
+            false,
+            false,
+            "bounded",
+            "a page of at most 1,000 folders, read for at most five seconds",
+            "Listing the folders of an ingest location",
+            "Listed the folders of an ingest location",
+        ),
+        row(
+            "POST /api/ingest/look",
+            "operator",
+            false,
+            false,
+            "bounded",
+            "sixteen files sniffed a folder, for at most 64 folders within the budget",
+            "Looking inside folders",
+            "Looked inside folders",
         ),
         row(
             "GET /api/ask/schema",

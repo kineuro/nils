@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- `POST /api/ingest/folders` and `POST /api/ingest/look` let an operator choose what to digest from the engine's own ingest locations, where no supervisor answers. The first lists the locations, each with the place that holds it, or a page of the folders inside a folder named as `@root/relative`, filtered by name and paged after a name, at most 1,000 a page, each folder with whether it can be opened and the place that holds it. A folder's names are kept for a minute while it does not change, so a folder of a hundred thousand folders is read once for all its pages. The second says what a few folders hold: a sample of sixteen files each, read breadth first and sniffed for DICOM with their modalities and scanners, within a budget the folders share, and a folder the budget did not reach says so, to be asked for again. Nothing outside the ingest locations is listed: a parent step, a leading slash and a link that leaves its location are refused, links inside are left out as the digest leaves them out, and a listing reads the disk for at most five seconds.
+
 ### Changed
 
 - `nils setup` does not finish an install that would not work. Before anything is placed, the plan names what the machine lacks for it (Node 22, git and npm for the assistant; podman or docker for their runtime). While installing, a failure that leaves a chosen part unusable stops the install with the reason and exit status 1, where it was a warning under a card saying NILS was running: the desk not installed or nobody added to it, a registration at the provider not made, a place not declared, the rule packs, the assistant, its image, its gateway, its model's admission or its key, and a service that does not start. `nils uninstall` removes what was placed. An update or a repair still says these and goes on.

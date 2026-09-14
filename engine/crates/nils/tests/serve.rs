@@ -2381,3 +2381,301 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
     );
     server.finish();
 }
+
+/// The desk's picker: the ingest roots with the places that hold them, a page
+/// of the folders inside a folder, filtered and paged after a name, and a
+/// look inside a few of them, for an operator and never outside the roots.
+#[cfg(unix)]
+#[test]
+fn an_operator_pages_through_the_ingest_roots_and_looks_inside_them_never_outside() {
+    use serde_json::json;
+    use std::os::unix::fs::symlink;
+    let home = TempDir::new("browse-home");
+    let scans = TempDir::new("browse-scans");
+    let archive = TempDir::new("browse-archive");
+    let elsewhere = TempDir::new("browse-elsewhere");
+    for name in ["alpha", "Beta", "gamma"] {
+        std::fs::create_dir_all(scans.path().join(name)).unwrap();
+    }
+    scans.file("notes/readme.txt", b"not dicom");
+    scans.file("list.csv", b"a,b");
+    for (i, (series, sop)) in [
+        ("anat", "1.2.3.1.1.1"),
+        ("anat", "1.2.3.1.1.2"),
+        ("func", "1.2.3.2.1.1"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mr = synth::minimal_mr("1.2.3", &format!("1.2.3.{}", i + 1), sop);
+        scans.file(
+            &format!("sub-001/ses-1/{series}/IM_{i}"),
+            &synth::part10(&MetaFields::mr(sop), &mr, true),
+        );
+    }
+    // a link that leaves the root, and one that stays inside it: neither is listed
+    symlink(elsewhere.path(), scans.path().join("outside")).unwrap();
+    symlink(scans.path().join("alpha"), scans.path().join("alias")).unwrap();
+    // a folder of twenty thousand folders, and forty folders of one DICOM file each
+    for i in 0..20_000 {
+        std::fs::create_dir_all(archive.path().join("many").join(format!("f{i:05}"))).unwrap();
+    }
+    for i in 0..40 {
+        let sop = format!("1.2.4.{i}.1");
+        let mr = synth::minimal_mr("1.2.4", "1.2.4.1", &sop);
+        archive.file(
+            &format!("looks/l{i:02}/IM"),
+            &synth::part10(&MetaFields::mr(&sop), &mr, true),
+        );
+    }
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    let scans_path = scans.path().to_str().unwrap();
+    let looks_path = archive.path().join("looks");
+    run(
+        &home,
+        &["place", "add", "incoming", scans_path, "--role", "source"],
+        None,
+    );
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "looked",
+            looks_path.to_str().unwrap(),
+            "--role",
+            "source",
+        ],
+        None,
+    );
+    const LIMIT: usize = 45;
+    let scans_flag = format!("scans={scans_path}");
+    let archive_flag = format!("archive={}", archive.path().display());
+    let server = Server::start(
+        &home,
+        LIMIT,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--ingest-root",
+            &scans_flag,
+            "--ingest-root",
+            &archive_flag,
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let ops = Some("an-operator-token-of-len");
+    // every request counts toward the limit, and the ones not spent are spent
+    // at the end so the server stops
+    let used = std::cell::Cell::new(0usize);
+    let call = |door: &str, body: serde_json::Value, token: Option<&str>| {
+        used.set(used.get() + 1);
+        server.request("POST", door, Some(&body.to_string()), token)
+    };
+    let listed = |body: serde_json::Value| {
+        let (status, doc) = call("/api/ingest/folders", body, ops);
+        assert_eq!(status, 200, "{doc}");
+        assert_eq!(doc["timed_out"], false, "{doc}");
+        doc
+    };
+    let names = |doc: &serde_json::Value| -> Vec<String> {
+        doc["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    used.set(used.get() + 1);
+    let (status, caps) = server.request("GET", "/api/capabilities", None, ops);
+    assert_eq!(status, 200, "{caps}");
+    for door in ["POST /api/ingest/folders", "POST /api/ingest/look"] {
+        assert!(
+            caps["doors"].as_array().unwrap().iter().any(|d| d == door),
+            "{door}: {caps}"
+        );
+        assert!(
+            caps["policy"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["door"] == door && p["role"] == "operator"),
+            "{door}: {caps}"
+        );
+    }
+
+    // a reader is refused; an operator starts at the roots, sources first
+    let (status, refused) = call("/api/ingest/folders", json!({}), reader);
+    assert_eq!(status, 403, "{refused}");
+    let roots = listed(json!({}));
+    assert_eq!(roots["at"], serde_json::Value::Null, "{roots}");
+    assert_eq!(roots["roots"][0]["name"], "scans", "{roots}");
+    assert_eq!(roots["roots"][0]["path"], scans_path, "{roots}");
+    assert_eq!(
+        roots["roots"][0]["place"],
+        json!({"name": "incoming", "role": "source"}),
+        "{roots}"
+    );
+    assert_eq!(roots["roots"][1]["name"], "archive", "{roots}");
+    assert_eq!(
+        roots["roots"][1]["place"],
+        serde_json::Value::Null,
+        "{roots}"
+    );
+
+    // a folder's folders, sorted without regard to case, links left out, files counted
+    let top = listed(json!({"at": "@scans"}));
+    assert_eq!(names(&top), ["alpha", "Beta", "gamma", "notes", "sub-001"]);
+    assert_eq!(top["at"], "@scans", "{top}");
+    assert_eq!(top["rel"], "", "{top}");
+    assert_eq!(top["parent"], serde_json::Value::Null, "{top}");
+    assert_eq!(top["path"], scans_path, "{top}");
+    assert_eq!(top["files"], json!({"count": 1, "more": false}), "{top}");
+    assert_eq!(top["total"], 5, "{top}");
+    assert_eq!(top["next"], serde_json::Value::Null, "{top}");
+    assert_eq!(top["partial"], false, "{top}");
+    assert_eq!(top["place"]["name"], "incoming", "{top}");
+    assert_eq!(top["folders"][0]["readable"], true, "{top}");
+    assert_eq!(top["folders"][0]["place"]["role"], "source", "{top}");
+    // a page, the page after it, and a filter
+    let first = listed(json!({"at": "@scans", "limit": 2}));
+    assert_eq!(names(&first), ["alpha", "Beta"]);
+    assert_eq!(first["next"], "Beta", "{first}");
+    assert_eq!(first["total"], 5, "{first}");
+    let second = listed(json!({"at": "@scans", "after": "Beta", "limit": 2}));
+    assert_eq!(names(&second), ["gamma", "notes"]);
+    assert_eq!(second["next"], "notes", "{second}");
+    let filtered = listed(json!({"at": "@scans", "filter": "A"}));
+    assert_eq!(names(&filtered), ["alpha", "Beta", "gamma"]);
+    assert_eq!(filtered["total"], 3, "{filtered}");
+    let deeper = listed(json!({"at": "@scans/sub-001/ses-1/"}));
+    assert_eq!(names(&deeper), ["anat", "func"]);
+    assert_eq!(deeper["at"], "@scans/sub-001/ses-1", "{deeper}");
+    assert_eq!(deeper["parent"], "@scans/sub-001", "{deeper}");
+    // a folder inside a root that is a place of its own says so; its neighbour does not
+    let archived = listed(json!({"at": "@archive"}));
+    assert_eq!(names(&archived), ["looks", "many"]);
+    assert_eq!(archived["place"], serde_json::Value::Null, "{archived}");
+    assert_eq!(
+        archived["folders"][0]["place"],
+        json!({"name": "looked", "role": "source"}),
+        "{archived}"
+    );
+    assert_eq!(
+        archived["folders"][1]["place"],
+        serde_json::Value::Null,
+        "{archived}"
+    );
+
+    // twenty thousand folders: the first page, then every page after it, quickly
+    let began = std::time::Instant::now();
+    let mut seen: Vec<String> = Vec::new();
+    let mut after = serde_json::Value::Null;
+    loop {
+        let page = listed(json!({"at": "@archive/many", "limit": 1000, "after": after}));
+        assert_eq!(page["total"], 20_000, "{}", page["total"]);
+        seen.extend(names(&page));
+        after = page["next"].clone();
+        if after.is_null() {
+            break;
+        }
+        assert!(seen.len() < 20_000, "a next past the last page");
+    }
+    assert_eq!(seen.len(), 20_000);
+    assert_eq!(seen[0], "f00000");
+    assert_eq!(seen[19_999], "f19999");
+    assert!(seen.windows(2).all(|w| w[0] < w[1]), "in order, none twice");
+    assert!(
+        began.elapsed() < std::time::Duration::from_secs(20),
+        "twenty pages took {:?}",
+        began.elapsed()
+    );
+
+    // nothing outside the roots: a parent step, a leading slash, an unknown
+    // root, a link that leaves the root and a path of the host
+    for bad in [
+        "@scans/../x",
+        "@scans//etc",
+        "@nowhere/x",
+        "@scans/outside",
+        "/etc",
+    ] {
+        let (status, doc) = call("/api/ingest/folders", json!({"at": bad}), ops);
+        assert_eq!(status, 400, "{bad}: {doc}");
+    }
+    let nowhere = listed(json!({"at": "@scans/nothing-here"}));
+    assert_eq!(nowhere["exists"], false, "{nowhere}");
+    let file = listed(json!({"at": "@scans/list.csv"}));
+    assert_eq!(file["exists"], true, "{file}");
+    assert_eq!(file["directory"], false, "{file}");
+
+    // a look: DICOM found in a nested tree, a folder of other files, an empty
+    // one and a name that is not there, each in the order named
+    let (status, refused) = call("/api/ingest/look", json!({"at": "@scans"}), reader);
+    assert_eq!(status, 403, "{refused}");
+    let (status, seen) = call(
+        "/api/ingest/look",
+        json!({"at": "@scans", "names": ["sub-001", "notes", "alpha", "gone"]}),
+        ops,
+    );
+    assert_eq!(status, 200, "{seen}");
+    assert_eq!(seen["timed_out"], false, "{seen}");
+    assert_eq!(names(&seen), ["sub-001", "notes", "alpha", "gone"]);
+    let sub = &seen["folders"][0];
+    assert_eq!(sub["looked"], true, "{seen}");
+    assert_eq!(sub["sampled"], 3, "{seen}");
+    assert_eq!(sub["dicom"], 3, "{seen}");
+    assert_eq!(sub["modalities"]["MR"], 3, "{seen}");
+    assert_eq!(sub["files"], json!({"count": 3, "more": false}), "{seen}");
+    assert_eq!(seen["folders"][1]["sampled"], 1, "{seen}");
+    assert_eq!(seen["folders"][1]["dicom"], 0, "{seen}");
+    assert_eq!(seen["folders"][2]["sampled"], 0, "{seen}");
+    assert_eq!(
+        seen["folders"][2]["files"],
+        json!({"count": 0, "more": false}),
+        "{seen}"
+    );
+    assert_eq!(seen["folders"][3]["directory"], false, "{seen}");
+    assert_eq!(
+        seen["here"]["files"],
+        json!({"count": 1, "more": false}),
+        "{seen}"
+    );
+    assert_eq!(seen["here"]["dicom"], 0, "{seen}");
+    // past a tiny budget the folders not reached say only that
+    let (status, tiny) = call(
+        "/api/ingest/look",
+        json!({"at": "@archive/looks", "budget_ms": 1}),
+        ops,
+    );
+    assert_eq!(status, 200, "{tiny}");
+    let looks = tiny["folders"].as_array().unwrap();
+    assert_eq!(looks.len(), 40, "every folder, as none were named: {tiny}");
+    assert_eq!(looks[0]["name"], "l00", "{tiny}");
+    let unreached: Vec<&serde_json::Value> =
+        looks.iter().filter(|f| f["looked"] == false).collect();
+    assert!(!unreached.is_empty(), "{tiny}");
+    for f in unreached {
+        assert_eq!(f.as_object().unwrap().len(), 2, "{f}");
+    }
+    for body in [
+        json!({"at": "@scans/../x"}),
+        json!({"at": "@scans", "names": ["../x"]}),
+    ] {
+        let (status, doc) = call("/api/ingest/look", body.clone(), ops);
+        assert_eq!(status, 400, "{body}: {doc}");
+    }
+    assert!(used.get() <= LIMIT, "{} requests", used.get());
+    while used.get() < LIMIT {
+        used.set(used.get() + 1);
+        let _ = server.request("GET", "/api/capabilities", None, ops);
+    }
+    server.finish();
+}
