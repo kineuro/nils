@@ -831,6 +831,15 @@ pub(crate) fn checklist(
     out
 }
 
+/// How many rows of a terminal `columns` wide some lines take on screen, a
+/// line wider than the terminal going on to the next row.
+pub(crate) fn rows_on_screen(lines: &[String], columns: usize) -> usize {
+    lines
+        .iter()
+        .map(|line| visible_width(line).max(1).div_ceil(columns.max(1)))
+        .sum()
+}
+
 /// The checklist drawn in place while an install works, and again ten times
 /// a second so its spinner turns. Nothing else may write to the terminal
 /// while it is drawn, so what the install says meanwhile is kept by the
@@ -845,6 +854,9 @@ struct Board {
     title: String,
     rows: Vec<(String, TaskState, Option<Instant>)>,
     detail: String,
+    /// Lines drawn beneath the rows while the install waits on a person,
+    /// such as a code to enter somewhere.
+    notice: Vec<String>,
     started: Instant,
     /// How many lines the last drawing took, to move back over them.
     drawn: usize,
@@ -867,7 +879,11 @@ impl Board {
             })
             .collect();
         let tenths = u64::try_from(self.started.elapsed().as_millis() / 100).unwrap_or(0);
-        let lines = checklist(self.palette, &self.title, &tasks, &self.detail, tenths);
+        let mut lines = checklist(self.palette, &self.title, &tasks, &self.detail, tenths);
+        if !self.notice.is_empty() {
+            lines.push(String::new());
+            lines.extend(self.notice.iter().map(|line| format!(" {line}")));
+        }
         let mut out = String::new();
         if self.drawn > 0 {
             let _ = write!(out, "\x1b[{}F", self.drawn);
@@ -875,7 +891,9 @@ impl Board {
         for line in &lines {
             let _ = writeln!(out, "\x1b[2K{line}");
         }
-        self.drawn = lines.len();
+        // what a longer drawing left beneath, such as a notice taken away
+        out.push_str("\x1b[J");
+        self.drawn = rows_on_screen(&lines, width(1));
         let mut stdout = std::io::stdout().lock();
         let _ = stdout.write_all(out.as_bytes());
         let _ = stdout.flush();
@@ -902,6 +920,7 @@ impl Live {
                 .map(|name| (name, TaskState::Waiting, None))
                 .collect(),
             detail: String::new(),
+            notice: Vec::new(),
             started: Instant::now(),
             drawn: 0,
             stop: false,
@@ -945,6 +964,15 @@ impl Live {
     pub(crate) fn detail(&self, text: &str) {
         if let Ok(mut b) = self.board.lock() {
             b.detail = text.to_string();
+        }
+    }
+
+    /// Lines drawn beneath the rows while the install waits on a person, such
+    /// as a code to enter somewhere; none takes them away.
+    pub(crate) fn notice(&self, lines: &[String]) {
+        if let Ok(mut b) = self.board.lock() {
+            b.notice = lines.to_vec();
+            b.draw();
         }
     }
 
@@ -1403,6 +1431,20 @@ mod tests {
         );
         assert!(lines[4].starts_with(" ✗ gateway"), "{lines:?}");
         assert!(lines[5].starts_with(" – assistant"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_notice_is_counted_by_the_rows_it_takes_on_screen() {
+        // a link to open and a code, wider than a narrow terminal, wraps onto
+        // a second row, which the drawing moves back over
+        let lines = vec![
+            " Installing".to_string(),
+            String::new(),
+            format!(" open {} and enter the code WXYZ-1234", "x".repeat(70)),
+        ];
+        assert_eq!(rows_on_screen(&lines, 120), 3);
+        assert_eq!(rows_on_screen(&lines, 80), 4);
+        assert_eq!(rows_on_screen(&lines[..2], 80), 2, "an empty line is a row");
     }
 
     #[test]
