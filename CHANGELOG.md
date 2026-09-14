@@ -4,6 +4,12 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.26] - 2026-09-14
+
+### Fixed
+
+- `nils setup` pins Kvasir 1.0.0-alpha.6, which keeps a stream open while a model reads a long prompt. On the processor, llama.cpp read a prompt of the assistant's for seven minutes before its first token, the answer stayed silent, and a question to the assistant failed as "terminated" with nothing written.
+
 ## [1.0.0-alpha.25] - 2026-09-14
 
 ### Added
