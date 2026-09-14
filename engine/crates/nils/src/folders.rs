@@ -39,8 +39,8 @@ pub(crate) fn answer(path: Option<&Path>) -> Value {
 
 /// Work that may wait on a disk, done in a thread of its own: its answer when
 /// it ends within `wait`, else None, and the thread is left to end in its own
-/// time.
-fn within<T: Send + 'static>(
+/// time. The engine's own folder doors read the ingest roots the same way.
+pub(crate) fn within<T: Send + 'static>(
     wait: Duration,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {

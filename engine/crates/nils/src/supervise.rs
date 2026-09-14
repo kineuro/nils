@@ -1200,27 +1200,51 @@ fn files_of(root: &Path, deadline: Instant) -> (Vec<PathBuf>, bool) {
 /// One folder in the words a person decides by: its files, a sample sniffed
 /// for DICOM, and what the DICOM in the sample is.
 fn describe(name: &str, files: &[PathBuf], capped: bool) -> Value {
-    use dicom_dictionary_std::tags;
     let step = (files.len() / LOOK_SAMPLE).max(1);
     let sample: Vec<&PathBuf> = files.iter().step_by(step).take(LOOK_SAMPLE).collect();
-    let mut dicom = 0u64;
-    let mut modalities: BTreeMap<String, u64> = BTreeMap::new();
-    let mut scanners: BTreeSet<String> = BTreeSet::new();
+    let mut seen = Seen::default();
     for file in &sample {
+        seen.add(file);
+    }
+    json!({
+        "name": name,
+        "files": files.len(),
+        "capped": capped,
+        "sampled": sample.len(),
+        "dicom": seen.dicom,
+        "modalities": seen.modalities,
+        "scanners": seen.scanners.len(),
+    })
+}
+
+/// What a sample of files is: how many are DICOM, and what those are by
+/// modality and scanner. Only the equipment fields of a header are read,
+/// never a person's. The supervisor's look and the engine's both sniff with it.
+#[derive(Debug, Default)]
+pub(crate) struct Seen {
+    pub(crate) dicom: u64,
+    pub(crate) modalities: BTreeMap<String, u64>,
+    pub(crate) scanners: BTreeSet<String>,
+}
+
+impl Seen {
+    /// Sniff one file, and read what it is when it is DICOM.
+    pub(crate) fn add(&mut self, file: &Path) {
+        use dicom_dictionary_std::tags;
         match nils_dicom::sniff::sniff(file) {
             nils_dicom::sniff::Sniff::Part10 => {}
             nils_dicom::sniff::Sniff::BareDataset => {
-                dicom += 1;
-                continue;
+                self.dicom += 1;
+                return;
             }
-            _ => continue,
+            _ => return,
         }
-        dicom += 1;
+        self.dicom += 1;
         let Ok(object) = dicom_object::OpenFileOptions::new()
             .read_until(tags::PIXEL_DATA)
             .open_file(file)
         else {
-            continue;
+            return;
         };
         let word = |tag| {
             object
@@ -1230,7 +1254,8 @@ fn describe(name: &str, files: &[PathBuf], capped: bool) -> Value {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
         };
-        *modalities
+        *self
+            .modalities
             .entry(word(tags::MODALITY).unwrap_or_else(|| "unknown".to_string()))
             .or_default() += 1;
         let scanner = format!(
@@ -1239,18 +1264,9 @@ fn describe(name: &str, files: &[PathBuf], capped: bool) -> Value {
             word(tags::MANUFACTURER_MODEL_NAME).unwrap_or_default()
         );
         if !scanner.trim().is_empty() {
-            scanners.insert(scanner.trim().to_string());
+            self.scanners.insert(scanner.trim().to_string());
         }
     }
-    json!({
-        "name": name,
-        "files": files.len(),
-        "capped": capped,
-        "sampled": sample.len(),
-        "dicom": dicom,
-        "modalities": modalities,
-        "scanners": scanners.len(),
-    })
 }
 
 fn body_json(request: &mut Request) -> Value {
