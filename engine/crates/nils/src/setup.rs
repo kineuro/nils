@@ -905,13 +905,14 @@ fn llama_devices(server: &Path) -> Vec<String> {
     devices_listed(&said)
 }
 
-/// The device lines of `--list-devices`: those under "Available devices".
+/// The device lines of `--list-devices`: those under "Available devices",
+/// where a machine with none has the one line `(none)`.
 fn devices_listed(said: &str) -> Vec<String> {
     said.lines()
         .skip_while(|line| !line.trim_start().starts_with("Available devices"))
         .skip(1)
         .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.is_empty() && *line != "(none)")
         .map(str::to_string)
         .collect()
 }
@@ -13518,6 +13519,8 @@ mod tests {
             ]
         );
         assert!(devices_listed("Available devices:\n").is_empty());
+        // a machine with no graphics device, as the CPU build says it
+        assert!(devices_listed("Available devices:\n  (none)\n").is_empty());
     }
 
     /// A build's archive shaped as llama.cpp publishes one: a folder of the
