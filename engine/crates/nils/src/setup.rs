@@ -91,6 +91,42 @@ const ASSISTANT_REPO: &str = "https://github.com/kineuro/nils-assistant";
 const KVASIR_REF: &str = "v1.0.0-alpha.4";
 const ASSISTANT_REF: &str = "v1.0.0-alpha.23";
 
+/// llama.cpp's server, which runs the models Kvasir downloads once an admin
+/// starts one (record 24): the build this version takes, where its archives
+/// are published, and the sha256 of every archive it may take. A mirror that
+/// NILS_SETUP_LLAMA_RELEASES names is held to the same digests.
+const LLAMA_BUILD: &str = "b10964";
+const LLAMA_RELEASES: &str = "https://github.com/ggml-org/llama.cpp/releases/download";
+const LLAMA_ARCHIVES: [(&str, &str); 6] = [
+    (
+        "ubuntu-x64",
+        "9abf88aea48a55d0f80edb1ee20220b186848cca0b4e919d71518cfd7ca67443",
+    ),
+    (
+        "ubuntu-vulkan-x64",
+        "55d1e58e14c11eedea090bf088fdeefbfe7b4b09ee03bf6dba9834651769afcf",
+    ),
+    (
+        "ubuntu-arm64",
+        "5f0e9c95d970892e43380f82ebcab960edfd20a1cd0f7abffa13b29fdb924949",
+    ),
+    (
+        "ubuntu-vulkan-arm64",
+        "f7864baa0edf5a059fb42c5efb5aceb96075aa1f41e6c3142b71ca69286cb0bb",
+    ),
+    (
+        "macos-arm64",
+        "033c845c1df9bf945ff37bb193238b40910b2244be3e1e637b2ceb5878f1a6f5",
+    ),
+    (
+        "macos-x64",
+        "03430a394d0a169a5e6d8f01c09f48cf58eb026af6fc95940a4a528e2e50cf38",
+    ),
+];
+
+/// The name the setup record keeps llama.cpp's build under, and its folder.
+const LLAMA_PART: &str = "llama.cpp";
+
 /// Inside a container, everything lives under one prefix.
 const IN_DESK: &str = "/srv/nils/desk";
 
@@ -505,6 +541,9 @@ pub(crate) struct Ports {
     /// The supervisor on this host, which the desk asks about the install.
     #[serde(default = "default_supervisor_port")]
     pub(crate) supervisor: u16,
+    /// llama.cpp on this host, which runs the models Kvasir starts.
+    #[serde(default = "default_llama_port")]
+    pub(crate) llama: u16,
 }
 
 fn default_postgres_port() -> u16 {
@@ -513,6 +552,10 @@ fn default_postgres_port() -> u16 {
 
 fn default_supervisor_port() -> u16 {
     8470
+}
+
+fn default_llama_port() -> u16 {
+    7110
 }
 
 impl Default for Ports {
@@ -524,6 +567,7 @@ impl Default for Ports {
             assistant: 7300,
             postgres: default_postgres_port(),
             supervisor: default_supervisor_port(),
+            llama: default_llama_port(),
         }
     }
 }
@@ -628,6 +672,250 @@ pub(crate) fn probe_card() -> Option<Card> {
     None
 }
 
+// ------------------------------------------------------- the model runtime
+
+/// The llama.cpp build a machine takes (record 24), and whether a Vulkan
+/// build finds the loader it needs there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Llama {
+    pub(crate) variant: &'static str,
+    /// False only for a Vulkan build on a Linux machine with no
+    /// libvulkan.so.1, where a model runs on the processor instead.
+    pub(crate) loader: bool,
+}
+
+/// The archive a machine takes by its system, its processor and whether it
+/// has graphics: macOS by its processor; Linux the Vulkan build where there
+/// is a card or a render node, and the CPU build otherwise. None where
+/// llama.cpp publishes no build.
+fn llama_variant(os: &str, arch: &str, graphics: bool) -> Option<&'static str> {
+    Some(match (os, arch, graphics) {
+        ("macos", "aarch64", _) => "macos-arm64",
+        ("macos", "x86_64", _) => "macos-x64",
+        ("linux", "x86_64", true) => "ubuntu-vulkan-x64",
+        ("linux", "x86_64", false) => "ubuntu-x64",
+        ("linux", "aarch64", true) => "ubuntu-vulkan-arm64",
+        ("linux", "aarch64", false) => "ubuntu-arm64",
+        _ => return None,
+    })
+}
+
+/// Whether this machine has a render node, which gives a Vulkan build a
+/// device where the card probe names none, an integrated one among them.
+fn render_node() -> bool {
+    std::fs::read_dir("/dev/dri").is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+    })
+}
+
+/// Whether the Vulkan loader is on this machine, as the dynamic linker lists
+/// it or where the distributions put it.
+fn vulkan_loader() -> bool {
+    let listed = ["ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"]
+        .iter()
+        .find_map(|ldconfig| run_quiet(ldconfig, &["-p"]))
+        .is_some_and(|list| list.contains("libvulkan.so.1"));
+    listed
+        || [
+            "/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
+            "/usr/lib/aarch64-linux-gnu/libvulkan.so.1",
+            "/usr/lib64/libvulkan.so.1",
+            "/usr/lib/libvulkan.so.1",
+        ]
+        .iter()
+        .any(|path| Path::new(path).exists())
+}
+
+/// The build this machine takes, where llama.cpp publishes one for it.
+fn llama_here(card: bool) -> Option<Llama> {
+    let variant = llama_variant(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        card || render_node(),
+    )?;
+    Some(Llama {
+        variant,
+        loader: !variant.contains("vulkan") || vulkan_loader(),
+    })
+}
+
+/// The variant of a build folder a record names, `<build>-<variant>`.
+fn llama_recorded(path: &str) -> Option<&'static str> {
+    let name = Path::new(path).file_name()?.to_str()?;
+    let (_, variant) = name.split_once('-')?;
+    LLAMA_ARCHIVES
+        .iter()
+        .map(|(v, _)| *v)
+        .find(|v| *v == variant)
+}
+
+/// A build as a person reads it: what it runs a model on.
+fn llama_words(variant: &str) -> &'static str {
+    if variant.contains("vulkan") {
+        "Vulkan"
+    } else if variant.starts_with("macos") {
+        "Metal"
+    } else {
+        "CPU"
+    }
+}
+
+/// The sha256 this version takes for one variant's archive.
+fn llama_digest(variant: &str) -> Option<&'static str> {
+    LLAMA_ARCHIVES
+        .iter()
+        .find(|(v, _)| *v == variant)
+        .map(|(_, digest)| *digest)
+}
+
+/// Where the archives come from: llama.cpp's releases, or a mirror of them.
+fn llama_base() -> String {
+    std::env::var("NILS_SETUP_LLAMA_RELEASES")
+        .ok()
+        .map(|base| base.trim().to_string())
+        .filter(|base| !base.is_empty())
+        .unwrap_or_else(|| LLAMA_RELEASES.to_string())
+}
+
+/// One variant's archive of the pinned build, under a base.
+fn llama_archive(base: &str, variant: &str) -> String {
+    format!(
+        "{}/{LLAMA_BUILD}/llama-{LLAMA_BUILD}-bin-{variant}.tar.gz",
+        base.trim_end_matches('/')
+    )
+}
+
+/// Where a build is unpacked: `<dir>/llama.cpp/<build>-<variant>`.
+fn llama_build_dir(dir: &Path, variant: &str) -> PathBuf {
+    dir.join(LLAMA_PART)
+        .join(format!("{LLAMA_BUILD}-{variant}"))
+}
+
+/// An archive unpacked into `into` without its `llama-<build>/` folder, once
+/// its sha256 is `want`. Where it is not, where the archive names a path
+/// outside that folder or holds no llama-server, nothing is left at `into`
+/// and a build already there stays.
+fn unpack_llama(bytes: &[u8], want: &str, into: &Path) -> Result<(), String> {
+    let got = crate::supervise::sha256_hex(bytes);
+    if got != want {
+        return Err(format!(
+            "its sha256 is {got}, and this version of nils takes only {want}"
+        ));
+    }
+    let name = into
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let partial = into.with_file_name(format!(".{name}.partial"));
+    let _ = std::fs::remove_dir_all(&partial);
+    if let Err(e) = unpack_into(bytes, &partial) {
+        let _ = std::fs::remove_dir_all(&partial);
+        return Err(e);
+    }
+    let _ = std::fs::remove_dir_all(into);
+    std::fs::rename(&partial, into).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&partial);
+        format!("{}: {e}", into.display())
+    })
+}
+
+/// The entries of a build's archive under `to`, each without the build's own
+/// folder, its links kept as links.
+fn unpack_into(bytes: &[u8], to: &Path) -> Result<(), String> {
+    use std::path::Component;
+    let top = format!("llama-{LLAMA_BUILD}");
+    std::fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    let entries = archive.entries().map_err(|e| format!("the archive: {e}"))?;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| format!("the archive: {e}"))?;
+        let path = entry
+            .path()
+            .map_err(|e| format!("the archive: {e}"))?
+            .into_owned();
+        let outside = || format!("the archive names {}, outside {top}/", path.display());
+        let mut parts = path.components();
+        if !matches!(parts.next(), Some(Component::Normal(first)) if first.to_str() == Some(top.as_str()))
+        {
+            return Err(outside());
+        }
+        let rest: PathBuf = parts.collect();
+        if rest.as_os_str().is_empty() {
+            continue;
+        }
+        if !rest.components().all(|c| matches!(c, Component::Normal(_))) {
+            return Err(outside());
+        }
+        if entry.header().entry_type().is_hard_link() {
+            return Err(format!(
+                "the archive holds {} as a hard link",
+                path.display()
+            ));
+        }
+        let at = to.join(&rest);
+        if let Some(parent) = at.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        entry
+            .unpack(&at)
+            .map_err(|e| format!("{}: {e}", rest.display()))?;
+    }
+    if !to.join("llama-server").is_file() {
+        return Err(format!("the archive holds no {top}/llama-server"));
+    }
+    Ok(())
+}
+
+/// The devices a build runs a model on, as `llama-server --list-devices`
+/// names them; none where it names none, or says nothing within ten seconds.
+fn llama_devices(server: &Path) -> Vec<String> {
+    use std::io::Read as _;
+    let Ok(mut child) = Command::new(server)
+        .arg("--list-devices")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < std::time::Duration::from_secs(10) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Vec::new();
+            }
+        }
+    }
+    let mut said = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut said);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut said);
+    }
+    devices_listed(&said)
+}
+
+/// The device lines of `--list-devices`: those under "Available devices".
+fn devices_listed(said: &str) -> Vec<String> {
+    said.lines()
+        .skip_while(|line| !line.trim_start().starts_with("Available devices"))
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Run a command for its output, or nothing at all when it is not there.
 fn run_quiet(program: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(program).args(args).output().ok()?;
@@ -684,14 +972,18 @@ struct Facts {
     podman: bool,
     docker: Result<(), DockerAbsent>,
     card: Option<Card>,
+    /// The llama.cpp build this machine takes, where there is one.
+    llama: Option<Llama>,
 }
 
 impl Facts {
     fn probe() -> Facts {
+        let card = probe_card();
         Facts {
             podman: have("podman"),
             docker: docker_answers(),
-            card: probe_card(),
+            llama: llama_here(card.is_some()),
+            card,
         }
     }
 }
@@ -1927,6 +2219,9 @@ pub(crate) struct Plan {
     pub(crate) postgres: Option<ManagedPostgres>,
     /// The provider the desk signs people in at, in `oidc` mode, once named.
     pub(crate) oidc: Option<OidcPlan>,
+    /// The llama.cpp build the models Kvasir starts run on, where the plan
+    /// has the assistant and llama.cpp publishes a build for this machine.
+    pub(crate) llama: Option<Llama>,
 }
 
 /// The provider the desk signs people in at, as the desk, the engine and
@@ -2034,6 +2329,13 @@ impl Plan {
         self.desk_dir().join("nils-desk.toml")
     }
 
+    /// Where llama.cpp and Kvasir both read the runtime's presets and key,
+    /// and where llama.cpp writes its log, at the same path inside a
+    /// container and out.
+    fn runtime_dir(&self) -> PathBuf {
+        self.dir.join("kvasir").join("runtime")
+    }
+
     /// The data of a Postgres this setup runs, and its environment, which
     /// holds the password.
     fn postgres_dir(&self) -> PathBuf {
@@ -2123,6 +2425,28 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
             .filter(|r| r.container())
             .map(|runtime| ManagedPostgres { runtime }),
         oidc: state.oidc.clone(),
+        llama: llama_of_state(state),
+    }
+}
+
+/// The llama.cpp build of a recorded install with the assistant: the one on
+/// record, or where none is on record yet, the one this machine takes.
+fn llama_of_state(state: &State) -> Option<Llama> {
+    let runtime = Runtime::parse(&state.runtime).unwrap_or(Runtime::Machine);
+    if !state.parts.contains_key("assistant") || (runtime.container() && cfg!(target_os = "macos"))
+    {
+        return None;
+    }
+    match state
+        .parts
+        .get(LLAMA_PART)
+        .and_then(|p| llama_recorded(&p.path))
+    {
+        Some(variant) => Some(Llama {
+            variant,
+            loader: !variant.contains("vulkan") || vulkan_loader(),
+        }),
+        None => llama_here(probe_card().is_some()),
     }
 }
 
@@ -3328,6 +3652,11 @@ fn questions(
     let mut ports = existing.map(|s| s.ports).unwrap_or_default();
     let ours = |part: &str| existing.is_some_and(|s| s.parts.contains_key(part));
     let assistant = parts.contains(&Part::Assistant);
+    // llama.cpp runs beside Kvasir wherever there is a build for this machine;
+    // podman and docker on macOS run in a machine of their own, where it does not
+    let llama = facts
+        .llama
+        .filter(|_| assistant && !(runtime.container() && cfg!(target_os = "macos")));
     let mut chosen: Vec<u16> = Vec::new();
     // a supervisor this setup started holds its own port on a rerun
     let supervised = dir.join("supervise").join("supervise.toml").exists();
@@ -3354,6 +3683,7 @@ fn questions(
             postgres.is_some(),
         ),
         ("the supervisor", "supervisor", &mut ports.supervisor, true),
+        ("llama.cpp", LLAMA_PART, &mut ports.llama, llama.is_some()),
     ] {
         if listens
             && !ours(part)
@@ -3435,6 +3765,7 @@ fn questions(
         channel: args.channel.clone(),
         version: update::VERSION.to_string(),
         oidc,
+        llama,
     };
 
     // 8. the summary, then the work
@@ -3604,6 +3935,9 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         stages.push((Stage::Desk, "desk configuration".to_string()));
     }
     if plan.has(Part::Assistant) {
+        if plan.llama.is_some() {
+            stages.push((Stage::Runtime, LLAMA_PART.to_string()));
+        }
         stages.push((Stage::Kvasir, "Kvasir configuration".to_string()));
     }
     stages.push((Stage::Services, "services".to_string()));
@@ -3626,6 +3960,8 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
 /// configuration written and Kvasir's mended, and the services written and
 /// started.
 fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service>, Exit> {
+    // what a repair places is recorded, so the services and an uninstall know it
+    let mut state = state.clone();
     // A Postgres this setup runs, started again with its data and password.
     if let Some(pg) = plan.postgres {
         console.begin(Stage::Postgres);
@@ -3645,6 +3981,15 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     // is written where it is missing; the models are added and the key is
     // made during the start-up below, once Kvasir answers.
     if plan.has(Part::Assistant) {
+        if plan.llama.is_some() {
+            console.begin(Stage::Runtime);
+            let before = state.parts.get(LLAMA_PART).map(|p| p.path.clone());
+            if install_llama(plan, &mut state, console).is_ok()
+                && state.parts.get(LLAMA_PART).map(|p| p.path.clone()) != before
+            {
+                let _ = write_state(&state);
+            }
+        }
         console.begin(Stage::Kvasir);
         if let Err(e) = configure_kvasir(plan, console, None) {
             console.warn(&format!(
@@ -3662,7 +4007,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     console.begin(Stage::Services);
     let mut services = Vec::new();
     if plan.service {
-        match start_everything(plan, state, console, None) {
+        match start_everything(plan, &state, console, None) {
             Ok(started) => {
                 console.report(&started);
                 services = started.services;
@@ -3680,7 +4025,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     if plan.has(Part::Assistant) && !(plan.service && (systemd || plan.runtime.container())) {
         ready_kvasir(plan, console, None)?;
     }
-    start_supervisor(plan, state, console);
+    start_supervisor(plan, &state, console);
     Ok(services)
 }
 
@@ -3728,6 +4073,9 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
                 "and the assistant built here and run in {NODE_IMAGE}, their directories mounted"
             ),
         ));
+    }
+    if plan.has(Part::Assistant) {
+        rows.push((LLAMA_PART, llama_row(plan)));
     }
     rows.push((
         "registry",
@@ -3805,6 +4153,34 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
     rows
 }
 
+/// llama.cpp's row of the plan: the build, what it runs a model on, where it
+/// listens, and what a Linux machine without a Vulkan loader should know.
+fn llama_row(plan: &Plan) -> String {
+    let Some(llama) = plan.llama else {
+        return "no build for this machine, so a model Kvasir downloads is started with a model \
+                server of your own"
+            .to_string();
+    };
+    let mut row = format!(
+        "{LLAMA_BUILD}, the {} build, runs the models Kvasir starts, on {}:{}",
+        llama_words(llama.variant),
+        match plan.runtime {
+            Runtime::Docker => "docker's bridge",
+            _ => "127.0.0.1",
+        },
+        plan.ports.llama
+    );
+    if !llama.loader {
+        row.push_str(&format!("; {}", NO_VULKAN_LOADER));
+    }
+    row
+}
+
+/// What a Linux machine with a card and no Vulkan loader is told.
+const NO_VULKAN_LOADER: &str = "this machine has no Vulkan loader, so a model runs on the \
+                                processor until libvulkan1 (Debian, Ubuntu) or vulkan-loader \
+                                (Fedora) is installed";
+
 /// The plan's rows, as lines.
 fn plan_text(plan: &Plan, console: &Console) -> String {
     let mut out = String::new();
@@ -3856,6 +4232,32 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
             }
         }
     }
+    // llama.cpp runs on this machine whichever runtime the parts use
+    if plan.has(Part::Assistant)
+        && plan.service
+        && let Some(llama) = plan.llama
+    {
+        let build = llama_build_dir(&plan.dir, llama.variant);
+        let (name, text) = if cfg!(target_os = "macos") {
+            (
+                "se.kineuro.nils-llama.plist".to_string(),
+                launchd_plist(
+                    "se.kineuro.nils-llama",
+                    &llama_argv(plan, &build, "127.0.0.1"),
+                    &plan.runtime_dir().display().to_string(),
+                ),
+            )
+        } else {
+            (
+                "nils-llama.service".to_string(),
+                llama_unit(plan, &build, &llama_host(plan)),
+            )
+        };
+        let _ = writeln!(out, "\n  {}", console.bold(&name));
+        for line in text.lines() {
+            let _ = writeln!(out, "{}", indent(line));
+        }
+    }
     let _ = writeln!(out, "\n{}", console.bold("  places"));
     for spec in place_specs(plan) {
         let _ = writeln!(out, "    {}", place_argv(&spec).join(" "));
@@ -3872,6 +4274,7 @@ enum Stage {
     Postgres,
     Registry,
     Desk,
+    Runtime,
     Kvasir,
     Assistant,
     Places,
@@ -3903,6 +4306,9 @@ fn stages(plan: &Plan, only_update: bool) -> Vec<(Stage, String)> {
         out.push((Stage::Desk, "desk".to_string()));
     }
     if plan.has(Part::Assistant) {
+        if plan.llama.is_some() {
+            out.push((Stage::Runtime, LLAMA_PART.to_string()));
+        }
         out.push((Stage::Kvasir, "Kvasir".to_string()));
         out.push((Stage::Assistant, "assistant".to_string()));
     }
@@ -4248,6 +4654,14 @@ fn place(
         }
     }
 
+    // llama.cpp, which runs the models Kvasir starts: here before Kvasir is
+    // configured, since kvasir.json names only a build that is here.
+    if plan.has(Part::Assistant) && plan.llama.is_some() {
+        console.begin(Stage::Runtime);
+        install_llama(plan, state, console)?;
+        checkpoint(state);
+    }
+
     // The assistant and Kvasir, which are built rather than downloaded.
     if plan.has(Part::Assistant) {
         console.begin(Stage::Kvasir);
@@ -4324,6 +4738,11 @@ fn place(
         };
         for line in &rest {
             run(line)?;
+        }
+        if let Some(line) = llama_command(plan, state) {
+            console.say(&format!(
+                "start llama.cpp, which runs the models Kvasir starts: {line}"
+            ));
         }
         if !assistant.is_empty() {
             ready_kvasir(plan, console, answers.model.as_ref())?;
@@ -6244,6 +6663,7 @@ fn configure_kvasir(
             fields.remove("backends");
             fields.remove("oauth");
         }
+        runtime_into_kvasir(&mut value, plan);
 
         write_secret_bytes(
             &config,
@@ -6274,6 +6694,9 @@ fn configure_kvasir(
             }
         }
         None => {}
+    }
+    if llama_built(plan).is_some() {
+        write_runtime_files(plan)?;
     }
     Ok(())
 }
@@ -6513,6 +6936,8 @@ fn repair_kvasir(plan: &Plan, console: &mut Console) -> Result<(), Exit> {
         ));
         value["purposes"] = serde_json::json!(purposes);
     }
+    // where llama.cpp is, and how Kvasir in a container reaches this machine
+    mended.extend(runtime_into_kvasir(&mut value, plan));
 
     // The key file an earlier wizard wrote for the model: its key is kept
     // for Kvasir above, or Kvasir holds it already.
@@ -6539,6 +6964,200 @@ fn repair_kvasir(plan: &Plan, console: &mut Console) -> Result<(), Exit> {
     )?;
     for line in mended {
         console.note(&format!("{}: {line}", config.display()));
+    }
+    Ok(())
+}
+
+/// The runtime's binary a plan names, where its build is here.
+fn llama_built(plan: &Plan) -> Option<PathBuf> {
+    plan.llama
+        .map(|l| llama_build_dir(&plan.dir, l.variant).join("llama-server"))
+        .filter(|server| server.is_file())
+}
+
+/// llama.cpp's address as Kvasir dials it from where Kvasir runs: this
+/// machine's loopback, the loopback a pod is given, or docker's name for this
+/// machine.
+fn llama_url(plan: &Plan) -> String {
+    let port = plan.ports.llama;
+    match plan.runtime {
+        Runtime::Machine => format!("http://127.0.0.1:{port}"),
+        Runtime::Podman if plan.host_loopback => format!("http://{HOST_LOOPBACK_IN_POD}:{port}"),
+        Runtime::Podman => format!("http://host.containers.internal:{port}"),
+        Runtime::Docker => format!("http://host.docker.internal:{port}"),
+    }
+}
+
+/// The name Kvasir in a container reaches this machine's own loopback by,
+/// which it dials in place of a loopback address an admin gives it; none on
+/// the machine.
+fn host_alias(plan: &Plan) -> Option<String> {
+    match plan.runtime {
+        Runtime::Machine => None,
+        Runtime::Podman if plan.host_loopback => Some(HOST_LOOPBACK_IN_POD.to_string()),
+        runtime => host_from_container(runtime).map(str::to_string),
+    }
+}
+
+/// kvasir.json told where llama.cpp is and how Kvasir reaches this machine,
+/// the rest of it kept: `local.runtime` where the build is here, and
+/// `hostAlias` where Kvasir runs in a container. What changed, in words.
+fn runtime_into_kvasir(value: &mut serde_json::Value, plan: &Plan) -> Vec<String> {
+    let mut said = Vec::new();
+    if !value.is_object() {
+        return said;
+    }
+    if let Some(llama) = plan.llama.filter(|_| llama_built(plan).is_some()) {
+        let dir = plan.runtime_dir();
+        let runtime = serde_json::json!({
+            "url": llama_url(plan),
+            "keyFile": dir.join("runtime.key").display().to_string(),
+            "presets": dir.join("models.ini").display().to_string(),
+            "log": dir.join("runtime.log").display().to_string(),
+            "build": LLAMA_BUILD,
+            "variant": llama.variant,
+        });
+        if value["local"]["runtime"] != runtime {
+            if !value["local"].is_object() {
+                value["local"] = serde_json::json!({});
+            }
+            value["local"]["runtime"] = runtime;
+            said.push(format!(
+                "names llama.cpp {LLAMA_BUILD}, which runs the models Kvasir starts"
+            ));
+        }
+    }
+    match host_alias(plan) {
+        Some(alias) if value["hostAlias"].as_str() != Some(alias.as_str()) => {
+            said.push(format!(
+                "reaches this machine's own loopback as {alias}, from the container it runs in"
+            ));
+            value["hostAlias"] = serde_json::json!(alias);
+        }
+        None => {
+            if let Some(fields) = value.as_object_mut()
+                && fields.remove("hostAlias").is_some()
+            {
+                said.push("names no host alias, since it runs on the machine".to_string());
+            }
+        }
+        _ => {}
+    }
+    said
+}
+
+/// The runtime's files in Kvasir's folder: the key only Kvasir and llama.cpp
+/// read, made once, and the presets holding only their defaults' section
+/// until Kvasir writes the models it starts into them. A file already there
+/// stays.
+fn write_runtime_files(plan: &Plan) -> Result<(), Exit> {
+    let dir = plan.runtime_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
+    let key = dir.join("runtime.key");
+    if !std::fs::read_to_string(&key).is_ok_and(|k| !k.trim().is_empty()) {
+        write_secret(&key, &generated_passphrase())?;
+    }
+    let presets = dir.join("models.ini");
+    if !presets.exists() {
+        std::fs::write(&presets, "[*]\n")
+            .map_err(|e| fail(format!("{}: {e}", presets.display())))?;
+    }
+    Ok(())
+}
+
+/// kvasir.json and the runtime's files brought to what a plan names, for an
+/// update, which mends nothing else of Kvasir's.
+fn mend_kvasir_runtime(plan: &Plan) {
+    let config = plan.dir.join("kvasir").join("kvasir.json");
+    if let Ok(text) = std::fs::read_to_string(&config)
+        && let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text)
+        && !runtime_into_kvasir(&mut value, plan).is_empty()
+    {
+        let _ = write_secret_bytes(
+            &config,
+            serde_json::to_string_pretty(&value)
+                .unwrap_or(text)
+                .as_bytes(),
+        );
+    }
+    if llama_built(plan).is_some() {
+        let _ = write_runtime_files(plan);
+    }
+}
+
+/// The build a plan names brought to this machine: its archive downloaded,
+/// checked against the pinned sha256 and unpacked, unless it is here already,
+/// and a build this install took before removed once it is. Answers the
+/// build's folder, and whether it was taken now.
+fn fetch_llama(plan: &Plan) -> Result<(PathBuf, bool), String> {
+    let llama = plan
+        .llama
+        .ok_or_else(|| "llama.cpp publishes no build for this machine".to_string())?;
+    let dir = llama_build_dir(&plan.dir, llama.variant);
+    if dir.join("llama-server").is_file() {
+        return Ok((dir, false));
+    }
+    let want = llama_digest(llama.variant)
+        .ok_or_else(|| format!("no sha256 is pinned for the {} build", llama.variant))?;
+    let url = llama_archive(&llama_base(), llama.variant);
+    let bytes = crate::supervise::fetch(&url)?;
+    unpack_llama(&bytes, want, &dir).map_err(|e| format!("{url}: {e}"))?;
+    if let Ok(entries) = std::fs::read_dir(plan.dir.join(LLAMA_PART)) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path != dir && llama_recorded(&path.display().to_string()).is_some() {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+    }
+    Ok((dir, true))
+}
+
+/// llama.cpp placed for an install or a repair and recorded, with the devices
+/// it runs a model on said. An archive that cannot be downloaded, or whose
+/// sha256 is not the pinned one, stops an install, and is said on an update
+/// or a repair, where Kvasir is then configured without it.
+fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<(), Exit> {
+    let Some(llama) = plan.llama else {
+        return Ok(());
+    };
+    console.doing(&format!(
+        "taking llama.cpp {LLAMA_BUILD}, the {} build",
+        llama_words(llama.variant)
+    ));
+    let dir = match fetch_llama(plan) {
+        Ok((dir, _)) => dir,
+        Err(e) => {
+            console.broken(&format!(
+                "llama.cpp {LLAMA_BUILD}, which runs the models Kvasir starts, was not installed: {e}"
+            ))?;
+            console.say(&format!(
+                "run nils setup again once it downloads, or point NILS_SETUP_LLAMA_RELEASES at a \
+                 folder or server holding {LLAMA_BUILD}/llama-{LLAMA_BUILD}-bin-{}.tar.gz",
+                llama.variant
+            ));
+            return Ok(());
+        }
+    };
+    state.parts.insert(
+        LLAMA_PART.to_string(),
+        PartState {
+            version: LLAMA_BUILD.to_string(),
+            path: dir.display().to_string(),
+            kind: LLAMA_PART.to_string(),
+        },
+    );
+    console.progress(&format!("llama.cpp {LLAMA_BUILD} at {}", dir.display()));
+    let devices = llama_devices(&dir.join("llama-server"));
+    if devices.is_empty() {
+        console.say(
+            "llama.cpp finds no graphics device here, so a model Kvasir starts runs on the processor",
+        );
+    } else {
+        console.say(&format!("llama.cpp runs a model on {}", devices.join("; ")));
+    }
+    if !llama.loader {
+        console.say(NO_VULKAN_LOADER);
     }
     Ok(())
 }
@@ -7578,6 +8197,10 @@ fn start_everything(
             // is started once that is made, as on the machine.
             quietly("systemctl", &["--user", "restart", "nils-pod"]);
             let mut units = vec!["nils-engine".to_string()];
+            // llama.cpp runs on this machine, outside the pod, and is up before Kvasir
+            if let Some(unit) = start_llama_unit(plan, state) {
+                units.push(unit);
+            }
             if plan.has(Part::Desk) {
                 units.push("nils-desk".to_string());
             }
@@ -7603,7 +8226,9 @@ fn start_everything(
             // Recreated, not only brought up: a Kvasir or an assistant built
             // again has the same configuration and would otherwise keep
             // running the old code. The assistant starts once Kvasir has made
-            // its key.
+            // its key. llama.cpp runs on this machine, outside docker, and is
+            // up before Kvasir.
+            let llama = start_llama_unit(plan, state);
             let mut services = vec!["engine"];
             if plan.has(Part::Desk) {
                 services.push("desk");
@@ -7626,7 +8251,11 @@ fn start_everything(
                 )?;
                 containers.push("nils-assistant".to_string());
             }
-            let mut started = Started::of(unit_report(&containers, console, Watcher::Docker));
+            let mut reported = unit_report(&containers, console, Watcher::Docker);
+            if let Some(unit) = llama {
+                reported.extend(unit_report(&[unit], console, Watcher::Systemd));
+            }
+            let mut started = Started::of(reported);
             let _ = writeln!(
                 started.text,
                 "  {}",
@@ -7872,6 +8501,13 @@ pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)>
             ),
         ));
     }
+    // llama.cpp is up before Kvasir, which starts models on it
+    if let Some(part) = state.parts.get(LLAMA_PART) {
+        out.push((
+            "nils-llama.service".to_string(),
+            llama_unit(plan, Path::new(&part.path), &llama_host(plan)),
+        ));
+    }
     if state.parts.contains_key("kvasir") {
         out.push((
             "kvasir.service".to_string(),
@@ -7913,24 +8549,102 @@ fn assistant_entry(dir: &Path) -> &'static str {
     }
 }
 
+/// Where llama.cpp listens: this machine's loopback, or for docker the
+/// bridge's own address, where a container reaches the machine and a server
+/// on the loopback alone does not answer it.
+fn llama_host(plan: &Plan) -> String {
+    match plan.runtime {
+        Runtime::Docker => docker_bridge(),
+        _ => "127.0.0.1".to_string(),
+    }
+}
+
+/// llama.cpp's command: its server in router mode, which loads no model until
+/// Kvasir asks and at most one at a time, reads Kvasir's presets and the key
+/// only Kvasir holds besides it, and logs where Kvasir reads a failed load.
+fn llama_argv(plan: &Plan, build: &Path, host: &str) -> Vec<String> {
+    let dir = plan.runtime_dir();
+    let at = |name: &str| dir.join(name).display().to_string();
+    vec![
+        build.join("llama-server").display().to_string(),
+        "--models-preset".to_string(),
+        at("models.ini"),
+        "--no-models-autoload".to_string(),
+        "--models-max".to_string(),
+        "1".to_string(),
+        "--api-key-file".to_string(),
+        at("runtime.key"),
+        "--host".to_string(),
+        host.to_string(),
+        "--port".to_string(),
+        plan.ports.llama.to_string(),
+        "--no-webui".to_string(),
+        "--log-file".to_string(),
+        at("runtime.log"),
+    ]
+}
+
+/// llama.cpp's systemd user unit, on this machine whichever runtime the parts
+/// use, started again when it fails.
+fn llama_unit(plan: &Plan, build: &Path, host: &str) -> String {
+    format!(
+        "[Unit]\nDescription=llama.cpp, which runs the models Kvasir starts\n\
+         After=network-online.target\n\n[Service]\nExecStart={}\nWorkingDirectory={}\n\
+         Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
+        llama_argv(plan, build, host).join(" "),
+        plan.runtime_dir().display()
+    )
+}
+
+/// llama.cpp's command for a person to run, where no service runs it.
+fn llama_command(plan: &Plan, state: &State) -> Option<String> {
+    let part = state.parts.get(LLAMA_PART)?;
+    Some(llama_argv(plan, Path::new(&part.path), &llama_host(plan)).join(" "))
+}
+
+/// llama.cpp's unit written and started on this machine ahead of Kvasir, for
+/// an install whose parts run in containers; on the machine it is among the
+/// units. None where no build is on record, and on macOS.
+fn start_llama_unit(plan: &Plan, state: &State) -> Option<String> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    let part = state.parts.get(LLAMA_PART)?;
+    let dir = units_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::write(
+        dir.join("nils-llama.service"),
+        llama_unit(plan, Path::new(&part.path), &llama_host(plan)),
+    )
+    .ok()?;
+    quietly("systemctl", &["--user", "daemon-reload"]);
+    quietly("systemctl", &["--user", "enable", "nils-llama"]);
+    quietly("systemctl", &["--user", "restart", "nils-llama"]);
+    Some("nils-llama".to_string())
+}
+
+/// A launchd agent that runs one command in a directory, started when it is
+/// loaded and kept alive.
+fn launchd_plist(label: &str, argv: &[String], cwd: &str) -> String {
+    let args = argv
+        .iter()
+        .map(|a| format!("    <string>{a}</string>"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <plist version=\"1.0\">\n<dict>\n\
+         \x20 <key>Label</key><string>{label}</string>\n\
+         \x20 <key>ProgramArguments</key>\n  <array>\n{args}\n  </array>\n\
+         \x20 <key>WorkingDirectory</key><string>{cwd}</string>\n\
+         \x20 <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n\
+         </dict>\n</plist>\n"
+    )
+}
+
 /// The same, as launchd agents, for a machine with no systemd.
 pub(crate) fn launchd_plists(plan: &Plan, state: &State) -> Vec<(String, String)> {
-    let plist = |label: &str, argv: Vec<String>, cwd: &str| {
-        let args = argv
-            .iter()
-            .map(|a| format!("    <string>{a}</string>"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-             <plist version=\"1.0\">\n<dict>\n\
-             \x20 <key>Label</key><string>{label}</string>\n\
-             \x20 <key>ProgramArguments</key>\n  <array>\n{args}\n  </array>\n\
-             \x20 <key>WorkingDirectory</key><string>{cwd}</string>\n\
-             \x20 <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n\
-             </dict>\n</plist>\n"
-        )
-    };
+    let plist = |label: &str, argv: Vec<String>, cwd: &str| launchd_plist(label, &argv, cwd);
     let engine = state
         .parts
         .get("engine")
@@ -7962,6 +8676,16 @@ pub(crate) fn launchd_plists(plan: &Plan, state: &State) -> Vec<(String, String)
                     plan.desk_config().display().to_string(),
                 ],
                 &plan.desk_dir().display().to_string(),
+            ),
+        ));
+    }
+    if let Some(part) = state.parts.get(LLAMA_PART) {
+        out.push((
+            "se.kineuro.nils-llama.plist".to_string(),
+            plist(
+                "se.kineuro.nils-llama",
+                llama_argv(plan, Path::new(&part.path), "127.0.0.1"),
+                &plan.runtime_dir().display().to_string(),
             ),
         ));
     }
@@ -8041,6 +8765,10 @@ fn start_commands(plan: &Plan) -> Vec<String> {
         ));
     }
     if plan.has(Part::Assistant) {
+        if let Some(server) = llama_built(plan) {
+            let build = server.parent().map(Path::to_path_buf).unwrap_or_default();
+            out.push(llama_argv(plan, &build, "127.0.0.1").join(" "));
+        }
         out.push(format!(
             "(cd {} && node dist/main.js --config kvasir.json)",
             plan.dir.join("kvasir").display()
@@ -8148,6 +8876,18 @@ fn card_rows(plan: &Plan) -> Vec<(&'static str, String)> {
         rows.push((
             "assistant",
             model_on_record(plan).unwrap_or_else(|| "no model named yet".to_string()),
+        ));
+    }
+    if plan.has(Part::Assistant)
+        && let Some(llama) = plan.llama
+        && llama_built(plan).is_some()
+    {
+        rows.push((
+            "models",
+            format!(
+                "llama.cpp {LLAMA_BUILD} ({}), started from Kvasir",
+                llama_words(llama.variant)
+            ),
         ));
     }
     rows.push((
@@ -8329,6 +9069,30 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                     Err(e) => println!("{name}: {}", e.message),
                 }
             }
+            // llama.cpp is taken again where this version pins another build
+            LLAMA_PART => {
+                let plan = plan_from_state(&state, channel);
+                match fetch_llama(&plan) {
+                    Ok((dir, taken)) => {
+                        state.parts.insert(
+                            name.clone(),
+                            PartState {
+                                version: LLAMA_BUILD.to_string(),
+                                path: dir.display().to_string(),
+                                kind: LLAMA_PART.to_string(),
+                            },
+                        );
+                        mend_kvasir_runtime(&plan);
+                        if taken || part.version != LLAMA_BUILD {
+                            println!("{name}: {LLAMA_BUILD} in {}", dir.display());
+                            changed = true;
+                        } else {
+                            println!("{name}: {LLAMA_BUILD} is the build this version takes");
+                        }
+                    }
+                    Err(e) => println!("{name}: {e}"),
+                }
+            }
             _ => match update_binary_part(&name, &part, &update::desk_base(channel)) {
                 Ok((version, said)) => {
                     println!("{name}: {said}");
@@ -8339,6 +9103,32 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                 }
                 Err(e) => println!("{name}: {}", e.message),
             },
+        }
+    }
+
+    // an install from before llama.cpp takes it, where it has the assistant
+    if state.parts.contains_key("assistant") && !state.parts.contains_key(LLAMA_PART) {
+        let plan = plan_from_state(&state, channel);
+        if plan.llama.is_some() {
+            match fetch_llama(&plan) {
+                Ok((dir, _)) => {
+                    state.parts.insert(
+                        LLAMA_PART.to_string(),
+                        PartState {
+                            version: LLAMA_BUILD.to_string(),
+                            path: dir.display().to_string(),
+                            kind: LLAMA_PART.to_string(),
+                        },
+                    );
+                    mend_kvasir_runtime(&plan);
+                    println!(
+                        "{LLAMA_PART}: {LLAMA_BUILD} in {}, which runs the models Kvasir starts",
+                        dir.display()
+                    );
+                    changed = true;
+                }
+                Err(e) => println!("{LLAMA_PART}: {e}"),
+            }
         }
     }
 
@@ -8415,6 +9205,9 @@ pub(crate) fn service_units(state: &State) -> Vec<Unit> {
             if has("desk") {
                 push("desk", "nils-desk", "docker");
             }
+            if has(LLAMA_PART) {
+                push(LLAMA_PART, "nils-llama", "systemd");
+            }
             if has("kvasir") {
                 push("gateway", "nils-kvasir", "docker");
             }
@@ -8426,6 +9219,9 @@ pub(crate) fn service_units(state: &State) -> Vec<Unit> {
             push("engine", "nils-engine", "systemd");
             if has("desk") {
                 push("desk", "nils-desk", "systemd");
+            }
+            if has(LLAMA_PART) {
+                push(LLAMA_PART, "nils-llama", "systemd");
             }
             if has("kvasir") {
                 push("gateway", "nils-kvasir", "systemd");
@@ -8439,11 +9235,17 @@ pub(crate) fn service_units(state: &State) -> Vec<Unit> {
             if desk_binary {
                 push("desk", "se.kineuro.nils-desk", "launchd");
             }
+            if has(LLAMA_PART) {
+                push(LLAMA_PART, "se.kineuro.nils-llama", "launchd");
+            }
         }
         (Runtime::Machine, false) => {
             push("engine", "nils-engine", "systemd");
             if desk_binary {
                 push("desk", "nils-desk", "systemd");
+            }
+            if has(LLAMA_PART) {
+                push(LLAMA_PART, "nils-llama", "systemd");
             }
             if has("kvasir") {
                 push("gateway", "kvasir", "systemd");
@@ -8503,6 +9305,13 @@ pub(crate) fn addresses(state: &State) -> Vec<serde_json::Value> {
     );
     if state.parts.contains_key("kvasir") {
         out.push(serde_json::json!({ "part": "gateway", "address": format!("127.0.0.1:{}", ports.kvasir), "reach": "this machine only" }));
+    }
+    if state.parts.contains_key(LLAMA_PART) {
+        let (host, reach) = match runtime {
+            Runtime::Docker => (docker_bridge(), "this machine and its docker containers"),
+            _ => ("127.0.0.1".to_string(), "this machine only"),
+        };
+        out.push(serde_json::json!({ "part": LLAMA_PART, "address": format!("{host}:{}", ports.llama), "reach": reach }));
     }
     if state.parts.contains_key("assistant") {
         out.push(serde_json::json!({ "part": "assistant", "address": named("nils-assistant", ports.assistant), "reach": inside }));
@@ -8935,6 +9744,9 @@ struct Removal {
     /// assistant's key go with NILS. Where everything goes, it goes with the
     /// base directory.
     kvasir: Option<PathBuf>,
+    /// llama.cpp's build, which goes with NILS where the data stays; where
+    /// everything goes, it goes with the base directory.
+    llama: Option<PathBuf>,
     state: PathBuf,
     /// The runtime of a Postgres this setup runs, whose container goes; its
     /// data goes with the base directory, or stays with it.
@@ -9243,6 +10055,7 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         packs_kept: None,
         built: Vec::new(),
         kvasir: None,
+        llama: None,
         state: state_path(),
         postgres: None,
     };
@@ -9311,22 +10124,26 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
             }
         }
     }
-    // the supervisor runs on the host, whichever runtime the parts use
+    // the supervisor and llama.cpp run on the host, whichever runtime the parts use
     if cfg!(target_os = "macos") {
         if let Some(home) = home_dir() {
-            let path = home
-                .join("Library")
-                .join("LaunchAgents")
-                .join("se.kineuro.nils-supervise.plist");
-            if path.exists() {
-                removal.unit_files.push(path);
+            for file in [
+                "se.kineuro.nils-supervise.plist",
+                "se.kineuro.nils-llama.plist",
+            ] {
+                let path = home.join("Library").join("LaunchAgents").join(file);
+                if path.exists() {
+                    removal.unit_files.push(path);
+                }
             }
         }
     } else {
-        let path = units_dir().join("nils-supervise.service");
-        if path.exists() {
-            removal.units.push("nils-supervise".to_string());
-            removal.unit_files.push(path);
+        for unit in ["nils-supervise", "nils-llama"] {
+            let path = units_dir().join(format!("{unit}.service"));
+            if path.exists() {
+                removal.units.push(unit.to_string());
+                removal.unit_files.push(path);
+            }
         }
     }
     if matches!(state.runtime.as_str(), "podman" | "docker") {
@@ -9423,6 +10240,10 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         if kvasir.exists() {
             removal.kvasir = Some(kvasir);
         }
+        let llama = dir.join(LLAMA_PART);
+        if llama.exists() {
+            removal.llama = Some(llama);
+        }
     }
     removal
 }
@@ -9509,6 +10330,16 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
                 "{}, with the models it holds, their keys, its subscriptions and the assistant's \
                  key",
                 kvasir.display()
+            ),
+        );
+    }
+    if let Some(llama) = &removal.llama {
+        row(
+            &mut out,
+            LLAMA_PART,
+            format!(
+                "{}, the build that ran the models Kvasir started",
+                llama.display()
             ),
         );
     }
@@ -9624,7 +10455,9 @@ fn human_size(bytes: u64) -> String {
 fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
     let say = |text: String| println!("  {text}");
 
-    if !removal.units.is_empty() && removal.runtime != "docker" {
+    // the units on this machine, the supervisor and llama.cpp among them on a
+    // docker install too, whose containers go below
+    if !removal.units.is_empty() {
         let mut args = vec!["--user", "disable", "--now"];
         args.extend(removal.units.iter().map(String::as_str));
         quietly("systemctl", &args);
@@ -9713,6 +10546,12 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
                 kvasir.display()
             )),
             Err(e) => say(format!("{} was not removed: {e}", kvasir.display())),
+        }
+    }
+    if let Some(llama) = &removal.llama {
+        match remove_path(llama, &removal.runtime) {
+            Ok(()) => say(format!("removed {}", llama.display())),
+            Err(e) => say(format!("{} was not removed: {e}", llama.display())),
         }
     }
     for path in &removal.packs {
@@ -9856,6 +10695,7 @@ mod tests {
             host_loopback: false,
             postgres: None,
             oidc: None,
+            llama: None,
         }
     }
 
@@ -9983,6 +10823,7 @@ mod tests {
             podman: false,
             docker: Err(DockerAbsent::NotInstalled),
             card: None,
+            llama: None,
         };
         let (outcome, drawn) = on_screens(
             |console| questions(console, &args, None, &facts, false),
@@ -12609,6 +13450,475 @@ mod tests {
             plists[0].1
         );
         assert!(plists[0].1.starts_with("<?xml"), "{}", plists[0].1);
+    }
+
+    #[test]
+    fn a_machine_takes_the_llama_cpp_build_it_can_run() {
+        assert_eq!(
+            llama_variant("linux", "x86_64", true),
+            Some("ubuntu-vulkan-x64")
+        );
+        assert_eq!(llama_variant("linux", "x86_64", false), Some("ubuntu-x64"));
+        assert_eq!(
+            llama_variant("linux", "aarch64", true),
+            Some("ubuntu-vulkan-arm64")
+        );
+        assert_eq!(
+            llama_variant("linux", "aarch64", false),
+            Some("ubuntu-arm64")
+        );
+        assert_eq!(
+            llama_variant("macos", "aarch64", false),
+            Some("macos-arm64")
+        );
+        assert_eq!(llama_variant("macos", "x86_64", true), Some("macos-x64"));
+        assert_eq!(llama_variant("windows", "x86_64", true), None);
+        assert_eq!(llama_variant("linux", "riscv64", false), None);
+        // every build a machine may take has its archive's sha256 pinned
+        for os in ["linux", "macos"] {
+            for arch in ["x86_64", "aarch64"] {
+                for graphics in [true, false] {
+                    let variant = llama_variant(os, arch, graphics).unwrap();
+                    let digest = llama_digest(variant).unwrap();
+                    assert_eq!(digest.len(), 64, "{variant}");
+                    assert!(digest.chars().all(|c| c.is_ascii_hexdigit()), "{variant}");
+                }
+            }
+        }
+        assert_eq!(
+            llama_archive(
+                "https://github.com/ggml-org/llama.cpp/releases/download/",
+                "ubuntu-x64"
+            ),
+            "https://github.com/ggml-org/llama.cpp/releases/download/b10964/llama-b10964-bin-ubuntu-x64.tar.gz"
+        );
+        // a build's folder on record says which build it is
+        assert_eq!(
+            llama_recorded("/home/x/nils/llama.cpp/b10964-ubuntu-vulkan-x64"),
+            Some("ubuntu-vulkan-x64")
+        );
+        assert_eq!(
+            llama_recorded("/home/x/nils/llama.cpp/b9000-macos-arm64"),
+            Some("macos-arm64")
+        );
+        assert_eq!(
+            llama_recorded("/home/x/nils/llama.cpp/.b10964-ubuntu-x64.partial"),
+            None
+        );
+        assert_eq!(llama_words("ubuntu-vulkan-x64"), "Vulkan");
+        assert_eq!(llama_words("macos-arm64"), "Metal");
+        assert_eq!(llama_words("ubuntu-arm64"), "CPU");
+        assert_eq!(
+            devices_listed(
+                "ggml_vulkan: Found 2 Vulkan devices:\nAvailable devices:\n  Vulkan0: a card (8192 MiB, 8000 MiB free)\n  Vulkan1: another card (6144 MiB, 5741 MiB free)\n"
+            ),
+            vec![
+                "Vulkan0: a card (8192 MiB, 8000 MiB free)",
+                "Vulkan1: another card (6144 MiB, 5741 MiB free)"
+            ]
+        );
+        assert!(devices_listed("Available devices:\n").is_empty());
+    }
+
+    /// A build's archive shaped as llama.cpp publishes one: a folder of the
+    /// build's name holding the server, its libraries and links to them.
+    fn llama_tar_gz(files: &[(&str, &[u8])], link: Option<(&str, &str)>) -> Vec<u8> {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut gz);
+            builder.mode(tar::HeaderMode::Deterministic);
+            for (path, body) in files {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(body.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder.append_data(&mut header, path, *body).unwrap();
+            }
+            if let Some((path, target)) = link {
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_size(0);
+                header.set_mode(0o777);
+                builder.append_link(&mut header, path, target).unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        gz.finish().unwrap()
+    }
+
+    #[test]
+    fn a_llama_cpp_archive_is_unpacked_only_with_its_pinned_sha256() {
+        let root = scratch("llama-archive");
+        let into = llama_build_dir(&root, "ubuntu-x64");
+        std::fs::create_dir_all(into.parent().unwrap()).unwrap();
+        let good = llama_tar_gz(
+            &[
+                ("llama-b10964/llama-server", b"#!/bin/sh\necho server\n"),
+                ("llama-b10964/libllama.so.0", b"a library"),
+            ],
+            Some(("llama-b10964/libllama.so", "libllama.so.0")),
+        );
+        let digest = crate::supervise::sha256_hex(&good);
+
+        // an archive whose sha256 is not the pinned one is not unpacked at all
+        let refused = unpack_llama(&good, &"0".repeat(64), &into).unwrap_err();
+        assert!(refused.contains("sha256"), "{refused}");
+        assert!(!into.exists());
+        assert_eq!(
+            std::fs::read_dir(into.parent().unwrap()).unwrap().count(),
+            0,
+            "nothing is left behind"
+        );
+
+        unpack_llama(&good, &digest, &into).unwrap();
+        let server = into.join("llama-server");
+        assert!(server.is_file(), "the build's own folder is left out");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_ne!(
+                std::fs::metadata(&server).unwrap().permissions().mode() & 0o111,
+                0,
+                "the server runs"
+            );
+            assert_eq!(
+                std::fs::read_link(into.join("libllama.so")).unwrap(),
+                PathBuf::from("libllama.so.0"),
+                "a link stays a link"
+            );
+        }
+
+        // an archive of another folder, or with no server, is refused, and
+        // the build already there stays
+        let elsewhere = llama_tar_gz(&[("other/llama-server", b"x")], None);
+        let refused =
+            unpack_llama(&elsewhere, &crate::supervise::sha256_hex(&elsewhere), &into).unwrap_err();
+        assert!(refused.contains("outside llama-b10964/"), "{refused}");
+        let serverless = llama_tar_gz(&[("llama-b10964/README.md", b"x")], None);
+        let refused = unpack_llama(
+            &serverless,
+            &crate::supervise::sha256_hex(&serverless),
+            &into,
+        )
+        .unwrap_err();
+        assert!(
+            refused.contains("no llama-b10964/llama-server"),
+            "{refused}"
+        );
+        assert!(server.is_file(), "the build already there stays");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn llama_cpp_runs_as_a_service_of_its_own_ahead_of_kvasir() {
+        let mut plan = plan(Runtime::Machine);
+        plan.parts.push(Part::Assistant);
+        plan.llama = Some(Llama {
+            variant: "ubuntu-vulkan-x64",
+            loader: true,
+        });
+        let mut state = state_of(
+            &plan,
+            &[
+                ("engine", "binary"),
+                ("kvasir", "node"),
+                ("assistant", "node"),
+            ],
+        );
+        let build = llama_build_dir(&plan.dir, "ubuntu-vulkan-x64");
+        state.parts.insert(
+            LLAMA_PART.to_string(),
+            PartState {
+                version: LLAMA_BUILD.to_string(),
+                path: build.display().to_string(),
+                kind: LLAMA_PART.to_string(),
+            },
+        );
+        let units = systemd_units(&plan, &state);
+        let names: Vec<&str> = units.iter().map(|(n, _)| n.as_str()).collect();
+        let llama = names
+            .iter()
+            .position(|n| *n == "nils-llama.service")
+            .expect("a unit of llama.cpp's own");
+        let kvasir = names.iter().position(|n| *n == "kvasir.service").unwrap();
+        assert!(llama < kvasir, "llama.cpp starts before Kvasir: {names:?}");
+        let unit = &units[llama].1;
+        assert!(
+            unit.contains(
+                "ExecStart=/home/x/nils/llama.cpp/b10964-ubuntu-vulkan-x64/llama-server \
+                 --models-preset /home/x/nils/kvasir/runtime/models.ini --no-models-autoload \
+                 --models-max 1 --api-key-file /home/x/nils/kvasir/runtime/runtime.key \
+                 --host 127.0.0.1 --port 7110 --no-webui \
+                 --log-file /home/x/nils/kvasir/runtime/runtime.log\n"
+            ),
+            "{unit}"
+        );
+        assert!(
+            unit.contains("WorkingDirectory=/home/x/nils/kvasir/runtime\n"),
+            "{unit}"
+        );
+        assert!(unit.contains("Restart=on-failure"), "{unit}");
+        // docker's containers reach it on the bridge
+        assert!(
+            llama_unit(&plan, &build, "172.17.0.1").contains("--host 172.17.0.1 --port 7110"),
+            "listening where a container reaches this machine"
+        );
+        // launchd runs the same command
+        let plists = launchd_plists(&plan, &state);
+        let plist = &plists
+            .iter()
+            .find(|(n, _)| n == "se.kineuro.nils-llama.plist")
+            .expect("a plist of llama.cpp's own")
+            .1;
+        assert!(
+            plist.contains("<key>Label</key><string>se.kineuro.nils-llama</string>"),
+            "{plist}"
+        );
+        assert!(
+            plist.contains("<string>--no-models-autoload</string>"),
+            "{plist}"
+        );
+        // the supervisor names it as a part, and says where it answers
+        let mut recorded = state.clone();
+        recorded.service = "systemd user units".to_string();
+        let parts: Vec<(&str, String)> = service_units(&recorded)
+            .into_iter()
+            .map(|u| (u.part, u.name))
+            .collect();
+        assert!(
+            parts.contains(&(LLAMA_PART, "nils-llama".to_string())),
+            "{parts:?}"
+        );
+        let at = addresses(&recorded);
+        assert!(
+            at.iter()
+                .any(|a| a["part"] == LLAMA_PART && a["address"] == "127.0.0.1:7110"),
+            "{at:?}"
+        );
+        // without a build on record there is no unit to start
+        state.parts.remove(LLAMA_PART);
+        assert!(
+            !systemd_units(&plan, &state)
+                .iter()
+                .any(|(n, _)| n == "nils-llama.service")
+        );
+    }
+
+    #[test]
+    fn kvasir_is_told_where_llama_cpp_is_from_where_kvasir_runs() {
+        let dir = scratch("llama-kvasir");
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.parts.push(Part::Assistant);
+        plan.llama = Some(Llama {
+            variant: "ubuntu-x64",
+            loader: true,
+        });
+        let mut value = serde_json::json!({
+            "bind": "127.0.0.1:7100",
+            "local": { "endpoint": "https://huggingface.co" },
+        });
+        // with no build here yet, nothing is named
+        assert!(runtime_into_kvasir(&mut value, &plan).is_empty());
+        assert!(value["local"].get("runtime").is_none(), "{value}");
+
+        let build = llama_build_dir(&dir, "ubuntu-x64");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("llama-server"), "").unwrap();
+        let said = runtime_into_kvasir(&mut value, &plan);
+        assert_eq!(said.len(), 1, "{said:?}");
+        let runtime = dir.join("kvasir").join("runtime");
+        assert_eq!(
+            value["local"]["runtime"],
+            serde_json::json!({
+                "url": "http://127.0.0.1:7110",
+                "keyFile": runtime.join("runtime.key").display().to_string(),
+                "presets": runtime.join("models.ini").display().to_string(),
+                "log": runtime.join("runtime.log").display().to_string(),
+                "build": "b10964",
+                "variant": "ubuntu-x64",
+            })
+        );
+        assert_eq!(
+            value["local"]["endpoint"], "https://huggingface.co",
+            "the rest of the file is kept"
+        );
+        assert_eq!(value["bind"], "127.0.0.1:7100");
+        assert!(
+            value.get("hostAlias").is_none(),
+            "Kvasir on the machine needs no alias"
+        );
+        assert!(
+            runtime_into_kvasir(&mut value, &plan).is_empty(),
+            "a second run changes nothing"
+        );
+
+        // in a pod given this machine's loopback, and in one that is not
+        plan.runtime = Runtime::Podman;
+        plan.host_loopback = true;
+        runtime_into_kvasir(&mut value, &plan);
+        assert_eq!(value["local"]["runtime"]["url"], "http://169.254.1.2:7110");
+        assert_eq!(value["hostAlias"], "169.254.1.2");
+        plan.host_loopback = false;
+        runtime_into_kvasir(&mut value, &plan);
+        assert_eq!(value["hostAlias"], "host.containers.internal");
+        // on docker
+        plan.runtime = Runtime::Docker;
+        runtime_into_kvasir(&mut value, &plan);
+        assert_eq!(
+            value["local"]["runtime"]["url"],
+            "http://host.docker.internal:7110"
+        );
+        assert_eq!(value["hostAlias"], "host.docker.internal");
+        // and moved back to the machine, where the alias goes
+        plan.runtime = Runtime::Machine;
+        let said = runtime_into_kvasir(&mut value, &plan);
+        assert!(value.get("hostAlias").is_none(), "{value}");
+        assert_eq!(said.len(), 2, "{said:?}");
+
+        // the runtime's files are made once and kept
+        assert!(write_runtime_files(&plan).is_ok());
+        let key = std::fs::read_to_string(runtime.join("runtime.key")).unwrap();
+        assert_eq!(key.trim().len(), 48, "{key}");
+        assert_eq!(key.lines().count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(runtime.join("models.ini")).unwrap(),
+            "[*]\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(runtime.join("runtime.key"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        std::fs::write(
+            runtime.join("models.ini"),
+            "[*]\ncache-type-k = q8_0\n\n[a-model]\nmodel = /m.gguf\n",
+        )
+        .unwrap();
+        assert!(write_runtime_files(&plan).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(runtime.join("runtime.key")).unwrap(),
+            key,
+            "the key is kept"
+        );
+        assert!(
+            std::fs::read_to_string(runtime.join("models.ini"))
+                .unwrap()
+                .contains("[a-model]"),
+            "the presets Kvasir wrote are kept"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_plan_names_llama_cpp_and_a_machine_without_a_vulkan_loader() {
+        let mut plan = plan(Runtime::Machine);
+        plan.parts.push(Part::Assistant);
+        let row = |plan: &Plan| {
+            plan_rows(plan)
+                .into_iter()
+                .find(|(key, _)| *key == LLAMA_PART)
+                .map(|(_, value)| value)
+                .unwrap()
+        };
+        assert!(
+            row(&plan).starts_with("no build for this machine"),
+            "{}",
+            row(&plan)
+        );
+        plan.llama = Some(Llama {
+            variant: "ubuntu-vulkan-x64",
+            loader: true,
+        });
+        assert_eq!(
+            row(&plan),
+            "b10964, the Vulkan build, runs the models Kvasir starts, on 127.0.0.1:7110"
+        );
+        assert!(
+            stages(&plan, false)
+                .iter()
+                .any(|(stage, label)| *stage == Stage::Runtime && label == LLAMA_PART)
+        );
+        plan.llama = Some(Llama {
+            variant: "ubuntu-vulkan-x64",
+            loader: false,
+        });
+        assert!(
+            row(&plan)
+                .contains("no Vulkan loader, so a model runs on the processor until libvulkan1"),
+            "{}",
+            row(&plan)
+        );
+        plan.parts.retain(|p| *p != Part::Assistant);
+        assert!(!plan_rows(&plan).iter().any(|(key, _)| *key == LLAMA_PART));
+        assert!(
+            !stages(&plan, false)
+                .iter()
+                .any(|(stage, _)| *stage == Stage::Runtime)
+        );
+    }
+
+    #[test]
+    fn an_uninstall_removes_llama_cpps_build_with_nils() {
+        let root = scratch("uninstall-llama");
+        let dir = root.join("nils");
+        let build = llama_build_dir(&dir, "ubuntu-x64");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("llama-server"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("registry")).unwrap();
+        let mut state = State {
+            dir: dir.display().to_string(),
+            mode: "off".to_string(),
+            runtime: "machine".to_string(),
+            ..State::default()
+        };
+        state.parts.insert(
+            LLAMA_PART.to_string(),
+            PartState {
+                version: LLAMA_BUILD.to_string(),
+                path: build.display().to_string(),
+                kind: LLAMA_PART.to_string(),
+            },
+        );
+        let removal = gather_removal(&state, None, Leaving::KeepData);
+        assert_eq!(
+            removal.llama.as_deref(),
+            Some(dir.join(LLAMA_PART).as_path())
+        );
+        assert!(
+            removal.programs.is_empty(),
+            "a build is not a program the record names"
+        );
+        let text = removal_text(&removal, Leaving::KeepData, &Console::new(true));
+        assert!(
+            text.contains("the build that ran the models Kvasir started"),
+            "{text}"
+        );
+
+        // carried out with nothing of this machine's own in it
+        let record = root.join("setup.toml");
+        std::fs::write(&record, "").unwrap();
+        let removal = Removal {
+            units: Vec::new(),
+            unit_files: Vec::new(),
+            state: record.clone(),
+            ..removal
+        };
+        carry_out(&removal, Leaving::KeepData, &Console::new(true));
+        assert!(!dir.join(LLAMA_PART).exists());
+        assert!(dir.join("registry").is_dir(), "the data stays");
+
+        // where everything goes, it goes with the base directory
+        std::fs::create_dir_all(&build).unwrap();
+        assert_eq!(gather_removal(&state, None, Leaving::Purge).llama, None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
