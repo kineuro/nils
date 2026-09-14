@@ -30,7 +30,7 @@ other. `--runtime machine|podman|docker`.
 
 **3. Where it lives.** One directory, `~/nils` by default, holding
 `registry/`, `desk/`, `backups/`, `working/`, `export/` and, with the
-assistant, `assistant/` and `kvasir/`. A directory of DICOM the engine may
+assistant, `assistant/`, `kvasir/` and `llama.cpp/`. A directory of DICOM the engine may
 read can be named here; it becomes an ingest root and a `source` place, and
 it is mounted read only in a container. `--dir PATH`, `--source PATH`.
 
@@ -92,6 +92,15 @@ says what that means before the assistant is offered:
 | 12 to 24 GB | A 7B to 14B model. The stations still work, with more retries on the harder questions. |
 | Under 12 GB, or none | No local model worth serving. A model on another machine you can reach, a commercial provider through Kvasir, the model gateway (the prompt then leaves the machine, and Kvasir marks that backend remote), or no assistant at all, which costs nothing else. |
 
+With the assistant, setup also takes llama.cpp's server for this machine,
+which runs a model Kvasir downloads once an admin starts it from Kvasir: on
+Linux the Vulkan build where there is a graphics card or a render node and the
+CPU build otherwise, and on macOS the build for its processor. Where a Linux
+machine has no Vulkan loader, the plan says that a model then runs on the
+processor, and names the package that brings one (`libvulkan1` on Debian and
+Ubuntu, `vulkan-loader` on Fedora). Once it is unpacked, setup names the
+devices llama.cpp runs a model on.
+
 The wizard never installs a model. It asks what the assistant talks to: a
 model server on this machine or on another machine of yours, a commercial
 provider, or a model named later. A model is taken only once it answers one
@@ -109,7 +118,9 @@ subscription is each person's own, and each signs in to theirs from the desk.
 
 **7. Keeping it running.** Systemd user units on Linux, podman quadlets for a
 podman run, a compose file for a docker one, launchd agents on macOS. Where
-there is no service manager the commands are printed instead.
+there is no service manager the commands are printed instead. llama.cpp runs
+on this machine whichever runtime the parts use: a systemd user unit of its
+own, `nils-llama.service`, started before Kvasir, or a launchd agent on macOS.
 `--service` / `--no-service`.
 
 **8. The plan, and then the work.** Everything decided, on one screen, and
@@ -153,6 +164,20 @@ and the wizard says that the prompt then leaves the machine. Until Kvasir
 holds the model, it is kept with its key in
 `<dir>/kvasir/backends-to-add.json`; that file and `kvasir.json` are
 readable by nobody else.
+
+llama.cpp comes from [its releases](https://github.com/ggml-org/llama.cpp/releases)
+at the build this version of `nils` pins, b10964, and each archive is checked
+against the sha256 pinned beside it. `NILS_SETUP_LLAMA_RELEASES` points at a
+mirror laid out the same way (`<build>/llama-<build>-bin-<variant>.tar.gz`),
+held to the same digests. An archive that cannot be downloaded, or that does
+not match, stops an install. The build is unpacked into
+`<dir>/llama.cpp/<build>-<variant>/` and runs in router mode: no model is
+loaded until Kvasir loads one, and at most one at a time. It listens on
+127.0.0.1:7110, or on docker's bridge for a docker install, and reads
+`<dir>/kvasir/runtime/`: the presets Kvasir writes, and a key only Kvasir and
+llama.cpp read. Its log is written there too. `kvasir.json` names it under
+`local.runtime`, and where Kvasir runs in a container it also names
+`hostAlias`, the name Kvasir reaches this machine's own loopback by.
 
 `<dir>/assistant/assistant.env` holds everything the assistant reads: the
 engine's address, Kvasir's, the key file, the model (`chatgpt` for the
@@ -222,9 +247,11 @@ nils update --all
 
 Every part the state names, each in the way it runs: a binary is replaced
 from its release, a container is a pull of the new tag and a restart of its
-unit, a Node part is its release tag fetched, checked out and built again.
-One line each, and the engine last, since it replaces the binary doing the
-replacing. `nils setup --update` is the same work from the wizard's side.
+unit, a Node part is its release tag fetched, checked out and built again,
+and llama.cpp's build is taken again when a version pins another, or taken
+for an install from before that has the assistant, and restarted with the
+rest. One line each, and the engine last, since it replaces the binary doing
+the replacing. `nils setup --update` is the same work from the wizard's side.
 
 ## Removing it
 
@@ -233,8 +260,9 @@ nils uninstall
 ```
 
 It asks what should go. Keeping your data removes the services, the
-programs, the packs and Kvasir's directory, with the models Kvasir holds,
-their keys, its subscriptions and the assistant's key, and keeps the
+programs, the packs, llama.cpp's build and Kvasir's directory, with the
+models Kvasir holds, their keys, its subscriptions and the assistant's key,
+and keeps the
 registry and its key, the backups, the desk's people and the assistant's
 history. Everything removes the base directory as well, and the registry's
 key cannot be recovered. `--keep-data` and `--purge` answer it.

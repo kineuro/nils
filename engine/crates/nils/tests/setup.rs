@@ -771,6 +771,40 @@ fn what_this_machine_can_do_is_said_before_the_assistant_is_offered() {
     }
 }
 
+/// With the assistant, the plan names the llama.cpp build that runs the
+/// models Kvasir starts, and where it listens.
+#[test]
+fn the_plan_names_llama_cpp_beside_the_assistant() {
+    let nils = Installed::new("nils-setup-llama");
+    let config = TempDir::new("nils-setup-llama-config");
+    let base = TempDir::new("nils-setup-llama-base");
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--print",
+            "--parts",
+            "engine,desk,assistant",
+            "--runtime",
+            "machine",
+            "--dir",
+            base.path().join("nils").to_str().unwrap(),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    let built = matches!(std::env::consts::OS, "linux" | "macos")
+        && matches!(std::env::consts::ARCH, "x86_64" | "aarch64");
+    if !built {
+        o.says("no build for this machine");
+        return;
+    }
+    o.says("b10964, the");
+    o.says("runs the models Kvasir starts, on 127.0.0.1:7110");
+    if o.stdout.contains("nils-llama.service") {
+        o.says("--no-models-autoload --models-max 1");
+    }
+}
+
 /// An uninstall takes Kvasir's state with NILS, where the data is kept too:
 /// the models it holds and their keys, its subscriptions, its seal key and
 /// pepper, and the assistant's key. The registry and the assistant's history
