@@ -38,7 +38,8 @@ pub(crate) struct UpdateArgs {
     /// Where releases come from; NILS_RELEASES sets the same thing
     #[arg(long, value_name = "URL")]
     channel: Option<String>,
-    /// Update every part `nils setup` installed, the engine last
+    /// Update every part `nils setup` installed: the engine first, then the
+    /// rest by the newest binary, with the versions its release pins
     #[arg(long)]
     all: bool,
 }
@@ -385,15 +386,54 @@ fn destination(args: &UpdateArgs) -> Result<PathBuf, Exit> {
     Ok(std::fs::canonicalize(&me).unwrap_or(me))
 }
 
+/// What a binary `nils update --all` installed is started with: the version it
+/// replaced, so it updates the parts and does not replace itself again.
+pub(crate) const HANDED_OVER: &str = "NILS_UPDATE_HANDED_OVER";
+
+/// Hand the rest of an update to the binary just installed, with this
+/// process's arguments and the version it replaced. On Unix this process
+/// becomes it; elsewhere it runs to its end and this one exits with its
+/// status. Returns only when the new binary could not be started.
+fn hand_over(path: &Path) -> std::io::Error {
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let mut command = std::process::Command::new(path);
+    command
+        .args(std::env::args_os().skip(1))
+        .env(HANDED_OVER, VERSION);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.exec()
+    }
+    #[cfg(not(unix))]
+    {
+        match command.status() {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(e) => e,
+        }
+    }
+}
+
 pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Result<(), Exit> {
     let base = base_of(&args);
-    // Every other part first, each in whatever way it runs; the engine is
-    // last because it replaces the binary doing the replacing.
-    let changed = if args.all && !args.check {
-        crate::setup::update_all(args.channel.as_deref())?
-    } else {
-        false
-    };
+    // The engine first, then every other part: the parts are the newest
+    // binary's to update, since this one's pins are the release it came with
+    // and a part a later release adds is unknown to it. A binary this update
+    // installed carries on from here, and its services start again, since the
+    // engine's binary is new.
+    if args.all && !args.check {
+        if let Some(from) = std::env::var_os(HANDED_OVER) {
+            println!(
+                "nils {VERSION} carries on the update from {}",
+                from.to_string_lossy()
+            );
+            crate::setup::update_all(args.channel.as_deref())?;
+            crate::setup::restart_after_update(args.channel.as_deref());
+            return Ok(());
+        }
+        crate::setup::setup_recorded()?;
+    }
     let wanted = match &args.version {
         Some(v) => v.trim().trim_start_matches('v').to_string(),
         None => newest_version(&base)?,
@@ -401,7 +441,7 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
     let asked = args.version.is_some() || args.to.is_some();
     if !asked && !newer(&wanted, VERSION) {
         println!("nils {VERSION} is the newest release");
-        if changed {
+        if args.all && !args.check && crate::setup::update_all(args.channel.as_deref())? {
             crate::setup::restart_after_update(args.channel.as_deref());
         }
         return Ok(());
@@ -453,10 +493,20 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
         },
     }
 
+    // Every other part is the new binary's to update, with the versions its
+    // release pins; where it cannot be started, this one does what it can.
+    if args.all {
+        let why = hand_over(&path);
+        println!("nils {wanted} could not be started ({why}), so nils {VERSION} updates the parts");
+        crate::setup::update_all(args.channel.as_deref())?;
+        crate::setup::restart_after_update(args.channel.as_deref());
+        return Ok(());
+    }
+
     // A running engine keeps the binary it started with until it is
-    // restarted, and so does every other part, so an update that stopped here
-    // would change nothing until the next boot.
-    if changed || serves {
+    // restarted, so an update that stopped here would change nothing until
+    // the next boot.
+    if serves {
         crate::setup::restart_after_update(args.channel.as_deref());
     }
     Ok(())
