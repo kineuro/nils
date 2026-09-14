@@ -702,6 +702,8 @@ enum Flow {
     Printed,
     /// The plan was declined.
     Declined,
+    /// This machine lacks what the plan needs, each said; nothing was placed.
+    Unready(Vec<String>),
 }
 
 /// Why the questions stopped short: an error of their own, or a question
@@ -845,6 +847,9 @@ struct Console {
     /// What was said under the checklist that a person should read, shown
     /// once it is finished.
     later: std::cell::RefCell<Vec<String>>,
+    /// Whether a failure that leaves a chosen part unusable stops the run:
+    /// an install's, where nothing is running yet that a stop would strand.
+    strict: std::cell::Cell<bool>,
     /// The answers given on the screens, while the questions are asked on
     /// them.
     screens: Option<std::cell::RefCell<Replay>>,
@@ -875,6 +880,7 @@ impl Console {
             palette: tui::Palette::detect(terminal),
             checklist: None,
             later: std::cell::RefCell::new(Vec::new()),
+            strict: std::cell::Cell::new(false),
             screens: None,
         }
     }
@@ -1013,6 +1019,19 @@ impl Console {
 
     /// Something that did not happen, which marks the checklist's running
     /// row; the install goes on.
+    /// A failure that leaves a part the person chose unusable. An install
+    /// stops on it with the reason, before the rest is started, since an
+    /// install that would not work is not finished; an update or a repair of
+    /// one already there says it and goes on, so what still works keeps
+    /// running.
+    fn broken(&self, text: &str) -> Result<(), Exit> {
+        if self.strict.get() {
+            return Err(fail(text));
+        }
+        self.warn(text);
+        Ok(())
+    }
+
     fn warn(&self, text: &str) {
         match &self.checklist {
             Some((live, _)) => {
@@ -1162,15 +1181,15 @@ impl Console {
         if self.screens.is_none() {
             return Ok(self.secret(question));
         }
-        self.ask_twice(question)
+        self.ask_twice(question, false)
     }
 
-    /// A password, twice and hidden.
+    /// A password for the desk, twice and hidden, held to the desk's rule.
     fn ask_password(&mut self, question: &str) -> Result<Option<String>, Stop> {
         if self.screens.is_none() {
             return Ok(self.password(question));
         }
-        self.ask_twice(question)
+        self.ask_twice(question, true)
     }
 
     /// A key a provider gave, once and hidden; empty for none.
@@ -1182,9 +1201,16 @@ impl Console {
         Ok(Some(text).filter(|t| !t.is_empty()))
     }
 
-    fn ask_twice(&mut self, question: &str) -> Result<Option<String>, Stop> {
+    /// Hidden text twice on a screen. A password for the desk is held to the
+    /// desk's rule when it is typed the first time, so one the desk would
+    /// refuse is asked for again here, not found out once the rest is installed.
+    fn ask_twice(&mut self, question: &str, password: bool) -> Result<Option<String>, Stop> {
         loop {
             let first = self.ask_text(question, "", true, true)?;
+            if let Some(refused) = password.then(|| desk_password_refusal(&first)).flatten() {
+                self.note(refused);
+                continue;
+            }
             let again = self.ask_text("and again", "", true, true)?;
             if first == again {
                 return Ok(Some(first));
@@ -1438,12 +1464,18 @@ impl Console {
     }
 
     fn read_line(&mut self) -> Option<String> {
+        self.read_typed_line().map(|line| line.trim().to_string())
+    }
+
+    /// A line as it was typed, only its line ending taken off: a password's
+    /// spaces are part of it, as the desk's sign-in counts them.
+    fn read_typed_line(&mut self) -> Option<String> {
         let mut line = String::new();
         let read = match self.tty.as_mut() {
             Some(tty) => tty.read_line(&mut line).ok()?,
             None => std::io::stdin().read_line(&mut line).ok()?,
         };
-        (read > 0).then(|| line.trim().to_string())
+        (read > 0).then(|| line.trim_end_matches(['\n', '\r']).to_string())
     }
 
     /// One of a list, by number. Returns the index chosen.
@@ -1514,25 +1546,30 @@ impl Console {
 
     /// A passphrase, twice, without echoing it.
     fn secret(&mut self, question: &str) -> Option<String> {
-        self.hidden_twice(question, "a passphrase")
+        self.hidden_twice(question, "a passphrase", false)
     }
 
-    /// A password, twice, without echoing it.
+    /// A password for the desk, twice, without echoing it, as typed and held
+    /// to the desk's rule.
     fn password(&mut self, question: &str) -> Option<String> {
-        self.hidden_twice(question, "a password")
+        self.hidden_twice(question, "a password", true)
     }
 
-    fn hidden_twice(&mut self, question: &str, noun: &str) -> Option<String> {
+    fn hidden_twice(&mut self, question: &str, noun: &str, password: bool) -> Option<String> {
         if !self.interactive() {
             return None;
         }
         loop {
-            let first = self.secret_once(question)?;
+            let first = self.secret_once(question, password)?;
             if first.is_empty() {
                 println!("  {}", self.dim(&format!("{noun} is needed")));
                 continue;
             }
-            let again = self.secret_once("and again")?;
+            if let Some(refused) = password.then(|| desk_password_refusal(&first)).flatten() {
+                println!("  {}", self.dim(refused));
+                continue;
+            }
+            let again = self.secret_once("and again", password)?;
             if first == again {
                 return Some(first);
             }
@@ -1546,7 +1583,7 @@ impl Console {
         if !self.interactive() {
             return None;
         }
-        self.secret_once(question).filter(|s| !s.is_empty())
+        self.secret_once(question, false).filter(|s| !s.is_empty())
     }
 
     /// A slow thing, said in one line with a timer that runs while it
@@ -1656,11 +1693,15 @@ impl Console {
         Err(fail(format!("{program} {} failed", args.join(" "))))
     }
 
-    fn secret_once(&mut self, question: &str) -> Option<String> {
+    fn secret_once(&mut self, question: &str, as_typed: bool) -> Option<String> {
         print!("  {question}: ");
         let _ = std::io::stdout().flush();
         let guard = EchoOff::on(self.tty.as_ref().map(BufReader::get_ref));
-        let line = self.read_line();
+        let line = if as_typed {
+            self.read_typed_line()
+        } else {
+            self.read_line()
+        };
         drop(guard);
         println!();
         line
@@ -2675,6 +2716,10 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
             print: args.print,
         }),
         Flow::Printed => Ok(()),
+        Flow::Unready(missing) => Err(fail(format!(
+            "nothing was changed: this machine lacks what the plan needs: {}",
+            missing.join("; ")
+        ))),
         Flow::Declined => {
             println!("nothing was changed");
             Ok(())
@@ -3147,7 +3192,17 @@ fn questions(
         && console.interactive()
         && console.ask_yes_no("Add the first person now, who may do everything?", true)?
     {
-        let name = console.ask_line("A username for them", "admin")?;
+        // the desk's rules, held where they are asked: an answer it would refuse is asked again
+        let name = loop {
+            let name = console
+                .ask_line("A username for them", "admin")?
+                .trim()
+                .to_string();
+            match desk_username_refusal(&name) {
+                None => break name,
+                Some(refused) => console.note(refused),
+            }
+        };
         if let Some(password) = console.ask_password(&format!("A password for {name}"))? {
             answers.first = Some((name, password));
         }
@@ -3377,11 +3432,19 @@ fn questions(
         };
         console.row("model", &said);
     }
+    // what this machine lacks for the plan, found before anything is placed
+    let missing = missing_for(&plan);
+    for need in &missing {
+        console.row("missing", need);
+    }
     if args.print {
         print!("{}", commands_text(&plan, console));
         println!();
         println!("nothing was changed");
         return Ok(Flow::Printed);
+    }
+    if !missing.is_empty() {
+        return Ok(Flow::Unready(missing));
     }
     if console.interactive() && !console.ask_yes_no("Do it?", true)? {
         return Ok(Flow::Declined);
@@ -3578,7 +3641,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     // gateway and the assistant
     let systemd = plan.runtime == Runtime::Machine && !cfg!(target_os = "macos");
     if plan.has(Part::Assistant) && !(plan.service && (systemd || plan.runtime.container())) {
-        ready_gateway(plan, console);
+        ready_gateway(plan, console)?;
     }
     start_supervisor(plan, state, console);
     Ok(services)
@@ -3897,6 +3960,7 @@ fn do_it(
         ("Installing", "Installed")
     };
     console.start_checklist(doing, stages(plan, only_update));
+    console.strict.set(!only_update);
     let placed = place(
         plan,
         console,
@@ -3906,6 +3970,7 @@ fn do_it(
         only_update,
         answers,
     );
+    console.strict.set(false);
     console.finish_checklist(
         placed.is_ok(),
         if placed.is_ok() { done } else { "Stopped" },
@@ -3983,7 +4048,10 @@ fn place(
                 plan.runtime.name(),
                 &["pull", NODE_IMAGE],
             ) {
-                console.warn(&format!("{NODE_IMAGE} could not be pulled: {}", e.message));
+                console.broken(&format!(
+                    "{NODE_IMAGE} could not be pulled, and the gateway and the assistant run in it: {}",
+                    e.message
+                ))?;
             }
         }
         if plan.has(Part::Desk) {
@@ -4071,7 +4139,7 @@ fn place(
                     );
                     checkpoint(state);
                 }
-                Err(e) => console.warn(&format!("the desk was not installed: {}", e.message)),
+                Err(e) => console.broken(&format!("the desk was not installed: {}", e.message))?,
             }
         } else {
             state.parts.insert(
@@ -4118,12 +4186,19 @@ fn place(
                 .get("desk")
                 .filter(|p| p.kind == "binary")
                 .map(|p| PathBuf::from(&p.path));
-            add_first_admin(plan, desk, answers.first.as_ref(), console);
+            add_first_admin(plan, desk, answers.first.as_ref(), console)?;
         }
         if plan.mode == Mode::Oidc && plan.oidc.is_none() {
-            console.warn(
-                "the desk has no provider yet, so nobody can sign in and the engine does not start",
-            );
+            // a registration asked for and not made leaves nobody able to sign
+            // in, which stops an install; a provider left for later was the
+            // person's own choice, and is said
+            let why =
+                "the desk has no provider yet, so nobody can sign in and the engine does not start";
+            if answers.provider.is_some() {
+                console.broken(why)?;
+            } else {
+                console.warn(why);
+            }
             console.say(
                 "run nils setup again and name one, or register the desk at an Authentik with:",
             );
@@ -4154,7 +4229,7 @@ fn place(
                 }
                 checkpoint(state);
             }
-            Err(e) => console.warn(&format!("the assistant was not installed: {}", e.message)),
+            Err(e) => console.broken(&format!("the assistant was not installed: {}", e.message))?,
         }
     }
 
@@ -4163,7 +4238,7 @@ fn place(
     if only_update {
         state.places = existing_places;
     } else {
-        state.places = declare_places(plan, &home, console);
+        state.places = declare_places(plan, &home, console)?;
     }
     checkpoint(state);
 
@@ -4174,9 +4249,23 @@ fn place(
         match start_everything(plan, state, console) {
             Ok(started) => {
                 console.report(&started);
+                let stopped: Vec<&str> = started
+                    .services
+                    .iter()
+                    .filter(|s| !s.running)
+                    .map(|s| s.unit.as_str())
+                    .collect();
+                // what each said is kept for after the checklist, so the stop
+                // only names them
+                if console.strict.get() && !stopped.is_empty() {
+                    return Err(fail(format!(
+                        "{} did not start; what each said is above",
+                        stopped.join(", ")
+                    )));
+                }
                 services = started.services;
             }
-            Err(e) => console.warn(&format!("no services were written: {}", e.message)),
+            Err(e) => console.broken(&format!("no services were written: {}", e.message))?,
         }
     } else if plan.runtime.container() {
         console.begin(Stage::Services);
@@ -4186,21 +4275,24 @@ fn place(
         let (assistant, rest): (Vec<String>, Vec<String>) = container_commands(plan)
             .into_iter()
             .partition(|line| line.contains("--name nils-assistant"));
-        let run = |line: &str| match run_line(line) {
-            Ok(()) => console.progress(&short(line)),
-            Err(e) => {
-                console.warn(&format!("that failed: {e}"));
-                console.say(&format!("run: {line}"));
+        let run = |line: &str| -> Result<(), Exit> {
+            match run_line(line) {
+                Ok(()) => console.progress(&short(line)),
+                Err(e) => {
+                    console.say(&format!("run: {line}"));
+                    console.broken(&format!("{} did not start: {e}", short(line)))?;
+                }
             }
+            Ok(())
         };
         for line in &rest {
-            run(line);
+            run(line)?;
         }
         if !assistant.is_empty() {
-            ready_gateway(plan, console);
+            ready_gateway(plan, console)?;
         }
         for line in &assistant {
-            run(line);
+            run(line)?;
         }
     }
 
@@ -4209,7 +4301,7 @@ fn place(
     // did the containers just above; launchd has no gateway to wait for.
     let systemd = plan.runtime == Runtime::Machine && !cfg!(target_os = "macos");
     if plan.has(Part::Assistant) && plan.service && !systemd && !plan.runtime.container() {
-        ready_gateway(plan, console);
+        ready_gateway(plan, console)?;
     }
     if plan.has(Part::Assistant) && !plan.service && !plan.runtime.container() {
         console.say(
@@ -4656,12 +4748,16 @@ fn make_registry(
 /// The places the engine now keeps, added in an order that lets the
 /// registry name its backup. A place already there is left as it is, so a
 /// second run of the wizard says the same thing as the first.
-fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Vec<PlaceState> {
+fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Result<Vec<PlaceState>, Exit> {
     use nils_registry::place::{self, Role};
-    let mut registry = match crate::open(home) {
-        Ok(registry) => registry,
-        Err(_) => return Vec::new(),
-    };
+    // a place asked for and not declared is a registry that does not read
+    // the directory the person named, so each failure here stops the install
+    let mut registry = crate::open(home).map_err(|e| {
+        fail(format!(
+            "the registry did not open to declare its places: {}",
+            e.message
+        ))
+    })?;
     let mut declared: Vec<PlaceState> = Vec::new();
     for spec in place_specs(plan) {
         let Some(role) = Role::parse(spec.role) else {
@@ -4697,14 +4793,10 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Vec<PlaceState
                             declared.push(row);
                         }
                         Err(e) => {
-                            console.warn(&format!(
+                            return Err(fail(format!(
                                 "the {} place was not moved to {path}: {e}",
                                 spec.name
-                            ));
-                            declared.push(PlaceState {
-                                path: there.path,
-                                ..row
-                            });
+                            )));
                         }
                     }
                     continue;
@@ -4716,7 +4808,12 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Vec<PlaceState
                 continue;
             }
             Ok(None) => {}
-            Err(_) => continue,
+            Err(e) => {
+                return Err(fail(format!(
+                    "the {} place could not be read: {e}",
+                    spec.name
+                )));
+            }
         }
         let made = place::add(
             registry.store(),
@@ -4744,7 +4841,12 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Vec<PlaceState
                 );
                 declared.push(row);
             }
-            Err(e) => console.warn(&format!("the {} place was not declared: {e}", spec.name)),
+            Err(e) => {
+                return Err(fail(format!(
+                    "the {} place was not declared: {e}",
+                    spec.name
+                )));
+            }
         }
     }
     // Every other source place is kept on record too, so a later update
@@ -4764,7 +4866,7 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Vec<PlaceState
     if !declared.is_empty() {
         console.progress(&format!("places: {}", say_places(&declared)));
     }
-    declared
+    Ok(declared)
 }
 
 /// The places as one line: `backups as backup, registry as registry`.
@@ -4845,13 +4947,14 @@ fn install_packs(plan: &Plan, me: &Path, console: &mut Console) -> Result<(), Ex
             console.note(&format!("packs at {}", dir.display()));
             Ok(())
         }
-        // Not fatal: the engine runs, digests and answers questions without
-        // packs; what it cannot do is say what a scan is. That is worth a
-        // plain sentence rather than a note, and worth being accurate
-        // about, since an install that can still read a study is not a
-        // broken one.
+        // The engine runs, digests and answers questions without packs, but
+        // it cannot say what a scan is, which is most of what it is installed
+        // for: an install stops here and says where the packs go, and an
+        // update keeps the packs it had and says so.
         Err(e) => {
-            console.warn(&format!("the rule packs were not installed: {e}"));
+            console.broken(&format!(
+                "the rule packs were not installed, so the engine could not say what a scan is: {e}"
+            ))?;
             console.say("the engine still runs and digests; what it cannot do is classify.");
             console.say(&format!(
                 "put a packs directory at {} or pass --pack-dir",
@@ -5060,18 +5163,34 @@ fn desk_config_text(plan: &Plan) -> String {
     text
 }
 
+/// The desk's rule for a username (nils-desk's `users::add`): letters, digits,
+/// dots, dashes and underscores.
+fn desk_username_refusal(name: &str) -> Option<&'static str> {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
+    (name.is_empty() || !name.chars().all(allowed))
+        .then_some("a username is letters, digits, dots, dashes and underscores")
+}
+
+/// The desk's rule for a password (nils-desk's `users::add`): at least eight
+/// characters, counted as the desk counts them, in bytes.
+fn desk_password_refusal(password: &str) -> Option<&'static str> {
+    (password.len() < 8).then_some("a password is at least eight characters")
+}
+
 /// In local mode the desk keeps the people, and an empty desk has nobody to
-/// let in. The first person is added with the password asked for with the
-/// other questions; with nobody named here, the summary says how to add one
-/// when the desk still keeps nobody.
+/// let in. The first person is added with the name and password asked for
+/// with the other questions, both held to the desk's rules there; with nobody
+/// named here, the summary says how to add one when the desk still keeps
+/// nobody. A first person the desk still refuses stops the install before the
+/// rest is started: an install nobody can sign in to is not finished.
 fn add_first_admin(
     plan: &Plan,
     desk: Option<PathBuf>,
     first: Option<&(String, String)>,
     console: &Console,
-) {
+) -> Result<(), Exit> {
     let Some((name, password)) = first else {
-        return;
+        return Ok(());
     };
     let by_hand = format!(
         "nils-desk user add <name> --admin --config {}",
@@ -5101,18 +5220,18 @@ fn add_first_admin(
     match done {
         Ok(out) if out.status.success() => {
             console.progress(&format!("{name} may sign in and do everything"));
+            Ok(())
         }
         Ok(out) => {
             let why = String::from_utf8_lossy(&out.stderr);
-            console.warn(&format!(
-                "{name} was not added: {}",
+            Err(fail(format!(
+                "{name} was not added, so nobody could sign in: {}. Add them with: {by_hand}",
                 why.lines().last().unwrap_or("the desk refused")
-            ));
-            console.say(&format!("the command is: {by_hand}"));
+            )))
         }
-        Err(e) => console.warn(&format!(
-            "{name} was not added ({e}); the command is: {by_hand}"
-        )),
+        Err(e) => Err(fail(format!(
+            "{name} was not added, so nobody could sign in ({e}). Add them with: {by_hand}"
+        ))),
     }
 }
 
@@ -5495,20 +5614,48 @@ fn desk_config_fate(plan: &Plan) -> DeskConfigFate {
 
 /// The gateway and the assistant: cloned and built, since neither ships a
 /// binary. Anything missing is said rather than guessed at.
-fn install_node_parts(
-    plan: &Plan,
-    console: &mut Console,
-    model: Option<&ModelChoice>,
-) -> Result<Vec<(&'static str, PathBuf)>, Exit> {
-    let node = run_quiet("node", &["--version"]).unwrap_or_default();
-    let major: u32 = node
+/// What this machine lacks for a plan, found before anything is placed, so
+/// an install never stops halfway for a tool it could have named at the start.
+fn missing_for(plan: &Plan) -> Vec<String> {
+    let mut out = Vec::new();
+    if plan.runtime.container() && !have(plan.runtime.name()) {
+        out.push(format!("{}, which runs the parts", plan.runtime.name()));
+    }
+    if plan.has(Part::Assistant) {
+        // the assistant and the gateway are built on this machine, whatever runs them
+        if node_major() < 22 {
+            out.push("Node 22 or newer, which builds the assistant and the gateway".to_string());
+        }
+        for (tool, does) in [
+            ("git", "takes their source"),
+            ("npm", "installs their packages"),
+        ] {
+            if !have(tool) {
+                out.push(format!("{tool}, which {does}"));
+            }
+        }
+    }
+    out
+}
+
+/// The major version of the Node on the path; 0 where there is none.
+fn node_major() -> u32 {
+    run_quiet("node", &["--version"])
+        .unwrap_or_default()
         .trim()
         .trim_start_matches('v')
         .split('.')
         .next()
         .and_then(|n| n.parse().ok())
-        .unwrap_or(0);
-    if major < 22 {
+        .unwrap_or(0)
+}
+
+fn install_node_parts(
+    plan: &Plan,
+    console: &mut Console,
+    model: Option<&ModelChoice>,
+) -> Result<Vec<(&'static str, PathBuf)>, Exit> {
+    if node_major() < 22 {
         return Err(fail(
             "the assistant and the gateway are built with Node 22; install it and run nils setup again",
         ));
@@ -5583,126 +5730,152 @@ fn choose_model(console: &mut Console, served: bool) -> Result<ModelChoice, Stop
         "the assistant talks to a model through the gateway, over the OpenAI chat API, which \
          almost every model server and provider speaks",
     );
-    let pick = console.ask_choice(
-        "What should it talk to?",
-        &[
-            (
-                "A model server on this machine",
-                "SGLang, vLLM, llama.cpp or Ollama, already running here",
-            ),
-            (
-                "A model server on another machine of yours",
-                "the same, reached over your network; the prompt stays inside your own systems",
-            ),
-            (
-                "A commercial provider",
-                "OpenAI, OpenRouter, MiniMax or another; the prompt leaves your systems",
-            ),
-            (
-                "Decide later",
-                "install it without a model now; run nils setup again to name one",
-            ),
-        ],
-        if served { 0 } else { 3 },
-    )?;
+    // a model named is asked one short question, and taken only once it answers
+    loop {
+        let pick = console.ask_choice(
+            "What should it talk to?",
+            &[
+                (
+                    "A model server on this machine",
+                    "SGLang, vLLM, llama.cpp or Ollama, already running here",
+                ),
+                (
+                    "A model server on another machine of yours",
+                    "the same, reached over your network; the prompt stays inside your own systems",
+                ),
+                (
+                    "A commercial provider",
+                    "OpenAI, OpenRouter, MiniMax or another; the prompt leaves your systems",
+                ),
+                (
+                    "Decide later",
+                    "install it without a model now; run nils setup again to name one",
+                ),
+            ],
+            if served { 0 } else { 3 },
+        )?;
 
-    if pick == 3 {
-        console.note(&format!(
-            "the gateway is pointed at {DEFAULT_MODEL_URL} for now; the assistant answers once a \
-             model runs there, or once you run nils setup and name another"
-        ));
-        return Ok(ModelChoice {
-            url: DEFAULT_MODEL_URL.to_string(),
-            local: true,
-            key: None,
-            model: example_model.to_string(),
-            later: true,
-        });
-    }
+        if pick == 3 {
+            return Ok(model_later(console));
+        }
 
-    let (url, local) = match pick {
-        0 => {
-            console.note(
-                "SGLang listens on http://127.0.0.1:30000/v1, vLLM on :8000/v1, llama.cpp on \
+        let (url, local) = match pick {
+            0 => {
+                console.note(
+                    "SGLang listens on http://127.0.0.1:30000/v1, vLLM on :8000/v1, llama.cpp on \
                  :8080/v1 and Ollama on :11434/v1",
-            );
-            (ask_address(console, DEFAULT_MODEL_URL)?, true)
-        }
-        1 => {
-            console.note(
-                "the address of that server as this machine reaches it, for example \
+                );
+                (ask_address(console, DEFAULT_MODEL_URL)?, true)
+            }
+            1 => {
+                console.note(
+                    "the address of that server as this machine reaches it, for example \
                  http://192.168.1.20:30000/v1",
-            );
-            (ask_address(console, "")?, true)
-        }
-        _ => {
-            console.note(
-                "its OpenAI compatible address: https://api.openai.com/v1, \
+                );
+                (ask_address(console, "")?, true)
+            }
+            _ => {
+                console.note(
+                    "its OpenAI compatible address: https://api.openai.com/v1, \
                  https://openrouter.ai/api/v1 or https://api.minimax.io/v1, among others",
-            );
-            (ask_address(console, "https://api.openai.com/v1")?, false)
-        }
-    };
+                );
+                (ask_address(console, "https://api.openai.com/v1")?, false)
+            }
+        };
 
-    let key = if local {
-        if console.ask_yes_no("Does that server need a key?", false)? {
-            console.ask_hidden_once("Its key")?
+        let key = if local {
+            if console.ask_yes_no("Does that server need a key?", false)? {
+                console.ask_hidden_once("Its key")?
+            } else {
+                None
+            }
         } else {
-            None
-        }
-    } else {
-        let key = console.ask_hidden_once("Your key from that provider")?;
-        if key.is_none() {
-            console.note("no key was given; the provider will refuse the gateway until one is");
-        }
-        key
-    };
+            let key = console.ask_hidden_once("Your key from that provider")?;
+            if key.is_none() {
+                console.note("no key was given; the provider will refuse the gateway until one is");
+            }
+            key
+        };
 
-    let listed = console.probe(&format!("models {url}"), || {
-        list_models(&url, key.as_deref())
-    });
-    let model = match listed {
-        Some(ids) if ids.len() == 1 => {
-            console.note(&format!("{url} answered, serving {}", ids[0]));
-            ids[0].clone()
-        }
-        Some(ids) if !ids.is_empty() => {
-            console.note(&format!("{url} answered"));
-            let shown: Vec<(&str, &str)> =
-                ids.iter().take(12).map(|id| (id.as_str(), "")).collect();
-            let at = console.ask_choice("Which model?", &shown, 0)?;
-            ids[at].clone()
-        }
-        _ => {
-            console.note(&format!(
-                "nothing answered at {url} yet; the gateway will reach it once it is running"
-            ));
-            let default = if local { example_model } else { "" };
-            loop {
-                let named =
-                    console.ask_line("The model's name, as the server lists it", default)?;
-                if !named.trim().is_empty() || !console.interactive() {
-                    break named.trim().to_string();
+        let listed = console.probe(&format!("models {url}"), || {
+            list_models(&url, key.as_deref())
+        });
+        let model = match listed {
+            Some(ids) if ids.len() == 1 => {
+                console.note(&format!("{url} answered, serving {}", ids[0]));
+                ids[0].clone()
+            }
+            Some(ids) if !ids.is_empty() => {
+                console.note(&format!("{url} answered"));
+                let shown: Vec<(&str, &str)> =
+                    ids.iter().take(12).map(|id| (id.as_str(), "")).collect();
+                let at = console.ask_choice("Which model?", &shown, 0)?;
+                ids[at].clone()
+            }
+            _ => {
+                console.note(&format!(
+                    "{url} did not list its models; name the one to use"
+                ));
+                let default = if local { example_model } else { "" };
+                loop {
+                    let named =
+                        console.ask_line("The model's name, as the server lists it", default)?;
+                    if !named.trim().is_empty() || !console.interactive() {
+                        break named.trim().to_string();
+                    }
+                    console.note("a model's name is needed, for example gpt-4.1-mini");
                 }
-                console.note("a model's name is needed, for example gpt-4.1-mini");
+            }
+        };
+
+        let answered = console.probe(
+            &format!(
+                "answers {url} {model} {}",
+                key.as_deref().map_or(0, key_mark)
+            ),
+            || try_model(&url, key.as_deref(), &model),
+        );
+        match answered {
+            Ok(()) => {
+                console.note(&format!("{model} answered at {url}"));
+                if !local {
+                    console.note(
+                        "the gateway keeps your registry's rows on your own systems unless you \
+                     decide otherwise, so questions that read the registry are refused by this \
+                     provider until you open them: https://kineuro.se/nils/docs/assistant/kvasir/",
+                    );
+                }
+                return Ok(ModelChoice {
+                    url,
+                    local,
+                    key,
+                    model,
+                    later: false,
+                });
+            }
+            Err(why) => {
+                console.note(&format!("{model} at {url} did not answer: {why}"));
+                if !console.interactive() {
+                    console.note("with nobody to ask, the model is left for later");
+                    return Ok(model_later(console));
+                }
+                let next = console.ask_choice(
+                    "A model is taken only once it answers. What now?",
+                    &[
+                        ("Name it again", "another address, key or model"),
+                        (
+                            "Decide later",
+                            "install it without a model now; run nils setup again to name one",
+                        ),
+                    ],
+                    0,
+                )?;
+                if next == 1 {
+                    return Ok(model_later(console));
+                }
             }
         }
-    };
-
-    if !local {
-        console.note(
-            "the gateway keeps your registry's rows on your own systems unless you decide \
-             otherwise, so questions that read the registry are refused by this provider until \
-             you open them: https://kineuro.se/nils/docs/assistant/kvasir/",
-        );
     }
-    Ok(ModelChoice {
-        url,
-        local,
-        key,
-        model,
-        later: false,
-    })
 }
 
 /// An http or https address, asked until one is given.
@@ -5742,6 +5915,102 @@ fn list_models(url: &str, key: Option<&str>) -> Option<Vec<String>> {
         .filter_map(|m| m["id"].as_str().map(str::to_string))
         .collect();
     Some(ids)
+}
+
+/// No model named yet: the gateway is pointed at the address the stations
+/// were written against, until nils setup names another.
+fn model_later(console: &mut Console) -> ModelChoice {
+    console.note(&format!(
+        "the gateway is pointed at {DEFAULT_MODEL_URL} for now; the assistant answers once a \
+         model runs there, or once you run nils setup and name another"
+    ));
+    ModelChoice {
+        url: DEFAULT_MODEL_URL.to_string(),
+        local: true,
+        key: None,
+        model: EXAMPLE_MODEL_ID.to_string(),
+        later: true,
+    }
+}
+
+/// A mark of a key that tells one answer from another on the screens,
+/// without showing or keeping the key.
+fn key_mark(key: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// One short chat request to a model, the kind the gateway will send it:
+/// whether it answers, and when it does not, why, in a person's words.
+fn try_model(url: &str, key: Option<&str>, model: &str) -> Result<(), String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_secs(5)))
+        .timeout_global(Some(std::time::Duration::from_secs(90)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let asked = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "Say ready."}],
+        "max_tokens": 8,
+        "stream": false,
+    });
+    let mut request = agent
+        .post(&format!("{url}/chat/completions"))
+        .header("content-type", "application/json");
+    if let Some(key) = key {
+        request = request.header("authorization", &format!("Bearer {key}"));
+    }
+    let mut response = request
+        .send(asked.to_string())
+        .map_err(|e| format!("nothing answered there ({e})"))?;
+    let status = response.status().as_u16();
+    let text = response.body_mut().read_to_string().unwrap_or_default();
+    model_answer(status, &text, model)
+}
+
+/// What the answer to that request says: the model answered, or why not.
+fn model_answer(status: u16, text: &str, model: &str) -> Result<(), String> {
+    let said: Option<serde_json::Value> = serde_json::from_str(text).ok();
+    let message = said
+        .as_ref()
+        .and_then(|v| {
+            v["error"]["message"]
+                .as_str()
+                .or_else(|| v["error"].as_str())
+                .or_else(|| v["message"].as_str())
+                .or_else(|| v["detail"].as_str())
+        })
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(|m| {
+            let cut: String = m.chars().take(160).collect();
+            if cut.len() < m.len() {
+                format!("{cut}...")
+            } else {
+                cut
+            }
+        });
+    let with = |words: String| match &message {
+        Some(m) => format!("{words}: {m}"),
+        None => words,
+    };
+    match status {
+        200..=299 if said.as_ref().is_some_and(|v| v["choices"].is_array()) => Ok(()),
+        200..=299 => {
+            Err("it answered, but not the way an OpenAI compatible server does".to_string())
+        }
+        401 | 403 => Err(with("the key was refused".to_string())),
+        404 => Err(with(format!(
+            "it serves no model named {model}, or this is not its OpenAI address"
+        ))),
+        429 => Err(with(
+            "it refuses for now: too many requests, or no credit left".to_string(),
+        )),
+        _ => Err(with(format!("it answered {status}"))),
+    }
 }
 
 /// The purposes the assistant uses: the host's own, from the gateway's
@@ -6306,24 +6575,24 @@ fn gateway_up(plan: &Plan, console: &Console, seconds: u64) -> bool {
 /// where it never comes up, the reason is the gateway's own and is shown
 /// with the services, so this says only what did not happen and how it
 /// will. Answers whether the assistant has its key.
-fn ready_gateway(plan: &Plan, console: &Console) -> bool {
+fn ready_gateway(plan: &Plan, console: &Console) -> Result<bool, Exit> {
     let path = plan.dir.join("kvasir").join("assistant.key");
     let Some(admin) = gateway_admin_token(plan) else {
-        return path.exists();
+        return Ok(path.exists());
     };
     if !gateway_up(plan, console, 30) {
         if path.exists() {
-            return true;
+            return Ok(true);
         }
-        console.warn("the gateway did not come up, so the assistant has no key yet");
         console.say("once it runs, nils setup and then repair makes the key");
-        return false;
+        console.broken("the gateway did not come up, so the assistant has no key")?;
+        return Ok(false);
     }
     let gateway = Gateway {
         base: format!("http://127.0.0.1:{}", plan.ports.kvasir),
         admin,
     };
-    admit_local_models(plan, &gateway, console);
+    admit_local_models(plan, &gateway, console)?;
     open_to_the_provider(plan, &gateway, console);
     assistant_key(plan, &gateway, console)
 }
@@ -6378,14 +6647,14 @@ impl Gateway {
 /// admission, where the model answers. The suite asks the model itself for
 /// tool calls, a schema and a stream, so it takes a while, and a model that
 /// does not pass stays unlisted, which is said.
-fn admit_local_models(plan: &Plan, gateway: &Gateway, console: &Console) {
+fn admit_local_models(plan: &Plan, gateway: &Gateway, console: &Console) -> Result<(), Exit> {
     let Some(config) = gateway_config(plan) else {
-        return;
+        return Ok(());
     };
     // what the gateway lists now: a local model once it is admitted, and
     // every model where its gate is off
     let Some(catalog) = gateway.call("GET", "/v1/config", None, 10) else {
-        return;
+        return Ok(());
     };
     let listed: Vec<&str> = catalog["models"]
         .as_array()
@@ -6447,22 +6716,23 @@ fn admit_local_models(plan: &Plan, gateway: &Gateway, console: &Console) {
                         .filter(|c| c["passed"] == false)
                         .filter_map(|c| c["name"].as_str())
                         .collect();
-                    console.warn(&format!(
-                        "{name} did not pass the gateway's admission: {}",
-                        failed.join(", ")
-                    ));
                     console.say(
                         "the gateway does not offer it until it passes; nils setup and then \
                          repair runs the suite again",
                     );
+                    console.broken(&format!(
+                        "{name} did not pass the gateway's admission ({}), so the assistant has no model it may use",
+                        failed.join(", ")
+                    ))?;
                 }
                 None => {
-                    console.warn(&format!("the gateway did not finish admitting {name}"));
                     console.say("nils setup and then repair runs the suite again");
+                    console.broken(&format!("the gateway did not finish admitting {name}"))?;
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// A commercial provider as the only model: a purpose goes to a local model
@@ -6536,7 +6806,7 @@ fn open_to_the_provider(plan: &Plan, gateway: &Gateway, console: &Console) {
 /// station's purpose, and the gateway refuses the station, so a key that
 /// does not cover them all, or that the gateway no longer holds, is made
 /// again and the one it replaces is revoked.
-fn assistant_key(plan: &Plan, gateway: &Gateway, console: &Console) -> bool {
+fn assistant_key(plan: &Plan, gateway: &Gateway, console: &Console) -> Result<bool, Exit> {
     let path = plan.dir.join("kvasir").join("assistant.key");
     let purposes: Vec<String> = gateway_config(plan)
         .and_then(|c| {
@@ -6559,7 +6829,7 @@ fn assistant_key(plan: &Plan, gateway: &Gateway, console: &Console) -> bool {
     if path.exists() {
         let Some(keys) = gateway.call("GET", "/v1/keys", None, 10) else {
             // a gateway that does not list its keys keeps the one there
-            return true;
+            return Ok(true);
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -6581,7 +6851,7 @@ fn assistant_key(plan: &Plan, gateway: &Gateway, console: &Console) -> bool {
                 })
         });
         if covers {
-            return true;
+            return Ok(true);
         }
     }
     let body = serde_json::json!({
@@ -6601,12 +6871,12 @@ fn assistant_key(plan: &Plan, gateway: &Gateway, console: &Console) -> bool {
             } else {
                 console.note(&format!("the assistant's key is at {}", path.display()));
             }
-            true
+            Ok(true)
         }
         _ => {
-            console.warn("the gateway would not make the assistant's key");
             console.say("nils setup and then repair asks it again");
-            path.exists()
+            console.broken("the gateway would not make the assistant's key")?;
+            Ok(path.exists())
         }
     }
 }
@@ -6677,7 +6947,7 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Sta
                 quietly("systemctl", &["--user", "start", unit]);
             }
             if plan.has(Part::Assistant) {
-                ready_gateway(plan, console);
+                ready_gateway(plan, console)?;
                 // again, since a key made again replaces the one it read
                 quietly("systemctl", &["--user", "restart", "nils-assistant"]);
                 units.push("nils-assistant".to_string());
@@ -6706,7 +6976,7 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Sta
             let mut containers: Vec<String> =
                 services.iter().map(|s| format!("nils-{s}")).collect();
             if plan.has(Part::Assistant) {
-                ready_gateway(plan, console);
+                ready_gateway(plan, console)?;
                 console.task(
                     "starting the assistant",
                     &plan.dir,
@@ -6779,7 +7049,7 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Sta
                 quietly("systemctl", &["--user", "restart", unit]);
             }
             if !assistant.is_empty() {
-                ready_gateway(plan, console);
+                ready_gateway(plan, console)?;
                 for unit in &assistant {
                     quietly("systemctl", &["--user", "restart", unit]);
                 }
@@ -8834,6 +9104,48 @@ fn remove_path(path: &Path, runtime: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_first_person_is_held_to_the_desks_rules_where_it_is_asked() {
+        // exactly what nils-desk's users::add refuses, which the installer asks for again
+        assert_eq!(desk_username_refusal("admin"), None);
+        assert_eq!(desk_username_refusal("nima.ch-2_x"), None);
+        for bad in ["", "two words", "someone@ki", "åsa", "a/b"] {
+            assert_eq!(
+                desk_username_refusal(bad),
+                Some("a username is letters, digits, dots, dashes and underscores"),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(desk_password_refusal("12345678"), None);
+        assert_eq!(
+            desk_password_refusal("  spaced "),
+            None,
+            "spaces are part of a password"
+        );
+        for short in ["", "1234567", "short"] {
+            assert_eq!(
+                desk_password_refusal(short),
+                Some("a password is at least eight characters"),
+                "{short:?}"
+            );
+        }
+        // counted in bytes, as the desk counts them: four two-byte letters make eight
+        assert_eq!(desk_password_refusal("åäöü"), None);
+    }
+
+    #[test]
+    fn a_part_left_unusable_stops_an_install_and_is_only_said_on_an_update() {
+        let console = Console::new(true);
+        assert!(
+            console.broken("the desk was not installed").is_ok(),
+            "an update or a repair says it and goes on"
+        );
+        console.strict.set(true);
+        let stopped = console.broken("the desk was not installed").unwrap_err();
+        assert_eq!(stopped.message, "the desk was not installed");
+        assert_eq!(stopped.code, fail("x").code);
+    }
+
     fn plan(runtime: Runtime) -> Plan {
         Plan {
             dir: PathBuf::from("/home/x/nils"),
@@ -9349,7 +9661,7 @@ mod tests {
 
         // a local model not listed yet is admitted; a key made before a
         // station was added is made again, and the old one revoked
-        assert!(ready_gateway(&plan, &console));
+        assert_eq!(ready_gateway(&plan, &console).ok(), Some(true));
         let key = std::fs::read_to_string(kvasir.join("assistant.key")).unwrap();
         assert_eq!(key.trim(), "kvs_k_new.fresh");
         let seen = calls.lock().unwrap().clone();
@@ -9379,7 +9691,7 @@ mod tests {
         // mapped to it, and a key that covers every purpose is kept
         calls.lock().unwrap().clear();
         std::fs::write(kvasir.join("kvasir.json"), config("remote")).unwrap();
-        assert!(ready_gateway(&plan, &console));
+        assert_eq!(ready_gateway(&plan, &console).ok(), Some(true));
         let seen = calls.lock().unwrap().clone();
         assert!(
             seen.iter().any(
@@ -9444,6 +9756,81 @@ mod tests {
             list_models("http://127.0.0.1:1/v1", None),
             None,
             "nothing answering is None"
+        );
+    }
+
+    #[test]
+    fn a_model_is_taken_only_once_it_answers_a_short_question() {
+        // the words for each way a model server or a provider answers
+        assert_eq!(
+            model_answer(200, r#"{"choices":[{"message":{"content":"ready"}}]}"#, "m"),
+            Ok(())
+        );
+        assert!(
+            model_answer(200, "<html></html>", "m")
+                .unwrap_err()
+                .contains("not the way an OpenAI compatible server does")
+        );
+        assert_eq!(
+            model_answer(
+                401,
+                r#"{"error":{"message":"Incorrect API key provided"}}"#,
+                "m"
+            ),
+            Err("the key was refused: Incorrect API key provided".to_string())
+        );
+        assert!(
+            model_answer(404, "{}", "gpt-9")
+                .unwrap_err()
+                .contains("no model named gpt-9")
+        );
+        assert!(
+            model_answer(429, r#"{"error":"insufficient quota"}"#, "m")
+                .unwrap_err()
+                .ends_with(": insufficient quota")
+        );
+        assert_eq!(
+            model_answer(500, "", "m"),
+            Err("it answered 500".to_string())
+        );
+
+        // over the wire: a server that answers with its key and refuses without one
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let asked = String::from_utf8_lossy(&buf[..n]).to_string();
+                let (status, body) = if asked.contains("authorization: Bearer sk-test") {
+                    (
+                        "200 OK",
+                        r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ready"}}]}"#,
+                    )
+                } else {
+                    ("401 Unauthorized", r#"{"error":{"message":"no key"}}"#)
+                };
+                let _ = s.write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/v1");
+        assert_eq!(try_model(&url, Some("sk-test"), "qwen"), Ok(()));
+        assert_eq!(
+            try_model(&url, None, "qwen"),
+            Err("the key was refused: no key".to_string())
+        );
+        assert!(
+            try_model("http://127.0.0.1:1/v1", None, "qwen")
+                .unwrap_err()
+                .starts_with("nothing answered there")
         );
     }
 

@@ -63,9 +63,23 @@ default port is taken, the wizard says which and moves that part to the next
 free one; where they are free it asks nothing.
 
 Where the desk keeps the people, the wizard offers to add the first person,
-who may do everything; the desk's own command asks for the password, so the
-wizard never holds one. For an identity provider it prints the `nils-desk
-register --authentik ...` line rather than pretending to have run it.
+who may do everything. It holds the name and the password to the desk's own
+rules as they are typed (a username of letters, digits, dots, dashes and
+underscores; a password of at least eight characters, its spaces kept), so an
+answer the desk would refuse is asked for again. For an identity provider it
+prints the `nils-desk register --authentik ...` line rather than pretending
+to have run it.
+
+An install that would not work is not finished. Before anything is placed,
+the plan names what this machine lacks for it (Node 22, git and npm for the
+assistant; podman or docker for their runtime), and nothing is changed until
+it is there. A model is taken only once it answers one short question. While
+installing, a failure that leaves a chosen part unusable stops the install
+with the reason: the desk not installed or nobody added to it, a place not
+declared, the rule packs, the assistant, its gateway, its model or its key,
+or a service that does not start. `nils uninstall` removes what was placed,
+and `nils setup` starts again. An update or a repair says the same and goes
+on, so what still works keeps running.
 
 **6. What this machine can do.** The wizard reads the graphics card
 (`nvidia-smi`, then `rocm-smi`, then an Apple machine's unified memory) and

@@ -507,6 +507,54 @@ fn a_machine_install_puts_the_packs_where_the_engine_looks() {
     o.says("packs at");
 }
 
+/// An install that would not work is not finished. A desk the release does
+/// not have stops the install with the reason and a failure, where it once
+/// ended on a card saying NILS was running with no desk to open.
+#[test]
+fn a_desk_that_cannot_be_installed_stops_the_install() {
+    let releases = Releases::new("99.0.0");
+    let desk = releases
+        .dir
+        .path()
+        .join("download")
+        .join("v99.0.0")
+        .join(if cfg!(windows) {
+            format!("nils-desk-{}.exe", target())
+        } else {
+            format!("nils-desk-{}", target())
+        });
+    std::fs::remove_file(&desk).unwrap();
+    let nils = Installed::new("nils-setup-stops");
+    let config = TempDir::new("nils-setup-stops-config");
+    let base = TempDir::new("nils-setup-stops-base");
+    let dir = base.path().join("nils");
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "desk",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--channel",
+            &releases.url(),
+        ],
+    );
+    assert!(!o.ok, "the install went on without its desk:\n{}", o.stdout);
+    assert!(
+        o.stderr.contains("the desk was not installed"),
+        "{}",
+        o.stderr
+    );
+    assert!(
+        o.stderr.contains("nils uninstall removes it"),
+        "{}",
+        o.stderr
+    );
+}
+
 #[test]
 fn the_mode_writes_the_configuration_that_mode_asks_for() {
     let releases = Releases::new("99.0.0");
