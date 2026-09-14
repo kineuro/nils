@@ -19,7 +19,8 @@ to a script that does have a terminal.
 ## The eight steps
 
 **1. What to install.** The engine alone, the engine and the desk (the
-default), or everything, which adds the assistant and the model gateway.
+default), or everything, which adds the assistant and Kvasir, the model
+gateway.
 `--parts engine,desk,assistant` answers it.
 
 **2. Where it runs.** On this machine, as two small binaries, or in
@@ -76,8 +77,8 @@ assistant; podman or docker for their runtime), and nothing is changed until
 it is there. A model is taken only once it answers one short question. While
 installing, a failure that leaves a chosen part unusable stops the install
 with the reason: the desk not installed or nobody added to it, a place not
-declared, the rule packs, the assistant, its gateway, its model or its key,
-or a service that does not start. `nils uninstall` removes what was placed,
+declared, the rule packs, the assistant, Kvasir, its model or its key, or a
+service that does not start. `nils uninstall` removes what was placed,
 and `nils setup` starts again. An update or a repair says the same and goes
 on, so what still works keeps running.
 
@@ -89,9 +90,22 @@ says what that means before the assistant is offered:
 |---|---|
 | 24 GB or more | A 27B model at 4 bit, with room for the context. That is what the stations were written against. |
 | 12 to 24 GB | A 7B to 14B model. The stations still work, with more retries on the harder questions. |
-| Under 12 GB, or none | No local model worth serving. A model on another machine you can reach, a commercial provider through the gateway (the prompt then leaves the machine, and the gateway marks that backend remote), or no assistant at all, which costs nothing else. |
+| Under 12 GB, or none | No local model worth serving. A model on another machine you can reach, a commercial provider through Kvasir, the model gateway (the prompt then leaves the machine, and Kvasir marks that backend remote), or no assistant at all, which costs nothing else. |
 
-The wizard never installs a model.
+The wizard never installs a model. It asks what the assistant talks to: a
+model server on this machine or on another machine of yours, a commercial
+provider, or a model named later. A model is taken only once it answers one
+short question from this machine.
+
+Where nobody signs in, it also offers your ChatGPT subscription. Once Kvasir
+runs, setup shows a link and a code and waits while you open the link, sign
+in with ChatGPT and enter the code. The assistant's purposes that read no
+rows of the archive then go to the subscription, and the prompt leaves your
+systems; those that read rows stay closed to it until an admin opens them in
+the desk's settings. A sign-in that fails or outlives its code stops the
+install, and `nils setup` run again signs in when you keep the subscription.
+With nobody at the terminal, no sign-in is started. Where people sign in, a
+subscription is each person's own, and each signs in to theirs from the desk.
 
 **7. Keeping it running.** Systemd user units on Linux, podman quadlets for a
 podman run, a compose file for a docker one, launchd agents on macOS. Where
@@ -119,21 +133,32 @@ Both are public and pull without an account. Where an image cannot be
 pulled, a Containerfile is written beside the base directory and the image
 is built there from the release binary already downloaded.
 
-The assistant and the gateway ship no binary: they are cloned from
-[`kineuro/kvasir`](https://github.com/kineuro/kvasir) and
-[`kineuro/nils-assistant`](https://github.com/kineuro/nils-assistant) and
-built with Node 22. Where node is missing the wizard says so and installs
-the rest.
+The assistant and Kvasir, the model gateway, ship no binary: they are cloned
+from [`kineuro/kvasir`](https://github.com/kineuro/kvasir) and
+[`kineuro/nils-assistant`](https://github.com/kineuro/nils-assistant) at the
+release tags this version of `nils` names, and built with Node 22. Where
+Node 22, git or npm is missing, the plan says so and nothing is placed.
 
-The gateway's `kvasir.json` is written from its own example with the port
-this setup chose, an admin token made here, and the address you gave for the
-model; a backend that is not on this machine is marked remote, and the
-wizard says that the prompt then leaves the machine. The file holds that
-token, so it is readable by nobody else. `<dir>/assistant/assistant.env`
-holds everything the assistant reads: the engine's address, the gateway's,
-the key file, the model, the stores and the port. The assistant's key is
-minted at the gateway once the gateway answers; where it is not up yet the
-wizard prints the one command that mints it.
+Kvasir's `kvasir.json` is written from its own example with the port this
+setup chose, an admin token made here, how Kvasir knows its callers, and
+every purpose the assistant's stations use. It names no model, since Kvasir
+holds its models in its own database. Once Kvasir runs, the model you chose
+is added through Kvasir, which tries it with one short request from where
+Kvasir runs and holds it only once it answers. A model that answered the
+wizard on this machine and not Kvasir, as a server on this machine's
+loopback does not answer a container, stops the install with Kvasir's own
+words. Kvasir warms and admits a local model it is given, and setup waits
+for the admission. A backend that is not on this machine is marked remote,
+and the wizard says that the prompt then leaves the machine. Until Kvasir
+holds the model, it is kept with its key in
+`<dir>/kvasir/backends-to-add.json`; that file and `kvasir.json` are
+readable by nobody else.
+
+`<dir>/assistant/assistant.env` holds everything the assistant reads: the
+engine's address, Kvasir's, the key file, the model (`chatgpt` for the
+subscription), the stores and the port. The assistant's key is minted at
+Kvasir once Kvasir answers; where it is not up yet, `nils setup` and repair
+adds the model and mints the key once it is.
 
 ## Containers
 
@@ -185,7 +210,9 @@ kind = "podman"
 Run `nils setup` again and it opens with what is installed, where, in what
 mode and how it runs, then offers to update everything, change something,
 add a part, or repair, which writes the configuration and the services again
-from what the state records.
+from what the state records. A `kvasir.json` from before Kvasir held its
+models has its backends taken out, and each is added back through Kvasir
+once it runs, under the same id and with the key its key file holds.
 
 ## Updating
 
@@ -195,9 +222,22 @@ nils update --all
 
 Every part the state names, each in the way it runs: a binary is replaced
 from its release, a container is a pull of the new tag and a restart of its
-unit, a Node part is a fetch and a rebuild. One line each, and the engine
-last, since it replaces the binary doing the replacing. `nils setup
---update` is the same work from the wizard's side.
+unit, a Node part is its release tag fetched, checked out and built again.
+One line each, and the engine last, since it replaces the binary doing the
+replacing. `nils setup --update` is the same work from the wizard's side.
+
+## Removing it
+
+```
+nils uninstall
+```
+
+It asks what should go. Keeping your data removes the services, the
+programs, the packs and Kvasir's directory, with the models Kvasir holds,
+their keys, its subscriptions and the assistant's key, and keeps the
+registry and its key, the backups, the desk's people and the assistant's
+history. Everything removes the base directory as well, and the registry's
+key cannot be recovered. `--keep-data` and `--purge` answer it.
 
 ## The flags
 

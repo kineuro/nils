@@ -767,8 +767,78 @@ fn what_this_machine_can_do_is_said_before_the_assistant_is_offered() {
     );
     if o.stdout.contains("No local model worth serving.") {
         o.says("no assistant at all");
-        o.says("the gateway marks that backend remote");
+        o.says("Kvasir marks that backend remote");
     }
+}
+
+/// An uninstall takes Kvasir's state with NILS, where the data is kept too:
+/// the models it holds and their keys, its subscriptions, its seal key and
+/// pepper, and the assistant's key. The registry and the assistant's history
+/// stay.
+#[test]
+fn an_uninstall_takes_kvasirs_state_and_keeps_the_data() {
+    let nils = Installed::new("nils-setup-uninstall-kvasir");
+    let config = TempDir::new("nils-setup-uninstall-kvasir-config");
+    let base = TempDir::new("nils-setup-uninstall-kvasir-base");
+    let dir = base.path().join("nils");
+    let kvasir = dir.join("kvasir");
+    std::fs::create_dir_all(kvasir.join("state")).unwrap();
+    for file in [
+        "kvasir.json",
+        "kvasir.sqlite",
+        "kvasir.seal",
+        "kvasir.pepper",
+        "assistant.key",
+        "state/held",
+    ] {
+        std::fs::write(kvasir.join(file), "x").unwrap();
+    }
+    let assistant = dir.join("assistant");
+    std::fs::create_dir_all(assistant.join("dist")).unwrap();
+    std::fs::write(assistant.join("assistant.sqlite"), "x").unwrap();
+    std::fs::create_dir_all(dir.join("registry")).unwrap();
+    std::fs::write(
+        dir.join("registry").join("nils.toml"),
+        "backend = \"sqlite\"\n",
+    )
+    .unwrap();
+    let record = config.path().join("nils");
+    std::fs::create_dir_all(&record).unwrap();
+    std::fs::write(
+        record.join("setup.toml"),
+        format!(
+            "dir = \"{}\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"none\"\n\n\
+             [parts.kvasir]\nversion = \"from source\"\npath = \"{}\"\nkind = \"node\"\n\n\
+             [parts.assistant]\nversion = \"from source\"\npath = \"{}\"\nkind = \"node\"\n",
+            dir.display(),
+            kvasir.display(),
+            assistant.display()
+        ),
+    )
+    .unwrap();
+
+    let out = output(
+        Command::new(nils.path())
+            .args(["uninstall", "--keep-data", "--yes"])
+            .env("NILS_NO_TTY", "1")
+            .env("NO_COLOR", "1")
+            .env("XDG_CONFIG_HOME", config.path()),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("the models it holds"), "{stdout}");
+    assert!(!kvasir.exists(), "Kvasir's state stayed:\n{stdout}");
+    assert!(!assistant.join("dist").exists(), "{stdout}");
+    assert!(
+        assistant.join("assistant.sqlite").is_file(),
+        "the assistant's history is data"
+    );
+    assert!(dir.join("registry").join("nils.toml").is_file());
+    assert!(!record.join("setup.toml").exists());
 }
 
 #[test]

@@ -83,9 +83,13 @@ fn image_tag(version: &str) -> String {
     }
 }
 
-/// Where the two Node parts come from.
+/// Where the two Node parts come from, and the release tag each is taken
+/// at: the Kvasir and the assistant this version of the engine was released
+/// beside.
 const KVASIR_REPO: &str = "https://github.com/kineuro/kvasir";
 const ASSISTANT_REPO: &str = "https://github.com/kineuro/nils-assistant";
+const KVASIR_REF: &str = "v1.0.0-alpha.4";
+const ASSISTANT_REF: &str = "v1.0.0-alpha.23";
 
 /// Inside a container, everything lives under one prefix.
 const IN_DESK: &str = "/srv/nils/desk";
@@ -98,7 +102,7 @@ const POSTGRES_MAJOR: &str = "17";
 const POSTGRES_CONTAINER: &str = "nils-postgres";
 const IN_POSTGRES: &str = "/var/lib/postgresql/data";
 
-/// What the gateway and the assistant run in beside the engine and the desk.
+/// What Kvasir and the assistant run in beside the engine and the desk.
 /// Neither has an image of its own: both are built on this machine, and their
 /// directories are mounted into Node's image at the same paths, so every path
 /// their configuration names means the same inside as out.
@@ -118,7 +122,7 @@ fn host_from_container(runtime: Runtime) -> Option<&'static str> {
     }
 }
 
-/// A model address as the gateway must dial it from where it runs: on this
+/// A model address as Kvasir must dial it from where it runs: on this
 /// machine as it was typed, in a container with this machine's loopback named
 /// the way a container reaches it.
 fn model_address_for(runtime: Runtime, url: &str) -> String {
@@ -138,10 +142,10 @@ fn model_address_for(runtime: Runtime, url: &str) -> String {
     url.to_string()
 }
 
-/// What a person should know when the gateway runs in a container and the
-/// model server is on this machine's loopback: how it will be reached, or
-/// why it will not be. Nothing when the gateway runs on the machine or the
-/// server is somewhere else.
+/// What a person should know when Kvasir runs in a container and the model
+/// server is on this machine's loopback: how it will be reached, or why it
+/// will not be. Nothing when Kvasir runs on the machine or the server is
+/// somewhere else.
 fn model_reach_note(runtime: Runtime, url: &str, pasta: fn() -> bool) -> Option<String> {
     let dialled = model_address_for(runtime, url);
     if dialled == url {
@@ -149,18 +153,18 @@ fn model_reach_note(runtime: Runtime, url: &str, pasta: fn() -> bool) -> Option<
     }
     Some(match runtime {
         Runtime::Podman if pasta() => format!(
-            "the gateway runs in the pod and reaches this machine's own {url} as {dialled}, \
-             which podman hands the pod"
+            "Kvasir runs in the pod and reaches this machine's own {url} as {dialled}, which \
+             podman hands the pod"
         ),
         Runtime::Podman => format!(
             "podman here does not network through pasta, so the pod cannot reach this \
              machine's 127.0.0.1; start the model server on an address the pod reaches, and \
-             the gateway dials {dialled}"
+             Kvasir dials {dialled}"
         ),
         _ => format!(
-            "the gateway runs in a container and dials {dialled}, which is this machine on \
-             docker's bridge; a server listening only on 127.0.0.1 does not answer there, so \
-             start it on 0.0.0.0 or on the bridge's address"
+            "Kvasir runs in a container and dials {dialled}, which is this machine on docker's \
+             bridge; a server listening only on 127.0.0.1 does not answer there, so start it on \
+             0.0.0.0 or on the bridge's address"
         ),
     })
 }
@@ -275,8 +279,8 @@ fn with_causes(error: &dyn std::error::Error) -> String {
     out
 }
 
-/// The same address the other way: what a person typed, from what the
-/// gateway dials, for a machine run after a container one.
+/// The same address the other way: what a person typed, from what Kvasir
+/// dials, for a machine run after a container one.
 fn model_address_on_machine(url: &str) -> String {
     for host in ["host.containers.internal", "host.docker.internal"] {
         for scheme in ["http://", "https://"] {
@@ -569,8 +573,8 @@ pub(crate) fn card_advice(memory_gb: Option<f64>) -> Vec<String> {
         _ => vec![
             "No local model worth serving.".to_string(),
             "The options are a model on another machine you can reach, a commercial provider \
-             through the gateway (the prompt then leaves the machine, and the gateway marks \
-             that backend remote), or no assistant at all, which costs nothing else: the \
+             through Kvasir, the model gateway (the prompt then leaves the machine, and Kvasir \
+             marks that backend remote), or no assistant at all, which costs nothing else: the \
              engine and the desk are complete without it."
                 .to_string(),
         ],
@@ -1014,6 +1018,20 @@ impl Console {
             self.later.borrow_mut().push(format!("  {text}"));
         } else {
             println!("  {text}");
+        }
+    }
+
+    /// Lines a person must read while the work waits on them, such as a code
+    /// to enter somewhere: under a checklist, drawn beneath its rows until
+    /// they are taken away with none; otherwise said at once.
+    fn show(&self, lines: &[String]) {
+        match &self.checklist {
+            Some((live, _)) => live.notice(lines),
+            None => {
+                for line in lines {
+                    self.say(line);
+                }
+            }
         }
     }
 
@@ -1900,7 +1918,7 @@ pub(crate) struct Plan {
     pub(crate) service: bool,
     pub(crate) channel: Option<String>,
     pub(crate) version: String,
-    /// Whether the pod is given this machine's loopback, so a gateway or an
+    /// Whether the pod is given this machine's loopback, so Kvasir or an
     /// engine inside it reaches a model server or a Postgres listening on
     /// 127.0.0.1 here. Rootless podman with pasta, and only when something
     /// in the pod needs it.
@@ -1911,8 +1929,8 @@ pub(crate) struct Plan {
     pub(crate) oidc: Option<OidcPlan>,
 }
 
-/// The provider the desk signs people in at, as the desk, the engine and the
-/// gateway are each told of it. The client's secret is not here but in a
+/// The provider the desk signs people in at, as the desk, the engine and
+/// Kvasir are each told of it. The client's secret is not here but in a
 /// file beside the desk's configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OidcPlan {
@@ -2370,7 +2388,7 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
     };
     let mut pod = format!("podman pod create --name nils -p {publish}");
     if plan.has(Part::Assistant) {
-        // the gateway, on this machine's loopback only, for the key setup makes
+        // Kvasir, on this machine's loopback only, for what setup asks of it
         let _ = write!(pod, " -p 127.0.0.1:{p}:{p}", p = plan.ports.kvasir);
     }
     if plan.host_loopback {
@@ -3250,12 +3268,12 @@ fn questions(
     }
     if parts.contains(&Part::Assistant) && runtime.container() {
         console.note(&format!(
-            "the assistant and the gateway are built from source on this machine, which needs Node \
-             22, and run in {NODE_IMAGE} beside the others"
+            "the assistant and Kvasir, the model gateway, are built from source on this machine, \
+             which needs Node 22, and run in {NODE_IMAGE} beside the others"
         ));
     }
-    // A gateway written before keeps its model unless another is chosen, and
-    // a rerun is how the model is changed.
+    // The model the assistant asks for is kept unless another is chosen, and
+    // a rerun is how the model is changed; with none named yet, it is asked.
     let on_record = if parts.contains(&Part::Assistant) {
         model_on_record_in(&dir)
     } else {
@@ -3264,22 +3282,38 @@ fn questions(
     let choose = parts.contains(&Part::Assistant)
         && match &on_record {
             Some(model) => {
-                !console.ask_yes_no(&format!("The assistant talks to {model}. Keep it?"), true)?
+                let talks_to = if model == CHATGPT_WORDS {
+                    "a ChatGPT subscription"
+                } else {
+                    model.as_str()
+                };
+                !console.ask_yes_no(
+                    &format!("The assistant talks to {talks_to}. Keep it?"),
+                    true,
+                )?
             }
-            None => !dir.join("kvasir").join("kvasir.json").exists(),
+            None => true,
         };
     if choose {
-        let chosen = choose_model(console, served)?;
+        let chosen = choose_model(console, served, mode)?;
         if let Some(note) = model_reach_note(runtime, &chosen.url, podman_has_pasta) {
             console.note(&note);
         }
         console.said(if chosen.later {
             "a model later"
+        } else if chosen.chatgpt {
+            "ChatGPT"
         } else {
             &chosen.model
         });
         answers.model = Some(chosen);
     } else {
+        // The install's ChatGPT subscription, kept, is chosen again: signed
+        // in once Kvasir runs where it is not, which is how a sign-in that did
+        // not finish is taken up by running setup again.
+        if on_record.as_deref() == Some(CHATGPT_WORDS) && mode == Mode::Off {
+            answers.model = Some(ModelChoice::chatgpt());
+        }
         let said = match &on_record {
             Some(model) => model.clone(),
             None if parts.contains(&Part::Assistant) => "the assistant".to_string(),
@@ -3305,7 +3339,7 @@ fn questions(
             &mut ports.desk,
             parts.contains(&Part::Desk),
         ),
-        ("the gateway", "kvasir", &mut ports.kvasir, assistant),
+        ("Kvasir", "kvasir", &mut ports.kvasir, assistant),
         // in a container the assistant is published nowhere
         (
             "the assistant",
@@ -3414,6 +3448,9 @@ fn questions(
     if let Some(model) = &answers.model {
         let said = if model.later {
             "none named yet".to_string()
+        } else if model.chatgpt {
+            "your ChatGPT subscription, signed in once Kvasir runs (the prompt leaves your systems)"
+                .to_string()
         } else {
             format!(
                 "{} at {}{}",
@@ -3567,7 +3604,7 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         stages.push((Stage::Desk, "desk configuration".to_string()));
     }
     if plan.has(Part::Assistant) {
-        stages.push((Stage::Gateway, "gateway configuration".to_string()));
+        stages.push((Stage::Kvasir, "Kvasir configuration".to_string()));
     }
     stages.push((Stage::Services, "services".to_string()));
     console.start_checklist("Repairing", stages);
@@ -3586,8 +3623,8 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
 }
 
 /// A repair's work: the Postgres this setup runs started again, the desk's
-/// configuration written and the gateway's mended, and the services written
-/// and started.
+/// configuration written and Kvasir's mended, and the services written and
+/// started.
 fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service>, Exit> {
     // A Postgres this setup runs, started again with its data and password.
     if let Some(pg) = plan.postgres {
@@ -3604,14 +3641,14 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
         write_desk_config(plan)?;
         console.progress(&plan.desk_config().display().to_string());
     }
-    // The gateway's file is mended, not rewritten, and the assistant's
-    // environment is written where it is missing; the key is made during the
-    // start-up below, once the gateway answers.
+    // Kvasir's file is mended, not rewritten, and the assistant's environment
+    // is written where it is missing; the models are added and the key is
+    // made during the start-up below, once Kvasir answers.
     if plan.has(Part::Assistant) {
-        console.begin(Stage::Gateway);
+        console.begin(Stage::Kvasir);
         if let Err(e) = configure_kvasir(plan, console, None) {
             console.warn(&format!(
-                "the gateway's configuration was not mended: {}",
+                "Kvasir's configuration was not mended: {}",
                 e.message
             ));
         }
@@ -3625,7 +3662,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     console.begin(Stage::Services);
     let mut services = Vec::new();
     if plan.service {
-        match start_everything(plan, state, console) {
+        match start_everything(plan, state, console, None) {
             Ok(started) => {
                 console.report(&started);
                 services = started.services;
@@ -3637,11 +3674,11 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
             console.say(&format!("run: {line}"));
         }
     }
-    // systemd, podman and docker make the key as they start, between the
-    // gateway and the assistant
+    // systemd, podman and docker make Kvasir ready as they start, between
+    // Kvasir and the assistant
     let systemd = plan.runtime == Runtime::Machine && !cfg!(target_os = "macos");
     if plan.has(Part::Assistant) && !(plan.service && (systemd || plan.runtime.container())) {
-        ready_gateway(plan, console)?;
+        ready_kvasir(plan, console, None)?;
     }
     start_supervisor(plan, state, console);
     Ok(services)
@@ -3686,7 +3723,7 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
     ];
     if plan.runtime.container() && plan.has(Part::Assistant) {
         rows.push((
-            "gateway",
+            "kvasir",
             format!(
                 "and the assistant built here and run in {NODE_IMAGE}, their directories mounted"
             ),
@@ -3835,7 +3872,7 @@ enum Stage {
     Postgres,
     Registry,
     Desk,
-    Gateway,
+    Kvasir,
     Assistant,
     Places,
     Services,
@@ -3866,7 +3903,7 @@ fn stages(plan: &Plan, only_update: bool) -> Vec<(Stage, String)> {
         out.push((Stage::Desk, "desk".to_string()));
     }
     if plan.has(Part::Assistant) {
-        out.push((Stage::Gateway, "gateway".to_string()));
+        out.push((Stage::Kvasir, "Kvasir".to_string()));
         out.push((Stage::Assistant, "assistant".to_string()));
     }
     out.push((Stage::Places, "places".to_string()));
@@ -4049,7 +4086,7 @@ fn place(
                 &["pull", NODE_IMAGE],
             ) {
                 console.broken(&format!(
-                    "{NODE_IMAGE} could not be pulled, and the gateway and the assistant run in it: {}",
+                    "{NODE_IMAGE} could not be pulled, and Kvasir and the assistant run in it: {}",
                     e.message
                 ))?;
             }
@@ -4154,8 +4191,8 @@ fn place(
     }
 
     // The provider, once the desk is on this machine to register itself at
-    // an Authentik: what it answers is what the desk, the engine and the
-    // gateway are told.
+    // an Authentik: what it answers is what the desk, the engine and Kvasir
+    // are told.
     let registered;
     let plan = match register_desk(plan, state, answers, console) {
         Some(oidc) => {
@@ -4211,9 +4248,9 @@ fn place(
         }
     }
 
-    // The assistant and its gateway, which are built rather than downloaded.
+    // The assistant and Kvasir, which are built rather than downloaded.
     if plan.has(Part::Assistant) {
-        console.begin(Stage::Gateway);
+        console.begin(Stage::Kvasir);
         match install_node_parts(plan, console, answers.model.as_ref()) {
             Ok(paths) => {
                 for (name, path) in paths {
@@ -4246,7 +4283,7 @@ fn place(
     let mut services = Vec::new();
     if plan.service {
         console.begin(Stage::Services);
-        match start_everything(plan, state, console) {
+        match start_everything(plan, state, console, answers.model.as_ref()) {
             Ok(started) => {
                 console.report(&started);
                 let stopped: Vec<&str> = started
@@ -4271,7 +4308,7 @@ fn place(
         console.begin(Stage::Services);
         // No unit files were asked for, but a container still has to be
         // started, or the person is left with images and nothing running.
-        // The assistant's starts once the gateway has made its key.
+        // The assistant's starts once Kvasir has made its key.
         let (assistant, rest): (Vec<String>, Vec<String>) = container_commands(plan)
             .into_iter()
             .partition(|line| line.contains("--name nils-assistant"));
@@ -4289,24 +4326,24 @@ fn place(
             run(line)?;
         }
         if !assistant.is_empty() {
-            ready_gateway(plan, console)?;
+            ready_kvasir(plan, console, answers.model.as_ref())?;
         }
         for line in &assistant {
             run(line)?;
         }
     }
 
-    // The assistant's key comes from the gateway. systemd, podman and docker
-    // make it as they start, between the gateway and the assistant, and so
-    // did the containers just above; launchd has no gateway to wait for.
+    // The model and the assistant's key come from Kvasir. systemd, podman and
+    // docker make them as they start, between Kvasir and the assistant, and
+    // so did the containers just above; launchd has no Kvasir to wait for.
     let systemd = plan.runtime == Runtime::Machine && !cfg!(target_os = "macos");
     if plan.has(Part::Assistant) && plan.service && !systemd && !plan.runtime.container() {
-        ready_gateway(plan, console)?;
+        ready_kvasir(plan, console, answers.model.as_ref())?;
     }
     if plan.has(Part::Assistant) && !plan.service && !plan.runtime.container() {
         console.say(
-            "with no services, start the gateway yourself; then nils setup and repair makes \
-             the assistant's key",
+            "with no services, start Kvasir yourself; then nils setup and repair adds its model \
+             and makes the assistant's key",
         );
     }
     start_supervisor(plan, state, console);
@@ -5018,7 +5055,7 @@ const DESK_MANAGED: [&str; 11] = [
 
 /// The desk's configuration on disk with a plan's set in it: each key setup
 /// writes replaced, each table it writes set key by key so a person's other
-/// keys in it stay, and the gateway's and the assistant's tables removed
+/// keys in it stay, and Kvasir's and the assistant's tables removed
 /// with them. A `[local]` or an `[oidc]` table stays for a desk that goes
 /// back, and every key setup does not write is kept, though not the file's
 /// comments. `Ok(None)` when nothing setup writes has changed; an error when
@@ -5612,8 +5649,6 @@ fn desk_config_fate(plan: &Plan) -> DeskConfigFate {
     }
 }
 
-/// The gateway and the assistant: cloned and built, since neither ships a
-/// binary. Anything missing is said rather than guessed at.
 /// What this machine lacks for a plan, found before anything is placed, so
 /// an install never stops halfway for a tool it could have named at the start.
 fn missing_for(plan: &Plan) -> Vec<String> {
@@ -5622,9 +5657,9 @@ fn missing_for(plan: &Plan) -> Vec<String> {
         out.push(format!("{}, which runs the parts", plan.runtime.name()));
     }
     if plan.has(Part::Assistant) {
-        // the assistant and the gateway are built on this machine, whatever runs them
+        // the assistant and Kvasir are built on this machine, whatever runs them
         if node_major() < 22 {
-            out.push("Node 22 or newer, which builds the assistant and the gateway".to_string());
+            out.push("Node 22 or newer, which builds the assistant and Kvasir".to_string());
         }
         for (tool, does) in [
             ("git", "takes their source"),
@@ -5650,6 +5685,63 @@ fn node_major() -> u32 {
         .unwrap_or(0)
 }
 
+/// The ref a Node part is taken at: the release tag pinned here, or, for
+/// testing in a lab before that tag exists, the ref its variable names,
+/// which may be a branch.
+fn source_ref(pinned: &str, named: Option<&str>) -> String {
+    named
+        .map(str::trim)
+        .filter(|named| !named.is_empty())
+        .unwrap_or(pinned)
+        .to_string()
+}
+
+/// A Node part's source by the part's name: its repository, the ref it is
+/// taken at, and what a person reads it as.
+fn node_source(name: &str) -> Option<(&'static str, String, &'static str)> {
+    let (repo, pinned, variable, said) = match name {
+        "kvasir" => (KVASIR_REPO, KVASIR_REF, "NILS_SETUP_KVASIR_REF", "Kvasir"),
+        "assistant" => (
+            ASSISTANT_REPO,
+            ASSISTANT_REF,
+            "NILS_SETUP_ASSISTANT_REF",
+            "the assistant",
+        ),
+        _ => return None,
+    };
+    let named = std::env::var(variable).ok();
+    Some((repo, source_ref(pinned, named.as_deref()), said))
+}
+
+/// The git commands that bring a Node part's source to a ref, each as its
+/// arguments. With no checkout, a clone of that ref alone. With one, from a
+/// checkout of main too, the ref fetched and checked out detached, which
+/// takes a tag and a branch alike.
+fn source_steps(repo: &str, reference: &str, into: &Path, checked_out: bool) -> Vec<Vec<String>> {
+    let words = |list: &[&str]| list.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+    if checked_out {
+        vec![
+            words(&["fetch", "--depth", "1", "origin", reference]),
+            words(&["checkout", "--detach", "FETCH_HEAD"]),
+        ]
+    } else {
+        let into = into.display().to_string();
+        vec![words(&[
+            "clone", "--depth", "1", "--branch", reference, repo, &into,
+        ])]
+    }
+}
+
+/// A git command's line on screen: what it does, to which part, at which ref.
+fn source_label(step: &[String], said: &str, reference: &str) -> String {
+    match step.first().map(String::as_str) {
+        Some("checkout") => format!("checking out {said} at {reference}"),
+        _ => format!("fetching {said} at {reference}"),
+    }
+}
+
+/// Kvasir and the assistant: taken at their release tags and built, since
+/// neither ships a binary. Anything missing is said rather than guessed at.
 fn install_node_parts(
     plan: &Plan,
     console: &mut Console,
@@ -5657,36 +5749,31 @@ fn install_node_parts(
 ) -> Result<Vec<(&'static str, PathBuf)>, Exit> {
     if node_major() < 22 {
         return Err(fail(
-            "the assistant and the gateway are built with Node 22; install it and run nils setup again",
+            "the assistant and Kvasir, the model gateway, are built with Node 22; install it and \
+             run nils setup again",
         ));
     }
     if !have("git") {
-        return Err(fail("git is needed to take the assistant's source"));
+        return Err(fail(
+            "git is needed to take the source of the assistant and Kvasir",
+        ));
     }
 
     let mut out = Vec::new();
-    for (name, said, repo) in [
-        ("kvasir", "the gateway", KVASIR_REPO),
-        ("assistant", "the assistant", ASSISTANT_REPO),
-    ] {
+    for name in ["kvasir", "assistant"] {
         if name == "assistant" {
             console.begin(Stage::Assistant);
         }
+        let Some((repo, reference, said)) = node_source(name) else {
+            continue;
+        };
         let into = plan.dir.join(name);
-        if into.exists() {
-            console.task(
-                &format!("updating {said}'s source"),
-                &into,
-                "git",
-                &["pull", "--ff-only"],
-            )?;
-        } else {
-            console.task(
-                &format!("fetching {said}"),
-                &plan.dir,
-                "git",
-                &["clone", "--depth", "1", repo, &into.display().to_string()],
-            )?;
+        // a checkout is brought to the release, whatever it followed before
+        let checked_out = into.join(".git").exists();
+        let at = if checked_out { &into } else { &plan.dir };
+        for step in source_steps(repo, &reference, &into, checked_out) {
+            let args: Vec<&str> = step.iter().map(String::as_str).collect();
+            console.task(&source_label(&step, said, &reference), at, "git", &args)?;
         }
         console.task(
             &format!("installing {said}'s packages"),
@@ -5704,59 +5791,133 @@ fn install_node_parts(
 }
 
 /// What the assistant will talk to, chosen by a person who may not know
-/// what an OpenAI compatible address is.
+/// what an OpenAI compatible address is: a model server or a provider, the
+/// install's own ChatGPT subscription, or nothing yet.
 struct ModelChoice {
+    /// The model's OpenAI compatible address; empty for ChatGPT and for later.
     url: String,
     local: bool,
     key: Option<String>,
+    /// The model's name as its server lists it, and `chatgpt` for ChatGPT.
     model: String,
     later: bool,
+    /// The install's own ChatGPT subscription, signed in once Kvasir runs.
+    chatgpt: bool,
 }
 
-/// The model the gateway is given when nobody has named one: the one the
-/// assistant's stations were written against, on SGLang's own port.
+impl ModelChoice {
+    /// No model named yet.
+    fn later() -> ModelChoice {
+        ModelChoice {
+            url: String::new(),
+            local: true,
+            key: None,
+            model: String::new(),
+            later: true,
+            chatgpt: false,
+        }
+    }
+
+    /// The install's own ChatGPT subscription: no address and no key, and
+    /// the model the assistant names is Kvasir's ChatGPT.
+    fn chatgpt() -> ModelChoice {
+        ModelChoice {
+            url: String::new(),
+            local: false,
+            key: None,
+            model: CHATGPT.to_string(),
+            later: false,
+            chatgpt: true,
+        }
+    }
+}
+
+/// Kvasir's name for its ChatGPT backend and for the subscription, and so
+/// the model the assistant names for it.
+const CHATGPT: &str = "chatgpt";
+
+/// The model on record, where the assistant names Kvasir's ChatGPT.
+const CHATGPT_WORDS: &str = "ChatGPT subscription";
+
+/// The address offered for a model server on this machine: SGLang's own
+/// port, and the model the assistant's stations were written against.
 const DEFAULT_MODEL_URL: &str = "http://127.0.0.1:30000/v1";
 
-/// That model's name, as the gateway's own example gives it.
+/// That model's name, offered where a server does not list its models.
 const EXAMPLE_MODEL_ID: &str = "qwen38-27b";
 
 /// Ask what the assistant should talk to, and what to type for it. Where the
 /// address answers, the server is asked which models it serves, so the name
-/// is picked from a list rather than remembered.
-fn choose_model(console: &mut Console, served: bool) -> Result<ModelChoice, Stop> {
+/// is picked from a list rather than remembered. Where nobody signs in, the
+/// install's own ChatGPT subscription is offered; where people sign in, a
+/// subscription is each person's own, signed in from the desk.
+fn choose_model(console: &mut Console, served: bool, mode: Mode) -> Result<ModelChoice, Stop> {
     let example_model = EXAMPLE_MODEL_ID;
     console.heading("The model");
     console.note(
-        "the assistant talks to a model through the gateway, over the OpenAI chat API, which \
-         almost every model server and provider speaks",
+        "the assistant talks to a model through Kvasir, the model gateway, over the OpenAI chat \
+         API, which almost every model server and provider speaks",
     );
+    let subscription = mode == Mode::Off;
+    if !subscription {
+        console.note(
+            "where people sign in, a ChatGPT subscription is each person's own: each signs in to \
+             theirs from the desk",
+        );
+    }
+    let mut options = vec![
+        (
+            "A model server on this machine",
+            "SGLang, vLLM, llama.cpp or Ollama, already running here",
+        ),
+        (
+            "A model server on another machine of yours",
+            "the same, reached over your network; the prompt stays inside your own systems",
+        ),
+        (
+            "A commercial provider",
+            "OpenAI, OpenRouter, MiniMax or another; the prompt leaves your systems",
+        ),
+    ];
+    if subscription {
+        options.push((
+            "Your ChatGPT subscription",
+            "sign in with ChatGPT once setup has started Kvasir; the prompt leaves your systems",
+        ));
+    }
+    options.push((
+        "Decide later",
+        "install it without a model now; run nils setup again to name one",
+    ));
+    let later = options.len() - 1;
     // a model named is asked one short question, and taken only once it answers
     loop {
         let pick = console.ask_choice(
             "What should it talk to?",
-            &[
-                (
-                    "A model server on this machine",
-                    "SGLang, vLLM, llama.cpp or Ollama, already running here",
-                ),
-                (
-                    "A model server on another machine of yours",
-                    "the same, reached over your network; the prompt stays inside your own systems",
-                ),
-                (
-                    "A commercial provider",
-                    "OpenAI, OpenRouter, MiniMax or another; the prompt leaves your systems",
-                ),
-                (
-                    "Decide later",
-                    "install it without a model now; run nils setup again to name one",
-                ),
-            ],
-            if served { 0 } else { 3 },
+            &options,
+            if served { 0 } else { later },
         )?;
 
-        if pick == 3 {
+        if pick == later {
             return Ok(model_later(console));
+        }
+
+        if subscription && pick == 3 {
+            // a sign-in is made by a person, at the terminal
+            if !console.interactive() {
+                console.note("with nobody at the terminal to sign in, the model is left for later");
+                return Ok(model_later(console));
+            }
+            console.note(
+                "once setup has started Kvasir, it shows a link and a code: open the link, sign in \
+                 with ChatGPT and enter the code",
+            );
+            console.note(
+                "Kvasir keeps your registry's rows on your own systems unless you decide \
+                 otherwise, so the questions that read the registry are not sent to ChatGPT until \
+                 you open them: https://kineuro.se/nils/docs/assistant/kvasir/",
+            );
+            return Ok(ModelChoice::chatgpt());
         }
 
         let (url, local) = match pick {
@@ -5792,7 +5953,7 @@ fn choose_model(console: &mut Console, served: bool) -> Result<ModelChoice, Stop
         } else {
             let key = console.ask_hidden_once("Your key from that provider")?;
             if key.is_none() {
-                console.note("no key was given; the provider will refuse the gateway until one is");
+                console.note("no key was given; the provider will refuse Kvasir until one is");
             }
             key
         };
@@ -5840,9 +6001,9 @@ fn choose_model(console: &mut Console, served: bool) -> Result<ModelChoice, Stop
                 console.note(&format!("{model} answered at {url}"));
                 if !local {
                     console.note(
-                        "the gateway keeps your registry's rows on your own systems unless you \
-                     decide otherwise, so questions that read the registry are refused by this \
-                     provider until you open them: https://kineuro.se/nils/docs/assistant/kvasir/",
+                        "Kvasir keeps your registry's rows on your own systems unless you decide \
+                     otherwise, so questions that read the registry are refused by this provider \
+                     until you open them: https://kineuro.se/nils/docs/assistant/kvasir/",
                     );
                 }
                 return Ok(ModelChoice {
@@ -5851,6 +6012,7 @@ fn choose_model(console: &mut Console, served: bool) -> Result<ModelChoice, Stop
                     key,
                     model,
                     later: false,
+                    chatgpt: false,
                 });
             }
             Err(why) => {
@@ -5917,20 +6079,14 @@ fn list_models(url: &str, key: Option<&str>) -> Option<Vec<String>> {
     Some(ids)
 }
 
-/// No model named yet: the gateway is pointed at the address the stations
-/// were written against, until nils setup names another.
+/// No model named yet: Kvasir holds none, and the assistant answers once
+/// nils setup names one, or one is added from the desk.
 fn model_later(console: &mut Console) -> ModelChoice {
-    console.note(&format!(
-        "the gateway is pointed at {DEFAULT_MODEL_URL} for now; the assistant answers once a \
-         model runs there, or once you run nils setup and name another"
-    ));
-    ModelChoice {
-        url: DEFAULT_MODEL_URL.to_string(),
-        local: true,
-        key: None,
-        model: EXAMPLE_MODEL_ID.to_string(),
-        later: true,
-    }
+    console.note(
+        "Kvasir holds no model for now, so the assistant does not answer yet; run nils setup \
+         again to name one, or add one from the desk",
+    );
+    ModelChoice::later()
 }
 
 /// A mark of a key that tells one answer from another on the screens,
@@ -5942,7 +6098,7 @@ fn key_mark(key: &str) -> u64 {
     hasher.finish()
 }
 
-/// One short chat request to a model, the kind the gateway will send it:
+/// One short chat request to a model, the kind Kvasir will send it:
 /// whether it answers, and when it does not, why, in a person's words.
 fn try_model(url: &str, key: Option<&str>, model: &str) -> Result<(), String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -6013,10 +6169,10 @@ fn model_answer(status: u16, text: &str, model: &str) -> Result<(), String> {
     }
 }
 
-/// The purposes the assistant uses: the host's own, from the gateway's
-/// example, and one for each station the assistant ships, read from that
-/// station's own file. The gateway refuses a purpose it was not told of, so
-/// a station missing here is a station that never answers.
+/// The purposes the assistant uses: the host's own, from Kvasir's example,
+/// and one for each station the assistant ships, read from that station's
+/// own file. Kvasir refuses a purpose it was not told of, so a station
+/// missing here is a station that never answers.
 fn assistant_purposes(plan: &Plan, declared: &serde_json::Value) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = declared.as_array().cloned().unwrap_or_default();
     let stations = plan.dir.join("assistant").join("stations");
@@ -6054,17 +6210,15 @@ fn assistant_purposes(plan: &Plan, declared: &serde_json::Value) -> Vec<serde_js
     out
 }
 
-/// The gateway's configuration: the port this setup chose, an admin token
-/// made here, one backend for the model the person named, and every purpose
-/// the assistant uses. The file holds that token and a provider's key path,
-/// so it is written readable by nobody else.
+/// Kvasir's configuration: where it listens, an admin token made here, how
+/// it knows its callers, and every purpose the assistant uses. It names no
+/// model. Kvasir holds its models in its own database and refuses a file
+/// that names any, so the model a person chose is kept beside the file until
+/// Kvasir, once it runs, adds it. The file holds that token, so it is written
+/// readable by nobody else.
 ///
-/// An existing file is repaired rather than rewritten, because a person may
-/// have named their model in it by hand. What is repaired is what an earlier
-/// version of this wizard got wrong: a key file copied from the example that
-/// is not on this machine, which stops the gateway at start; the example's
-/// commercial backends, which nobody chose and which have no key; and
-/// purposes the assistant's stations use and the file never declared.
+/// An existing file is mended rather than rewritten, because a person may
+/// have changed it by hand.
 fn configure_kvasir(
     plan: &Plan,
     console: &mut Console,
@@ -6073,77 +6227,72 @@ fn configure_kvasir(
     let dir = plan.dir.join("kvasir");
     let config = dir.join("kvasir.json");
     if config.exists() {
-        return repair_kvasir(plan, console, chosen);
+        repair_kvasir(plan, console)?;
+    } else {
+        let example = dir.join("kvasir.example.json");
+        let text = std::fs::read_to_string(&example)
+            .map_err(|e| fail(format!("{}: {e}", example.display())))?;
+        let mut value: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| fail(format!("{}: {e}", example.display())))?;
+
+        value["bind"] = serde_json::json!(kvasir_bind(plan));
+        value["origin"] = serde_json::json!(format!("http://127.0.0.1:{}", plan.ports.kvasir));
+        value["auth"] = kvasir_auth(plan, &generated_passphrase());
+        value["purposes"] = serde_json::json!(assistant_purposes(plan, &value["purposes"]));
+        // an example from before Kvasir held its models still names them
+        if let Some(fields) = value.as_object_mut() {
+            fields.remove("backends");
+            fields.remove("oauth");
+        }
+
+        write_secret_bytes(
+            &config,
+            serde_json::to_string_pretty(&value)
+                .unwrap_or(text)
+                .as_bytes(),
+        )?;
+        console.note(&format!("{} is written", config.display()));
     }
-    let example = dir.join("kvasir.example.json");
-    let text = std::fs::read_to_string(&example)
-        .map_err(|e| fail(format!("{}: {e}", example.display())))?;
-    let mut value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| fail(format!("{}: {e}", example.display())))?;
-
-    value["bind"] = serde_json::json!(gateway_bind(plan));
-    value["origin"] = serde_json::json!(format!("http://127.0.0.1:{}", plan.ports.kvasir));
-    value["auth"] = gateway_auth(plan, &generated_passphrase());
-
-    let template = value["backends"][0].clone();
-    let example_model = template["models"][0]["id"]
-        .as_str()
-        .unwrap_or(EXAMPLE_MODEL_ID)
-        .to_string();
-    // Nobody was asked (a run with no terminal, or --yes): the gateway gets
-    // the example's model on SGLang's port, and the plan already said so.
-    let later = ModelChoice {
-        url: DEFAULT_MODEL_URL.to_string(),
-        local: true,
-        key: None,
-        model: example_model.clone(),
-        later: true,
-    };
-    let chosen = chosen.unwrap_or(&later);
-    let model_id = if chosen.model.is_empty() {
-        example_model.clone()
-    } else {
-        chosen.model.clone()
-    };
-
-    let mut backend = model_backend(plan, template, chosen, &model_id)?;
-    backend["id"] = serde_json::json!("model");
-    value["backends"] = serde_json::json!([backend]);
-    value["purposes"] = serde_json::json!(assistant_purposes(plan, &value["purposes"]));
-
-    write_secret_bytes(
-        &config,
-        serde_json::to_string_pretty(&value)
-            .unwrap_or(text)
-            .as_bytes(),
-    )?;
-    if chosen.later {
-        console.note(&format!(
-            "{} is written, with no model named yet",
-            config.display()
-        ));
-    } else {
-        console.note(&format!(
-            "{} sends the assistant to {} at {}",
-            config.display(),
-            model_id,
-            chosen.url
-        ));
+    match chosen {
+        Some(chosen) if !chosen.later && !chosen.chatgpt => {
+            keep_to_add(plan, vec![model_door_body(plan, chosen)])?;
+            console.note(&format!(
+                "Kvasir adds {} at {} once it runs",
+                chosen.model, chosen.url
+            ));
+        }
+        // ChatGPT, or no model for now, in place of a model chosen before
+        // that Kvasir does not hold yet; a backend from before stays kept
+        Some(chosen) => {
+            let kept: Vec<serde_json::Value> = to_add(plan)
+                .into_iter()
+                .filter(|backend| backend["replaces"] != true)
+                .collect();
+            write_to_add(plan, &kept)?;
+            if chosen.chatgpt {
+                console.note("the ChatGPT sign-in follows once Kvasir runs");
+            }
+        }
+        None => {}
     }
     Ok(())
 }
 
-/// The name the installer's token carries at the gateway.
+/// The name the installer's token carries at Kvasir.
 const INSTALLER: &str = "nils-setup:admin";
 
-/// How the gateway knows its callers, following the desk's sign-in. In `off`
-/// mode nobody signs in. In `local` mode it trusts the tokens the desk signs,
-/// as the engine does, so a person reaches it through the desk under their
-/// own roles; knowing only its own token, it refused every call the desk
-/// passed on. With a provider it trusts the provider's tokens once the
-/// provider is named, and knows only its token until then. The installer's
-/// token is kept in every mode, for what setup asks of the gateway.
-fn gateway_auth(plan: &Plan, admin: &str) -> serde_json::Value {
+/// The id of the backend setup adds for the model a person chose, which the
+/// assistant teaches on.
+const MODEL_BACKEND: &str = "model";
+
+/// How Kvasir knows its callers, following the desk's sign-in. In `off` mode
+/// nobody signs in. In `local` mode it trusts the tokens the desk signs, as
+/// the engine does, so a person reaches it through the desk under their own
+/// roles; knowing only its own token, it refused every call the desk passed
+/// on. With a provider it trusts the provider's tokens once the provider is
+/// named, and knows only its token until then. The installer's token is kept
+/// in every mode, for what setup asks of Kvasir.
+fn kvasir_auth(plan: &Plan, admin: &str) -> serde_json::Value {
     let tokens = serde_json::json!({ admin: INSTALLER });
     match plan.mode {
         Mode::Off => serde_json::json!({ "mode": "off", "tokens": tokens }),
@@ -6180,41 +6329,74 @@ fn gateway_auth(plan: &Plan, admin: &str) -> serde_json::Value {
     }
 }
 
-/// A gateway backend for the model a person chose, from a backend of the
-/// same shape: the model's address as the gateway reaches it, whether the
-/// prompt leaves this site, the model's name, and its key, in a file of its
-/// own.
-fn model_backend(
-    plan: &Plan,
-    mut backend: serde_json::Value,
-    chosen: &ModelChoice,
-    model_id: &str,
-) -> Result<serde_json::Value, Exit> {
-    if let Some(fields) = backend.as_object_mut() {
-        fields.remove("keyFile");
-        fields.remove("key");
-        fields.remove("provider");
-    }
-    backend["baseUrl"] = serde_json::json!(model_address_for(plan.runtime, &chosen.url));
-    backend["locality"] = serde_json::json!(if chosen.local { "local" } else { "remote" });
-    if backend["models"].as_array().is_none_or(Vec::is_empty) {
-        backend["models"] = serde_json::json!([{}]);
-    }
-    backend["models"][0]["id"] = serde_json::json!(model_id);
-    backend["models"][0]["name"] = serde_json::json!(model_id);
+/// The model a person chose, as Kvasir's door takes it: under the id
+/// `model`, at its address as Kvasir reaches it from where it runs, with
+/// whether the prompt leaves this site, the model's name and its key. It is
+/// marked as the wizard's, which takes the place of a `model` Kvasir holds
+/// with another address or model.
+fn model_door_body(plan: &Plan, chosen: &ModelChoice) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "id": MODEL_BACKEND,
+        "baseUrl": model_address_for(plan.runtime, &chosen.url),
+        "locality": if chosen.local { "local" } else { "remote" },
+        "models": [chosen.model],
+        "replaces": true,
+    });
     if let Some(key) = &chosen.key {
-        let path = plan.dir.join("kvasir").join("model.key");
-        write_secret(&path, key)?;
-        backend["keyFile"] = serde_json::json!(path.display().to_string());
+        body["key"] = serde_json::json!(key);
     }
-    Ok(backend)
+    body
 }
 
-/// Where the gateway listens. On the machine, loopback. In a container,
-/// every address of the container's own network, which is what a published
-/// port and the other containers reach; the port is published on this
-/// machine's loopback alone.
-fn gateway_bind(plan: &Plan) -> String {
+/// The backends Kvasir is to hold, kept beside its configuration until it
+/// holds each: the model chosen in the wizard, and the backends a kvasir.json
+/// from before named. The file holds their keys, so it is readable by nobody
+/// else, and it goes once Kvasir holds them all.
+fn to_add_path(plan: &Plan) -> PathBuf {
+    plan.dir.join("kvasir").join("backends-to-add.json")
+}
+
+/// The backends kept for Kvasir to add; none where there is no such file.
+fn to_add(plan: &Plan) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(to_add_path(plan))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|kept| kept.as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// The backends still to add written down, and the file gone where none is
+/// left.
+fn write_to_add(plan: &Plan, backends: &[serde_json::Value]) -> Result<(), Exit> {
+    let path = to_add_path(plan);
+    if backends.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(fail(format!("{}: {e}", path.display())))
+            }
+            _ => Ok(()),
+        };
+    }
+    let text = serde_json::to_string_pretty(backends).map_err(|e| fail(e.to_string()))?;
+    write_secret_bytes(&path, text.as_bytes())
+}
+
+/// More backends kept for Kvasir to add, each taking the place of one kept
+/// under the same id.
+fn keep_to_add(plan: &Plan, more: Vec<serde_json::Value>) -> Result<(), Exit> {
+    let mut kept = to_add(plan);
+    for backend in more {
+        kept.retain(|k| k["id"] != backend["id"]);
+        kept.push(backend);
+    }
+    write_to_add(plan, &kept)
+}
+
+/// Where Kvasir listens. On the machine, loopback. In a container, every
+/// address of the container's own network, which is what a published port
+/// and the other containers reach; the port is published on this machine's
+/// loopback alone.
+fn kvasir_bind(plan: &Plan) -> String {
     if plan.runtime.container() {
         format!("0.0.0.0:{}", plan.ports.kvasir)
     } else {
@@ -6222,45 +6404,75 @@ fn gateway_bind(plan: &Plan) -> String {
     }
 }
 
-/// Mend what an earlier version of this wizard wrote, and say what changed.
-fn repair_kvasir(
-    plan: &Plan,
-    console: &mut Console,
-    chosen: Option<&ModelChoice>,
-) -> Result<(), Exit> {
-    let config = plan.dir.join("kvasir").join("kvasir.json");
+/// Mend what an earlier version of this wizard, or of Kvasir, left in
+/// kvasir.json, and say what changed.
+fn repair_kvasir(plan: &Plan, console: &mut Console) -> Result<(), Exit> {
+    let dir = plan.dir.join("kvasir");
+    let config = dir.join("kvasir.json");
     let text =
         std::fs::read_to_string(&config).map_err(|e| fail(format!("{}: {e}", config.display())))?;
     let mut value: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| fail(format!("{}: {e}", config.display())))?;
     let mut mended: Vec<String> = Vec::new();
 
-    // A model chosen on a rerun takes the place of the one on record.
-    if let Some(chosen) = chosen.filter(|c| !c.later)
-        && let Some(first) = value["backends"]
-            .as_array()
-            .and_then(|all| all.first())
-            .cloned()
+    // Kvasir holds its models in its own database, and refuses a file that
+    // still names backends or the OAuth of its first design. Each backend is
+    // kept aside with its key before it leaves the file, and Kvasir adds it
+    // again under the same id once it runs, so nothing a person set up is
+    // lost. Its address is dialled from where Kvasir runs now, so a setup
+    // changed from the machine to containers, or back, is mended here too.
+    if let Some(named) = value
+        .as_object_mut()
+        .and_then(|fields| fields.remove("backends"))
     {
-        let model_id = if chosen.model.is_empty() {
-            first["models"][0]["id"]
-                .as_str()
-                .unwrap_or(EXAMPLE_MODEL_ID)
-                .to_string()
-        } else {
-            chosen.model.clone()
-        };
-        let backend = model_backend(plan, first.clone(), chosen, &model_id)?;
-        if backend != first {
-            mended.push(format!(
-                "sends the assistant to {model_id} at {}",
-                chosen.url
-            ));
-            value["backends"][0] = backend;
+        let mut moved = Vec::new();
+        for mut backend in named.as_array().cloned().unwrap_or_default() {
+            if let Some(file) = backend["keyFile"].as_str().map(str::to_string) {
+                match std::fs::read_to_string(dir.join(&file)) {
+                    Ok(key) if !key.trim().is_empty() => {
+                        backend["key"] = serde_json::json!(key.trim());
+                    }
+                    _ => mended.push(format!(
+                        "dropped a key file that is not on this machine ({file})"
+                    )),
+                }
+            }
+            if let Some(fields) = backend.as_object_mut() {
+                fields.remove("keyFile");
+                fields.remove("provider");
+                // a field an earlier file left empty is one Kvasir's door refuses
+                fields.retain(|_, value| !value.is_null());
+            }
+            if let Some(url) = backend["baseUrl"].as_str().map(str::to_string) {
+                backend["baseUrl"] = serde_json::json!(model_address_for(
+                    plan.runtime,
+                    &model_address_on_machine(&url)
+                ));
+            }
+            moved.push(backend);
         }
+        mended.push(if moved.is_empty() {
+            "no longer names backends, since Kvasir holds its models itself".to_string()
+        } else {
+            format!(
+                "no longer names its {} backend(s): Kvasir holds its models itself, and adds \
+                 each again once it runs",
+                moved.len()
+            )
+        });
+        keep_to_add(plan, moved)?;
     }
-    // How the gateway knows its callers follows the desk's sign-in; the
-    // tokens it holds are kept, the installer's among them.
+    if value
+        .as_object_mut()
+        .and_then(|fields| fields.remove("oauth"))
+        .is_some()
+    {
+        mended.push(
+            "no longer names oauth, since a subscription is signed in through Kvasir".to_string(),
+        );
+    }
+    // How Kvasir knows its callers follows the desk's sign-in; the tokens it
+    // holds are kept, the installer's among them.
     if plan.mode != Mode::Oidc || plan.oidc.is_some() {
         let mut tokens = value["auth"]["tokens"]
             .as_object()
@@ -6275,7 +6487,7 @@ fn repair_kvasir(
             tokens.insert(token.clone(), serde_json::json!(INSTALLER));
             token
         });
-        let mut auth = gateway_auth(plan, &admin);
+        let mut auth = kvasir_auth(plan, &admin);
         auth["tokens"] = serde_json::Value::Object(tokens);
         if value["auth"] != auth {
             mended.push(format!(
@@ -6285,75 +6497,11 @@ fn repair_kvasir(
             value["auth"] = auth;
         }
     }
-    // the example's own backends, as the first wizard copied them in
-    let example: Vec<(String, String)> =
-        std::fs::read_to_string(plan.dir.join("kvasir").join("kvasir.example.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|e| e["backends"].as_array().cloned())
-            .unwrap_or_default()
-            .iter()
-            .map(|b| {
-                (
-                    b["id"].as_str().unwrap_or_default().to_string(),
-                    b["baseUrl"].as_str().unwrap_or_default().to_string(),
-                )
-            })
-            .collect();
-
-    if let Some(backends) = value["backends"].as_array_mut() {
-        for backend in backends.iter_mut() {
-            let missing = backend["keyFile"]
-                .as_str()
-                .is_some_and(|path| !Path::new(path).exists());
-            if missing {
-                let path = backend["keyFile"].as_str().unwrap_or_default().to_string();
-                if let Some(fields) = backend.as_object_mut() {
-                    fields.remove("keyFile");
-                }
-                mended.push(format!(
-                    "dropped a key file that is not on this machine ({path})"
-                ));
-            }
-        }
-        // The first wizard copied the example's commercial backends in with
-        // no key, which nobody chose, and those go. A remote backend anyone
-        // else wrote stays, keyed or not: a provider's credential is kept in
-        // the gateway, and a key can be given later.
-        let before = backends.len();
-        backends.retain(|b| {
-            let keyless = b.get("keyFile").is_none() && b.get("key").is_none();
-            let the_examples = example
-                .iter()
-                .any(|(id, url)| b["id"] == id.as_str() && b["baseUrl"] == url.as_str());
-            !(b["locality"] == "remote" && keyless && the_examples)
-        });
-        if backends.len() < before {
-            mended.push(format!(
-                "dropped {} of the example's remote backend(s) with no key, which nobody chose",
-                before - backends.len()
-            ));
-        }
-    }
-    // Where the gateway listens and how it names this machine follow where
-    // it runs, so a setup changed from the machine to containers, or back,
-    // is mended here too.
-    let bind = gateway_bind(plan);
+    // Where Kvasir listens follows where it runs.
+    let bind = kvasir_bind(plan);
     if value["bind"].as_str() != Some(bind.as_str()) {
         mended.push(format!("listens on {bind}, for where it runs"));
         value["bind"] = serde_json::json!(bind);
-    }
-    if let Some(backends) = value["backends"].as_array_mut() {
-        for backend in backends.iter_mut() {
-            let Some(url) = backend["baseUrl"].as_str() else {
-                continue;
-            };
-            let dialled = model_address_for(plan.runtime, &model_address_on_machine(url));
-            if dialled != url {
-                mended.push(format!("dials the model at {dialled}, for where it runs"));
-                backend["baseUrl"] = serde_json::json!(dialled);
-            }
-        }
     }
 
     let purposes = assistant_purposes(plan, &value["purposes"]);
@@ -6364,6 +6512,16 @@ fn repair_kvasir(
             purposes.len() - had
         ));
         value["purposes"] = serde_json::json!(purposes);
+    }
+
+    // The key file an earlier wizard wrote for the model: its key is kept
+    // for Kvasir above, or Kvasir holds it already.
+    let leftover = dir.join("model.key");
+    if leftover.exists() && std::fs::remove_file(&leftover).is_ok() {
+        console.note(&format!(
+            "{} is removed, since Kvasir keeps the model's key",
+            leftover.display()
+        ));
     }
 
     if mended.is_empty() {
@@ -6408,14 +6566,14 @@ pub(crate) fn record_engine_version(path: &Path, version: &str) -> bool {
 }
 
 /// Everything the assistant reads from its environment, in one file its
-/// service reads. Nothing here is a secret: the gateway's key is a path.
+/// service reads. Nothing here is a secret: Kvasir's key is a path.
 fn write_assistant_env(plan: &Plan, chosen: Option<&ModelChoice>) -> Result<(), Exit> {
     let dir = plan.dir.join("assistant");
     let path = dir.join("assistant.env");
-    // How the assistant reaches the engine and the gateway, and where it
-    // listens, follow where it runs: a pod shares one loopback, a docker
-    // network names each container, and the desk in another container
-    // reaches the assistant only if it listens beyond its own loopback.
+    // How the assistant reaches the engine and Kvasir, and where it listens,
+    // follow where it runs: a pod shares one loopback, a docker network names
+    // each container, and the desk in another container reaches the
+    // assistant only if it listens beyond its own loopback.
     let (engine, kvasir, host) = match plan.runtime {
         Runtime::Docker => (
             format!("http://nils-engine:{}", plan.ports.engine),
@@ -6428,36 +6586,30 @@ fn write_assistant_env(plan: &Plan, chosen: Option<&ModelChoice>) -> Result<(), 
             None,
         ),
     };
-    // The model the assistant asks for is the first one the gateway serves,
-    // and a candidate it teaches is served from the gateway's backend.
-    let gateway = gateway_config(plan);
-    let backend_ids: Vec<&str> = gateway
-        .as_ref()
-        .and_then(|c| c["backends"].as_array())
-        .map(|all| all.iter().filter_map(|b| b["id"].as_str()).collect())
-        .unwrap_or_default();
-    let model = gateway
-        .as_ref()
-        .and_then(|c| c["backends"][0]["models"][0]["id"].as_str());
+    // The model the assistant asks for is the one chosen on this run, and
+    // chatgpt for the install's ChatGPT subscription; with none named, the
+    // assistant follows the first model Kvasir lists. A candidate it teaches
+    // is served from the backend setup adds for the model chosen.
+    let model = chosen.filter(|c| !c.later).map(|c| c.model.as_str());
+    let teaches = chosen.is_some_and(|c| !c.later && !c.chatgpt);
     if let Ok(text) = std::fs::read_to_string(&path) {
         let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
         set_env_line(&mut lines, "NILS_URL", Some(&engine));
         set_env_line(&mut lines, "KVASIR_URL", Some(&kvasir));
         set_env_line(&mut lines, "HOST", host);
-        // a teaching backend the gateway does not have, such as the
-        // assistant's own default, becomes the gateway's
-        let teaching = lines
+        // the teaching backend is the one setup adds, where none is named or
+        // a model is chosen now
+        let named = lines
             .iter()
-            .find_map(|line| line.strip_prefix("ASSISTANT_TEACHING_BACKEND="));
-        if teaching.is_none_or(|named| !backend_ids.contains(&named))
-            && let Some(first) = backend_ids.first().copied()
-        {
-            set_env_line(&mut lines, "ASSISTANT_TEACHING_BACKEND", Some(first));
+            .any(|line| line.starts_with("ASSISTANT_TEACHING_BACKEND="));
+        if teaches || !named {
+            set_env_line(
+                &mut lines,
+                "ASSISTANT_TEACHING_BACKEND",
+                Some(MODEL_BACKEND),
+            );
         }
-        // the model chosen on this run is the one the assistant asks for
-        if chosen.is_some_and(|c| !c.later)
-            && let Some(model) = model
-        {
+        if let Some(model) = model {
             set_env_line(&mut lines, "ASSISTANT_MODEL", Some(model));
         }
         let mended = format!("{}\n", lines.join("\n"));
@@ -6471,9 +6623,7 @@ fn write_assistant_env(plan: &Plan, chosen: Option<&ModelChoice>) -> Result<(), 
     if let Some(model) = model {
         let _ = writeln!(text, "ASSISTANT_MODEL={model}");
     }
-    if let Some(first) = backend_ids.first() {
-        let _ = writeln!(text, "ASSISTANT_TEACHING_BACKEND={first}");
-    }
+    let _ = writeln!(text, "ASSISTANT_TEACHING_BACKEND={MODEL_BACKEND}");
     let _ = writeln!(text, "NILS_URL={engine}");
     let _ = writeln!(text, "KVASIR_URL={kvasir}");
     let _ = writeln!(
@@ -6524,9 +6674,9 @@ fn set_env_line(lines: &mut Vec<String>, key: &str, value: Option<&str>) {
     }
 }
 
-/// The token this setup made for the gateway, read back from its own file.
-fn gateway_admin_token(plan: &Plan) -> Option<String> {
-    let config = gateway_config(plan)?;
+/// The token this setup made for Kvasir, read back from its own file.
+fn kvasir_admin_token(plan: &Plan) -> Option<String> {
+    let config = kvasir_config(plan)?;
     let tokens = config["auth"]["tokens"].as_object()?;
     tokens
         .iter()
@@ -6535,17 +6685,17 @@ fn gateway_admin_token(plan: &Plan) -> Option<String> {
         .map(|(token, _)| token.clone())
 }
 
-/// The gateway's configuration as setup wrote it, where it is there.
-fn gateway_config(plan: &Plan) -> Option<serde_json::Value> {
+/// Kvasir's configuration as setup wrote it, where it is there.
+fn kvasir_config(plan: &Plan) -> Option<serde_json::Value> {
     let text = std::fs::read_to_string(plan.dir.join("kvasir").join("kvasir.json")).ok()?;
     serde_json::from_str(&text).ok()
 }
 
-/// Whether the gateway answers its health door, waiting for it a while. A
-/// service that was started a moment ago is not up yet, and asking it once
-/// and giving up is how an install ended by printing a command to run by
-/// hand instead of doing the thing.
-fn gateway_up(plan: &Plan, console: &Console, seconds: u64) -> bool {
+/// Whether Kvasir answers its health door, waiting for it a while. A service
+/// that was started a moment ago is not up yet, and asking it once and
+/// giving up is how an install ended by printing a command to run by hand
+/// instead of doing the thing.
+fn kvasir_up(plan: &Plan, console: &Console, seconds: u64) -> bool {
     let url = format!("http://127.0.0.1:{}/healthz", plan.ports.kvasir);
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(1)))
@@ -6559,52 +6709,88 @@ fn gateway_up(plan: &Plan, console: &Console, seconds: u64) -> bool {
         if started.elapsed().as_secs() >= seconds {
             break false;
         }
-        console.waiting("waiting for the gateway", started);
+        console.waiting("waiting for Kvasir", started);
         std::thread::sleep(std::time::Duration::from_millis(500));
     };
     console.waited();
     up
 }
 
-/// The gateway made ready for the assistant, once it answers: a local model
-/// run through the gateway's admission, since the gateway lists no local
-/// model it has not admitted; a commercial provider that is the only model
+/// How often a wait on Kvasir asks again: while a person signs in, and while
+/// Kvasir admits a model on its own.
+const POLL: std::time::Duration =
+    std::time::Duration::from_millis(if cfg!(test) { 20 } else { 2_000 });
+
+/// How long an admission may take: the suite asks the model itself for tool
+/// calls, a schema and a stream.
+const ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(1_800);
+
+/// Kvasir made ready for the assistant, once it answers: the backends kept
+/// for it added, the model chosen among them, since Kvasir holds its models
+/// itself; a local model it does not list yet admitted, which Kvasir does on
+/// its own for one just added; the install's ChatGPT subscription signed in
+/// where it was chosen, or else a commercial provider that is the only model
 /// given the purposes that read no rows, since a purpose goes only to a
 /// local model until it is mapped; and the assistant's key, made again when
-/// the stations' purposes have outgrown it. Waits for the gateway first;
-/// where it never comes up, the reason is the gateway's own and is shown
-/// with the services, so this says only what did not happen and how it
-/// will. Answers whether the assistant has its key.
-fn ready_gateway(plan: &Plan, console: &Console) -> Result<bool, Exit> {
+/// the stations' purposes have outgrown it. Waits for Kvasir first; where it
+/// never comes up, the reason is Kvasir's own and is shown with the
+/// services, so this says only what did not happen and how it will. Answers
+/// whether the assistant has its key.
+fn ready_kvasir(
+    plan: &Plan,
+    console: &Console,
+    chosen: Option<&ModelChoice>,
+) -> Result<bool, Exit> {
     let path = plan.dir.join("kvasir").join("assistant.key");
-    let Some(admin) = gateway_admin_token(plan) else {
+    let Some(admin) = kvasir_admin_token(plan) else {
         return Ok(path.exists());
     };
-    if !gateway_up(plan, console, 30) {
+    if !kvasir_up(plan, console, 30) {
+        let kept: Vec<String> = to_add(plan)
+            .iter()
+            .filter_map(|b| b["id"].as_str().map(str::to_string))
+            .collect();
+        if !kept.is_empty() {
+            console.say("once it runs, nils setup and then repair adds them");
+            console.broken(&format!(
+                "Kvasir did not come up, so it does not hold {} yet",
+                kept.join(", ")
+            ))?;
+        }
         if path.exists() {
             return Ok(true);
         }
         console.say("once it runs, nils setup and then repair makes the key");
-        console.broken("the gateway did not come up, so the assistant has no key")?;
+        console.broken("Kvasir did not come up, so the assistant has no key")?;
         return Ok(false);
     }
-    let gateway = Gateway {
+    let kvasir = Kvasir {
         base: format!("http://127.0.0.1:{}", plan.ports.kvasir),
         admin,
     };
-    admit_local_models(plan, &gateway, console)?;
-    open_to_the_provider(plan, &gateway, console);
-    assistant_key(plan, &gateway, console)
+    // an admission record above this one is one written since this run began
+    let since = kvasir
+        .call("GET", "/v1/admission?limit=1", None, 10)
+        .and_then(|answer| answer["records"][0]["id"].as_i64())
+        .unwrap_or(0);
+    let added = hold_backends(plan, &kvasir, console)?;
+    admit_local_models(plan, &kvasir, console, &added, since)?;
+    if plan.mode == Mode::Off && chosen.is_some_and(|c| c.chatgpt) {
+        sign_in_to_chatgpt(&kvasir, console)?;
+    } else {
+        open_to_the_provider(&kvasir, console);
+    }
+    assistant_key(plan, &kvasir, console)
 }
 
-/// The gateway's admin doors, called as the installer.
+/// Kvasir's admin doors, called as the installer.
 #[derive(Clone)]
-struct Gateway {
+struct Kvasir {
     base: String,
     admin: String,
 }
 
-impl Gateway {
+impl Kvasir {
     /// A door's JSON answer, `null` for an empty one, or None where the door
     /// refused or did not answer within `seconds`.
     fn call(
@@ -6614,8 +6800,43 @@ impl Gateway {
         body: Option<&serde_json::Value>,
         seconds: u64,
     ) -> Option<serde_json::Value> {
+        let (status, text) = self.send(method, path, body, seconds)?;
+        if !(200..300).contains(&status) {
+            return None;
+        }
+        if text.trim().is_empty() {
+            return Some(serde_json::Value::Null);
+        }
+        serde_json::from_str(&text).ok()
+    }
+
+    /// A door's status with its JSON answer, `null` where there is none to
+    /// read, whatever the status; None where nothing answered within
+    /// `seconds`.
+    fn answer(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        seconds: u64,
+    ) -> Option<(u16, serde_json::Value)> {
+        let (status, text) = self.send(method, path, body, seconds)?;
+        Some((
+            status,
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+        ))
+    }
+
+    fn send(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        seconds: u64,
+    ) -> Option<(u16, String)> {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_secs(seconds)))
+            .http_status_as_error(false)
             .build()
             .into();
         let url = format!("{}{path}", self.base);
@@ -6635,104 +6856,364 @@ impl Gateway {
                 .header("content-type", "application/json")
                 .send(sent),
         };
-        let text = answered.ok()?.body_mut().read_to_string().ok()?;
-        if text.trim().is_empty() {
-            return Some(serde_json::Value::Null);
-        }
-        serde_json::from_str(&text).ok()
+        let mut response = answered.ok()?;
+        let status = response.status().as_u16();
+        let text = response.body_mut().read_to_string().unwrap_or_default();
+        Some((status, text))
     }
 }
 
-/// A local model the gateway does not list yet is run through the gateway's
-/// admission, where the model answers. The suite asks the model itself for
-/// tool calls, a schema and a stream, so it takes a while, and a model that
-/// does not pass stays unlisted, which is said.
-fn admit_local_models(plan: &Plan, gateway: &Gateway, console: &Console) -> Result<(), Exit> {
-    let Some(config) = gateway_config(plan) else {
-        return Ok(());
-    };
-    // what the gateway lists now: a local model once it is admitted, and
-    // every model where its gate is off
-    let Some(catalog) = gateway.call("GET", "/v1/config", None, 10) else {
-        return Ok(());
-    };
-    let listed: Vec<&str> = catalog["models"]
+/// The model ids a backend or a catalog names, each given as a name or as
+/// an entry with its id.
+fn model_ids(models: &serde_json::Value) -> Vec<String> {
+    models
         .as_array()
-        .map(|all| all.iter().filter_map(|m| m["id"].as_str()).collect())
-        .unwrap_or_default();
-    for backend in config["backends"].as_array().into_iter().flatten() {
-        let (Some(id), Some(url)) = (backend["id"].as_str(), backend["baseUrl"].as_str()) else {
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m.as_str().or_else(|| m["id"].as_str()).map(str::to_string))
+        .collect()
+}
+
+/// Why a door refused, in Kvasir's own words where it gave some.
+fn refusal(status: u16, said: &serde_json::Value) -> String {
+    said["error"]["message"]
+        .as_str()
+        .map_or_else(|| format!("it answered {status}"), str::to_string)
+}
+
+/// Each model that did not answer Kvasir's short request, with Kvasir's
+/// words for why.
+fn unanswered(said: &serde_json::Value) -> String {
+    let each: Vec<String> = said["error"]["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["answered"] != true)
+        .map(|m| {
+            format!(
+                "{}: {}",
+                m["id"].as_str().unwrap_or("a model"),
+                m["error"]["message"].as_str().unwrap_or("no answer")
+            )
+        })
+        .collect();
+    if each.is_empty() {
+        refusal(422, said)
+    } else {
+        each.join("; ")
+    }
+}
+
+/// The backends kept for Kvasir added through its door, each held only once
+/// every one of its models answered one short request from where Kvasir
+/// runs. One Kvasir holds already with the same address and models is not
+/// added again. The model chosen in the wizard takes the place of a `model`
+/// held with another address or model; a backend a kvasir.json from before
+/// named is left as Kvasir holds it. A chosen model Kvasir does not take
+/// leaves the assistant with no model, which stops an install and is said on
+/// an update; a backend from before that does not answer now is said. Either
+/// is kept for the next run. Answers the ids added now, which Kvasir warms
+/// and admits on its own.
+fn hold_backends(plan: &Plan, kvasir: &Kvasir, console: &Console) -> Result<Vec<String>, Exit> {
+    let kept = to_add(plan);
+    if kept.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(held) = kvasir
+        .call("GET", "/v1/backends", None, 10)
+        .and_then(|answer| answer["backends"].as_array().cloned())
+    else {
+        console.say("nils setup and then repair adds them once Kvasir answers");
+        console.broken("Kvasir did not say which models it holds, so none was added")?;
+        return Ok(Vec::new());
+    };
+    let mut added = Vec::new();
+    let mut left = Vec::new();
+    let mut stop: Option<String> = None;
+    for entry in kept {
+        let id = entry["id"].as_str().unwrap_or_default().to_string();
+        let replaces = entry["replaces"] == true;
+        let mut body = entry.clone();
+        if let Some(fields) = body.as_object_mut() {
+            fields.remove("replaces");
+        }
+        let url = body["baseUrl"]
+            .as_str()
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string();
+        let models = model_ids(&body["models"]);
+        let named = models.join(", ");
+        match held.iter().find(|b| b["id"] == id.as_str()) {
+            Some(b)
+                if b["base_url"].as_str().map(|u| u.trim_end_matches('/'))
+                    == Some(url.as_str())
+                    && model_ids(&b["models"]) == models =>
+            {
+                console.note(&format!("Kvasir holds {named} at {url} already"));
+                continue;
+            }
+            Some(_) if !replaces => {
+                console.note(&format!(
+                    "Kvasir holds a backend named {id} already, so the one kvasir.json named is \
+                     left as it holds it"
+                ));
+                continue;
+            }
+            // the model chosen now takes the place of the one held
+            Some(_) => {
+                let _ = kvasir.call("DELETE", &format!("/v1/backends/{id}"), None, 10);
+            }
+            None => {}
+        }
+        let started = std::time::Instant::now();
+        let asked = kvasir.clone();
+        let sent = body.clone();
+        let run =
+            std::thread::spawn(move || asked.answer("POST", "/v1/backends", Some(&sent), 300));
+        while !run.is_finished() {
+            console.waiting(&format!("Kvasir trying {named}"), started);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        console.waited();
+        match run.join().ok().flatten() {
+            Some((201, _)) => {
+                console.progress(&format!("Kvasir holds {named} at {url}"));
+                added.push(id);
+            }
+            Some((409, said)) => {
+                console.note(&format!("Kvasir did not add {id}: {}", refusal(409, &said)));
+            }
+            Some((422, said)) => {
+                let why = unanswered(&said);
+                if replaces {
+                    if let Some(note) = model_reach_note(
+                        plan.runtime,
+                        &model_address_on_machine(&url),
+                        podman_has_pasta,
+                    ) {
+                        console.say(&note);
+                    }
+                    console.say(
+                        "run nils setup again once the model server answers where Kvasir runs, \
+                         or name another model",
+                    );
+                    stop = Some(format!(
+                        "Kvasir could not reach {named} at {url} from where it runs ({why}), \
+                         though setup reached it from this machine, so the assistant has no model"
+                    ));
+                } else {
+                    console.warn(&format!(
+                        "Kvasir did not take {id} back, since {named} did not answer it ({why}); \
+                         nils setup and then repair tries again"
+                    ));
+                }
+                left.push(entry);
+            }
+            other => {
+                let why = other.map_or_else(
+                    || "it did not answer".to_string(),
+                    |(status, said)| refusal(status, &said),
+                );
+                if replaces {
+                    stop = Some(format!(
+                        "Kvasir did not take {named} ({why}), so the assistant has no model"
+                    ));
+                } else {
+                    console.warn(&format!(
+                        "Kvasir did not take {id} back ({why}); nils setup and then repair tries \
+                         again"
+                    ));
+                }
+                left.push(entry);
+            }
+        }
+    }
+    write_to_add(plan, &left)?;
+    if let Some(why) = stop {
+        console.broken(&why)?;
+    }
+    Ok(added)
+}
+
+/// A local model Kvasir does not list yet, admitted. Kvasir warms and admits
+/// a backend added through its door on its own, so for one added now this
+/// waits, for as long as admission takes, until the model is listed or its
+/// admission record says it did not pass. One Kvasir held from before is run
+/// through its admission door. The suite asks the model itself for tool
+/// calls, a schema and a stream, so it takes a while, and a model that does
+/// not pass stays unlisted, which is said.
+fn admit_local_models(
+    plan: &Plan,
+    kvasir: &Kvasir,
+    console: &Console,
+    added: &[String],
+    since: i64,
+) -> Result<(), Exit> {
+    let Some(held) = kvasir.call("GET", "/v1/backends", None, 10) else {
+        return Ok(());
+    };
+    // what Kvasir lists now: a local model once it is admitted, and every
+    // model where its gate is off
+    let Some(catalog) = kvasir.call("GET", "/v1/config", None, 10) else {
+        return Ok(());
+    };
+    let listed = model_ids(&catalog["models"]);
+    for backend in held["backends"].as_array().into_iter().flatten() {
+        let Some(id) = backend["id"].as_str() else {
             continue;
         };
-        if backend["locality"] != "local" {
+        if backend["builtin"] == true || backend["locality"] != "local" {
             continue;
         }
-        for name in backend["models"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|m| m["id"].as_str())
-        {
+        // Held at an address Kvasir does not reach from where it runs now, as
+        // after a setup moved between the machine and containers: the model
+        // is added again with its key, which only a person has.
+        let url = backend["base_url"].as_str().unwrap_or_default();
+        let dialled = model_address_for(plan.runtime, &model_address_on_machine(url));
+        if !url.is_empty() && dialled != url {
+            console.warn(&format!(
+                "Kvasir holds {id} at {url}, which it does not reach from where it runs now; \
+                 name the model again with nils setup, so Kvasir dials {dialled}"
+            ));
+            continue;
+        }
+        for name in model_ids(&backend["models"]) {
             if listed.contains(&name) {
                 continue;
             }
-            let here = model_address_on_machine(url);
-            let key = backend["keyFile"]
-                .as_str()
-                .and_then(|file| std::fs::read_to_string(file).ok())
-                .map(|key| key.trim().to_string());
-            if list_models(&here, key.as_deref()).is_none() {
+            if added.iter().any(|a| a == id) {
+                await_admission(kvasir, console, id, &name, since)?;
+                continue;
+            }
+            if backend["health"]["warming"] == true
+                && let Some(why) = backend["health"]["lastError"].as_str()
+            {
                 console.note(&format!(
-                    "{name} does not answer at {here} yet, so the gateway has not admitted it; \
+                    "{name} does not answer Kvasir yet ({why}), so Kvasir has not admitted it; \
                      nils setup and then repair admits it once it does"
                 ));
                 continue;
             }
-            let started = std::time::Instant::now();
-            let asked = gateway.clone();
-            let body = serde_json::json!({ "backend": id, "model": name });
-            let run = std::thread::spawn(move || {
-                asked.call("POST", "/v1/admission/run", Some(&body), 1800)
-            });
-            while !run.is_finished() {
-                console.waiting(&format!("the gateway admitting {name}"), started);
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-            console.waited();
-            let record = run
-                .join()
-                .ok()
-                .flatten()
-                .and_then(|answer| answer["records"].as_array()?.first().cloned());
-            match record {
-                Some(r) if r["passed"] == true => {
-                    console.note(&format!("the gateway admitted {name}"));
-                }
-                Some(r) => {
-                    let failed: Vec<&str> = r["checks"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter(|c| c["passed"] == false)
-                        .filter_map(|c| c["name"].as_str())
-                        .collect();
-                    console.say(
-                        "the gateway does not offer it until it passes; nils setup and then \
-                         repair runs the suite again",
-                    );
-                    console.broken(&format!(
-                        "{name} did not pass the gateway's admission ({}), so the assistant has no model it may use",
-                        failed.join(", ")
-                    ))?;
-                }
-                None => {
-                    console.say("nils setup and then repair runs the suite again");
-                    console.broken(&format!("the gateway did not finish admitting {name}"))?;
-                }
-            }
+            run_admission(kvasir, console, id, &name)?;
         }
     }
     Ok(())
+}
+
+/// A wait while Kvasir admits a model it was just given, for as long as
+/// admission takes: until the model is listed, or an admission record
+/// written since this run began says it did not pass.
+fn await_admission(
+    kvasir: &Kvasir,
+    console: &Console,
+    backend: &str,
+    name: &str,
+    since: i64,
+) -> Result<(), Exit> {
+    let started = std::time::Instant::now();
+    // None once admitted; a record that did not pass, or none where the wait ran out
+    let refused: Option<Option<serde_json::Value>> = loop {
+        let listed = kvasir
+            .call("GET", "/v1/config", None, 10)
+            .is_some_and(|catalog| model_ids(&catalog["models"]).iter().any(|m| m == name));
+        if listed {
+            break None;
+        }
+        let record = kvasir
+            .call("GET", "/v1/admission?limit=50", None, 10)
+            .and_then(|answer| {
+                answer["records"]
+                    .as_array()?
+                    .iter()
+                    .find(|r| {
+                        r["id"].as_i64().is_some_and(|n| n > since)
+                            && r["backend"] == backend
+                            && r["model"] == name
+                            && r["passed"] == false
+                    })
+                    .cloned()
+            });
+        if let Some(record) = record {
+            break Some(Some(record));
+        }
+        if started.elapsed() >= ADMISSION_WAIT {
+            break Some(None);
+        }
+        console.waiting(&format!("Kvasir admitting {name}"), started);
+        std::thread::sleep(POLL);
+    };
+    console.waited();
+    match refused {
+        None => {
+            console.note(&format!("Kvasir admitted {name}"));
+            Ok(())
+        }
+        Some(record) => admission_refused(console, name, record.as_ref()),
+    }
+}
+
+/// A model Kvasir held from before, run through its admission door.
+fn run_admission(
+    kvasir: &Kvasir,
+    console: &Console,
+    backend: &str,
+    name: &str,
+) -> Result<(), Exit> {
+    let started = std::time::Instant::now();
+    let asked = kvasir.clone();
+    let body = serde_json::json!({ "backend": backend, "model": name });
+    let run =
+        std::thread::spawn(move || asked.call("POST", "/v1/admission/run", Some(&body), 1800));
+    while !run.is_finished() {
+        console.waiting(&format!("Kvasir admitting {name}"), started);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    console.waited();
+    let record = run
+        .join()
+        .ok()
+        .flatten()
+        .and_then(|answer| answer["records"].as_array()?.first().cloned());
+    match record {
+        Some(r) if r["passed"] == true => {
+            console.note(&format!("Kvasir admitted {name}"));
+            Ok(())
+        }
+        other => admission_refused(console, name, other.as_ref()),
+    }
+}
+
+/// A model that did not pass Kvasir's admission, with the checks it failed,
+/// or whose admission did not finish.
+fn admission_refused(
+    console: &Console,
+    name: &str,
+    record: Option<&serde_json::Value>,
+) -> Result<(), Exit> {
+    match record {
+        Some(r) => {
+            let failed: Vec<&str> = r["checks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|c| c["passed"] == false)
+                .filter_map(|c| c["name"].as_str())
+                .collect();
+            console.say(
+                "Kvasir does not offer it until it passes; nils setup and then repair runs the \
+                 suite again",
+            );
+            console.broken(&format!(
+                "{name} did not pass Kvasir's admission ({}), so the assistant has no model it may use",
+                failed.join(", ")
+            ))
+        }
+        None => {
+            console.say("nils setup and then repair runs the suite again");
+            console.broken(&format!("Kvasir did not finish admitting {name}"))
+        }
+    }
 }
 
 /// A commercial provider as the only model: a purpose goes to a local model
@@ -6741,74 +7222,230 @@ fn admit_local_models(plan: &Plan, gateway: &Gateway, console: &Console) -> Resu
 /// provider now. Those that read rows stay closed to it until an admin opens
 /// them in the desk's settings, which records under that admin's name that
 /// rows leave the site.
-fn open_to_the_provider(plan: &Plan, gateway: &Gateway, console: &Console) {
-    let Some(config) = gateway_config(plan) else {
+fn open_to_the_provider(kvasir: &Kvasir, console: &Console) {
+    let Some(held) = kvasir.call("GET", "/v1/backends", None, 10) else {
         return;
     };
-    let backends = config["backends"].as_array().cloned().unwrap_or_default();
-    if backends
+    // Kvasir's own ChatGPT is not a provider anyone added
+    let added: Vec<&serde_json::Value> = held["backends"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| b["builtin"] != true)
+        .collect();
+    if added
         .iter()
-        .any(|b| b["locality"] == "local" && b["models"].as_array().is_some_and(|m| !m.is_empty()))
+        .any(|b| b["locality"] == "local" && !model_ids(&b["models"]).is_empty())
     {
         return;
     }
-    let Some(remote) = backends.iter().find(|b| b["locality"] == "remote") else {
+    let Some(remote) = added.iter().find(|b| b["locality"] == "remote") else {
         return;
     };
     let Some(id) = remote["id"].as_str() else {
         return;
     };
-    let Some(table) = gateway.call("GET", "/v1/purposes", None, 10) else {
+    let model = model_ids(&remote["models"])
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| id.to_string());
+    open_to(kvasir, console, id, &model, false);
+}
+
+/// The purposes that read no rows of the archive mapped to a remote backend,
+/// `to` in a person's words, and where the others stay said: closed to it
+/// until an admin opens them in the desk's settings, never where they carry
+/// identifiers, or on the local model that serves them. Only the purposes on
+/// no backend yet are mapped, unless a person chose that backend for the
+/// assistant, which maps every purpose of the assistant's that reads no rows.
+fn open_to(kvasir: &Kvasir, console: &Console, backend: &str, to: &str, chosen: bool) {
+    let Some(table) = kvasir.call("GET", "/v1/purposes", None, 10) else {
         return;
     };
     let mut opened = 0;
-    let mut closed = Vec::new();
+    let (mut closed, mut identifiers, mut local) = (Vec::new(), Vec::new(), Vec::new());
     for row in table["purposes"].as_array().into_iter().flatten() {
         let Some(purpose) = row["purpose"].as_str() else {
             continue;
         };
-        if !row["backend"].is_null() {
+        if chosen && !purpose.starts_with("assistant.") {
             continue;
         }
+        let on = row["backend"].as_str();
         match row["content"].as_str() {
-            Some("catalog") => {
-                let mapped = gateway.call(
+            Some("catalog") if on == Some(backend) => {}
+            Some("catalog") if on.is_none() || chosen => {
+                let mapped = kvasir.call(
                     "PUT",
                     &format!("/v1/purposes/{purpose}/policy"),
-                    Some(&serde_json::json!({ "backend": id })),
+                    Some(&serde_json::json!({ "backend": backend })),
                     10,
                 );
                 if mapped.is_some() {
                     opened += 1;
                 }
             }
-            Some("rows") => closed.push(purpose),
+            Some(_) if row["locality"] == "local" => local.push(purpose),
+            Some("rows") if on.is_none() => closed.push(purpose),
+            Some("identifiers") if on.is_none() => identifiers.push(purpose),
             _ => {}
         }
     }
-    let model = remote["models"][0]["id"].as_str().unwrap_or(id);
     if opened > 0 {
-        console.note(&format!(
-            "{opened} purpose(s) that read no rows of the archive go to {model}"
+        console.say(&format!(
+            "{opened} purpose(s) that read no rows of the archive go to {to}"
         ));
     }
     if !closed.is_empty() {
-        console.note(&format!(
-            "{} read rows of the archive and stay closed to {model} until an admin opens them \
-             in the desk's settings",
+        console.say(&format!(
+            "{} read rows of the archive and stay closed to {to} until an admin opens them in \
+             the desk's settings",
             closed.join(", ")
+        ));
+    }
+    if !identifiers.is_empty() {
+        console.say(&format!(
+            "{} carry identifiers and never leave your systems",
+            identifiers.join(", ")
+        ));
+    }
+    if !local.is_empty() {
+        console.say(&format!(
+            "{} stay local, on the model that serves them",
+            local.join(", ")
         ));
     }
 }
 
-/// The assistant's key at the gateway, for every purpose the gateway
-/// declares for it. A key made before a station was added lacks that
-/// station's purpose, and the gateway refuses the station, so a key that
-/// does not cover them all, or that the gateway no longer holds, is made
-/// again and the one it replaces is revoked.
-fn assistant_key(plan: &Plan, gateway: &Gateway, console: &Console) -> Result<bool, Exit> {
+/// The install's ChatGPT subscription, as Kvasir says it stands.
+fn subscription_state(kvasir: &Kvasir) -> Option<serde_json::Value> {
+    let answer = kvasir.call("GET", "/v1/subscriptions", None, 10)?;
+    answer["subscriptions"]
+        .as_array()?
+        .iter()
+        .find(|s| s["provider"] == CHATGPT)
+        .cloned()
+}
+
+/// Milliseconds since the epoch, as Kvasir writes its times.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// What a person reads to sign in to ChatGPT, in plain words: where to go,
+/// the code to enter there, and how long the code works.
+fn sign_in_words(waiting: &serde_json::Value, now: i64) -> Vec<String> {
+    let link = waiting["verification_uri"]
+        .as_str()
+        .unwrap_or("ChatGPT's sign-in page");
+    let code = waiting["user_code"].as_str().unwrap_or("Kvasir gave none");
+    let mut out = vec![
+        "Sign in to ChatGPT for the assistant:".to_string(),
+        format!("open {link} in a browser, sign in, and enter the code {code}"),
+    ];
+    if let Some(expires) = waiting["expires_at"].as_i64() {
+        let minutes = ((expires - now).max(0) + 59_999) / 60_000;
+        out.push(format!("the code works for {minutes} minute(s)"));
+    }
+    out
+}
+
+/// The install's own ChatGPT subscription signed in, where nobody signs in
+/// to the desk: Kvasir starts a sign-in with a device code, setup shows the
+/// link and the code, and asks Kvasir every two seconds until it is signed
+/// in, fails, or the code expires. Once it is signed in, the assistant's
+/// purposes that read no rows go to it. One signed in already is kept. With
+/// nobody at the terminal no sign-in is started, as with a model left for
+/// later.
+fn sign_in_to_chatgpt(kvasir: &Kvasir, console: &Console) -> Result<(), Exit> {
+    const TO: &str = "your ChatGPT subscription";
+    const LATER: &str =
+        "to sign in later, run nils setup again and keep the ChatGPT subscription when it asks";
+    if subscription_state(kvasir).is_some_and(|s| s["state"] == "signed_in") {
+        open_to(kvasir, console, CHATGPT, TO, true);
+        return Ok(());
+    }
+    if !console.interactive() {
+        console.say(&format!(
+            "with nobody at the terminal to sign in to ChatGPT, the assistant has no model yet; \
+             {LATER}"
+        ));
+        return Ok(());
+    }
+    let started = kvasir.answer(
+        "POST",
+        &format!("/v1/subscriptions/{CHATGPT}/sign-in"),
+        Some(&serde_json::json!({})),
+        60,
+    );
+    let waiting = match started {
+        Some((200, waiting)) => waiting,
+        other => {
+            let why = other.map_or_else(
+                || "Kvasir did not answer".to_string(),
+                |(status, said)| refusal(status, &said),
+            );
+            console.say(LATER);
+            return console.broken(&format!(
+                "the ChatGPT sign-in did not start ({why}), so the assistant has no model"
+            ));
+        }
+    };
+    console.show(&sign_in_words(&waiting, now_ms()));
+    let expires = waiting["expires_at"].as_i64();
+    let since = std::time::Instant::now();
+    let outcome = loop {
+        match subscription_state(kvasir) {
+            Some(s) if s["state"] == "signed_in" => {
+                break Ok(s["model"].as_str().map(str::to_string));
+            }
+            Some(s) if s["state"] == "failed" => {
+                break Err(s["error"]
+                    .as_str()
+                    .unwrap_or("the sign-in did not finish")
+                    .to_string());
+            }
+            Some(s) if s["state"] == "signed_out" => {
+                break Err("Kvasir no longer waits for it".to_string());
+            }
+            _ => {}
+        }
+        if expires.is_some_and(|at| now_ms() > at + 5_000) {
+            break Err("the code expired before it was approved".to_string());
+        }
+        console.waiting("waiting for you to sign in to ChatGPT", since);
+        std::thread::sleep(POLL);
+    };
+    console.waited();
+    console.show(&[]);
+    match outcome {
+        Ok(model) => {
+            console.say(&match model {
+                Some(model) => format!("signed in to ChatGPT; the assistant streams with {model}"),
+                None => "signed in to ChatGPT".to_string(),
+            });
+            open_to(kvasir, console, CHATGPT, TO, true);
+            Ok(())
+        }
+        Err(why) => {
+            console.say(LATER);
+            console.broken(&format!(
+                "the ChatGPT sign-in did not finish ({why}), so the assistant has no model"
+            ))
+        }
+    }
+}
+
+/// The assistant's key at Kvasir, for every purpose Kvasir declares for it.
+/// A key made before a station was added lacks that station's purpose, and
+/// Kvasir refuses the station, so a key that does not cover them all, or
+/// that Kvasir no longer holds, is made again and the one it replaces is
+/// revoked.
+fn assistant_key(plan: &Plan, kvasir: &Kvasir, console: &Console) -> Result<bool, Exit> {
     let path = plan.dir.join("kvasir").join("assistant.key");
-    let purposes: Vec<String> = gateway_config(plan)
+    let purposes: Vec<String> = kvasir_config(plan)
         .and_then(|c| {
             c["purposes"].as_array().map(|all| {
                 all.iter()
@@ -6827,13 +7464,11 @@ fn assistant_key(plan: &Plan, gateway: &Gateway, console: &Console) -> Result<bo
             .map(|(id, _)| id.to_string())
     });
     if path.exists() {
-        let Some(keys) = gateway.call("GET", "/v1/keys", None, 10) else {
-            // a gateway that does not list its keys keeps the one there
+        let Some(keys) = kvasir.call("GET", "/v1/keys", None, 10) else {
+            // a Kvasir that does not list its keys keeps the one there
             return Ok(true);
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+        let now = now_ms();
         let row = held.as_deref().and_then(|id| {
             keys["keys"]
                 .as_array()
@@ -6859,13 +7494,13 @@ fn assistant_key(plan: &Plan, gateway: &Gateway, console: &Console) -> Result<bo
         "purposes": purposes,
         "max_class": "rows",
     });
-    let minted = gateway
+    let minted = kvasir
         .call("POST", "/v1/keys", Some(&body), 10)
         .and_then(|answer| answer["key"].as_str().map(str::to_string));
     match minted {
         Some(key) if write_secret(&path, &key).is_ok() => {
             if let Some(old) = &held {
-                let _ = gateway.call("DELETE", &format!("/v1/keys/{old}"), None, 10);
+                let _ = kvasir.call("DELETE", &format!("/v1/keys/{old}"), None, 10);
                 console
                     .note("the assistant's key is made again, for every purpose its stations use");
             } else {
@@ -6875,7 +7510,7 @@ fn assistant_key(plan: &Plan, gateway: &Gateway, console: &Console) -> Result<bo
         }
         _ => {
             console.say("nils setup and then repair asks it again");
-            console.broken("the gateway would not make the assistant's key")?;
+            console.broken("Kvasir would not make the assistant's key")?;
             Ok(path.exists())
         }
     }
@@ -6901,8 +7536,14 @@ fn quadlet_dir() -> PathBuf {
         .join("systemd")
 }
 
-/// Whatever this machine and runtime use to keep the parts running.
-fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Started, Exit> {
+/// Whatever this machine and runtime use to keep the parts running. Kvasir is
+/// made ready, with the model chosen on this run, before the assistant starts.
+fn start_everything(
+    plan: &Plan,
+    state: &State,
+    console: &Console,
+    chosen: Option<&ModelChoice>,
+) -> Result<Started, Exit> {
     match (plan.runtime, cfg!(target_os = "macos")) {
         (Runtime::Podman, _) => {
             let dir = quadlet_dir();
@@ -6933,7 +7574,7 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Sta
             // are its own, and restarting it starts every container in it
             // again, from its new image tag and with rebuilt code. Each is
             // then started, which does nothing to one that is up. The
-            // assistant's quadlet waits for the key the gateway makes, so it
+            // assistant's quadlet waits for the key Kvasir makes, so it
             // is started once that is made, as on the machine.
             quietly("systemctl", &["--user", "restart", "nils-pod"]);
             let mut units = vec!["nils-engine".to_string()];
@@ -6947,7 +7588,7 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Sta
                 quietly("systemctl", &["--user", "start", unit]);
             }
             if plan.has(Part::Assistant) {
-                ready_gateway(plan, console)?;
+                ready_kvasir(plan, console, chosen)?;
                 // again, since a key made again replaces the one it read
                 quietly("systemctl", &["--user", "restart", "nils-assistant"]);
                 units.push("nils-assistant".to_string());
@@ -6959,10 +7600,10 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Sta
             let path = plan.dir.join("compose.yaml");
             std::fs::write(&path, docker_compose(plan))
                 .map_err(|e| fail(format!("{}: {e}", path.display())))?;
-            // Recreated, not only brought up: a gateway or an assistant built
+            // Recreated, not only brought up: a Kvasir or an assistant built
             // again has the same configuration and would otherwise keep
-            // running the old code. The assistant starts once the gateway has
-            // made its key.
+            // running the old code. The assistant starts once Kvasir has made
+            // its key.
             let mut services = vec!["engine"];
             if plan.has(Part::Desk) {
                 services.push("desk");
@@ -6976,7 +7617,7 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Sta
             let mut containers: Vec<String> =
                 services.iter().map(|s| format!("nils-{s}")).collect();
             if plan.has(Part::Assistant) {
-                ready_gateway(plan, console)?;
+                ready_kvasir(plan, console, chosen)?;
                 console.task(
                     "starting the assistant",
                     &plan.dir,
@@ -7039,17 +7680,17 @@ fn start_everything(plan: &Plan, state: &State, console: &Console) -> Result<Sta
             for unit in &names {
                 quietly("systemctl", &["--user", "enable", unit]);
             }
-            // The assistant reads a key the gateway makes, so everything
-            // else starts first, the key is made once the gateway answers,
-            // and the assistant starts last. Started together, the
-            // assistant died looking for a key that did not exist yet.
+            // The assistant reads a key Kvasir makes, so everything else
+            // starts first, the key is made once Kvasir answers, and the
+            // assistant starts last. Started together, the assistant died
+            // looking for a key that did not exist yet.
             let (assistant, rest): (Vec<&String>, Vec<&String>) =
                 names.iter().partition(|u| u.as_str() == "nils-assistant");
             for unit in &rest {
                 quietly("systemctl", &["--user", "restart", unit]);
             }
             if !assistant.is_empty() {
-                ready_gateway(plan, console)?;
+                ready_kvasir(plan, console, chosen)?;
                 for unit in &assistant {
                     quietly("systemctl", &["--user", "restart", unit]);
                 }
@@ -7368,8 +8009,10 @@ fn summary(plan: &Plan, console: &Console, services: &[Service]) {
         if plan.has(Part::Assistant) {
             println!(
                 "  {}",
-                console
-                    .dim("once the gateway runs, nils setup and repair makes the assistant's key")
+                console.dim(
+                    "once Kvasir runs, nils setup and repair adds its model and makes the \
+                     assistant's key"
+                )
             );
         }
         println!();
@@ -7451,7 +8094,10 @@ fn card_summary(plan: &Plan, console: &Console, services: &[Service]) {
         if plan.has(Part::Assistant) {
             println!(
                 "   {}",
-                p.dim("once the gateway runs, nils setup and repair makes the assistant's key")
+                p.dim(
+                    "once Kvasir runs, nils setup and repair adds its model and makes the \
+                     assistant's key"
+                )
             );
         }
     }
@@ -7523,29 +8169,30 @@ fn card_rows(plan: &Plan) -> Vec<(&'static str, String)> {
     rows
 }
 
-/// The model the gateway sends the assistant to, as its configuration says:
-/// where it is, or that the prompt leaves this organisation's systems.
+/// The model the assistant asks for, as its environment names it: a model's
+/// name, or the install's ChatGPT subscription.
 fn model_on_record(plan: &Plan) -> Option<String> {
     model_on_record_in(&plan.dir)
 }
 
-/// The model the gateway of a setup directory sends the assistant to.
+/// The model the assistant of a setup directory asks for.
 fn model_on_record_in(dir: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(dir.join("kvasir").join("kvasir.json")).ok()?;
-    let config: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let backend = config["backends"].as_array()?.first()?;
-    let model = backend["models"][0]["id"].as_str()?;
-    if backend["locality"] == "remote" {
-        return Some(format!("{model}, the prompt leaves your systems"));
+    let text = std::fs::read_to_string(dir.join("assistant").join("assistant.env")).ok()?;
+    let named = text
+        .lines()
+        .find_map(|line| line.strip_prefix("ASSISTANT_MODEL="))?
+        .trim();
+    match named {
+        "" => None,
+        CHATGPT => Some(CHATGPT_WORDS.to_string()),
+        model => Some(model.to_string()),
     }
-    let url = model_address_on_machine(backend["baseUrl"].as_str()?);
-    Some(format!("{model} at {url}"))
 }
 
 /// A unit or a container, by the name of the part it runs.
 fn service_name(unit: &str) -> String {
     match unit.strip_prefix("nils-").unwrap_or(unit) {
-        "kvasir" => "gateway".to_string(),
+        "kvasir" => "Kvasir".to_string(),
         other => other.to_string(),
     }
 }
@@ -7633,10 +8280,9 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
             }
             "node" => {
                 let dir = PathBuf::from(&part.path);
-                let said = match name.as_str() {
-                    "kvasir" => "the gateway",
-                    "assistant" => "the assistant",
-                    other => other,
+                let Some((repo, reference, said)) = node_source(&name) else {
+                    println!("{name}: not a part this can update");
+                    continue;
                 };
                 let head = |dir: &Path| {
                     run_quiet(
@@ -7645,19 +8291,21 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                     )
                 };
                 let before = head(&dir);
-                if let Err(e) = console.task(
-                    &format!("updating {said}'s source"),
-                    &dir,
-                    "git",
-                    &["pull", "--ff-only", "--quiet"],
-                ) {
+                // the release this version names, from a checkout of main too
+                let fetched = source_steps(repo, &reference, &dir, true)
+                    .iter()
+                    .try_for_each(|step| {
+                        let args: Vec<&str> = step.iter().map(String::as_str).collect();
+                        console.task(&source_label(step, said, &reference), &dir, "git", &args)
+                    });
+                if let Err(e) = fetched {
                     println!("{name}: {}", e.message);
                     continue;
                 }
                 // Source that did not move is not built again; nils setup and
                 // repair builds it regardless.
                 if before.is_some() && head(&dir) == before && dir.join("dist").exists() {
-                    println!("{name}: the newest source is the one built");
+                    println!("{name}: {reference} is the one built");
                     continue;
                 }
                 let built = console
@@ -7672,7 +8320,10 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                     });
                 match built {
                     Ok(()) => {
-                        println!("{name}: fetched and rebuilt in {}", dir.display());
+                        println!(
+                            "{name}: {reference} fetched and rebuilt in {}",
+                            dir.display()
+                        );
                         changed = true;
                     }
                     Err(e) => println!("{name}: {}", e.message),
@@ -7715,7 +8366,7 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     }
     let console = Console::new(true);
     println!("restarting the services");
-    match start_everything(&plan, &state, &console) {
+    match start_everything(&plan, &state, &console, None) {
         Ok(started) => print!("{}", started.text),
         Err(e) => println!("the services were left alone: {}", e.message),
     }
@@ -7735,7 +8386,8 @@ pub(crate) struct Unit {
 }
 
 /// The unit each part of a recorded install runs under, in the order the
-/// parts start: Postgres, the engine, the desk, the gateway, the assistant.
+/// parts start: Postgres, the engine, the desk, Kvasir, the assistant. Kvasir's
+/// part is named `gateway` there, as the desk asks for it.
 /// An install that runs no services has none.
 pub(crate) fn service_units(state: &State) -> Vec<Unit> {
     if state.service.is_empty() || state.service == "none" {
@@ -7955,7 +8607,7 @@ pub(crate) fn restart_units(state: &State, part: Option<&str>) -> Result<Vec<Str
 
 /// The engine made to follow the registry: its unit or container written
 /// again from the record, with every source place mounted, and only the
-/// engine started again, so the desk, the gateway and the assistant keep
+/// engine started again, so the desk, Kvasir and the assistant keep
 /// running. A container sees only what was mounted when it started, so a
 /// folder added as a source needs this before the engine can read it.
 pub(crate) fn reapply_engine(state: &State) -> Result<(), Exit> {
@@ -8276,8 +8928,13 @@ struct Removal {
     /// also holds a person's own.
     packs: Vec<PathBuf>,
     packs_kept: Option<PathBuf>,
-    /// What building the gateway and the assistant made.
+    /// What building Kvasir and the assistant made.
     built: Vec<PathBuf>,
+    /// Kvasir's directory, where the data stays: the models it holds and
+    /// their keys, its subscriptions, its seal key and pepper, and the
+    /// assistant's key go with NILS. Where everything goes, it goes with the
+    /// base directory.
+    kvasir: Option<PathBuf>,
     state: PathBuf,
     /// The runtime of a Postgres this setup runs, whose container goes; its
     /// data goes with the base directory, or stays with it.
@@ -8311,8 +8968,9 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
                 (
                     "NILS, keeping your data",
                     &format!(
-                        "the services, the programs and the packs; the registry and its key, the \
-                         backups, the desk's people and the assistant's history stay in {dir}"
+                        "the services, the programs, the packs and Kvasir's models and keys; the \
+                         registry and its key, the backups, the desk's people and the assistant's \
+                         history stay in {dir}"
                     ),
                 ),
                 (
@@ -8584,6 +9242,7 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         packs: Vec::new(),
         packs_kept: None,
         built: Vec::new(),
+        kvasir: None,
         state: state_path(),
         postgres: None,
     };
@@ -8735,21 +9394,34 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         }
     }
 
-    // what building the gateway and the assistant made; the rest of those
-    // directories holds their data and their configuration
-    for part in state.parts.values().filter(|p| p.kind == "node") {
+    // what building Kvasir and the assistant made; the rest of the
+    // assistant's directory holds its data and its configuration
+    for (name, part) in state.parts.iter().filter(|(_, p)| p.kind == "node") {
         let path = PathBuf::from(&part.path);
         let outside = !path.starts_with(&dir);
         if leaving == Leaving::Purge && outside {
             removal.built.push(path);
             continue;
         }
-        if leaving == Leaving::KeepData {
+        if leaving == Leaving::KeepData && name != "kvasir" {
             for sub in ["node_modules", "dist"] {
                 if path.join(sub).exists() {
                     removal.built.push(path.join(sub));
                 }
             }
+        }
+    }
+    // Kvasir's state goes with NILS where the data stays, the whole of its
+    // directory, which holds nothing else a person keeps: the models it holds
+    // and their keys, its subscriptions, its seal key and pepper, and the
+    // assistant's key.
+    if leaving == Leaving::KeepData {
+        let kvasir = state
+            .parts
+            .get("kvasir")
+            .map_or_else(|| dir.join("kvasir"), |part| PathBuf::from(&part.path));
+        if kvasir.exists() {
+            removal.kvasir = Some(kvasir);
         }
     }
     removal
@@ -8827,6 +9499,17 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", "),
+        );
+    }
+    if let Some(kvasir) = &removal.kvasir {
+        row(
+            &mut out,
+            "kvasir",
+            format!(
+                "{}, with the models it holds, their keys, its subscriptions and the assistant's \
+                 key",
+                kvasir.display()
+            ),
         );
     }
     row(
@@ -9021,6 +9704,15 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
         match remove_path(path, &removal.runtime) {
             Ok(()) => say(format!("removed {}", path.display())),
             Err(e) => say(format!("{} was not removed: {e}", path.display())),
+        }
+    }
+    if let Some(kvasir) = &removal.kvasir {
+        match remove_path(kvasir, &removal.runtime) {
+            Ok(()) => say(format!(
+                "removed {}, with the models Kvasir held and their keys",
+                kvasir.display()
+            )),
+            Err(e) => say(format!("{} was not removed: {e}", kvasir.display())),
         }
     }
     for path in &removal.packs {
@@ -9343,9 +10035,9 @@ mod tests {
 
     #[test]
     fn every_station_s_purpose_is_declared_to_the_gateway() {
-        // The gateway refuses a purpose it was not told of. The example
-        // declared three; the assistant's stations use more, so on a fresh
-        // install three of them would have answered nothing but a refusal.
+        // Kvasir refuses a purpose it was not told of. The example declared
+        // three; the assistant's stations use more, so on a fresh install
+        // three of them would have answered nothing but a refusal.
         let dir = scratch("purposes");
         station(&dir, "ask-help", "assistant.ask-help", "rows");
         station(&dir, "concierge", "assistant.concierge", "rows");
@@ -9376,37 +10068,113 @@ mod tests {
             operator["content"], "catalog",
             "the station's own class is kept"
         );
+
+        // A fresh kvasir.json declares them and names no model, even from an
+        // example that still names backends and the OAuth of Kvasir's first
+        // design, which Kvasir refuses to start with.
+        let kvasir = dir.join("kvasir");
+        std::fs::create_dir_all(&kvasir).unwrap();
+        std::fs::write(
+            kvasir.join("kvasir.example.json"),
+            serde_json::json!({
+                "bind": "127.0.0.1:7100",
+                "origin": "http://127.0.0.1:7100",
+                "store": "kvasir.sqlite",
+                "purposes": declared.clone(),
+                "backends": [{"id": "card", "baseUrl": "http://127.0.0.1:30000/v1", "locality": "local"}],
+                "oauth": {"openai": {}},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        plan.ports.kvasir = 7101;
+        let chosen = ModelChoice {
+            url: "http://127.0.0.1:30000/v1".to_string(),
+            local: true,
+            key: Some("sk-local".to_string()),
+            model: "qwen".to_string(),
+            later: false,
+            chatgpt: false,
+        };
+        let mut console = Console::new(true);
+        assert!(configure_kvasir(&plan, &mut console, Some(&chosen)).is_ok());
+        let written = kvasir_config(&plan).unwrap();
+        assert!(
+            written.get("backends").is_none() && written.get("oauth").is_none(),
+            "{written}"
+        );
+        assert_eq!(written["bind"], "127.0.0.1:7101");
+        assert_eq!(
+            written["store"], "kvasir.sqlite",
+            "the example's other settings stay"
+        );
+        let ids: Vec<&str> = written["purposes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["id"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&"assistant.concierge") && ids.contains(&"assistant.operator"),
+            "{ids:?}"
+        );
+        assert!(kvasir_admin_token(&plan).is_some());
+        // the model chosen is kept, with its key, for Kvasir to add once it runs
+        let kept = to_add(&plan);
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0]["id"], MODEL_BACKEND);
+        assert_eq!(kept[0]["baseUrl"], "http://127.0.0.1:30000/v1");
+        assert_eq!(kept[0]["locality"], "local");
+        assert_eq!(kept[0]["models"], serde_json::json!(["qwen"]));
+        assert_eq!(kept[0]["key"], "sk-local");
+        assert!(
+            !kvasir.join("model.key").exists(),
+            "no key file of the model's own"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for file in [kvasir.join("kvasir.json"), to_add_path(&plan)] {
+                assert_eq!(
+                    std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                    0o600,
+                    "{}",
+                    file.display()
+                );
+            }
+        }
+        // in a container, Kvasir dials this machine's loopback the way a
+        // container reaches it
+        plan.runtime = Runtime::Podman;
+        assert_eq!(
+            model_door_body(&plan, &chosen)["baseUrl"],
+            "http://host.containers.internal:30000/v1"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn repair_mends_what_the_first_wizard_wrote_and_nothing_else() {
-        // What alpha.4 left: the example's key file path, which is not on a
-        // laptop and stopped the gateway at start; two commercial backends
-        // with no key, which nobody chose; purposes missing for stations.
+        // What an install from before left: backends in kvasir.json, which
+        // Kvasir no longer starts with, among them a key file that is not on
+        // this machine and the model's key in a file of setup's own; the
+        // OAuth of Kvasir's first design; purposes missing for stations.
         let dir = scratch("repair");
         station(&dir, "concierge", "assistant.concierge", "rows");
         let kvasir = dir.join("kvasir");
         std::fs::create_dir_all(&kvasir).unwrap();
-        std::fs::write(
-            kvasir.join("kvasir.example.json"),
-            serde_json::json!({"backends": [
-                {"id": "card", "baseUrl": "http://127.0.0.1:30000/v1", "locality": "local"},
-                {"id": "minimax-openai", "baseUrl": "https://api.minimax.io/v1", "locality": "remote",
-                 "provider": "minimax"}
-            ]})
-            .to_string(),
-        )
-        .unwrap();
+        std::fs::write(kvasir.join("model.key"), "sk-model\n").unwrap();
         let written = serde_json::json!({
+            "bind": "127.0.0.1:7100",
             "auth": {"mode": "token", "tokens": {"tok": "nils-setup:admin"}},
+            "oauth": {"openai": {"clientId": "x"}},
             "backends": [
                 {"id": "card", "baseUrl": "http://127.0.0.1:30000/v1", "locality": "local",
-                 "keyFile": "/etc/kvasir/card.key", "models": [{"id": "m"}]},
-                {"id": "minimax-openai", "baseUrl": "https://api.minimax.io/v1", "locality": "remote",
-                 "provider": "minimax", "models": [{"id": "x"}]},
-                {"id": "openrouter", "baseUrl": "https://openrouter.ai/api/v1", "locality": "remote",
-                 "provider": "openrouter", "models": [{"id": "z"}]},
+                 "keyFile": "/etc/kvasir/card.key", "compat": null, "inlineReasoning": null,
+                 "models": [{"id": "m", "contextWindow": 65536}]},
+                {"id": "model", "baseUrl": "https://api.example.org/v1", "locality": "remote",
+                 "keyFile": kvasir.join("model.key").display().to_string(), "provider": "model",
+                 "models": [{"id": "big"}]},
                 {"id": "kept", "baseUrl": "https://api.example.org/v1", "locality": "remote",
                  "key": "a key someone put there", "models": [{"id": "y"}]}
             ],
@@ -9416,26 +10184,14 @@ mod tests {
         let mut plan = plan(Runtime::Machine);
         plan.dir = dir.clone();
         let mut console = Console::new(true);
-        assert!(repair_kvasir(&plan, &mut console, None).is_ok());
+        assert!(repair_kvasir(&plan, &mut console).is_ok());
 
-        let mended: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(kvasir.join("kvasir.json")).unwrap())
-                .unwrap();
-        let backends = mended["backends"].as_array().unwrap();
-        let ids: Vec<&str> = backends.iter().filter_map(|b| b["id"].as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["card", "openrouter", "kept"],
-            "the example's keyless remote one goes; one someone added stays, keyed or not"
-        );
+        let mended = kvasir_config(&plan).unwrap();
         assert!(
-            backends[0].get("keyFile").is_none(),
-            "a key file that is not there is dropped"
+            mended.get("backends").is_none(),
+            "Kvasir refuses a file that names them: {mended}"
         );
-        assert_eq!(
-            backends[0]["baseUrl"], "http://127.0.0.1:30000/v1",
-            "the model named is untouched"
-        );
+        assert!(mended.get("oauth").is_none(), "{mended}");
         let purposes: Vec<&str> = mended["purposes"]
             .as_array()
             .unwrap()
@@ -9443,17 +10199,52 @@ mod tests {
             .filter_map(|p| p["id"].as_str())
             .collect();
         assert!(purposes.contains(&"assistant.concierge"), "{purposes:?}");
-        assert_eq!(gateway_admin_token(&plan).as_deref(), Some("tok"));
+        assert_eq!(kvasir_admin_token(&plan).as_deref(), Some("tok"));
         assert_eq!(mended["auth"]["mode"], "off", "as the desk signs in");
         assert_eq!(mended["auth"]["tokens"]["tok"], INSTALLER);
 
+        // every backend is kept for Kvasir to add again, with its key
+        let kept = to_add(&plan);
+        let ids: Vec<&str> = kept.iter().filter_map(|b| b["id"].as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["card", "model", "kept"],
+            "nothing a person set up is lost"
+        );
+        assert!(
+            kept[0].get("key").is_none() && kept[0].get("keyFile").is_none(),
+            "a key file that is not there is dropped: {}",
+            kept[0]
+        );
+        assert!(
+            kept[0].get("compat").is_none() && kept[0].get("inlineReasoning").is_none(),
+            "an empty field Kvasir's door refuses is left out: {}",
+            kept[0]
+        );
+        assert_eq!(
+            kept[0]["models"][0]["contextWindow"], 65536,
+            "what a model's entry held is kept"
+        );
+        assert_eq!(kept[1]["key"], "sk-model", "the key its key file held");
+        assert!(kept[1].get("provider").is_none(), "{}", kept[1]);
+        assert_eq!(kept[2]["key"], "a key someone put there");
+        assert!(
+            kept.iter().all(|b| b.get("replaces").is_none()),
+            "a backend from before takes no other's place"
+        );
+        assert!(
+            !kvasir.join("model.key").exists(),
+            "the key file setup wrote goes once its key is kept"
+        );
+
         // and a second repair has nothing left to do
         let before = std::fs::read_to_string(kvasir.join("kvasir.json")).unwrap();
-        assert!(repair_kvasir(&plan, &mut console, None).is_ok());
+        assert!(repair_kvasir(&plan, &mut console).is_ok());
         assert_eq!(
             std::fs::read_to_string(kvasir.join("kvasir.json")).unwrap(),
             before
         );
+        assert_eq!(to_add(&plan).len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9461,7 +10252,7 @@ mod tests {
     fn the_gateway_knows_callers_the_way_the_desk_signs_them_in() {
         let mut plan = plan(Runtime::Podman);
         plan.mode = Mode::Local;
-        let auth = gateway_auth(&plan, "tok");
+        let auth = kvasir_auth(&plan, "tok");
         assert_eq!(auth["mode"], "oidc", "{auth}");
         assert_eq!(auth["tokens"]["tok"], INSTALLER, "{auth}");
         let (issuer, jwks) = desk_trust(&plan);
@@ -9482,7 +10273,7 @@ mod tests {
             "http://nils-desk:7200/.well-known/jwks.json"
         );
         plan.mode = Mode::Off;
-        assert_eq!(gateway_auth(&plan, "tok")["mode"], "off");
+        assert_eq!(kvasir_auth(&plan, "tok")["mode"], "off");
     }
 
     #[test]
@@ -9506,30 +10297,27 @@ mod tests {
             key: Some("sk-test".to_string()),
             model: "big".to_string(),
             later: false,
+            chatgpt: false,
         };
         let mut console = Console::new(true);
-        assert!(repair_kvasir(&plan, &mut console, Some(&chosen)).is_ok());
-        let config = gateway_config(&plan).unwrap();
-        let backend = &config["backends"][0];
+        assert!(configure_kvasir(&plan, &mut console, Some(&chosen)).is_ok());
+        // the model chosen takes the place of the one kvasir.json named
+        let kept = to_add(&plan);
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        let backend = &kept[0];
         assert_eq!(backend["id"], "model", "{backend}");
         assert_eq!(
             backend["baseUrl"], "https://api.example.org/v1",
             "{backend}"
         );
         assert_eq!(backend["locality"], "remote", "{backend}");
-        assert_eq!(backend["models"][0]["id"], "big", "{backend}");
-        assert_eq!(
-            backend["models"][0]["contextWindow"], 32768,
-            "what the model's entry held is kept"
-        );
-        let key = std::fs::read_to_string(backend["keyFile"].as_str().unwrap()).unwrap();
-        assert_eq!(key.trim(), "sk-test");
-        assert_eq!(
-            model_on_record(&plan).as_deref(),
-            Some("big, the prompt leaves your systems")
-        );
+        assert_eq!(backend["models"], serde_json::json!(["big"]), "{backend}");
+        assert_eq!(backend["key"], "sk-test", "{backend}");
+        assert_eq!(backend["replaces"], true, "{backend}");
+        assert!(kvasir_config(&plan).unwrap().get("backends").is_none());
 
-        // the assistant asks for the model chosen, and teaches on the gateway's backend
+        // the assistant asks for the model chosen, and teaches on the backend
+        // setup adds for it
         let env = dir.join("assistant");
         std::fs::create_dir_all(&env).unwrap();
         let env = env.join("assistant.env");
@@ -9542,22 +10330,44 @@ mod tests {
         let text = std::fs::read_to_string(&env).unwrap();
         assert!(text.contains("ASSISTANT_MODEL=big"), "{text}");
         assert!(text.contains("ASSISTANT_TEACHING_BACKEND=model"), "{text}");
-        // and a run that chose nothing leaves the model the file names
+        assert_eq!(model_on_record(&plan).as_deref(), Some("big"));
+        // and a run that chose nothing leaves what the file names
         std::fs::write(
             &env,
-            "ASSISTANT_MODEL=mine\nASSISTANT_TEACHING_BACKEND=model\n",
+            "ASSISTANT_MODEL=mine\nASSISTANT_TEACHING_BACKEND=card\n",
         )
         .unwrap();
         assert!(write_assistant_env(&plan, None).is_ok());
         let text = std::fs::read_to_string(&env).unwrap();
-        assert!(text.contains("ASSISTANT_MODEL=mine"), "{text}");
+        assert!(
+            text.contains("ASSISTANT_MODEL=mine")
+                && text.contains("ASSISTANT_TEACHING_BACKEND=card"),
+            "{text}"
+        );
+
+        // the install's ChatGPT subscription is named as Kvasir names it, and
+        // said on the card as what it is
+        assert!(write_assistant_env(&plan, Some(&ModelChoice::chatgpt())).is_ok());
+        let text = std::fs::read_to_string(&env).unwrap();
+        assert!(text.contains("ASSISTANT_MODEL=chatgpt"), "{text}");
+        assert!(
+            text.contains("ASSISTANT_TEACHING_BACKEND=card"),
+            "ChatGPT teaches nothing: {text}"
+        );
+        assert_eq!(
+            model_on_record(&plan).as_deref(),
+            Some("ChatGPT subscription")
+        );
+        // and the model chosen before, which Kvasir does not hold yet, is let go
+        assert!(configure_kvasir(&plan, &mut console, Some(&ModelChoice::chatgpt())).is_ok());
+        assert!(to_add(&plan).is_empty(), "{:?}", to_add(&plan));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A gateway that answers each door from a table, and writes down every
-    /// call it is sent with its body.
+    /// A Kvasir that answers each door from a table, with a status and a
+    /// body, and writes down every call it is sent with its body.
     fn fake_gateway(
-        answer: impl Fn(&str, &str) -> String + Send + 'static,
+        answer: impl Fn(&str, &str, &str) -> (u16, String) + Send + 'static,
     ) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{BufRead as _, Read as _, Write as _};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -9593,14 +10403,21 @@ mod tests {
                 let mut words = first.split_whitespace();
                 let method = words.next().unwrap_or_default().to_string();
                 let path = words.next().unwrap_or_default().to_string();
-                seen.lock().unwrap().push(format!(
-                    "{method} {path} {}",
-                    String::from_utf8_lossy(&body)
-                ));
-                let text = answer(&method, &path);
+                let body = String::from_utf8_lossy(&body).to_string();
+                seen.lock().unwrap().push(format!("{method} {path} {body}"));
+                let (status, text) = answer(&method, &path, &body);
+                let reason = match status {
+                    200 => "OK",
+                    201 => "Created",
+                    204 => "No Content",
+                    404 => "Not Found",
+                    409 => "Conflict",
+                    422 => "Unprocessable Entity",
+                    _ => "Answered",
+                };
                 let _ = reader.into_inner().write_all(
                     format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
                         text.len()
                     )
                     .as_bytes(),
@@ -9610,66 +10427,202 @@ mod tests {
         (port, calls)
     }
 
-    #[test]
-    fn the_gateway_is_made_ready_for_the_assistant() {
-        let dir = scratch("ready");
+    /// What a fake Kvasir holds between calls: its backends, the models it
+    /// lists, its policy table, its admission records, and the states its
+    /// ChatGPT subscription goes through, one each time it is asked, the last
+    /// one staying.
+    #[derive(Default)]
+    struct Held {
+        backends: Vec<serde_json::Value>,
+        listed: Vec<String>,
+        purposes: serde_json::Value,
+        admission: Vec<serde_json::Value>,
+        signing_in: Vec<&'static str>,
+    }
+
+    /// Kvasir's doors over what it holds. A backend is added unless one of
+    /// its models is named `silent`, which does not answer, and a local one is
+    /// listed at once, as Kvasir admits it on its own.
+    fn fake_kvasir(
+        held: std::sync::Arc<std::sync::Mutex<Held>>,
+    ) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use serde_json::json;
+        fake_gateway(move |method, path, body| {
+            let mut held = held.lock().unwrap();
+            let sent: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+            let ok = |value: serde_json::Value| (200, value.to_string());
+            match (method, path) {
+                ("GET", "/healthz") => ok(json!({"ok": true})),
+                ("GET", "/v1/backends") => ok(json!({ "backends": held.backends })),
+                ("POST", "/v1/backends") => {
+                    let id = sent["id"].as_str().unwrap_or("model").to_string();
+                    let models = model_ids(&sent["models"]);
+                    if models.iter().any(|m| m == "silent") {
+                        return (
+                            422,
+                            json!({"error": {"code": "backend", "message": "silent did not answer",
+                                "models": [{"id": "silent", "answered": false,
+                                    "error": {"kind": "unreachable", "message": "fetch failed"}}]}})
+                            .to_string(),
+                        );
+                    }
+                    if held.backends.iter().any(|b| b["id"] == id.as_str()) {
+                        return (
+                            409,
+                            json!({"error": {"code": "backend", "message": format!("a backend named {id} is held already")}})
+                                .to_string(),
+                        );
+                    }
+                    if sent["locality"] == "local" {
+                        held.listed.extend(models.iter().cloned());
+                    }
+                    held.backends.push(json!({
+                        "id": id, "locality": sent["locality"], "base_url": sent["baseUrl"],
+                        "models": models, "credential": sent.get("key").is_some(), "builtin": false,
+                        "health": {"warming": false, "lastError": null},
+                    }));
+                    (201, json!({"backend": {"id": id}}).to_string())
+                }
+                ("DELETE", p) if p.starts_with("/v1/backends/") => {
+                    let id = &p["/v1/backends/".len()..];
+                    held.backends.retain(|b| b["id"] != id);
+                    (204, String::new())
+                }
+                ("GET", "/v1/config") => {
+                    let models: Vec<serde_json::Value> =
+                        held.listed.iter().map(|m| json!({ "id": m })).collect();
+                    ok(json!({ "models": models }))
+                }
+                ("GET", p) if p.starts_with("/v1/admission") => {
+                    ok(json!({ "records": held.admission }))
+                }
+                ("POST", "/v1/admission/run") => ok(json!({"records": [
+                    {"model": sent["model"], "passed": true, "checks": []}
+                ]})),
+                ("GET", "/v1/keys") => ok(json!({"keys": [
+                    {"id": "k_old", "principal": "nils-assistant", "purposes": ["assistant.ask-help"],
+                     "expiresAt": null, "revokedAt": null},
+                    {"id": "k_new", "principal": "nils-assistant",
+                     "purposes": ["assistant.ask-help", "assistant.operator"],
+                     "expiresAt": null, "revokedAt": null}
+                ]})),
+                ("POST", "/v1/keys") => ok(json!({"id": "k_new", "key": "kvs_k_new.fresh"})),
+                ("DELETE", p) if p.starts_with("/v1/keys/") => (204, String::new()),
+                ("GET", "/v1/purposes") => ok(json!({ "purposes": held.purposes })),
+                ("PUT", p) if p.ends_with("/policy") => ok(json!({})),
+                ("POST", "/v1/subscriptions/chatgpt/sign-in") => ok(json!({
+                    "state": "waiting", "user_code": "WXYZ-1234",
+                    "verification_uri": "https://auth.openai.com/codex/device",
+                    "expires_at": now_ms() + 900_000,
+                })),
+                ("GET", "/v1/subscriptions") => {
+                    let state = if held.signing_in.len() > 1 {
+                        held.signing_in.remove(0)
+                    } else {
+                        held.signing_in.first().copied().unwrap_or("signed_out")
+                    };
+                    let error = (state == "failed").then_some("the code was refused");
+                    ok(json!({"subscriptions": [
+                        {"provider": "chatgpt", "state": state, "model": "gpt-5.4-mini", "error": error}
+                    ]}))
+                }
+                _ => (404, json!({"error": {"code": "no_such_door"}}).to_string()),
+            }
+        })
+    }
+
+    /// A setup directory whose kvasir.json holds the installer's token and
+    /// these purposes, and whose assistant already has a key that covers
+    /// both purposes the fake's keys name.
+    fn kvasir_dir(name: &str, purposes: serde_json::Value) -> PathBuf {
+        let dir = scratch(name);
         let kvasir = dir.join("kvasir");
         std::fs::create_dir_all(&kvasir).unwrap();
-        let (port, calls) = fake_gateway(|method, path| {
-            match (method, path) {
-                ("GET", "/healthz") => r#"{"ok":true}"#,
-                ("GET", "/v1/models") => r#"{"object":"list","data":[{"id":"m"}]}"#,
-                ("GET", "/v1/config") => r#"{"models":[]}"#,
-                ("POST", "/v1/admission/run") => {
-                    r#"{"records":[{"model":"m","passed":true,"checks":[]}]}"#
-                }
-                ("GET", "/v1/keys") => {
-                    r#"{"keys":[
-                        {"id":"k_old","principal":"nils-assistant","purposes":["assistant.ask-help"],"expiresAt":null,"revokedAt":null},
-                        {"id":"k_new","principal":"nils-assistant","purposes":["assistant.ask-help","assistant.operator"],"expiresAt":null,"revokedAt":null}
-                    ]}"#
-                }
-                ("POST", "/v1/keys") => r#"{"id":"k_new","key":"kvs_k_new.fresh"}"#,
-                ("GET", "/v1/purposes") => {
-                    r#"{"purposes":[
-                        {"purpose":"assistant.operator","content":"catalog","backend":null},
-                        {"purpose":"assistant.ask-help","content":"rows","backend":null}
-                    ]}"#
-                }
-                _ => "",
-            }
-            .to_string()
-        });
-        let config = |locality: &str| {
+        std::fs::write(
+            kvasir.join("kvasir.json"),
             serde_json::json!({
-                "auth": {"mode": "off", "tokens": {"tok": "nils-setup:admin"}},
-                "backends": [{"id": "model", "baseUrl": format!("http://127.0.0.1:{port}/v1"),
-                              "locality": locality, "models": [{"id": "m"}]}],
-                "purposes": [
-                    {"id": "assistant.ask-help", "content": "rows"},
-                    {"id": "assistant.operator", "content": "catalog"}
-                ]
+                "auth": {"mode": "off", "tokens": {"tok": INSTALLER}},
+                "purposes": purposes,
             })
-            .to_string()
-        };
-        std::fs::write(kvasir.join("kvasir.json"), config("local")).unwrap();
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(kvasir.join("assistant.key"), "kvs_k_new.fresh").unwrap();
+        dir
+    }
+
+    /// The bodies a fake Kvasir was sent to add a backend with, in order.
+    fn added_bodies(
+        calls: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Vec<serde_json::Value> {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.strip_prefix("POST /v1/backends "))
+            .map(|body| serde_json::from_str(body).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn the_gateway_is_made_ready_for_the_assistant() {
+        let dir = kvasir_dir(
+            "ready",
+            serde_json::json!([
+                {"id": "assistant.ask-help", "content": "rows"},
+                {"id": "assistant.operator", "content": "catalog"}
+            ]),
+        );
+        let kvasir = dir.join("kvasir");
         std::fs::write(kvasir.join("assistant.key"), "kvs_k_old.stale").unwrap();
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Held {
+            purposes: serde_json::json!([
+                {"purpose": "assistant.operator", "content": "catalog", "backend": null},
+                {"purpose": "assistant.ask-help", "content": "rows", "backend": null}
+            ]),
+            ..Held::default()
+        }));
+        let (port, calls) = fake_kvasir(held.clone());
         let mut plan = plan(Runtime::Machine);
         plan.dir = dir.clone();
         plan.ports.kvasir = port;
+        let chosen = ModelChoice {
+            url: "http://127.0.0.1:30000/v1".to_string(),
+            local: true,
+            key: Some("sk-local".to_string()),
+            model: "m".to_string(),
+            later: false,
+            chatgpt: false,
+        };
+        assert!(keep_to_add(&plan, vec![model_door_body(&plan, &chosen)]).is_ok());
         let console = Console::new(true);
 
-        // a local model not listed yet is admitted; a key made before a
-        // station was added is made again, and the old one revoked
-        assert_eq!(ready_gateway(&plan, &console).ok(), Some(true));
-        let key = std::fs::read_to_string(kvasir.join("assistant.key")).unwrap();
-        assert_eq!(key.trim(), "kvs_k_new.fresh");
+        // the model chosen is added through Kvasir, which admits it on its
+        // own; a key made before a station was added is made again, and the
+        // old one revoked
+        assert_eq!(
+            ready_kvasir(&plan, &console, Some(&chosen)).ok(),
+            Some(true)
+        );
+        let bodies = added_bodies(&calls);
+        assert_eq!(bodies.len(), 1, "{bodies:?}");
+        assert_eq!(bodies[0]["id"], "model");
+        assert_eq!(bodies[0]["baseUrl"], "http://127.0.0.1:30000/v1");
+        assert_eq!(bodies[0]["locality"], "local");
+        assert_eq!(bodies[0]["models"], serde_json::json!(["m"]));
+        assert_eq!(bodies[0]["key"], "sk-local");
+        assert!(bodies[0].get("replaces").is_none(), "{}", bodies[0]);
+        assert!(
+            !to_add_path(&plan).exists(),
+            "nothing is kept once Kvasir holds it"
+        );
         let seen = calls.lock().unwrap().clone();
         assert!(
-            seen.iter()
-                .any(|c| c.starts_with("POST /v1/admission/run") && c.contains(r#""model":"m""#)),
-            "{seen:?}"
+            !seen.iter().any(|c| c.starts_with("POST /v1/admission/run")),
+            "Kvasir admits what it was just given: {seen:?}"
         );
+        let key = std::fs::read_to_string(kvasir.join("assistant.key")).unwrap();
+        assert_eq!(key.trim(), "kvs_k_new.fresh");
         let minted = seen
             .iter()
             .find(|c| c.starts_with("POST /v1/keys"))
@@ -9687,11 +10640,33 @@ mod tests {
             "a local model needs no mapping: {seen:?}"
         );
 
+        // a model held from before and not listed is run through admission
+        {
+            let mut held = held.lock().unwrap();
+            held.listed.clear();
+        }
+        calls.lock().unwrap().clear();
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        let seen = calls.lock().unwrap().clone();
+        assert!(
+            seen.iter()
+                .any(|c| c.starts_with("POST /v1/admission/run") && c.contains(r#""model":"m""#)),
+            "{seen:?}"
+        );
+
         // a commercial provider as the only model: what reads no rows is
         // mapped to it, and a key that covers every purpose is kept
         calls.lock().unwrap().clear();
-        std::fs::write(kvasir.join("kvasir.json"), config("remote")).unwrap();
-        assert_eq!(ready_gateway(&plan, &console).ok(), Some(true));
+        {
+            let mut held = held.lock().unwrap();
+            held.backends = vec![
+                serde_json::json!({"id": "model", "locality": "remote", "base_url": "https://api.example.org/v1",
+                                   "models": ["big"], "builtin": false}),
+                serde_json::json!({"id": "chatgpt", "locality": "remote", "models": ["gpt-5.4-mini"], "builtin": true}),
+            ];
+            held.listed = vec!["big".to_string()];
+        }
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
         let seen = calls.lock().unwrap().clone();
         assert!(
             seen.iter().any(
@@ -9705,14 +10680,517 @@ mod tests {
             "what reads rows stays closed until an admin opens it: {seen:?}"
         );
         assert!(
-            !seen.iter().any(|c| c.starts_with("POST /v1/admission/run")),
-            "a provider is not admitted: {seen:?}"
+            !seen
+                .iter()
+                .any(|c| c.starts_with("POST /v1/admission/run")
+                    || c.starts_with("POST /v1/backends")),
+            "a provider is not admitted, and nothing is added: {seen:?}"
         );
         assert!(
             !seen.iter().any(|c| c.starts_with("POST /v1/keys")),
             "{seen:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_chosen_model_is_added_once_and_again_only_with_other_values() {
+        let dir = kvasir_dir("added-once", serde_json::json!([]));
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Held::default()));
+        let (port, calls) = fake_kvasir(held.clone());
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.ports.kvasir = port;
+        let console = Console::new(true);
+        let mut chosen = ModelChoice {
+            url: "http://127.0.0.1:30000/v1".to_string(),
+            local: true,
+            key: None,
+            model: "m".to_string(),
+            later: false,
+            chatgpt: false,
+        };
+        // chosen twice, as two runs of setup would
+        for _ in 0..2 {
+            assert!(keep_to_add(&plan, vec![model_door_body(&plan, &chosen)]).is_ok());
+            assert_eq!(
+                ready_kvasir(&plan, &console, Some(&chosen)).ok(),
+                Some(true)
+            );
+        }
+        assert_eq!(
+            added_bodies(&calls).len(),
+            1,
+            "held with the same address and model, it is not added again"
+        );
+        assert!(
+            !calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.starts_with("DELETE /v1/backends"))
+        );
+        assert!(!to_add_path(&plan).exists());
+
+        // another address takes the place of the one held
+        chosen.url = "http://127.0.0.1:8000/v1".to_string();
+        assert!(keep_to_add(&plan, vec![model_door_body(&plan, &chosen)]).is_ok());
+        assert_eq!(
+            ready_kvasir(&plan, &console, Some(&chosen)).ok(),
+            Some(true)
+        );
+        let seen = calls.lock().unwrap().clone();
+        let removed = seen
+            .iter()
+            .position(|c| c.starts_with("DELETE /v1/backends/model"))
+            .expect("the one held is removed");
+        let added = seen
+            .iter()
+            .rposition(|c| c.starts_with("POST /v1/backends "))
+            .unwrap();
+        assert!(
+            removed < added && seen[added].contains("127.0.0.1:8000"),
+            "{seen:?}"
+        );
+        assert_eq!(held.lock().unwrap().backends.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_model_kvasir_cannot_reach_stops_an_install_and_only_warns_on_an_update() {
+        let dir = kvasir_dir("unreached", serde_json::json!([]));
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Held::default()));
+        let (port, _calls) = fake_kvasir(held);
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.ports.kvasir = port;
+        let chosen = ModelChoice {
+            url: "http://127.0.0.1:30000/v1".to_string(),
+            local: true,
+            key: None,
+            model: "silent".to_string(),
+            later: false,
+            chatgpt: false,
+        };
+        assert!(keep_to_add(&plan, vec![model_door_body(&plan, &chosen)]).is_ok());
+        let console = Console::new(true);
+
+        // an install stops with Kvasir's words and says plainly where it failed
+        console.strict.set(true);
+        let stopped = ready_kvasir(&plan, &console, Some(&chosen)).unwrap_err();
+        for said in [
+            "could not reach silent",
+            "from where it runs",
+            "silent: fetch failed",
+            "reached it from this machine",
+            "the assistant has no model",
+        ] {
+            assert!(
+                stopped.message.contains(said),
+                "{said}: {}",
+                stopped.message
+            );
+        }
+        assert_eq!(to_add(&plan).len(), 1, "kept for the next run");
+
+        // an update says it and goes on
+        console.strict.set(false);
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(to_add(&plan).len(), 1);
+
+        // a backend from before that does not answer now is only said, in an
+        // install too, and kept
+        std::fs::write(
+            to_add_path(&plan),
+            serde_json::json!([{"id": "card", "baseUrl": "http://127.0.0.1:30000/v1",
+                                "locality": "local", "models": ["silent"]}])
+            .to_string(),
+        )
+        .unwrap();
+        console.strict.set(true);
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        assert_eq!(to_add(&plan).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repair_moves_old_backends_out_of_the_file_and_back_in_through_kvasir() {
+        let dir = kvasir_dir("moved", serde_json::json!([]));
+        let kvasir = dir.join("kvasir");
+        std::fs::write(kvasir.join("card.key"), "sk-card\n").unwrap();
+        std::fs::write(
+            kvasir.join("kvasir.json"),
+            serde_json::json!({
+                "auth": {"mode": "off", "tokens": {"tok": INSTALLER}},
+                "purposes": [],
+                "backends": [
+                    {"id": "card", "baseUrl": "http://127.0.0.1:30000/v1", "locality": "local",
+                     "keyFile": "card.key", "models": [{"id": "qwen", "contextWindow": 65536}]},
+                    {"id": "provider", "baseUrl": "https://api.example.org/v1", "locality": "remote",
+                     "key": "sk-provider", "models": ["big"]}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Held::default()));
+        let (port, calls) = fake_kvasir(held.clone());
+        // the setup moved into a pod since the file was written
+        let mut plan = plan(Runtime::Podman);
+        plan.dir = dir.clone();
+        plan.ports.kvasir = port;
+        let mut console = Console::new(true);
+        assert!(repair_kvasir(&plan, &mut console).is_ok());
+        assert!(kvasir_config(&plan).unwrap().get("backends").is_none());
+
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        let bodies = added_bodies(&calls);
+        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        assert_eq!(bodies[0]["id"], "card", "under the same id");
+        assert_eq!(
+            bodies[0]["key"], "sk-card",
+            "with the key its key file holds"
+        );
+        assert_eq!(
+            bodies[0]["baseUrl"], "http://host.containers.internal:30000/v1",
+            "dialled from where Kvasir runs"
+        );
+        assert_eq!(bodies[0]["models"][0]["contextWindow"], 65536);
+        assert_eq!(bodies[1]["id"], "provider");
+        assert_eq!(bodies[1]["key"], "sk-provider");
+        assert!(
+            !to_add_path(&plan).exists(),
+            "nothing is left once Kvasir holds them"
+        );
+        let ids: Vec<String> = held
+            .lock()
+            .unwrap()
+            .backends
+            .iter()
+            .filter_map(|b| b["id"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(ids, vec!["card", "provider"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_install_s_chatgpt_subscription_is_signed_in_and_opens_what_reads_no_rows() {
+        let dir = kvasir_dir("chatgpt", serde_json::json!([]));
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Held {
+            purposes: serde_json::json!([
+                {"purpose": "assistant.title", "content": "catalog", "backend": null},
+                {"purpose": "assistant.operator", "content": "catalog", "backend": null},
+                {"purpose": "assistant.ask-help", "content": "rows", "backend": null},
+                {"purpose": "other.lookup", "content": "catalog", "backend": null}
+            ]),
+            signing_in: vec!["signed_out", "waiting", "signed_in"],
+            ..Held::default()
+        }));
+        let (port, calls) = fake_kvasir(held.clone());
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.ports.kvasir = port;
+        // a person at the terminal, whose screen is kept to be read
+        let mut console = Console::new(false);
+        console.screens = Some(std::cell::RefCell::new(Replay::default()));
+        console.strict.set(true);
+        let said = |console: &Console| -> String {
+            console
+                .screens
+                .as_ref()
+                .map(|replay| {
+                    replay
+                        .borrow()
+                        .said
+                        .iter()
+                        .filter_map(|s| match s {
+                            tui::Said::Text(t) | tui::Said::Note(t) => Some(t.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default()
+        };
+
+        assert_eq!(
+            ready_kvasir(&plan, &console, Some(&ModelChoice::chatgpt())).ok(),
+            Some(true)
+        );
+        let shown = said(&console);
+        assert!(
+            shown.contains("open https://auth.openai.com/codex/device")
+                && shown.contains("enter the code WXYZ-1234"),
+            "the link and the code, in plain words: {shown}"
+        );
+        assert!(shown.contains("works for 15 minute(s)"), "{shown}");
+        assert!(shown.contains("signed in to ChatGPT"), "{shown}");
+        assert!(
+            shown.contains(
+                "2 purpose(s) that read no rows of the archive go to your ChatGPT subscription"
+            ),
+            "{shown}"
+        );
+        assert!(
+            shown.contains(
+                "assistant.ask-help read rows of the archive and stay closed to your ChatGPT subscription"
+            ),
+            "{shown}"
+        );
+        let seen = calls.lock().unwrap().clone();
+        assert!(
+            seen.iter()
+                .filter(|c| c.starts_with("GET /v1/subscriptions"))
+                .count()
+                >= 3,
+            "asked again until it is signed in: {seen:?}"
+        );
+        for purpose in ["assistant.title", "assistant.operator"] {
+            assert!(
+                seen.iter().any(
+                    |c| c.starts_with(&format!("PUT /v1/purposes/{purpose}/policy"))
+                        && c.contains(r#""backend":"chatgpt""#)
+                ),
+                "{purpose}: {seen:?}"
+            );
+        }
+        assert!(
+            !seen
+                .iter()
+                .any(|c| c.contains("assistant.ask-help/policy")
+                    || c.contains("other.lookup/policy")),
+            "what reads rows stays closed, and what is not the assistant's is not touched: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|c| c.starts_with("POST /v1/backends")),
+            "ChatGPT is Kvasir's own: {seen:?}"
+        );
+
+        // a sign-in that does not finish leaves the assistant with no model,
+        // which stops an install
+        held.lock().unwrap().signing_in = vec!["signed_out", "failed"];
+        let stopped = ready_kvasir(&plan, &console, Some(&ModelChoice::chatgpt())).unwrap_err();
+        assert!(
+            stopped
+                .message
+                .contains("the ChatGPT sign-in did not finish (the code was refused)")
+                && stopped.message.contains("the assistant has no model"),
+            "{}",
+            stopped.message
+        );
+        assert!(said(&console).contains("run nils setup again"));
+
+        // with nobody at the terminal, no sign-in is started
+        calls.lock().unwrap().clear();
+        let blind = Console::new(true);
+        assert_eq!(
+            ready_kvasir(&plan, &blind, Some(&ModelChoice::chatgpt())).ok(),
+            Some(true)
+        );
+        assert!(
+            !calls.lock().unwrap().iter().any(|c| c.contains("/sign-in")),
+            "a sign-in is a person's"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The question the model is chosen with, as the screens would ask it,
+    /// and what was said above it.
+    fn model_question(mode: Mode) -> (Vec<(String, String)>, Vec<tui::Said>) {
+        let mut console = Console::new(false);
+        console.screens = Some(std::cell::RefCell::new(Replay::default()));
+        let Err(Stop::Ask(Question {
+            ask: tui::Ask::Pick { options, .. },
+            ..
+        })) = choose_model(&mut console, true, mode)
+        else {
+            panic!("the model is asked with a list");
+        };
+        let said = console
+            .screens
+            .take()
+            .map(|replay| replay.into_inner().said)
+            .unwrap_or_default();
+        (options, said)
+    }
+
+    #[test]
+    fn chatgpt_is_offered_only_where_nobody_signs_in() {
+        let (options, _) = model_question(Mode::Off);
+        let titles: Vec<&str> = options.iter().map(|(title, _)| title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec![
+                "A model server on this machine",
+                "A model server on another machine of yours",
+                "A commercial provider",
+                "Your ChatGPT subscription",
+                "Decide later"
+            ]
+        );
+        assert!(
+            options[3].1.contains("once setup has started Kvasir")
+                && options[3].1.contains("the prompt leaves your systems"),
+            "{:?}",
+            options[3]
+        );
+
+        // where people sign in, each signs in to their own from the desk
+        for mode in [Mode::Local, Mode::Oidc] {
+            let (options, said) = model_question(mode);
+            assert!(
+                !options.iter().any(|(title, _)| title.contains("ChatGPT")),
+                "{options:?}"
+            );
+            assert!(
+                said.iter().any(|s| matches!(s, tui::Said::Note(note)
+                    if note.contains("each signs in to theirs from the desk"))),
+                "{said:?}"
+            );
+        }
+
+        // chosen, it has no address and no key, and names Kvasir's ChatGPT
+        use tui::Key::{Down, Enter};
+        let (outcome, _) = on_screens(
+            |console| choose_model(console, true, Mode::Off),
+            vec![Down, Down, Down, Enter],
+        );
+        let Ok((chosen, _)) = outcome else {
+            panic!("the subscription was not chosen");
+        };
+        assert!(chosen.chatgpt && !chosen.later);
+        assert_eq!(chosen.model, CHATGPT);
+        assert!(chosen.url.is_empty() && chosen.key.is_none());
+    }
+
+    #[test]
+    fn the_clones_are_pinned_to_release_tags_and_a_lab_may_name_another_ref() {
+        assert_eq!(KVASIR_REF, "v1.0.0-alpha.4");
+        assert_eq!(ASSISTANT_REF, "v1.0.0-alpha.23");
+        assert_eq!(source_ref(KVASIR_REF, None), "v1.0.0-alpha.4");
+        assert_eq!(
+            source_ref(KVASIR_REF, Some("models-held")),
+            "models-held",
+            "a branch, for a lab before the tag exists"
+        );
+        assert_eq!(
+            source_ref(ASSISTANT_REF, Some("  ")),
+            "v1.0.0-alpha.23",
+            "an empty variable names nothing"
+        );
+
+        let into = Path::new("/home/x/nils/kvasir");
+        assert_eq!(
+            source_steps(KVASIR_REPO, KVASIR_REF, into, false),
+            vec![vec![
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                "v1.0.0-alpha.4",
+                "https://github.com/kineuro/kvasir",
+                "/home/x/nils/kvasir"
+            ]],
+            "a clone of the tag alone"
+        );
+        // a checkout, one of main too, is brought to the ref and left detached
+        assert_eq!(
+            source_steps(KVASIR_REPO, "models-held", into, true),
+            vec![
+                vec!["fetch", "--depth", "1", "origin", "models-held"],
+                vec!["checkout", "--detach", "FETCH_HEAD"]
+            ]
+        );
+        let steps = source_steps(ASSISTANT_REPO, ASSISTANT_REF, into, true);
+        assert_eq!(
+            source_label(&steps[0], "the assistant", ASSISTANT_REF),
+            "fetching the assistant at v1.0.0-alpha.23"
+        );
+        assert_eq!(
+            source_label(&steps[1], "Kvasir", KVASIR_REF),
+            "checking out Kvasir at v1.0.0-alpha.4"
+        );
+        assert_eq!(node_source("desk"), None, "only the two Node parts");
+    }
+
+    #[test]
+    fn an_uninstall_removes_kvasirs_state_even_where_the_data_is_kept() {
+        let root = scratch("uninstall-kvasir");
+        let dir = root.join("nils");
+        let kvasir = dir.join("kvasir");
+        std::fs::create_dir_all(kvasir.join("state")).unwrap();
+        for file in [
+            "kvasir.json",
+            "kvasir.sqlite",
+            "kvasir.seal",
+            "kvasir.pepper",
+            "assistant.key",
+            "backends-to-add.json",
+            "state/held",
+        ] {
+            std::fs::write(kvasir.join(file), "x").unwrap();
+        }
+        let assistant = dir.join("assistant");
+        std::fs::create_dir_all(assistant.join("node_modules")).unwrap();
+        std::fs::write(assistant.join("assistant.sqlite"), "x").unwrap();
+        let mut state = State {
+            dir: dir.display().to_string(),
+            mode: "off".to_string(),
+            runtime: "machine".to_string(),
+            ..State::default()
+        };
+        for (name, path) in [("kvasir", &kvasir), ("assistant", &assistant)] {
+            state.parts.insert(
+                name.to_string(),
+                PartState {
+                    version: "from source".to_string(),
+                    path: path.display().to_string(),
+                    kind: "node".to_string(),
+                },
+            );
+        }
+        let removal = gather_removal(&state, None, Leaving::KeepData);
+        assert_eq!(removal.kvasir.as_deref(), Some(kvasir.as_path()));
+        assert_eq!(
+            removal.built,
+            vec![assistant.join("node_modules")],
+            "the assistant's history stays, and Kvasir goes whole"
+        );
+        let text = removal_text(&removal, Leaving::KeepData, &Console::new(true));
+        assert!(
+            text.contains("the models it holds, their keys, its subscriptions"),
+            "{text}"
+        );
+
+        // carried out with nothing of this machine's own in it
+        let record = root.join("setup.toml");
+        std::fs::write(&record, "").unwrap();
+        let removal = Removal {
+            units: Vec::new(),
+            unit_files: Vec::new(),
+            containers: Vec::new(),
+            images: Vec::new(),
+            programs: Vec::new(),
+            me: None,
+            packs: Vec::new(),
+            packs_kept: None,
+            state: record.clone(),
+            postgres: None,
+            ..removal
+        };
+        carry_out(&removal, Leaving::KeepData, &Console::new(true));
+        assert!(!kvasir.exists(), "Kvasir's state stayed");
+        assert!(
+            assistant.join("assistant.sqlite").is_file(),
+            "the assistant's history is data"
+        );
+        assert!(!assistant.join("node_modules").exists());
+        assert!(!record.exists());
+
+        // where everything goes, Kvasir goes with the base directory
+        std::fs::create_dir_all(&kvasir).unwrap();
+        assert_eq!(gather_removal(&state, None, Leaving::Purge).kvasir, None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -10126,7 +11604,7 @@ mod tests {
             ),
             "{engine}"
         );
-        let auth = gateway_auth(&plan, "tok");
+        let auth = kvasir_auth(&plan, "tok");
         assert_eq!(auth["mode"], "oidc", "{auth}");
         assert_eq!(auth["trust"][0]["audience"], "abc123", "{auth}");
         assert_eq!(auth["tokens"]["tok"], INSTALLER, "{auth}");
