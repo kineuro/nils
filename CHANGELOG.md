@@ -4,6 +4,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.25] - 2026-09-14
+
 ### Added
 
 - `nils setup` installs llama.cpp's server wherever it installs the assistant, so a model Kvasir downloads can be started from Kvasir without a model server of your own. It takes llama.cpp build b10964 for this machine: on Linux the Vulkan build where there is a graphics card or a render node and the CPU build otherwise, on macOS the build for its processor. The archive is checked against the sha256 this version pins and unpacked into `<dir>/llama.cpp/`, and setup names the devices llama.cpp runs a model on. The plan says when a Linux machine has no Vulkan loader, since a model then runs on the processor until one is installed. llama.cpp runs as `nils-llama.service` on this machine whichever runtime the parts use (a launchd agent on macOS), started before Kvasir, in router mode with no model loaded and at most one at a time. It listens only where Kvasir reaches it (127.0.0.1:7110 by default, docker's bridge for a docker install), with a key only Kvasir and llama.cpp read, and keeps its presets, key and log in `<dir>/kvasir/runtime/`. `kvasir.json` names it under `local.runtime`, and where Kvasir runs in a container, `hostAlias` names how Kvasir reaches this machine's own loopback. An archive that cannot be downloaded, or whose sha256 is not the pinned one, stops an install; `NILS_SETUP_LLAMA_RELEASES` names a mirror, held to the same digests. `nils update --all` takes the build a new version pins, or takes it for an install from before that has the assistant, and restarts it. `nils uninstall` removes it.
