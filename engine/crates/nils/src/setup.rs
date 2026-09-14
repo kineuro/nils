@@ -8949,12 +8949,25 @@ fn tilde(path: &Path) -> String {
 
 // -------------------------------------------------------------- the update
 
+/// Whether `nils setup` recorded an install for `nils update --all` to bring
+/// up to date, said before anything is fetched.
+pub(crate) fn setup_recorded() -> Result<(), Exit> {
+    if read_state().is_some() {
+        return Ok(());
+    }
+    Err(fail(format!(
+        "no setup is recorded at {}; nils update takes the engine alone",
+        state_path().display()
+    )))
+}
+
 /// Every part the state file names, brought up to date in whatever way that
 /// part runs: a binary is replaced, a container is a pull of the new tag, a
 /// Node part is a fetch and a rebuild. One line each, and a slow step is one
 /// line with a timer, as in the wizard. The engine's binary is not among
-/// them: `nils update` replaces the binary doing the replacing, last, and
-/// then [`restart_after_update`] starts everything again from what is there.
+/// them: `nils update` replaces it first and hands the parts to the new
+/// binary, so they move to the versions the newest release pins, and then
+/// [`restart_after_update`] starts everything again from what is there.
 /// The answer is whether any part changed.
 pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
     let mut state = read_state().ok_or_else(|| {

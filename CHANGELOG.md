@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- `nils update --all` takes the newest `nils` first and hands it the rest of the update, so every part moves to the versions the newest release pins. It updated the parts first with the binary it had, and replaced that binary last, so an update from 1.0.0-alpha.24 built Kvasir at 1.0.0-alpha.4 and never installed llama.cpp, which that version did not know. The update now says that no setup is recorded before it fetches anything.
+
 ## [1.0.0-alpha.26] - 2026-09-14
 
 ### Fixed

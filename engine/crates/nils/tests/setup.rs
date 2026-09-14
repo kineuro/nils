@@ -940,3 +940,111 @@ fn a_setup_that_is_there_is_named_and_update_needs_one() {
     update.says(&dir.display().to_string());
     update.says("nothing was changed");
 }
+
+/// `nils update --all` takes the newest `nils` first and starts it to update
+/// the parts, so they move to the versions the newest release pins. The
+/// release's engine here is a script that writes down how it was started.
+#[cfg(unix)]
+#[test]
+fn update_all_takes_the_newest_nils_first_and_hands_it_the_parts() {
+    let nils = Installed::new("nils-update-hands-over");
+    let config = TempDir::new("nils-update-hands-over-config");
+    let base = TempDir::new("nils-update-hands-over-base");
+    let dir = base.path().join("nils");
+    let made = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+        ],
+    );
+    assert!(made.ok, "{}", made.stderr);
+
+    let releases = Releases::new("99.0.0");
+    let started = base.path().join("started");
+    let name = format!("nils-{}", target());
+    let into = releases.dir.path().join("download").join("v99.0.0");
+    let body = format!(
+        "#!/bin/sh\nprintf '%s|%s\\n' \"$NILS_UPDATE_HANDED_OVER\" \"$*\" > '{}'\n",
+        started.display()
+    );
+    std::fs::write(into.join(&name), &body).unwrap();
+    let sums: String = std::fs::read_to_string(into.join("SHA256SUMS"))
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.ends_with(&format!("  {name}")) {
+                format!("{}  {name}\n", sha256_hex(body.as_bytes()))
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
+    std::fs::write(into.join("SHA256SUMS"), sums).unwrap();
+
+    let to = base.path().join("bin");
+    let registry = dir.join("registry");
+    let out = output(
+        Command::new(nils.path())
+            .args(["--registry", registry.to_str().unwrap()])
+            .args(["update", "--all", "--channel", &releases.url()])
+            .args(["--to", to.to_str().unwrap()])
+            .env("XDG_CONFIG_HOME", config.path())
+            .env("XDG_DATA_HOME", base.path().join("data"))
+            .env_remove("NILS_UPDATE_HANDED_OVER"),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("nils 99.0.0 at"), "{stdout}");
+    let how = std::fs::read_to_string(&started)
+        .unwrap_or_else(|e| panic!("the new binary was not started ({e}):\n{stdout}\n{stderr}"));
+    assert!(
+        how.starts_with(&format!("{}|", env!("CARGO_PKG_VERSION"))),
+        "it was not told what it replaced: {how}"
+    );
+    assert!(
+        how.trim_end().ends_with(&format!(
+            "update --all --channel {} --to {}",
+            releases.url(),
+            to.display()
+        )),
+        "it was not started with the update's own arguments: {how}"
+    );
+}
+
+/// A `nils` an update started carries the update on and does not install
+/// itself again; with no setup recorded there are no parts, and it says so.
+#[test]
+fn a_nils_an_update_started_updates_the_parts_and_not_itself() {
+    let nils = Installed::new("nils-update-carried-on");
+    let config = TempDir::new("nils-update-carried-on-config");
+    let base = TempDir::new("nils-update-carried-on-base");
+    let releases = Releases::new("99.0.0");
+    let to = base.path().join("bin");
+    let out = output(
+        Command::new(nils.path())
+            .args(["update", "--all", "--channel", &releases.url()])
+            .args(["--to", to.to_str().unwrap()])
+            .env("XDG_CONFIG_HOME", config.path())
+            .env("XDG_DATA_HOME", base.path().join("data"))
+            .env("NILS_UPDATE_HANDED_OVER", "1.0.0-alpha.1"),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("carries on the update from 1.0.0-alpha.1"),
+        "{stdout}\n{stderr}"
+    );
+    assert!(stderr.contains("no setup is recorded"), "{stderr}");
+    assert!(
+        !to.join("nils").exists(),
+        "it installed itself again:\n{stdout}"
+    );
+}
