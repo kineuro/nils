@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.22] - 2026-09-14
+
+Released beside nils-desk 1.0.0-alpha.22 so the two stay in step. The engine itself is unchanged since 1.0.0-alpha.21.
+
 ## [1.0.0-alpha.21] - 2026-09-14
 
 Released beside nils-desk 1.0.0-alpha.21 so the two stay in step. The engine itself is unchanged since 1.0.0-alpha.20.
