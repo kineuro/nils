@@ -8,7 +8,7 @@
 //! comes back as text with `isError`, never as a transport error, because
 //! a model reads text and retries. Every page is bounded by the caps.
 //!
-//! Identity is the doors' (§12.4): the same bearer token, the same roles,
+//! Identity is the doors' (§12.4): the same bearer token, the same grants,
 //! the same catalog policy. What this door adds is RFC 9728: a protected
 //! resource metadata document, a 401 that names it in `WWW-Authenticate`,
 //! and a 403 that says `insufficient_scope`. Audience binding to the MCP
@@ -22,7 +22,7 @@ use nils_registry::Registry;
 use serde_json::{Value, json};
 
 use crate::ask_doors::AskState;
-use crate::serve::{Caller, Doors, Reply, Role};
+use crate::serve::{Caller, Doors, Reply};
 
 /// The protocol versions this door speaks, newest first.
 pub(crate) const PROTOCOL: &[&str] = &["2025-06-18", "2025-03-26"];
@@ -155,7 +155,7 @@ fn input_schema(operation: &str) -> Value {
                 "name": {"type": "string"},
                 "keep": {"type": "boolean"},
             },
-            "description": "Run a document as a job under your own roles when the synchronous run was truncated; poll it with job_status",
+            "description": "Run a document as a job under your own detail when the synchronous run was truncated; poll it with job_status",
         }),
         "job_status" => json!({
             "type": "object",
@@ -326,7 +326,7 @@ pub(crate) fn metadata(doors: &Doors) -> Value {
     json!({
         "resource": format!("http://{}{PATH}", doors.bound),
         "authorization_servers": doors.mcp_authorization_servers,
-        "scopes_supported": ["reader", "reviewer", "operator", "admin"],
+        "scopes_supported": crate::grants::GRANTS,
         "bearer_methods_supported": ["header"],
         "resource_documentation": "https://github.com/kineuro/nils/blob/main/docs/specs/wave4b-the-ask.md",
         "deviation": "audience binding to this resource is named and dated (2026-09-07): the engine accepts the audience its own doors accept until a client that speaks OAuth exists",
@@ -344,13 +344,10 @@ fn unauthorized(doors: &Doors, message: &str) -> Reply {
     )
 }
 
-fn forbidden(message: &str, scope: Role) -> Reply {
+fn forbidden(message: &str, scope: &str) -> Reply {
     Reply::error(403, message).with(
         "WWW-Authenticate",
-        format!(
-            "Bearer error=\"insufficient_scope\", scope=\"{}\"",
-            scope.name()
-        ),
+        format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\""),
     )
 }
 
@@ -379,10 +376,11 @@ pub(crate) fn route(
     let Some(caller) = caller else {
         return Some(unauthorized(doors, "the MCP door takes a bearer token"));
     };
-    if caller.roles.is_empty() {
+    if caller.access.is_empty() {
+        // the tools read questions, which query:see opens
         return Some(forbidden(
-            "this token holds no role; an installer binds roles before a model reads",
-            Role::Reader,
+            "this token holds no grant; an installer binds grants before a model reads",
+            "query:see",
         ));
     }
     Some(match method {
@@ -542,7 +540,7 @@ fn one(
                 );
                 result(&id, tool_result(&doc, bounded))
             } else if reply.status == 401 || reply.status == 403 {
-                // A role refusal is the caller's to fix, not the model's to
+                // A refused grant is the caller's to fix, not the model's to
                 // retry: it comes back as an error of the protocol.
                 error(
                     &id,

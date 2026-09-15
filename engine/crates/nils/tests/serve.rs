@@ -260,16 +260,16 @@ fn the_door_serves_what_the_command_line_has() {
     // C26: the capabilities name the contracts, the pack, the epoch.
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
-    assert_eq!(caps["contracts"]["openapi"], "3", "{caps}");
+    assert_eq!(caps["contracts"]["openapi"], "4", "{caps}");
     assert_eq!(caps["contracts"]["review_item"], "4", "{caps}");
     // Wave 4c §4.5: the engine's document is the `engine` part of the
     // deployment capabilities document, and carries what the suite requires.
-    assert_eq!(caps["contracts"]["suite"], "1", "{caps}");
-    assert_eq!(caps["contracts"]["mcp"], "1", "{caps}");
+    assert_eq!(caps["contracts"]["suite"], "2", "{caps}");
+    assert_eq!(caps["contracts"]["mcp"], "2", "{caps}");
     let suite: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../contracts/suite/v1/capabilities.schema.json"),
+                .join("../../../contracts/suite/v2/capabilities.schema.json"),
         )
         .unwrap(),
     )
@@ -311,6 +311,14 @@ fn the_door_serves_what_the_command_line_has() {
     assert!(epoch > 0, "{caps}");
     assert_eq!(caps["auth"], "off", "{caps}");
     assert_eq!(caps["principal"], "anna@ward-3", "{caps}");
+    // the suite contract, version 2: off holds every grant and detail sensitive
+    assert_eq!(caps["grants"].as_array().unwrap().len(), 24, "{caps}");
+    assert_eq!(caps["detail"], "sensitive", "{caps}");
+    assert_eq!(
+        caps["roles"],
+        serde_json::json!(["reader", "reviewer", "operator"]),
+        "{caps}"
+    );
     let doors: Vec<&str> = caps["doors"]
         .as_array()
         .unwrap()
@@ -507,10 +515,10 @@ fn the_event_stream_is_display_plumbing() {
 }
 
 /// Wave 4a §11.2: the `oidc` mode. The engine validates the token against
-/// the issuer's keys and audience, maps groups to roles, makes the subject
+/// the issuer's keys and audience, maps groups to grants, makes the subject
 /// the audit principal, and keeps no user table beyond a cache of claims.
 #[test]
-fn under_oidc_the_subject_is_the_principal_and_groups_are_roles() {
+fn under_oidc_the_subject_is_the_principal_and_groups_give_grants() {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/oidc");
     let jwks = fixtures.join("jwks.json");
@@ -536,7 +544,7 @@ fn under_oidc_the_subject_is_the_principal_and_groups_are_roles() {
     let home = registry();
     let server = Server::start(
         &home,
-        11,
+        12,
         &[
             "--auth",
             "oidc",
@@ -565,21 +573,27 @@ fn under_oidc_the_subject_is_the_principal_and_groups_are_roles() {
     let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&stale));
     assert_eq!(status, 401, "{doc}");
 
-    // Wave 4b §12.4: a token whose groups map to nothing holds no role and
-    // is refused at every door, never defaulted to reader.
+    // Wave 4b §12.4: a token whose groups map to nothing holds no grant and
+    // is refused at every door, never defaulted to a reader.
     let unmapped = token("kit", &["guests"], "nils", now + 600, Some("test-2026"));
     let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&unmapped));
     assert_eq!(status, 403, "{doc}");
-    assert!(doc["error"].as_str().unwrap().contains("no role"), "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("no grant"), "{doc}");
 
-    // A reader: the subject at the issuer's node, the reader role only, and
-    // a door that asks for more says so with 403.
+    // A reader: the subject at the issuer's node, the reader's set only, and
+    // a door that needs more says which grant with 403.
     let reader = token("anna", &["students"], "nils", now + 600, Some("test-2026"));
     let (status, caps) = server.request("GET", "/api/capabilities", None, Some(&reader));
     assert_eq!(status, 200, "{caps}");
     assert_eq!(caps["auth"], "oidc", "{caps}");
     assert_eq!(caps["principal"], "anna@id.example.org", "{caps}");
     assert_eq!(caps["roles"], serde_json::json!(["reader"]), "{caps}");
+    assert_eq!(
+        caps["grants"],
+        serde_json::json!(["data:see", "query:see", "query:work"]),
+        "{caps}"
+    );
+    assert_eq!(caps["detail"], "plain", "{caps}");
     let (status, doc) = server.request(
         "POST",
         "/api/jobs",
@@ -587,11 +601,19 @@ fn under_oidc_the_subject_is_the_principal_and_groups_are_roles() {
         Some(&reader),
     );
     assert_eq!(status, 403, "{doc}");
-    assert!(doc["error"].as_str().unwrap().contains("operator"), "{doc}");
-    let (status, listed) = server.request("GET", "/api/review?status=open", None, Some(&reader));
-    assert_eq!(status, 200, "{listed}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("pipelines:work"),
+        "{doc}"
+    );
+    let (status, doc) = server.request("GET", "/api/review?status=open", None, Some(&reader));
+    assert_eq!(status, 403, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("review:see"),
+        "{doc}"
+    );
 
-    // A reviewer decides, and the audit row carries the subject.
+    // A reviewer reads what waits and decides, and the audit row carries
+    // the subject.
     let reviewer = token(
         "bo",
         &["neuro-reviewers"],
@@ -599,6 +621,8 @@ fn under_oidc_the_subject_is_the_principal_and_groups_are_roles() {
         now + 600,
         Some("test-2026"),
     );
+    let (status, listed) = server.request("GET", "/api/review?status=open", None, Some(&reviewer));
+    assert_eq!(status, 200, "{listed}");
     let id = listed["items"]
         .as_array()
         .unwrap()
@@ -614,9 +638,9 @@ fn under_oidc_the_subject_is_the_principal_and_groups_are_roles() {
         Some(&reviewer),
     );
     assert_eq!(status, 200, "{applied}");
-    // An operator reads the audit? No: that is the admin's; an operator
-    // queues work. A role implies the ones below it, so the operator
-    // reads and decides too.
+    // An operator reads the audit? No: audit:see is the admin's; an
+    // operator queues work. The operator's set holds the reader's and the
+    // reviewer's, so the operator reads and decides too.
     let operator = token(
         "cy",
         &["neuro-ops", "students"],
@@ -933,7 +957,7 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
     let root_flag = format!("src={}", root.path().display());
     let server = Server::start(
         &home,
-        13,
+        14,
         &[
             "--auth",
             "token",
@@ -941,6 +965,8 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
             "a-reader-token-of-length=reader@lab:reader",
             "--token",
             "an-operator-token-of-len=ops@lab:operator",
+            "--token",
+            "an-admin-token-of-length=adm@lab:admin",
             "--ingest-root",
             &root_flag,
             "--backup-dir",
@@ -950,6 +976,7 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
     );
     let reader = Some("a-reader-token-of-length");
     let ops = Some("an-operator-token-of-len");
+    let admin = Some("an-admin-token-of-length");
     let (status, caps) = server.request("GET", "/api/capabilities", None, ops);
     assert_eq!(status, 200, "{caps}");
     assert!(
@@ -1004,8 +1031,16 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
         "{argv}"
     );
     assert!(!argv.contains("@src"), "{argv}");
-    let (status, queued) =
+    // a backup is the database page's work, which an operator does not hold
+    let (status, doc) =
         server.request("POST", "/api/jobs", Some(r#"{"command": ["backup"]}"#), ops);
+    assert_eq!(status, 403, "{doc}");
+    let (status, queued) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["backup"]}"#),
+        admin,
+    );
     assert_eq!(status, 202, "{queued}");
     server.finish();
     // a worker runs both; the archive verifies; the audit log says so
@@ -1385,7 +1420,8 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
         moves.iter().all(|m| m["stacks"] == 1),
         "exactly the one stack with the word: {tried}"
     );
-    let (status, doc) = server.request("GET", "/api/overlays", None, reader);
+    // the overlays are the Review page's, which a reader does not see
+    let (status, doc) = server.request("GET", "/api/overlays", None, reviewer);
     assert_eq!(status, 200, "{doc}");
     assert_eq!(
         doc["overlays"].as_array().unwrap().len(),
@@ -1455,7 +1491,7 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     assert!(argv.contains("@src"), "{argv}");
     assert!(!argv.contains(&root.path().display().to_string()), "{argv}");
     // 17
-    let (status, listed) = server.request("GET", &format!("/api/overlays/{id}"), None, reader);
+    let (status, listed) = server.request("GET", &format!("/api/overlays/{id}"), None, reviewer);
     assert_eq!(status, 200, "{listed}");
     assert_eq!(listed["status"], "adopted", "{listed}");
     assert_eq!(listed["job"], adopt_job, "{listed}");
@@ -1577,13 +1613,13 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     assert_eq!(exported.id, "site@1.0.0");
 }
 
-/// Wave 4c §5.3: the trust list vectors of `contracts/suite/v1` run against
+/// Wave 4c §5.3: the trust list vectors of `contracts/suite/v2` run against
 /// the engine. Each case is minted with the key it names and presented; what
 /// happened is compared with what the vector expects.
 #[test]
 fn the_trust_list_vectors_hold() {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-    let vectors = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/suite/v1/vectors");
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/suite/v2/vectors");
     let t: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(vectors.join("trust-list.json")).unwrap())
             .unwrap();
@@ -2506,7 +2542,7 @@ fn an_operator_pages_through_the_ingest_roots_and_looks_inside_them_never_outsid
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|p| p["door"] == door && p["role"] == "operator"),
+                .any(|p| p["door"] == door && p["grant"] == "data:work"),
             "{door}: {caps}"
         );
     }

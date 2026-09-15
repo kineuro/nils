@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The ask doors of `nils serve` (Wave 4b §12.2): one door per operation,
-//! authenticated per request, the catalog policy reading the caller's roles
-//! from whichever auth mode supplied them, every statement run through a
-//! read only reader (§12.4), handles and audit rows written through the
+//! authenticated per request, the catalog policy reading the caller's
+//! detail from whichever auth mode supplied it, every statement run through
+//! a read only reader (§12.4), handles and audit rows written through the
 //! registry. A capped run is flagged truncated and has no hash; a token
-//! with no role never reaches a door.
+//! with no grant never reaches a door.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -25,7 +25,8 @@ use nils_registry::session::Scheme;
 use nils_registry::store::Store;
 use serde_json::{Value, json};
 
-use crate::serve::{Caller, Doors, Reply, Role, job_err, json_body};
+use crate::grants::{Detail, Need};
+use crate::serve::{Caller, Doors, Reply, job_err, json_body};
 
 /// What a handler thread keeps between ask requests: the pack, the catalog
 /// at an epoch, and the reader.
@@ -78,45 +79,31 @@ impl AskState {
     }
 }
 
-/// The scope the catalog's policy gives a caller (§9, rule 15): a reader
-/// asks; a reviewer projects quasi identifying fields; an operator sees
-/// sensitive kinds and may project identifiers.
+/// The scope the catalog's policy gives a caller (§9, rule 15), read from
+/// its detail: plain asks; quasi projects quasi identifying fields;
+/// sensitive sees sensitive kinds and may project identifiers.
 fn scope_of(caller: &Caller) -> Scope {
-    let mut classes = BTreeSet::new();
-    if caller.can(Role::Reviewer) {
-        classes.insert(Class::QuasiIdentifying);
-    }
-    if caller.can(Role::Operator) {
-        classes.insert(Class::Sensitive);
-    }
-    Scope {
-        federated: false,
-        classes,
-    }
+    scope_of_detail(caller.access.detail)
 }
 
 fn may_project_raw(caller: &Caller) -> bool {
-    caller.can(Role::Operator)
+    caller.access.detail >= Detail::Sensitive
 }
 
-/// The same scope from a role list alone, for the worker that runs a
-/// queued job under the roles the door recorded (Wave 4c §6.1).
-pub(crate) fn scope_of_roles(roles: &[Role]) -> Scope {
+/// The same scope from a detail alone, for the worker that runs a queued
+/// job under the detail the door recorded (Wave 4c §6.1).
+pub(crate) fn scope_of_detail(detail: Detail) -> Scope {
     let mut classes = BTreeSet::new();
-    if roles.iter().any(|r| *r >= Role::Reviewer) {
+    if detail >= Detail::Quasi {
         classes.insert(Class::QuasiIdentifying);
     }
-    if roles.iter().any(|r| *r >= Role::Operator) {
+    if detail >= Detail::Sensitive {
         classes.insert(Class::Sensitive);
     }
     Scope {
         federated: false,
         classes,
     }
-}
-
-pub(crate) fn may_project_raw_of_roles(roles: &[Role]) -> bool {
-    roles.iter().any(|r| *r >= Role::Operator)
 }
 
 /// Wave 4c §6.1: a handle's pages carry the classes the producing scope
@@ -186,7 +173,7 @@ fn handle_within_scope(h: &handle::Handle, scope: &Scope, id: i64) -> Result<(),
         Err(Reply::error(
             403,
             format!(
-                "handle {id} holds {} fields, which this role's scope does not reach",
+                "handle {id} holds {} fields, which this caller's detail does not reach",
                 beyond.join(" and ")
             ),
         ))
@@ -390,35 +377,12 @@ fn answer(
     let principal = caller.principal.as_str();
     let (get, post, put) = (method == "GET", method == "POST", method == "PUT");
     let path = format!("/{}", segs.join("/"));
-    let needs = match (method, segs) {
-        ("PUT", ["api", "ask", "selections", _]) => Role::Reviewer,
-        // Wave 5 §12.1: an identifier list is quasi-identifying territory,
-        // so uploading one, and starting a question from one, asks for the
-        // reviewer role; the resolver checks the second itself
-        ("POST", ["api", "ask", "values"]) => Role::Reviewer,
-        ("POST", ["api", "ask", "handles", _, "promote"])
-        | ("POST", ["api", "sessions", "rebuild"]) => Role::Operator,
-        _ => Role::Reader,
-    };
-    if !caller.can(needs) {
-        return Err(Reply::error(
-            403,
-            format!(
-                "{path} asks for the {} role; {principal} holds {}",
-                needs.name(),
-                if caller.roles.is_empty() {
-                    "no role".to_string()
-                } else {
-                    caller
-                        .roles
-                        .iter()
-                        .map(|r| r.name())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-            ),
-        ));
-    }
+    // The door table every door reads (the suite contract, version 2).
+    // Wave 5 §12.1: an identifier list is quasi-identifying territory, so
+    // uploading one, and starting a question from one, needs query:work at
+    // detail quasi; the resolver checks the second itself.
+    let (need, detail) = crate::serve::door(method, segs);
+    caller.allowed(&path, need, detail)?;
     state.ensure(doors, registry)?;
     let caps = &doors.ask_caps;
     let bounds = Bounds {
@@ -673,7 +637,7 @@ fn answer(
             if !ask.out.identifiers.is_empty() && !may_project_raw(caller) {
                 return Err(Reply::error(
                     403,
-                    "identifiers are projected only by a role that may read them",
+                    "identifiers are projected only at detail sensitive",
                 ));
             }
             let id = match id {
@@ -702,17 +666,15 @@ fn answer(
             }
             command.extend(["--pack".into(), doors.ask_pack.clone()]);
             // Wave 4c §6.1: the job carries the caller, so the worker runs
-            // it under these roles and never its own.
+            // it under this detail and never its own.
+            let mut by = crate::serve::queued_by(caller);
+            by["may_project_raw"] = json!(may_project_raw(caller));
             let job = nils_registry::job::enqueue_with(
                 registry.store(),
                 &command,
                 doc["name"].as_str(),
                 Some(principal),
-                json!({
-                    "roles": caller.roles.iter().map(|r| r.name()).collect::<Vec<_>>(),
-                    "may_project_raw": may_project_raw(caller),
-                    "actor": caller.actor,
-                }),
+                by,
             )
             .map_err(job_err)?;
             Ok(Reply::accepted(
@@ -1065,20 +1027,11 @@ fn answer(
                 set_name = d.ask.out.set.clone();
                 whole = Some(d.ask);
             } else if let Some(upload) = from["values"].as_str() {
-                if !caller.can(Role::Reviewer) {
-                    return Err(Reply::error(
-                        403,
-                        format!(
-                            "starting from an uploaded list asks for the reviewer role; {principal} holds {}",
-                            caller
-                                .roles
-                                .iter()
-                                .map(|r| r.name())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                    ));
-                }
+                caller.allowed(
+                    "starting from an uploaded list",
+                    Need::One("query:work"),
+                    Detail::Quasi,
+                )?;
                 values_decl.insert("list".into(), json!({"upload": upload}));
                 sets.insert(
                     "people".into(),
@@ -1348,7 +1301,7 @@ fn answer(
         ["api", "ask", "handles"] if get => {
             // Wave 4c §7.4: the result surface lists what runs left. Newest
             // first, within the caller's scope: a handle holding fields
-            // beyond the role's scope is left out, not refused, so the list
+            // beyond the caller's detail is left out, not refused, so the list
             // is what this caller may open. `withdrawn=1` includes the
             // withdrawn ones; `limit` caps the answer at page_rows_max.
             let withdrawn = query
@@ -1480,11 +1433,12 @@ fn answer(
             if let Some(r) = doc["reason"].as_str() {
                 command.extend(["--reason".into(), r.into()]);
             }
-            let job = nils_registry::job::enqueue(
+            let job = nils_registry::job::enqueue_with(
                 registry.store(),
                 &command,
                 Some(cohort),
                 Some(principal),
+                crate::serve::queued_by(caller),
             )
             .map_err(job_err)?;
             Ok(Reply::accepted(
@@ -1533,11 +1487,12 @@ fn answer(
             if doc["force"].as_bool().unwrap_or(false) {
                 command.push("--force".into());
             }
-            let job = nils_registry::job::enqueue(
+            let job = nils_registry::job::enqueue_with(
                 registry.store(),
                 &command,
                 doc["scheme_name"].as_str(),
                 Some(principal),
+                crate::serve::queued_by(caller),
             )
             .map_err(job_err)?;
             Ok(Reply::accepted(json!({"job": job, "state": "queued"})))

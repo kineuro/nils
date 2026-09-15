@@ -2,8 +2,8 @@
 
 //! The profile of one set of a query (`POST /api/ask/profile`), for the
 //! desk's charts: how many subjects, sessions and stacks are under it, its
-//! stacks by their base, the values of one stack field, and, for a role that
-//! may read them, the sex and the age of its subjects and the kinds of their
+//! stacks by their base, the values of one stack field, and, for a caller
+//! whose detail reaches them, the sex and the age of its subjects and the kinds of their
 //! clinical events. Each part is a small query added to a copy of the
 //! document and previewed under the caller's own scope and caps, so it
 //! stores nothing and reads no more than the caller may. A part that cannot
@@ -263,7 +263,7 @@ pub(crate) fn document(
         )
     };
 
-    // one stack field by value, never an identifying one, and only one the role may read
+    // one stack field by value, never an identifying one, and only one the caller's detail reaches
     let field = match field {
         None => Value::Null,
         Some(f) if !under => json!({"name": f, "refused": "no stacks are under this set"}),
@@ -275,7 +275,7 @@ pub(crate) fn document(
             Some(c @ (Class::QuasiIdentifying | Class::Sensitive))
                 if !scope.classes.contains(&c) =>
             {
-                json!({"name": f, "withheld": "the role may not read this field"})
+                json!({"name": f, "withheld": "the caller's detail does not reach this field"})
             }
             Some(_) => {
                 let (sets, of) = match &stack_set {
@@ -304,11 +304,11 @@ pub(crate) fn document(
         _ => None,
     };
 
-    // sex and age are quasi-identifying, so only a role that may read them has them counted
+    // sex and age are quasi-identifying, so only a caller whose detail reaches them has them counted
     let demographics = match &subjects {
         None => Value::Null,
         Some(_) if !scope.classes.contains(&Class::QuasiIdentifying) => json!({
-            "withheld": "the sex and the age of a subject are quasi-identifying, counted from the reviewer role"
+            "withheld": "the sex and the age of a subject are quasi-identifying, counted from detail quasi"
         }),
         Some((sets, of)) => {
             let sex = part(r.group(sets.clone(), of, "sex").map(|(mut values, _)| {
@@ -329,8 +329,8 @@ pub(crate) fn document(
         }
     };
 
-    // the kinds of the subjects' clinical events; a sensitive kind only for a role that may
-    // read it, and the answer says it is withheld whether or not the set holds one
+    // the kinds of the subjects' clinical events; a sensitive kind only for a caller
+    // whose detail reaches it, and the answer says it is withheld whether or not the set holds one
     let clinical = match &subjects {
         None => Value::Null,
         Some((sets, of)) => {

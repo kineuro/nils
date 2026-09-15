@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The suite and MCP contracts (`contracts/suite`, `contracts/mcp`; Wave 4c
-//! §4.5 and §6.7), held to the engine's own vocabulary: the entitlements are
-//! the engine's roles and `assist`, the ceiling is a role, the proposal
-//! kinds and terminal reasons are the closed sets the spec names, the MCP
-//! operations are the ones the pack loader admits and each names the door
-//! it calls. A live server's documents are held to them in `serve.rs` and
-//! `mcp.rs`.
+//! §4.5 and §6.7), held to the engine's own vocabulary: the grants and the
+//! detail with its order, the ladder a ceiling still names, the proposal
+//! kinds and terminal reasons the spec names, the MCP operations the pack
+//! loader admits and the door each calls. A live server's documents are
+//! held to them in `serve.rs` and `mcp.rs`, which also run the vectors.
 
 use std::path::{Path, PathBuf};
 
@@ -39,16 +38,17 @@ fn strings(v: &serde_json::Value) -> Vec<String> {
 #[test]
 fn the_suite_contract_names_the_engine_s_own_vocabulary() {
     let v = version("suite");
-    assert_eq!(v, 1);
+    assert_eq!(v, 2);
     let dir = format!("suite/v{v}");
     for file in [
-        "entitlements.schema.json",
+        "grants.schema.json",
         "headers.schema.json",
         "purpose.schema.json",
         "capabilities.schema.json",
         "app.schema.json",
         "station.schema.json",
         "vectors/trust-list.json",
+        "vectors/grants.json",
     ] {
         let doc = json(&format!("{dir}/{file}"));
         assert_eq!(
@@ -56,16 +56,42 @@ fn the_suite_contract_names_the_engine_s_own_vocabulary() {
             "{file}"
         );
     }
-    // the entitlements: the engine's ladder, then assist
-    let e = json(&format!("{dir}/entitlements.schema.json"));
-    let ladder: Vec<&str> = ["reader", "reviewer", "operator", "admin"].to_vec();
-    assert_eq!(strings(&e["ladder"]), ladder);
-    assert_eq!(strings(&e["$defs"]["role"]["enum"]), ladder);
-    let mut all = ladder.clone();
-    all.push("assist");
-    assert_eq!(strings(&e["$defs"]["entitlement"]["enum"]), all);
-    assert_eq!(strings(&e["orthogonal"]), ["assist"]);
-    // the headers: the ceiling is a role, the actor's kinds are the four
+    // version 1 stays beside it, with the entitlements it fixed; version 2
+    // has grants in their place
+    assert!(
+        contracts()
+            .join("suite/v1/entitlements.schema.json")
+            .is_file()
+    );
+    assert!(
+        !contracts()
+            .join(&dir)
+            .join("entitlements.schema.json")
+            .exists()
+    );
+    // the grants: a page and how far a caller goes there, see or work, which
+    // has its see beside it, and the assistant's use; sorted by code point
+    let g = json(&format!("{dir}/grants.schema.json"));
+    let grants = strings(&g["$defs"]["grant"]["enum"]);
+    assert_eq!(grants.len(), 24, "{grants:?}");
+    let mut sorted = grants.clone();
+    sorted.sort();
+    assert_eq!(sorted, grants, "sorted by code point");
+    for grant in &grants {
+        let (page, how) = grant.split_once(':').expect("page:how");
+        match how {
+            "use" => assert_eq!(page, "assistant"),
+            "see" => {}
+            "work" => assert!(grants.contains(&format!("{page}:see")), "{grant}"),
+            other => panic!("{grant}: {other} is not see, work or use"),
+        }
+    }
+    let details = ["plain", "quasi", "sensitive"];
+    assert_eq!(strings(&g["$defs"]["detail"]["enum"]), details);
+    assert_eq!(strings(&g["order"]), details);
+    let ladder = ["reader", "reviewer", "operator", "admin"];
+    assert_eq!(strings(&g["$defs"]["step"]["enum"]), ladder);
+    // the headers: the ceiling is still a ladder step, the actor's kinds are the four
     let h = json(&format!("{dir}/headers.schema.json"));
     assert_eq!(strings(&h["$defs"]["ceiling"]["enum"]), ladder);
     assert_eq!(
@@ -111,13 +137,30 @@ fn the_suite_contract_names_the_engine_s_own_vocabulary() {
             "{field}"
         );
     }
-    // the deployment document: the engine part names what the engine serves
+    // the deployment document: the engine's caller and the person carry
+    // grants and detail, and a policy row names its grant, not a role
     let c = json(&format!("{dir}/capabilities.schema.json"));
     assert_eq!(strings(&c["required"]), ["engine", "person", "desk"]);
     assert_eq!(
         strings(&c["properties"]["desk"]["properties"]["mode"]["enum"]),
         ["off", "local", "oidc"]
     );
+    let engine = strings(&c["properties"]["engine"]["required"]);
+    for key in ["principal", "grants", "detail", "roles", "policy"] {
+        assert!(engine.contains(&key.to_string()), "the engine's {key}");
+    }
+    assert_eq!(
+        strings(&c["properties"]["engine"]["properties"]["roles"]["items"]["enum"]),
+        ["reader", "reviewer", "operator"],
+        "never admin"
+    );
+    let person = strings(&c["properties"]["person"]["required"]);
+    for key in ["subject", "grants", "detail"] {
+        assert!(person.contains(&key.to_string()), "the person's {key}");
+    }
+    let row = strings(&c["$defs"]["policy_row"]["required"]);
+    assert!(row.contains(&"grant".to_string()), "{row:?}");
+    assert!(!row.contains(&"role".to_string()), "{row:?}");
     // the vectors: every key and JWKS they name is beside them
     let t = json(&format!("{dir}/vectors/trust-list.json"));
     for entry in t["trust"].as_array().unwrap() {
@@ -135,12 +178,27 @@ fn the_suite_contract_names_the_engine_s_own_vocabulary() {
         );
     }
     assert!(t["cases"].as_array().unwrap().len() >= 8);
+    // the grants vectors name grants of the vocabulary only, sorted, and
+    // hold a case in every group the engine runs
+    let gv = json(&format!("{dir}/vectors/grants.json"));
+    assert_eq!(strings(&gv["everything"]["grants"]), grants);
+    for (name, set) in gv["sets"].as_object().unwrap() {
+        let held = strings(&set["grants"]);
+        assert!(held.iter().all(|x| grants.contains(x)), "{name}: {held:?}");
+        let mut sorted = held.clone();
+        sorted.sort();
+        assert_eq!(sorted, held, "{name}: sorted");
+        assert!(details.contains(&set["detail"].as_str().unwrap()), "{name}");
+    }
+    for group in ["claims", "ceilings", "named", "principals"] {
+        assert!(!gv[group].as_array().unwrap().is_empty(), "{group}");
+    }
 }
 
 #[test]
 fn the_mcp_contract_is_the_pack_loader_s_vocabulary_and_every_operation_names_its_door() {
     let v = version("mcp");
-    assert_eq!(v, 1);
+    assert_eq!(v, 2);
     let m = json(&format!("mcp/v{v}/mcp.schema.json"));
     let mut ops: Vec<String> = nils_pack::mcp::OPERATIONS
         .iter()
@@ -174,4 +232,8 @@ fn the_mcp_contract_is_the_pack_loader_s_vocabulary_and_every_operation_names_it
         strings(&m["$defs"]["policy"]["properties"]["cost"]["enum"]),
         ["free", "bounded", "job", "stream"]
     );
+    // version 2: the policy fields name the grant a door needs, not a role
+    let policy = strings(&m["$defs"]["policy"]["required"]);
+    assert!(policy.contains(&"grant".to_string()), "{policy:?}");
+    assert!(!policy.contains(&"role".to_string()), "{policy:?}");
 }

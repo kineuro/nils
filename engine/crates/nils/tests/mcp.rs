@@ -393,6 +393,10 @@ fn the_metadata_is_public_and_a_refusal_names_it() {
             .contains("audience binding"),
         "{doc}"
     );
+    // the scopes it names are the grants
+    let scopes = doc["scopes_supported"].as_array().unwrap();
+    assert_eq!(scopes.len(), 24, "{doc}");
+    assert!(scopes.iter().any(|s| s == "query:see"), "{doc}");
 
     // no token: 401 that names the metadata
     let (status, headers, body) = server.request(
@@ -425,6 +429,8 @@ fn the_metadata_is_public_and_a_refusal_names_it() {
         .find(|l| l.to_lowercase().starts_with("www-authenticate"))
         .unwrap_or_default();
     assert!(auth.contains("insufficient_scope"), "{auth}");
+    assert!(auth.contains("scope=\"query:see\""), "{auth}");
+    assert!(body.contains("no grant"), "{body}");
 
     // a reader reads
     let listed = server.rpc(
@@ -509,14 +515,14 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 /// Wave 4c §6.7: every tool a live server lists carries its operation's
-/// input schema exactly as `contracts/mcp/v1` fixes it; the operation of a
+/// input schema exactly as `contracts/mcp/v2` fixes it; the operation of a
 /// tool is what the pack opted it in as.
 #[test]
 fn every_listed_tool_s_input_schema_is_the_contract_s() {
     let contract: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../contracts/mcp/v1/mcp.schema.json"),
+                .join("../../../contracts/mcp/v2/mcp.schema.json"),
         )
         .unwrap(),
     )

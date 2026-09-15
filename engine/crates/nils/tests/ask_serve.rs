@@ -197,7 +197,7 @@ fn the_ask_doors_run_a_document_to_a_handle_and_its_affordances_answer() {
     // the capabilities carry the ask block and the contract version
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
-    assert_eq!(caps["contracts"]["openapi"], "3");
+    assert_eq!(caps["contracts"]["openapi"], "4");
     // the synthetic marker: `nils synth` set it, a desk shows a banner on it
     assert_eq!(caps["registry"]["synthetic"], "nils-synth", "{caps}");
     let ask = &caps["ask"];
@@ -433,7 +433,7 @@ fn the_ask_doors_run_a_document_to_a_handle_and_its_affordances_answer() {
 }
 
 #[test]
-fn a_capped_run_is_truncated_and_a_token_with_no_role_is_refused() {
+fn a_capped_run_is_truncated_and_a_token_with_no_grant_is_refused() {
     let home = synthetic();
     let server = Server::start(
         &home,
@@ -455,6 +455,11 @@ fn a_capped_run_is_truncated_and_a_token_with_no_role_is_refused() {
     let (status, caps) = server.request("GET", "/api/capabilities", None, reader);
     assert_eq!(status, 200, "{caps}");
     assert_eq!(caps["roles"], serde_json::json!(["reader"]));
+    assert_eq!(
+        caps["grants"],
+        serde_json::json!(["data:see", "query:see", "query:work"])
+    );
+    assert_eq!(caps["detail"], "plain");
     assert_eq!(caps["ask"]["caps"]["sync_max_rows"], 3);
     // the cap: rows cut, flagged, no hash; a capped handle may be paged and read
     let (status, ran) = server.request(
@@ -468,7 +473,7 @@ fn a_capped_run_is_truncated_and_a_token_with_no_role_is_refused() {
     assert!(ran["content_hash"].is_null(), "{ran}");
     assert_eq!(ran["row_count"], 3);
     // the promotion of a truncated handle is refused before it is queued? No: the
-    // job refuses it; the door asks for the operator
+    // job refuses it; the door needs release:work
     let handle = ran["handle"].as_i64().unwrap();
     let (status, doc) = server.request(
         "POST",
@@ -477,8 +482,8 @@ fn a_capped_run_is_truncated_and_a_token_with_no_role_is_refused() {
         reader,
     );
     assert_eq!(status, 403, "{doc}");
-    assert!(doc["error"].as_str().unwrap().contains("operator"));
-    // a token with no role is refused at every door, and says so
+    assert!(doc["error"].as_str().unwrap().contains("release:work"));
+    // a token with no grant is refused at every door, and says so
     let (status, doc) = server.request(
         "GET",
         "/api/capabilities",
@@ -486,7 +491,7 @@ fn a_capped_run_is_truncated_and_a_token_with_no_role_is_refused() {
         Some("a-roleless-token-of-len"),
     );
     assert_eq!(status, 403, "{doc}");
-    assert!(doc["error"].as_str().unwrap().contains("no role"), "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("no grant"), "{doc}");
     server.finish();
 }
 
@@ -572,10 +577,10 @@ fn plain(name: &str) -> serde_json::Value {
 }
 
 /// Wave 4c §6.1, gate fixture 2: the job path refuses what the synchronous
-/// door refuses, the job carries the caller's roles, and the worker runs it
-/// under them and records what it produced on the row.
+/// door refuses, the job carries the caller's detail, and the worker runs it
+/// under that detail and records what it produced on the row.
 #[test]
-fn a_queued_job_runs_under_the_roles_the_door_recorded() {
+fn a_queued_job_runs_under_the_detail_the_door_recorded() {
     let home = synthetic();
     let server = Server::start(
         &home,
@@ -601,7 +606,7 @@ fn a_queued_job_runs_under_the_roles_the_door_recorded() {
         reader,
     );
     assert_eq!(status, 403, "{refused}");
-    // a reader queuing a plain document is accepted, and the row records the roles
+    // a reader queuing a plain document is accepted, and the row records the detail
     let (status, queued) = server.request(
         "POST",
         "/api/ask/jobs",
@@ -614,12 +619,9 @@ fn a_queued_job_runs_under_the_roles_the_door_recorded() {
     let reader_job = queued["job"].as_i64().unwrap();
     let (status, shown) = server.request("GET", &format!("/api/jobs/{reader_job}"), None, ops);
     assert_eq!(status, 200, "{shown}");
-    assert_eq!(
-        shown["args"]["roles"],
-        serde_json::json!(["reader"]),
-        "{shown}"
-    );
+    assert_eq!(shown["args"]["detail"], "plain", "{shown}");
     assert_eq!(shown["args"]["may_project_raw"], false);
+    let argv: Vec<String> = serde_json::from_value(shown["args"]["argv"].clone()).unwrap();
     // an operator queuing identifiers is accepted
     let (status, queued) = server.request(
         "POST",
@@ -632,7 +634,7 @@ fn a_queued_job_runs_under_the_roles_the_door_recorded() {
     assert_eq!(status, 202, "{queued}");
     let ops_job = queued["job"].as_i64().unwrap();
     server.finish();
-    // the worker runs both, each under its own roles
+    // the worker runs both, each under its own detail
     run(&home, &["jobs", "work", "--once"], None);
     run(&home, &["jobs", "work", "--once"], None);
     let listed = run(&home, &["jobs", "list", "--all", "--json"], None);
@@ -649,9 +651,8 @@ fn a_queued_job_runs_under_the_roles_the_door_recorded() {
     assert_eq!(r["state"], "done", "{r}");
     assert!(r["result"]["handle"].as_i64().unwrap() > 0, "{r}");
     assert_eq!(
-        r["args"]["roles"],
-        serde_json::json!(["reader"]),
-        "the roles survive the claim: {r}"
+        r["args"]["detail"], "plain",
+        "the detail survives the claim: {r}"
     );
     let o = job(ops_job);
     assert_eq!(o["state"], "done", "{o}");
@@ -690,6 +691,58 @@ fn a_queued_job_runs_under_the_roles_the_door_recorded() {
         h["suppression"]["classes"],
         serde_json::json!(["quasi_identifying", "sensitive"]),
         "{h}"
+    );
+    // a job that recorded no detail, as a door queued one before grants,
+    // runs as plain and never with the worker's own reach; a job queued at
+    // the keyboard keeps the keyboard's
+    let again = |name: &str| -> Vec<String> {
+        let mut out = argv.clone();
+        if let Some(i) = out.iter().position(|a| a == "--name") {
+            out[i + 1] = name.to_string();
+        }
+        out
+    };
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let bare =
+        nils_registry::job::enqueue(&mut store, &again("bare"), Some("bare"), Some("ops@lab"))
+            .unwrap();
+    drop(store);
+    run(&home, &["jobs", "work", "--once"], None);
+    let local = again("local");
+    let mut enqueue = vec!["jobs", "enqueue", "--name", "local", "--"];
+    enqueue.extend(local.iter().map(String::as_str));
+    run(&home, &enqueue, None);
+    run(&home, &["jobs", "work", "--once"], None);
+    let listed = run(&home, &["jobs", "list", "--all", "--json"], None);
+    let jobs: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let classes = |pick: &dyn Fn(&serde_json::Value) -> bool| -> serde_json::Value {
+        let job = jobs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| pick(j))
+            .cloned()
+            .unwrap_or_else(|| panic!("{listed}"));
+        assert_eq!(job["state"], "done", "{job}");
+        let handle = job["result"]["handle"].as_i64().unwrap();
+        let shown = run(
+            &home,
+            &[
+                "ask",
+                "handles",
+                "show",
+                "--handle",
+                &handle.to_string(),
+                "--json",
+            ],
+            None,
+        );
+        serde_json::from_str::<serde_json::Value>(&shown).unwrap()["suppression"]["classes"].clone()
+    };
+    assert_eq!(classes(&|j| j["id"] == bare), serde_json::json!([]));
+    assert_eq!(
+        classes(&|j| j["name"] == "local" && j["args"]["detail"] == "sensitive"),
+        serde_json::json!(["quasi_identifying", "sensitive"])
     );
 }
 
@@ -804,10 +857,10 @@ fn a_handle_is_read_within_the_callers_scope_and_every_page_is_audited() {
     assert_eq!(h["reads"], 2, "{h}");
 }
 
-/// Wave 4c §6.1, gate fixture 6: the event stream asks for the reader role
-/// and is capped, so open streams cannot wedge the other doors.
+/// Wave 4c §6.1, gate fixture 6: the event stream needs a grant and is
+/// capped, so open streams cannot wedge the other doors.
 #[test]
-fn event_streams_ask_for_the_reader_role_and_are_capped() {
+fn event_streams_need_a_grant_and_are_capped() {
     let home = synthetic();
     let server = Server::start(
         &home,
@@ -853,11 +906,11 @@ fn event_streams_ask_for_the_reader_role_and_are_capped() {
     server.finish();
 }
 
-/// Wave 4c §5.5, gate fixture 7: a ceiling only removes roles, and the
+/// Wave 4c §5.5, gate fixture 7: a ceiling only narrows a caller, and the
 /// actor is recorded on what the call touched: the handle, the queued job,
 /// the audit row, the handle a worker later writes.
 #[test]
-fn a_ceiling_only_removes_roles_and_the_actor_is_recorded_on_what_it_touches() {
+fn a_ceiling_only_narrows_and_the_actor_is_recorded_on_what_it_touches() {
     let home = synthetic();
     let server = Server::start(
         &home,
@@ -883,9 +936,22 @@ fn a_ceiling_only_removes_roles_and_the_actor_is_recorded_on_what_it_touches() {
         serde_json::json!(["reader", "reviewer"]),
         "{caps}"
     );
+    assert_eq!(
+        caps["grants"],
+        serde_json::json!([
+            "data:see",
+            "pipelines:see",
+            "query:see",
+            "query:work",
+            "review:see",
+            "review:work"
+        ]),
+        "{caps}"
+    );
+    assert_eq!(caps["detail"], "quasi", "{caps}");
     assert_eq!(caps["actor"]["name"], "ask-help", "{caps}");
     assert_eq!(caps["actor"]["ceiling"], "reviewer", "{caps}");
-    // a ceiling that is not a role is refused, not ignored
+    // a ceiling that is not a ladder name is refused, not ignored
     let (status, doc) = server.request_with(
         "GET",
         "/api/capabilities",
@@ -957,11 +1023,7 @@ fn a_ceiling_only_removes_roles_and_the_actor_is_recorded_on_what_it_touches() {
     let (status, shown) = server.request("GET", &format!("/api/jobs/{job}"), None, ops);
     assert_eq!(status, 200, "{shown}");
     assert_eq!(shown["args"]["actor"]["name"], "ask-help", "{shown}");
-    assert_eq!(
-        shown["args"]["roles"],
-        serde_json::json!(["reader", "reviewer"]),
-        "{shown}"
-    );
+    assert_eq!(shown["args"]["detail"], "quasi", "{shown}");
     // a saved selection writes an audit row that names the actor
     let (status, saved) = server.request_with(
         "PUT",

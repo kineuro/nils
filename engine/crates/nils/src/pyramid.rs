@@ -22,7 +22,8 @@ use openjph_core::file::{MemInfile, MemOutfile};
 use openjph_core::types::{Point, Size};
 use serde::{Deserialize, Serialize};
 
-use crate::serve::{Caller, Reply, Role};
+use crate::grants::Detail;
+use crate::serve::{Caller, Reply};
 use nils_registry::place::{self, Place, Role as PlaceRole};
 
 pub const TILE: u32 = 256;
@@ -814,18 +815,16 @@ pub fn door(
                 ),
             )
         })?;
-    // the disclosure class: pixels are quasi-identifying, so the reviewer role
+    // the disclosure class: pixels are quasi-identifying, so detail quasi
     // opens them; with burned-in annotation they are identifying until the
-    // band is held, so the operator role opens the tiles and the slab
-    if !caller.can(Role::Reviewer) {
+    // band is held, so detail sensitive opens the tiles and the slab
+    if caller.access.detail < Detail::Quasi {
         return Err(Reply::gated(
             403,
-            format!(
-                "the pixels of stack {stack} are quasi-identifying; the reviewer role opens them"
-            ),
+            format!("the pixels of stack {stack} are quasi-identifying; detail quasi opens them"),
         ));
     }
-    let held = m.annotation.burned_in && !caller.can(Role::Operator);
+    let held = m.annotation.burned_in && caller.access.detail < Detail::Sensitive;
     let level_of = |s: &str| -> Result<u32, Reply> {
         let l: u32 = s
             .parse()
@@ -867,7 +866,7 @@ pub fn door(
                 return Err(Reply::gated(
                     403,
                     format!(
-                        "stack {stack} carries burned-in annotation; its tiles open to the operator role, the render holds the band"
+                        "stack {stack} carries burned-in annotation; its tiles open at detail sensitive, the render holds the band"
                     ),
                 ));
             }
@@ -898,7 +897,7 @@ pub fn door(
                 return Err(Reply::gated(
                     403,
                     format!(
-                        "stack {stack} carries burned-in annotation; its slab opens to the operator role, the render holds the band"
+                        "stack {stack} carries burned-in annotation; its slab opens at detail sensitive, the render holds the band"
                     ),
                 ));
             }

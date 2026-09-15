@@ -32,6 +32,7 @@ mod depends;
 mod door_client;
 mod folders;
 mod gate;
+mod grants;
 mod login;
 mod mcp;
 mod places;
@@ -437,8 +438,9 @@ struct ServeArgs {
     bind: String,
     /// How a caller is known: `off` (the local user, laptop mode), `token`
     /// (a bearer token names the caller; see --token) or `oidc` (the
-    /// engine validates the issuer's token and maps its groups to roles;
-    /// see --oidc-issuer, --oidc-audience, --oidc-jwks, --role)
+    /// engine validates the issuer's token, takes its grants and detail
+    /// claims and maps its groups to grants; see --oidc-trust or
+    /// --oidc-issuer, --oidc-audience, --oidc-jwks, and --role)
     #[arg(long, default_value = "off", value_name = "off|token|oidc")]
     auth: String,
     /// The OIDC issuer, as the token's `iss` claim spells it
@@ -462,16 +464,19 @@ struct ServeArgs {
     /// The claim that carries the groups
     #[arg(long, default_value = "groups", value_name = "CLAIM")]
     oidc_groups_claim: String,
-    /// A group and the role it grants, as `GROUP=reader|reviewer|operator|admin`;
-    /// repeatable. A role implies the ones below it; a caller with no
-    /// mapped group holds no role and is refused at every door
-    #[arg(long, value_name = "GROUP=ROLE")]
+    /// A group and what it gives, as `GROUP=GRANT`: a grant such as
+    /// `query:see`, or a ladder name (reader, reviewer, operator, admin) or
+    /// `assist`, which stands for its set; repeatable, and a group bound
+    /// twice holds both. A token's own grants and detail claims count too;
+    /// a caller left with no grant is refused at every door
+    #[arg(long, value_name = "GROUP=GRANT")]
     role: Vec<String>,
-    /// A token, who it names and the roles it holds, as
-    /// `TOKEN=user@node:reader,operator`; repeatable, or NILS_TOKENS as a
-    /// comma-separated list of the same. Without `:roles` a token holds
-    /// every role (a machine token); with an empty list it holds none
-    #[arg(long, value_name = "TOKEN=PRINCIPAL[:ROLES]")]
+    /// A token, who it names and what it holds, as
+    /// `TOKEN=user@node:reader,kvasir:see`, ladder names and grants added
+    /// up; repeatable, or NILS_TOKENS as a comma-separated list of the
+    /// same. Without a list a token holds every grant and detail sensitive
+    /// (a machine token); with an empty list it holds none
+    #[arg(long, value_name = "TOKEN=PRINCIPAL[:GRANTS]")]
     token: Vec<String>,
     /// The DSN of the ask doors' SELECT only role on Postgres (Wave 4b
     /// section 12.4); the registry's own, read only, when absent
@@ -4153,10 +4158,10 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         serde_json::json!({
             "store": "claims cache",
             "owner": "the registry's operator",
-            "what": "what nils serve keeps of a token it verified (Wave 4c section 5.9): the subject, the roles, the display name and the mail the token carried, and who acted for the subject; in memory, for the token's lifetime",
+            "what": "what nils serve keeps of a token it verified (Wave 4c section 5.9): the subject, the grants and the detail, the display name and the mail the token carried, and who acted for the subject; in memory, for the token's lifetime",
             "where": "the memory of nils serve; nothing on disk",
             "files": [],
-            "holds": ["quasi-identifying: the subject, the display name, the mail", "technical: the roles, the expiry, the actor"],
+            "holds": ["quasi-identifying: the subject, the display name, the mail", "technical: the grants and the detail, the expiry, the actor"],
             "counts": {},
             "kept": "until the token expires, at most its lifetime; gone at restart",
             "commands": {
@@ -4275,7 +4280,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         serde_json::json!({
             "store": "identifier read audit",
             "owner": "the registry's operator; read by whoever answers for the archive",
-            "what": "who read which handle, when, which columns and how many rows, and for what purpose: every page read and every export at every role (Wave 4c section 6.1), and every identifier projection (Wave 4b section 9), with who acted for the principal",
+            "what": "who read which handle, when, which columns and how many rows, and for what purpose: every page read and every export at every detail (Wave 4c section 6.1), and every identifier projection (Wave 4b section 9), with who acted for the principal",
             "where": "rows of handle_read_audit in the registry",
             "files": [],
             "holds": ["quasi-identifying: the principal", "technical: the handle, the columns, the row count, the epoch, the time; never an identifier"],
@@ -5631,7 +5636,17 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             Ok(())
         }
         JobsCommand::Enqueue { name, command } => {
-            let id = job::enqueue(store, &command, name.as_deref(), Some(&actor())).map_err(err)?;
+            // queued at the keyboard, the verb keeps the keyboard's reach,
+            // every class; a worker runs a job that recorded no detail as
+            // plain (the suite contract, version 2)
+            let id = job::enqueue_with(
+                store,
+                &command,
+                name.as_deref(),
+                Some(&actor()),
+                serde_json::json!({ "detail": crate::grants::Detail::Sensitive.name() }),
+            )
+            .map_err(err)?;
             println!("queued job {id}: nils {}", command.join(" "));
             Ok(())
         }

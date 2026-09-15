@@ -74,7 +74,7 @@ the gate runs in one process and some of them are about a door:
   shape and hold neither a seeded value nor a path.
 - **In the engine's own tests** (`engine/crates/nils/tests/ask_serve.rs`,
   named after the fixture they are): a reader queuing a document that projects
-  identifiers is refused and a queued job runs under the roles the door
+  identifiers is refused and a queued job runs under the detail the door
   recorded; a reader paging an operator's handle is refused and every page read
-  is audited; event streams ask for the reader role and are capped. The
+  is audited; event streams need a grant and are capped. The
   idempotency, ceiling, sampler and schema fixtures join with their slices.

@@ -552,12 +552,12 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
             }
         }
     }
-    // the identifiers, role gated, with an audit row
+    // the identifiers, gated by the caller's detail, with an audit row
     let identifiers = ask.out.identifiers.clone();
     if !identifiers.is_empty() {
         if !req.may_project_raw {
             return Err(RunError::Forbidden(
-                "identifiers are projected only by a role that may read them".into(),
+                "identifiers are projected only at detail sensitive".into(),
             ));
         }
         reveal_into(
