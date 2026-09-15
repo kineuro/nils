@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 38;
+pub const SCHEMA_VERSION: i64 = 39;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,7 +206,55 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 38,
         apply: a_place_declares_how_it_is_handled,
     },
+    Migration {
+        version: 39,
+        apply: a_source_place_is_a_dataset,
+    },
 ];
+
+/// Record 26 §1: a source place is a dataset, with what arrives, its two
+/// trees, its identity rule, what an unmapped identifier does, the cohort it
+/// feeds, its tag lists and what becomes of the originals; and the table the
+/// pseudonymiser records every file of the originals in. A source place from
+/// before reads the folder itself as its pseudonymised tree, arriving as its
+/// handling said, or de-identified where none was declared, so every place
+/// declared before this keeps working as it did.
+fn a_source_place_is_a_dataset(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "place", &["dataset"])?;
+    add_tables(store, kind, &["pseudonym_file"])?;
+    if !table_exists(store, "place")? {
+        return Ok(());
+    }
+    let t = schema::table("place");
+    let handling = store
+        .dialect()
+        .text_of(t.column("handling").expect("place.handling"));
+    let rows = store.query(
+        &format!(
+            "SELECT id, {handling} FROM {} WHERE role = 'source' AND dataset IS NULL ORDER BY id",
+            store.qualified("place")
+        ),
+        &[],
+    )?;
+    for r in &rows {
+        let id = r.int(0)?;
+        let arrives = r
+            .opt_text(1)?
+            .and_then(|h| serde_json::from_str::<serde_json::Value>(h).ok())
+            .and_then(|h| h["arrives"].as_str().map(str::to_string));
+        let dataset = crate::place::default_dataset(arrives.as_deref());
+        store.update_by_id(
+            t,
+            &[("dataset", Param::from(dataset.to_string()))],
+            "id",
+            id,
+        )?;
+    }
+    Ok(())
+}
 
 /// Wave 4b §11.3 and §11.4: the case folded companions of the fingerprint's
 /// eight text columns and the two numbers of the spacing string, filled for
@@ -1398,5 +1446,89 @@ mod column_migration {
         assert!(column_exists(&mut store, "classification_evidence", "reference").unwrap());
         // and again, because a migration that has run must be safe to run
         evidence_says_which_pass(&mut store, Kind::Registry).unwrap();
+    }
+
+    /// A registry from before record 26 opens with every source place a
+    /// dataset reading its folder itself, arriving as its handling said and
+    /// de-identified where none was declared; a place of another role has
+    /// none; and the pseudonymiser's table is there, empty.
+    #[test]
+    fn a_source_place_from_before_becomes_a_dataset_reading_its_folder() {
+        use crate::schema::table;
+        use crate::store::Insert;
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 38) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        store
+            .batch("ALTER TABLE place DROP COLUMN dataset")
+            .unwrap();
+        store.batch("DROP TABLE pseudonym_file").unwrap();
+        assert!(!column_exists(&mut store, "place", "dataset").unwrap());
+        let row = |name: &str, role: &str, handling: Option<&str>| {
+            vec![
+                Param::from(name),
+                Param::from(role),
+                Param::from(format!("/data/{name}")),
+                Param::from("{}"),
+                Param::from("2026-09-01T00:00:00Z"),
+                handling.map_or(Param::Null, Param::from),
+            ]
+        };
+        let spec = Insert::new(
+            table("place"),
+            &[
+                "name",
+                "role",
+                "path",
+                "guarantees",
+                "created_at",
+                "handling",
+            ],
+        );
+        store
+            .insert(
+                &spec,
+                &[
+                    row("plain", "source", None),
+                    row("named", "source", Some(r#"{"arrives": "identified", "on_release": {"dates": "keep", "uids": "remap", "deface": false}}"#)),
+                    row("out", "export", None),
+                ],
+            )
+            .unwrap();
+
+        a_source_place_is_a_dataset(&mut store, Kind::Registry).unwrap();
+        assert!(column_exists(&mut store, "place", "dataset").unwrap());
+        assert!(table_exists(&mut store, "pseudonym_file").unwrap());
+        let places = crate::place::list(&mut store).unwrap();
+        let of = |name: &str| {
+            places
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+                .dataset
+                .clone()
+        };
+        assert_eq!(of("plain")["arrives"], "deidentified");
+        assert_eq!(
+            of("plain")["trees"],
+            serde_json::json!({"originals": null, "anon": "."})
+        );
+        assert_eq!(of("plain")["unmapped"], "code");
+        assert_eq!(of("named")["arrives"], "identified");
+        assert_eq!(of("named")["unmapped"], "hold");
+        assert!(of("out").is_null());
+        // and again, because a migration that has run must be safe to run,
+        // and a dataset once filled is not filled over
+        store
+            .execute(
+                "UPDATE place SET dataset = '{\"arrives\": \"coded\"}' WHERE name = 'plain'",
+                &[],
+            )
+            .unwrap();
+        a_source_place_is_a_dataset(&mut store, Kind::Registry).unwrap();
+        let places = crate::place::list(&mut store).unwrap();
+        let plain = places.iter().find(|p| p.name == "plain").unwrap();
+        assert_eq!(plain.dataset["arrives"], "coded");
     }
 }

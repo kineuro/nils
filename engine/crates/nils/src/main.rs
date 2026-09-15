@@ -28,6 +28,7 @@ mod ask_doors;
 mod assist_cli;
 mod backup;
 mod browse;
+mod dataset;
 mod depends;
 mod door_client;
 mod folders;
@@ -686,7 +687,9 @@ enum PlaceCommand {
         probe: bool,
     },
     /// Declare a place: a name, a role and a path; the guarantees are what
-    /// the operator declares, the probe what the engine finds
+    /// the operator declares, the probe what the engine finds. A source
+    /// place is a dataset: its folder is looked at, and the dataset flags
+    /// say what arrives in it and how it is read
     Add {
         /// One word, the name other places and verbs refer to
         name: String,
@@ -707,10 +710,12 @@ enum PlaceCommand {
         /// The storage is fast
         #[arg(long)]
         fast: bool,
+        #[command(flatten)]
+        dataset: DatasetFlags,
         #[arg(long)]
         json: bool,
     },
-    /// Change a place's path or guarantees
+    /// Change a place's path or guarantees, or a dataset's fields
     Set {
         id: i64,
         #[arg(long, value_name = "DIR")]
@@ -723,16 +728,110 @@ enum PlaceCommand {
         protected: Option<bool>,
         #[arg(long)]
         fast: Option<bool>,
+        #[command(flatten)]
+        dataset: DatasetFlags,
         #[arg(long)]
         json: bool,
     },
     /// Retire a place: it binds nothing from now on and stays as history
     Retire { id: i64 },
-    /// The verbs that take a path and the role each needs
+    /// The verbs that take a path and the role each needs, and where @name
+    /// points for each dataset
     Bindings {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Record 26: the dataset a source place is, as the command line declares
+/// it. A flag not given keeps what is in force, or takes its default.
+#[derive(Debug, Args, Default)]
+struct DatasetFlags {
+    /// What arrives: identified, deidentified or coded
+    #[arg(long, value_name = "HOW")]
+    arrives: Option<String>,
+    /// The identity rule its files are read under, as nils digest --identity-rule reads it
+    #[arg(long, value_name = "FILE")]
+    identity: Option<PathBuf>,
+    /// Forget the identity rule
+    #[arg(long, conflicts_with = "identity")]
+    no_identity: bool,
+    /// What an identifier the linkage store does not know does: hold its files, or code them
+    #[arg(long, value_name = "hold|code")]
+    unmapped: Option<String>,
+    /// The cohort every digest of the dataset feeds
+    #[arg(long, value_name = "NAME")]
+    cohort: Option<String>,
+    /// Feed no cohort
+    #[arg(long, conflicts_with = "cohort")]
+    no_cohort: bool,
+    /// Keep sex, weight and size when pseudonymising (the default)
+    #[arg(long)]
+    keep_demographics: bool,
+    /// Remove sex, weight and size when pseudonymising
+    #[arg(long, conflicts_with = "keep_demographics")]
+    no_keep_demographics: bool,
+    /// A tag to remove beside the four groups always removed, as gggg,eeee (repeatable)
+    #[arg(long, value_name = "TAG")]
+    remove: Vec<String>,
+    /// A tag to keep out of those groups, as gggg,eeee (repeatable)
+    #[arg(long, value_name = "TAG")]
+    keep: Vec<String>,
+    /// What becomes of the originals: kept, vaulted or purged
+    #[arg(long, value_name = "WHAT")]
+    originals: Option<String>,
+    /// Move the loose entries of a de-identified or coded folder into its pseudonymised tree
+    #[arg(long)]
+    move_into_anon: bool,
+}
+
+impl DatasetFlags {
+    /// The fields as the declaration takes them, only those given.
+    fn asked(&self) -> Result<serde_json::Value, Exit> {
+        let mut asked = serde_json::Map::new();
+        if let Some(a) = &self.arrives {
+            asked.insert("arrives".into(), serde_json::json!(a));
+        }
+        if let Some(file) = &self.identity {
+            asked.insert(
+                "identity".into(),
+                dataset::identity_from_file(file).map_err(|e| usage(format!("--identity {e}")))?,
+            );
+        } else if self.no_identity {
+            asked.insert("identity".into(), serde_json::Value::Null);
+        }
+        if let Some(u) = &self.unmapped {
+            asked.insert("unmapped".into(), serde_json::json!(u));
+        }
+        if let Some(c) = &self.cohort {
+            asked.insert("cohort".into(), serde_json::json!(c));
+        } else if self.no_cohort {
+            asked.insert("cohort".into(), serde_json::Value::Null);
+        }
+        let mut tags = serde_json::Map::new();
+        if self.keep_demographics || self.no_keep_demographics {
+            tags.insert(
+                "keep_demographics".into(),
+                serde_json::json!(!self.no_keep_demographics),
+            );
+        }
+        if !self.remove.is_empty() {
+            tags.insert("remove".into(), serde_json::json!(self.remove));
+        }
+        if !self.keep.is_empty() {
+            tags.insert("keep".into(), serde_json::json!(self.keep));
+        }
+        if !tags.is_empty() {
+            asked.insert("tags".into(), serde_json::Value::Object(tags));
+        }
+        if let Some(o) = &self.originals {
+            asked.insert("originals_kept".into(), serde_json::json!(o));
+        }
+        if self.move_into_anon {
+            asked.insert("move_into_anon".into(), serde_json::json!(true));
+        }
+        Ok(serde_json::Value::Object(asked))
+    }
 }
 
 /// Wave 4c §6.6: what is asked of a tree before it is digested.
@@ -1909,6 +2008,44 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             "fast": fast,
         })
     };
+    // what a dataset's trees are, for the listing
+    let trees_line = |p: &place::Place| -> Option<String> {
+        if p.role != Role::Source {
+            return None;
+        }
+        let d = p.dataset_doc();
+        let tree = |t: &serde_json::Value| match t["files"].as_u64() {
+            Some(n) => format!("{} ({n} files)", t["path"].as_str().unwrap_or("")),
+            None => t["path"].as_str().unwrap_or("").to_string(),
+        };
+        let originals = if d["trees"]["originals"].is_object() {
+            format!("originals {}", tree(&d["trees"]["originals"]))
+        } else {
+            "no originals".to_string()
+        };
+        Some(format!(
+            "arrives {}, {originals}, reads {}",
+            d["arrives"].as_str().unwrap_or(""),
+            tree(&d["trees"]["anon"])
+        ))
+    };
+    let show_layout = |layout: &serde_json::Value| {
+        if let Some(v0) = layout["v0"].as_object() {
+            println!(
+                "  a v0 cohort folder: {} original files, {} pseudonymised files{}",
+                v0["original_files"],
+                v0["raw_files"],
+                if v0["renamed"].as_bool() == Some(true) {
+                    "; dcm-raw is now dcm-anon"
+                } else {
+                    ""
+                }
+            );
+        }
+        if let Some(n) = layout["loose"].as_u64().filter(|n| *n > 0) {
+            println!("  {n} loose entries beside derivatives/, not read");
+        }
+    };
     match command {
         PlaceCommand::List { json, probe } => {
             let rows = place::list(registry.store()).map_err(|e| fail(e.to_string()))?;
@@ -1919,7 +2056,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                         fresh.push(p);
                         continue;
                     }
-                    let probed = places::probe(Path::new(&p.path));
+                    let probed = dataset::probe_place(&p);
                     fresh.push(
                         place::set(registry.store(), p.id, None, None, Some(&probed))
                             .map_err(|e| fail(e.to_string()))?,
@@ -1955,6 +2092,9 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                         p.guarantees
                     );
                     println!("      {}", p.path);
+                    if let Some(line) = trees_line(p) {
+                        println!("      {line}");
+                    }
                     if !p.probed.is_null() {
                         println!("      probed {}", p.probed);
                     }
@@ -1970,6 +2110,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             snapshots,
             protected,
             fast,
+            dataset,
             json,
         } => {
             let role = Role::parse(&role).ok_or_else(|| {
@@ -1989,7 +2130,32 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     path.display()
                 )));
             }
-            let probed = places::probe(&path);
+            // record 26: a source place is a dataset, and its folder is
+            // looked at before anything reads it
+            let asked = dataset.asked()?;
+            if dataset::fields_given(&asked) && role != Role::Source {
+                return Err(usage(format!(
+                    "the dataset flags belong to a source place, not a {} place",
+                    role.name()
+                )));
+            }
+            let (probed, dataset, layout) = if role == Role::Source {
+                if place::by_name(registry.store(), &name)
+                    .map_err(|e| fail(e.to_string()))?
+                    .is_some()
+                {
+                    return Err(fail(format!("a place is already named {name}")));
+                }
+                let d = dataset::declare(registry.store(), &path, &asked, None)
+                    .map_err(|r| fail(r.message))?;
+                (d.probed, d.dataset, d.layout)
+            } else {
+                (
+                    places::probe(&path),
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                )
+            };
             let id = place::add(
                 registry.store(),
                 &place::New {
@@ -1999,6 +2165,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     guarantees: guarantees(backup.as_deref(), snapshots, protected, fast),
                     probed,
                     handling: serde_json::Value::Null,
+                    dataset,
                 },
             )
             .map_err(|e| fail(e.to_string()))?;
@@ -2006,16 +2173,17 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 &mut registry,
                 nils_registry::audit::Action::PlaceAdd,
                 serde_json::json!({"place": id, "name": name, "role": role.name()}),
-                None,
+                layout
+                    .is_object()
+                    .then(|| serde_json::json!({"layout": layout})),
             )?;
             let p = place::show(registry.store(), id)
                 .map_err(|e| fail(e.to_string()))?
                 .ok_or_else(|| fail(format!("no place {id}")))?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&p.as_json()).unwrap_or_default()
-                );
+                let mut doc = p.as_json();
+                doc["layout"] = layout;
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
             } else {
                 println!(
                     "place {}: {} ({}) at {}",
@@ -2024,6 +2192,10 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     p.role.name(),
                     p.path
                 );
+                if let Some(line) = trees_line(&p) {
+                    println!("  {line}");
+                }
+                show_layout(&layout);
                 println!("  probed {}", p.probed);
             }
             Ok(())
@@ -2035,6 +2207,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             snapshots,
             protected,
             fast,
+            dataset,
             json,
         } => {
             let current = place::show(registry.store(), id)
@@ -2054,8 +2227,31 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     None
                 };
             let path = path.map(|p| fs::canonicalize(&p).unwrap_or(p));
-            let probed = path.as_deref().map(places::probe);
-            let p = place::set(
+            // record 26: a dataset's fields, and its folder looked at again
+            // when they or its path change
+            let asked = dataset.asked()?;
+            let dataset_given = dataset::fields_given(&asked);
+            if dataset_given && current.role != Role::Source {
+                return Err(usage(format!(
+                    "the dataset flags belong to a source place; {} is a {} place",
+                    current.name,
+                    current.role.name()
+                )));
+            }
+            let declared = if current.role == Role::Source && (dataset_given || path.is_some()) {
+                let folder = path.clone().unwrap_or_else(|| PathBuf::from(&current.path));
+                Some(
+                    dataset::declare(registry.store(), &folder, &asked, Some(&current))
+                        .map_err(|r| fail(r.message))?,
+                )
+            } else {
+                None
+            };
+            let probed = match &declared {
+                Some(d) => Some(d.probed.clone()),
+                None => path.as_deref().map(places::probe),
+            };
+            let mut p = place::set(
                 registry.store(),
                 id,
                 path.as_deref().map(|p| p.display().to_string()).as_deref(),
@@ -2063,17 +2259,25 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 probed.as_ref(),
             )
             .map_err(|e| fail(e.to_string()))?;
+            if let Some(d) = &declared {
+                p = place::set_dataset(registry.store(), id, &d.dataset)
+                    .map_err(|e| fail(e.to_string()))?;
+            }
             audit(
                 &mut registry,
                 nils_registry::audit::Action::PlaceSet,
                 serde_json::json!({"place": id, "name": p.name}),
-                None,
+                declared.as_ref().map(|d| {
+                    serde_json::json!({"dataset": {"before": current.as_json()["dataset"], "after": d.dataset, "layout": d.layout}})
+                }),
             )?;
+            let layout = declared
+                .map(|d| d.layout)
+                .unwrap_or(serde_json::Value::Null);
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&p.as_json()).unwrap_or_default()
-                );
+                let mut doc = p.as_json();
+                doc["layout"] = layout;
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
             } else {
                 println!(
                     "place {}: {} ({}) at {}",
@@ -2082,6 +2286,10 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     p.role.name(),
                     p.path
                 );
+                if let Some(line) = trees_line(&p) {
+                    println!("  {line}");
+                }
+                show_layout(&layout);
             }
             Ok(())
         }
@@ -2097,14 +2305,32 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             Ok(())
         }
         PlaceCommand::Bindings { json } => {
+            // where @name points for each of the registry's own source
+            // places: the pseudonymised tree, and the originals beside it
+            let given = dataset::place_roots(registry.store());
+            let roots: Vec<_> = dataset::roots(registry.store(), &given)
+                .into_values()
+                .map(|r| r.as_json())
+                .collect();
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&places::bindings_doc()).unwrap_or_default()
-                );
+                let doc = serde_json::json!({"bindings": places::bindings_doc(), "roots": roots});
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
             } else {
                 for b in places::BINDINGS {
                     println!("{:<22} {}", b.verb, b.role.name());
+                }
+                for r in &roots {
+                    println!(
+                        "@{:<21} {}",
+                        r["name"].as_str().unwrap_or(""),
+                        r["path"].as_str().unwrap_or("")
+                    );
+                    if let Some(originals) = r["originals"].as_str() {
+                        println!(
+                            "@{:<21} {originals}",
+                            format!("{}/originals", r["name"].as_str().unwrap_or(""))
+                        );
+                    }
                 }
             }
             Ok(())
@@ -2258,21 +2484,20 @@ fn ingest_roots(flags: &[String]) -> Result<std::collections::BTreeMap<String, P
 fn ingest_command(home: &Home, command: IngestCommand) -> Result<(), Exit> {
     let IngestCommand::Probe(args) = command;
     use nils_registry::job::{self, Claim, State};
+    let mut registry = open(home)?;
     // Where to read: a registered name, or a directory from the keyboard.
+    // Record 26: `@name` is the dataset's pseudonymised tree and
+    // `@name/originals` its originals, which a probe may read, shapes only.
     let root = if let Some(rest) = args.location.strip_prefix('@') {
-        let roots = ingest_roots(&args.ingest_root)?;
+        let roots = dataset::roots(registry.store(), &ingest_roots(&args.ingest_root)?);
         let (name, rel) = rest.split_once('/').unwrap_or((rest, ""));
         if rel.split('/').any(|s| s == "..") {
             return Err(fail("a location's relative part stays inside it"));
         }
-        let base = roots
+        roots
             .get(name)
-            .ok_or_else(|| fail(format!("no registered location named {name}")))?;
-        if rel.is_empty() {
-            base.clone()
-        } else {
-            base.join(rel)
-        }
+            .ok_or_else(|| fail(format!("no registered location named {name}")))?
+            .resolve(rel)
     } else {
         PathBuf::from(&args.location)
     };
@@ -2298,7 +2523,6 @@ fn ingest_command(home: &Home, command: IngestCommand) -> Result<(), Exit> {
     if candidates.is_empty() {
         candidates.push(("default".into(), nils_digest::Rule::default()));
     }
-    let mut registry = open(home)?;
     let job = job::claim(
         registry.store(),
         &Claim {
@@ -2687,8 +2911,57 @@ fn fingerprint(home: &Home, args: FingerprintArgs) -> Result<(), Exit> {
     Ok(())
 }
 
+/// Record 26: the tree a digest reads. `@name` is the dataset's pseudonymised
+/// tree, resolved against the worker's registered locations and then the
+/// registry's own source places; a tree inside a dataset's originals is
+/// refused, whatever names it, since the registry never points at an
+/// identified file.
+fn digest_tree(home: &Home, root: &Path) -> Result<PathBuf, Exit> {
+    let named = root.to_str().and_then(|s| s.strip_prefix('@'));
+    if named.is_none() && !home.exists() {
+        return Ok(root.to_path_buf());
+    }
+    let mut registry = open(home)?;
+    let store = registry.store();
+    let path = match named {
+        Some(rest) => {
+            let (name, rel) = rest.split_once('/').unwrap_or((rest, ""));
+            if rel.split('/').any(|s| s == "..") || rel.starts_with('/') {
+                return Err(usage(format!("@{name}/{rel} steps outside its location")));
+            }
+            let mut given = ingest_roots(&[])?;
+            for (n, p) in dataset::place_roots(store) {
+                given.entry(n).or_insert(p);
+            }
+            let roots = dataset::roots(store, &given);
+            let root = roots.get(name).ok_or_else(|| {
+                usage(format!(
+                    "@{name} is neither a registered ingest location nor a source place; those are {}",
+                    if roots.is_empty() {
+                        "none".to_string()
+                    } else {
+                        roots.keys().cloned().collect::<Vec<_>>().join(", ")
+                    }
+                ))
+            })?;
+            root.resolve(rel)
+        }
+        None => root.to_path_buf(),
+    };
+    if let Some(p) = dataset::originals_holding(store, &path) {
+        return Err(fail(format!(
+            "{} is in the originals of the dataset {}, which the pseudonymiser alone reads; a digest reads @{} (record 26)",
+            path.display(),
+            p.name,
+            p.name
+        )));
+    }
+    Ok(path)
+}
+
 fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
-    let mut settings = Settings::new(args.root);
+    let root = digest_tree(home, &args.root)?;
+    let mut settings = Settings::new(root);
     settings.dry_run = args.dry_run;
     settings.json = args.json;
     settings.retry_quarantine = args.retry_quarantine;
@@ -2721,6 +2994,13 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
             .map_err(|e| usage(format!("--identity-rule {}: {e}", path.display())))?;
         rule.source = Some(path.display().to_string());
         settings.identity = rule;
+    } else if home.exists() {
+        // record 26: the rule the dataset stores, when the tree is a
+        // dataset's and it stores one
+        let mut registry = open(home)?;
+        if let Some(rule) = dataset::stored_rule(registry.store(), &settings.root).map_err(fail)? {
+            settings.identity = rule;
+        }
     }
     // Wave 4a §5.2: the private elements the pack asks for are read at
     // digest time. A pack that cannot be found is not an error unless one was
