@@ -618,7 +618,7 @@ paths:
   /api/supervise/install:
     get:
       summary: The install nils setup made, as the supervisor on its host sees it
-      description: "{record, dir, runtime, service, reach, backend, mode, at, ports, parts: {name: {version, kind, path}}, places, oidc: {issuer, client_id} | null, addresses: [{part, address, reach}], services: [{part, unit, watcher, running}], unfinished, release: {installed, newest, newer, error, command}, machine: {card: {name, memory_gb} | null, advice}}. The record is the setup's own file on the host and holds no secret. The newest release and the card are looked at once in a while, not on every call."
+      description: "{record, dir, runtime, service, reach, backend, mode, at, ports, parts: {name: {version, kind, path}}, places, oidc: {issuer, client_id} | null, addresses: [{part, address, reach}], services: [{part, unit, watcher, running}], unfinished, release: {installed, newest, newer, error, command}, machine: {card: {name, memory_gb} | null, cards: [{name, memory_gb}], advice}}. `cards` is every graphics card the machine has, and `card` the one with the most memory, which the advice reads. The record is the setup's own file on the host and holds no secret. The newest release and the cards are looked at once in a while, not on every call."
       responses:
         "200": {description: The install}
         "401": {description: No token the supervisor knows}

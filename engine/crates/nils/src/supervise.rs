@@ -1102,9 +1102,14 @@ fn install(config: &Config) -> (u16, Value) {
         "command": "nils update --all",
     });
     doc["machine"] = cached(&MACHINE, Duration::from_secs(3600), || {
-        let card = crate::setup::probe_card();
+        // every card, and beside them the one with the most memory as the
+        // card, which the advice reads and an older desk shows
+        let cards = crate::setup::probe_cards();
+        let card = crate::setup::largest(&cards);
+        let shown = |c: &crate::setup::Card| json!({ "name": c.name, "memory_gb": c.memory_gb });
         json!({
-            "card": card.as_ref().map(|c| json!({ "name": c.name, "memory_gb": c.memory_gb })),
+            "card": card.as_ref().map(shown),
+            "cards": cards.iter().map(shown).collect::<Vec<_>>(),
             "advice": crate::setup::card_advice(card.as_ref().map(|c| c.memory_gb)),
         })
     });

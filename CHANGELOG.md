@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- `nils setup` names every graphics card the machine has and the memory of them all, as in `2 × NVIDIA RTX PRO 6000, 191 GB`, where it named only the first card nvidia-smi listed. The supervisor's install report carries `machine.cards`, each card with its name and memory, beside `machine.card`, which is the card with the most memory and what the advice reads.
+
 ## [1.0.0-alpha.28] - 2026-09-15
 
 ### Changed
