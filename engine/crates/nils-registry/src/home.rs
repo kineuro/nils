@@ -435,6 +435,20 @@ fn set_meta(store: &mut Store, key: &str, value: &str) -> Result<(), store::Erro
     set_meta_in(store, "registry_meta", key, value)
 }
 
+/// Bump the epoch on a registry store the caller holds without its
+/// [`Registry`] (a merge inside an import, an audit row written from a
+/// store): read what is there, write one more, inside the caller's
+/// transaction. [`Registry::next_epoch`] goes through here, so the two
+/// never disagree.
+pub fn next_epoch_in(store: &mut Store) -> Result<i64, store::Error> {
+    let current = get_meta_in(store, "registry_meta", "epoch")?
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let next = current + 1;
+    set_meta(store, "epoch", &next.to_string())?;
+    Ok(next)
+}
+
 fn set_meta_in(store: &mut Store, table: &str, key: &str, value: &str) -> Result<(), store::Error> {
     let table = store.qualified(table);
     let d = store.dialect();
@@ -648,8 +662,7 @@ impl Registry {
     /// Bump the epoch (§4.2) inside the caller's transaction and return the
     /// new value.
     pub fn next_epoch(&mut self) -> Result<i64, HomeError> {
-        let next = self.meta.epoch + 1;
-        set_meta(&mut self.store, "epoch", &next.to_string())?;
+        let next = next_epoch_in(&mut self.store)?;
         self.meta.epoch = next;
         Ok(next)
     }
@@ -709,7 +722,7 @@ mod tests {
         let n = linkage.query("SELECT COUNT(*) FROM id_type", &[]).unwrap()[0]
             .int(0)
             .unwrap();
-        assert_eq!(n, 2);
+        assert_eq!(n, 3);
         let owner = linkage
             .query(
                 "SELECT value FROM linkage_meta WHERE key = 'registry_id'",

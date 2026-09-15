@@ -1,0 +1,629 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! A later link merges (record 26, decision 6). Merging an alias subject
+//! into a canonical one re-points every row of the alias to the canonical
+//! subject in one transaction per store, moves the alias's identities,
+//! files the alias's code on the canonical subject as an identifier of
+//! type `subject-code`, leaves the alias row marked merged, closes the
+//! alias's provisional item, records `subject.merge` in the audit and moves
+//! the epoch. Nothing is deleted but the session cache, which is derived
+//! and rebuilt.
+//!
+//! Which tables carry a subject is not remembered here by hand: every
+//! table with a `subject_id` column is listed in [`SUBJECT_TABLES`] with
+//! what the merge does to it, and a test fails when the schema gains one
+//! the list does not name.
+
+use std::collections::BTreeMap;
+
+use crate::audit::{self, Action, Entry};
+use crate::linkage::{self, NewIdentity, Subject, Subkeys};
+use crate::review;
+use crate::schema::{SUBJECT_CODE_TYPE, Type, table};
+use crate::store::{Error, Param, Store};
+use crate::time::now_iso;
+
+/// What the merge does to a table that names a subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handling {
+    /// `subject_id` of the alias becomes the canonical's.
+    Repoint,
+    /// Derived from the subject's studies: the rows of both subjects are
+    /// dropped and the next `session rebuild` makes them again.
+    Rebuild,
+}
+
+/// Every table with a `subject_id` column, in either store, and what the
+/// merge does to it. `cohort_member` is re-pointed after the alias's open
+/// intervals that duplicate an open one of the canonical are closed;
+/// `date_shift` keeps the canonical's offset where both have one.
+pub const SUBJECT_TABLES: &[(&str, Handling)] = &[
+    ("study", Handling::Repoint),
+    ("series", Handling::Repoint),
+    ("stack_fingerprint", Handling::Repoint),
+    ("cohort_member", Handling::Repoint),
+    ("subject_disease", Handling::Repoint),
+    ("event", Handling::Repoint),
+    ("pick", Handling::Repoint),
+    ("handover_subject", Handling::Repoint),
+    ("session_cache", Handling::Rebuild),
+    ("handle_member", Handling::Repoint),
+    ("values_member", Handling::Repoint),
+    // the linkage store
+    ("identity", Handling::Repoint),
+    ("date_shift", Handling::Repoint),
+];
+
+/// The tables that name a subject otherwise, each handled by name in
+/// [`merge`]: a decision at subject scope (`ref` is the id as text), a
+/// review item at subject scope (its `group_key`), the alias row itself,
+/// and the linkage rows, which name the link and stay as history.
+pub const BY_REFERENCE: &[&str] = &["decision", "review_item", "subject", "linkage"];
+
+/// What to merge, and who says so.
+#[derive(Debug, Clone)]
+pub struct Ask<'a> {
+    pub canonical: i64,
+    pub alias: i64,
+    pub why: &'a str,
+    pub actor: &'a str,
+    pub job_id: Option<i64>,
+    /// The dataset the merge was asked from, if one.
+    pub place_id: Option<i64>,
+}
+
+/// What a merge did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    pub canonical: Subject,
+    pub alias: Subject,
+    /// Rows re-pointed, by table.
+    pub moved: BTreeMap<&'static str, u64>,
+    /// Alias memberships closed because the canonical subject was in the
+    /// cohort already.
+    pub memberships_closed: u64,
+    pub provisional_closed: u64,
+    pub audit: i64,
+}
+
+impl Merged {
+    pub fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "canonical": { "id": self.canonical.id, "code": self.canonical.code },
+            "alias": { "id": self.alias.id, "code": self.alias.code },
+            "moved": self.moved,
+            "memberships_closed": self.memberships_closed,
+            "provisional_closed": self.provisional_closed,
+            "audit": self.audit,
+        })
+    }
+}
+
+fn subject(registry: &mut Store, id: i64) -> Result<Subject, Error> {
+    linkage::subjects_by_id(registry, &[id])?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Message(format!("no subject with id {id}")))
+}
+
+/// Merge `alias` into `canonical`. The registry first, then the linkage
+/// store (§9.3), each in one transaction. Refused when the two are one,
+/// or either was merged already.
+pub fn merge(
+    registry: &mut Store,
+    linkage: &mut Store,
+    keys: &Subkeys,
+    ask: &Ask<'_>,
+) -> Result<Merged, Error> {
+    if ask.canonical == ask.alias {
+        return Err(Error::Message(
+            "a subject cannot be merged into itself".to_string(),
+        ));
+    }
+    let canonical = subject(registry, ask.canonical)?;
+    let alias = subject(registry, ask.alias)?;
+    for s in [&canonical, &alias] {
+        if let Some(into) = s.merged_into {
+            let into = subject(registry, into)?;
+            return Err(Error::Message(format!(
+                "subject {} was merged into {} already",
+                s.code, into.code
+            )));
+        }
+    }
+    let now = now_iso();
+    registry.begin()?;
+    let written = (|| -> Result<(BTreeMap<&'static str, u64>, u64, u64, i64), Error> {
+        let d = registry.dialect();
+        // an alias membership that duplicates an open one of the canonical
+        // closes; the rest move
+        let member = registry.qualified("cohort_member");
+        let sql = format!(
+            "UPDATE {member} SET left_at = {}, left_by = 'merge' \
+             WHERE subject_id = {} AND left_at IS NULL AND cohort_id IN \
+             (SELECT cohort_id FROM {member} WHERE subject_id = {} AND left_at IS NULL)",
+            d.param(1, Type::Timestamp),
+            d.param(2, Type::Int),
+            d.param(3, Type::Int)
+        );
+        let closed = registry.execute(
+            &sql,
+            &[
+                Param::from(now.as_str()),
+                Param::Int(alias.id),
+                Param::Int(canonical.id),
+            ],
+        )?;
+        let mut moved = BTreeMap::new();
+        for (name, handling) in SUBJECT_TABLES {
+            if crate::schema::linkage_tables().iter().any(|t| t.name == *name) {
+                continue;
+            }
+            let n = match handling {
+                Handling::Repoint => repoint(registry, name, canonical.id, alias.id)?,
+                Handling::Rebuild => {
+                    let cache = registry.qualified("session_cache");
+                    let ids = format!(
+                        "SELECT id FROM {cache} WHERE subject_id IN ({}, {})",
+                        d.param(1, Type::Int),
+                        d.param(2, Type::Int)
+                    );
+                    let both = [Param::Int(canonical.id), Param::Int(alias.id)];
+                    for t in ["session_label", "session_cache_study"] {
+                        registry.execute(
+                            &format!(
+                                "DELETE FROM {} WHERE session_id IN ({ids})",
+                                registry.qualified(t)
+                            ),
+                            &both,
+                        )?;
+                    }
+                    registry.execute(
+                        &format!(
+                            "DELETE FROM {cache} WHERE subject_id IN ({}, {})",
+                            d.param(1, Type::Int),
+                            d.param(2, Type::Int)
+                        ),
+                        &both,
+                    )?
+                }
+            };
+            moved.insert(*name, n);
+        }
+        // a decision at subject scope names the subject by its id as text
+        let sql = format!(
+            "UPDATE {} SET ref = {} WHERE scope = 'subject' AND ref = {}",
+            registry.qualified("decision"),
+            d.param(1, Type::Text),
+            d.param(2, Type::Text)
+        );
+        let decisions = registry.execute(
+            &sql,
+            &[
+                Param::from(canonical.id.to_string()),
+                Param::from(alias.id.to_string()),
+            ],
+        )?;
+        moved.insert("decision", decisions);
+        let provisional = review::close_provisional(
+            registry,
+            alias.id,
+            ask.actor,
+            &serde_json::json!({ "merged_into": canonical.code, "why": ask.why }),
+        )?;
+        registry.update_by_id(
+            table("subject"),
+            &[
+                ("merged_into", Param::Int(canonical.id)),
+                ("merged_at", Param::from(now.as_str())),
+            ],
+            "id",
+            alias.id,
+        )?;
+        let audit = audit::record_in(
+            registry,
+            &Entry {
+                principal: ask.actor,
+                action: Action::SubjectMerge,
+                scope: serde_json::json!({
+                    "canonical": { "id": canonical.id, "code": canonical.code },
+                    "alias": { "id": alias.id, "code": alias.code },
+                }),
+                policy: None,
+                job_id: ask.job_id,
+                details: Some(serde_json::json!({
+                    "why": ask.why,
+                    "moved": moved,
+                    "memberships_closed": closed,
+                    "provisional_closed": provisional,
+                    "place": ask.place_id,
+                })),
+            },
+        )?;
+        Ok((moved, closed, provisional, audit))
+    })();
+    let (mut moved, memberships_closed, provisional_closed, audit) = match written {
+        Ok(v) => {
+            registry.commit()?;
+            v
+        }
+        Err(e) => {
+            let _ = registry.rollback();
+            return Err(e);
+        }
+    };
+
+    linkage.begin()?;
+    let written = (|| -> Result<(), Error> {
+        let d = linkage.dialect();
+        let n = repoint(linkage, "identity", canonical.id, alias.id)?;
+        moved.insert("identity", n);
+        // the canonical's offset stays where both have one
+        let shift = linkage.qualified("date_shift");
+        let has = linkage
+            .query_opt(
+                &format!(
+                    "SELECT 1 FROM {shift} WHERE subject_id = {}",
+                    d.param(1, Type::Int)
+                ),
+                &[Param::Int(canonical.id)],
+            )?
+            .is_some();
+        let n = if has {
+            linkage.execute(
+                &format!(
+                    "DELETE FROM {shift} WHERE subject_id = {}",
+                    d.param(1, Type::Int)
+                ),
+                &[Param::Int(alias.id)],
+            )?;
+            0
+        } else {
+            repoint(linkage, "date_shift", canonical.id, alias.id)?
+        };
+        moved.insert("date_shift", n);
+        // the alias's code, filed on the canonical subject
+        let type_id = match linkage::id_type_id(linkage, SUBJECT_CODE_TYPE)? {
+            Some(id) => id,
+            None => linkage::add_id_type(linkage, SUBJECT_CODE_TYPE, None)?.id,
+        };
+        let lookup = keys.lookup(SUBJECT_CODE_TYPE, &alias.code);
+        if linkage::identities_by_lookup(linkage, &[lookup.clone()])?.is_empty() {
+            linkage::insert_identities(
+                linkage,
+                &[NewIdentity {
+                    subject_id: canonical.id,
+                    id_type_id: type_id,
+                    lookup,
+                    ciphertext: keys.seal(&alias.code),
+                    source: "merge",
+                    first_batch_id: None,
+                }],
+            )?;
+        }
+        Ok(())
+    })();
+    match written {
+        Ok(()) => linkage.commit()?,
+        Err(e) => {
+            let _ = linkage.rollback();
+            return Err(e);
+        }
+    }
+    Ok(Merged {
+        canonical,
+        alias,
+        moved,
+        memberships_closed,
+        provisional_closed,
+        audit,
+    })
+}
+
+fn repoint(store: &mut Store, name: &str, canonical: i64, alias: i64) -> Result<u64, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET subject_id = {} WHERE subject_id = {}",
+        store.qualified(name),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int)
+    );
+    store.execute(&sql, &[Param::Int(canonical), Param::Int(alias)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::migrate::{self, Kind};
+    use crate::schema::{linkage_tables, registry_tables};
+
+    const KEY: &[u8] = b"nils-fixture-key";
+
+    /// The list and the schema agree: every table with a `subject_id`
+    /// column is handled, and nothing handled is missing from the schema.
+    /// A new table that carries a subject fails here until the merge says
+    /// what it does to it.
+    #[test]
+    fn every_table_with_a_subject_id_column_is_handled() {
+        let with_subject: Vec<&str> = registry_tables()
+            .iter()
+            .chain(linkage_tables())
+            .filter(|t| t.column("subject_id").is_some())
+            .map(|t| t.name)
+            .collect();
+        for name in &with_subject {
+            assert!(
+                SUBJECT_TABLES.iter().any(|(n, _)| n == name),
+                "{name} has a subject_id column and the merge does not say what it does to it"
+            );
+        }
+        for (name, _) in SUBJECT_TABLES {
+            assert!(
+                with_subject.contains(name),
+                "{name} is handled but has no subject_id column"
+            );
+        }
+        for name in BY_REFERENCE {
+            assert!(
+                registry_tables()
+                    .iter()
+                    .chain(linkage_tables())
+                    .any(|t| t.name == *name),
+                "{name} is not a table"
+            );
+        }
+        // the alias row keeps its columns
+        assert!(table("subject").column("merged_into").is_some());
+        assert!(table("subject").column("merged_at").is_some());
+    }
+
+    fn stores() -> (Store, Store, Subkeys) {
+        let mut registry = Store::sqlite_in_memory().unwrap();
+        migrate::migrate(&mut registry, Kind::Registry).unwrap();
+        let mut linkage = Store::sqlite_in_memory().unwrap();
+        migrate::migrate(&mut linkage, Kind::Linkage).unwrap();
+        (registry, linkage, Subkeys::derive(KEY))
+    }
+
+    fn one(store: &mut Store, sql: &str) -> i64 {
+        store.query(sql, &[]).unwrap()[0].int(0).unwrap()
+    }
+
+    fn exec(store: &mut Store, sql: &str) {
+        store.execute(sql, &[]).unwrap();
+    }
+
+    #[test]
+    fn a_merge_repoints_every_row_of_the_alias_and_files_its_code() {
+        let (mut registry, mut linkage, keys) = stores();
+        exec(
+            &mut registry,
+            "INSERT INTO subject (id, code, created_at) VALUES (1, 'canon', 't'), (2, 'alias', 't'), (3, 'other', 't')",
+        );
+        // one row per subject table for the alias, and a few for the canonical
+        exec(&mut registry, "INSERT INTO study (id, study_instance_uid, subject_id, first_batch_id) VALUES (10, 'S.1', 2, 1), (11, 'S.2', 1, 1)");
+        exec(&mut registry, "INSERT INTO series (id, series_instance_uid, study_id, subject_id, n_instances, n_stacks, first_batch_id) VALUES (20, 'R.1', 10, 2, 1, 1, 1)");
+        exec(&mut registry, "INSERT INTO stack_fingerprint (stack_id, series_id, study_id, subject_id, modality, orientation, n_instances, stack_index, stacks_in_series, job_id, epoch) VALUES (30, 20, 10, 2, 'MR', 'ax', 1, 0, 1, 1, 1)");
+        exec(&mut registry, "INSERT INTO cohort (id, name, owner, created_at) VALUES (1, 'a', 'o', 't'), (2, 'b', 'o', 't')");
+        exec(&mut registry, "INSERT INTO cohort_member (cohort_id, subject_id, joined_at, source) VALUES (1, 1, 't1', 'import'), (1, 2, 't2', 'import'), (2, 2, 't3', 'import')");
+        exec(&mut registry, "INSERT INTO disease (id, name) VALUES (1, 'd')");
+        exec(&mut registry, "INSERT INTO subject_disease (subject_id, disease_id, created_at) VALUES (2, 1, 't')");
+        exec(&mut registry, "INSERT INTO observation_type (id, name, category, is_primary) VALUES (1, 'k', 'c', 0)");
+        exec(&mut registry, "INSERT INTO event (subject_id, observation_type_id, event_date, created_at) VALUES (2, 1, '2020-01-01', 't')");
+        exec(&mut registry, "INSERT INTO pick (model, role, subject_id, session_day, scheme, reference, pack, pack_version, actor, author_kind, decided_at) VALUES ('m', 'r', 2, '2020-01-01', 's', 'ref', 'mri', '1', 'a', 'agent', 't')");
+        exec(&mut registry, "INSERT INTO handover_subject (archive_id, subject_id, code, files, bytes) VALUES (1, 2, 'alias', 1, 1)");
+        exec(&mut registry, "INSERT INTO session_cache (id, subject_id, window_days, timeline_digest, first, last, n_studies, epoch, built_at) VALUES (40, 2, 30, 'x', '2020-01-01', '2020-01-01', 1, 1, 't'), (41, 1, 30, 'y', '2020-02-01', '2020-02-01', 1, 1, 't'), (42, 3, 30, 'z', '2020-02-01', '2020-02-01', 1, 1, 't')");
+        exec(&mut registry, "INSERT INTO session_cache_study (session_id, study_id, window_days) VALUES (40, 10, 30), (41, 11, 30)");
+        exec(&mut registry, "INSERT INTO session_label (session_id, scheme_digest, flagged) VALUES (40, 'd', 0)");
+        exec(&mut registry, "INSERT INTO handle_member (handle_id, position, key, subject_id) VALUES (1, 0, 2, 2)");
+        exec(&mut registry, "INSERT INTO values_member (source_id, position, subject_id) VALUES (1, 0, 2)");
+        exec(&mut registry, "INSERT INTO decision (scope, ref, axis, actor, author_kind, decided_at) VALUES ('subject', '2', 'sex', 'a', 'person', 't'), ('stack', '2', 'x', 'a', 'person', 't')");
+        review::raise_provisional(
+            &mut registry,
+            &review::Provisional {
+                subject_id: 2,
+                code: "alias",
+                id_type: "patient-id",
+                shape: "AA",
+                place_id: 1,
+                place: "p",
+                batch_id: None,
+                job_id: None,
+            },
+        )
+        .unwrap();
+        // the linkage store: an identity each, a shift for the alias only
+        linkage::insert_identities(
+            &mut linkage,
+            &[
+                NewIdentity {
+                    subject_id: 1,
+                    id_type_id: 1,
+                    lookup: keys.lookup("patient-id", "P1"),
+                    ciphertext: keys.seal("P1"),
+                    source: "dicom",
+                    first_batch_id: None,
+                },
+                NewIdentity {
+                    subject_id: 2,
+                    id_type_id: 1,
+                    lookup: keys.lookup("patient-id", "P2"),
+                    ciphertext: keys.seal("P2"),
+                    source: "dicom",
+                    first_batch_id: None,
+                },
+            ],
+        )
+        .unwrap();
+        exec(&mut linkage, "INSERT INTO date_shift (subject_id, offset_days) VALUES (2, 7)");
+        // a store migrated in memory has no epoch row yet: it reads as zero
+        let epoch_before = registry
+            .query_opt("SELECT value FROM registry_meta WHERE key = 'epoch'", &[])
+            .unwrap()
+            .map(|r| r.text(0).unwrap().parse::<i64>().unwrap())
+            .unwrap_or(0);
+
+        let merged = merge(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &Ask {
+                canonical: 1,
+                alias: 2,
+                why: "the clinic renamed P2 to P1",
+                actor: "anna@lab",
+                job_id: Some(9),
+                place_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(merged.canonical.code, "canon");
+        assert_eq!(merged.alias.code, "alias");
+        assert_eq!(merged.memberships_closed, 1);
+        assert_eq!(merged.provisional_closed, 1);
+        let moved = &merged.moved;
+        for (t, n) in [
+            ("study", 1),
+            ("series", 1),
+            ("stack_fingerprint", 1),
+            ("cohort_member", 2),
+            ("subject_disease", 1),
+            ("event", 1),
+            ("pick", 1),
+            ("handover_subject", 1),
+            ("session_cache", 2),
+            ("handle_member", 1),
+            ("values_member", 1),
+            ("decision", 1),
+            ("identity", 1),
+            ("date_shift", 1),
+        ] {
+            assert_eq!(moved.get(t).copied(), Some(n), "{t}");
+        }
+        // every registry table with a subject_id column names the alias nowhere
+        for (t, _) in SUBJECT_TABLES {
+            if linkage_tables().iter().any(|l| l.name == *t) {
+                continue;
+            }
+            assert_eq!(
+                one(&mut registry, &format!("SELECT COUNT(*) FROM {t} WHERE subject_id = 2")),
+                0,
+                "{t}"
+            );
+        }
+        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM study WHERE subject_id = 1"), 2);
+        // the duplicate membership closed by the merge, the other moved open
+        let rows = registry
+            .query(
+                "SELECT cohort_id, subject_id, left_at IS NOT NULL, left_by FROM cohort_member ORDER BY id",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!((rows[1].int(0).unwrap(), rows[1].int(1).unwrap(), rows[1].int(2).unwrap()), (1, 1, 1));
+        assert_eq!(rows[1].text(3).unwrap(), "merge");
+        assert_eq!((rows[2].int(0).unwrap(), rows[2].int(1).unwrap(), rows[2].int(2).unwrap()), (2, 1, 0));
+        // the session cache of both is gone, the other subject's stays
+        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM session_cache"), 1);
+        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM session_cache_study"), 0);
+        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM session_label"), 0);
+        // the subject-scope decision moved, the stack one did not
+        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM decision WHERE scope = 'subject' AND ref = '1'"), 1);
+        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM decision WHERE scope = 'stack' AND ref = '2'"), 1);
+        // the alias row stays, marked
+        let row = registry
+            .query_opt("SELECT merged_into, merged_at FROM subject WHERE id = 2", &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.int(0).unwrap(), 1);
+        assert!(row.text(1).unwrap().ends_with('Z'));
+        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM subject WHERE merged_into IS NULL"), 2);
+        // the provisional item closed with the merge as its decision
+        let item = registry
+            .query_opt("SELECT status, decision FROM review_item", &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.text(0).unwrap(), "superseded");
+        assert!(item.text(1).unwrap().contains("canon"));
+        // the audit names both codes and the why, and the epoch moved
+        let audit = registry
+            .query_opt("SELECT action, principal, scope, details, job_id, epoch FROM audit", &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(audit.text(0).unwrap(), "subject.merge");
+        assert_eq!(audit.text(1).unwrap(), "anna@lab");
+        assert!(audit.text(2).unwrap().contains("\"code\":\"alias\""));
+        assert!(audit.text(3).unwrap().contains("renamed P2 to P1"));
+        assert_eq!(audit.int(4).unwrap(), 9);
+        assert_eq!(audit.int(5).unwrap(), epoch_before + 1);
+        // the linkage store: identities on the canonical, the shift moved,
+        // the alias's code filed as subject-code, from the merge
+        let shown = linkage::reveal(&mut linkage, &keys, 1, "tester", None).unwrap();
+        let mut values: Vec<(String, String, String)> = shown
+            .into_iter()
+            .map(|r| (r.id_type, r.value, r.source))
+            .collect();
+        values.sort();
+        assert_eq!(
+            values,
+            [
+                ("patient-id".to_string(), "P1".to_string(), "dicom".to_string()),
+                ("patient-id".to_string(), "P2".to_string(), "dicom".to_string()),
+                ("subject-code".to_string(), "alias".to_string(), "merge".to_string()),
+            ]
+        );
+        assert_eq!(one(&mut linkage, "SELECT subject_id FROM date_shift"), 1);
+
+        // merged once: the alias is refused as either side
+        let err = merge(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &Ask {
+                canonical: 2,
+                alias: 3,
+                why: "x",
+                actor: "anna@lab",
+                job_id: None,
+                place_id: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("merged into canon already"), "{err}");
+        assert!(
+            merge(
+                &mut registry,
+                &mut linkage,
+                &keys,
+                &Ask {
+                    canonical: 1,
+                    alias: 1,
+                    why: "x",
+                    actor: "anna@lab",
+                    job_id: None,
+                    place_id: None,
+                }
+            )
+            .is_err()
+        );
+        // a shift on both sides keeps the canonical's
+        exec(&mut linkage, "INSERT INTO date_shift (subject_id, offset_days) VALUES (3, 9)");
+        let again = merge(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &Ask {
+                canonical: 1,
+                alias: 3,
+                why: "y",
+                actor: "anna@lab",
+                job_id: None,
+                place_id: Some(4),
+            },
+        )
+        .unwrap();
+        assert_eq!(again.moved.get("date_shift"), Some(&0));
+        assert_eq!(one(&mut linkage, "SELECT offset_days FROM date_shift WHERE subject_id = 1"), 7);
+        assert_eq!(one(&mut linkage, "SELECT COUNT(*) FROM date_shift"), 1);
+    }
+}

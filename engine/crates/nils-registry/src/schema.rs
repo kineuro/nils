@@ -347,10 +347,17 @@ fn build_registry() -> Vec<Table> {
                     // overwrite (§13.3). What no file carries is when the
                     // subject died.
                     col("deceased_at", Type::Date),
+                    // Record 26 §6: a subject merged into another stays as a
+                    // row that says so, and every listing leaves it out. Its
+                    // code is filed on the canonical subject as an identifier
+                    // of type `subject-code`.
+                    col("merged_into", Type::Int),
+                    col("merged_at", Type::Timestamp),
                 ],
             ),
         )
-        .unique(&["code"]),
+        .unique(&["code"])
+        .index(&["merged_into"]),
         Table::new(
             "study",
             with_catalogue(
@@ -1620,12 +1627,20 @@ fn build_linkage() -> Vec<Table> {
     ]
 }
 
-/// The id types seeded at `nils init` (§7.2).
-pub const ID_TYPES: [(&str, &str); 2] = [
+/// The id type a merge files the alias's code under (record 26 §6).
+pub const SUBJECT_CODE_TYPE: &str = "subject-code";
+
+/// The id types seeded at `nils init` (§7.2), and the one a merge needs,
+/// which migration 39 adds to a store from before it.
+pub const ID_TYPES: [(&str, &str); 3] = [
     ("patient-id", "PatientID (0010,0020) as written, trimmed"),
     (
         "study-instance-uid",
         "StudyInstanceUID, the fallback when PatientID is absent",
+    ),
+    (
+        SUBJECT_CODE_TYPE,
+        "the code of a subject merged into this one",
     ),
 ];
 
