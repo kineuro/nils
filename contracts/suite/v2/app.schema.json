@@ -25,13 +25,37 @@
     "entitlement": {
       "type": "string",
       "enum": [
+        "assistant-settings:see",
+        "assistant-settings:work",
+        "assistant:use",
+        "audit:see",
+        "data:see",
+        "data:work",
+        "database:see",
+        "database:work",
+        "identity:see",
+        "identity:work",
+        "install:see",
+        "install:work",
+        "kvasir:see",
+        "kvasir:work",
+        "pipelines:see",
+        "pipelines:work",
+        "places:see",
+        "places:work",
+        "query:see",
+        "query:work",
+        "release:see",
+        "release:work",
+        "review:see",
+        "review:work",
         "reader",
         "reviewer",
         "operator",
         "admin",
         "assist"
       ],
-      "description": "The entitlement that shows the app's section"
+      "description": "The grant that shows the app's section, or a ladder name, which stands for its set (grants.schema.json)"
     },
     "capabilities": {
       "type": "string",
