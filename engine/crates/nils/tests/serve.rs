@@ -503,6 +503,47 @@ fn under_token_auth_the_token_names_the_principal() {
     server.finish();
 }
 
+/// `NILS_TOKENS` holds the entries `--token` takes, and an entry's own list
+/// of grants survives the commas between the entries.
+#[test]
+fn nils_tokens_keeps_an_entry_s_own_list() {
+    let home = registry();
+    let server = Server::start(
+        &home,
+        2,
+        &["--auth", "token"],
+        &[(
+            "NILS_TOKENS",
+            "a-listed-token-of-length=bo@lab-2:reader,kvasir:see, a-machine-token-of-length=cy@lab-2",
+        )],
+    );
+    let (status, doc) = server.request(
+        "GET",
+        "/api/capabilities",
+        None,
+        Some("a-listed-token-of-length"),
+    );
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["principal"], "bo@lab-2", "{doc}");
+    assert_eq!(
+        doc["grants"],
+        serde_json::json!(["data:see", "kvasir:see", "query:see", "query:work"]),
+        "{doc}"
+    );
+    assert_eq!(doc["detail"], "plain", "{doc}");
+    let (status, doc) = server.request(
+        "GET",
+        "/api/capabilities",
+        None,
+        Some("a-machine-token-of-length"),
+    );
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["principal"], "cy@lab-2", "{doc}");
+    assert_eq!(doc["grants"].as_array().unwrap().len(), 24, "{doc}");
+    assert_eq!(doc["detail"], "sensitive", "{doc}");
+    server.finish();
+}
+
 #[test]
 fn the_event_stream_is_display_plumbing() {
     let home = registry();

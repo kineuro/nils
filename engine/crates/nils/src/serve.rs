@@ -304,12 +304,7 @@ impl Auth {
                 let mut tokens = HashMap::new();
                 let mut given: Vec<String> = args.token.clone();
                 if let Ok(env) = std::env::var("NILS_TOKENS") {
-                    given.extend(
-                        env.split(',')
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(String::from),
-                    );
+                    given.extend(token_entries(&env));
                 }
                 for t in given {
                     let Some((token, rest)) = t.split_once('=') else {
@@ -609,6 +604,25 @@ fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
         caller.idempotency_key = Some(key);
     }
     Ok(caller)
+}
+
+/// `NILS_TOKENS`: the entries `--token` takes, separated by commas. A piece
+/// that holds no `=` continues the entry before it, since an entry always
+/// holds one and a ladder name or a grant never does, so an entry's own list
+/// survives, as in `T1=bo@lab:reader,kvasir:see`. A piece before any entry
+/// stays on its own, to be refused as it was.
+fn token_entries(env: &str) -> Vec<String> {
+    let mut entries: Vec<String> = Vec::new();
+    for piece in env.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        match entries.last_mut() {
+            Some(last) if !piece.contains('=') && last.contains('=') => {
+                last.push(',');
+                last.push_str(piece);
+            }
+            _ => entries.push(piece.to_string()),
+        }
+    }
+    entries
 }
 
 /// The refusal of a name that is neither a ladder name nor a grant.
@@ -3667,5 +3681,30 @@ mod disclosure_tests {
         ));
         assert_eq!(r.status, 409);
         assert_eq!(r.body["disclosure"], "gated");
+    }
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::token_entries;
+
+    #[test]
+    fn nils_tokens_splits_into_the_entries_token_takes() {
+        // what worked before reads the same
+        assert_eq!(
+            token_entries("t1=bo@lab,t2=cy@lab:reader"),
+            ["t1=bo@lab", "t2=cy@lab:reader"]
+        );
+        assert_eq!(
+            token_entries(" t1=bo@lab: , ,t2=cy@lab "),
+            ["t1=bo@lab:", "t2=cy@lab"]
+        );
+        // a piece that holds no `=` continues the entry before it
+        assert_eq!(
+            token_entries("t1=bo@lab:reader,kvasir:see, t2=cy@lab:query:work"),
+            ["t1=bo@lab:reader,kvasir:see", "t2=cy@lab:query:work"]
+        );
+        // a piece before any entry stays on its own, and is refused as before
+        assert_eq!(token_entries("reader,t1=bo@lab"), ["reader", "t1=bo@lab"]);
     }
 }

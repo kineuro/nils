@@ -10,6 +10,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Fixed
 
+- `NILS_TOKENS` keeps an entry's own list: `T1=bo@lab:reader,kvasir:see` is one entry, as `--token` takes it, since a piece that holds no `=` belongs to the entry before it. The variable was split at every comma, so an entry listing more than one name stopped `nils serve` at start.
 - A job queued through `POST /api/jobs` records the caller's detail, and a job that recorded none runs as plain; an `ask run` queued there ran with every class. Of the ask verbs that door queues `ask run` and `ask promote`, and no other.
 - `GET /api/review`, `GET /api/review/{id}`, `POST /api/ask/values` and `GET /api/instances/*` need what their handlers needed, the stricter of the two, now that each policy row is read from the door table.
 

@@ -477,7 +477,8 @@ struct ServeArgs {
     /// A token, who it names and what it holds, as
     /// `TOKEN=user@node:reader,kvasir:see`, ladder names and grants added
     /// up; repeatable, or NILS_TOKENS as a comma-separated list of the
-    /// same. Without a list a token holds every grant and detail sensitive
+    /// same, where a piece holding no `=` belongs to the entry before it.
+    /// Without a list a token holds every grant and detail sensitive
     /// (a machine token); with an empty list it holds none
     #[arg(long, value_name = "TOKEN=PRINCIPAL[:GRANTS]")]
     token: Vec<String>,
