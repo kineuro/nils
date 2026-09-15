@@ -15,6 +15,7 @@ directory beside the old one, which stays.
 | version | document | since |
 |---|---|---|
 | 1 | [`v1/mcp.schema.json`](v1/mcp.schema.json) | Wave 4c slice A7, 2026-09-09: the sixteen operations (the twelve of Wave 4b and the four of Wave 4c §6.4: guide, draft, job, job_status), the input schema per operation, the door each calls, the tool object, the result envelope, the paging contract and the policy fields |
+| 2 | [`v2/mcp.schema.json`](v2/mcp.schema.json) | 2026-09-15: version 1 with the policy fields naming the grant a door needs (one, or an array meaning any of), a second grant and the lowest detail, in place of the role (suite contract version 2); the job tool runs under the caller's detail |
 
 The engine's test (`engine/crates/nils/tests/contracts.rs`) holds the
 operation list to the engine's own and every input schema to what a live
