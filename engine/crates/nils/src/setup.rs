@@ -625,34 +625,26 @@ pub(crate) fn card_advice(memory_gb: Option<f64>) -> Vec<String> {
     }
 }
 
-/// Ask the machine what card it has: NVIDIA first, then AMD, then the
-/// unified memory of an Apple machine. Nothing here installs anything.
-pub(crate) fn probe_card() -> Option<Card> {
+/// Ask the machine what cards it has: every NVIDIA card, else every AMD
+/// card, else the unified memory of an Apple machine. Nothing here installs
+/// anything.
+pub(crate) fn probe_cards() -> Vec<Card> {
     if let Some(out) = run_quiet(
         "nvidia-smi",
         &[
             "--query-gpu=name,memory.total",
             "--format=csv,noheader,nounits",
         ],
-    ) && let Some(line) = out.lines().next()
-        && let Some((name, mib)) = line.split_once(',')
-    {
-        let mib: f64 = mib.trim().parse().unwrap_or(0.0);
-        return Some(Card {
-            name: name.trim().to_string(),
-            memory_gb: mib / 1024.0,
-        });
+    ) {
+        let cards = nvidia_cards(&out);
+        if !cards.is_empty() {
+            return cards;
+        }
     }
     if let Some(out) = run_quiet("rocm-smi", &["--showmeminfo", "vram", "--csv"]) {
-        let bytes = out
-            .split(|c: char| !c.is_ascii_digit())
-            .filter_map(|n| n.parse::<f64>().ok())
-            .find(|n| *n > 1e9);
-        if let Some(bytes) = bytes {
-            return Some(Card {
-                name: "an AMD card".to_string(),
-                memory_gb: bytes / 1024.0 / 1024.0 / 1024.0,
-            });
+        let cards = amd_cards(&out);
+        if !cards.is_empty() {
+            return cards;
         }
     }
     if cfg!(target_os = "macos") {
@@ -663,13 +655,96 @@ pub(crate) fn probe_card() -> Option<Card> {
             && let Some(mem) = run_quiet("sysctl", &["-n", "hw.memsize"])
             && let Ok(bytes) = mem.trim().parse::<f64>()
         {
-            return Some(Card {
+            return vec![Card {
                 name: format!("{name}, unified memory"),
                 memory_gb: bytes / 1024.0 / 1024.0 / 1024.0,
-            });
+            }];
         }
     }
-    None
+    Vec::new()
+}
+
+/// The one card a caller that wants one reads: the card with the most
+/// memory.
+pub(crate) fn probe_card() -> Option<Card> {
+    largest(&probe_cards())
+}
+
+/// The card with the most memory; the first of those alike.
+pub(crate) fn largest(cards: &[Card]) -> Option<Card> {
+    cards
+        .iter()
+        .fold(None, |best: Option<&Card>, c| match best {
+            Some(b) if b.memory_gb >= c.memory_gb => Some(b),
+            _ => Some(c),
+        })
+        .cloned()
+}
+
+/// Every card `nvidia-smi --query-gpu=name,memory.total
+/// --format=csv,noheader,nounits` lists, one a line, in MiB; a line that is
+/// not a name and a size names no card, and a size that does not read is
+/// none.
+fn nvidia_cards(out: &str) -> Vec<Card> {
+    out.lines()
+        .filter_map(|line| line.rsplit_once(','))
+        .map(|(name, mib)| Card {
+            name: name.trim().to_string(),
+            memory_gb: mib.trim().parse::<f64>().unwrap_or(0.0) / 1024.0,
+        })
+        .filter(|c| !c.name.is_empty())
+        .collect()
+}
+
+/// Every card `rocm-smi --showmeminfo vram --csv` names: a line whose first
+/// number past a gigabyte is the card's memory, in bytes.
+fn amd_cards(out: &str) -> Vec<Card> {
+    out.lines()
+        .filter_map(|line| {
+            line.split(|c: char| !c.is_ascii_digit())
+                .filter_map(|n| n.parse::<f64>().ok())
+                .find(|n| *n > 1e9)
+        })
+        .map(|bytes| Card {
+            name: "an AMD card".to_string(),
+            memory_gb: bytes / 1024.0 / 1024.0 / 1024.0,
+        })
+        .collect()
+}
+
+/// The memory of every card, in gigabytes.
+fn total_gb(cards: &[Card]) -> f64 {
+    cards.iter().map(|c| c.memory_gb).sum()
+}
+
+/// The cards as the plan names them: each name once, with how many there are
+/// when more than one, and the memory of them all, as in
+/// `2 × NVIDIA RTX PRO 6000, 191 GB`; none without a card.
+pub(crate) fn cards_words(cards: &[Card]) -> Option<String> {
+    if cards.is_empty() {
+        return None;
+    }
+    let mut names: Vec<(&str, usize)> = Vec::new();
+    for c in cards {
+        match names.iter_mut().find(|(n, _)| *n == c.name) {
+            Some((_, count)) => *count += 1,
+            None => names.push((c.name.as_str(), 1)),
+        }
+    }
+    let mut named: Vec<String> = names
+        .iter()
+        .map(|(name, count)| match count {
+            1 => name.to_string(),
+            n => format!("{n} × {name}"),
+        })
+        .collect();
+    let last = named.pop().unwrap_or_default();
+    let all = if named.is_empty() {
+        last
+    } else {
+        format!("{} and {last}", named.join(", "))
+    };
+    Some(format!("{all}, {:.0} GB", total_gb(cards).round()))
 }
 
 // ------------------------------------------------------- the model runtime
@@ -972,6 +1047,9 @@ const STEPS: [&str; 8] = [
 struct Facts {
     podman: bool,
     docker: Result<(), DockerAbsent>,
+    /// Every card the probe found, and the one with the most memory, which
+    /// is what the advice reads.
+    cards: Vec<Card>,
     card: Option<Card>,
     /// The llama.cpp build this machine takes, where there is one.
     llama: Option<Llama>,
@@ -979,12 +1057,14 @@ struct Facts {
 
 impl Facts {
     fn probe() -> Facts {
-        let card = probe_card();
+        let cards = probe_cards();
+        let card = largest(&cards);
         Facts {
             podman: have("podman"),
             docker: docker_answers(),
             llama: llama_here(card.is_some()),
             card,
+            cards,
         }
     }
 }
@@ -3576,8 +3656,8 @@ fn questions(
     // 6. the assistant, and what this machine can do
     console.step(6);
     let card = facts.card.clone();
-    match &card {
-        Some(card) => console.note(&format!("{}, {:.0} GB", card.name, card.memory_gb.round())),
+    match cards_words(&facts.cards) {
+        Some(words) => console.note(&words),
         None => console.note("no graphics card the probe could find"),
     }
     for line in card_advice(card.as_ref().map(|c| c.memory_gb)) {
@@ -10892,6 +10972,7 @@ mod tests {
         let facts = Facts {
             podman: false,
             docker: Err(DockerAbsent::NotInstalled),
+            cards: Vec::new(),
             card: None,
             llama: None,
         };
@@ -12424,6 +12505,64 @@ mod tests {
         let plenty = card_advice(Some(48.0)).join(" ");
         assert!(plenty.starts_with("A 27B model at 4 bit fits"), "{plenty}");
         assert!(plenty.contains("stations were written against"), "{plenty}");
+    }
+
+    #[test]
+    fn every_card_is_read_and_named_once_with_the_memory_of_them_all() {
+        // several lines of nvidia-smi: two cards alike and one other
+        let out = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887\n\
+                   NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887\n\
+                   NVIDIA GeForce RTX 4090, 24564\n";
+        let cards = nvidia_cards(out);
+        assert_eq!(cards.len(), 3, "{cards:?}");
+        assert_eq!(cards[2].name, "NVIDIA GeForce RTX 4090");
+        assert!(
+            (cards[0].memory_gb - 97887.0 / 1024.0).abs() < 1e-9,
+            "{cards:?}"
+        );
+        assert!((total_gb(&cards) - 220338.0 / 1024.0).abs() < 1e-9);
+        assert_eq!(largest(&cards).unwrap().name, cards[0].name);
+        assert_eq!(
+            cards_words(&cards).as_deref(),
+            Some(
+                "2 × NVIDIA RTX PRO 6000 Blackwell Workstation Edition and NVIDIA GeForce RTX 4090, 215 GB"
+            )
+        );
+        let pair = nvidia_cards("NVIDIA RTX PRO 6000, 97887\nNVIDIA RTX PRO 6000, 97887");
+        assert_eq!(
+            cards_words(&pair).as_deref(),
+            Some("2 × NVIDIA RTX PRO 6000, 191 GB")
+        );
+        // one line reads as the one card did
+        let one = nvidia_cards("NVIDIA GeForce RTX 4090, 24564\n");
+        assert_eq!(one.len(), 1, "{one:?}");
+        assert_eq!(
+            cards_words(&one).as_deref(),
+            Some("NVIDIA GeForce RTX 4090, 24 GB")
+        );
+        assert_eq!(largest(&one).unwrap().name, "NVIDIA GeForce RTX 4090");
+        // none: nothing listed, or a line that names no card
+        assert!(nvidia_cards("").is_empty());
+        assert!(nvidia_cards("No devices were found\n").is_empty());
+        assert_eq!(total_gb(&[]), 0.0);
+        assert!(largest(&[]).is_none());
+        assert_eq!(cards_words(&[]), None);
+        // the largest is the one with the most memory, wherever it is listed
+        let unlike = nvidia_cards("NVIDIA GeForce RTX 3060, 12288\nNVIDIA GeForce RTX 4090, 24564");
+        assert_eq!(largest(&unlike).unwrap().name, "NVIDIA GeForce RTX 4090");
+        assert_eq!(
+            cards_words(&unlike).as_deref(),
+            Some("NVIDIA GeForce RTX 3060 and NVIDIA GeForce RTX 4090, 36 GB")
+        );
+        // rocm-smi: a card on each line that names its memory
+        let amd = amd_cards(
+            "device,VRAM Total Memory (B),VRAM Total Used Memory (B)\n\
+             card0,17163091968,1254912\n\
+             card1,34342961152,11653120\n",
+        );
+        assert_eq!(amd.len(), 2, "{amd:?}");
+        assert!((largest(&amd).unwrap().memory_gb - 34342961152.0 / 1073741824.0).abs() < 1e-9);
+        assert!(amd_cards("device,VRAM Total Memory (B)\n").is_empty());
     }
 
     #[test]
