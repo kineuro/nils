@@ -785,7 +785,7 @@ components:
     bearer:
       type: http
       scheme: bearer
-      description: Under --auth token a token the deployment named; under --auth oidc a token of a trusted issuer (Wave 4c section 5.3); absent under --auth off, where the caller holds every grant and detail sensitive. A token's grants and detail claims are taken as they are, a string outside the vocabulary dropped, a work grant including its see and an unknown detail read as plain; its groups add the grants --role binds them to, where a ladder step or assist stands for its set, and the highest detail holds. A caller left with no grant is refused with 403.
+      description: Under --auth token a token the deployment named; under --auth oidc a token of a trusted issuer (Wave 4c section 5.3); absent under --auth off, where the caller holds every grant and detail sensitive. A token's grants and detail claims are taken as they are, a string outside the vocabulary dropped, a work grant including its see and an unknown detail read as plain; its groups add the grants --role binds them to, where a ladder step or assist stands for its set, and the highest detail holds. A caller left with no grant is refused with 403. A trust entry that keeps subjects (`keep_subject=true` in `--oidc-trust`) takes a subject that already holds @ as the principal; any other entry qualifies a subject by the issuer's host.
   parameters:
     ceiling:
       name: X-Nils-Ceiling

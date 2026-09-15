@@ -47,7 +47,7 @@ sees. The other documents and vectors are version 1's.
 | `grants.schema.json` | replaces `entitlements.schema.json`: the grants, the detail and its order, and the ladder steps a ceiling or a binding still names |
 | `capabilities.schema.json` | the engine's caller and the person carry `grants` and `detail`, and for one release `roles` as the ladder steps up to the detail; a policy row names its `grant`, one or an array meaning any of, with `also` for a second grant a door needs and `detail` for the lowest detail |
 | `headers.schema.json` | the ceiling is still a ladder step: the caller keeps the grants its set holds and `assistant:use`, and detail is lowered to the step's |
-| `vectors/grants.json` | the ladder's sets, and how a caller is resolved from a token's claims, narrowed by a ceiling, named by a token's list, and known by its principal |
+| `vectors/grants.json` | the ladder's sets, and how a caller is resolved from a token's claims, narrowed by a ceiling, named by a token's list, and known by its principal, which only a trust entry that keeps subjects takes as the token spells it |
 
 A ladder name stands for its set wherever one is still met: a `--role`
 binding, a named token's list, a legacy entitlement, a ceiling. The engine
