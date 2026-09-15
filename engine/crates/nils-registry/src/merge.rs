@@ -99,6 +99,14 @@ impl Merged {
     }
 }
 
+/// What the registry's transaction of a merge produced.
+struct RegistryPart {
+    moved: BTreeMap<&'static str, u64>,
+    closed: u64,
+    provisional: u64,
+    audit: i64,
+}
+
 fn subject(registry: &mut Store, id: i64) -> Result<Subject, Error> {
     linkage::subjects_by_id(registry, &[id])?
         .into_iter()
@@ -133,7 +141,7 @@ pub fn merge(
     }
     let now = now_iso();
     registry.begin()?;
-    let written = (|| -> Result<(BTreeMap<&'static str, u64>, u64, u64, i64), Error> {
+    let written = (|| -> Result<RegistryPart, Error> {
         let d = registry.dialect();
         // an alias membership that duplicates an open one of the canonical
         // closes; the rest move
@@ -156,7 +164,10 @@ pub fn merge(
         )?;
         let mut moved = BTreeMap::new();
         for (name, handling) in SUBJECT_TABLES {
-            if crate::schema::linkage_tables().iter().any(|t| t.name == *name) {
+            if crate::schema::linkage_tables()
+                .iter()
+                .any(|t| t.name == *name)
+            {
                 continue;
             }
             let n = match handling {
@@ -240,9 +251,19 @@ pub fn merge(
                 })),
             },
         )?;
-        Ok((moved, closed, provisional, audit))
+        Ok(RegistryPart {
+            moved,
+            closed,
+            provisional,
+            audit,
+        })
     })();
-    let (mut moved, memberships_closed, provisional_closed, audit) = match written {
+    let RegistryPart {
+        mut moved,
+        closed: memberships_closed,
+        provisional: provisional_closed,
+        audit,
+    } = match written {
         Ok(v) => {
             registry.commit()?;
             v
@@ -288,7 +309,7 @@ pub fn merge(
             None => linkage::add_id_type(linkage, SUBJECT_CODE_TYPE, None)?.id,
         };
         let lookup = keys.lookup(SUBJECT_CODE_TYPE, &alias.code);
-        if linkage::identities_by_lookup(linkage, &[lookup.clone()])?.is_empty() {
+        if linkage::identities_by_lookup(linkage, std::slice::from_ref(&lookup))?.is_empty() {
             linkage::insert_identities(
                 linkage,
                 &[NewIdentity {
@@ -401,23 +422,74 @@ mod tests {
             "INSERT INTO subject (id, code, created_at) VALUES (1, 'canon', 't'), (2, 'alias', 't'), (3, 'other', 't')",
         );
         // one row per subject table for the alias, and a few for the canonical
-        exec(&mut registry, "INSERT INTO study (id, study_instance_uid, subject_id, first_batch_id) VALUES (10, 'S.1', 2, 1), (11, 'S.2', 1, 1)");
-        exec(&mut registry, "INSERT INTO series (id, series_instance_uid, study_id, subject_id, n_instances, n_stacks, first_batch_id) VALUES (20, 'R.1', 10, 2, 1, 1, 1)");
-        exec(&mut registry, "INSERT INTO stack_fingerprint (stack_id, series_id, study_id, subject_id, modality, orientation, n_instances, stack_index, stacks_in_series, job_id, epoch) VALUES (30, 20, 10, 2, 'MR', 'ax', 1, 0, 1, 1, 1)");
-        exec(&mut registry, "INSERT INTO cohort (id, name, owner, created_at) VALUES (1, 'a', 'o', 't'), (2, 'b', 'o', 't')");
-        exec(&mut registry, "INSERT INTO cohort_member (cohort_id, subject_id, joined_at, source) VALUES (1, 1, 't1', 'import'), (1, 2, 't2', 'import'), (2, 2, 't3', 'import')");
-        exec(&mut registry, "INSERT INTO disease (id, name) VALUES (1, 'd')");
-        exec(&mut registry, "INSERT INTO subject_disease (subject_id, disease_id, created_at) VALUES (2, 1, 't')");
-        exec(&mut registry, "INSERT INTO observation_type (id, name, category, is_primary) VALUES (1, 'k', 'c', 0)");
-        exec(&mut registry, "INSERT INTO event (subject_id, observation_type_id, event_date, created_at) VALUES (2, 1, '2020-01-01', 't')");
-        exec(&mut registry, "INSERT INTO pick (model, role, subject_id, session_day, scheme, reference, pack, pack_version, actor, author_kind, decided_at) VALUES ('m', 'r', 2, '2020-01-01', 's', 'ref', 'mri', '1', 'a', 'agent', 't')");
-        exec(&mut registry, "INSERT INTO handover_subject (archive_id, subject_id, code, files, bytes) VALUES (1, 2, 'alias', 1, 1)");
-        exec(&mut registry, "INSERT INTO session_cache (id, subject_id, window_days, timeline_digest, first, last, n_studies, epoch, built_at) VALUES (40, 2, 30, 'x', '2020-01-01', '2020-01-01', 1, 1, 't'), (41, 1, 30, 'y', '2020-02-01', '2020-02-01', 1, 1, 't'), (42, 3, 30, 'z', '2020-02-01', '2020-02-01', 1, 1, 't')");
-        exec(&mut registry, "INSERT INTO session_cache_study (session_id, study_id, window_days) VALUES (40, 10, 30), (41, 11, 30)");
-        exec(&mut registry, "INSERT INTO session_label (session_id, scheme_digest, flagged) VALUES (40, 'd', 0)");
-        exec(&mut registry, "INSERT INTO handle_member (handle_id, position, key, subject_id) VALUES (1, 0, 2, 2)");
-        exec(&mut registry, "INSERT INTO values_member (source_id, position, subject_id) VALUES (1, 0, 2)");
-        exec(&mut registry, "INSERT INTO decision (scope, ref, axis, actor, author_kind, decided_at) VALUES ('subject', '2', 'sex', 'a', 'person', 't'), ('stack', '2', 'x', 'a', 'person', 't')");
+        exec(
+            &mut registry,
+            "INSERT INTO study (id, study_instance_uid, subject_id, first_batch_id) VALUES (10, 'S.1', 2, 1), (11, 'S.2', 1, 1)",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO series (id, series_instance_uid, study_id, subject_id, n_instances, n_stacks, first_batch_id) VALUES (20, 'R.1', 10, 2, 1, 1, 1)",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO stack_fingerprint (stack_id, series_id, study_id, subject_id, modality, orientation, n_instances, stack_index, stacks_in_series, job_id, epoch) VALUES (30, 20, 10, 2, 'MR', 'ax', 1, 0, 1, 1, 1)",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO cohort (id, name, owner, created_at) VALUES (1, 'a', 'o', 't'), (2, 'b', 'o', 't')",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO cohort_member (cohort_id, subject_id, joined_at, source) VALUES (1, 1, 't1', 'import'), (1, 2, 't2', 'import'), (2, 2, 't3', 'import')",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO disease (id, name) VALUES (1, 'd')",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO subject_disease (subject_id, disease_id, created_at) VALUES (2, 1, 't')",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO observation_type (id, name, category, is_primary) VALUES (1, 'k', 'c', 0)",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO event (subject_id, observation_type_id, event_date, created_at) VALUES (2, 1, '2020-01-01', 't')",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO pick (model, role, subject_id, session_day, scheme, reference, pack, pack_version, actor, author_kind, decided_at) VALUES ('m', 'r', 2, '2020-01-01', 's', 'ref', 'mri', '1', 'a', 'agent', 't')",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO handover_subject (archive_id, subject_id, code, files, bytes) VALUES (1, 2, 'alias', 1, 1)",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO session_cache (id, subject_id, window_days, timeline_digest, first, last, n_studies, epoch, built_at) VALUES (40, 2, 30, 'x', '2020-01-01', '2020-01-01', 1, 1, 't'), (41, 1, 30, 'y', '2020-02-01', '2020-02-01', 1, 1, 't'), (42, 3, 30, 'z', '2020-02-01', '2020-02-01', 1, 1, 't')",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO session_cache_study (session_id, study_id, window_days) VALUES (40, 10, 30), (41, 11, 30)",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO session_label (session_id, scheme_digest, flagged) VALUES (40, 'd', 0)",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO handle_member (handle_id, position, key, subject_id) VALUES (1, 0, 2, 2)",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO values_member (source_id, position, subject_id) VALUES (1, 0, 2)",
+        );
+        exec(
+            &mut registry,
+            "INSERT INTO decision (scope, ref, axis, actor, author_kind, decided_at) VALUES ('subject', '2', 'sex', 'a', 'person', 't'), ('stack', '2', 'x', 'a', 'person', 't')",
+        );
         review::raise_provisional(
             &mut registry,
             &review::Provisional {
@@ -455,7 +527,10 @@ mod tests {
             ],
         )
         .unwrap();
-        exec(&mut linkage, "INSERT INTO date_shift (subject_id, offset_days) VALUES (2, 7)");
+        exec(
+            &mut linkage,
+            "INSERT INTO date_shift (subject_id, offset_days) VALUES (2, 7)",
+        );
         // a store migrated in memory has no epoch row yet: it reads as zero
         let epoch_before = registry
             .query_opt("SELECT value FROM registry_meta WHERE key = 'epoch'", &[])
@@ -506,12 +581,21 @@ mod tests {
                 continue;
             }
             assert_eq!(
-                one(&mut registry, &format!("SELECT COUNT(*) FROM {t} WHERE subject_id = 2")),
+                one(
+                    &mut registry,
+                    &format!("SELECT COUNT(*) FROM {t} WHERE subject_id = 2")
+                ),
                 0,
                 "{t}"
             );
         }
-        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM study WHERE subject_id = 1"), 2);
+        assert_eq!(
+            one(
+                &mut registry,
+                "SELECT COUNT(*) FROM study WHERE subject_id = 1"
+            ),
+            2
+        );
         // the duplicate membership closed by the merge, the other moved open
         let rows = registry
             .query(
@@ -520,24 +604,62 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rows.len(), 3);
-        assert_eq!((rows[1].int(0).unwrap(), rows[1].int(1).unwrap(), rows[1].int(2).unwrap()), (1, 1, 1));
+        assert_eq!(
+            (
+                rows[1].int(0).unwrap(),
+                rows[1].int(1).unwrap(),
+                rows[1].int(2).unwrap()
+            ),
+            (1, 1, 1)
+        );
         assert_eq!(rows[1].text(3).unwrap(), "merge");
-        assert_eq!((rows[2].int(0).unwrap(), rows[2].int(1).unwrap(), rows[2].int(2).unwrap()), (2, 1, 0));
+        assert_eq!(
+            (
+                rows[2].int(0).unwrap(),
+                rows[2].int(1).unwrap(),
+                rows[2].int(2).unwrap()
+            ),
+            (2, 1, 0)
+        );
         // the session cache of both is gone, the other subject's stays
         assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM session_cache"), 1);
-        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM session_cache_study"), 0);
+        assert_eq!(
+            one(&mut registry, "SELECT COUNT(*) FROM session_cache_study"),
+            0
+        );
         assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM session_label"), 0);
         // the subject-scope decision moved, the stack one did not
-        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM decision WHERE scope = 'subject' AND ref = '1'"), 1);
-        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM decision WHERE scope = 'stack' AND ref = '2'"), 1);
+        assert_eq!(
+            one(
+                &mut registry,
+                "SELECT COUNT(*) FROM decision WHERE scope = 'subject' AND ref = '1'"
+            ),
+            1
+        );
+        assert_eq!(
+            one(
+                &mut registry,
+                "SELECT COUNT(*) FROM decision WHERE scope = 'stack' AND ref = '2'"
+            ),
+            1
+        );
         // the alias row stays, marked
         let row = registry
-            .query_opt("SELECT merged_into, merged_at FROM subject WHERE id = 2", &[])
+            .query_opt(
+                "SELECT merged_into, merged_at FROM subject WHERE id = 2",
+                &[],
+            )
             .unwrap()
             .unwrap();
         assert_eq!(row.int(0).unwrap(), 1);
         assert!(row.text(1).unwrap().ends_with('Z'));
-        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM subject WHERE merged_into IS NULL"), 2);
+        assert_eq!(
+            one(
+                &mut registry,
+                "SELECT COUNT(*) FROM subject WHERE merged_into IS NULL"
+            ),
+            2
+        );
         // the provisional item closed with the merge as its decision
         let item = registry
             .query_opt("SELECT status, decision FROM review_item", &[])
@@ -547,7 +669,10 @@ mod tests {
         assert!(item.text(1).unwrap().contains("canon"));
         // the audit names both codes and the why, and the epoch moved
         let audit = registry
-            .query_opt("SELECT action, principal, scope, details, job_id, epoch FROM audit", &[])
+            .query_opt(
+                "SELECT action, principal, scope, details, job_id, epoch FROM audit",
+                &[],
+            )
             .unwrap()
             .unwrap();
         assert_eq!(audit.text(0).unwrap(), "subject.merge");
@@ -567,9 +692,21 @@ mod tests {
         assert_eq!(
             values,
             [
-                ("patient-id".to_string(), "P1".to_string(), "dicom".to_string()),
-                ("patient-id".to_string(), "P2".to_string(), "dicom".to_string()),
-                ("subject-code".to_string(), "alias".to_string(), "merge".to_string()),
+                (
+                    "patient-id".to_string(),
+                    "P1".to_string(),
+                    "dicom".to_string()
+                ),
+                (
+                    "patient-id".to_string(),
+                    "P2".to_string(),
+                    "dicom".to_string()
+                ),
+                (
+                    "subject-code".to_string(),
+                    "alias".to_string(),
+                    "merge".to_string()
+                ),
             ]
         );
         assert_eq!(one(&mut linkage, "SELECT subject_id FROM date_shift"), 1);
@@ -589,7 +726,10 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(err.to_string().contains("merged into canon already"), "{err}");
+        assert!(
+            err.to_string().contains("merged into canon already"),
+            "{err}"
+        );
         assert!(
             merge(
                 &mut registry,
@@ -607,7 +747,10 @@ mod tests {
             .is_err()
         );
         // a shift on both sides keeps the canonical's
-        exec(&mut linkage, "INSERT INTO date_shift (subject_id, offset_days) VALUES (3, 9)");
+        exec(
+            &mut linkage,
+            "INSERT INTO date_shift (subject_id, offset_days) VALUES (3, 9)",
+        );
         let again = merge(
             &mut registry,
             &mut linkage,
@@ -623,7 +766,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(again.moved.get("date_shift"), Some(&0));
-        assert_eq!(one(&mut linkage, "SELECT offset_days FROM date_shift WHERE subject_id = 1"), 7);
+        assert_eq!(
+            one(
+                &mut linkage,
+                "SELECT offset_days FROM date_shift WHERE subject_id = 1"
+            ),
+            7
+        );
         assert_eq!(one(&mut linkage, "SELECT COUNT(*) FROM date_shift"), 1);
     }
 }

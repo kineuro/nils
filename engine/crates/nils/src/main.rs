@@ -33,6 +33,7 @@ mod door_client;
 mod folders;
 mod gate;
 mod grants;
+mod linkage_doors;
 mod login;
 mod mcp;
 mod places;
@@ -54,7 +55,7 @@ use nils_registry::home::{
     Config, DSN_ENV, Home, InitOptions, LINKAGE_DB, REGISTRY_DB, REGISTRY_ENV,
 };
 use nils_registry::keys::strip_newline;
-use nils_registry::linkage::{self, ImportError, ImportRow, Subkeys};
+use nils_registry::linkage::{self, Subkeys};
 use nils_registry::schema::{Type, table};
 use nils_registry::session;
 use nils_registry::{Backend, Insert, Param, Registry, Scheme, Store};
@@ -1262,12 +1263,31 @@ struct DigestArgs {
 
 #[derive(Debug, Subcommand)]
 enum LinkageCommand {
-    /// File the identifier → code pairs of a CSV, creating the subjects the codes name
+    /// File the identifier map of a CSV, in any shape, creating the subjects it names
     Import(ImportArgs),
     /// The identifier types
     IdType {
         #[command(subcommand)]
         command: IdTypeCommand,
+    },
+    /// The identifier types with how many identifiers and subjects each holds
+    Types {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Merge an alias subject into a canonical one: every row of the alias moves
+    Merge {
+        /// The canonical subject's code
+        canonical: String,
+        /// The alias subject's code
+        alias: String,
+        /// Why they are one person; written to the audit
+        #[arg(long, value_name = "TEXT")]
+        why: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
     },
     /// Decrypt the identifiers of a subject; every read is audited
     Show {
@@ -1277,7 +1297,7 @@ enum LinkageCommand {
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
     },
-    /// Record that two subjects are one person: A is canonical, B the alias
+    /// Record that two subjects are one person, A canonical and B the alias, and merge B into A
     Link {
         /// The canonical subject's code
         a: String,
@@ -1308,17 +1328,36 @@ enum LinkageCommand {
 
 #[derive(Debug, Args)]
 struct ImportArgs {
-    /// The CSV: a header row, then one identifier and its code per row
+    /// The CSV: a header row, then one subject per row
     csv: PathBuf,
-    /// The type the identifiers are filed under
+    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the code derives from it), HEADER=code or HEADER=ignore; without any, the two flags below name the columns
+    #[arg(long, value_name = "HEADER=ROLE")]
+    column: Vec<String>,
+    /// The type the identifiers are filed under, without --column
     #[arg(long, default_value = "patient-id", value_name = "NAME")]
     id_type: String,
-    /// The header of the identifier column
+    /// The header of the identifier column, without --column
     #[arg(long, default_value = "identifier", value_name = "HEADER")]
     id_column: String,
-    /// The header of the code column
+    /// The header of the code column, without --column
     #[arg(long, default_value = "code", value_name = "HEADER")]
     code_column: String,
+    /// Make the types the columns name that the store has not got
+    #[arg(long)]
+    make_types: bool,
+    /// Print the report and write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// The dataset the map is for, by place name; recorded, never a filter
+    #[arg(long, value_name = "NAME")]
+    place: Option<String>,
+    /// Machine-readable output: the report as one JSON document
+    #[arg(long)]
+    json: bool,
+    /// Delete the CSV when the import ends, however it ends: the imports
+    /// door writes one for a job and wants it gone
+    #[arg(long, hide = true)]
+    consume: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -3275,6 +3314,48 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
                 Ok(())
             }
         },
+        LinkageCommand::Types { json } => {
+            let types = linkage::id_type_counts(&mut store)?;
+            if json {
+                let doc: Vec<_> = types.iter().map(|t| t.as_json()).collect();
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+                return Ok(());
+            }
+            println!(
+                "{:>3}  {:<24} {:>11} {:>9}  description",
+                "id", "name", "identifiers", "subjects"
+            );
+            for t in &types {
+                println!(
+                    "{:>3}  {:<24} {:>11} {:>9}  {}",
+                    t.id,
+                    t.name,
+                    t.identifiers,
+                    t.subjects,
+                    t.description.as_deref().unwrap_or("")
+                );
+            }
+            Ok(())
+        }
+        LinkageCommand::Merge {
+            canonical,
+            alias,
+            why,
+            json,
+        } => {
+            let canonical_id = subject_of(&mut registry, &canonical)?;
+            let alias_id = subject_of(&mut registry, &alias)?;
+            let merged = merge_subjects(&mut registry, &mut store, canonical_id, alias_id, &why)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&merged.as_json()).unwrap_or_default()
+                );
+            } else {
+                println!("{}", merged_line(&merged));
+            }
+            Ok(())
+        }
         LinkageCommand::Show { code, why } => {
             let subject = subject_of(&mut registry, &code)?;
             let keys = Subkeys::derive(&registry.pseudonym_key()?);
@@ -3285,7 +3366,21 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
                 serde_json::json!({ "subject": subject, "identifiers": shown.len() }),
                 why.as_ref().map(|w| serde_json::json!({ "why": w })),
             )?;
-            println!("subject {code} (id {subject})");
+            let merged_into = linkage::subjects_by_id(registry.store(), &[subject])?
+                .into_iter()
+                .next()
+                .and_then(|s| s.merged_into);
+            match merged_into {
+                Some(into) => {
+                    let into = linkage::subjects_by_id(registry.store(), &[into])?
+                        .into_iter()
+                        .next()
+                        .map(|s| s.code)
+                        .unwrap_or_else(|| format!("#{into}"));
+                    println!("subject {code} (id {subject}), merged into {into}");
+                }
+                None => println!("subject {code} (id {subject})"),
+            }
             if shown.is_empty() {
                 println!("  no identifiers");
             }
@@ -3345,6 +3440,10 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
                 Some(serde_json::json!({ "evidence": evidence })),
             )?;
             println!("linked {b} to {a} (linkage {id})");
+            // record 26 §6: a later link merges
+            let merged =
+                merge_subjects(&mut registry, &mut store, subject_a, subject_b, &evidence)?;
+            println!("{}", merged_line(&merged));
             Ok(())
         }
         LinkageCommand::Unlink { id } => {
@@ -3365,6 +3464,86 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
             purge(&mut registry, &mut store, subject.as_deref(), all, yes)
         }
     }
+}
+
+/// `nils linkage merge`, and the merge a link ends with (record 26 §6):
+/// recorded as a `linkage-merge` job, adopting the queued row when a
+/// worker runs it, and its report is the job's result.
+fn merge_subjects(
+    registry: &mut Registry,
+    store: &mut Store,
+    canonical: i64,
+    alias: i64,
+    why: &str,
+) -> Result<nils_registry::merge::Merged, Exit> {
+    use nils_registry::job::{self, Claim, State};
+    let keys = Subkeys::derive(&registry.pseudonym_key()?);
+    let job_id = job::claim(
+        registry.store(),
+        &Claim {
+            kind: "linkage-merge",
+            name: "merge",
+            args: serde_json::json!({ "canonical": canonical, "alias": alias, "actor": actor() }),
+        },
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    let merged = nils_registry::merge::merge(
+        registry.store(),
+        store,
+        &keys,
+        &nils_registry::merge::Ask {
+            canonical,
+            alias,
+            why,
+            actor: &actor(),
+            job_id: Some(job_id),
+            place_id: None,
+        },
+    );
+    let merged = match merged {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = job::finish(
+                registry.store(),
+                job_id,
+                State::Failed,
+                Some(&e.to_string()),
+            );
+            return Err(fail(e.to_string()));
+        }
+    };
+    job::set_result(registry.store(), job_id, &merged.as_json())
+        .map_err(|e| fail(e.to_string()))?;
+    job::finish(registry.store(), job_id, State::Done, None).map_err(|e| fail(e.to_string()))?;
+    registry.refresh_meta()?;
+    Ok(merged)
+}
+
+fn merged_line(m: &nils_registry::merge::Merged) -> String {
+    let moved: Vec<String> = m
+        .moved
+        .iter()
+        .filter(|(_, n)| **n > 0)
+        .map(|(t, n)| format!("{n} {t}"))
+        .collect();
+    format!(
+        "merged {} into {}: {}{}{}",
+        m.alias.code,
+        m.canonical.code,
+        if moved.is_empty() {
+            "no rows to move".to_string()
+        } else {
+            moved.join(", ")
+        },
+        match m.memberships_closed {
+            0 => String::new(),
+            n => format!("; {n} duplicate membership(s) closed"),
+        },
+        match m.provisional_closed {
+            0 => String::new(),
+            _ => "; the provisional item closed".to_string(),
+        }
+    )
 }
 
 /// `nils linkage purge`: what it would delete is said first, and nothing is
@@ -3861,6 +4040,20 @@ fn about(item: &serde_json::Value) -> String {
             s(&e["reason"]),
             e["batch_id"]
         ),
+        "identity.unmapped" => format!(
+            "dataset {}, shape {} under {}, {} file(s) held",
+            s(&r["place"]),
+            s(&r["shape"]),
+            s(&r["id_type"]),
+            e["files"]
+        ),
+        "identity.provisional" => format!(
+            "subject {} coded from an unmapped {} (shape {}) in dataset {}",
+            s(&r["code"]),
+            s(&e["id_type"]),
+            s(&e["shape"]),
+            s(&e["place"])
+        ),
         _ if s(&item["scope"]) == "group" => format!(
             "{} stack(s): {} = {} ({})",
             item["members"],
@@ -3934,6 +4127,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let fingerprints = count_of(store, "stack_fingerprint", "")?;
     let classified = count_of(store, "classification", "")?;
     let decisions = count_of(store, "decision", " WHERE withdrawn_at IS NULL")?;
+    // custody is what is retained: a merged subject's row is still a row
     let subjects = count_of(store, "subject", "")?;
     let studies = count_of(store, "study", "")?;
     let series = count_of(store, "series", "")?;
@@ -4071,7 +4265,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "kept": "until purged; a purged identifier is filed again only when its file is parsed again (changed, or new), not by a digest that finds the file unchanged",
             "commands": {
                 "read": ["nils linkage show <code> [--why <text>] (every read is audited)"],
-                "change": ["nils digest <root>", "nils linkage import <csv>", "nils linkage link | unlink", "nils linkage id-type add"],
+                "change": ["nils digest <root>", "nils linkage import <csv>", "nils linkage link | unlink | merge", "nils linkage id-type add"],
                 "export": ["none in Wave 1"],
                 "delete": "nils linkage purge --subject <code> | --all (the read audit and the id types stay)",
             },
@@ -4564,8 +4758,21 @@ fn subject_of(registry: &mut Registry, code: &str) -> Result<i64, Exit> {
         .ok_or_else(|| fail(format!("no subject with code {code}")))
 }
 
-/// `nils linkage import`: the CSV read whole, checked whole, then filed.
+/// `nils linkage import`: the CSV read whole, checked whole, then filed,
+/// in any shape (record 26 §5). Recorded as a `linkage-import` job whose
+/// result is the report; under a worker it adopts the queued row. A CSV
+/// the imports door wrote is removed when the import ends, however it ends.
 fn import(registry: &mut Registry, store: &mut Store, args: ImportArgs) -> Result<(), Exit> {
+    let outcome = import_map(registry, store, &args);
+    if args.consume {
+        let _ = fs::remove_file(&args.csv);
+    }
+    outcome
+}
+
+fn import_map(registry: &mut Registry, store: &mut Store, args: &ImportArgs) -> Result<(), Exit> {
+    use nils_registry::identity_map::{self, Column, Derive, Map, Role, Row};
+    use nils_registry::job::{self, Claim, State};
     let mut reader = csv::ReaderBuilder::new()
         .trim(csv::Trim::All)
         .flexible(true)
@@ -4584,51 +4791,174 @@ fn import(registry: &mut Registry, store: &mut Store, args: ImportArgs) -> Resul
             ))
         })
     };
-    let id_col = column(&args.id_column, "--id-column")?;
-    let code_col = column(&args.code_column, "--code-column")?;
+    // the roles, by column: --column names them, else the first shape's
+    // three flags do
+    let mut roles: Vec<Role> = vec![Role::Ignore; headers.len()];
+    if args.column.is_empty() {
+        roles[column(&args.id_column, "--id-column")?] = Role::Identifier(args.id_type.clone());
+        roles[column(&args.code_column, "--code-column")?] = Role::Code;
+    } else {
+        for spec in &args.column {
+            let (header, role) = spec
+                .split_once('=')
+                .ok_or_else(|| usage(format!("--column {spec}: HEADER=ROLE")))?;
+            let role = Role::parse(role).map_err(|e| usage(format!("--column {spec}: {e}")))?;
+            let i = column(header.trim(), "--column")?;
+            if roles[i] != Role::Ignore {
+                return Err(usage(format!(
+                    "--column {spec}: {} was given a role already",
+                    header.trim()
+                )));
+            }
+            roles[i] = role;
+        }
+    }
+    let columns: Vec<Column> = headers
+        .iter()
+        .zip(roles)
+        .map(|(h, role)| Column {
+            header: h.to_string(),
+            role,
+        })
+        .collect();
     let mut rows = Vec::new();
     for (i, record) in reader.records().enumerate() {
         let line = i + 2;
         let record =
             record.map_err(|e| usage(format!("{} line {line}: {e}", args.csv.display())))?;
-        rows.push(ImportRow {
+        rows.push(Row {
             line,
-            identifier: record.get(id_col).unwrap_or("").to_string(),
-            code: record.get(code_col).unwrap_or("").to_string(),
+            cells: record.iter().map(str::to_string).collect(),
         });
     }
-    let keys = Subkeys::derive(&registry.pseudonym_key()?);
-    match linkage::import(registry.store(), store, &keys, &args.id_type, &rows) {
-        Ok(report) => {
-            audit(
-                registry,
-                nils_registry::audit::Action::LinkageImport,
-                serde_json::json!({
-                    "id_type": args.id_type, "rows": report.rows,
-                    "subjects_created": report.subjects_created,
-                    "identities_added": report.identities_added,
-                    "unchanged": report.unchanged,
-                    "second_identifiers": report.second_identifiers,
-                }),
-                None,
-            )?;
-            println!(
-                "imported {} row(s) as {}: {} subject(s) created, {} identifier(s) filed, {} already filed{}",
-                report.rows,
-                args.id_type,
-                report.subjects_created,
-                report.identities_added,
-                report.unchanged,
-                match report.second_identifiers {
-                    0 => String::new(),
-                    n => format!("; {n} of them a further identifier of a subject that had one"),
-                }
-            );
-            Ok(())
+    let place_id = match &args.place {
+        Some(name) => Some(
+            nils_registry::place::by_name(registry.store(), name)?
+                .ok_or_else(|| usage(format!("no place named {name}")))?
+                .id,
+        ),
+        None => None,
+    };
+    let key = registry.pseudonym_key()?;
+    let keys = Subkeys::derive(&key);
+    let derive = Derive {
+        scheme: registry.meta().pseudonym_scheme,
+        key: &key,
+        display_length: registry.meta().display_length,
+    };
+    // a dry run is not a job: it writes nothing, so nothing records it
+    let job_id = if args.dry_run {
+        None
+    } else {
+        Some(
+            job::claim(
+                registry.store(),
+                &Claim {
+                    kind: "linkage-import",
+                    name: args.place.as_deref().unwrap_or("identifier map"),
+                    args: serde_json::json!({
+                        "rows": rows.len(), "columns": columns.iter().map(|c| c.role.name()).collect::<Vec<_>>(),
+                        "make_types": args.make_types, "place": args.place, "actor": actor(),
+                    }),
+                },
+            )
+            .map_err(|e| fail(e.to_string()))?,
+        )
+    };
+    let report = identity_map::import(
+        registry.store(),
+        store,
+        &keys,
+        Some(&derive),
+        &Map {
+            columns: &columns,
+            rows: &rows,
+            dry_run: args.dry_run,
+            make_types: args.make_types,
+            place_id,
+            actor: &actor(),
+            job_id,
+        },
+    );
+    let report = match report {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(job) = job_id {
+                let _ = job::finish(registry.store(), job, State::Failed, Some(&e.to_string()));
+            }
+            return Err(fail(e.to_string()));
         }
-        Err(e @ ImportError::Faults(_)) => Err(fail(e.to_string().trim_end().to_string())),
-        Err(ImportError::Store(e)) => Err(fail(e.to_string())),
+    };
+    registry.refresh_meta()?;
+    if let Some(job) = job_id {
+        job::set_result(registry.store(), job, &report.as_json())
+            .map_err(|e| fail(e.to_string()))?;
+        let (state, error) = if report.conflicts.is_empty() {
+            (State::Done, None)
+        } else {
+            (
+                State::Failed,
+                Some(format!(
+                    "{} row(s) refused; nothing was written",
+                    report.conflicts.len()
+                )),
+            )
+        };
+        job::finish(registry.store(), job, state, error.as_deref())
+            .map_err(|e| fail(e.to_string()))?;
     }
+    if !report.conflicts.is_empty() {
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report.as_json()).unwrap_or_default()
+            );
+        }
+        return Err(fail(report.to_string().trim_end().to_string()));
+    }
+    if report.written() {
+        audit(
+            registry,
+            nils_registry::audit::Action::LinkageImport,
+            serde_json::json!({
+                "rows": report.rows, "place": place_id,
+                "subjects": { "named": report.subjects.named, "known": report.subjects.known, "new": report.subjects.new },
+                "identifiers": { "filed": report.identifiers.filed, "known": report.identifiers.known, "new": report.identifiers.new, "types_new": report.identifiers.types_new },
+                "held_released": report.held_released,
+                "merges": report.merges.len(),
+            }),
+            job_id.map(|j| serde_json::json!({ "job": j })),
+        )?;
+    }
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report.as_json()).unwrap_or_default()
+        );
+    } else if args.column.is_empty() && !args.dry_run {
+        // the first shape's line, as it has always read
+        println!(
+            "imported {} row(s) as {}: {} subject(s) created, {} identifier(s) filed, {} already filed{}",
+            report.rows,
+            args.id_type,
+            report.subjects.new,
+            report.identifiers.new,
+            report.identifiers.known,
+            match report.further {
+                0 => String::new(),
+                n => format!("; {n} of them a further identifier of a subject that had one"),
+            }
+        );
+        if report.held_released > 0 {
+            println!(
+                "  {} held file(s) released for the next pseudonymise",
+                report.held_released
+            );
+        }
+    } else {
+        print!("{report}");
+    }
+    Ok(())
 }
 
 fn s(v: &serde_json::Value) -> &str {

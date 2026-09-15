@@ -1143,8 +1143,13 @@ mod identity_items {
             p
         );
         assert_eq!(
-            close_provisional(&mut store, 42, "anna@lab", &serde_json::json!({"merged_into": "sub-y"}))
-                .unwrap(),
+            close_provisional(
+                &mut store,
+                42,
+                "anna@lab",
+                &serde_json::json!({"merged_into": "sub-y"})
+            )
+            .unwrap(),
             1
         );
         assert_eq!(

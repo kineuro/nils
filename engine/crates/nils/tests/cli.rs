@@ -459,10 +459,10 @@ fn import_digest_show_and_link_go_round() {
         "hospital number",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out), "added id type mrn (id 3)\n");
+    assert_eq!(stdout(&out), "added id type mrn (id 4)\n");
     let out = run(&["linkage", "id-type", "list"]);
     assert!(
-        stdout(&out).contains("  3  mrn                      hospital number"),
+        stdout(&out).contains("  4  mrn                      hospital number"),
         "{}",
         stdout(&out)
     );
@@ -581,7 +581,8 @@ fn import_digest_show_and_link_go_round() {
     assert_eq!(report["unchanged"], 4);
     assert_eq!(report["written"]["subjects_created"], 0);
 
-    // a linkage joins two subjects and can be reversed once
+    // a linkage joins two subjects, merges the alias into the canonical
+    // one (record 26), and the record can be reversed once
     let out = run(&[
         "linkage",
         "link",
@@ -591,12 +592,26 @@ fn import_digest_show_and_link_go_round() {
         "the clinic renamed P1 to P2",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(
-        stdout(&out),
-        format!("linked {p2} to legacy-0001 (linkage 1)\n")
+    let text = stdout(&out);
+    assert!(
+        text.starts_with(&format!(
+            "linked {p2} to legacy-0001 (linkage 1)\nmerged {p2} into legacy-0001: "
+        )),
+        "{text}"
     );
+    assert!(text.contains("1 study"), "{text}");
     let out = run(&["linkage", "show", "legacy-0001"]);
     let text = stdout(&out);
+    // the alias's identifier and its code moved to the canonical subject
+    assert!(
+        text.contains("  patient-id               P2   (identity "),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("  subject-code             {p2}   (identity ")),
+        "{text}"
+    );
+    assert!(text.contains(", from merge)"), "{text}");
     assert!(text.contains("linkages\n"), "{text}");
     assert!(
         text.contains(&format!("     1  canonical of {p2}   ")),
@@ -606,11 +621,14 @@ fn import_digest_show_and_link_go_round() {
     assert!(text.contains("   by tester@"), "{text}");
     assert!(text.trim_end().ends_with("   open"), "{text}");
     let out = run(&["linkage", "show", &p2]);
+    let text = stdout(&out);
     assert!(
-        stdout(&out).contains("     1  alias of legacy-0001   "),
-        "{}",
-        stdout(&out)
+        text.starts_with(&format!(
+            "subject {p2} (id 2), merged into legacy-0001\n  no identifiers\n"
+        )),
+        "{text}"
     );
+    assert!(text.contains("     1  alias of legacy-0001   "), "{text}");
     let out = run(&["linkage", "unlink", "1"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(stdout(&out), "reversed linkage 1\n");
@@ -1330,13 +1348,15 @@ fn custody_quarantine_review_and_purge_go_round() {
     let out = run(&["linkage", "show", &p2]);
     assert!(stdout(&out).contains("P2   (identity "), "{}", stdout(&out));
 
-    // with a yes the subject's identifiers and linkages go; the audit and the subject stay
+    // with a yes the subject's identifiers and linkages go; the audit and
+    // the subject stay. The link merged P3 into P2, so P2 holds its own
+    // identifier, P3's and P3's code.
     let out = run(&["linkage", "purge", "--subject", &p2, "--yes"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         stdout(&out),
         format!(
-            "purged 1 identifier(s) and 1 linkage(s) of subject {p2}; the read audit and the registry's subjects stay, and a file parsed again files its identifier again (an unchanged file does not)\n"
+            "purged 3 identifier(s) and 1 linkage(s) of subject {p2}; the read audit and the registry's subjects stay, and a file parsed again files its identifier again (an unchanged file does not)\n"
         )
     );
     let out = run(&["linkage", "show", &p2]);
@@ -1345,7 +1365,11 @@ fn custody_quarantine_review_and_purge_go_round() {
     assert!(text.contains("  no identifiers\n"), "{text}");
     assert!(!text.contains("linkages"), "{text}");
     let out = run(&["linkage", "show", &p3]);
-    assert!(stdout(&out).contains("P3   (identity "), "{}", stdout(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains(&format!("), merged into {p2}\n  no identifiers\n")),
+        "{text}"
+    );
     let out = run(&["custody", "--json"]);
     let doc = json(&out);
     let by_name = |name: &str| {
@@ -1357,15 +1381,15 @@ fn custody_quarantine_review_and_purge_go_round() {
             .unwrap()
             .clone()
     };
-    assert_eq!(by_name("linkage store")["counts"]["identities"], 2);
+    assert_eq!(by_name("linkage store")["counts"]["identities"], 1);
     assert_eq!(by_name("linkage store")["counts"]["open_linkages"], 0);
     assert_eq!(
         by_name("linkage store")["counts"]["audited_reads"],
-        2,
+        3,
         "one row per identifier revealed; a show of a subject without identifiers reads nothing"
     );
     assert_eq!(by_name("registry")["counts"]["subjects"], 3);
-    assert_eq!(by_name("job records")["counts"]["jobs"], 2);
+    assert_eq!(by_name("job records")["counts"]["jobs"], 3);
 
     // an unchanged digest does not file the identifier again; a parsed file does
     let out = nils()
@@ -1408,7 +1432,7 @@ fn custody_quarantine_review_and_purge_go_round() {
     let out = run(&["linkage", "purge", "--all", "--yes"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
-        stdout(&out).starts_with("purged 3 identifier(s) and 0 linkage(s) of every subject;"),
+        stdout(&out).starts_with("purged 2 identifier(s) and 0 linkage(s) of every subject;"),
         "{}",
         stdout(&out)
     );
@@ -1416,7 +1440,7 @@ fn custody_quarantine_review_and_purge_go_round() {
     let rows = store.query("SELECT COUNT(*) FROM identity", &[]).unwrap();
     assert_eq!(rows[0].int(0).unwrap(), 0);
     let rows = store.query("SELECT COUNT(*) FROM read_audit", &[]).unwrap();
-    assert_eq!(rows[0].int(0).unwrap(), 3, "the audit survives the purge");
+    assert_eq!(rows[0].int(0).unwrap(), 4, "the audit survives the purge");
     let out = run(&["linkage", "show", &p2]);
     assert!(
         stdout(&out).contains("  no identifiers\n"),
@@ -1424,17 +1448,17 @@ fn custody_quarantine_review_and_purge_go_round() {
         stdout(&out)
     );
     let rows = store.query("SELECT COUNT(*) FROM id_type", &[]).unwrap();
-    assert_eq!(rows[0].int(0).unwrap(), 2);
+    assert_eq!(rows[0].int(0).unwrap(), 3);
     // status lists the purges as the jobs they were
     let out = run(&["status", "--json"]);
     let doc = json(&out);
     assert_eq!(doc["jobs"].as_array().unwrap().len(), 0, "{doc}");
     let purges = doc["other_jobs"].as_array().unwrap();
-    assert_eq!(purges.len(), 2, "{doc}");
+    assert_eq!(purges.len(), 3, "{doc}");
     assert_eq!(purges[0]["kind"], "linkage-purge");
     assert_eq!(purges[0]["name"], "every subject");
     assert_eq!(purges[0]["state"], "done");
-    assert_eq!(purges[0]["args"]["identities"], 3);
+    assert_eq!(purges[0]["args"]["identities"], 2);
     // Wave 4a section 9.2: the actor is a principal, user@node.
     assert!(
         purges[0]["args"]["actor"]
@@ -1444,9 +1468,12 @@ fn custody_quarantine_review_and_purge_go_round() {
     );
     assert_eq!(purges[1]["name"], format!("subject {p2}"));
     assert_eq!(purges[1]["args"]["linkages"], 1);
+    // and the merge the link ended with, as the job it was
+    assert_eq!(purges[2]["kind"], "linkage-merge");
+    assert_eq!(purges[2]["state"], "done");
     let out = run(&["status"]);
     let text = stdout(&out);
-    assert!(text.contains("other jobs (last 2)\n"), "{text}");
+    assert!(text.contains("other jobs (last 3)\n"), "{text}");
     assert!(
         text.contains("   linkage-purge every subject   done on "),
         "{text}"

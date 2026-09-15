@@ -267,7 +267,11 @@ impl Report {
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let verb = if self.written() { "filed" } else { "would file" };
+        let verb = if self.written() {
+            "filed"
+        } else {
+            "would file"
+        };
         writeln!(
             f,
             "{} row(s): {} subject(s) named, {} known, {} new; {} identifier(s) {verb}, {} known, {} new{}",
@@ -350,11 +354,7 @@ pub fn import(
         ..Report::default()
     };
     // the columns
-    let codes = map
-        .columns
-        .iter()
-        .filter(|c| c.role == Role::Code)
-        .count();
+    let codes = map.columns.iter().filter(|c| c.role == Role::Code).count();
     let canonicals = map
         .columns
         .iter()
@@ -641,7 +641,9 @@ pub fn import(
                 let holder = code_of(&subjects, e.subject_id);
                 if holder != r.code
                     && !merges.iter().any(|m| m.alias == holder)
-                    && !subjects.get(&e.subject_id).is_some_and(|s| s.merged_into.is_some())
+                    && !subjects
+                        .get(&e.subject_id)
+                        .is_some_and(|s| s.merged_into.is_some())
                 {
                     merges.push(Merge {
                         alias: holder,
@@ -729,13 +731,10 @@ pub fn import(
         }
     }
     for m in &report.merges {
-        let alias = *ids.get(&m.alias).or_else(|| {
-            subjects
-                .values()
-                .find(|s| s.code == m.alias)
-                .map(|s| &s.id)
-        })
-        .ok_or_else(|| Error::Message(format!("subject {} is not in the registry", m.alias)))?;
+        let alias = *ids
+            .get(&m.alias)
+            .or_else(|| subjects.values().find(|s| s.code == m.alias).map(|s| &s.id))
+            .ok_or_else(|| Error::Message(format!("subject {} is not in the registry", m.alias)))?;
         let canonical = *ids
             .get(&m.canonical)
             .ok_or_else(|| Error::Message(format!("subject {} was not created", m.canonical)))?;
@@ -965,9 +964,20 @@ mod tests {
     fn the_first_shape_files_codes_as_given_and_again_changes_nothing() {
         let (mut registry, mut linkage, keys) = stores();
         // v0's file: PatientID, subject_code
-        let cols = columns(&[("PatientID", "identifier:patient-id"), ("subject_code", "code")]);
+        let cols = columns(&[
+            ("PatientID", "identifier:patient-id"),
+            ("subject_code", "code"),
+        ]);
         let data = rows(&[&["P1", "legacy-0001"], &["P2", "legacy-0002"]]);
-        let r = run(&mut registry, &mut linkage, &keys, &cols, &data, false, false);
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            false,
+        );
         assert!(r.written());
         assert_eq!(
             (
@@ -983,11 +993,29 @@ mod tests {
         );
         assert_eq!(codes(&mut registry), ["legacy-0001", "legacy-0002"]);
         assert_eq!(
-            count(&mut registry, "SELECT COUNT(*) FROM subject WHERE code_digest IS NULL"),
+            count(
+                &mut registry,
+                "SELECT COUNT(*) FROM subject WHERE code_digest IS NULL"
+            ),
             2
         );
-        let again = run(&mut registry, &mut linkage, &keys, &cols, &data, false, false);
-        assert_eq!((again.subjects.known, again.identifiers.known, again.identifiers.new), (2, 2, 0));
+        let again = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            false,
+        );
+        assert_eq!(
+            (
+                again.subjects.known,
+                again.identifiers.known,
+                again.identifiers.new
+            ),
+            (2, 2, 0)
+        );
         assert_eq!(count(&mut linkage, "SELECT COUNT(*) FROM identity"), 2);
         let text = again.to_string();
         assert!(text.starts_with("2 row(s): 2 subject(s) named, 2 known, 0 new; 2 identifier(s) filed, 2 known, 0 new\n"), "{text}");
@@ -1001,9 +1029,21 @@ mod tests {
             ("person", "canonical:registry-id"),
             ("note", "ignore"),
         ]);
-        let data = rows(&[&["S-1", "PID-0001", "x"], &["S-2", "PID-0001", ""], &["S-3", "PID-0002", ""]]);
+        let data = rows(&[
+            &["S-1", "PID-0001", "x"],
+            &["S-2", "PID-0001", ""],
+            &["S-3", "PID-0002", ""],
+        ]);
         // the types are new: refused without --make-types, and nothing written
-        let r = run(&mut registry, &mut linkage, &keys, &cols, &data, false, false);
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            false,
+        );
         assert_eq!(r.conflicts.len(), 2, "{r}");
         assert!(matches!(r.conflicts[0].why, Why::UnknownType { .. }));
         assert_eq!(r.conflicts[0].row, 1);
@@ -1011,7 +1051,15 @@ mod tests {
         assert_eq!(count(&mut registry, "SELECT COUNT(*) FROM subject"), 0);
         assert_eq!(count(&mut linkage, "SELECT COUNT(*) FROM id_type"), 3);
         // with it: the fixture code of §7.1 for PID-0001
-        let r = run(&mut registry, &mut linkage, &keys, &cols, &data, false, true);
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            true,
+        );
         assert!(r.written(), "{r}");
         assert_eq!(r.identifiers.types_new, 2);
         assert_eq!((r.subjects.new, r.identifiers.new), (2, 5));
@@ -1038,10 +1086,8 @@ mod tests {
             .int(0)
             .unwrap();
         let shown = linkage::reveal(&mut linkage, &keys, one, "tester", None).unwrap();
-        let mut values: Vec<(String, String)> = shown
-            .into_iter()
-            .map(|r| (r.id_type, r.value))
-            .collect();
+        let mut values: Vec<(String, String)> =
+            shown.into_iter().map(|r| (r.id_type, r.value)).collect();
         values.sort();
         assert_eq!(
             values,
@@ -1052,8 +1098,24 @@ mod tests {
             ]
         );
         // the same map again is all known
-        let again = run(&mut registry, &mut linkage, &keys, &cols, &data, false, true);
-        assert_eq!((again.subjects.known, again.identifiers.known, again.identifiers.new, again.identifiers.types_new), (2, 5, 0, 0));
+        let again = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            true,
+        );
+        assert_eq!(
+            (
+                again.subjects.known,
+                again.identifiers.known,
+                again.identifiers.new,
+                again.identifiers.types_new
+            ),
+            (2, 5, 0, 0)
+        );
     }
 
     #[test]
@@ -1066,8 +1128,19 @@ mod tests {
             ("old", "identifier:old-number"),
             ("older", "identifier:old-number"),
         ]);
-        let data = rows(&[&["sub-a", "P1", "19000101-0001", ""], &["sub-b", "P2", "", ""]]);
-        let r = run(&mut registry, &mut linkage, &keys, &cols, &data, false, false);
+        let data = rows(&[
+            &["sub-a", "P1", "19000101-0001", ""],
+            &["sub-b", "P2", "", ""],
+        ]);
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            false,
+        );
         assert!(r.written(), "{r}");
         assert_eq!((r.subjects.new, r.identifiers.new, r.further), (2, 3, 0));
         // a row with no code and one known identifier adds the others to that subject
@@ -1077,17 +1150,49 @@ mod tests {
             ("older", "identifier:old-number"),
         ]);
         let data = rows(&[&["P1", "19000101-0002", "19000101-0003"]]);
-        let r = run(&mut registry, &mut linkage, &keys, &more, &data, false, false);
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &more,
+            &data,
+            false,
+            false,
+        );
         assert!(r.written(), "{r}");
-        assert_eq!((r.subjects.named, r.subjects.known, r.subjects.new), (1, 1, 0));
-        assert_eq!((r.identifiers.known, r.identifiers.new, r.further), (1, 2, 2));
+        assert_eq!(
+            (r.subjects.named, r.subjects.known, r.subjects.new),
+            (1, 1, 0)
+        );
+        assert_eq!(
+            (r.identifiers.known, r.identifiers.new, r.further),
+            (1, 2, 2)
+        );
         let shown = linkage::reveal(&mut linkage, &keys, 1, "tester", None).unwrap();
         assert_eq!(shown.len(), 4);
         // one no subject holds resolves to nothing; two of two subjects is a conflict
-        let data = rows(&[&["P9", "", ""], &["P1", "", ""], &["P2", "19000101-0001", ""]]);
-        let r = run(&mut registry, &mut linkage, &keys, &more, &data, false, false);
+        let data = rows(&[
+            &["P9", "", ""],
+            &["P1", "", ""],
+            &["P2", "19000101-0001", ""],
+        ]);
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &more,
+            &data,
+            false,
+            false,
+        );
         assert_eq!(r.conflicts.len(), 2, "{r}");
-        assert_eq!(r.conflicts[0], Conflict { row: 2, why: Why::Unresolved });
+        assert_eq!(
+            r.conflicts[0],
+            Conflict {
+                row: 2,
+                why: Why::Unresolved
+            }
+        );
         assert_eq!(
             r.conflicts[1],
             Conflict {
@@ -1120,7 +1225,15 @@ mod tests {
             &["", "sub-seven"],
             &["P8", "sub-eight"],
         ]);
-        let r = run(&mut registry, &mut linkage, &keys, &cols, &data, false, false);
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            false,
+        );
         assert_eq!(
             r.conflicts,
             vec![
@@ -1144,8 +1257,14 @@ mod tests {
         assert_eq!(codes(&mut registry), ["sub-one"]);
         assert_eq!(count(&mut linkage, "SELECT COUNT(*) FROM identity"), 1);
         let text = r.to_string();
-        assert!(text.contains("3 row(s) refused; nothing was written:"), "{text}");
-        assert!(text.contains("line 2: the identifier already maps to subject sub-one"), "{text}");
+        assert!(
+            text.contains("3 row(s) refused; nothing was written:"),
+            "{text}"
+        );
+        assert!(
+            text.contains("line 2: the identifier already maps to subject sub-one"),
+            "{text}"
+        );
         assert!(!text.contains("P1"), "{text}");
         // the report's JSON carries counts, codes and reasons, never an identifier
         let json = r.as_json().to_string();
@@ -1153,13 +1272,29 @@ mod tests {
         assert!(json.contains("\"written\":false"));
 
         let good = rows(&[&["P4", "sub-four"], &["P8", "sub-eight"]]);
-        let dry = run(&mut registry, &mut linkage, &keys, &cols, &good, true, false);
+        let dry = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &good,
+            true,
+            false,
+        );
         assert!(dry.dry_run && !dry.written());
         assert_eq!((dry.subjects.new, dry.identifiers.new), (2, 2));
         assert_eq!(codes(&mut registry), ["sub-one"]);
         assert_eq!(count(&mut linkage, "SELECT COUNT(*) FROM identity"), 1);
         assert!(dry.to_string().contains("dry run: nothing was written"));
-        let done = run(&mut registry, &mut linkage, &keys, &cols, &good, false, false);
+        let done = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &good,
+            false,
+            false,
+        );
         assert!(done.written());
         assert_eq!(codes(&mut registry), ["sub-eight", "sub-four", "sub-one"]);
     }
@@ -1184,16 +1319,40 @@ mod tests {
         held(&mut registry, 1, &keys.lookup("patient-id", "P1"), "held");
         held(&mut registry, 2, &keys.lookup("patient-id", "P1"), "held");
         held(&mut registry, 3, &keys.lookup("patient-id", "P2"), "held");
-        held(&mut registry, 4, &keys.lookup("patient-id", "P1"), "written");
+        held(
+            &mut registry,
+            4,
+            &keys.lookup("patient-id", "P1"),
+            "written",
+        );
         let cols = columns(&[("identifier", "identifier:patient-id"), ("code", "code")]);
         let data = rows(&[&["P1", "sub-one"]]);
-        let dry = run(&mut registry, &mut linkage, &keys, &cols, &data, true, false);
+        let dry = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            true,
+            false,
+        );
         assert_eq!(dry.held_released, 2);
         assert_eq!(
-            count(&mut registry, "SELECT COUNT(*) FROM pseudonym_file WHERE released_at IS NOT NULL"),
+            count(
+                &mut registry,
+                "SELECT COUNT(*) FROM pseudonym_file WHERE released_at IS NOT NULL"
+            ),
             0
         );
-        let r = run(&mut registry, &mut linkage, &keys, &cols, &data, false, false);
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            false,
+        );
         assert_eq!(r.held_released, 2);
         assert!(r.to_string().contains("2 held file(s) released"));
         let released: Vec<i64> = registry
@@ -1207,11 +1366,27 @@ mod tests {
             .collect();
         assert_eq!(released, [1, 2]);
         // a second import of the same identifier releases nothing more
-        let again = run(&mut registry, &mut linkage, &keys, &cols, &data, false, false);
+        let again = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            false,
+        );
         assert_eq!(again.held_released, 0);
         // and without the table, nothing to release
         let (mut bare, mut bare_linkage, keys) = stores();
-        let r = run(&mut bare, &mut bare_linkage, &keys, &cols, &data, false, false);
+        let r = run(
+            &mut bare,
+            &mut bare_linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            false,
+        );
         assert_eq!(r.held_released, 0);
     }
 
@@ -1231,9 +1406,20 @@ mod tests {
             false,
         );
         // the map says P1 is the person whose canonical identifier is PID-0001
-        let cols = columns(&[("pid", "identifier:patient-id"), ("person", "canonical:registry-id")]);
+        let cols = columns(&[
+            ("pid", "identifier:patient-id"),
+            ("person", "canonical:registry-id"),
+        ]);
         let data = rows(&[&["P1", "PID-0001"]]);
-        let dry = run(&mut registry, &mut linkage, &keys, &cols, &data, true, false);
+        let dry = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            true,
+            false,
+        );
         assert_eq!(
             dry.merges,
             vec![Merge {
@@ -1241,25 +1427,40 @@ mod tests {
                 canonical: "xg5pf9g20xwm".into()
             }]
         );
-        assert!(dry.to_string().contains("merge split-off into xg5pf9g20xwm"));
+        assert!(
+            dry.to_string()
+                .contains("merge split-off into xg5pf9g20xwm")
+        );
         assert_eq!(codes(&mut registry), ["split-off"]);
-        let r = run(&mut registry, &mut linkage, &keys, &cols, &data, false, false);
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            false,
+        );
         assert!(r.written(), "{r}");
         assert_eq!(r.merges.len(), 1);
-        assert_eq!((r.subjects.new, r.identifiers.known, r.identifiers.new), (1, 1, 1));
+        assert_eq!(
+            (r.subjects.new, r.identifiers.known, r.identifiers.new),
+            (1, 1, 1)
+        );
         assert_eq!(codes(&mut registry), ["xg5pf9g20xwm"]);
         let merged = registry
-            .query("SELECT merged_into FROM subject WHERE code = 'split-off'", &[])
+            .query(
+                "SELECT merged_into FROM subject WHERE code = 'split-off'",
+                &[],
+            )
             .unwrap()[0]
             .int(0)
             .unwrap();
         assert_eq!(merged, 2);
         // the canonical subject holds P1, PID-0001 and the alias's code
         let shown = linkage::reveal(&mut linkage, &keys, 2, "tester", None).unwrap();
-        let mut values: Vec<(String, String)> = shown
-            .into_iter()
-            .map(|r| (r.id_type, r.value))
-            .collect();
+        let mut values: Vec<(String, String)> =
+            shown.into_iter().map(|r| (r.id_type, r.value)).collect();
         values.sort();
         assert_eq!(
             values,
@@ -1317,7 +1518,10 @@ mod tests {
             &keys,
             None,
             &Map {
-                columns: &columns(&[("a", "identifier:patient-id"), ("b", "canonical:patient-id")]),
+                columns: &columns(&[
+                    ("a", "identifier:patient-id"),
+                    ("b", "canonical:patient-id"),
+                ]),
                 rows: &[],
                 dry_run: true,
                 make_types: false,
