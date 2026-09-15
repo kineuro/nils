@@ -2715,3 +2715,615 @@ fn an_operator_pages_through_the_ingest_roots_and_looks_inside_them_never_outsid
     }
     server.finish();
 }
+
+/// The suite contract, version 2: the door table. A door of every row is
+/// passed by a token that holds its grant and refused, naming the grant, to
+/// a token that does not; a queued verb needs its own grant and a cancel
+/// the grant of the job's verb; adopting a rule needs two grants; the detail
+/// gates refuse below their detail; a queued job records the caller's
+/// detail; the policy rows name the grant of their door; a ceiling can leave
+/// a caller with no grant; and a name that is neither a ladder name nor a
+/// grant stops the engine before it listens.
+#[test]
+fn every_door_needs_its_grant_and_a_refusal_names_it() {
+    let home = registry();
+    // what each token holds, by the name it is known by
+    let holds: &[(&str, &str)] = &[
+        ("none", ""),
+        ("assist", "assist"),
+        ("query-see", "query:see"),
+        ("query-work", "query:work"),
+        ("data-see", "data:see"),
+        ("data-work", "data:work"),
+        ("places-see", "places:see"),
+        ("places-work", "places:work"),
+        ("review-see", "review:see"),
+        ("review-work", "review:work"),
+        ("both-work", "review:work,data:work"),
+        ("release-see", "release:see"),
+        ("release-work", "release:work"),
+        ("pipelines-see", "pipelines:see"),
+        ("pipelines-work", "pipelines:work"),
+        ("database-see", "database:see"),
+        ("database-work", "database:work"),
+        ("audit-see", "audit:see"),
+        ("reader", "reader"),
+        ("reviewer", "reviewer"),
+        ("operator", "operator"),
+    ];
+    let token = |name: &str| format!("a-token-that-holds-{name}");
+    // a door of every row: who passes it, who is refused, and what the
+    // refusal names
+    let rows: &[(&str, &str, &str, &str, &str, &str)] = &[
+        ("GET", "/api/status", "", "assist", "none", "no grant"),
+        (
+            "GET",
+            "/api/ask/schema",
+            "",
+            "query-see",
+            "data-see",
+            "query:see",
+        ),
+        (
+            "GET",
+            "/api/instances/1/manifest",
+            "",
+            "query-see",
+            "data-see",
+            "query:see",
+        ),
+        (
+            "GET",
+            "/api/timeline/stack/1",
+            "",
+            "data-see",
+            "places-see",
+            "data:see, query:see",
+        ),
+        (
+            "POST",
+            "/api/ask/documents",
+            "{}",
+            "query-work",
+            "query-see",
+            "query:work",
+        ),
+        (
+            "PUT",
+            "/api/ask/selections/kept",
+            "{}",
+            "reviewer",
+            "query-work",
+            "detail quasi",
+        ),
+        (
+            "POST",
+            "/api/ask/values",
+            "{}",
+            "reviewer",
+            "reader",
+            "detail quasi",
+        ),
+        (
+            "POST",
+            "/api/ask/start",
+            r#"{"from": {"values": "nowhere"}}"#,
+            "reviewer",
+            "reader",
+            "detail quasi",
+        ),
+        ("GET", "/api/packs", "", "data-see", "query-see", "data:see"),
+        (
+            "GET",
+            "/api/places",
+            "",
+            "places-see",
+            "query-see",
+            "data:see, places:see",
+        ),
+        (
+            "POST",
+            "/api/ingest/folders",
+            "{}",
+            "data-work",
+            "data-see",
+            "data:work",
+        ),
+        (
+            "GET",
+            "/api/review",
+            "",
+            "review-see",
+            "reader",
+            "review:see",
+        ),
+        (
+            "POST",
+            "/api/classify/try",
+            "{}",
+            "review-work",
+            "review-see",
+            "review:work",
+        ),
+        (
+            "POST",
+            "/api/overlays/999/adopt",
+            "",
+            "both-work",
+            "review-work",
+            "review:work and data:work",
+        ),
+        (
+            "POST",
+            "/api/overlays/999/adopt",
+            "",
+            "both-work",
+            "data-work",
+            "review:work and data:work",
+        ),
+        (
+            "GET",
+            "/api/releases",
+            "",
+            "release-see",
+            "query-work",
+            "release:see",
+        ),
+        (
+            "POST",
+            "/api/handovers",
+            "{}",
+            "release-work",
+            "release-see",
+            "release:work",
+        ),
+        (
+            "GET",
+            "/api/jobs",
+            "",
+            "pipelines-see",
+            "reader",
+            "pipelines:see",
+        ),
+        (
+            "POST",
+            "/api/sessions/rebuild",
+            "{}",
+            "pipelines-work",
+            "pipelines-see",
+            "pipelines:work",
+        ),
+        (
+            "POST",
+            "/api/places",
+            "{}",
+            "places-work",
+            "places-see",
+            "places:work",
+        ),
+        (
+            "GET",
+            "/api/backups",
+            "",
+            "database-see",
+            "pipelines-work",
+            "database:see",
+        ),
+        (
+            "PUT",
+            "/api/settings",
+            "{}",
+            "database-work",
+            "database-see",
+            "database:work",
+        ),
+        (
+            "GET",
+            "/api/audit",
+            "",
+            "audit-see",
+            "database-work",
+            "audit:see",
+        ),
+    ];
+    // a queued command: the door needs one of the verbs' grants, and each
+    // verb its own
+    let jobs: &[(&str, &str, u16, &str)] = &[
+        ("query-see", r#"["fingerprint"]"#, 403, "one of the grants"),
+        ("data-work", r#"["fingerprint"]"#, 403, "pipelines:work"),
+        (
+            "pipelines-work",
+            r#"["digest", "@nowhere"]"#,
+            403,
+            "data:work",
+        ),
+        (
+            "data-work",
+            r#"["digest", "@nowhere"]"#,
+            400,
+            "is not a registered ingest location",
+        ),
+        (
+            "data-work",
+            r#"["linkage", "import", "@nowhere/codes.csv"]"#,
+            403,
+            "detail sensitive",
+        ),
+        (
+            "operator",
+            r#"["linkage", "import", "@nowhere/codes.csv"]"#,
+            400,
+            "is not a registered ingest location",
+        ),
+        ("pipelines-work", r#"["backup"]"#, 403, "database:work"),
+        ("database-work", r#"["backup"]"#, 409, "no backup directory"),
+        (
+            "query-work",
+            r#"["ask", "promote", "--handle", "1", "--cohort", "c"]"#,
+            403,
+            "release:work",
+        ),
+        (
+            "query-work",
+            r#"["ask", "gate"]"#,
+            400,
+            "ask run and ask promote",
+        ),
+        (
+            "release-see",
+            r#"["release", "--name", "x"]"#,
+            403,
+            "release:work",
+        ),
+    ];
+    // the rows twice, the jobs, then the cancels, the recorded detail, the
+    // capabilities and the ceiling below
+    let requests = rows.len() * 2 + jobs.len() + 8;
+    let mut extra: Vec<String> = vec!["--auth".into(), "token".into()];
+    for (name, list) in holds {
+        extra.push("--token".into());
+        extra.push(format!("{}={name}@lab:{list}", token(name)));
+    }
+    let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+    let server = Server::start(&home, requests, &extra, &[]);
+    for (method, path, body, passes, refused, names) in rows {
+        let body = (!body.is_empty()).then_some(*body);
+        let (status, doc) = server.request(method, path, body, Some(&token(passes)));
+        assert_ne!(status, 403, "{method} {path} as {passes}: {doc}");
+        let (status, doc) = server.request(method, path, body, Some(&token(refused)));
+        assert_eq!(status, 403, "{method} {path} as {refused}: {doc}");
+        assert!(
+            doc["error"].as_str().unwrap_or_default().contains(names),
+            "{method} {path} as {refused} names {names}: {doc}"
+        );
+    }
+    for (holder, command, want, says) in jobs {
+        let (status, doc) = server.request(
+            "POST",
+            "/api/jobs",
+            Some(&format!(r#"{{"command": {command}}}"#)),
+            Some(&token(holder)),
+        );
+        assert_eq!(status, *want, "{command} as {holder}: {doc}");
+        assert!(
+            doc["error"].as_str().unwrap_or_default().contains(says),
+            "{command} as {holder} says {says}: {doc}"
+        );
+    }
+    // a cancel needs the grant of the job's verb
+    let (status, queued) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["fingerprint"]}"#),
+        Some(&token("pipelines-work")),
+    );
+    assert_eq!(status, 202, "{queued}");
+    let cancel = format!("/api/jobs/{}/cancel", queued["job"]);
+    let (status, doc) = server.request("POST", &cancel, None, Some(&token("data-work")));
+    assert_eq!(status, 403, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("pipelines:work"),
+        "{doc}"
+    );
+    let (status, doc) = server.request("POST", &cancel, None, Some(&token("pipelines-work")));
+    assert_eq!(status, 200, "{doc}");
+    let (status, doc) = server.request(
+        "POST",
+        "/api/jobs/99999/cancel",
+        None,
+        Some(&token("pipelines-work")),
+    );
+    assert_eq!(status, 404, "{doc}");
+    // a queued job records the caller's detail, which its verb runs under
+    let (status, queued) = server.request(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["ask", "run", "--document", "1"]}"#),
+        Some(&token("reviewer")),
+    );
+    assert_eq!(status, 202, "{queued}");
+    let (status, shown) = server.request(
+        "GET",
+        &format!("/api/jobs/{}", queued["job"]),
+        None,
+        Some(&token("pipelines-see")),
+    );
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(shown["args"]["detail"], "quasi", "{shown}");
+    assert_eq!(shown["args"]["actor"]["kind"], "absent", "{shown}");
+    // the capabilities: the caller's grants, detail and steps, and a policy
+    // row that names the grant of its door, the four doors where the policy
+    // and the code once disagreed at the stricter side
+    let (status, caps) = server.request("GET", "/api/capabilities", None, Some(&token("reviewer")));
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(
+        caps["grants"],
+        serde_json::json!([
+            "data:see",
+            "pipelines:see",
+            "query:see",
+            "query:work",
+            "review:see",
+            "review:work"
+        ]),
+        "{caps}"
+    );
+    assert_eq!(caps["detail"], "quasi", "{caps}");
+    assert_eq!(
+        caps["roles"],
+        serde_json::json!(["reader", "reviewer"]),
+        "{caps}"
+    );
+    let row = |door: &str| -> serde_json::Value {
+        caps["policy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["door"] == door)
+            .cloned()
+            .unwrap_or_else(|| panic!("no policy row for {door}"))
+    };
+    assert!(
+        caps["policy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["role"].is_null() && !r["grant"].is_null()),
+        "{caps}"
+    );
+    assert_eq!(
+        row("GET /api/status")["grant"].as_array().unwrap().len(),
+        24
+    );
+    assert_eq!(row("GET /api/review")["grant"], "review:see");
+    assert_eq!(row("GET /api/review/{id}")["grant"], "review:see");
+    assert_eq!(row("POST /api/ask/values")["grant"], "query:work");
+    assert_eq!(row("POST /api/ask/values")["detail"], "quasi");
+    let tiles = row("GET /api/instances/{stack}/tiles/{level}/{z}");
+    assert_eq!(tiles["grant"], "query:see", "{tiles}");
+    assert_eq!(tiles["detail"], "quasi", "{tiles}");
+    assert_eq!(
+        row("GET /api/places")["grant"],
+        serde_json::json!(["data:see", "places:see"])
+    );
+    let adopt = row("POST /api/overlays/{id}/adopt");
+    assert_eq!(adopt["grant"], "review:work", "{adopt}");
+    assert_eq!(adopt["also"], "data:work", "{adopt}");
+    assert_eq!(
+        row("POST /api/jobs")["grant"],
+        serde_json::json!([
+            "data:work",
+            "database:work",
+            "pipelines:work",
+            "query:work",
+            "release:work"
+        ])
+    );
+    // a ceiling keeps only what its step's set holds, which can be nothing
+    let (status, doc) = server.request_with(
+        "GET",
+        "/api/status",
+        None,
+        Some(&token("places-work")),
+        &[("X-Nils-Ceiling", "reader")],
+    );
+    assert_eq!(status, 403, "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("no grant"), "{doc}");
+    server.finish();
+
+    // a name that is neither a ladder name nor a grant stops the engine
+    // before it listens, in a token's list and in a binding
+    let jwks = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/oidc/jwks.json");
+    let trust = format!(
+        "issuer=https://id.example.org/,audience=nils,jwks={}",
+        jwks.display()
+    );
+    for args in [
+        vec![
+            "--auth",
+            "token",
+            "--token",
+            "sixteen-characters-long=bo@lab:reader,coffee:work",
+        ],
+        vec![
+            "--auth",
+            "oidc",
+            "--oidc-trust",
+            trust.as_str(),
+            "--role",
+            "students=assistant:see",
+        ],
+    ] {
+        let out = nils()
+            .arg("--registry")
+            .arg(home.path())
+            .args(["serve", "--bind", "127.0.0.1:0"])
+            .args(&args)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
+        assert!(
+            err.contains("neither a ladder name nor a grant"),
+            "{args:?}: {err}"
+        );
+    }
+}
+
+/// The suite contract, version 2: the grants vectors run against the
+/// engine. The claims and the ceilings are tokens of the trust list's first
+/// issuer, bound by the vectors' `--role` bindings; a principal is a token
+/// of the issuer its case names; a named case is a token of `--auth token`.
+/// What the capabilities say is compared with what each case expects.
+#[test]
+fn the_grants_vectors_hold() {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    let vectors = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/suite/v2/vectors");
+    let read = |name: &str| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(vectors.join(name)).unwrap()).unwrap()
+    };
+    let g = read("grants.json");
+    let t = read("trust-list.json");
+    let kid = "test-2026";
+    let key = EncodingKey::from_rsa_pem(
+        &std::fs::read(vectors.join(t["keys"][kid].as_str().unwrap())).unwrap(),
+    )
+    .unwrap();
+    let jwks = vectors.join(t["trust"][0]["jwks"].as_str().unwrap());
+    let issuer = t["trust"][0]["issuer"].as_str().unwrap();
+    let audience = t["trust"][0]["audience"].as_str().unwrap();
+    let mut extra: Vec<String> = vec![
+        "--auth".into(),
+        "oidc".into(),
+        "--oidc-groups-claim".into(),
+        g["groups_claim"].as_str().unwrap().into(),
+        "--oidc-trust".into(),
+        format!(
+            "issuer={issuer},audience={audience},jwks={}",
+            jwks.display()
+        ),
+    ];
+    let claims = g["claims"].as_array().unwrap();
+    let ceilings = g["ceilings"].as_array().unwrap();
+    let principals = g["principals"].as_array().unwrap();
+    // every issuer a principal case names, trusted with the same keys
+    let mut issuers: Vec<&str> = principals
+        .iter()
+        .map(|c| c["iss"].as_str().unwrap())
+        .filter(|i| *i != issuer)
+        .collect();
+    issuers.sort();
+    issuers.dedup();
+    for iss in issuers {
+        extra.push("--oidc-trust".into());
+        extra.push(format!(
+            "issuer={iss},audience={audience},jwks={}",
+            jwks.display()
+        ));
+    }
+    for (group, bound) in g["roles"].as_object().unwrap() {
+        extra.push("--role".into());
+        extra.push(format!("{group}={}", bound.as_str().unwrap()));
+    }
+    let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+    let home = registry();
+    let server = Server::start(
+        &home,
+        claims.len() + ceilings.len() + principals.len(),
+        &extra,
+        &[],
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mint = |mut claims: serde_json::Value, iss: &str| -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.to_string());
+        claims["iss"] = iss.into();
+        claims["aud"] = audience.into();
+        if claims.get("sub").is_none() {
+            claims["sub"] = "anna".into();
+        }
+        claims["iat"] = now.into();
+        claims["exp"] = (now + 600).into();
+        encode(&header, &claims, &key).unwrap()
+    };
+    let compare = |name: &str, status: u16, doc: &serde_json::Value, expect: &serde_json::Value| {
+        if expect["refused"] == true {
+            assert_eq!(status, 403, "{name}: {doc}");
+            assert!(
+                doc["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("no grant"),
+                "{name}: {doc}"
+            );
+        } else {
+            assert_eq!(status, 200, "{name}: {doc}");
+            assert_eq!(doc["grants"], expect["grants"], "{name}: {doc}");
+            assert_eq!(doc["detail"], expect["detail"], "{name}: {doc}");
+        }
+    };
+    for case in claims {
+        let name = case["name"].as_str().unwrap();
+        let token = mint(case["claims"].clone(), issuer);
+        let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&token));
+        compare(name, status, &doc, &case["expect"]);
+    }
+    for case in ceilings {
+        let name = case["name"].as_str().unwrap();
+        let token = mint(
+            serde_json::json!({"grants": case["grants"], "detail": case["detail"]}),
+            issuer,
+        );
+        let ceiling = case["ceiling"].as_str().unwrap();
+        let (status, doc) = server.request_with(
+            "GET",
+            "/api/capabilities",
+            None,
+            Some(&token),
+            &[("X-Nils-Ceiling", ceiling)],
+        );
+        compare(name, status, &doc, &case["expect"]);
+        assert_eq!(doc["ceiling"], ceiling, "{name}: {doc}");
+        assert_eq!(doc["actor"]["ceiling"], ceiling, "{name}: {doc}");
+    }
+    for case in principals {
+        let name = case["name"].as_str().unwrap();
+        let token = mint(
+            serde_json::json!({"sub": case["sub"], "grants": ["query:see"]}),
+            case["iss"].as_str().unwrap(),
+        );
+        let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&token));
+        assert_eq!(status, 200, "{name}: {doc}");
+        assert_eq!(doc["principal"], case["expect"], "{name}: {doc}");
+    }
+    server.finish();
+
+    // the named cases: one token of `--auth token` each
+    let named = g["named"].as_array().unwrap();
+    let tokens: Vec<String> = named
+        .iter()
+        .enumerate()
+        .map(|(i, case)| {
+            format!(
+                "a-named-vector-token-{i}=named{i}@lab:{}",
+                case["roles"].as_str().unwrap()
+            )
+        })
+        .collect();
+    let mut extra: Vec<&str> = vec!["--auth", "token"];
+    for t in &tokens {
+        extra.push("--token");
+        extra.push(t.as_str());
+    }
+    let server = Server::start(&home, named.len(), &extra, &[]);
+    for (i, case) in named.iter().enumerate() {
+        let name = case["name"].as_str().unwrap();
+        let token = format!("a-named-vector-token-{i}");
+        let (status, doc) = server.request("GET", "/api/capabilities", None, Some(&token));
+        compare(name, status, &doc, &case["expect"]);
+    }
+    server.finish();
+}
