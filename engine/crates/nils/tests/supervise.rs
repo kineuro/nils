@@ -610,6 +610,27 @@ fn the_door_reports_the_install_restarts_apart_and_looks_inside_a_folder() {
     assert_eq!(engine["reach"], "this machine only", "{doc}");
     assert_eq!(doc["release"]["newer"], serde_json::Value::Null, "{doc}");
     assert_eq!(doc["release"]["command"], "nils update --all", "{doc}");
+    // every card this machine has, and beside them the one with the most
+    // memory as the card; a machine with none has an empty list and no card
+    let cards = doc["machine"]["cards"].as_array().expect("a list of cards");
+    assert!(
+        cards
+            .iter()
+            .all(|c| c["name"].is_string() && c["memory_gb"].is_number()),
+        "{doc}"
+    );
+    match cards
+        .iter()
+        .filter_map(|c| c["memory_gb"].as_f64())
+        .reduce(f64::max)
+    {
+        Some(most) => assert_eq!(
+            doc["machine"]["card"]["memory_gb"].as_f64(),
+            Some(most),
+            "{doc}"
+        ),
+        None => assert!(doc["machine"]["card"].is_null(), "{doc}"),
+    }
 
     let (status, run) = s.call(
         "POST",
