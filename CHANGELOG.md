@@ -4,9 +4,12 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.28] - 2026-09-15
+
 ### Changed
 
 - The engine checks grants and detail in place of the role ladder (suite contract version 2, HTTP API contract version 4, MCP contract version 2). A caller holds a set of grants, each naming a page and how far it goes there (`see`, or `work`, which includes see; the assistant has `use`), and a detail, `plain`, `quasi` or `sensitive`, for how much of a record it sees. A token's `grants` and `detail` claims are taken as they are. `--role GROUP=X` and `--token TOKEN=user@node:LIST` take grants beside the ladder names, which stand for their sets: reader is `query:work`, `data:see` and plain; reviewer adds `review:work`, `pipelines:see` and quasi; operator adds `data:work`, `release:work`, `pipelines:work`, `places:work`, `install:see`, `kvasir:see`, `assistant-settings:see` and sensitive; admin is every grant but `assistant:use`; `assist` is `assistant:use`. A caller left with no grant is refused with 403. Every door needs its grant, which its policy row and a refusal name; `POST /api/jobs` checks the grant of each verb, a cancel the grant of the job's verb, and adopting an overlay needs `review:work` and `data:work`. Saving a selection, uploading a list and starting from one need detail quasi, the viewer's pixels quasi and burned-in annotation sensitive, and projecting raw identifiers sensitive. `X-Nils-Ceiling` keeps the grants of its step's set and `assistant:use` and lowers detail to the step's. The capabilities carry `grants`, `detail` and, for one release, `roles` as the ladder steps up to the detail; the MCP door's metadata names the grants as its scopes. A subject that already holds `@` is taken as the principal only from a trust entry that keeps subjects, `--oidc-trust ...,keep_subject=true`, as the desk's own entry is to; any other entry qualifies every subject by the issuer's host, as before.
+- Setup, where people sign in through a provider, has the engine and Kvasir trust the tokens the desk signs beside the provider's, marks the desk's trust entry as keeping its subjects, and names the provider's groups claim in the desk's configuration; `nils update --all` mends Kvasir's trust on an install from before. The install takes Kvasir 1.0.0-alpha.7 and the assistant 1.0.0-alpha.24, which read grants.
 
 ### Fixed
 
