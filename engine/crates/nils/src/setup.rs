@@ -2656,7 +2656,9 @@ fn engine_args(plan: &Plan, registry: &str, backups: &str) -> Vec<String> {
             argv.push("--auth".to_string());
             argv.push("oidc".to_string());
             argv.push("--oidc-trust".to_string());
-            argv.push(format!("issuer={issuer},audience=nils,jwks={jwks}"));
+            argv.push(format!(
+                "issuer={issuer},audience=nils,jwks={jwks},keep_subject=true"
+            ));
             argv.push("--oidc-groups-claim".to_string());
             argv.push("roles".to_string());
             for role in ["reader", "reviewer", "operator", "admin"] {
@@ -2685,7 +2687,9 @@ fn engine_args(plan: &Plan, registry: &str, backups: &str) -> Vec<String> {
                 // provider has said who they are (record 25)
                 let (issuer, jwks) = desk_trust(plan);
                 argv.push("--oidc-trust".to_string());
-                argv.push(format!("issuer={issuer},audience=nils,jwks={jwks}"));
+                argv.push(format!(
+                    "issuer={issuer},audience=nils,jwks={jwks},keep_subject=true"
+                ));
             }
         }
     }
@@ -6734,13 +6738,14 @@ fn kvasir_auth(plan: &Plan, admin: &str) -> serde_json::Value {
             serde_json::json!({
                 "mode": "oidc",
                 "tokens": tokens,
-                "trust": [{ "issuer": issuer, "audience": "nils", "jwks": jwks }],
+                "trust": [{ "issuer": issuer, "audience": "nils", "jwks": jwks, "keepSubject": true }],
                 "groupsClaim": "roles",
                 "roles": {
                     "reader": "reader",
                     "reviewer": "reviewer",
                     "operator": "operator",
                     "admin": "admin",
+                    "assist": "assist",
                 },
             })
         }
@@ -6752,7 +6757,7 @@ fn kvasir_auth(plan: &Plan, admin: &str) -> serde_json::Value {
                     "tokens": tokens,
                     "trust": [
                         { "issuer": oidc.issuer, "audience": oidc.client_id, "jwks": oidc.jwks },
-                        { "issuer": issuer, "audience": "nils", "jwks": jwks },
+                        { "issuer": issuer, "audience": "nils", "jwks": jwks, "keepSubject": true },
                     ],
                     "groupsClaim": oidc.roles_claim,
                     "roles": {
@@ -6760,6 +6765,7 @@ fn kvasir_auth(plan: &Plan, admin: &str) -> serde_json::Value {
                         "reviewer": "reviewer",
                         "operator": "operator",
                         "admin": "admin",
+                        "assist": "assist",
                     },
                 })
             }
@@ -11215,6 +11221,11 @@ mod tests {
         assert_eq!(auth["trust"][0]["audience"], "nils", "{auth}");
         assert_eq!(auth["groupsClaim"], "roles", "{auth}");
         assert_eq!(auth["roles"]["admin"], "admin", "{auth}");
+        assert_eq!(auth["roles"]["assist"], "assist", "{auth}");
+        assert_eq!(
+            auth["trust"][0]["keepSubject"], true,
+            "the desk's subjects are its own: {auth}"
+        );
         let engine = engine_args(&plan, "/r", "/b").join(" ");
         assert!(
             engine.contains(&format!("issuer={issuer},audience=nils,jwks={jwks}")),
@@ -12569,6 +12580,16 @@ mod tests {
         );
         assert_eq!(auth["trust"][1]["issuer"], issuer.as_str(), "{auth}");
         assert_eq!(auth["trust"][1]["audience"], "nils", "{auth}");
+        assert_eq!(auth["trust"][1]["keepSubject"], true, "{auth}");
+        assert_eq!(
+            auth["trust"][0].get("keepSubject"),
+            None,
+            "the provider's subjects are qualified by its host: {auth}"
+        );
+        assert!(
+            engine.contains(&format!("jwks={jwks},keep_subject=true")),
+            "{engine}"
+        );
         assert_eq!(auth["tokens"]["tok"], INSTALLER, "{auth}");
         assert!(write_desk_config(&plan).is_ok());
         let desk = std::fs::read_to_string(plan.desk_config()).unwrap();
