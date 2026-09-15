@@ -2656,7 +2656,9 @@ fn engine_args(plan: &Plan, registry: &str, backups: &str) -> Vec<String> {
             argv.push("--auth".to_string());
             argv.push("oidc".to_string());
             argv.push("--oidc-trust".to_string());
-            argv.push(format!("issuer={issuer},audience=nils,jwks={jwks}"));
+            argv.push(format!(
+                "issuer={issuer},audience=nils,jwks={jwks},keep_subject=true"
+            ));
             argv.push("--oidc-groups-claim".to_string());
             argv.push("roles".to_string());
             for role in ["reader", "reviewer", "operator", "admin"] {
@@ -2667,8 +2669,8 @@ fn engine_args(plan: &Plan, registry: &str, backups: &str) -> Vec<String> {
         Mode::Oidc => {
             argv.push("--auth".to_string());
             argv.push("oidc".to_string());
-            // the provider's tokens, which the desk passes on; with none
-            // named the engine refuses to start, and setup says so
+            // the provider's tokens, for a command line signed in there; with
+            // none named the engine refuses to start, and setup says so
             if let Some(oidc) = &plan.oidc {
                 argv.push("--oidc-trust".to_string());
                 argv.push(format!(
@@ -2681,6 +2683,13 @@ fn engine_args(plan: &Plan, registry: &str, backups: &str) -> Vec<String> {
                     argv.push("--role".to_string());
                     argv.push(format!("{role}={role}"));
                 }
+                // and the desk's, which it signs for a person once the
+                // provider has said who they are (record 25)
+                let (issuer, jwks) = desk_trust(plan);
+                argv.push("--oidc-trust".to_string());
+                argv.push(format!(
+                    "issuer={issuer},audience=nils,jwks={jwks},keep_subject=true"
+                ));
             }
         }
     }
@@ -2691,8 +2700,9 @@ fn engine_args(plan: &Plan, registry: &str, backups: &str) -> Vec<String> {
     argv
 }
 
-/// The desk as an issuer, for a part that trusts the tokens it signs in
-/// `local` mode. The issuer is what the desk writes into its tokens, which is
+/// The desk as an issuer, for a part that trusts the tokens it signs: in
+/// `local` mode, and in `oidc` mode for a person the provider named (record
+/// 25). The issuer is what the desk writes into its tokens, which is
 /// its own origin; the keys are fetched by the part, so that address is one a
 /// part reaches from where it runs.
 fn desk_trust(plan: &Plan) -> (String, String) {
@@ -5573,6 +5583,8 @@ fn desk_config_text(plan: &Plan) -> String {
                 let _ = writeln!(text, "client_id = \"{}\"", oidc.client_id);
                 let _ = writeln!(text, "client_secret_file = \"client-secret\"");
                 let _ = writeln!(text, "roles_claim = \"{}\"", oidc.roles_claim);
+                // the provider's groups, which the desk's groups follow (record 25)
+                let _ = writeln!(text, "groups_claim = \"groups\"");
                 if let Some(scopes) = &oidc.scopes {
                     let listed: Vec<String> = scopes.iter().map(|s| format!("\"{s}\"")).collect();
                     let _ = writeln!(text, "scopes = [{}]", listed.join(", "));
@@ -6713,7 +6725,8 @@ const MODEL_BACKEND: &str = "model";
 /// nobody signs in. In `local` mode it trusts the tokens the desk signs, as
 /// the engine does, so a person reaches it through the desk under their own
 /// roles; knowing only its own token, it refused every call the desk passed
-/// on. With a provider it trusts the provider's tokens once the provider is
+/// on. With a provider it trusts the provider's tokens and the desk's, which
+/// the desk signs for a person the provider named, once the provider is
 /// named, and knows only its token until then. The installer's token is kept
 /// in every mode, for what setup asks of Kvasir.
 fn kvasir_auth(plan: &Plan, admin: &str) -> serde_json::Value {
@@ -6725,29 +6738,37 @@ fn kvasir_auth(plan: &Plan, admin: &str) -> serde_json::Value {
             serde_json::json!({
                 "mode": "oidc",
                 "tokens": tokens,
-                "trust": [{ "issuer": issuer, "audience": "nils", "jwks": jwks }],
+                "trust": [{ "issuer": issuer, "audience": "nils", "jwks": jwks, "keepSubject": true }],
                 "groupsClaim": "roles",
                 "roles": {
                     "reader": "reader",
                     "reviewer": "reviewer",
                     "operator": "operator",
                     "admin": "admin",
+                    "assist": "assist",
                 },
             })
         }
         Mode::Oidc => match &plan.oidc {
-            Some(oidc) => serde_json::json!({
-                "mode": "oidc",
-                "tokens": tokens,
-                "trust": [{ "issuer": oidc.issuer, "audience": oidc.client_id, "jwks": oidc.jwks }],
-                "groupsClaim": oidc.roles_claim,
-                "roles": {
-                    "reader": "reader",
-                    "reviewer": "reviewer",
-                    "operator": "operator",
-                    "admin": "admin",
-                },
-            }),
+            Some(oidc) => {
+                let (issuer, jwks) = desk_trust(plan);
+                serde_json::json!({
+                    "mode": "oidc",
+                    "tokens": tokens,
+                    "trust": [
+                        { "issuer": oidc.issuer, "audience": oidc.client_id, "jwks": oidc.jwks },
+                        { "issuer": issuer, "audience": "nils", "jwks": jwks, "keepSubject": true },
+                    ],
+                    "groupsClaim": oidc.roles_claim,
+                    "roles": {
+                        "reader": "reader",
+                        "reviewer": "reviewer",
+                        "operator": "operator",
+                        "admin": "admin",
+                        "assist": "assist",
+                    },
+                })
+            }
             None => serde_json::json!({ "mode": "token", "tokens": tokens }),
         },
     }
@@ -6897,29 +6918,12 @@ fn repair_kvasir(plan: &Plan, console: &mut Console) -> Result<(), Exit> {
     }
     // How Kvasir knows its callers follows the desk's sign-in; the tokens it
     // holds are kept, the installer's among them.
-    if plan.mode != Mode::Oidc || plan.oidc.is_some() {
-        let mut tokens = value["auth"]["tokens"]
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
-        let held = tokens
-            .iter()
-            .find(|(_, named)| named.as_str() == Some(INSTALLER))
-            .map(|(token, _)| token.clone());
-        let admin = held.unwrap_or_else(|| {
-            let token = generated_passphrase();
-            tokens.insert(token.clone(), serde_json::json!(INSTALLER));
-            token
-        });
-        let mut auth = kvasir_auth(plan, &admin);
-        auth["tokens"] = serde_json::Value::Object(tokens);
-        if value["auth"] != auth {
-            mended.push(format!(
-                "knows its callers the way the desk signs them in ({})",
-                plan.mode.name()
-            ));
-            value["auth"] = auth;
-        }
+    if let Some(auth) = kvasir_auth_now(plan, &value["auth"]) {
+        mended.push(format!(
+            "knows its callers the way the desk signs them in ({})",
+            plan.mode.name()
+        ));
+        value["auth"] = auth;
     }
     // Where Kvasir listens follows where it runs.
     let bind = kvasir_bind(plan);
@@ -7303,6 +7307,53 @@ fn kvasir_admin_token(plan: &Plan) -> Option<String> {
         .find(|(_, named)| named.as_str() == Some(INSTALLER))
         .or_else(|| tokens.iter().next())
         .map(|(token, _)| token.clone())
+}
+
+/// How Kvasir knows its callers as the desk signs them in now, keeping the
+/// tokens it holds, the installer's among them: `None` where it already does,
+/// or where the provider is not named yet.
+fn kvasir_auth_now(plan: &Plan, current: &serde_json::Value) -> Option<serde_json::Value> {
+    if plan.mode == Mode::Oidc && plan.oidc.is_none() {
+        return None;
+    }
+    let mut tokens = current["tokens"].as_object().cloned().unwrap_or_default();
+    let held = tokens
+        .iter()
+        .find(|(_, named)| named.as_str() == Some(INSTALLER))
+        .map(|(token, _)| token.clone());
+    let admin = held.unwrap_or_else(|| {
+        let token = generated_passphrase();
+        tokens.insert(token.clone(), serde_json::json!(INSTALLER));
+        token
+    });
+    let mut auth = kvasir_auth(plan, &admin);
+    auth["tokens"] = serde_json::Value::Object(tokens);
+    (*current != auth).then_some(auth)
+}
+
+/// After an update, Kvasir knows its callers the way the desk signs them in
+/// now: a desk that signs for the people a provider names needs Kvasir to
+/// trust what it signs (record 25). Only `auth` changes, and one line says
+/// so; an install without the file is left for setup.
+fn mend_kvasir_auth(plan: &Plan) {
+    let config = plan.dir.join("kvasir").join("kvasir.json");
+    let Some(mut value) = kvasir_config(plan) else {
+        return;
+    };
+    let Some(auth) = kvasir_auth_now(plan, &value["auth"]) else {
+        return;
+    };
+    value["auth"] = auth;
+    let Ok(text) = serde_json::to_string_pretty(&value) else {
+        return;
+    };
+    match write_secret_bytes(&config, text.as_bytes()) {
+        Ok(()) => println!(
+            "Kvasir now knows its callers the way the desk signs them in ({})",
+            plan.mode.name()
+        ),
+        Err(e) => println!("Kvasir's configuration was left alone: {}", e.message),
+    }
 }
 
 /// Kvasir's configuration as setup wrote it, where it is there.
@@ -9167,6 +9218,11 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     let mut plan = plan_from_state(&state, channel);
     if let Some(engine) = state.parts.get("engine") {
         plan.version = engine.version.clone();
+    }
+    // Kvasir trusts what the desk signs as the desk signs it now, before it
+    // starts again (record 25)
+    if plan.has(Part::Assistant) {
+        mend_kvasir_auth(&plan);
     }
     let console = Console::new(true);
     println!("restarting the services");
@@ -11104,6 +11160,54 @@ mod tests {
     }
 
     #[test]
+    fn an_update_has_kvasir_trust_what_the_desk_signs() {
+        // An install that signs people in through a provider, from before
+        // the desk signed for them: Kvasir trusts the provider alone.
+        let dir = scratch("mend-auth");
+        let kvasir = dir.join("kvasir");
+        std::fs::create_dir_all(&kvasir).unwrap();
+        let mut plan = plan(Runtime::Podman);
+        plan.dir = dir.clone();
+        plan.mode = Mode::Oidc;
+        plan.oidc = registered_at(
+            "the desk's [oidc] table:\n  issuer = \"https://auth.example.org/application/o/nils/\"\n  client_id = \"abc123\"\n  client_secret_file = \"/x/client-secret\"\n",
+        );
+        let before = serde_json::json!({
+            "bind": "0.0.0.0:7100",
+            "auth": {
+                "mode": "oidc",
+                "tokens": {"tok": INSTALLER},
+                "trust": [{"issuer": "https://auth.example.org/application/o/nils/", "audience": "abc123",
+                           "jwks": "https://auth.example.org/application/o/nils/jwks/"}],
+                "groupsClaim": "roles",
+                "roles": {"reader": "reader", "reviewer": "reviewer", "operator": "operator", "admin": "admin"}
+            }
+        });
+        std::fs::write(kvasir.join("kvasir.json"), before.to_string()).unwrap();
+        mend_kvasir_auth(&plan);
+        let after = kvasir_config(&plan).unwrap();
+        let (issuer, jwks) = desk_trust(&plan);
+        assert_eq!(
+            after["auth"]["trust"][0], before["auth"]["trust"][0],
+            "{after}"
+        );
+        assert_eq!(
+            after["auth"]["trust"][1]["issuer"],
+            issuer.as_str(),
+            "{after}"
+        );
+        assert_eq!(after["auth"]["trust"][1]["jwks"], jwks.as_str(), "{after}");
+        assert_eq!(
+            after["auth"]["tokens"]["tok"], INSTALLER,
+            "the installer's token is kept"
+        );
+        assert_eq!(after["bind"], "0.0.0.0:7100", "nothing else is touched");
+        // and the next update has nothing left to change
+        assert!(kvasir_auth_now(&plan, &after["auth"]).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_gateway_knows_callers_the_way_the_desk_signs_them_in() {
         let mut plan = plan(Runtime::Podman);
         plan.mode = Mode::Local;
@@ -11117,6 +11221,11 @@ mod tests {
         assert_eq!(auth["trust"][0]["audience"], "nils", "{auth}");
         assert_eq!(auth["groupsClaim"], "roles", "{auth}");
         assert_eq!(auth["roles"]["admin"], "admin", "{auth}");
+        assert_eq!(auth["roles"]["assist"], "assist", "{auth}");
+        assert_eq!(
+            auth["trust"][0]["keepSubject"], true,
+            "the desk's subjects are its own: {auth}"
+        );
         let engine = engine_args(&plan, "/r", "/b").join(" ");
         assert!(
             engine.contains(&format!("issuer={issuer},audience=nils,jwks={jwks}")),
@@ -12462,6 +12571,25 @@ mod tests {
         let auth = kvasir_auth(&plan, "tok");
         assert_eq!(auth["mode"], "oidc", "{auth}");
         assert_eq!(auth["trust"][0]["audience"], "abc123", "{auth}");
+        let (issuer, jwks) = desk_trust(&plan);
+        assert!(
+            engine.contains(&format!(
+                "--oidc-trust issuer={issuer},audience=nils,jwks={jwks}"
+            )),
+            "the engine trusts what the desk signs for a person the provider named: {engine}"
+        );
+        assert_eq!(auth["trust"][1]["issuer"], issuer.as_str(), "{auth}");
+        assert_eq!(auth["trust"][1]["audience"], "nils", "{auth}");
+        assert_eq!(auth["trust"][1]["keepSubject"], true, "{auth}");
+        assert_eq!(
+            auth["trust"][0].get("keepSubject"),
+            None,
+            "the provider's subjects are qualified by its host: {auth}"
+        );
+        assert!(
+            engine.contains(&format!("jwks={jwks},keep_subject=true")),
+            "{engine}"
+        );
         assert_eq!(auth["tokens"]["tok"], INSTALLER, "{auth}");
         assert!(write_desk_config(&plan).is_ok());
         let desk = std::fs::read_to_string(plan.desk_config()).unwrap();

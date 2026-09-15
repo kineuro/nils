@@ -23,6 +23,7 @@ use nils_registry::home::Home;
 use nils_registry::{Registry, Store};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
+use crate::grants::{Access, Detail, Need, Step};
 use crate::{Exit, ServeArgs, fail, usage};
 
 /// The contract versions this binary speaks, read from the checked-in
@@ -34,40 +35,8 @@ const SUITE_VERSION: &str = include_str!("../../../../contracts/suite/VERSION");
 const MCP_VERSION: &str = include_str!("../../../../contracts/mcp/VERSION");
 const PACK_CONTRACT_VERSION: &str = include_str!("../../../../contracts/pack/VERSION");
 
-/// What a caller may do (Wave 4a §11.2): groups map to roles, and a door
-/// asks for one. `reader` reads and previews; `reviewer` decides;
-/// `operator` queues work and cancels it; `admin` reads the audit log and
-/// the custody. Under `off` and `token` every caller holds every role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Role {
-    Reader,
-    Reviewer,
-    Operator,
-    Admin,
-}
-
-impl Role {
-    pub(crate) fn parse(text: &str) -> Option<Role> {
-        Some(match text {
-            "reader" => Role::Reader,
-            "reviewer" => Role::Reviewer,
-            "operator" => Role::Operator,
-            "admin" => Role::Admin,
-            _ => return None,
-        })
-    }
-
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Role::Reader => "reader",
-            Role::Reviewer => "reviewer",
-            Role::Operator => "operator",
-            Role::Admin => "admin",
-        }
-    }
-}
-
-/// The claims an OIDC token carries that the engine reads.
+/// The claims an OIDC token carries that the engine reads; `grants` and
+/// `detail` (the suite contract, version 2) are read from the rest.
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Claims {
     sub: String,
@@ -88,15 +57,17 @@ struct Claims {
 }
 
 /// The `oidc` mode (D8): the engine validates the token against the
-/// issuer's keys and its audience, maps groups to roles, and keeps no user
-/// table beyond a cache of claims for the token's lifetime.
+/// issuer's keys and its audience, takes the grants and detail it carries,
+/// adds what its groups are bound to, and keeps no user table beyond a
+/// cache of claims for the token's lifetime.
 struct Oidc {
     /// Wave 4c §5.3: the issuers the engine trusts, each with its own
     /// audience and keys; a token is verified against the one it names.
     trusts: Vec<Trust>,
     groups_claim: String,
-    /// group -> role
-    roles: HashMap<String, Role>,
+    /// group -> what `--role` binds it to: a grant, or a ladder name or
+    /// `assist` as its set; a group bound twice holds both
+    bindings: HashMap<String, Access>,
     /// token -> what was verified, until the token expires
     cache: std::sync::Mutex<ClaimsCache>,
     /// The floor between two fetches of one issuer's keys, in seconds.
@@ -122,6 +93,12 @@ struct Trust {
     audience: String,
     /// The issuer's host, which is the node half of the principal.
     node: String,
+    /// Whether a subject that already holds `@` is the principal as it
+    /// stands: the desk's own entry, which qualifies its subjects itself.
+    /// Any other entry qualifies every subject by its host, so a provider
+    /// whose subjects are mail addresses keeps its people's principals, and
+    /// no issuer names a principal under another issuer's host.
+    keep_subject: bool,
     jwks: Jwks,
     keys: std::sync::Mutex<Vec<Key>>,
     fetched: std::sync::Mutex<Instant>,
@@ -237,12 +214,13 @@ fn load_jwks(jwks: &Jwks) -> Result<Vec<Key>, String> {
 }
 
 /// What the engine keeps of a token it verified, until the token expires:
-/// the principal, the roles, and (Wave 4c §5.9) the display name and mail
-/// beside the subject, which are listed in custody and are never a key.
+/// the principal, the grants and detail, and (Wave 4c §5.9) the display
+/// name and mail beside the subject, which are listed in custody and are
+/// never a key.
 #[derive(Clone)]
 struct Known {
     principal: String,
-    roles: Vec<Role>,
+    access: Access,
     exp: u64,
     display: Option<String>,
     email: Option<String>,
@@ -255,16 +233,17 @@ type ClaimsCache = HashMap<String, Known>;
 enum Auth {
     /// The local user, as the command line would record it.
     Off,
-    /// A bearer token names the caller.
-    Token(HashMap<String, (String, Vec<Role>)>),
-    /// An OIDC token names the caller, and its groups say what they may do.
+    /// A bearer token names the caller and what it holds.
+    Token(HashMap<String, (String, Access)>),
+    /// An OIDC token names the caller, and its grants, detail and groups say
+    /// what they may do.
     Oidc(Box<Oidc>),
 }
 
-/// A caller: who, and with which roles.
+/// A caller: who, what they hold, and how much of a record they see.
 pub(crate) struct Caller {
     pub(crate) principal: String,
-    pub(crate) roles: Vec<Role>,
+    pub(crate) access: Access,
     /// Wave 4c §5.9: the display name and mail the token carried, kept
     /// beside the subject and never a key.
     pub(crate) display: Option<String>,
@@ -273,18 +252,49 @@ pub(crate) struct Caller {
     /// its own value.
     pub(crate) actor: serde_json::Value,
     /// Wave 4c §5.5: the downgrade only ceiling the call named, if any.
-    pub(crate) ceiling: Option<Role>,
+    pub(crate) ceiling: Option<Step>,
     /// Wave 4c §6.3: the `Idempotency-Key` the call carried, if any.
     pub(crate) idempotency_key: Option<String>,
 }
 
 impl Caller {
-    pub(crate) fn can(&self, role: Role) -> bool {
-        self.roles.contains(&role)
+    /// Whether the caller passes a door that needs `need` at `detail`, or
+    /// the refusal, which names what was needed. A caller that holds no
+    /// grant is refused at every door, whatever the door needs (Wave 4b
+    /// §12.4: never defaulted to a reader).
+    pub(crate) fn allowed(&self, what: &str, need: Need, detail: Detail) -> Result<(), Reply> {
+        let principal = &self.principal;
+        if self.access.is_empty() {
+            return Err(Reply::error(
+                403,
+                format!(
+                    "{what}: {principal} holds no grant; an installer binds grants before a caller reads"
+                ),
+            ));
+        }
+        if !need.met(&self.access) {
+            return Err(Reply::error(
+                403,
+                format!(
+                    "{what} needs {}; {principal} holds {}",
+                    need.words(),
+                    self.access.list().join(", ")
+                ),
+            ));
+        }
+        if self.access.detail < detail {
+            return Err(Reply::error(
+                403,
+                format!(
+                    "{what} needs detail {}; {principal} sees {}",
+                    detail.name(),
+                    self.access.detail.name()
+                ),
+            ));
+        }
+        Ok(())
     }
 }
-
-const EVERY_ROLE: [Role; 4] = [Role::Reader, Role::Reviewer, Role::Operator, Role::Admin];
 
 impl Auth {
     fn parse(args: &ServeArgs) -> Result<Auth, Exit> {
@@ -294,38 +304,27 @@ impl Auth {
                 let mut tokens = HashMap::new();
                 let mut given: Vec<String> = args.token.clone();
                 if let Ok(env) = std::env::var("NILS_TOKENS") {
-                    given.extend(
-                        env.split(',')
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(String::from),
-                    );
+                    given.extend(token_entries(&env));
                 }
                 for t in given {
                     let Some((token, rest)) = t.split_once('=') else {
-                        return Err(usage(format!("{t} is not TOKEN=user@node[:roles]")));
+                        return Err(usage(format!("{t} is not TOKEN=user@node[:grants]")));
                     };
-                    // `user@node:reader,operator`; no suffix is every role,
-                    // an empty suffix is no role (Wave 4b §12.4)
-                    let (who, roles) = match rest.split_once(':') {
-                        Some((who, list)) => {
-                            let mut roles = Vec::new();
-                            for r in list.split(',').map(str::trim).filter(|r| !r.is_empty()) {
-                                let Some(role) = Role::parse(r) else {
-                                    return Err(usage(format!(
-                                        "{r} is not a role: reader, reviewer, operator or admin"
-                                    )));
-                                };
-                                roles.push(role);
-                            }
-                            (who, roles)
-                        }
+                    // `user@node:reader,kvasir:see`: ladder names, which stand
+                    // for their sets, and grants, added up; no suffix is
+                    // everything, and an empty suffix is nothing, so its
+                    // caller is refused at every door (Wave 4b §12.4)
+                    let (who, access) = match rest.split_once(':') {
+                        Some((who, list)) => (
+                            who,
+                            Access::of_list(list).map_err(|item| usage(not_a_grant(&item)))?,
+                        ),
                         None => {
                             // Wave 4c §6.1: the shortest form is the widest one.
                             eprintln!(
-                                "nils serve: the token for {rest} names no roles and therefore holds every role, admin included; a machine token that should hold less is written {rest}:reader,operator"
+                                "nils serve: the token for {rest} names no grants and therefore holds every grant and detail sensitive; a machine token that should hold less is written {rest}:pipelines:work,release:work"
                             );
-                            (rest, EVERY_ROLE.to_vec())
+                            (rest, Access::everything())
                         }
                     };
                     let Some(p) = nils_registry::principal::Principal::parse(who) else {
@@ -334,13 +333,7 @@ impl Auth {
                     if token.len() < 16 {
                         return Err(usage("a token is at least 16 characters"));
                     }
-                    let mut roles = roles;
-                    roles.sort();
-                    roles.dedup();
-                    if let Some(top) = roles.iter().max().copied() {
-                        roles = EVERY_ROLE.iter().copied().filter(|r| *r <= top).collect();
-                    }
-                    tokens.insert(token.to_string(), (p.to_string(), roles));
+                    tokens.insert(token.to_string(), (p.to_string(), access));
                 }
                 if tokens.is_empty() {
                     return Err(usage(
@@ -351,14 +344,15 @@ impl Auth {
             }
             "oidc" => {
                 // Wave 4c §5.3: a trust list; the three single flags of
-                // Wave 4b are sugar for one entry.
-                let mut specs: Vec<(String, String, Jwks)> = Vec::new();
+                // Wave 4b are sugar for one entry, which keeps no subject.
+                let mut specs: Vec<(String, String, Jwks, bool)> = Vec::new();
                 for t in &args.oidc_trust {
                     let (mut issuer, mut audience, mut jwks) = (None, None, None);
+                    let mut keep_subject = false;
                     for part in t.split(',') {
                         let Some((k, v)) = part.split_once('=') else {
                             return Err(usage(format!(
-                                "{t} is not issuer=URL,audience=ID,jwks=URL"
+                                "{t} is not issuer=URL,audience=ID,jwks=URL[,keep_subject=true]"
                             )));
                         };
                         let v = v.trim().to_string();
@@ -373,15 +367,26 @@ impl Auth {
                                         Jwks::File(PathBuf::from(v))
                                     })
                             }
+                            "keep_subject" => {
+                                keep_subject = match v.as_str() {
+                                    "true" => true,
+                                    "false" => false,
+                                    other => {
+                                        return Err(usage(format!(
+                                            "keep_subject is true or false, not {other}"
+                                        )));
+                                    }
+                                }
+                            }
                             other => {
                                 return Err(usage(format!(
-                                    "{other} is not a part of --oidc-trust: issuer, audience, jwks"
+                                    "{other} is not a part of --oidc-trust: issuer, audience, jwks, keep_subject"
                                 )));
                             }
                         }
                     }
                     match (issuer, audience, jwks) {
-                        (Some(i), Some(a), Some(j)) => specs.push((i, a, j)),
+                        (Some(i), Some(a), Some(j)) => specs.push((i, a, j, keep_subject)),
                         _ => {
                             return Err(usage(format!(
                                 "{t}: --oidc-trust names issuer, audience and jwks together"
@@ -391,7 +396,7 @@ impl Auth {
                 }
                 match (&args.oidc_issuer, &args.oidc_audience, &args.oidc_jwks) {
                     (Some(i), Some(a), Some(j)) => {
-                        specs.push((i.clone(), a.clone(), Jwks::File(j.clone())));
+                        specs.push((i.clone(), a.clone(), Jwks::File(j.clone()), false));
                     }
                     (None, None, None) => {}
                     _ => {
@@ -406,7 +411,7 @@ impl Auth {
                     ));
                 }
                 let mut trusts = Vec::new();
-                for (issuer, audience, jwks) in specs {
+                for (issuer, audience, jwks, keep_subject) in specs {
                     // A file that cannot be read is a fault in the
                     // configuration and stops the engine here. A URL that
                     // does not answer is a matter of order: the issuer may
@@ -436,27 +441,29 @@ impl Auth {
                         issuer,
                         audience,
                         node,
+                        keep_subject,
                         jwks,
                         keys: std::sync::Mutex::new(keys),
                         fetched: std::sync::Mutex::new(Instant::now()),
                     });
                 }
-                let mut roles = HashMap::new();
+                let mut bindings: HashMap<String, Access> = HashMap::new();
                 for r in &args.role {
-                    let Some((group, role)) = r.split_once('=') else {
-                        return Err(usage(format!("{r} is not GROUP=ROLE")));
+                    let Some((group, bound)) = r.split_once('=') else {
+                        return Err(usage(format!("{r} is not GROUP=GRANT")));
                     };
-                    let Some(role) = Role::parse(role.trim()) else {
-                        return Err(usage(format!(
-                            "{role} is not a role: reader, reviewer, operator or admin"
-                        )));
+                    let Some(access) = Access::named(bound.trim()) else {
+                        return Err(usage(not_a_grant(bound.trim())));
                     };
-                    roles.insert(group.trim().to_string(), role);
+                    bindings
+                        .entry(group.trim().to_string())
+                        .or_default()
+                        .add(&access);
                 }
                 Ok(Auth::Oidc(Box::new(Oidc {
                     trusts,
                     groups_claim: args.oidc_groups_claim.clone(),
-                    roles,
+                    bindings,
                     cache: std::sync::Mutex::new(HashMap::new()),
                     refetch_floor: args.jwks_refetch_secs.unwrap_or(60),
                 })))
@@ -493,7 +500,7 @@ impl Auth {
         let caller = match self {
             Auth::Off => Caller {
                 principal: crate::actor(),
-                roles: EVERY_ROLE.to_vec(),
+                access: Access::everything(),
                 display: None,
                 email: None,
                 actor: nils_registry::actor::absent(),
@@ -503,9 +510,9 @@ impl Auth {
             Auth::Token(tokens) => {
                 let token = bearer()?;
                 match tokens.get(&token) {
-                    Some((p, roles)) => Caller {
+                    Some((p, access)) => Caller {
                         principal: p.clone(),
-                        roles: roles.clone(),
+                        access: access.clone(),
                         display: None,
                         email: None,
                         actor: nils_registry::actor::absent(),
@@ -536,7 +543,7 @@ impl Auth {
                 };
                 Caller {
                     principal: known.principal,
-                    roles: known.roles,
+                    access: known.access,
                     display: known.display,
                     email: known.email,
                     actor,
@@ -549,9 +556,11 @@ impl Auth {
     }
 }
 
-/// Wave 4c §5.5: the two headers a call may carry. `X-Nils-Ceiling` can
-/// only remove roles; `X-Nils-Actor` names who acts for the principal and
-/// is recorded with the ceiling inside it.
+/// Wave 4c §5.5: the two headers a call may carry. `X-Nils-Ceiling` names a
+/// ladder step and can only narrow: the caller keeps the grants of the
+/// step's set and the assistant, and detail is lowered to the step's.
+/// `X-Nils-Actor` names who acts for the principal and is recorded with the
+/// ceiling inside it.
 fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
     let header = |name: &'static str| -> Option<String> {
         request
@@ -573,17 +582,17 @@ fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
         caller.actor = value;
     }
     if let Some(ceiling) = header("X-Nils-Ceiling") {
-        let Some(role) = Role::parse(&ceiling) else {
+        let Some(step) = Step::parse(&ceiling) else {
             return Err(Reply::error(
                 400,
                 format!(
-                    "X-Nils-Ceiling {ceiling} is not a role: reader, reviewer, operator or admin"
+                    "X-Nils-Ceiling {ceiling} is not a ladder name: reader, reviewer, operator or admin"
                 ),
             ));
         };
-        caller.roles.retain(|r| *r <= role);
-        caller.ceiling = Some(role);
-        caller.actor["ceiling"] = serde_json::Value::String(role.name().to_string());
+        caller.access.narrow(step);
+        caller.ceiling = Some(step);
+        caller.actor["ceiling"] = serde_json::Value::String(step.name().to_string());
     }
     if let Some(key) = header("Idempotency-Key") {
         if key.len() > 256 {
@@ -595,6 +604,32 @@ fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
         caller.idempotency_key = Some(key);
     }
     Ok(caller)
+}
+
+/// `NILS_TOKENS`: the entries `--token` takes, separated by commas. A piece
+/// that holds no `=` continues the entry before it, since an entry always
+/// holds one and a ladder name or a grant never does, so an entry's own list
+/// survives, as in `T1=bo@lab:reader,kvasir:see`. A piece before any entry
+/// stays on its own, to be refused as it was.
+fn token_entries(env: &str) -> Vec<String> {
+    let mut entries: Vec<String> = Vec::new();
+    for piece in env.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        match entries.last_mut() {
+            Some(last) if !piece.contains('=') && last.contains('=') => {
+                last.push(',');
+                last.push_str(piece);
+            }
+            _ => entries.push(piece.to_string()),
+        }
+    }
+    entries
+}
+
+/// The refusal of a name that is neither a ladder name nor a grant.
+fn not_a_grant(name: &str) -> String {
+    format!(
+        "{name} is neither a ladder name nor a grant: reader, reviewer, operator, admin, assist, or a grant such as query:see or kvasir:work"
+    )
 }
 
 impl Oidc {
@@ -672,23 +707,29 @@ impl Oidc {
                     })
                     .unwrap_or_default()
             };
-            let mut roles: Vec<Role> = groups
-                .iter()
-                .filter_map(|g| oidc.roles.get(g).copied())
-                .collect();
-            roles.sort();
-            roles.dedup();
-            // A role implies the ones below it: an operator reads.
-            if let Some(top) = roles.iter().max().copied() {
-                roles = EVERY_ROLE.iter().copied().filter(|r| *r <= top).collect();
-            }
-            // Wave 4b §12.4: a token with no role is refused at every
-            // door, never defaulted to reader.
-            // The audit principal is the subject (§11.2), at the issuer's node.
-            let principal = format!("{}@{}", claims.sub, trust.node);
+            // The suite contract, version 2: the grants and the detail the
+            // token carries, taken as they are, and what its groups are
+            // bound to, added up with the highest detail holding. Wave 4b
+            // §12.4: a token left with no grant is refused at every door,
+            // never defaulted to a reader.
+            let access = Access::of_token(
+                claims.rest.get("grants"),
+                claims.rest.get("detail"),
+                &groups,
+                &oidc.bindings,
+            );
+            // The audit principal is the subject (§11.2), at the issuer's
+            // node; a subject that already names its node is the principal
+            // as it stands, but only from an entry that keeps subjects, as
+            // the desk's own entry does.
+            let principal = if trust.keep_subject && claims.sub.contains('@') {
+                claims.sub.clone()
+            } else {
+                format!("{}@{}", claims.sub, trust.node)
+            };
             let known = Known {
                 principal,
-                roles,
+                access,
                 exp: claims.exp,
                 display: claims.preferred_username.clone().or(claims.name.clone()),
                 email: claims.email.clone(),
@@ -1152,7 +1193,7 @@ fn handle(
 }
 
 /// One ask door called from inside the engine: what the MCP door's tools
-/// run. The roles, the reader and the caps are the doors' own.
+/// run. The grants, the reader and the caps are the doors' own.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ask_call(
     doors: &Doors,
@@ -1212,7 +1253,8 @@ fn routed(
 ) -> Result<Reply, Reply> {
     let principal = caller.principal.as_str();
     let segs = segments(path);
-    // Wave 4b §12.2: the ask doors check their own roles.
+    // Wave 4b §12.2: the ask doors check their own grants, from the same
+    // table as every other door.
     if let Some(r) = crate::ask_doors::route(
         doors,
         registry,
@@ -1228,53 +1270,16 @@ fn routed(
     let get = *method == Method::Get;
     let post = *method == Method::Post;
     let put = *method == Method::Put;
-    // Which role a door asks for (§11.2). A door not named here asks for
-    // reader, which every caller holds.
-    let needs = match (method.as_str(), segs.as_slice()) {
-        ("GET", ["api", "audit"]) | ("GET", ["api", "custody"]) => Role::Admin,
-        ("GET", ["api", "quarantine"]) => Role::Reviewer,
-        // Wave 4c §6.6: the knob engine.
-        ("GET", ["api", "classify", "signals"])
-        | ("POST", ["api", "classify", "try"])
-        | ("POST", ["api", "overlays"]) => Role::Reviewer,
-        // The ingest probe, and the desk's picker: the folders of the ingest
-        // roots and a look inside them.
-        ("POST", ["api", "overlays", _, "adopt"])
-        | ("POST", ["api", "ingest", "probe"])
-        | ("POST", ["api", "ingest", "folders"])
-        | ("POST", ["api", "ingest", "look"]) => Role::Operator,
-        ("POST", ["api", "places"]) | ("PUT", ["api", "places", _]) => Role::Operator,
-        // Wave 5 §10.3: the archives, their schedule and the registry's
-        // calendar are an admin's to read and change.
-        ("GET", ["api", "backups"])
-        | ("PUT", ["api", "backups", "schedule"])
-        | ("PUT", ["api", "settings"]) => Role::Admin,
-        ("POST", ["api", "jobs"])
-        | ("POST", ["api", "jobs", _, "cancel"])
-        | ("POST", ["api", "releases"])
-        | ("POST", ["api", "handovers"]) => Role::Operator,
-        ("POST", ["api", "review", _, _]) | ("POST", ["api", "decisions", _, _]) => Role::Reviewer,
-        _ => Role::Reader,
+    // What the door needs (the suite contract, version 2). The instance
+    // doors gate their detail themselves, with a gated refusal (Wave 5
+    // §12.7), so only the grant is checked here.
+    let (need, detail) = door(method.as_str(), &segs);
+    let detail = if matches!(segs.as_slice(), ["api", "instances", ..]) {
+        Detail::Plain
+    } else {
+        detail
     };
-    if !caller.can(needs) {
-        return Err(Reply::error(
-            403,
-            format!(
-                "{path} asks for the {} role; {principal} holds {}",
-                needs.name(),
-                if caller.roles.is_empty() {
-                    "no role: an installer binds roles before a caller reads".to_string()
-                } else {
-                    caller
-                        .roles
-                        .iter()
-                        .map(|r| r.name())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-            ),
-        ));
-    }
+    caller.allowed(path, need, detail)?;
     let id_at = |i: usize| -> Result<i64, Reply> {
         segs.get(i)
             .and_then(|s| s.parse::<i64>().ok())
@@ -1772,7 +1777,7 @@ fn routed(
                 Some(&format!("adopt overlay {id}")),
                 Some(principal),
                 serde_json::json!({
-                    "roles": caller.roles.iter().map(|r| r.name()).collect::<Vec<_>>(),
+                    "detail": caller.access.detail.name(),
                     "actor": caller.actor,
                     "overlay": id,
                 }),
@@ -1911,10 +1916,7 @@ fn routed(
                 &command,
                 doc["name"].as_str().or(Some("identity probe")),
                 Some(principal),
-                serde_json::json!({
-                    "roles": caller.roles.iter().map(|r| r.name()).collect::<Vec<_>>(),
-                    "actor": caller.actor,
-                }),
+                queued_by(caller),
             )
             .map_err(job_err)?;
             Ok(Reply::accepted(
@@ -1984,12 +1986,29 @@ fn routed(
             // Wave 4c §6.5: a tree is named by a registered location, as
             // @name/relative, never by a path a caller composes; backup and
             // verify go to the deployment's backup directory.
+            // The suite contract, version 2: each verb needs its own grant,
+            // and a linkage import the sensitive detail it reads; the job
+            // records the caller's detail, which the verb runs under.
+            let Some((grant, detail)) = verb_needs(&command) else {
+                return Err(Reply::error(
+                    400,
+                    "ask run and ask promote are the ask verbs the door queues",
+                ));
+            };
+            let words = if matches!(command[0].as_str(), "ask" | "linkage") {
+                2
+            } else {
+                1
+            };
+            let verb = command[..words.min(command.len())].join(" ");
+            caller.allowed(&format!("{path} {verb}"), Need::One(grant), detail)?;
             let command = located(doors, command)?;
-            let id = nils_registry::job::enqueue(
+            let id = nils_registry::job::enqueue_with(
                 registry.store(),
                 &command,
                 doc["name"].as_str(),
                 Some(principal),
+                queued_by(caller),
             )
             .map_err(job_err)?;
             Ok(Reply::accepted(
@@ -2005,6 +2024,11 @@ fn routed(
         }
         ["api", "jobs", _, "cancel"] if post => {
             let id = id_at(2)?;
+            // a cancel needs the grant of the job's verb
+            let Some(job) = nils_registry::job::show(registry.store(), id).map_err(job_err)? else {
+                return Err(Reply::error(404, format!("no job {id}")));
+            };
+            caller.allowed(path, Need::One(cancel_needs(&job)), Detail::Plain)?;
             match nils_registry::job::request_cancel(registry.store(), id).map_err(job_err)? {
                 Some(state) => Ok(Reply::ok(
                     serde_json::json!({ "job": id, "state": state.name() }),
@@ -2086,11 +2110,12 @@ fn routed(
                     command.extend(["--stack".into(), key.to_string()]);
                 }
             }
-            let id = nils_registry::job::enqueue(
+            let id = nils_registry::job::enqueue_with(
                 registry.store(),
                 &command,
                 Some(name),
                 Some(principal),
+                queued_by(caller),
             )
             .map_err(job_err)?;
             Ok(Reply::accepted(
@@ -2123,11 +2148,12 @@ fn routed(
             if let Some(k) = doc["key"].as_str() {
                 command.extend(["--key".into(), k.into()]);
             }
-            let id = nils_registry::job::enqueue(
+            let id = nils_registry::job::enqueue_with(
                 registry.store(),
                 &command,
                 Some(release),
                 Some(principal),
+                queued_by(caller),
             )
             .map_err(job_err)?;
             Ok(Reply::accepted(
@@ -2330,6 +2356,146 @@ const QUEUEABLE: &[&str] = &[
     "ask",
 ];
 
+/// The grants of the verbs the door queues: `POST /api/jobs` needs any of
+/// them, and each verb its own (`verb_needs`).
+const JOB_GRANTS: &[&str] = &[
+    "data:work",
+    "database:work",
+    "pipelines:work",
+    "query:work",
+    "release:work",
+];
+
+/// What a door needs (the suite contract, version 2): a grant, any of two,
+/// or two at once, and the lowest detail. A door not named here needs a
+/// grant, any grant: the capabilities, the status, the summary, the
+/// calendar and the event stream. Every door reads this table, the ask
+/// doors and the MCP door's tools included, and the policy rows are read
+/// from it.
+pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
+    use Detail::{Plain, Quasi};
+    match (method, segs) {
+        // the Query page: reading and running questions
+        (
+            "GET",
+            [
+                "api",
+                "ask",
+                "schema" | "catalog" | "guide" | "documents" | "handles",
+            ],
+        )
+        | ("GET", ["api", "ask", "catalog", _])
+        | ("GET", ["api", "ask", "catalog", _, _, "values"])
+        | ("GET", ["api", "ask", "documents" | "selections" | "handles", _])
+        | ("GET", ["api", "ask", "handles", _, "rows"])
+        | (
+            "POST",
+            [
+                "api",
+                "ask",
+                "draft" | "diff" | "validate" | "run" | "explain" | "options" | "apply"
+                | "diagnose" | "preview" | "profile" | "describe" | "start",
+            ],
+        ) => (Need::One("query:see"), Plain),
+        // Wave 5 §12.7: the viewer's pixels are quasi-identifying
+        ("GET", ["api", "instances", _, ..]) => (Need::One("query:see"), Quasi),
+        ("GET", ["api", "depends" | "timeline", _, _]) => {
+            (Need::AnyOf(&["data:see", "query:see"]), Plain)
+        }
+        // saving what a question is; Wave 5 §12.1: a saved selection and an
+        // identifier list are quasi-identifying territory
+        ("POST", ["api", "ask", "documents" | "jobs"]) => (Need::One("query:work"), Plain),
+        ("PUT", ["api", "ask", "selections", _]) | ("POST", ["api", "ask", "values"]) => {
+            (Need::One("query:work"), Quasi)
+        }
+        // the Data page
+        ("GET", ["api", "sources" | "packs" | "batches"])
+        | ("GET", ["api", "packs" | "batches", _]) => (Need::One("data:see"), Plain),
+        ("GET", ["api", "places"]) => (Need::AnyOf(&["data:see", "places:see"]), Plain),
+        ("POST", ["api", "ingest", "folders" | "look" | "probe"]) => {
+            (Need::One("data:work"), Plain)
+        }
+        // the Review page, and the knob engine of Wave 4c §6.6
+        ("GET", ["api", "review" | "overlays" | "quarantine"])
+        | ("GET", ["api", "review" | "overlays", _])
+        | ("GET", ["api", "classify", "signals"]) => (Need::One("review:see"), Plain),
+        ("POST", ["api", "review", _, "apply" | "accept"])
+        | ("POST", ["api", "decisions", _, "commit" | "withdraw"])
+        | ("POST", ["api", "classify", "try"])
+        | ("POST", ["api", "overlays"]) => (Need::One("review:work"), Plain),
+        // adopting a rule changes how data is sorted: work on both pages
+        ("POST", ["api", "overlays", _, "adopt"]) => {
+            (Need::Both("review:work", "data:work"), Plain)
+        }
+        // the Release page
+        ("GET", ["api", "releases"]) | ("POST", ["api", "select"]) => {
+            (Need::One("release:see"), Plain)
+        }
+        ("POST", ["api", "releases" | "handovers"])
+        | ("POST", ["api", "ask", "handles", _, "promote"]) => (Need::One("release:work"), Plain),
+        // the Pipelines page; a queued verb needs its own grant and a cancel
+        // the grant of the job's verb, both checked at the door itself
+        ("GET", ["api", "jobs"]) | ("GET", ["api", "jobs", _]) => {
+            (Need::One("pipelines:see"), Plain)
+        }
+        ("POST", ["api", "sessions", "rebuild"]) => (Need::One("pipelines:work"), Plain),
+        ("POST", ["api", "jobs"]) | ("POST", ["api", "jobs", _, "cancel"]) => {
+            (Need::AnyOf(JOB_GRANTS), Plain)
+        }
+        // the settings pages
+        ("POST", ["api", "places"]) | ("PUT", ["api", "places", _]) => {
+            (Need::One("places:work"), Plain)
+        }
+        ("GET", ["api", "backups"]) => (Need::One("database:see"), Plain),
+        ("PUT", ["api", "backups", "schedule"]) | ("PUT", ["api", "settings"]) => {
+            (Need::One("database:work"), Plain)
+        }
+        ("GET", ["api", "audit" | "custody"]) => (Need::One("audit:see"), Plain),
+        _ => (Need::Any, Plain),
+    }
+}
+
+/// What a queued command needs by its verb: the grant, and the lowest
+/// detail; none for an ask verb the door does not queue.
+pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
+    let verb = command.first().map(String::as_str).unwrap_or_default();
+    Some(match (verb, command.get(1).map(String::as_str)) {
+        ("digest", _) => ("data:work", Detail::Plain),
+        // a linkage import reads the identifiers it links
+        ("linkage", _) => ("data:work", Detail::Sensitive),
+        ("release" | "handover", _) | ("ask", Some("promote")) => ("release:work", Detail::Plain),
+        ("ask", Some("run")) => ("query:work", Detail::Plain),
+        ("fingerprint" | "classify" | "pick" | "session" | "pyramid", _) => {
+            ("pipelines:work", Detail::Plain)
+        }
+        ("backup" | "verify", _) => ("database:work", Detail::Plain),
+        _ => return None,
+    })
+}
+
+/// The grant a cancel needs: the grant of the job's verb. A job a door
+/// queued names its command line; one the command line claimed names its
+/// verb as its kind, and a kind no door queues is a pipeline's.
+fn cancel_needs(job: &nils_registry::job::Job) -> &'static str {
+    if let Some((grant, _)) = job.argv().as_deref().and_then(verb_needs) {
+        return grant;
+    }
+    match job.kind.as_str() {
+        "digest" | "ingest" | "linkage" | "linkage-purge" | "clinical-import" => "data:work",
+        "release" | "handover" => "release:work",
+        "backup" | "verify" => "database:work",
+        "ask" if job.args["cohort"].is_string() => "release:work",
+        "ask" => "query:work",
+        _ => "pipelines:work",
+    }
+}
+
+/// What a queued job records of its caller beside the principal: the detail
+/// the verb runs under, never the worker's own, and who acted.
+pub(crate) fn queued_by(caller: &Caller) -> serde_json::Value {
+    serde_json::json!({ "detail": caller.access.detail.name(), "actor": caller.actor })
+}
+
 /// Wave 4c §6.6: the scope a body names.
 fn scope_of(doc: &serde_json::Value) -> Result<nils_classify::scope::Scope, Reply> {
     let text = doc["scope"]
@@ -2502,10 +2668,13 @@ fn capabilities(
         "registry": { "id": meta.registry_id, "epoch": meta.epoch, "schema_version": meta.schema_version, "synthetic": meta.synthetic },
         "auth": doors.auth.name(),
         "principal": caller.principal,
-        "roles": caller.roles.iter().map(|r| r.name()).collect::<Vec<_>>(),
+        "grants": caller.access.list(),
+        "detail": caller.access.detail.name(),
+        // for one release: the ladder steps up to the caller's detail
+        "roles": caller.access.steps(),
         "display": caller.display,
         "email": caller.email,
-        "ceiling": caller.ceiling.map(Role::name),
+        "ceiling": caller.ceiling.map(Step::name),
         "actor": caller.actor,
         "node": doors.node,
         "uptime_seconds": doors.started.elapsed().as_secs(),
@@ -2597,20 +2766,11 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request) {
             return;
         }
     };
-    // Wave 4c §6.1: a door like any other, so it asks for the reader role;
-    // and capped well below the worker count, because an open stream pins
-    // a worker for its life and four tabs must not wedge every door.
-    if !caller.can(Role::Reader) {
-        let _ = respond(
-            request,
-            Reply::error(
-                403,
-                format!(
-                    "/api/events asks for the reader role; {} holds no role",
-                    caller.principal
-                ),
-            ),
-        );
+    // Wave 4c §6.1: a door like any other, so it needs a grant; and capped
+    // well below the worker count, because an open stream pins a worker for
+    // its life and four tabs must not wedge every door.
+    if let Err(refused) = caller.allowed("/api/events", Need::Any, Detail::Plain) {
+        let _ = respond(request, refused);
         return;
     }
     if doors.streams_open.fetch_add(1, Ordering::SeqCst) >= doors.event_streams {
@@ -2780,28 +2940,32 @@ fn located(doors: &Doors, command: Vec<String>) -> Result<Vec<String>, Reply> {
     Ok(out)
 }
 
-/// Wave 4c §6.5: one row per door: the role it needs, whether it writes,
+/// Wave 4c §6.5: one row per door: the grant it needs, whether it writes,
 /// whether it takes an idempotency key, its cost class, its result cap and
 /// a human label in the present and the past tense. The desk's controls,
-/// the MCP door's gating and the audit line derive from this table.
+/// the MCP door's gating and the audit line derive from this table. The
+/// grant and the detail are read from the door table itself, so the policy
+/// and the doors cannot disagree on a door.
 pub(crate) fn policy() -> Vec<serde_json::Value> {
-    let row = |door: &str,
-               role: &str,
-               writes: bool,
-               idem: bool,
-               cost: &str,
-               cap: &str,
-               now: &str,
-               then: &str| {
-        serde_json::json!({
-            "door": door, "role": role, "writes": writes, "idempotent": idem,
-            "cost": cost, "result_cap": cap, "label": {"present": now, "past": then},
-        })
-    };
+    let row =
+        |name: &str, writes: bool, idem: bool, cost: &str, cap: &str, now: &str, then: &str| {
+            let (method, path) = name.split_once(' ').unwrap_or(("GET", name));
+            let (need, detail) = door(method, &segments(path));
+            let mut r = serde_json::json!({
+                "door": name, "grant": need.grant(), "writes": writes, "idempotent": idem,
+                "cost": cost, "result_cap": cap, "label": {"present": now, "past": then},
+            });
+            if let Some(also) = need.also() {
+                r["also"] = serde_json::Value::from(also);
+            }
+            if detail > Detail::Plain {
+                r["detail"] = serde_json::Value::from(detail.name());
+            }
+            r
+        };
     vec![
         row(
             "GET /api/capabilities",
-            "reader",
             false,
             false,
             "free",
@@ -2811,7 +2975,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/status",
-            "reader",
             false,
             false,
             "bounded",
@@ -2821,7 +2984,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/custody",
-            "admin",
             false,
             false,
             "bounded",
@@ -2831,7 +2993,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/audit",
-            "admin",
             false,
             false,
             "bounded",
@@ -2841,7 +3002,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/jobs",
-            "reader",
             false,
             false,
             "bounded",
@@ -2851,7 +3011,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/jobs",
-            "operator",
             true,
             false,
             "job",
@@ -2861,7 +3020,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/jobs/{id}",
-            "reader",
             false,
             false,
             "free",
@@ -2871,7 +3029,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/jobs/{id}/cancel",
-            "operator",
             true,
             true,
             "free",
@@ -2881,7 +3038,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/releases",
-            "reader",
             false,
             false,
             "bounded",
@@ -2891,7 +3047,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/releases",
-            "operator",
             true,
             false,
             "job",
@@ -2901,7 +3056,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/handovers",
-            "operator",
             true,
             false,
             "job",
@@ -2911,7 +3065,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/select",
-            "reader",
             false,
             false,
             "bounded",
@@ -2921,7 +3074,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/review",
-            "reviewer",
             false,
             false,
             "bounded",
@@ -2931,7 +3083,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/review/{id}",
-            "reviewer",
             false,
             false,
             "free",
@@ -2941,7 +3092,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/review/{id}/apply",
-            "reviewer",
             true,
             false,
             "free",
@@ -2951,7 +3101,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/review/{id}/accept",
-            "reviewer",
             true,
             true,
             "free",
@@ -2961,7 +3110,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/decisions/{id}/commit",
-            "reviewer",
             true,
             true,
             "free",
@@ -2971,7 +3119,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/decisions/{id}/withdraw",
-            "reviewer",
             true,
             true,
             "free",
@@ -2981,7 +3128,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/events",
-            "reader",
             false,
             false,
             "stream",
@@ -2991,7 +3137,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/packs",
-            "reader",
             false,
             false,
             "free",
@@ -3001,7 +3146,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/packs/{name}",
-            "reader",
             false,
             false,
             "free",
@@ -3011,7 +3155,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/batches",
-            "reader",
             false,
             false,
             "bounded",
@@ -3021,7 +3164,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/batches/{id}",
-            "reader",
             false,
             false,
             "free",
@@ -3031,7 +3173,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/quarantine",
-            "reviewer",
             false,
             false,
             "bounded",
@@ -3041,7 +3182,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/classify/signals",
-            "reviewer",
             false,
             false,
             "bounded",
@@ -3051,7 +3191,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/classify/try",
-            "reviewer",
             false,
             false,
             "bounded",
@@ -3061,7 +3200,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/instances/{stack}/manifest",
-            "reader",
             false,
             false,
             "free",
@@ -3071,7 +3209,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/instances/{stack}/tiles/{level}/{z}",
-            "reader",
             false,
             false,
             "bounded",
@@ -3081,7 +3218,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/instances/{stack}/slab/{level}/{z0}-{z1}",
-            "reader",
             false,
             false,
             "bounded",
@@ -3091,7 +3227,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/instances/{stack}/render/{level}/{z}",
-            "reader",
             false,
             false,
             "bounded",
@@ -3101,7 +3236,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/places",
-            "reader",
             false,
             false,
             "bounded",
@@ -3111,7 +3245,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/sources",
-            "reader",
             false,
             false,
             "bounded",
@@ -3121,7 +3254,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/places",
-            "operator",
             true,
             false,
             "bounded",
@@ -3131,7 +3263,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "PUT /api/places/{id}",
-            "operator",
             true,
             true,
             "bounded",
@@ -3141,7 +3272,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/backups",
-            "admin",
             false,
             false,
             "bounded",
@@ -3151,7 +3281,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "PUT /api/backups/schedule",
-            "admin",
             true,
             true,
             "free",
@@ -3161,7 +3290,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/settings",
-            "reader",
             false,
             false,
             "free",
@@ -3171,7 +3299,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "PUT /api/settings",
-            "admin",
             true,
             true,
             "free",
@@ -3181,7 +3308,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/overlays",
-            "reader",
             false,
             false,
             "free",
@@ -3191,7 +3317,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/overlays",
-            "reviewer",
             true,
             false,
             "bounded",
@@ -3201,7 +3326,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/overlays/{id}",
-            "reader",
             false,
             false,
             "free",
@@ -3211,7 +3335,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/overlays/{id}/adopt",
-            "operator",
             true,
             false,
             "job",
@@ -3221,7 +3344,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ingest/probe",
-            "operator",
             false,
             false,
             "job",
@@ -3231,7 +3353,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ingest/folders",
-            "operator",
             false,
             false,
             "bounded",
@@ -3241,7 +3362,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ingest/look",
-            "operator",
             false,
             false,
             "bounded",
@@ -3251,7 +3371,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/ask/schema",
-            "reader",
             false,
             false,
             "free",
@@ -3261,7 +3380,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/ask/catalog",
-            "reader",
             false,
             false,
             "bounded",
@@ -3271,7 +3389,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/ask/catalog/{level}",
-            "reader",
             false,
             false,
             "bounded",
@@ -3281,7 +3398,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/ask/catalog/{level}/{field}/values",
-            "reader",
             false,
             false,
             "bounded",
@@ -3291,7 +3407,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/ask/guide",
-            "reader",
             false,
             false,
             "free",
@@ -3301,7 +3416,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/draft",
-            "reader",
             true,
             false,
             "bounded",
@@ -3311,7 +3425,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/diff",
-            "reader",
             false,
             false,
             "free",
@@ -3321,7 +3434,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/validate",
-            "reader",
             false,
             false,
             "free",
@@ -3331,7 +3443,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/run",
-            "reader",
             true,
             true,
             "bounded",
@@ -3341,7 +3452,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/jobs",
-            "reader",
             true,
             true,
             "job",
@@ -3351,7 +3461,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/explain",
-            "reader",
             false,
             false,
             "free",
@@ -3361,7 +3470,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/options",
-            "reader",
             false,
             false,
             "free",
@@ -3371,7 +3479,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/apply",
-            "reader",
             true,
             true,
             "free",
@@ -3381,7 +3488,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/diagnose",
-            "reader",
             false,
             false,
             "bounded",
@@ -3391,7 +3497,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/preview",
-            "reader",
             false,
             false,
             "bounded",
@@ -3401,7 +3506,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/profile",
-            "reader",
             false,
             false,
             "bounded",
@@ -3411,7 +3515,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/describe",
-            "reader",
             false,
             false,
             "free",
@@ -3421,7 +3524,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/summary",
-            "reader",
             false,
             false,
             "bounded",
@@ -3431,7 +3533,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/start",
-            "reader",
             false,
             false,
             "bounded",
@@ -3441,7 +3542,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/ask/documents",
-            "reader",
             false,
             false,
             "bounded",
@@ -3451,7 +3551,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/documents",
-            "reader",
             true,
             false,
             "free",
@@ -3461,7 +3560,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/ask/documents/{id}",
-            "reader",
             false,
             false,
             "free",
@@ -3471,7 +3569,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "PUT /api/ask/selections/{name}",
-            "reviewer",
             true,
             false,
             "free",
@@ -3481,7 +3578,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/ask/selections/{name}",
-            "reader",
             false,
             false,
             "free",
@@ -3491,7 +3587,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/ask/handles",
-            "reader",
             false,
             false,
             "free",
@@ -3501,7 +3596,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/ask/handles/{id}",
-            "reader",
             false,
             false,
             "free",
@@ -3511,7 +3605,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/timeline/{kind}/{id}",
-            "reader",
             false,
             false,
             "bounded",
@@ -3521,7 +3614,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/depends/{kind}/{id}",
-            "reader",
             false,
             false,
             "bounded",
@@ -3531,7 +3623,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "GET /api/ask/handles/{id}/rows",
-            "reader",
             false,
             false,
             "bounded",
@@ -3541,7 +3632,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/handles/{id}/promote",
-            "operator",
             true,
             true,
             "job",
@@ -3551,7 +3641,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/ask/values",
-            "reader",
             true,
             false,
             "bounded",
@@ -3561,7 +3650,6 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
         ),
         row(
             "POST /api/sessions/rebuild",
-            "operator",
             true,
             false,
             "job",
@@ -3593,5 +3681,30 @@ mod disclosure_tests {
         ));
         assert_eq!(r.status, 409);
         assert_eq!(r.body["disclosure"], "gated");
+    }
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::token_entries;
+
+    #[test]
+    fn nils_tokens_splits_into_the_entries_token_takes() {
+        // what worked before reads the same
+        assert_eq!(
+            token_entries("t1=bo@lab,t2=cy@lab:reader"),
+            ["t1=bo@lab", "t2=cy@lab:reader"]
+        );
+        assert_eq!(
+            token_entries(" t1=bo@lab: , ,t2=cy@lab "),
+            ["t1=bo@lab:", "t2=cy@lab"]
+        );
+        // a piece that holds no `=` continues the entry before it
+        assert_eq!(
+            token_entries("t1=bo@lab:reader,kvasir:see, t2=cy@lab:query:work"),
+            ["t1=bo@lab:reader,kvasir:see", "t2=cy@lab:query:work"]
+        );
+        // a piece before any entry stays on its own, and is refused as before
+        assert_eq!(token_entries("reader,t1=bo@lab"), ["reader", "t1=bo@lab"]);
     }
 }

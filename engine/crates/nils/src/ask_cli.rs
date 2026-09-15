@@ -1284,24 +1284,25 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
         },
     )
     .map_err(|e| fail(e.to_string()))?;
-    // Wave 4c §6.1: under a claim a door queued, the roles the door
-    // recorded decide the scope and the projection, never the worker's own;
-    // from a terminal, the operator at the keyboard holds every class.
-    let queued_roles = std::env::var("NILS_JOB_ROLES")
+    // Wave 4c §6.1: under a claim a door queued, the detail the job
+    // recorded decides the scope and the projection, never the worker's
+    // own; a worker from before grants hands the roles instead. From a
+    // terminal, the operator at the keyboard holds every class.
+    let queued = std::env::var("NILS_JOB_DETAIL")
         .ok()
-        .filter(|r| !r.is_empty());
-    let (scope, may_project_raw) = match &queued_roles {
-        Some(list) => {
-            let roles: Vec<crate::serve::Role> = list
-                .split(',')
-                .filter_map(crate::serve::Role::parse)
-                .collect();
-            (
-                crate::ask_doors::scope_of_roles(&roles),
-                crate::ask_doors::may_project_raw_of_roles(&roles)
-                    && std::env::var("NILS_JOB_RAW").ok().as_deref() == Some("1"),
-            )
-        }
+        .map(|d| crate::grants::Detail::parse(d.trim()).unwrap_or_default())
+        .or_else(|| {
+            std::env::var("NILS_JOB_ROLES")
+                .ok()
+                .filter(|r| !r.is_empty())
+                .map(|list| crate::grants::Detail::of_steps(list.split(',')))
+        });
+    let (scope, may_project_raw) = match queued {
+        Some(detail) => (
+            crate::ask_doors::scope_of_detail(detail),
+            detail == crate::grants::Detail::Sensitive
+                && std::env::var("NILS_JOB_RAW").ok().as_deref() == Some("1"),
+        ),
         None => (scope(), true),
     };
     let pack_version = pack.version.to_string();

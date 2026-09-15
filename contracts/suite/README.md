@@ -14,6 +14,7 @@ directory beside the old one, which stays.
 | version | documents | since |
 |---|---|---|
 | 1 | [`v1/`](v1/) | Wave 4c slice A7, 2026-09-09 |
+| 2 | [`v2/`](v2/) | 2026-09-15: grants and detail in place of the role ladder |
 
 ## What version 1 fixes
 
@@ -32,3 +33,23 @@ The vectors are data. An implementation mints each case with the named key
 for an expired case), presents it, and compares what happened with `expect`.
 The engine runs them in `engine/crates/nils/tests/serve.rs`; Kvasir runs the
 same file.
+
+## What version 2 changes
+
+Version 2 is version 1 with grants and detail in place of the role ladder. A
+caller holds a set of grants, each naming a page and how far the caller goes
+there (`see`, or `work`, which includes see; the assistant has `use`), and a
+detail, `plain`, `quasi` or `sensitive`, that says how much of a record it
+sees. The other documents and vectors are version 1's.
+
+| document | what changes |
+|---|---|
+| `grants.schema.json` | replaces `entitlements.schema.json`: the grants, the detail and its order, and the ladder steps a ceiling or a binding still names |
+| `capabilities.schema.json` | the engine's caller and the person carry `grants` and `detail`, and for one release `roles` as the ladder steps up to the detail; a policy row names its `grant`, one or an array meaning any of, with `also` for a second grant a door needs and `detail` for the lowest detail |
+| `headers.schema.json` | the ceiling is still a ladder step: the caller keeps the grants its set holds and `assistant:use`, and detail is lowered to the step's |
+| `vectors/grants.json` | the ladder's sets, and how a caller is resolved from a token's claims, narrowed by a ceiling, named by a token's list, and known by its principal, which only a trust entry that keeps subjects takes as the token spells it |
+
+A ladder name stands for its set wherever one is still met: a `--role`
+binding, a named token's list, a legacy entitlement, a ceiling. The engine
+runs the grants vectors in `engine/crates/nils/tests/serve.rs` beside the
+trust list vectors; Kvasir, the assistant and the desk run the same file.

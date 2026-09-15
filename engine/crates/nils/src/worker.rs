@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The queue's worker (Wave 4c section 6.1): queued jobs run one at a time,
-//! oldest first, each as a `nils` process of its own under the roles and the
+//! oldest first, each as a `nils` process of its own under the detail and the
 //! actor the door recorded. `nils jobs work` runs it in the foreground, and
 //! `nils serve --worker` runs it beside the doors, so a job queued at a door
 //! runs without anyone starting a worker by hand.
@@ -102,17 +102,11 @@ pub(crate) fn run(
         } else {
             writeln!(std::io::stdout(), "{line}")
         };
-        // Wave 4c section 6.1: the roles the door recorded reach the verb,
-        // which runs under them and never under the worker's own.
-        let roles = next.args["roles"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            })
-            .unwrap_or_default();
+        // Wave 4c section 6.1: the detail the door recorded reaches the
+        // verb, which runs under it and never under the worker's own. A job
+        // queued before grants runs under the detail of the highest role it
+        // recorded, and one that recorded neither runs as plain.
+        let detail = crate::grants::Detail::of_job(&next.args);
         let raw = if next.args["may_project_raw"].as_bool() == Some(true) {
             "1"
         } else {
@@ -129,7 +123,7 @@ pub(crate) fn run(
                 "NILS_PRINCIPAL",
                 next.principal().unwrap_or(&crate::actor()),
             )
-            .env("NILS_JOB_ROLES", roles)
+            .env("NILS_JOB_DETAIL", detail.name())
             .env("NILS_JOB_RAW", raw)
             .env("NILS_INGEST_ROOTS", &roots_env)
             .env(
