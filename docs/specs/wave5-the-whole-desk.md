@@ -446,13 +446,46 @@ than typed. The roles:
 The rules are checked, not documented: a release writes only to an `export`
 place; a question's subset writes only to a `share` place; the `registry` role is
 refused on a place without a backup; a `source` place is never written except
-beside the original by the anonymiser. The engine probes what it can, the mount,
-the free space, the presence of snapshots where the filesystem shows them, and
-records what it cannot as a declaration by the operator. On a laptop a place is a
-directory and its guarantees are what the person declares; the rules are the
-same. The Settings page shows every place, its role, its guarantees and which
-paths are bound to it, and lets an operator add, bind and retire places. The
-group's own places are the record's (`20 §6`).
+inside the dataset's own trees by the pseudonymiser. The engine probes what it
+can, the mount, the free space, the presence of snapshots where the filesystem
+shows them, and records what it cannot as a declaration by the operator. On a
+laptop a place is a directory and its guarantees are what the person declares;
+the rules are the same. The Settings page shows every place, its role, its
+guarantees and which paths are bound to it, and lets an operator add, bind and
+retire places. The group's own places are the record's (`20 §6`).
+
+**A source place is a dataset** (record 26, HTTP API contract version 5). One
+folder with one name, and on it: `arrives`, what comes in, `identified` (to be
+pseudonymised into the tree before anything reads it), `deidentified` (moved into
+the tree as sent, its identifiers mapped at read time) or `coded` (our codes in
+PatientID already, taken verbatim); `trees`, the originals at
+`derivatives/dcm-original`, read by the pseudonymiser and nothing else, and the
+pseudonymised tree at `derivatives/dcm-anon`, the registry's only source, or the
+folder itself, `.`, where there is no such layout, which is how every place
+declared before the record keeps working; `identity`, the rule its files are read
+under, the `identity` block of a rule file as `nils digest --identity-rule` reads
+it, or null, which a digest of the dataset takes when it names none of its own;
+`unmapped`, what a file whose identifier the linkage store does not know does,
+`hold` (the default for identified arrivals) or `code`; `cohort`, the one every
+digest of it feeds, or null; `tags`, `keep_demographics` (sex, weight and size,
+kept unless said), `remove` and `keep`, each tag as `gggg,eeee`, applied beside
+the four groups the pseudonymiser always removes; `originals_kept`, `kept`,
+`vaulted` or `purged`. Declaring a source place, or changing its dataset, looks
+at the folder: `derivatives/dcm-raw`, a v0 cohort folder's, is renamed
+`derivatives/dcm-anon` and nothing else is rewritten; an identified folder's
+loose entries beside `derivatives/` are moved into the originals and an empty
+pseudonymised tree is made; a de-identified or coded folder's are moved into the
+pseudonymised tree when `move_into_anon` asks. Every move is a rename inside the
+folder, top-level entries only; nothing is copied and nothing is read. A folder
+that is a tree of another dataset is refused. `POST /api/places` and `PUT
+/api/places/{id}` take the fields under `data:work` beside `places:work` and
+answer `layout`; `POST /api/ingest/look` answers `layout` before a folder is
+declared; `GET /api/sources` and `GET /api/places` show the dataset with each
+tree's path and the files, bytes and last write the last probe counted
+(`?probe=1` counts again, bounded), and `held`, what the pseudonymiser holds for
+want of a map. Wherever a location is named, `@name` is the pseudonymised tree
+and `@name/originals` the originals, which a digest is refused: the registry
+never points at an identified file.
 
 ### 10.3 Database (D75)
 
