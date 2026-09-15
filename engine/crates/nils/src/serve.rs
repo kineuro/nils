@@ -93,6 +93,12 @@ struct Trust {
     audience: String,
     /// The issuer's host, which is the node half of the principal.
     node: String,
+    /// Whether a subject that already holds `@` is the principal as it
+    /// stands: the desk's own entry, which qualifies its subjects itself.
+    /// Any other entry qualifies every subject by its host, so a provider
+    /// whose subjects are mail addresses keeps its people's principals, and
+    /// no issuer names a principal under another issuer's host.
+    keep_subject: bool,
     jwks: Jwks,
     keys: std::sync::Mutex<Vec<Key>>,
     fetched: std::sync::Mutex<Instant>,
@@ -343,14 +349,15 @@ impl Auth {
             }
             "oidc" => {
                 // Wave 4c §5.3: a trust list; the three single flags of
-                // Wave 4b are sugar for one entry.
-                let mut specs: Vec<(String, String, Jwks)> = Vec::new();
+                // Wave 4b are sugar for one entry, which keeps no subject.
+                let mut specs: Vec<(String, String, Jwks, bool)> = Vec::new();
                 for t in &args.oidc_trust {
                     let (mut issuer, mut audience, mut jwks) = (None, None, None);
+                    let mut keep_subject = false;
                     for part in t.split(',') {
                         let Some((k, v)) = part.split_once('=') else {
                             return Err(usage(format!(
-                                "{t} is not issuer=URL,audience=ID,jwks=URL"
+                                "{t} is not issuer=URL,audience=ID,jwks=URL[,keep_subject=true]"
                             )));
                         };
                         let v = v.trim().to_string();
@@ -365,15 +372,26 @@ impl Auth {
                                         Jwks::File(PathBuf::from(v))
                                     })
                             }
+                            "keep_subject" => {
+                                keep_subject = match v.as_str() {
+                                    "true" => true,
+                                    "false" => false,
+                                    other => {
+                                        return Err(usage(format!(
+                                            "keep_subject is true or false, not {other}"
+                                        )));
+                                    }
+                                }
+                            }
                             other => {
                                 return Err(usage(format!(
-                                    "{other} is not a part of --oidc-trust: issuer, audience, jwks"
+                                    "{other} is not a part of --oidc-trust: issuer, audience, jwks, keep_subject"
                                 )));
                             }
                         }
                     }
                     match (issuer, audience, jwks) {
-                        (Some(i), Some(a), Some(j)) => specs.push((i, a, j)),
+                        (Some(i), Some(a), Some(j)) => specs.push((i, a, j, keep_subject)),
                         _ => {
                             return Err(usage(format!(
                                 "{t}: --oidc-trust names issuer, audience and jwks together"
@@ -383,7 +401,7 @@ impl Auth {
                 }
                 match (&args.oidc_issuer, &args.oidc_audience, &args.oidc_jwks) {
                     (Some(i), Some(a), Some(j)) => {
-                        specs.push((i.clone(), a.clone(), Jwks::File(j.clone())));
+                        specs.push((i.clone(), a.clone(), Jwks::File(j.clone()), false));
                     }
                     (None, None, None) => {}
                     _ => {
@@ -398,7 +416,7 @@ impl Auth {
                     ));
                 }
                 let mut trusts = Vec::new();
-                for (issuer, audience, jwks) in specs {
+                for (issuer, audience, jwks, keep_subject) in specs {
                     // A file that cannot be read is a fault in the
                     // configuration and stops the engine here. A URL that
                     // does not answer is a matter of order: the issuer may
@@ -428,6 +446,7 @@ impl Auth {
                         issuer,
                         audience,
                         node,
+                        keep_subject,
                         jwks,
                         keys: std::sync::Mutex::new(keys),
                         fetched: std::sync::Mutex::new(Instant::now()),
@@ -686,9 +705,10 @@ impl Oidc {
                 &oidc.bindings,
             );
             // The audit principal is the subject (§11.2), at the issuer's
-            // node; a subject that already names its node, as the desk's
-            // tokens do, is the principal as it stands.
-            let principal = if claims.sub.contains('@') {
+            // node; a subject that already names its node is the principal
+            // as it stands, but only from an entry that keeps subjects, as
+            // the desk's own entry does.
+            let principal = if trust.keep_subject && claims.sub.contains('@') {
                 claims.sub.clone()
             } else {
                 format!("{}@{}", claims.sub, trust.node)

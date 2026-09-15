@@ -454,8 +454,11 @@ struct ServeArgs {
     oidc_jwks: Option<PathBuf>,
     /// An issuer the engine trusts, as `issuer=URL,audience=ID,jwks=URL`
     /// where jwks is the issuer's JWKS URL or a file; repeatable (Wave 4c
-    /// section 5.3). The three flags above are one entry
-    #[arg(long, value_name = "ISSUER,AUDIENCE,JWKS")]
+    /// section 5.3). `keep_subject=true` takes a subject that already holds
+    /// `@` as the principal, as the desk's own entry does; without it every
+    /// subject is qualified by the issuer's host. The three flags above are
+    /// one entry, which keeps no subject
+    #[arg(long, value_name = "ISSUER,AUDIENCE,JWKS[,KEEP_SUBJECT]")]
     oidc_trust: Vec<String>,
     /// The floor between two fetches of one issuer's keys, in seconds
     /// (for tests)

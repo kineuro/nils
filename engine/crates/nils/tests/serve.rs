@@ -3132,27 +3132,39 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
     server.finish();
 
     // a name that is neither a ladder name nor a grant stops the engine
-    // before it listens, in a token's list and in a binding
+    // before it listens, in a token's list and in a binding, and so does a
+    // trust entry whose keep_subject is neither true nor false
     let jwks = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/oidc/jwks.json");
     let trust = format!(
         "issuer=https://id.example.org/,audience=nils,jwks={}",
         jwks.display()
     );
-    for args in [
-        vec![
-            "--auth",
-            "token",
-            "--token",
-            "sixteen-characters-long=bo@lab:reader,coffee:work",
-        ],
-        vec![
-            "--auth",
-            "oidc",
-            "--oidc-trust",
-            trust.as_str(),
-            "--role",
-            "students=assistant:see",
-        ],
+    let keeps = format!("{trust},keep_subject=yes");
+    for (args, says) in [
+        (
+            vec![
+                "--auth",
+                "token",
+                "--token",
+                "sixteen-characters-long=bo@lab:reader,coffee:work",
+            ],
+            "neither a ladder name nor a grant",
+        ),
+        (
+            vec![
+                "--auth",
+                "oidc",
+                "--oidc-trust",
+                trust.as_str(),
+                "--role",
+                "students=assistant:see",
+            ],
+            "neither a ladder name nor a grant",
+        ),
+        (
+            vec!["--auth", "oidc", "--oidc-trust", keeps.as_str()],
+            "keep_subject is true or false",
+        ),
     ] {
         let out = nils()
             .arg("--registry")
@@ -3163,17 +3175,15 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
             .unwrap();
         let err = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
-        assert!(
-            err.contains("neither a ladder name nor a grant"),
-            "{args:?}: {err}"
-        );
+        assert!(err.contains(says), "{args:?}: {err}");
     }
 }
 
 /// The suite contract, version 2: the grants vectors run against the
 /// engine. The claims and the ceilings are tokens of the trust list's first
 /// issuer, bound by the vectors' `--role` bindings; a principal is a token
-/// of the issuer its case names; a named case is a token of `--auth token`.
+/// of the issuer its case names, whose entry keeps subjects when the case
+/// says so; a named case is a token of `--auth token`.
 /// What the capabilities say is compared with what each case expects.
 #[test]
 fn the_grants_vectors_hold() {
@@ -3206,19 +3216,31 @@ fn the_grants_vectors_hold() {
     let claims = g["claims"].as_array().unwrap();
     let ceilings = g["ceilings"].as_array().unwrap();
     let principals = g["principals"].as_array().unwrap();
-    // every issuer a principal case names, trusted with the same keys
-    let mut issuers: Vec<&str> = principals
+    // every issuer a principal case names, trusted with the same keys, one
+    // entry each, keeping subjects when the case's entry does; an entry that
+    // keeps none says nothing, so the default is what is tested
+    let mut entries: Vec<(&str, bool)> = principals
         .iter()
-        .map(|c| c["iss"].as_str().unwrap())
-        .filter(|i| *i != issuer)
+        .map(|c| {
+            (
+                c["iss"].as_str().unwrap(),
+                c["keep_subject"].as_bool().unwrap_or(false),
+            )
+        })
+        .filter(|(i, _)| *i != issuer)
         .collect();
-    issuers.sort();
-    issuers.dedup();
-    for iss in issuers {
+    entries.sort();
+    entries.dedup();
+    assert!(
+        entries.windows(2).all(|w| w[0].0 != w[1].0),
+        "one entry per issuer: {entries:?}"
+    );
+    for (iss, keep) in entries {
         extra.push("--oidc-trust".into());
         extra.push(format!(
-            "issuer={iss},audience={audience},jwks={}",
-            jwks.display()
+            "issuer={iss},audience={audience},jwks={}{}",
+            jwks.display(),
+            if keep { ",keep_subject=true" } else { "" }
         ));
     }
     for (group, bound) in g["roles"].as_object().unwrap() {
