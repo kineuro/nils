@@ -4818,7 +4818,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "kept": "for ever; a correction supersedes the old row and the old row stays (section 13.2)",
             "commands": {
                 "read": ["nils clinical vocabulary list", "nils clinical cohort list", "nils clinical cohort show <name>", "nils custody"],
-                "change": ["nils clinical vocabulary load", "nils clinical cohort make|rename|set|retire|add|remove", "nils ask promote", "a digest of a dataset that feeds a cohort"],
+                "change": ["nils clinical vocabulary load", "nils clinical cohort make | rename | set | retire | add | remove", "nils ask promote", "a digest of a dataset that feeds a cohort"],
                 "export": ["nils release"],
                 "delete": delete_db(REGISTRY_DB, &registry_schema),
             },

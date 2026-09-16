@@ -865,8 +865,12 @@ struct Recorder<'a> {
     codes: HashMap<i64, (String, bool)>,
     subjects_seen: HashSet<i64>,
     provisional_seen: HashSet<i64>,
-    /// The subjects this run made, with their files written.
+    /// The subjects this run made, with their files written. The files
+    /// are counted for every subject as its items arrive, since the item
+    /// that says a subject was made need not be the first of it a worker
+    /// wrote.
     made: BTreeMap<i64, (String, u64)>,
+    files_of: HashMap<i64, u64>,
     /// The shape of the identifier each subject this run made was coded
     /// from, for its provisional item; never the identifier.
     shapes: HashMap<i64, String>,
@@ -902,6 +906,7 @@ impl<'a> Recorder<'a> {
             subjects_seen: HashSet::new(),
             provisional_seen: HashSet::new(),
             made: BTreeMap::new(),
+            files_of: HashMap::new(),
             shapes: HashMap::new(),
             would_make: HashSet::new(),
             held_by_shape: BTreeMap::new(),
@@ -1150,13 +1155,16 @@ impl<'a> Recorder<'a> {
             Item::Written {
                 subject, created, ..
             } => {
+                let files = self.files_of.entry(*subject).or_insert(0);
+                *files += 1;
+                let files = *files;
                 if *created || self.made.contains_key(subject) {
                     let code = self
                         .codes
                         .get(subject)
                         .map(|(c, _)| c.clone())
                         .unwrap_or_default();
-                    self.made.entry(*subject).or_insert((code, 0)).1 += 1;
+                    self.made.entry(*subject).or_insert((code, 0)).1 = files;
                 }
             }
             Item::Held { shape, .. } => {

@@ -697,12 +697,6 @@ fn a_verbatim_rule_files_the_code_the_files_carry() {
         s.identity = rule.clone();
         let mut reg = lab.open();
         let mut store = reg.open_linkage().unwrap();
-        linkage::add_id_type(
-            &mut store,
-            "subject-code",
-            Some("the code the anonymizer wrote"),
-        )
-        .unwrap();
         let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(
             report.written.clone().unwrap().subjects_created,
@@ -782,8 +776,6 @@ fn a_path_segment_is_a_source_and_a_constant_tag_says_so() {
         let mut s = settings(&dir);
         s.identity = rule.clone();
         let mut reg = lab.open();
-        let mut store = reg.open_linkage().unwrap();
-        linkage::add_id_type(&mut store, "subject-code", None).unwrap();
         let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
 
         // Three people, not one and not six.

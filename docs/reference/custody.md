@@ -110,7 +110,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | owner | the research group that owns the cohort |
 | kept | for ever; a correction supersedes the old row and the old row stays (section 13.2) |
 | read | `nils clinical vocabulary list`<br>`nils clinical cohort list`<br>`nils clinical cohort show <name>`<br>`nils custody` |
-| change | `nils clinical vocabulary load`<br>`nils clinical cohort make|rename|set|retire|add|remove`<br>`nils ask promote`<br>a digest of a dataset that feeds a cohort |
+| change | `nils clinical vocabulary load`<br>`nils clinical cohort make \| rename \| set \| retire \| add \| remove`<br>`nils ask promote`<br>a digest of a dataset that feeds a cohort |
 | export | `nils release` |
 | delete | remove `<home>/registry.db` (nils has no command for it) |
 

@@ -17,7 +17,7 @@ use nils_registry::audit::{self, Action, Entry};
 use nils_registry::cohort::{self, Opened};
 use nils_registry::home::Registry;
 use nils_registry::schema::{Type, table};
-use nils_registry::store::Error as StoreError;
+use nils_registry::store::{Error as StoreError, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -103,6 +103,25 @@ struct Applied {
     selection: Option<Matched>,
 }
 
+/// Whether a version of the selection named so holds this ask: the
+/// selection is then the cohort's own source ask (Wave 4b §8.2).
+fn selection_holds(store: &mut Store, name: &str, hash: Option<&str>) -> Result<bool, StoreError> {
+    let Some(hash) = hash else {
+        return Ok(false);
+    };
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT 1 FROM {} sv JOIN {} s ON s.id = sv.selection_id WHERE s.name = {} AND sv.hash = {}",
+        store.qualified("selection_version"),
+        store.qualified("selection"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text)
+    );
+    Ok(store
+        .query_opt(&sql, &[Param::from(name), Param::from(hash)])?
+        .is_some())
+}
+
 /// Promote a handle's subjects into a cohort, opening one so named when
 /// asked. A judgement changing act: the epoch advances. A subject grain
 /// handle's keys are its subjects; a session or stack grain handle's rows
@@ -153,7 +172,14 @@ pub fn promote(
             "cohort {cohort} is retired; bring it back before promoting into it"
         )));
     }
-    if existing.is_none() && create && cohort::selection_named(store, cohort)? {
+    // Wave 4b §8.2: the two namespaces are one, unless the selection is
+    // this cohort's own source ask, which is what a promotion of a saved
+    // selection into a cohort of its name is.
+    if existing.is_none()
+        && create
+        && cohort::selection_named(store, cohort)?
+        && !selection_holds(store, cohort, ask_hash.as_deref())?
+    {
         return Err(PromoteError::Refused(format!(
             "{cohort} is a selection's name; a cohort cannot be named so (Wave 4b section 8.2)"
         )));
