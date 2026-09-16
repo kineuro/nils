@@ -5,7 +5,8 @@
 //! `nils serve --worker` runs it beside the doors, so a job queued at a door
 //! runs without anyone starting a worker by hand.
 
-use std::io::Write as _;
+use std::collections::VecDeque;
+use std::io::{BufRead as _, Write as _};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,44 @@ use crate::{Exit, fail};
 /// inside the freshness a claim allows, so a long digest never reads as a
 /// worker that died.
 const BEAT_EVERY: Duration = Duration::from_secs(10);
+
+/// How much of a job's stderr the worker keeps for the job's error when
+/// the verb ends without finishing its own row (lab 26, defect 6): the
+/// last lines, bounded in bytes, so a job that stopped says why as a job
+/// run from the command line does.
+const TAIL_LINES: usize = 8;
+const TAIL_BYTES: usize = 2_000;
+
+/// What the verb printed last: read line by line as the child runs, so a
+/// verb that says a great deal never fills a pipe and stalls, echoed to
+/// this process's stderr unless the worker is quiet.
+fn tail_of(stderr: std::process::ChildStderr, quiet: bool) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut kept: VecDeque<String> = VecDeque::new();
+        let mut bytes = 0usize;
+        for line in std::io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if !quiet {
+                let _ = writeln!(std::io::stderr(), "{line}");
+            }
+            let trimmed = line.trim_end().to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+            bytes += trimmed.len();
+            kept.push_back(trimmed);
+            while kept.len() > TAIL_LINES || (bytes > TAIL_BYTES && kept.len() > 1) {
+                if let Some(gone) = kept.pop_front() {
+                    bytes -= gone.len();
+                }
+            }
+        }
+        kept.into_iter()
+            .map(|l| l.strip_prefix("nils: ").unwrap_or(&l).to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
 
 /// Take the queue: a registry's queue has one worker at a time.
 pub(crate) fn claim(store: &mut Store, once: bool) -> Result<i64, job::Error> {
@@ -139,11 +178,15 @@ pub(crate) fn run(
             } else {
                 Stdio::inherit()
             })
+            .stderr(Stdio::piped())
             .spawn();
         // The worker says it is alive while the job runs; a cancel of the
-        // worker lets the job finish and then stops.
+        // worker lets the job finish and then stops. What the verb printed
+        // last is kept for the job's error.
         let mut asked_to_stop = false;
+        let mut tail: Option<std::thread::JoinHandle<String>> = None;
         let status = spawned.and_then(|mut child| {
+            tail = child.stderr.take().map(|e| tail_of(e, opts.quiet));
             let mut beaten = Instant::now();
             loop {
                 if let Some(status) = child.try_wait()? {
@@ -165,10 +208,15 @@ pub(crate) fn run(
             }
         });
         // The verb adopted the row and finished it itself; the worker writes
-        // the outcome only when the verb did not.
+        // the outcome only when the verb did not, and then the error is what
+        // the verb printed last, or its exit status when it printed nothing.
+        let printed = tail
+            .and_then(|t| t.join().ok())
+            .unwrap_or_default();
         let (state, error) = match status {
             Ok(s) if s.success() => (State::Done, None),
-            Ok(s) => (State::Failed, Some(format!("exit status {s}"))),
+            Ok(s) if printed.is_empty() => (State::Failed, Some(format!("exit status {s}"))),
+            Ok(_) => (State::Failed, Some(printed)),
             Err(e) => (State::Failed, Some(e.to_string())),
         };
         match job::show(store, next.id) {

@@ -3158,7 +3158,9 @@ fn nils_jobs_lists_shows_cancels_queues_works_and_resumes() {
         .unwrap();
     assert!(adopted["args"]["argv"].is_array(), "{adopted}");
     assert!(adopted["heartbeat_at"].is_string(), "{adopted}");
-    // A queued command that fails ends failed with the exit status.
+    // A queued command that fails ends failed with the reason the verb
+    // printed, as a job run from the command line records it (lab 26,
+    // defect 6), never a bare exit status.
     run(&["jobs", "enqueue", "--", "explain", "999999"]);
     let worked = run(&["jobs", "work", "--once"]);
     assert!(worked.contains("nils explain"), "{worked}");
@@ -3171,13 +3173,8 @@ fn nils_jobs_lists_shows_cancels_queues_works_and_resumes() {
         .find(|j| j["kind"] == "explain")
         .unwrap();
     assert_eq!(failed["state"], "failed", "{failed}");
-    assert!(
-        failed["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("exit status"),
-        "{failed}"
-    );
+    let error = failed["error"].as_str().unwrap_or("");
+    assert_eq!(error, "stack 999999 has not been classified", "{failed}");
 
     // Resume: the digest runs again from its recorded command line, and
     // finds nothing changed.
