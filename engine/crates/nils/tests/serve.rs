@@ -255,12 +255,12 @@ impl Server {
 #[test]
 fn the_door_serves_what_the_command_line_has() {
     let home = registry();
-    let server = Server::start(&home, 17, &[], &[]);
+    let server = Server::start(&home, 18, &[], &[]);
 
     // C26: the capabilities name the contracts, the pack, the epoch.
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
-    assert_eq!(caps["contracts"]["openapi"], "5", "{caps}");
+    assert_eq!(caps["contracts"]["openapi"], "6", "{caps}");
     assert_eq!(caps["contracts"]["review_item"], "4", "{caps}");
     // Wave 4c §4.5: the engine's document is the `engine` part of the
     // deployment capabilities document, and carries what the suite requires.
@@ -344,6 +344,33 @@ fn the_door_serves_what_the_command_line_has() {
             "{door} is not in the contract"
         );
     }
+
+    // Record 28: the engine serves the tag policy it owns, so that nothing
+    // reading it has to keep a copy. A hundred elements in four categories,
+    // never the times, which are a release's.
+    assert!(doors.contains(&"GET /api/pseudonymize/tags"), "{doors:?}");
+    let (status, policy) = server.request("GET", "/api/pseudonymize/tags", None, None);
+    assert_eq!(status, 200, "{policy}");
+    assert_eq!(policy["count"], 100, "{policy}");
+    assert_eq!(
+        policy["categories"],
+        serde_json::json!([
+            {"category": "patient", "count": 34},
+            {"category": "trial", "count": 23},
+            {"category": "provider", "count": 38},
+            {"category": "institution", "count": 5},
+        ]),
+        "{policy}"
+    );
+    assert!(!policy.to_string().contains("times"), "{policy}");
+    assert_eq!(policy["code"]["tag"], "0010,0020", "{policy}");
+    assert_eq!(policy["code"]["fate"], "replaced", "{policy}");
+    assert_eq!(policy["mandatory"][0]["tag"], "0008,0016", "{policy}");
+    assert_eq!(policy["mandatory"][1]["tag"], "0008,0018", "{policy}");
+    assert_eq!(
+        policy["covariates"]["opt_out"], "keep_demographics",
+        "{policy}"
+    );
 
     let (status, doc) = server.request("GET", "/api/status", None, None);
     assert_eq!(status, 200, "{doc}");

@@ -21,6 +21,7 @@
 //! that the digest after it shares a name with.
 
 pub mod layout;
+pub mod policy;
 pub mod progress;
 pub mod report;
 pub mod resume;

@@ -123,6 +123,23 @@ impl<'a> Scrub<'a> {
             remove,
         }
     }
+
+    /// The plan one file is rewritten under, under the subject's `code`: the
+    /// four categories, the policy that keeps the dates and the UIDs, and
+    /// the dataset's own lists. One statement of it, so that what the door
+    /// of record 28 serves and what a file meets cannot part company.
+    pub fn plan<'p>(&'p self, code: &'p str) -> Plan<'p> {
+        Plan {
+            policy: &self.policy,
+            categories: &CATEGORIES,
+            private: self.private,
+            code,
+            offset: Offset(0),
+            remap: None,
+            keep: self.keep,
+            remove: self.remove,
+        }
+    }
 }
 
 /// What writing one file did.
@@ -193,17 +210,7 @@ pub fn write(
                 )
             })?,
     };
-    let plan = Plan {
-        policy: &scrub.policy,
-        categories: &CATEGORIES,
-        private: scrub.private,
-        code,
-        offset: Offset(0),
-        remap: None,
-        keep: scrub.keep,
-        remove: scrub.remove,
-    };
-    let applied = scrub::apply(&mut object, &plan);
+    let applied = scrub::apply(&mut object, &scrub.plan(code));
     if dry_run {
         return Ok(Outcome {
             out_size: 0,
