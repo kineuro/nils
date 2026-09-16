@@ -515,21 +515,46 @@ and purging that file destroys the only version of it anybody has; the
 asymmetry decides it, since a false refusal costs a run of the pseudonymiser
 and a false acceptance costs the data. A modification time that moved
 innocently, after a restore or a copy between disks, is refused too, and that is
-the price. The counts keep the three cases apart because their cures differ:
-`copy_unverified` (the copy is missing or is not what was recorded) and
-`changed` (the original moved on) are both mended by pseudonymising the dataset
-again, which writes either again, and `no_copy` (the reader refused the file,
-so it is not DICOM and was never copied) is mended only by moving the file out
-of the originals tree, which nothing offers to do for a person. A dataset read
-in place, whose folder is its own pseudonymised tree, is refused outright:
-there is nothing to verify against. Each refusal names its count in words and
-the cure that works for it, the door refuses in the same words the job would,
-and the verification runs three times over: in the survey, at the door before a
-job is queued, and on each file immediately before it is removed, so a file
-that changes while the walk runs is left rather than destroyed. Both acts
-resume, since a file that has moved is not there the next time, and stop at a
-heartbeat on a cancel with what was done kept, the job reading `cancelled` and
-not `failed`. The job's result is
+the price. The counts keep the four cases apart because their cures differ:
+`copy_unverified` (the copy is missing or is not what was recorded),
+`changed` (the original moved on) and `unproved` (the row says nothing about
+what the original hashed to, being a row written before that digest was
+recorded) are all mended by pseudonymising the dataset again, which writes a
+copy again or reads an original again and records what it is, and `no_copy`
+(the reader refused the file, so it is not DICOM and was never copied) is
+mended only by moving the file out of the originals tree, which nothing offers
+to do for a person. A dataset read in place, whose folder is its own
+pseudonymised tree, is refused outright: there is nothing to verify against.
+Each refusal names its count in words and the cure that works for it, and the
+door refuses in the same words the job would. Both acts resume, since a file
+that has moved is not there the next time, and stop at a heartbeat on a cancel
+with what was done kept, the job reading `cancelled` and not `failed`.
+
+**A purge proves each original by its content, and reads every one of them to
+do it** (lab 26d). Two ways of losing data came of judging a file by anything
+else. The walk lists a directory and then reaches its files one by one, so the
+size and the modification time it captured may be many files old when a file's
+turn comes: the lab wrote into the originals under a running purge, as an
+rsync, a re-export or a corrected study copied over the old one does, and lost
+one file in its first run and five consecutive files of one directory in its
+second. And the copy was proved honestly, by a digest hashed on the spot, while
+the original was proved by two numbers anything may set: an original changed in
+place whose modification time was then put back to the recorded value passed as
+`verified` and was destroyed. So the pseudonymiser records the digest of the
+original it read beside the digest of the copy it wrote, and the purge,
+immediately before it removes a file, opens that file, measures it and hashes
+every byte of it, judging that reading and no other. One read of the original
+serves both: what the file is now, and whether it is the file that was copied.
+A purge therefore reads every original once, whole, and that is the point of
+it, not a cost to be trimmed. What fails is left, not removed, the first reason
+named as before, and the job ends refused. The survey and the door stay cheap,
+on the rows and on each original's size and modification time, and say so in
+`forecast`, a sentence they always carry: a person told `ready` is told in the
+same breath that the purge proves each file by its content as it goes, so that
+a refusal afterwards is never without a sentence explaining it. A row written
+before the digest was recorded is counted as `unproved` in the forecast too,
+so that its cure is named before a purge is asked for rather than at the last
+moment. Migration 44 adds `pseudonym_file.original_digest`. The job's result is
 `{did, files, bytes, into, path, verified, seconds}`. On success the dataset
 records `originals_kept` and `originals_vault`, the place a vault used, and the
 act is audited as `originals.vault` or `originals.purge` with its counts and
@@ -560,11 +585,20 @@ from the path it came in on:
 a counter before the extension on a clash. It is written as `.part` through a
 256 KiB buffer, hashed on the way (the release's manifest digest), renamed into
 place; directories are made once each; nothing is synced per file and the
-tree's directory once per batch. The walker, the bounded channels and the
+tree's directory once per batch. The original is hashed in that same pass, from
+its first byte to its last, and its digest is recorded beside the copy's, since
+a purge proves what it destroys by content (lab 26d); the pass reads the file
+once, the header the reader has already seen costing a page or two more. The walker, the bounded channels and the
 per-file workers are the digest's; one thread holds the registry and the key,
-answers each worker the code, and records a row per file in `pseudonym_file`
-by size and modification time, so a second run over an unchanged tree costs a
-row touch per file and a changed source is written again over its own place.
+answers each worker the code, and records a row per file in `pseudonym_file`.
+A run resumes by size and modification time, and a file those bring back is
+then proved on both sides, the copy against the digest that was recorded and
+the original against its own, so a second run over an unchanged tree reads
+both files and touches a row per file. A changed source is written again over
+its own place, and so is one whose bytes moved under a modification time that
+did not and one whose row is from before the original's digest was recorded:
+that run is the cure a refused purge names, and it has to be a run that
+notices.
 
 A file whose identifier the linkage store does not know is held when the
 dataset says `hold` (the default for identified arrivals): not written, its row
