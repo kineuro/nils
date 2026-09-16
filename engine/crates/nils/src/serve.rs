@@ -2090,6 +2090,34 @@ fn routed(
                     "linkage import is the one linkage verb the door queues",
                 ));
             }
+            // Record 26 §7: the chain, `then: [command, ...]`, each a
+            // command line queued when the one before ends done; and
+            // `bring-in @dataset`, which stands for the thread of a
+            // dataset with its own steps in front of whatever follows.
+            let mut then = crate::chain::parse_then(&doc).map_err(|e| Reply::error(400, e))?;
+            let mut command = command;
+            if command[0] == "bring-in" {
+                let asked =
+                    crate::chain::BringIn::parse(&command).map_err(|e| Reply::error(400, e))?;
+                let place = nils_registry::place::by_name(registry.store(), &asked.dataset)?
+                    .filter(|p| {
+                        p.role == nils_registry::place::Role::Source && p.retired_at.is_none()
+                    })
+                    .ok_or_else(|| {
+                        Reply::error(
+                            400,
+                            format!(
+                                "@{} is not a dataset; bring-in names a source place",
+                                asked.dataset
+                            ),
+                        )
+                    })?;
+                let (first, mut rest) =
+                    crate::chain::bring_in(&place, asked.name.as_deref(), asked.pack.as_deref());
+                command = first;
+                rest.append(&mut then);
+                then = rest;
+            }
             // Wave 4c §6.5: a tree is named by a registered location, as
             // @name/relative, never by a path a caller composes; backup and
             // verify go to the deployment's backup directory.
@@ -2110,18 +2138,36 @@ fn routed(
             let verb = command[..words.min(command.len())].join(" ");
             caller.allowed(&format!("{path} {verb}"), Need::One(grant), detail)?;
             let command = located(doors, registry.store(), command)?;
+            // each step of the chain a verb the door queues, its tree
+            // located now; its grant is checked when its turn comes, and a
+            // refusal then ends the chain (record 26 §7)
+            let mut steps = Vec::with_capacity(then.len());
+            for step in then {
+                let verb = step[0].as_str();
+                if verb == "bring-in" || !QUEUEABLE.contains(&verb) || verb_needs(&step).is_none() {
+                    return Err(Reply::error(
+                        400,
+                        format!("then: {verb} is not a verb the chain queues"),
+                    ));
+                }
+                steps.push(located(doors, registry.store(), step)?);
+            }
+            let mut extra = queued_by(caller);
+            if !steps.is_empty() {
+                extra["then"] = serde_json::json!(steps);
+            }
             let id = nils_registry::job::enqueue_with(
                 registry.store(),
                 &command,
                 doc["name"].as_str(),
                 Some(principal),
-                queued_by(caller),
+                extra,
             )
             .map_err(job_err)?;
             // the command as located, so a caller sees which tree @name was
-            Ok(Reply::accepted(
-                serde_json::json!({ "job": id, "state": "queued", "command": command }),
-            ))
+            Ok(Reply::accepted(serde_json::json!({
+                "job": id, "state": "queued", "command": command, "then": steps,
+            })))
         }
         ["api", "jobs", _] if get => {
             let id = id_at(2)?;
@@ -2448,6 +2494,10 @@ const QUEUEABLE: &[&str] = &[
     "backup",
     "verify",
     "digest",
+    // Record 26 §3 and §7: the pseudonymise step of a dataset, and the
+    // whole thread of one as a chain.
+    "pseudonymize",
+    "bring-in",
     "fingerprint",
     "classify",
     "pick",
@@ -2569,6 +2619,11 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
     let verb = command.first().map(String::as_str).unwrap_or_default();
     Some(match (verb, command.get(1).map(String::as_str)) {
         ("digest", _) => ("data:work", Detail::Plain),
+        // record 26 §3: the pseudonymiser reads the identifiers it replaces;
+        // bring-in is checked by its first step at the door, and this is
+        // what a cancel of it needs
+        ("pseudonymize", _) => ("data:work", Detail::Sensitive),
+        ("bring-in", _) => ("data:work", Detail::Plain),
         // a linkage import reads the identifiers it links
         ("linkage", _) => ("data:work", Detail::Sensitive),
         ("release" | "handover", _) | ("ask", Some("promote")) => ("release:work", Detail::Plain),
@@ -2589,7 +2644,8 @@ fn cancel_needs(job: &nils_registry::job::Job) -> &'static str {
         return grant;
     }
     match job.kind.as_str() {
-        "digest" | "ingest" | "linkage" | "linkage-purge" | "clinical-import" => "data:work",
+        "digest" | "ingest" | "pseudonymize" | "bring-in" | "linkage" | "linkage-purge"
+        | "clinical-import" => "data:work",
         "release" | "handover" => "release:work",
         "backup" | "verify" => "database:work",
         "ask" if job.args["cohort"].is_string() => "release:work",
@@ -2601,7 +2657,14 @@ fn cancel_needs(job: &nils_registry::job::Job) -> &'static str {
 /// What a queued job records of its caller beside the principal: the detail
 /// the verb runs under, never the worker's own, and who acted.
 pub(crate) fn queued_by(caller: &Caller) -> serde_json::Value {
-    serde_json::json!({ "detail": caller.access.detail.name(), "actor": caller.actor })
+    // record 26 §7: the grants too, which a chain's later steps are
+    // checked against when their turn comes
+    let grants: Vec<&str> = caller.access.grants.iter().copied().collect();
+    serde_json::json!({
+        "detail": caller.access.detail.name(),
+        "actor": caller.actor,
+        "grants": grants,
+    })
 }
 
 /// Record 26: the dataset fields a places body names, as the declaration
@@ -3022,6 +3085,9 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
     // originals, `@name/originals`, are the pseudonymiser's alone
     let roots = crate::dataset::roots(store, &doors.ingest_roots);
     let digests = verb == "digest";
+    // record 26 §3: the pseudonymiser reads a dataset by its name, both
+    // trees at once, so `@name` stays a name for it
+    let by_name = verb == "pseudonymize";
     let mut out = Vec::with_capacity(command.len());
     for arg in command {
         if let Some(rest) = arg.strip_prefix('@') {
@@ -3035,6 +3101,16 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
                     ),
                 )
             })?;
+            if by_name {
+                if root.place.is_none() || !rel.is_empty() {
+                    return Err(Reply::error(
+                        400,
+                        format!("pseudonymize takes a dataset as @name; @{name} is not one"),
+                    ));
+                }
+                out.push(arg);
+                continue;
+            }
             if rel.split('/').any(|seg| seg == "..") || rel.starts_with('/') {
                 return Err(Reply::error(
                     400,

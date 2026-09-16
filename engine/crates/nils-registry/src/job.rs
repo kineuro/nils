@@ -431,6 +431,32 @@ impl Job {
         })
     }
 
+    /// Record 26 §7: the command lines queued when this job ends done, the
+    /// first of them next, each as a list of words.
+    pub fn then(&self) -> Vec<Vec<String>> {
+        self.args["then"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                c.as_array().map(|words| {
+                    words
+                        .iter()
+                        .filter_map(|w| w.as_str().map(str::to_string))
+                        .collect()
+                })
+            })
+            .collect()
+    }
+
+    /// The jobs before and after this one in its chain, when it has one.
+    pub fn chain(&self) -> serde_json::Value {
+        serde_json::json!({
+            "before": self.args["chain_before"].as_i64(),
+            "after": self.args["chain_after"].as_i64(),
+        })
+    }
+
     pub fn as_json(&self) -> serde_json::Value {
         serde_json::json!({
             "id": self.id,
@@ -446,8 +472,35 @@ impl Job {
             "error": self.error,
             "args": self.args,
             "result": self.result,
+            "then": self.then(),
+            "chain": self.chain(),
         })
     }
+}
+
+/// Set one field of a job's args, keeping the rest: how a chain notes the
+/// job after this one, and a result names why a chain stopped.
+pub fn set_arg(
+    store: &mut Store,
+    job_id: i64,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), Error> {
+    let Some(job) = show(store, job_id)? else {
+        return Err(Error::Message(format!("no job {job_id}")));
+    };
+    let mut args = job.args;
+    if !args.is_object() {
+        args = serde_json::json!({});
+    }
+    args[key] = value;
+    store.update_by_id(
+        table("job"),
+        &[("args", Param::from(args.to_string()))],
+        "id",
+        job_id,
+    )?;
+    Ok(())
 }
 
 fn select_columns(store: &Store) -> String {

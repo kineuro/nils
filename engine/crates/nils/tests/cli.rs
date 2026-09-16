@@ -3910,8 +3910,13 @@ fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
     assert!(described.status.success(), "{}", stderr(&described));
     let text = stdout(&described);
     assert!(text.contains("derivatives/dcm-anon"), "{text}");
+    // record 26 §3: the tree of an identified dataset carries the codes
+    // the pseudonymiser wrote, read verbatim; the dataset's own rule is
+    // for its originals
     assert!(
-        text.contains("as study-id") && text.contains("from dataset ds"),
+        text.contains("as subject-code")
+            && text.contains("the value read is the code itself")
+            && text.contains("from the pseudonymised tree of the dataset ds"),
         "{text}"
     );
     let refused = nils()
@@ -4034,4 +4039,248 @@ fn a_backup_with_no_directory_goes_to_the_place_the_registry_names() {
     let manifest: serde_json::Value = serde_json::from_slice(&backed.stdout).unwrap();
     let archive = manifest["archive"].as_str().unwrap();
     assert!(vault.path().join(archive).exists(), "{manifest}");
+}
+
+/// An identified file for the pseudonymiser's tests: a patient with a
+/// name and a number, a study, a series, a slice, and pixels.
+fn identified(patient: &str, series: u32, instance: u32) -> Vec<u8> {
+    use dicom_core::VR;
+    use dicom_dictionary_std::tags;
+    let study = format!("1.2.826.0.1.3680043.8.498.{patient}.1");
+    let series_uid = format!("{study}.{series}");
+    let sop = format!("{series_uid}.{instance}");
+    let mut e = synth::minimal_mr(&study, &series_uid, &sop);
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+    e.push(synth::text(tags::PATIENT_NAME, VR::PN, "Doe^Jane"));
+    e.push(synth::text(tags::PATIENT_BIRTH_DATE, VR::DA, "19900101"));
+    e.push(synth::text(tags::STUDY_DATE, VR::DA, "20240131"));
+    e.push(synth::text(
+        tags::SERIES_NUMBER,
+        VR::IS,
+        &series.to_string(),
+    ));
+    e.push(synth::text(
+        tags::INSTANCE_NUMBER,
+        VR::IS,
+        &instance.to_string(),
+    ));
+    e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+    e.push(synth::bytes(
+        tags::PIXEL_DATA,
+        VR::OW,
+        (0..4000u32).map(|i| (i % 251) as u8).collect(),
+    ));
+    synth::part10(&MetaFields::mr(&sop), &e, true)
+}
+
+/// Record 26 §3 and §7 at the keyboard: `nils pseudonymize @dataset`
+/// rewrites an identified dataset's originals into its pseudonymised tree
+/// and refuses a dataset read in place; a dry run writes nothing; the
+/// digest of the tree reads the codes verbatim and finds the subjects the
+/// pseudonymiser made; `nils bring-in` queues the thread as a chain a
+/// worker runs step by step.
+#[test]
+fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
+    let home = home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = TempDir::new("cli-pseudonymize");
+    for (p, patient) in ["199001011234", "198502023456"].iter().enumerate() {
+        for instance in 1..=3 {
+            dir.file(
+                &format!("sub-{p}/IM_{instance:04}"),
+                &identified(patient, 1, instance),
+            );
+        }
+    }
+    let plain = TempDir::new("cli-pseudonymize-plain");
+    plain.file(
+        "sub-1/IM_0001",
+        &synth::part10(
+            &MetaFields::mr("1.2.3.A.1.1"),
+            &synth::minimal_mr("1.2.3.A", "1.2.3.A.1", "1.2.3.A.1.1"),
+            true,
+        ),
+    );
+    let run = |args: &[&str]| {
+        let out = nils()
+            .args(registry)
+            .args(args)
+            .env("NILS_PACK_DIR", packs_dir())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}: {}\n{}",
+            args.join(" "),
+            stderr(&out),
+            stdout(&out)
+        );
+        stdout(&out)
+    };
+    let refused = |args: &[&str]| {
+        let out = nils().args(registry).args(args).output().unwrap();
+        assert!(
+            !out.status.success(),
+            "{}: {}",
+            args.join(" "),
+            stdout(&out)
+        );
+        stderr(&out)
+    };
+    run(&[
+        "place",
+        "add",
+        "ds",
+        dir.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--arrives",
+        "identified",
+        "--unmapped",
+        "code",
+    ]);
+    run(&[
+        "place",
+        "add",
+        "plain",
+        plain.path().to_str().unwrap(),
+        "--role",
+        "source",
+    ]);
+    // the type the pseudonymised tree's digest files the codes under
+    run(&["linkage", "id-type", "add", "subject-code"]);
+
+    // a dataset read in place has nothing to pseudonymise
+    let why = refused(&["pseudonymize", "@plain"]);
+    assert!(why.contains("read in place"), "{why}");
+    assert!(
+        refused(&["pseudonymize", "ds"]).contains("@name"),
+        "a dataset is named as @name"
+    );
+
+    // a dry run walks and resolves and writes nothing
+    let doc: serde_json::Value =
+        serde_json::from_str(&run(&["pseudonymize", "@ds", "--dry-run", "--json"])).unwrap();
+    assert_eq!(doc["dry_run"], true, "{doc}");
+    assert_eq!(doc["files"]["seen"], 6, "{doc}");
+    assert_eq!(doc["files"]["written"], 6, "{doc}");
+    assert_eq!(doc["subjects"]["new"], 2, "{doc}");
+    let anon = dir.path().join("derivatives/dcm-anon");
+    assert!(std::fs::read_dir(&anon).unwrap().next().is_none());
+
+    // the run: six files written under two codes, the report printed
+    let text = run(&["pseudonymize", "@ds", "--name", "first", "--workers", "2"]);
+    assert!(
+        text.starts_with("nils pseudonymize   name first   dataset ds"),
+        "{text}"
+    );
+    assert!(
+        text.contains("6 seen   6 written   0 unchanged   0 held   0 refused"),
+        "{text}"
+    );
+    assert!(text.contains("2 seen   2 new   2 provisional"), "{text}");
+    assert!(
+        !text.contains("199001011234") && !text.contains("Doe"),
+        "{text}"
+    );
+    let codes: Vec<String> = std::fs::read_dir(&anon)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(codes.len(), 2, "{codes:?}");
+    assert!(codes.iter().all(|c| c.len() == 10), "{codes:?}");
+    let listed: serde_json::Value =
+        serde_json::from_str(&run(&["jobs", "list", "--all", "--json"])).unwrap();
+    let job = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["kind"] == "pseudonymize")
+        .unwrap();
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(job["result"]["files"]["written"], 6, "{job}");
+    assert_eq!(job["then"], serde_json::json!([]), "{job}");
+    assert_eq!(job["chain"]["after"], serde_json::Value::Null, "{job}");
+
+    // the tree digested under the code rule: the subjects the pseudonymiser
+    // made are found by their codes, none made again
+    let digest: serde_json::Value = serde_json::from_str(&run(&[
+        "digest",
+        "@ds",
+        "--name",
+        "first",
+        "--no-private",
+        "--json",
+    ]))
+    .unwrap();
+    assert_eq!(digest["parsed"], 6, "{digest}");
+    assert_eq!(digest["subjects"], 2, "{digest}");
+    assert_eq!(digest["written"]["ingested"], 6, "{digest}");
+    assert_eq!(digest["written"]["subjects_created"], 0, "{digest}");
+    assert_eq!(digest["written"]["identities_attached"], 2, "{digest}");
+    let status: serde_json::Value = serde_json::from_str(&run(&["status", "--json"])).unwrap();
+    let kinds: Vec<&str> = status["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["digest", "pseudonymize"], "{status}");
+    // the originals are never digested
+    assert!(
+        refused(&["digest", "@ds/originals"]).contains("pseudonymiser"),
+        "the originals are the pseudonymiser's"
+    );
+    // a second run leaves everything alone
+    let text = run(&["pseudonymize", "@ds", "--name", "first"]);
+    assert!(text.contains("6 seen   0 written   6 unchanged"), "{text}");
+
+    // bring-in: the thread queued as a chain, run by a worker in turn
+    let queued = run(&["bring-in", "@ds", "--name", "second", "--pack", "mri"]);
+    assert!(queued.starts_with("queued job "), "{queued}");
+    assert!(
+        queued.contains("pseudonymize @ds --name second"),
+        "{queued}"
+    );
+    assert!(
+        queued.contains("then nils digest @ds --name second"),
+        "{queued}"
+    );
+    assert!(queued.contains("then nils classify --pack mri"), "{queued}");
+    run(&["jobs", "work", "--once"]);
+    let listed: serde_json::Value =
+        serde_json::from_str(&run(&["jobs", "list", "--all", "--json"])).unwrap();
+    let jobs = listed.as_array().unwrap();
+    // the chain, followed link by link from the queued job
+    let first = jobs
+        .iter()
+        .find(|j| j["kind"] == "pseudonymize" && j["name"] == "second")
+        .unwrap_or_else(|| panic!("{listed}"));
+    let mut ran: Vec<(String, String, Option<i64>, Option<i64>)> = Vec::new();
+    let mut next = Some(first["id"].as_i64().unwrap());
+    while let Some(id) = next {
+        let j = jobs.iter().find(|j| j["id"] == id).unwrap();
+        ran.push((
+            j["kind"].as_str().unwrap().to_string(),
+            j["state"].as_str().unwrap().to_string(),
+            j["chain"]["before"].as_i64(),
+            j["chain"]["after"].as_i64(),
+        ));
+        next = j["chain"]["after"].as_i64();
+    }
+    let kinds: Vec<&str> = ran.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(
+        kinds,
+        ["pseudonymize", "digest", "fingerprint", "classify"],
+        "{listed}"
+    );
+    assert!(ran.iter().all(|r| r.1 == "done"), "{listed}");
+    assert!(ran[0].2.is_none() && ran[0].3.is_some(), "{listed}");
+    assert!(ran[3].2.is_some() && ran[3].3.is_none(), "{listed}");
+    assert_eq!(first["then"].as_array().unwrap().len(), 3, "{first}");
+}
+
+fn packs_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs")
 }

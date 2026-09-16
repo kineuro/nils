@@ -27,7 +27,9 @@ mod ask_cli;
 mod ask_doors;
 mod assist_cli;
 mod backup;
+mod batches;
 mod browse;
+mod chain;
 mod dataset;
 mod depends;
 mod door_client;
@@ -88,6 +90,12 @@ enum Command {
     },
     /// Walk a tree of DICOM files, read every header and digest it into the registry
     Digest(DigestArgs),
+    /// Rewrite a dataset's originals into its pseudonymised tree: the code
+    /// in, the identifiers out, the pixels untouched (record 26)
+    Pseudonymize(PseudonymizeArgs),
+    /// Bring in what is new: pseudonymise a dataset, then digest, fingerprint
+    /// and classify it, as one chain of queued jobs (record 26)
+    BringIn(BringInArgs),
     /// Derive the per-stack values a classifier reads, once, and store them
     Fingerprint(FingerprintArgs),
     /// Judge every stack with a pack, and write the verdict with its evidence
@@ -1359,6 +1367,52 @@ struct DigestArgs {
     json: bool,
 }
 
+#[derive(Debug, Args)]
+struct PseudonymizeArgs {
+    /// The dataset, as @name: a source place whose data arrives identified
+    dataset: String,
+    /// The batch's label; the dataset's name and today's date by default
+    #[arg(long)]
+    name: Option<String>,
+    /// File workers; one per core by default
+    #[arg(long, value_name = "N")]
+    workers: Option<usize>,
+    /// Walker threads
+    #[arg(long, value_name = "N")]
+    walk_threads: Option<usize>,
+    /// Rows per write to the registry
+    #[arg(long, value_name = "N")]
+    batch_rows: Option<usize>,
+    /// The pack whose release list says which private elements are kept
+    #[arg(long, default_value = "mri", value_name = "PACK")]
+    pack: String,
+    /// Where the packs are; $NILS_PACK_DIR, else `packs/` in the registry home
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<PathBuf>,
+    /// Read only the held files a map released or a person asked to code anyway
+    #[arg(long)]
+    held: bool,
+    /// Walk, read and resolve everything, print the report, write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Machine-readable output: the report as one JSON document, progress as JSON lines
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct BringInArgs {
+    /// The dataset, as @name
+    dataset: String,
+    /// The name the pseudonymise step and the digest share; the dataset's
+    /// name and today's date by default
+    #[arg(long)]
+    name: Option<String>,
+    /// The pack the classify step judges with
+    #[arg(long, value_name = "PACK")]
+    pack: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 enum LinkageCommand {
     /// File the identifier → code pairs of a CSV, creating the subjects the codes name
@@ -1449,6 +1503,8 @@ fn main() -> ExitCode {
         Command::Init(args) => init(&home, args),
         Command::Key { command } => key(&home, command),
         Command::Digest(args) => digest(&home, args),
+        Command::Pseudonymize(args) => pseudonymize(&home, args),
+        Command::BringIn(args) => bring_in(&home, args),
         Command::Fingerprint(args) => fingerprint(&home, args),
         Command::Classify(args) => classify(&home, args),
         Command::Explain { stack, json } => explain(&home, stack, json),
@@ -3079,6 +3135,145 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
     }
 }
 
+/// A dataset named as `@name`: a source place in force.
+fn dataset_named(
+    registry: &mut Registry,
+    given: &str,
+) -> Result<nils_registry::place::Place, Exit> {
+    use nils_registry::place::{self, Role};
+    let Some(name) = given.strip_prefix('@') else {
+        return Err(usage(format!(
+            "{given}: a dataset is named as @name, the name of its source place"
+        )));
+    };
+    match place::by_name(registry.store(), name).map_err(|e| fail(e.to_string()))? {
+        Some(p) if p.role == Role::Source && p.retired_at.is_none() => Ok(p),
+        _ => Err(usage(format!(
+            "@{name} is not a dataset; nils place list shows the source places"
+        ))),
+    }
+}
+
+/// Record 26 §3: `nils pseudonymize @dataset`.
+fn pseudonymize(home: &Home, args: PseudonymizeArgs) -> Result<(), Exit> {
+    use nils_pseudonymize::{PseudonymizeError, Settings};
+    let mut registry = open(home)?;
+    let dataset = dataset_named(&mut registry, &args.dataset)?;
+    let mut settings = Settings::for_dataset(&dataset).map_err(fail)?;
+    if let Some(name) = args.name {
+        settings.name = name;
+    }
+    for (flag, value, slot) in [
+        ("--workers", args.workers, &mut settings.workers),
+        (
+            "--walk-threads",
+            args.walk_threads,
+            &mut settings.walk_threads,
+        ),
+        ("--batch-rows", args.batch_rows, &mut settings.batch_rows),
+    ] {
+        if let Some(n) = value {
+            if n == 0 {
+                return Err(usage(format!("{flag} must be at least 1")));
+            }
+            *slot = n;
+        }
+    }
+    settings.held = args.held;
+    settings.dry_run = args.dry_run;
+    settings.json = args.json;
+    // The private elements the pack keeps on release are the ones the
+    // pseudonymised tree keeps (record 26 §3), as the release reads them. A
+    // pack that cannot be found is not an error unless one was asked for by
+    // name or by directory: every private element then goes.
+    let asked = args.pack_dir.is_some() || args.pack != "mri";
+    match pack_dir(home, args.pack_dir.clone()) {
+        Ok(dir) => {
+            let found = packs_in(&dir)?
+                .into_iter()
+                .find(|p| p.file_name().is_some_and(|f| f == args.pack.as_str()));
+            match found {
+                Some(found) => {
+                    let pack = nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
+                    settings.private = pack.release.clone();
+                    settings.pack = Some(pack.id());
+                }
+                None if asked => {
+                    return Err(fail(format!(
+                        "no pack named {} in {}",
+                        args.pack,
+                        dir.display()
+                    )));
+                }
+                None => {}
+            }
+        }
+        Err(e) if asked => return Err(e),
+        Err(_) => {}
+    }
+    let cancel = stop_on_signal()?;
+    match nils_pseudonymize::pseudonymize_with(&settings, &mut registry, &cancel) {
+        Ok(report) => {
+            if settings.json {
+                let text = serde_json::to_string_pretty(&report)
+                    .map_err(|e| fail(format!("cannot render the report: {e}")))?;
+                println!("{text}");
+            } else {
+                print!("{report}");
+            }
+            match report.cancelled {
+                None => Ok(()),
+                Some(Cancelled::Stopped) => Err(Exit {
+                    code: STOPPED,
+                    message: "stopped: what was written stays written; run again to go on".into(),
+                }),
+                Some(Cancelled::Aborted) => Err(Exit {
+                    code: STOPPED,
+                    message: "aborted: what was written stays written; run again to go on".into(),
+                }),
+            }
+        }
+        Err(e @ PseudonymizeError::Busy { .. }) => Err(Exit {
+            code: BUSY,
+            message: e.to_string(),
+        }),
+        Err(e) => Err(fail(e.to_string())),
+    }
+}
+
+/// Record 26 §7: `nils bring-in @dataset`, the thread of a dataset queued
+/// as a chain, from the keyboard with the keyboard's reach.
+fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
+    use nils_registry::job;
+    let mut registry = open(home)?;
+    let dataset = dataset_named(&mut registry, &args.dataset)?;
+    let (first, then) = chain::bring_in(&dataset, args.name.as_deref(), args.pack.as_deref());
+    let name = first
+        .iter()
+        .position(|w| w == "--name")
+        .and_then(|i| first.get(i + 1))
+        .cloned();
+    let grants: Vec<&str> = crate::grants::GRANTS.to_vec();
+    let id = job::enqueue_with(
+        registry.store(),
+        &first,
+        name.as_deref(),
+        Some(&actor()),
+        serde_json::json!({
+            "detail": crate::grants::Detail::Sensitive.name(),
+            "grants": grants,
+            "then": then,
+        }),
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    println!("queued job {id}: nils {}", first.join(" "));
+    for step in &then {
+        println!("  then nils {}", step.join(" "));
+    }
+    println!("a worker runs them in turn: nils jobs work, or nils serve --worker");
+    Ok(())
+}
+
 /// The token a run is asked to stop through (§10): one signal asks for a
 /// stop, a second for an abort. SIGINT and SIGTERM both count.
 fn stop_on_signal() -> Result<Cancel, Exit> {
@@ -3333,7 +3528,7 @@ fn status_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value,
         .collect::<Result<_, nils_registry::Error>>()?;
 
     let batches_sql = format!(
-        "SELECT id, name, state, {}, {}, epoch_after, {} FROM {} ORDER BY id DESC LIMIT 10",
+        "SELECT id, name, state, {}, {}, epoch_after, {}, kind FROM {} ORDER BY id DESC LIMIT 10",
         text_of(store, "ingest_batch", "started_at"),
         text_of(store, "ingest_batch", "finished_at"),
         text_of(store, "ingest_batch", "counts"),
@@ -3353,6 +3548,9 @@ fn status_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value,
                 }
                 v.as_u64()
             };
+            // record 26 §14: which step the batch is; a pseudonymise step
+            // counts its files where a digest counts what it parsed
+            let kind = r.opt_text(7)?.unwrap_or("digest");
             Ok(serde_json::json!({
                 "id": r.int(0)?,
                 "name": r.text(1)?,
@@ -3360,10 +3558,11 @@ fn status_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value,
                 "started_at": r.opt_text(3)?,
                 "finished_at": r.opt_text(4)?,
                 "epoch_after": r.opt_int(5)?,
-                "seen": pick(&["seen"]),
-                "parsed": pick(&["parsed"]),
-                "quarantined": pick(&["quarantined"]),
-                "ingested": pick(&["written", "ingested"]),
+                "kind": kind,
+                "seen": pick(&["seen"]).or_else(|| pick(&["files", "seen"])),
+                "parsed": pick(&["parsed"]).or_else(|| pick(&["files", "written"])),
+                "quarantined": pick(&["quarantined"]).or_else(|| pick(&["files", "refused"])),
+                "ingested": pick(&["written", "ingested"]).or_else(|| pick(&["files", "written"])),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
@@ -7628,7 +7827,7 @@ pub(crate) fn batches_doc(
 ) -> Result<serde_json::Value, Exit> {
     let store = registry.store();
     let sql = format!(
-        "SELECT id, name, state, {}, {}, epoch_after, {} FROM {} ORDER BY id DESC LIMIT {}",
+        "SELECT id, name, state, {}, {}, epoch_after, {}, kind FROM {} ORDER BY id DESC LIMIT {}",
         text_of(store, "ingest_batch", "started_at"),
         text_of(store, "ingest_batch", "finished_at"),
         text_of(store, "ingest_batch", "counts"),
@@ -7649,6 +7848,9 @@ pub(crate) fn batches_doc(
                 }
                 v.as_u64()
             };
+            // record 26 §14: which step the batch is; a pseudonymise step
+            // counts its files where a digest counts what it parsed
+            let kind = r.opt_text(7)?.unwrap_or("digest");
             Ok(serde_json::json!({
                 "id": r.int(0)?,
                 "name": r.text(1)?,
@@ -7656,10 +7858,11 @@ pub(crate) fn batches_doc(
                 "started_at": r.opt_text(3)?,
                 "finished_at": r.opt_text(4)?,
                 "epoch_after": r.opt_int(5)?,
-                "seen": pick(&["seen"]),
-                "parsed": pick(&["parsed"]),
-                "quarantined": pick(&["quarantined"]),
-                "ingested": pick(&["written", "ingested"]),
+                "kind": kind,
+                "seen": pick(&["seen"]).or_else(|| pick(&["files", "seen"])),
+                "parsed": pick(&["parsed"]).or_else(|| pick(&["files", "written"])),
+                "quarantined": pick(&["quarantined"]).or_else(|| pick(&["files", "refused"])),
+                "ingested": pick(&["written", "ingested"]).or_else(|| pick(&["files", "written"])),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
@@ -7672,32 +7875,25 @@ pub(crate) fn batch_doc(
     id: i64,
 ) -> Result<Option<serde_json::Value>, Exit> {
     let store = registry.store();
-    let sql = format!(
-        "SELECT state, name, {}, {}, {} FROM {} WHERE id = {}",
-        text_of(store, "ingest_batch", "started_at"),
-        text_of(store, "ingest_batch", "finished_at"),
-        text_of(store, "ingest_batch", "counts"),
-        store.qualified("ingest_batch"),
-        store.dialect().param(1, Type::Int)
-    );
-    let Some(row) = store.query_opt(&sql, &[Param::Int(id)])? else {
+    let Some(batch) = crate::batches::row(store, id)? else {
         return Ok(None);
     };
-    let report = row
-        .opt_text(4)?
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
-    let started_at = row.opt_text(2)?.map(str::to_string);
-    let finished_at = row.opt_text(3)?.map(str::to_string);
-    let (state, name) = (row.text(0)?.to_string(), row.text(1)?.to_string());
+    // record 26 §14: the batch is the thread, its five stages read off
+    // this row, the one it shares a name with, its jobs and its questions
+    let stages = crate::batches::stages(store, &batch)?;
+    let report = (!batch.counts.is_null()).then(|| batch.counts.clone());
     // Wave 5 §12.7: the pyramid is offered as a follow-on when a working place is bound
     let working = crate::pyramid::working_place(store, None).ok();
     Ok(Some(serde_json::json!({
         "id": id,
-        "state": state,
-        "name": name,
-        "started_at": started_at,
-        "finished_at": finished_at,
+        "kind": batch.kind,
+        "state": batch.state,
+        "name": batch.name,
+        "job_id": batch.job_id,
+        "started_at": batch.started_at,
+        "finished_at": batch.finished_at,
         "report": report,
+        "stages": stages,
         "pyramid": working.map(|w| serde_json::json!({
             "offered": true, "place": w.name,
             "command": ["pyramid", "build", "--stack", "<stack id>"],

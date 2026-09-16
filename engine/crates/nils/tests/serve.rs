@@ -3859,3 +3859,377 @@ fn the_grants_vectors_hold() {
     }
     server.finish();
 }
+
+/// Record 26 §7 and §14 through the doors: `bring-in @dataset` queues the
+/// thread of a dataset as a chain the serve worker runs step by step,
+/// each job naming the one before and after it; the batch page reads the
+/// five stages off the thread and the timeline serves the batch; the
+/// sources door fills the pseudonymise step in and the machine's rates; a
+/// step the caller who queued the chain may not queue ends the chain and
+/// the job says why; a chain that is not one is refused at the door; and
+/// a dataset's originals are never digested.
+#[test]
+fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
+    let home = registry();
+    let dir = TempDir::new("chain-ds");
+    let identified = |patient: &str, instance: u32| {
+        let study = format!("1.2.826.0.1.3680043.8.498.{patient}.1");
+        let series = format!("{study}.1");
+        let sop = format!("{series}.{instance}");
+        let mut e = synth::minimal_mr(&study, &series, &sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+        e.push(synth::text(tags::PATIENT_NAME, VR::PN, "Doe^Jane"));
+        e.push(synth::text(tags::STUDY_DATE, VR::DA, "20240131"));
+        e.push(synth::text(tags::SERIES_NUMBER, VR::IS, "1"));
+        e.push(synth::text(
+            tags::INSTANCE_NUMBER,
+            VR::IS,
+            &instance.to_string(),
+        ));
+        e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+        e.push(synth::bytes(
+            tags::PIXEL_DATA,
+            VR::OW,
+            (0..2000u32).map(|i| (i % 251) as u8).collect(),
+        ));
+        synth::part10(&MetaFields::mr(&sop), &e, true)
+    };
+    for (p, patient) in ["199001011234", "198502023456"].iter().enumerate() {
+        for instance in 1..=3 {
+            dir.file(
+                &format!("sub-{p}/IM_{instance:04}"),
+                &identified(patient, instance),
+            );
+        }
+    }
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "ds",
+            dir.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--arrives",
+            "identified",
+            "--unmapped",
+            "code",
+        ],
+        None,
+    );
+    run(&home, &["linkage", "id-type", "add", "subject-code"], None);
+    const LIMIT: usize = 220;
+    let used = std::cell::Cell::new(0usize);
+    let server = Server::start(
+        &home,
+        LIMIT,
+        &[
+            "--worker",
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--token",
+            "a-data-token-of-length-x=data@lab:reviewer,data:work",
+            "--ingest-root",
+            &format!("ds={}", dir.path().display()),
+        ],
+        &[("NILS_PACK_DIR", packs().to_str().unwrap())],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let ops = Some("an-operator-token-of-len");
+    let data = Some("a-data-token-of-length-x");
+    let ask = |method: &str, path: &str, body: Option<&str>, token: Option<&str>| {
+        used.set(used.get() + 1);
+        server.request(method, path, body, token)
+    };
+    let wait = |job: i64| -> serde_json::Value {
+        let mut shown = serde_json::Value::Null;
+        for _ in 0..150 {
+            let (status, now) = ask("GET", &format!("/api/jobs/{job}"), None, ops);
+            assert_eq!(status, 200, "{now}");
+            shown = now;
+            if matches!(
+                shown["state"].as_str(),
+                Some("done" | "failed" | "cancelled")
+            ) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        shown
+    };
+
+    // the originals are the pseudonymiser's: a digest of them is refused
+    let (status, refused) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@ds/originals"]}"#),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    // a chain that is not one, and a verb the door does not queue
+    let (status, refused) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@ds"], "then": [["bring-in", "@ds"]]}"#),
+        ops,
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@ds"], "then": [["restore", "x"]]}"#),
+        ops,
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["pseudonymize", "@ds"]}"#),
+        reader,
+    );
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("data:work"),
+        "{refused}"
+    );
+    let (status, refused) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["pseudonymize", "@ds"]}"#),
+        data,
+    );
+    assert_eq!(
+        status, 403,
+        "the pseudonymiser reads identifiers: {refused}"
+    );
+    assert!(
+        refused["error"].as_str().unwrap().contains("sensitive"),
+        "{refused}"
+    );
+
+    // bring-in: the thread queued as a chain
+    let (status, queued) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["bring-in", "@ds", "--name", "chain-1"], "name": "chain-1"}"#),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    assert_eq!(queued["command"][0], "pseudonymize", "{queued}");
+    assert_eq!(queued["command"][1], "@ds", "{queued}");
+    let then = queued["then"].as_array().unwrap();
+    assert_eq!(then.len(), 3, "{queued}");
+    assert_eq!(then[0][0], "digest", "{queued}");
+    assert!(
+        then[0][1]
+            .as_str()
+            .unwrap()
+            .ends_with("derivatives/dcm-anon"),
+        "the digest's tree located: {queued}"
+    );
+    assert_eq!(then[1], serde_json::json!(["fingerprint"]), "{queued}");
+    assert_eq!(then[2], serde_json::json!(["classify"]), "{queued}");
+    let first = queued["job"].as_i64().unwrap();
+    let mut ids = vec![first];
+    let mut job = wait(first);
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(job["kind"], "pseudonymize", "{job}");
+    assert_eq!(job["result"]["files"]["written"], 6, "{job}");
+    assert_eq!(job["then"].as_array().unwrap().len(), 3, "{job}");
+    assert_eq!(job["chain"]["before"], serde_json::Value::Null, "{job}");
+    // the chain, step by step, each job naming the one before
+    for expected in ["digest", "fingerprint", "classify"] {
+        let mut next = job["chain"]["after"].as_i64();
+        for _ in 0..50 {
+            if next.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let (_, again) = ask(
+                "GET",
+                &format!("/api/jobs/{}", ids.last().unwrap()),
+                None,
+                ops,
+            );
+            next = again["chain"]["after"].as_i64();
+        }
+        let next = next.unwrap_or_else(|| panic!("no job after {expected}: {job}"));
+        job = wait(next);
+        assert_eq!(job["state"], "done", "{job}");
+        assert_eq!(job["kind"], expected, "{job}");
+        assert_eq!(
+            job["chain"]["before"],
+            serde_json::json!(ids.last().unwrap()),
+            "{job}"
+        );
+        assert_eq!(job["args"]["principal"], "ops@lab", "{job}");
+        assert_eq!(job["args"]["detail"], "sensitive", "{job}");
+        ids.push(next);
+    }
+    assert_eq!(job["then"], serde_json::json!([]), "{job}");
+    assert_eq!(job["chain"]["after"], serde_json::Value::Null, "{job}");
+
+    // the batch is the thread: the two batches of one name, the stages
+    let (status, batches) = ask("GET", "/api/batches", None, reader);
+    assert_eq!(status, 200, "{batches}");
+    let of = |kind: &str| {
+        batches["batches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["name"] == "chain-1" && b["kind"] == kind)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {kind} batch chain-1: {batches}"))
+    };
+    let pseudonymise = of("pseudonymize");
+    let digest = of("digest");
+    assert_eq!(pseudonymise["seen"], 6, "{pseudonymise}");
+    let (status, page) = ask(
+        "GET",
+        &format!("/api/batches/{}", digest["id"]),
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["kind"], "digest", "{page}");
+    let stages = &page["stages"];
+    assert_eq!(stages["pseudonymised"]["files"], 6, "{page}");
+    assert_eq!(stages["pseudonymised"]["changed"], 6, "{page}");
+    assert_eq!(stages["pseudonymised"]["held"], 0, "{page}");
+    assert_eq!(stages["pseudonymised"]["job"], first, "{page}");
+    assert_eq!(
+        stages["pseudonymised"]["batch"], pseudonymise["id"],
+        "{page}"
+    );
+    assert_eq!(stages["walked"]["files"], 6, "{page}");
+    assert_eq!(stages["walked"]["new"], 6, "{page}");
+    assert_eq!(stages["walked"]["job"], ids[1], "{page}");
+    assert_eq!(stages["digested"]["stacks"], 2, "{page}");
+    assert_eq!(
+        stages["digested"]["subjects"], 0,
+        "found by their codes: {page}"
+    );
+    assert_eq!(stages["classified"]["of"], 2, "{page}");
+    assert_eq!(stages["classified"]["stacks"], 2, "{page}");
+    assert_eq!(
+        stages["classified"]["jobs"],
+        serde_json::json!([ids[3]]),
+        "{page}"
+    );
+    assert!(
+        stages["classified"]["pack"]
+            .as_str()
+            .unwrap()
+            .starts_with("mri"),
+        "{page}"
+    );
+    assert!(stages["classified"]["by_base"].is_object(), "{page}");
+    assert!(stages["reviewed"]["of"].as_u64().is_some(), "{page}");
+    let (status, page) = ask(
+        "GET",
+        &format!("/api/batches/{}", pseudonymise["id"]),
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["kind"], "pseudonymize", "{page}");
+    assert_eq!(
+        page["stages"]["pseudonymised"]["batch"], pseudonymise["id"],
+        "{page}"
+    );
+    assert_eq!(page["stages"]["walked"]["batch"], digest["id"], "{page}");
+    assert_eq!(page["report"]["files"]["written"], 6, "{page}");
+
+    // the timeline of a batch
+    let (status, line) = ask(
+        "GET",
+        &format!("/api/timeline/batch/{}", digest["id"]),
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{line}");
+    let kinds: Vec<&str> = line["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    for k in ["started", "finished", "pseudonymised", "classified"] {
+        assert!(kinds.contains(&k), "{k} missing: {line}");
+    }
+    let (status, _) = ask("GET", "/api/timeline/batch/999999", None, reader);
+    assert_eq!(status, 404);
+
+    // the sources door: the pseudonymise step on the digest, the rates
+    let (status, sources) = ask("GET", "/api/sources", None, reader);
+    assert_eq!(status, 200, "{sources}");
+    let source = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "ds")
+        .unwrap();
+    let recent = &source["digests"]["recent"][0];
+    assert_eq!(recent["name"], "chain-1", "{sources}");
+    assert_eq!(recent["pseudonymised"]["files"], 6, "{sources}");
+    assert_eq!(recent["pseudonymised"]["changed"], 6, "{sources}");
+    assert_eq!(recent["pseudonymised"]["job"], first, "{sources}");
+    assert_eq!(
+        source["digests"]["count"], 1,
+        "a pseudonymise step is not a digest: {sources}"
+    );
+    assert!(
+        sources["rates"]["pseudonymize"].as_f64().is_some(),
+        "{sources}"
+    );
+    assert!(sources["rates"]["digest"].as_f64().is_some(), "{sources}");
+
+    // a step the caller may not queue ends the chain, and the job says why
+    let (status, queued) = ask(
+        "POST",
+        "/api/jobs",
+        Some(
+            r#"{"command": ["digest", "@ds", "--name", "chain-2"], "then": [["fingerprint"], ["classify"]]}"#,
+        ),
+        data,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let second = queued["job"].as_i64().unwrap();
+    let job = wait(second);
+    assert_eq!(job["state"], "done", "{job}");
+    let mut stopped = job["result"]["chain_stopped"].clone();
+    for _ in 0..50 {
+        if !stopped.is_null() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (_, again) = ask("GET", &format!("/api/jobs/{second}"), None, ops);
+        stopped = again["result"]["chain_stopped"].clone();
+    }
+    assert_eq!(stopped["step"], serde_json::json!(["fingerprint"]), "{job}");
+    assert!(
+        stopped["why"].as_str().unwrap().contains("pipelines:work"),
+        "{stopped}"
+    );
+    let (_, again) = ask("GET", &format!("/api/jobs/{second}"), None, ops);
+    assert_eq!(again["chain"]["after"], serde_json::Value::Null, "{again}");
+    let (_, jobs) = ask("GET", "/api/jobs?all=1", None, ops);
+    assert!(
+        !jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["chain"]["before"] == second),
+        "nothing queued after the refused step: {jobs}"
+    );
+
+    while used.get() < LIMIT {
+        ask("GET", "/api/capabilities", None, reader);
+    }
+    server.finish();
+}
