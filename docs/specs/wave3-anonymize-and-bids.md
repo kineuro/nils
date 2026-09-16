@@ -258,6 +258,15 @@ source:
 - **A release always writes the date it used into the tree** (§9.4), because for
   a study whose date came from a UID, remapping the UID means the tree can never
   re-derive it.
+- **A session labelled by its date is no label for files whose dates moved**,
+  since the path would carry what the files no longer do. Here the tree gives
+  way rather than the release: where any policy in play shifts or truncates
+  dates and the run's session scheme labels by the date, the sessions are
+  numbered in date order, the release row records the scheme that named them,
+  and the report says why. The dates are each dataset's own (record 26, the
+  leaving policy), so refusing the run would keep a dataset whose dates are
+  kept from leaving beside one whose dates move, and the labels are the tree's
+  to choose. A months or ordinal scheme named by the caller stands as it is.
 
 ## 5. Repair three: the session scheme
 

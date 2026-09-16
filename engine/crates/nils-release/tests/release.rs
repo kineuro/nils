@@ -546,7 +546,7 @@ fn a_release_spanning_two_datasets_leaves_each_under_its_own_policy() {
 }
 
 #[test]
-fn the_two_halves_of_4_3_are_refused_rather_than_warned_about() {
+fn the_two_halves_of_4_3_hold_one_by_refusal_and_one_by_numbering() {
     let source = tree();
     let home_dir = TempDir::new("release-home");
     let out = TempDir::new("release-out");
@@ -573,14 +573,37 @@ fn the_two_halves_of_4_3_are_refused_rather_than_warned_about() {
         dates: dates::Policy::Shift,
         ..Policy::default()
     };
-    let by_date = SessionScheme::default();
-    let e = run::run(&mut reg, &settings(out.path(), &shifted, &by_date))
-        .unwrap_err()
-        .to_string();
-    assert!(e.contains("labels by the date"), "{e}");
-
-    // Neither wrote anything.
+    // Nothing was written.
     assert!(files_under(out.path()).is_empty());
+
+    // And a shift with a date-named session: the labels give way rather than
+    // the release, since the dates are the dataset's and the labels are the
+    // tree's (record 26 section 13). The sessions are numbered in date
+    // order, the report says why, and the row records the scheme that named
+    // them.
+    let by_date = SessionScheme::default();
+    let report = run::run(&mut reg, &settings(out.path(), &shifted, &by_date)).unwrap();
+    assert_eq!(report.files, 2, "{report:?}");
+    let why = report.session_naming.clone().unwrap_or_default();
+    assert!(why.contains("numbered in date order"), "{why}");
+    let written = files_under(out.path());
+    assert!(!written.is_empty());
+    for path in &written {
+        let text = path.display().to_string();
+        assert!(
+            !text.contains("20220115") && !text.contains("20220715"),
+            "{text}"
+        );
+        assert!(text.contains("ses-01") || text.contains("ses-02"), "{text}");
+    }
+    let store = reg.store();
+    let sql = format!(
+        "SELECT session_scheme FROM {} ORDER BY id DESC",
+        store.qualified("release")
+    );
+    let stored = store.query(&sql, &[]).unwrap();
+    let scheme: serde_json::Value = serde_json::from_str(stored[0].text(0).unwrap()).unwrap();
+    assert_eq!(scheme["naming"], "ordinal", "{scheme}");
 }
 
 /// A tree whose files say something about their own pixels, and carry two

@@ -7946,6 +7946,10 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             p["from"].as_str().unwrap_or_default()
         );
     }
+    // section 4.3: the sessions were numbered because a dataset's dates moved
+    if let Some(why) = &report.session_naming {
+        println!("  sessions         {why}");
+    }
     if let Some(c) = &report.converter {
         println!("  converted by     {c}");
     }

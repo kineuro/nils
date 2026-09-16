@@ -130,6 +130,11 @@ pub struct Report {
     /// worth reading: "no tag" is not "no text".
     pub burned_in: i64,
     pub unjudged: i64,
+    /// Why the tree's sessions are numbered rather than labelled the way the
+    /// run's scheme asked: §4.3 with record 26 §13, a dataset whose files
+    /// leave with their dates moved under a scheme that labels by the date.
+    /// None where the scheme stood, which is every other run.
+    pub session_naming: Option<String>,
     /// Which layout was written, and for BIDS what it chose (§9.3).
     pub layout: String,
     pub placements: BTreeMap<String, String>,
@@ -442,17 +447,25 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // dataset's, every one checked by name before anything is read.
     let policies = Policies::resolve(registry.store(), settings)?;
     // And the other half of §4.3: a session label that is a date under a
-    // policy that moves dates would put the true date back in the path.
+    // policy that moves dates would put the true date back in the path. The
+    // dates are each dataset's own (record 26 §13) and the labels are the
+    // tree's, so the tree gives way rather than the release: the sessions
+    // are numbered in date order, the row records the scheme that named
+    // them, and the report says why it is not the scheme that was asked for.
+    let mut scheme = settings.scheme.clone();
+    let mut session_naming = None;
     if let Some(moving) = policies.all.iter().find(|p| p.dates.moves_dates())
-        && settings.scheme.naming == session::Naming::Date
+        && scheme.naming == session::Naming::Date
     {
-        return Err(Error::Refused(format!(
-            "dates {} and a session scheme that labels by the date is not a policy: the tree \
-             would carry the date the files no longer do (§4.3). Use a months or ordinal \
-             scheme, or keep the dates.",
+        scheme.naming = session::Naming::Ordinal;
+        session_naming = Some(format!(
+            "dates {} and a session scheme that labels by the date would put the date back in \
+             the tree the files no longer carry (§4.3), so the sessions are numbered in date \
+             order instead. Name a months or ordinal scheme to choose the labels yourself.",
             moving.dates.name()
-        )));
+        ));
     }
+    let scheme = &scheme;
 
     // §9.2 and §9.6, before a registry row exists. A pack with no mapping
     // cannot name a BIDS tree, and a converter is not a thing to discover
@@ -489,11 +502,10 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // Wave 4b §7: sessions come from the cache, built over each subject's
     // whole timeline under the scheme's own anchor, so that this, the picker
     // and `nils session list` read the same rows.
-    let anchors = nils_session::Anchors::resolve(registry, settings.scheme, BTreeMap::new())
-        .map_err(session_err)?;
-    nils_session::ensure(registry, settings.scheme, &anchors, None, false).map_err(session_err)?;
-    let by_study =
-        nils_session::labels_by_study(registry.store(), settings.scheme).map_err(session_err)?;
+    let anchors =
+        nils_session::Anchors::resolve(registry, scheme, BTreeMap::new()).map_err(session_err)?;
+    nils_session::ensure(registry, scheme, &anchors, None, false).map_err(session_err)?;
+    let by_study = nils_session::labels_by_study(registry.store(), scheme).map_err(session_err)?;
     let named = places(registry.store(), &by_study, settings.pack)?;
     // The dataset this is a version of, and the version before it, read before
     // anything is written.
@@ -522,6 +534,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         root: settings.root.display().to_string(),
         policy: policies.describe(),
         policies: policies.as_json(),
+        session_naming,
         ..Report::default()
     };
     // one remapping for the run, hung from the run's root, handed to the
@@ -534,6 +547,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     report.release_id = open_row(
         registry.store(),
         settings,
+        scheme,
         &version,
         dataset,
         earlier.as_ref(),
@@ -2802,6 +2816,9 @@ fn remember_offset(
 fn open_row(
     store: &mut Store,
     settings: &Settings,
+    // the scheme that named the sessions, the run's own unless §4.3 numbered
+    // them instead
+    scheme: &Scheme,
     version: &str,
     dataset: i64,
     earlier: Option<&Earlier>,
@@ -2856,9 +2873,7 @@ fn open_row(
             Param::from(policy.to_string()),
             Param::from(settings.selection.as_json().to_string()),
             Param::from(categories.join(",")),
-            Param::from(
-                serde_json::to_string(settings.scheme).unwrap_or_else(|_| "{}".to_string()),
-            ),
+            Param::from(serde_json::to_string(scheme).unwrap_or_else(|_| "{}".to_string())),
             Param::from(settings.layout.name()),
             Param::from(serde_json::json!(placements).to_string()),
             match settings.converter {
