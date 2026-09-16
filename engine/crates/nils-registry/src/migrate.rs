@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 42;
+pub const SCHEMA_VERSION: i64 = 43;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +222,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 42,
         apply: a_subject_may_be_merged,
     },
+    Migration {
+        version: 43,
+        apply: a_release_says_why_its_sessions_were_numbered,
+    },
 ];
 
 /// Record 26 §3, §4 and §14: a batch says which step it is, `digest` or
@@ -338,6 +342,20 @@ fn a_subject_may_be_merged(store: &mut Store, kind: Kind) -> Result<(), Error> {
             Ok(())
         }
     }
+}
+
+/// §4.3 with record 26 §13: a release says why its sessions were numbered in
+/// date order, where a dataset's own declaration moved the dates under a
+/// scheme that labels by them. A row written before this says nothing, which
+/// is what a run whose scheme stood has to say for itself anyway.
+fn a_release_says_why_its_sessions_were_numbered(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "release", &["session_naming"])
 }
 
 /// Wave 4b §11.3 and §11.4: the case folded companions of the fingerprint's

@@ -1943,6 +1943,155 @@ fn a_release_is_versioned_and_a_re_run_writes_nothing() {
     assert!(text.contains("stacks left alone"), "{text}");
 }
 
+/// Two studies of one person six months apart, so that a release has two
+/// sessions to hold and a scheme has something to name them by.
+fn sessions_tree() -> TempDir {
+    let dir = TempDir::new("cli-sessions");
+    for (n, day) in [("A", "20220115"), ("B", "20220715")] {
+        let study = format!("1.2.3.{n}");
+        let series = format!("{study}.1");
+        let sop = format!("{series}.1");
+        let mut e = synth::minimal_mr(&study, &series, &sop);
+        e.extend([
+            synth::text(
+                dicom_dictionary_std::tags::PATIENT_ID,
+                dicom_core::VR::LO,
+                "P1",
+            ),
+            synth::text(
+                dicom_dictionary_std::tags::STUDY_DATE,
+                dicom_core::VR::DA,
+                day,
+            ),
+            synth::text(
+                dicom_dictionary_std::tags::SERIES_DESCRIPTION,
+                dicom_core::VR::LO,
+                "sag T1 mprage",
+            ),
+        ]);
+        dir.file(
+            &format!("{n}/1"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    dir
+}
+
+#[test]
+fn a_release_says_how_many_sessions_it_holds_and_what_named_them() {
+    // §4.3 with record 26 section 13, as a caller reads it. The history asked
+    // for by machine is the document the door answers, so a release says how
+    // many sessions it holds and under which scheme; and where a dataset's
+    // own declared shift had the sessions numbered in date order rather than
+    // labelled the way the scheme asked, it says so in words.
+    let home = home();
+    let dir = sessions_tree();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let release = |name: &str, out: &std::path::Path| {
+        let done = nils()
+            .args(registry)
+            .args([
+                "release",
+                "--name",
+                name,
+                "--on-unknown",
+                "write",
+                "--pack-dir",
+                packs.to_str().unwrap(),
+                "--out",
+                out.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(done.status.success(), "{}", stderr(&done));
+    };
+
+    let done = nils()
+        .args(registry)
+        .args(["digest", "--name", "first"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", stderr(&done));
+
+    let plainly = TempDir::new("cli-sessions-plain");
+    release("plain", plainly.path());
+
+    // Now the folder is a dataset whose files leave with their dates moved,
+    // which nobody asked for on the run: the release numbers its sessions
+    // rather than refusing, and records why. A declared place puts the rules
+    // of Wave 5 §10.2 in force, so the tree leaves into an export place.
+    let exports = TempDir::new("cli-sessions-exports");
+    {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        let mut declare = |name: &str, role, path: &std::path::Path, handling| {
+            nils_registry::place::add(
+                &mut store,
+                &nils_registry::place::New {
+                    name,
+                    role,
+                    path: path.to_str().unwrap(),
+                    guarantees: serde_json::json!({}),
+                    probed: serde_json::json!({}),
+                    handling,
+                    dataset: serde_json::Value::Null,
+                },
+            )
+            .unwrap();
+        };
+        declare(
+            "ds-shifted",
+            nils_registry::place::Role::Source,
+            dir.path(),
+            serde_json::json!({"on_release": {"dates": "shift", "uids": "remap"}}),
+        );
+        declare(
+            "exports",
+            nils_registry::place::Role::Export,
+            exports.path(),
+            serde_json::Value::Null,
+        );
+    }
+    let shifted = exports.path().join("shifted");
+    release("shifted", &shifted);
+
+    let history = nils()
+        .args(registry)
+        .args(["release", "--history", "--json"])
+        .output()
+        .unwrap();
+    assert!(history.status.success(), "{}", stderr(&history));
+    let doc: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
+    let of = |name: &str| {
+        doc["releases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap_or_else(|| panic!("no release {name} in {doc}"))
+            .clone()
+    };
+
+    // Made plainly: the scheme it used, and nothing to explain.
+    let plain = of("plain");
+    assert_eq!(plain["sessions"], 2, "{plain}");
+    assert_eq!(plain["session_scheme"]["naming"], "date", "{plain}");
+    assert!(plain["session_naming"].is_null(), "{plain}");
+
+    // Made under the dataset's declaration: numbered, and why.
+    let declared = of("shifted");
+    assert_eq!(declared["sessions"], 2, "{declared}");
+    assert_eq!(
+        declared["session_scheme"]["naming"], "ordinal",
+        "{declared}"
+    );
+    let why = declared["session_naming"].as_str().unwrap_or_default();
+    assert!(why.contains("ds-shifted"), "{why}");
+    assert!(why.contains("numbered in date order"), "{why}");
+}
+
 /// A tree whose files carry a Siemens block: a b value that varies, a
 /// gradient mode that does not, and a field of view that changes per file
 /// (which no real acquisition does), so a survey has something to name, a

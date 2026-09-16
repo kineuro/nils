@@ -584,6 +584,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         earlier.as_ref(),
         &report.placements,
         &report.policies,
+        report.session_naming.as_deref(),
     )?;
 
     // The parts of a stack's content digest that are the same for every stack
@@ -2859,6 +2860,10 @@ fn open_row(
     earlier: Option<&Earlier>,
     placements: &BTreeMap<String, String>,
     policies: &[serde_json::Value],
+    // §4.3: the sentence the report carries where a dataset's own declaration
+    // moved the dates and the sessions were numbered instead, and nothing
+    // where the scheme stood
+    session_naming: Option<&str>,
 ) -> Result<i64, Error> {
     let categories: Vec<&str> = settings.categories.iter().map(|c| c.name()).collect();
     // record 26 §13: the row says where its policy came from, and what each
@@ -2893,6 +2898,7 @@ fn open_row(
                 "added",
                 "removed",
                 "policies",
+                "session_naming",
             ],
         )
         .returning(&["id"]),
@@ -2929,6 +2935,10 @@ fn open_row(
             Param::Int(0),
             Param::Int(0),
             Param::from(serde_json::Value::Array(policies.to_vec()).to_string()),
+            match session_naming {
+                Some(why) => Param::from(why),
+                None => Param::Null,
+            },
         ]],
     )?;
     Ok(written.first().map(|r| r.int(0)).transpose()?.unwrap_or(0))

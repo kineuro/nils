@@ -1134,6 +1134,13 @@ fn build_registry() -> Vec<Table> {
                 // release spanned, `[{dataset, dates, uids, from}]`, beside
                 // the run's own `policy`.
                 col("policies", Type::Json),
+                // §4.3 with record 26 §13: why this release's sessions were
+                // numbered in date order rather than labelled the way its
+                // scheme asked, in the engine's own words. The scheme in
+                // `session_scheme` is the one that named them, so without
+                // this the row says what happened and never why. Null on a
+                // run whose scheme stood, which is nearly every one.
+                col("session_naming", Type::Text),
             ],
         )
         .index(&["name"]),

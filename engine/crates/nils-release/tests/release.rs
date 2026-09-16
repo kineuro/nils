@@ -222,6 +222,20 @@ fn what_leaves_carries_no_identifier_and_says_what_was_done_to_it() {
     let rendered = format!("{:?}", report.changes);
     assert!(!rendered.contains("SVENSSON"), "{rendered}");
     assert!(rendered.contains("(0010,0010) removed"), "{rendered}");
+
+    // The row records the scheme that named the sessions, which here is the
+    // one the run asked for, and says nothing about why they were named that
+    // way: §4.3 numbered nothing, because nothing moved the dates.
+    assert!(report.session_naming.is_none(), "{report:?}");
+    let store = reg.store();
+    let sql = format!(
+        "SELECT session_scheme, session_naming FROM {} ORDER BY id DESC",
+        store.qualified("release")
+    );
+    let stored = store.query(&sql, &[]).unwrap();
+    let named: serde_json::Value = serde_json::from_str(stored[0].text(0).unwrap()).unwrap();
+    assert_eq!(named["naming"], "date", "{named}");
+    assert_eq!(stored[0].opt_text(1).unwrap(), None);
 }
 
 #[test]
@@ -636,6 +650,14 @@ fn a_dataset_that_declares_moved_dates_numbers_its_sessions_rather_than_refusing
     let stored = store.query(&sql, &[]).unwrap();
     let scheme: serde_json::Value = serde_json::from_str(stored[0].text(0).unwrap()).unwrap();
     assert_eq!(scheme["naming"], "ordinal", "{scheme}");
+    // and the sentence with it, so that why they were numbered hangs off the
+    // release itself and not off the job that happened to make it
+    let sql = format!(
+        "SELECT session_naming FROM {} ORDER BY id DESC",
+        store.qualified("release")
+    );
+    let stored = store.query(&sql, &[]).unwrap();
+    assert_eq!(stored[0].text(0).unwrap(), why, "{why}");
 }
 
 /// A tree whose files say something about their own pixels, and carry two

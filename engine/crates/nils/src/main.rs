@@ -8121,17 +8121,30 @@ fn release_withdraw(home: &Home, name: &str, version: &str, why: &str) -> Result
     Ok(())
 }
 
-/// The releases the registry holds, newest first (`GET /api/releases`).
-fn releases_doc(registry: &mut Registry, limit: usize) -> Result<serde_json::Value, Exit> {
+/// The releases the registry holds, newest first (`GET /api/releases`, and
+/// `nils release --history --json`); every version of one dataset where a
+/// name is given.
+fn releases_doc(
+    registry: &mut Registry,
+    limit: usize,
+    name: Option<&str>,
+) -> Result<serde_json::Value, Exit> {
     let store = registry.store();
     let started = text_of(store, "release", "started_at");
     let withdrawn = text_of(store, "release", "withdrawn_at");
     let policy = text_of(store, "release", "policy");
     let policies = text_of(store, "release", "policies");
+    let scheme = text_of(store, "release", "session_scheme");
+    let mut wheres = String::new();
+    let mut params: Vec<Param> = Vec::new();
+    if let Some(name) = name {
+        wheres = format!(" WHERE name = {}", store.dialect().param(1, Type::Text));
+        params.push(Param::from(name));
+    }
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
-         {policies} FROM {} \
+         {policies}, {scheme}, session_naming FROM {}{wheres} \
          ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
@@ -8140,12 +8153,18 @@ fn releases_doc(registry: &mut Registry, limit: usize) -> Result<serde_json::Val
         s.and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
             .unwrap_or(serde_json::Value::Null)
     };
-    let rows: Vec<serde_json::Value> = store
-        .query(&sql, &[])?
+    let found = store.query(&sql, &params)?;
+    let ids: Vec<i64> = found
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<_, nils_registry::Error>>()?;
+    let sessions = sessions_of(store, &ids)?;
+    let rows: Vec<serde_json::Value> = found
         .iter()
         .map(|r| {
+            let id = r.int(0)?;
             Ok(serde_json::json!({
-                "id": r.int(0)?,
+                "id": id,
                 "name": r.text(1)?,
                 "version": r.text(2)?,
                 "root": r.text(3)?,
@@ -8166,10 +8185,63 @@ fn releases_doc(registry: &mut Registry, limit: usize) -> Result<serde_json::Val
                 // from, and what each dataset's files left under
                 "policy": json(r.opt_text(17)?),
                 "policies": json(r.opt_text(18)?),
+                // How many sessions the release holds, the scheme that named
+                // them, and, where §4.3 numbered them in date order under a
+                // dataset's declared shift, the engine's own sentence for why
+                // they are not labelled the way the scheme asked.
+                "sessions": sessions.get(&id).copied(),
+                "session_scheme": json(r.opt_text(19)?),
+                "session_naming": r.opt_text(20)?,
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
     Ok(serde_json::json!({ "count": rows.len(), "releases": rows }))
+}
+
+/// How many sessions each of these releases holds.
+///
+/// A release records its sessions nowhere but in the places of its stacks:
+/// every place of §9 begins `sub-<code>/ses-<label>`, whatever the layout put
+/// in front of it, so the distinct pairs are the sessions of the tree. A state
+/// row says which version last wrote it, so a release a later version has
+/// written over holds none of them and answers nothing at all, rather than a
+/// count that is really its successor's.
+fn sessions_of(store: &mut Store, ids: &[i64]) -> Result<BTreeMap<i64, i64>, nils_registry::Error> {
+    if ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    // The ids are the ones just read out of the release table, so the list is
+    // the rows' own integers and never a caller's text.
+    let list: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    let sql = format!(
+        "SELECT release_id, dir FROM {} WHERE release_id IN ({})",
+        store.qualified("release_stack"),
+        list.join(", ")
+    );
+    let mut seen: BTreeMap<i64, std::collections::BTreeSet<String>> = BTreeMap::new();
+    store.query_stream(&sql, &[], |r| {
+        if let Some(session) = session_of(r.text(1)?) {
+            seen.entry(r.int(0)?).or_default().insert(session);
+        }
+        Ok(true)
+    })?;
+    Ok(seen
+        .into_iter()
+        .map(|(id, sessions)| (id, sessions.len() as i64))
+        .collect())
+}
+
+/// The session a released stack's directory is in: the `sub-…/ses-…` pair
+/// every layout of §9 puts in the path, whatever it puts in front of it.
+fn session_of(dir: &str) -> Option<String> {
+    dir.split('/')
+        .collect::<Vec<&str>>()
+        .windows(2)
+        .find_map(|pair| {
+            let (subject, session) = (pair[0], pair[1]);
+            (subject.starts_with("sub-") && session.starts_with("ses-"))
+                .then(|| format!("{subject}/{session}"))
+        })
 }
 
 /// One row of the version history.
@@ -8191,6 +8263,17 @@ struct Version {
 /// left everything alone says so.
 fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
     let mut registry = home.open().map_err(|e| fail(e.to_string()))?;
+    // Asked for by machine, the history is the document the door answers, so
+    // that a caller reads one shape of a release row and not two.
+    if args.json {
+        let doc = releases_doc(&mut registry, i64::MAX as usize, args.name.as_deref())?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&doc)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
     let store = registry.store();
     let mut wheres = String::new();
     let mut params: Vec<nils_registry::store::Param> = Vec::new();
@@ -8297,6 +8380,27 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_released_stack_says_which_session_it_is_in() {
+        // Every layout of §9 writes the pair; what differs is only what it
+        // puts in front of it, which is why the pair is looked for anywhere.
+        assert_eq!(
+            session_of("sub-a/ses-20220115/t1-mprage").as_deref(),
+            Some("sub-a/ses-20220115")
+        );
+        assert_eq!(
+            session_of("sourcedata/sub-a/ses-01/misc/stack-00000001").as_deref(),
+            Some("sub-a/ses-01")
+        );
+        assert_eq!(
+            session_of("derivatives/nils/sub-b/ses-M06/anat").as_deref(),
+            Some("sub-b/ses-M06")
+        );
+        // and a directory in no session is in none, rather than in a guess
+        assert_eq!(session_of("misc/stack-00000001"), None);
+        assert_eq!(session_of("sub-a/anat"), None);
+    }
 
     #[test]
     fn a_count_names_its_noun() {
