@@ -2813,6 +2813,10 @@ fn remember_offset(
     Ok(())
 }
 
+// what the row says is what the run worked out: its settings, the scheme
+// that named the sessions, and the four things read before anything was
+// written
+#[allow(clippy::too_many_arguments)]
 fn open_row(
     store: &mut Store,
     settings: &Settings,

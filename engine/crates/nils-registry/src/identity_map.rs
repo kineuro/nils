@@ -1832,7 +1832,7 @@ mod tests {
             false,
         );
         assert!(r.written(), "{r}");
-        assert_eq!(codes(&mut registry), [first.clone()]);
+        assert_eq!(codes(&mut registry), std::slice::from_ref(&first));
         // one open membership, the canonical's; the alias's, the same
         // interval, is gone
         let members = registry
@@ -1894,7 +1894,11 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("refused"), "{err}");
-        assert_eq!(codes(&mut registry), [first.clone()], "no subject behind");
+        assert_eq!(
+            codes(&mut registry),
+            std::slice::from_ref(&first),
+            "no subject behind"
+        );
         assert!(!codes(&mut registry).contains(&third));
         assert_eq!(
             count(
