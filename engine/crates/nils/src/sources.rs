@@ -181,6 +181,10 @@ fn source(
                 "stacks_added": n(&["written", "stacks_created"]),
                 // the pseudonymise step before the digest, once there is one
                 "pseudonymised": null,
+                // record 26 §14: the jobs of the thread by stage, so that a
+                // page can walk from a digest to the run that wrote the
+                // files and to the runs that sorted them
+                "chain": {"pseudonymize": null, "digest": r.opt_int(5)?, "classify": []},
             }),
         ));
     }
@@ -189,6 +193,7 @@ fn source(
             && let Some(step) = crate::batches::other_side(store, &b)?
         {
             let step = crate::batches::pseudonymised(&step);
+            doc["chain"]["pseudonymize"] = step["job"].clone();
             doc["pseudonymised"] = json!({
                 "files": step["files"], "changed": step["changed"], "held": step["held"],
                 "job": step["job"], "batch": step["batch"],
@@ -222,6 +227,17 @@ fn source(
                  WHERE {open} AND st.first_batch_id IN ({batches}) GROUP BY st.first_batch_id"
             ),
         )?;
+        // the classify runs over each batch's stacks, the last stage of the
+        // thread the sources door can name
+        let classifiers = pairs(
+            store,
+            &format!(
+                "SELECT DISTINCT st.first_batch_id, cl.job_id FROM {stack} st \
+                 JOIN {class} cl ON cl.stack_id = st.id \
+                 WHERE st.first_batch_id IN ({batches}) AND cl.job_id IS NOT NULL \
+                 ORDER BY st.first_batch_id, cl.job_id"
+            ),
+        )?;
         for (id, doc) in shown.iter_mut() {
             let of = |v: &[(i64, i64)]| {
                 v.iter()
@@ -231,6 +247,13 @@ fn source(
             };
             doc["classified"] = json!(of(&classified));
             doc["to_sort"] = json!(of(&unsure));
+            doc["chain"]["classify"] = json!(
+                classifiers
+                    .iter()
+                    .filter(|(b, _)| b == id)
+                    .map(|(_, job)| *job)
+                    .collect::<Vec<_>>()
+            );
         }
     }
 

@@ -4298,6 +4298,15 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(recent["pseudonymised"]["files"], 6, "{sources}");
     assert_eq!(recent["pseudonymised"]["changed"], 6, "{sources}");
     assert_eq!(recent["pseudonymised"]["job"], first, "{sources}");
+    // record 26 §14: the jobs of the thread by stage, the whole way from
+    // the pseudonymise step to the runs that sorted the stacks
+    assert_eq!(recent["chain"]["pseudonymize"], first, "{sources}");
+    assert_eq!(recent["chain"]["digest"], ids[1], "{sources}");
+    assert_eq!(
+        recent["chain"]["classify"],
+        serde_json::json!([ids[3]]),
+        "{sources}"
+    );
     assert_eq!(
         source["digests"]["count"], 1,
         "a pseudonymise step is not a digest: {sources}"
