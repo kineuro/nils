@@ -243,6 +243,7 @@ fn run_err(e: RunError) -> Reply {
         RunError::Handle(
             e @ (HandleError::Expired(_) | HandleError::Withdrawn(_) | HandleError::Truncated(_)),
         ) => Reply::error(409, e.to_string()),
+        e @ RunError::NameTaken(_) => Reply::error(409, e.to_string()),
         RunError::Exec(ExecError::Timeout(ms)) => Reply::error(
             504,
             format!("the statement ran past {ms} ms; POST /api/ask/jobs runs it unbounded"),

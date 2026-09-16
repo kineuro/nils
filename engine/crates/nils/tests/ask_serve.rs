@@ -193,7 +193,7 @@ fn body(v: serde_json::Value) -> String {
 #[test]
 fn the_ask_doors_run_a_document_to_a_handle_and_its_affordances_answer() {
     let home = synthetic();
-    let server = Server::start(&home, 22, &[]);
+    let server = Server::start(&home, 23, &[]);
     // the capabilities carry the ask block and the contract version
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
@@ -289,6 +289,25 @@ fn the_ask_doors_run_a_document_to_a_handle_and_its_affordances_answer() {
     assert_eq!(status, 200, "{h}");
     assert_eq!(h["name"], "converters");
     assert_eq!(h["pages"], 1);
+    // the name is taken: refused in words, never as the store's constraint
+    // (lab 26, defect 18)
+    let (status, taken) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(
+            serde_json::json!({"document": doc, "name": "converters", "keep": true, "fresh": true}),
+        )),
+        None,
+    );
+    assert_eq!(status, 409, "{taken}");
+    assert!(
+        taken["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("a kept handle named converters exists"),
+        "{taken}"
+    );
+    assert!(!taken.to_string().contains("UNIQUE"), "{taken}");
     // Wave 4c §7.4: the list door names the handle newest first with what
     // the result surface reads, and the policy table carries the door.
     let (status, list) = server.request("GET", "/api/ask/handles?limit=5", None, None);
