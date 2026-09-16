@@ -30,6 +30,10 @@ use crate::rule::{FALLBACK_ID_TYPE, Ident, Rule};
 /// Rows the lookup cache holds (§9.1).
 pub const CACHE_ROWS: usize = 200_000;
 
+/// The alphabet of a blake2b-32 display code, Crockford's base32 in lower
+/// case; a blake2b-8 code's hex is inside it.
+const CODE_ALPHABET: &str = "0123456789abcdefghjkmnpqrstvwxyz";
+
 /// An id type the rule files under, with its row in the linkage store.
 pub struct IdType {
     pub name: String,
@@ -139,6 +143,10 @@ pub struct Resolver {
     fallback: IdType,
     /// The rule reads the code itself, not an identifier to derive one from.
     verbatim: bool,
+    /// The tree is this registry's own pseudonymised tree (record 26 §3): a
+    /// value read verbatim there is one of this registry's codes, or no
+    /// code at all.
+    own_codes: bool,
     batch_id: i64,
     /// Lookup → subject, for the identities met (§7.4 step 3).
     identities: LruCache<Vec<u8>, i64>,
@@ -172,6 +180,7 @@ impl Resolver {
             id_type,
             fallback,
             verbatim: rule.verbatim,
+            own_codes: rule.own_codes,
             batch_id,
             identities: LruCache::new(cap),
             pending: Vec::new(),
@@ -185,6 +194,35 @@ impl Resolver {
 
     pub fn display_length(&self) -> usize {
         self.display_length
+    }
+
+    /// Whether a value has the shape of a code this registry makes: sixteen
+    /// hex characters under blake2b-8, the display length of the alphabet
+    /// under blake2b-32.
+    pub fn own_shape(&self, value: &str) -> bool {
+        match self.scheme {
+            Scheme::Blake2b8 => {
+                value.len() == 16
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            }
+            Scheme::Blake2b32 => {
+                value.len() == self.display_length
+                    && value.chars().all(|c| CODE_ALPHABET.contains(c))
+            }
+        }
+    }
+
+    /// Whether the value a file carries stands as its subject's code: the
+    /// rule reads codes, the fallback was not taken, and on this registry's
+    /// own pseudonymised tree the value has the shape this registry makes.
+    /// A code some subject holds already is found before this is asked, so
+    /// what this decides is what becomes of a value the registry has never
+    /// met: its own code where the shape is this registry's, and otherwise
+    /// an identifier a code is derived from (record 26 §3).
+    fn takes_verbatim(&self, ident: &Ident) -> bool {
+        self.verbatim && !ident.fell_back && (!self.own_codes || self.own_shape(&ident.value))
     }
 
     /// The id type a file's identifier is filed under.
@@ -258,6 +296,46 @@ impl Resolver {
             // miss under its own, whichever file first named that lookup
             misses.retain(|_, i| self.hit(&who[*i], &lookups[*i]).is_none());
         }
+        // a value read verbatim that is a code some subject holds stands as
+        // that subject's, whatever its length and whatever scheme made it:
+        // every person keeps the code they had (record 26 §3)
+        if self.verbatim && !misses.is_empty() {
+            let mut by_value: HashMap<&str, Vec<(Vec<u8>, usize)>> = HashMap::new();
+            for (lookup, &i) in &misses {
+                let w = &who[i];
+                if !w.ident.fell_back {
+                    by_value
+                        .entry(w.ident.value.as_str())
+                        .or_default()
+                        .push((lookup.clone(), i));
+                }
+            }
+            if !by_value.is_empty() {
+                let t = table("subject");
+                let cols = [
+                    t.column("id").expect("subject.id"),
+                    t.column("code").expect("subject.code"),
+                    t.column("merged_into").expect("subject.merged_into"),
+                ];
+                let values: Vec<String> = by_value.keys().map(|v| (*v).to_string()).collect();
+                let found = store.select_by_keys(t, &cols, "code", &values)?;
+                for r in &found {
+                    if r.opt_int(2)?.is_some() {
+                        continue;
+                    }
+                    let id = r.int(0)?;
+                    let Some(members) = by_value.remove(r.text(1)?) else {
+                        continue;
+                    };
+                    for (lookup, i) in members {
+                        self.attach(id, who[i].ident, lookup.clone());
+                        out.found[i] = Found::Known(id);
+                        out.attached += 1;
+                        misses.remove(&lookup);
+                    }
+                }
+            }
+        }
         if make == Make::Nothing {
             // the rest are identifiers no subject holds, and none is made
             for (i, w) in who.iter().enumerate() {
@@ -277,10 +355,13 @@ impl Resolver {
         let mut groups: BTreeMap<String, Group> = BTreeMap::new();
         for (lookup, &i) in &misses {
             let w = &who[i];
-            let code = if self.verbatim && !w.ident.fell_back {
+            let code = if self.takes_verbatim(w.ident) {
                 // the value the rule read is the code itself (§7.3)
                 pseudonym::verbatim(self.scheme, &self.key, &w.ident.value)
             } else {
+                // an identifier a code is derived from, which on this
+                // registry's own pseudonymised tree is a value of a shape
+                // it does not make and a code it does not hold
                 pseudonym::code(self.scheme, &self.key, &w.ident.value, self.display_length)
             };
             let g = groups.entry(code.code).or_insert_with(|| Group {
@@ -378,7 +459,7 @@ impl Resolver {
                         // which is not this code's, and that is no collision.
                         // The check is for two identifiers truncating to one
                         // display code, which a verbatim read cannot be.
-                        let verbatim = self.verbatim && !w.ident.fell_back;
+                        let verbatim = self.takes_verbatim(w.ident);
                         let other_digest = !verbatim
                             && digests
                                 .get(&id)

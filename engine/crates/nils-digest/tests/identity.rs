@@ -801,3 +801,80 @@ fn a_path_segment_is_a_source_and_a_constant_tag_says_so() {
         );
     }
 }
+
+#[test]
+fn a_code_a_subject_holds_is_read_verbatim_whatever_its_length() {
+    // Record 26 §3: a dataset's pseudonymised tree is read under the rule
+    // the engine writes for it, which takes whatever the code alphabet can
+    // spell, of any length, and leaves it to the registry to say what the
+    // value is. A v0 cohort folder carries sixteen hex characters where
+    // this registry derives twelve, and v0's map has been filed: every
+    // person keeps the code they had, so the digest attaches the tree's
+    // code to the subject the map made instead of making a second subject
+    // for the same person. A value the registry neither holds nor makes is
+    // an identifier, and a code is derived from it.
+    let mut rule = Rule::parse(
+        "identity:\n  id_type: subject-code\n  from:\n    - field: PatientID\n      pattern: '^(?<id>[0-9a-hjkmnp-tv-z]+)$'\n  code: verbatim\n",
+    )
+    .unwrap();
+    rule.own_codes = true;
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("identity-v0-codes");
+        dir.file(
+            "a/IM_0001",
+            &mr("A", "A.1", "A.1.1", "771c4326c89c082c", &[]),
+        );
+        dir.file(
+            "b/IM_0001",
+            &mr("B", "B.1", "B.1.1", "5e0d9b1a77c34210", &[]),
+        );
+        dir.file("c/IM_0001", &mr("C", "C.1", "C.1.1", "xg5pf9g20xwmk", &[]));
+        let mut s = settings(&dir);
+        s.identity = rule.clone();
+        let mut reg = lab.open();
+        let mut store = reg.open_linkage().unwrap();
+        let keys = Subkeys::derive(&reg.pseudonym_key().unwrap());
+
+        // v0's own file, PatientID and subject_code, filed as it is
+        let rows = [
+            ImportRow {
+                line: 2,
+                identifier: "P1".to_string(),
+                code: "771c4326c89c082c".to_string(),
+            },
+            ImportRow {
+                line: 3,
+                identifier: "P2".to_string(),
+                code: "5e0d9b1a77c34210".to_string(),
+            },
+        ];
+        let imported =
+            linkage::import(reg.store(), &mut store, &keys, "patient-id", &rows).unwrap();
+        assert_eq!(imported.subjects_created, 2, "{name}");
+
+        let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = report.written.clone().unwrap();
+        // the two the map made, found by their codes, and one subject for
+        // the value that is no code of this registry
+        assert_eq!(w.subjects_created, 1, "{name}");
+        assert_eq!(w.identities_attached, 2, "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {subject}"), 3, "{name}");
+        let person = subject_of_study(&mut reg, "A");
+        assert_eq!(code_of(&mut reg, person), "771c4326c89c082c", "{name}");
+        assert!(
+            revealed(&mut reg, &mut store, person).contains(&identity(
+                "subject-code",
+                "771c4326c89c082c",
+                "dicom"
+            )),
+            "{name}"
+        );
+        // the value of no shape of this registry's is an identifier, so its
+        // code is one the registry derived, of its own display length
+        let odd = subject_of_study(&mut reg, "C");
+        let derived = code_of(&mut reg, odd);
+        assert_ne!(derived, "xg5pf9g20xwmk", "{name}");
+        assert_eq!(derived.len(), 12, "{name}");
+    }
+}

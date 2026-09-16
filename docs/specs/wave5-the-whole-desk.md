@@ -535,11 +535,17 @@ heartbeat; what was written stays written. The run is a batch of kind
 `pseudonymize` on the pseudonymised tree's source, its report the batch's
 counts and the job's result:
 `{files {seen, written, unchanged, held, refused, skipped}, subjects {new, seen, provisional}, tags_removed {tag: count}, private_removed, refused_by, held_by_shape, bytes, seconds, files_per_s}`.
-A digest of the tree reads the codes verbatim under the `subject-code` type, a
-pattern shaped by the registry's scheme and display length, so a subject the
-pseudonymiser made is found by its code and never coded again; the type is
-seeded by the identifiers slice, and until then `nils linkage id-type add
-subject-code` makes it. A change to the dataset's tag lists reaches the files
+A digest of the tree reads the codes verbatim under the `subject-code` type,
+any value of the code alphabet whatever its length, so a subject the
+pseudonymiser made is found by its code and never coded again, and so is a
+subject whose code was made elsewhere, a v0 cohort's sixteen hex characters
+under a registry that derives twelve among them: every person keeps the code
+they had. A value no subject holds stands as its own code where it has the
+shape this registry makes, its scheme's alphabet and its display length, and
+is otherwise no code of this registry, so a code is derived from it as from
+any identifier. A value outside the alphabet is no identifier the rule can
+read and falls back to the study UID. The type is seeded by the identifiers
+slice, and until then `nils linkage id-type add subject-code` makes it. A change to the dataset's tag lists reaches the files
 written after it; an unchanged source is not written again for a new list.
 
 **The chain.** `POST /api/jobs` takes `then: [command, ...]`, the command
