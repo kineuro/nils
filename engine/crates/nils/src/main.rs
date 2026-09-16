@@ -819,9 +819,6 @@ struct DatasetFlags {
     /// A tag to keep out of those groups, as gggg,eeee (repeatable)
     #[arg(long, value_name = "TAG")]
     keep: Vec<String>,
-    /// What becomes of the originals: kept, vaulted or purged
-    #[arg(long, value_name = "WHAT")]
-    originals: Option<String>,
     /// Move the loose entries of a de-identified or coded folder into its pseudonymised tree
     #[arg(long)]
     move_into_anon: bool,
@@ -865,9 +862,6 @@ impl DatasetFlags {
         }
         if !tags.is_empty() {
             asked.insert("tags".into(), serde_json::Value::Object(tags));
-        }
-        if let Some(o) = &self.originals {
-            asked.insert("originals_kept".into(), serde_json::json!(o));
         }
         if self.move_into_anon {
             asked.insert("move_into_anon".into(), serde_json::json!(true));

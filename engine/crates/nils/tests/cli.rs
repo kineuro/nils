@@ -4187,8 +4187,6 @@ fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
             &id,
             "--no-cohort",
             "--no-keep-demographics",
-            "--originals",
-            "vaulted",
             "--json",
         ])
         .output()
@@ -4208,11 +4206,20 @@ fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
         changed["dataset"]["tags"]["remove"][0], "0010,1010",
         "{changed}"
     );
-    assert_eq!(changed["dataset"]["originals_kept"], "vaulted", "{changed}");
+    assert_eq!(changed["dataset"]["originals_kept"], "kept", "{changed}");
     assert_eq!(
         changed["dataset"]["identity"]["id_type"], "study-id",
         "{changed}"
     );
+
+    // lab 26c, finding 4: what became of the originals is what an act did,
+    // so it is no flag on a declaration
+    let refused = nils()
+        .args(registry)
+        .args(["place", "set", &id, "--originals", "purged"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "{}", stdout(&refused));
 
     // the dataset flags belong to a source place
     let refused = nils()
@@ -4377,6 +4384,127 @@ fn a_dataset_s_originals_are_surveyed_then_vaulted_at_the_keyboard() {
     let rows: serde_json::Value = serde_json::from_slice(&audited.stdout).unwrap();
     assert_eq!(rows[0]["details"]["files"], 1, "{rows}");
     assert_eq!(rows[0]["scope"]["into"], "vault", "{rows}");
+}
+
+/// Lab 26c, finding 1 at the keyboard, written as the lab wrote it: one
+/// original changed in place to other bytes of exactly its length, and no
+/// second run of the pseudonymiser. Its copy still verifies on its own, so
+/// the purge used to run, delete the original and leave the older copy,
+/// and the newer bytes were gone from the machine. Now the survey counts
+/// the file as changed, the keyboard refuses in words naming the cure,
+/// every original stays, and the cure the words name does the work.
+#[test]
+fn a_changed_original_refuses_a_purge_until_the_dataset_is_pseudonymised_again() {
+    let home = home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = TempDir::new("cli-originals-changed");
+    for instance in 1..=2u32 {
+        dir.file(
+            &format!("sub-0/IM_{instance:04}"),
+            &identified("199001011234", 1, instance),
+        );
+    }
+    let go = |args: &[&str]| {
+        let out = nils()
+            .args(registry)
+            .args(args)
+            .env("NILS_PACK_DIR", packs_dir())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}: {}", args.join(" "), stderr(&out));
+        stdout(&out)
+    };
+    let refused = |args: &[&str]| {
+        let out = nils()
+            .args(registry)
+            .args(args)
+            .env("NILS_PACK_DIR", packs_dir())
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{}: {}",
+            args.join(" "),
+            stdout(&out)
+        );
+        stderr(&out)
+    };
+    go(&[
+        "place",
+        "add",
+        "ds",
+        dir.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--arrives",
+        "identified",
+        "--unmapped",
+        "code",
+    ]);
+    go(&["pseudonymize", "@ds"]);
+
+    // every original is verified, so a purge may run
+    let text = go(&["place", "originals", "ds"]);
+    assert!(text.contains("verified         2 of 2"), "{text}");
+    assert!(text.contains("purge            may run"), "{text}");
+
+    // one original changed in place, to other bytes of exactly its length,
+    // its modification time moving with them as a disk moves it
+    let changed = dir.path().join("derivatives/dcm-original/sub-0/IM_0001");
+    let mut bytes = std::fs::read(&changed).unwrap();
+    let n = bytes.len();
+    for b in &mut bytes[n - 64..] {
+        *b ^= 0xFF;
+    }
+    let moved = std::fs::metadata(&changed).unwrap().modified().unwrap()
+        + std::time::Duration::from_secs(1);
+    std::fs::write(&changed, &bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&changed)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(moved))
+        .unwrap();
+    assert_eq!(std::fs::metadata(&changed).unwrap().len() as usize, n);
+
+    // the survey says which of the problems this is, and the keyboard
+    // refuses in the same words the door answers
+    let text = go(&["place", "originals", "ds"]);
+    assert!(text.contains("verified         1 of 2"), "{text}");
+    assert!(
+        text.contains("changed          1 that changed after being copied"),
+        "{text}"
+    );
+    assert!(text.contains("purge            is refused:"), "{text}");
+    let why = refused(&[
+        "place",
+        "originals",
+        "ds",
+        "--purge",
+        "--why",
+        "the study is over and the originals are no longer needed",
+    ]);
+    assert!(why.contains("changed after being copied"), "{why}");
+    assert!(why.contains("nils pseudonymize @ds"), "{why}");
+    assert!(changed.is_file(), "a refused purge deletes nothing");
+    assert!(
+        dir.path()
+            .join("derivatives/dcm-original/sub-0/IM_0002")
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read(&changed).unwrap(),
+        bytes,
+        "the changed bytes are still on the machine"
+    );
+
+    // the cure the refusal names: the run writes the changed original
+    // again, and only then may a purge run
+    let text = go(&["pseudonymize", "@ds"]);
+    assert!(text.contains("2 seen   1 written   1 unchanged"), "{text}");
+    let text = go(&["place", "originals", "ds"]);
+    assert!(text.contains("verified         2 of 2"), "{text}");
+    assert!(text.contains("purge            may run"), "{text}");
 }
 
 /// An identified file for the pseudonymiser's tests: a patient with a

@@ -1741,6 +1741,11 @@ fn routed(
         ["api", "places"] if post => {
             use nils_registry::place::{self, Role as PlaceRole};
             let doc = json_body(body)?;
+            // lab 26c, finding 4: what became of the originals is an act's
+            // to write, never a declaration's
+            if let Some(refused) = crate::dataset::engine_written_refused(&doc) {
+                return Err(Reply::error(refused.status, refused.message));
+            }
             let name = doc["name"]
                 .as_str()
                 .filter(|n| !n.trim().is_empty())
@@ -1853,6 +1858,11 @@ fn routed(
             use nils_registry::place;
             let id = id_at(2)?;
             let doc = json_body(body)?;
+            // lab 26c, finding 4: the same at the door that changes a
+            // dataset, which is the one the desk's Change form sends to
+            if let Some(refused) = crate::dataset::engine_written_refused(&doc) {
+                return Err(Reply::error(refused.status, refused.message));
+            }
             let current = place::show(registry.store(), id)?
                 .ok_or_else(|| Reply::error(404, format!("no place {id}")))?;
             if doc["retired"].as_bool() == Some(true) {

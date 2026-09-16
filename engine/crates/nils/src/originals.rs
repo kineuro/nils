@@ -9,11 +9,27 @@
 //! where the destination is on the same filesystem, and otherwise a copy
 //! whose digest is checked against the source's before the source is let
 //! go, so no file is ever removed whose copy did not verify. **Purge**
-//! deletes them, and is refused unless every original is verified in the
-//! pseudonymised tree, at the size and the digest the pseudonymiser
-//! recorded and hashed again now, and no file of the dataset waits for a
-//! map: what a purge destroys is the only identified copy of those
-//! people's scans, and a file that is held has no copy at all.
+//! deletes them, and is refused unless every original is verified and no
+//! file of the dataset waits for a map: what a purge destroys is the only
+//! identified copy of those people's scans, and a file that is held has no
+//! copy at all.
+//!
+//! **An original is verified only when it is still the file that was
+//! copied** (lab 26c): its size and its modification time are what the row
+//! recorded, *and* the copy is what was recorded, there at the recorded
+//! size with the digest hashed again now. Where the two disagree the purge
+//! refuses, and the refusal names the cure. A file whose bytes changed
+//! after its copy was written reads as verified under the copy's half
+//! alone, and a purge would then delete the only version of the data
+//! nobody has read; the asymmetry decides it, since a false refusal costs
+//! a run of the pseudonymiser and a false acceptance destroys data that
+//! exists nowhere else. A modification time that moved innocently, after a
+//! restore or a copy between disks, is refused too, and that is the price.
+//!
+//! The counts a person reads keep the problems apart, because their cures
+//! differ: a file whose **copy** is missing or is no longer what was
+//! recorded, a file whose **original moved on** since it was copied, and a
+//! file the reader **refused**, which has no copy at all and never will.
 //!
 //! Both acts are jobs of kind `originals`, resumable because a file that
 //! has moved is simply not there the next time and cancellable at a
@@ -136,6 +152,17 @@ fn are(n: u64) -> &'static str {
     if n == 1 { "is" } else { "are" }
 }
 
+/// The object pronoun that agrees with a count.
+fn them(n: u64) -> &'static str {
+    if n == 1 { "it" } else { "them" }
+}
+
+/// The subject pronoun with its verb, so a sentence about one file and a
+/// sentence about many read alike.
+fn they_have(n: u64) -> &'static str {
+    if n == 1 { "it has" } else { "they have" }
+}
+
 /// The dataset a door names by the place's id: a source place in force.
 pub(crate) fn dataset_at(store: &mut Store, id: i64) -> Result<Place, Refused> {
     match place::show(store, id).map_err(store_failed)? {
@@ -161,7 +188,17 @@ pub(crate) struct Survey {
     pub(crate) files: u64,
     pub(crate) bytes: u64,
     pub(crate) verified: u64,
+    /// Every original that is not verified, whatever is wrong with it: the
+    /// three counts below say which, since their cures differ.
     pub(crate) unverified: u64,
+    /// The copy is missing, or is no longer what the pseudonymiser
+    /// recorded.
+    pub(crate) copy_unverified: u64,
+    /// The original moved on: its size or its modification time is not
+    /// what the row recorded, so the copy was made from other bytes.
+    pub(crate) changed: u64,
+    /// The reader refused the original, so it has no copy at all.
+    pub(crate) no_copy: u64,
     pub(crate) held: u64,
     /// The refusal's words, when a purge may not run.
     pub(crate) why: Option<String>,
@@ -178,6 +215,9 @@ impl Survey {
             "bytes": self.bytes,
             "verified": self.verified,
             "unverified": self.unverified,
+            "copy_unverified": self.copy_unverified,
+            "changed": self.changed,
+            "no_copy": self.no_copy,
             "held": self.held,
             "ready": self.ready(),
             "why": self.why,
@@ -186,11 +226,12 @@ impl Survey {
 }
 
 /// What the act would do, without doing it. Every original is checked
-/// against the pseudonymised tree exactly as a purge checks it: the copy
-/// is there, at the size that was recorded, and its digest is what was
-/// recorded, hashed again now. The check therefore costs what a purge
-/// costs, which is the point: nothing is destroyed on the strength of a
-/// row alone.
+/// exactly as a purge checks it: the copy is there, at the size that was
+/// recorded, its digest is what was recorded, hashed again now, and the
+/// original is still the file that copy was made from, at the size and the
+/// modification time the row recorded. The check therefore costs what a
+/// purge costs, which is the point: nothing is destroyed on the strength
+/// of a row alone.
 pub(crate) fn survey(registry: &mut Registry, place: &Place) -> Result<Survey, StoreError> {
     let mut survey = Survey {
         held: held_files(registry, place)?,
@@ -216,16 +257,23 @@ pub(crate) fn survey(registry: &mut Registry, place: &Place) -> Result<Survey, S
         } else {
             HashMap::new()
         };
-        for (_, rel, size) in files {
+        for (_, rel, size, mtime) in files {
             survey.files += 1;
             survey.bytes += size;
-            let whole = anon
-                .as_deref()
-                .is_some_and(|tree| rows.get(rel.as_str()).is_some_and(|r| verified(tree, r)));
-            if whole {
-                survey.verified += 1;
-            } else {
-                survey.unverified += 1;
+            match standing(anon.as_deref(), rows.get(rel.as_str()), *size, *mtime) {
+                Standing::Verified => survey.verified += 1,
+                Standing::Changed => {
+                    survey.unverified += 1;
+                    survey.changed += 1;
+                }
+                Standing::NoCopy => {
+                    survey.unverified += 1;
+                    survey.no_copy += 1;
+                }
+                Standing::CopyUnverified => {
+                    survey.unverified += 1;
+                    survey.copy_unverified += 1;
+                }
             }
         }
         Flow::Go
@@ -299,18 +347,26 @@ fn purge_refusal(place: &Place, survey: &Survey) -> Option<String> {
             place.name
         ));
     }
+    // one sentence per problem, in the order a person should hear them:
+    // what waits for a map, what has no copy at all, what moved on since it
+    // was copied, and what was copied and no longer verifies. Each names
+    // the cure that works for it, and each is counted on its own, because
+    // a person told only that something is unverified cannot tell which
+    // they have (lab 26c).
+    let mut why: Vec<String> = Vec::new();
     if survey.held > 0 {
-        return Some(held_words(place, survey.held));
+        why.push(held_words(place, survey.held));
     }
-    if survey.unverified > 0 {
-        return Some(format!(
-            "{} of the dataset {} {} not verified in its pseudonymised tree, so a purge is refused: every original must be there at the size and the digest that were recorded. Pseudonymise the dataset again, then look once more.",
-            many(survey.unverified, "file"),
-            place.name,
-            are(survey.unverified)
-        ));
+    if survey.no_copy > 0 {
+        why.push(no_copy_words(place, survey.no_copy));
     }
-    None
+    if survey.changed > 0 {
+        why.push(changed_words(place, survey.changed));
+    }
+    if survey.copy_unverified > 0 {
+        why.push(copy_words(place, survey.copy_unverified));
+    }
+    (!why.is_empty()).then(|| why.join(" "))
 }
 
 fn held_words(place: &Place, held: u64) -> String {
@@ -322,23 +378,66 @@ fn held_words(place: &Place, held: u64) -> String {
     )
 }
 
+/// The words a purge is refused with when the reader refused an original
+/// (lab 26c, finding 6): a file that is not DICOM is never copied, so a
+/// purge would lose it and no run of the pseudonymiser can help. Nothing
+/// offers to delete it: the engine deletes no file it never read.
+fn no_copy_words(place: &Place, n: u64) -> String {
+    format!(
+        "{} of the dataset {} {} not DICOM and the reader refused {}, so {} no copy in the pseudonymised tree and a purge would lose {}; a purge is refused. Move {} out of the originals tree, to where such files are kept, then look once more.",
+        many(n, "file"),
+        place.name,
+        are(n),
+        them(n),
+        they_have(n),
+        them(n),
+        them(n)
+    )
+}
+
+/// The words a purge is refused with when an original moved on since its
+/// copy was written (lab 26c, finding 1): the tree holds the older bytes,
+/// so removing the original would destroy what is newer. The cure is a run
+/// of the pseudonymiser, which writes a changed original again.
+fn changed_words(place: &Place, n: u64) -> String {
+    format!(
+        "{} of the dataset {} changed after being copied, at the size or the modification time the pseudonymiser recorded, so the pseudonymised tree holds the older bytes and a purge would destroy what is newer; a purge is refused. Pseudonymise the dataset again with nils pseudonymize @{}, which writes a changed original again, then look once more.",
+        many(n, "file"),
+        place.name,
+        place.name
+    )
+}
+
+/// The words a purge is refused with when a copy is missing or is no
+/// longer what was recorded. The pseudonymiser writes such a copy again
+/// (lab 26c, finding 3), so the advice is true for this case too.
+fn copy_words(place: &Place, n: u64) -> String {
+    format!(
+        "{} of the dataset {} {} not verified in its pseudonymised tree, so a purge is refused: every original must have its copy there at the size and the digest that were recorded. Pseudonymise the dataset again with nils pseudonymize @{}, which writes the copy again where it is missing or is no longer what was recorded, then look once more.",
+        many(n, "file"),
+        place.name,
+        are(n),
+        place.name
+    )
+}
+
 /// The files of a dataset that wait for a map: the rows the pseudonymiser
 /// holds and no map has released, and the rows a digest of a dataset read
 /// in place quarantined under `identity.unmapped`.
 fn held_files(registry: &mut Registry, place: &Place) -> Result<u64, StoreError> {
     let store = registry.store();
+    let rows_there = nils_registry::migrate::table_exists(store, "pseudonym_file")?;
+    let pseudonym = store.qualified("pseudonym_file");
+    let released = store.dialect().text_of(
+        table("pseudonym_file")
+            .column("released_at")
+            .expect("pseudonym_file.released_at"),
+    );
     let mut held = 0i64;
-    if nils_registry::migrate::table_exists(store, "pseudonym_file")? {
-        let d = store.dialect();
-        let released = d.text_of(
-            table("pseudonym_file")
-                .column("released_at")
-                .expect("pseudonym_file.released_at"),
-        );
+    if rows_there {
         let sql = format!(
-            "SELECT COUNT(*) FROM {} WHERE place_id = {} AND state = 'held' AND {released} IS NULL",
-            store.qualified("pseudonym_file"),
-            d.param(1, Type::Int)
+            "SELECT COUNT(*) FROM {pseudonym} WHERE place_id = {} AND state = 'held' AND {released} IS NULL",
+            store.dialect().param(1, Type::Int)
         );
         held += store.query(&sql, &[Param::Int(place.id)])?[0].int(0)?;
     }
@@ -349,13 +448,30 @@ fn held_files(registry: &mut Registry, place: &Place) -> Result<u64, StoreError>
             .map(i64::to_string)
             .collect::<Vec<_>>()
             .join(", ");
+        let source_file = store.qualified("source_file");
+        let d = store.dialect();
+        // lab 26c, finding 3: a digest of a dataset read in place records
+        // the file it holds in both tables, so a quarantined row counts
+        // only where no held row counts that file already. One file waits
+        // once, whichever verb held it, and the count a person reads in the
+        // refusal is the count the sources door and the held door answer.
+        let once = if rows_there {
+            format!(
+                " AND NOT EXISTS (SELECT 1 FROM {pseudonym} WHERE {pseudonym}.place_id = {} AND {pseudonym}.path = {source_file}.path AND {pseudonym}.state = 'held' AND {released} IS NULL)",
+                d.param(2, Type::Int)
+            )
+        } else {
+            String::new()
+        };
         let sql = format!(
-            "SELECT COUNT(*) FROM {} WHERE source_id IN ({ids}) AND status = 'quarantined' AND reason = {}",
-            store.qualified("source_file"),
-            store.dialect().param(1, Type::Text)
+            "SELECT COUNT(*) FROM {source_file} WHERE source_id IN ({ids}) AND status = 'quarantined' AND reason = {}{once}",
+            d.param(1, Type::Text)
         );
-        held +=
-            store.query(&sql, &[Param::from(nils_registry::review::UNMAPPED_KIND)])?[0].int(0)?;
+        let mut params = vec![Param::from(nils_registry::review::UNMAPPED_KIND)];
+        if rows_there {
+            params.push(Param::Int(place.id));
+        }
+        held += store.query(&sql, &params)?[0].int(0)?;
     }
     Ok(held.max(0) as u64)
 }
@@ -380,6 +496,11 @@ fn source_ids(store: &mut Store, place: &Place) -> Result<Vec<i64>, StoreError> 
 #[derive(Debug, Clone)]
 struct Recorded {
     state: String,
+    /// The size and the modification time of the original as the run that
+    /// wrote the copy read them: what the original must still be for that
+    /// copy to be a copy of it (lab 26c).
+    size: i64,
+    mtime: i64,
     out_path: Option<String>,
     out_size: Option<i64>,
     digest: Option<String>,
@@ -395,7 +516,7 @@ fn recorded_in(
 ) -> Result<HashMap<String, Recorded>, StoreError> {
     let d = store.dialect();
     let sql = format!(
-        "SELECT path, state, out_path, out_size, digest FROM {} WHERE place_id = {} AND dir = {}",
+        "SELECT path, state, size, mtime, out_path, out_size, digest FROM {} WHERE place_id = {} AND dir = {}",
         store.qualified("pseudonym_file"),
         d.param(1, Type::Int),
         d.param(2, Type::Text)
@@ -407,23 +528,81 @@ fn recorded_in(
             r.text(0)?.to_string(),
             Recorded {
                 state: r.text(1)?.to_string(),
-                out_path: r.opt_text(2)?.map(str::to_string),
-                out_size: r.opt_int(3)?,
-                digest: r.opt_text(4)?.map(str::to_string),
+                size: r.int(2)?,
+                mtime: r.int(3)?,
+                out_path: r.opt_text(4)?.map(str::to_string),
+                out_size: r.opt_int(5)?,
+                digest: r.opt_text(6)?.map(str::to_string),
             },
         );
     }
     Ok(out)
 }
 
-/// Whether the copy of an original stands in the pseudonymised tree as it
-/// was written: the row says it was written, the copy is there, it is the
-/// size that was recorded, and its digest now is the digest that was
-/// recorded. A row alone proves nothing, which is why the file is hashed.
-fn verified(anon: &Path, recorded: &Recorded) -> bool {
-    if !matches!(recorded.state.as_str(), "written" | "unchanged") {
-        return false;
+/// What one original stands as when the row the pseudonymiser left, the
+/// copy in the pseudonymised tree and the original itself are read
+/// together (lab 26c). The three ways of not being verified are kept apart
+/// because their cures are different.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// Still the file that was copied, and the copy is what was recorded:
+    /// a purge may remove it.
+    Verified,
+    /// The reader refused it, so it has no copy and no run will make one.
+    NoCopy,
+    /// It moved on since it was copied: the copy is of other bytes.
+    Changed,
+    /// The copy is missing, or is no longer what was recorded.
+    CopyUnverified,
+}
+
+impl Standing {
+    /// Why a purge left the file, as the job's first reason names it.
+    fn why(self) -> &'static str {
+        match self {
+            Standing::Verified => "is verified",
+            Standing::NoCopy => {
+                "was refused by the reader and has no copy in the pseudonymised tree"
+            }
+            Standing::Changed => "changed after its copy was written",
+            Standing::CopyUnverified => "has no verified copy in the pseudonymised tree",
+        }
     }
+}
+
+/// Where one original stands: the row says a copy was written; the
+/// original is still that file, at the size and the modification time the
+/// row recorded; the copy is there at the recorded size; and its digest
+/// now is the digest that was recorded. A row alone proves nothing, which
+/// is why both files are read.
+fn standing(anon: Option<&Path>, recorded: Option<&Recorded>, size: u64, mtime: i64) -> Standing {
+    // no tree to verify against, or no row at all: never copied
+    let (Some(anon), Some(r)) = (anon, recorded) else {
+        return Standing::CopyUnverified;
+    };
+    if r.state == "refused" {
+        return Standing::NoCopy;
+    }
+    if !matches!(r.state.as_str(), "written" | "unchanged") {
+        return Standing::CopyUnverified;
+    }
+    // the original first: a file whose bytes changed after its copy was
+    // written is the one case where a purge destroys what exists nowhere
+    // else, and the copy's own half cannot see it at all
+    if r.size != size as i64 || r.mtime != mtime {
+        return Standing::Changed;
+    }
+    if copy_stands(anon, r) {
+        Standing::Verified
+    } else {
+        Standing::CopyUnverified
+    }
+}
+
+/// Whether the copy of an original stands in the pseudonymised tree as it
+/// was written: it is there, it is the size that was recorded, and its
+/// digest now is the digest that was recorded, hashed again here.
+fn copy_stands(anon: &Path, recorded: &Recorded) -> bool {
     let (Some(out), Some(size), Some(digest)) = (
         recorded.out_path.as_deref(),
         recorded.out_size,
@@ -462,10 +641,11 @@ enum Flow {
 }
 
 /// Every directory under `root` with the files in it: the path, the path
-/// relative to `root` as `pseudonym_file` records it, and the size. Links
+/// relative to `root` as `pseudonym_file` records it, the size and the
+/// modification time, which are what a row says the original was. Links
 /// and special files are left out, as the pseudonymiser leaves them out.
 /// One directory is held at a time, never the tree.
-fn each_directory(root: &Path, mut f: impl FnMut(&str, &[(PathBuf, String, u64)]) -> Flow) {
+fn each_directory(root: &Path, mut f: impl FnMut(&str, &[(PathBuf, String, u64, i64)]) -> Flow) {
     let mut queue = vec![root.to_path_buf()];
     while let Some(dir) = queue.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -485,10 +665,13 @@ fn each_directory(root: &Path, mut f: impl FnMut(&str, &[(PathBuf, String, u64)]
             if !kind.is_file() {
                 continue;
             }
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let (size, mtime) = match entry.metadata() {
+                Ok(m) => (m.len(), nils_digest::walk::mtime_ns_of(&m)),
+                Err(_) => (0, 0),
+            };
             let (rel, in_dir) = relative(root, &path);
             here = in_dir;
-            files.push((path, rel, size));
+            files.push((path, rel, size, mtime));
         }
         if files.is_empty() {
             continue;
@@ -689,9 +872,15 @@ pub(crate) fn check(
                 place.name
             )));
         }
-        let held = held_files(registry, place).map_err(store_failed)?;
-        if held > 0 {
-            return Err(conflict(held_words(place, held)));
+        // lab 26c: the whole verification here as well, so that a person
+        // who asks for a purge meets the refusal in words at the door, in
+        // the sentence GET answered with, rather than as a job that failed.
+        // It costs the walk and the hashing, which is what a purge costs in
+        // any case, and it is what stands between a changed original and
+        // its deletion.
+        let surveyed = survey(registry, place).map_err(store_failed)?;
+        if let Some(why) = surveyed.why {
+            return Err(conflict(why));
         }
         return Ok(None);
     }
@@ -787,6 +976,18 @@ pub(crate) fn as_text(place: &Place, survey: &Survey) -> String {
         thousands(survey.files)
     ));
     out.push_str(&format!(
+        "  copy unverified  {} whose copy is missing or is not what was recorded\n",
+        thousands(survey.copy_unverified)
+    ));
+    out.push_str(&format!(
+        "  changed          {} that changed after being copied\n",
+        thousands(survey.changed)
+    ));
+    out.push_str(&format!(
+        "  no copy          {} the reader refused, which are never copied\n",
+        thousands(survey.no_copy)
+    ));
+    out.push_str(&format!(
         "  held             {} for want of a map\n",
         thousands(survey.held)
     ));
@@ -852,13 +1053,9 @@ pub(crate) fn run(
     if why.is_empty() {
         return Err(bad("why: a sentence saying why, which the audit row keeps"));
     }
+    // a purge is verified inside `check`, which walks and hashes: the
+    // refusal is words and no job is claimed for it
     let destination = check(registry, place, act, into)?;
-    if act == Act::Purge {
-        let surveyed = survey(registry, place).map_err(store_failed)?;
-        if let Some(refusal) = surveyed.why {
-            return Err(conflict(refusal));
-        }
-    }
     let originals = place
         .tree_path("originals")
         .ok_or_else(|| conflict(read_in_place(place)))?;
@@ -907,8 +1104,19 @@ pub(crate) fn run(
                 tally.first.as_deref().unwrap_or("of an error")
             ),
             Act::Purge => format!(
-                "{} under the originals of the dataset {} were not verified when the purge reached them and were left as they are; run the purge again",
+                "{} under the originals of the dataset {} did not verify when the purge reached {} and {}, the first because {}; nothing was removed that did not verify at that moment. Pseudonymise the dataset again with nils pseudonymize @{}, then look once more.",
                 many(tally.left, "file"),
+                place.name,
+                them(tally.left),
+                if tally.left == 1 {
+                    "was left as it is"
+                } else {
+                    "were left as they are"
+                },
+                tally
+                    .first
+                    .as_deref()
+                    .unwrap_or("its copy could not be verified"),
                 place.name
             ),
         };
@@ -1010,7 +1218,7 @@ fn vault(
     let mut tally = Tally::default();
     let mut since = 0u64;
     each_directory(originals, |_, files| {
-        for (path, rel, size) in files {
+        for (path, rel, size, _) in files {
             // a stop is seen before the next file is touched, however few
             // files there are between heartbeats
             if cancel.stop() {
@@ -1072,19 +1280,18 @@ fn purge(
                 return Flow::Stop;
             }
         };
-        for (path, rel, size) in files {
+        for (path, rel, size, mtime) in files {
             if cancel.stop() {
                 tally.cancelled = true;
                 return Flow::Stop;
             }
-            let copy = rows.get(rel.as_str()).filter(|r| {
-                matches!(r.state.as_str(), "written" | "unchanged")
-                    && r.out_path
-                        .as_deref()
-                        .is_some_and(|out| anon.join(out).is_file())
-            });
-            match copy {
-                Some(_) => match std::fs::remove_file(path) {
+            // lab 26c: the whole check again, on this file, now. The survey
+            // hashed every copy a moment ago, but a file that changed since
+            // then must not be removed on the strength of that reading, and
+            // a file that appeared under the originals while the run went on
+            // has no copy at all.
+            match standing(Some(&anon), rows.get(rel.as_str()), *size, *mtime) {
+                Standing::Verified => match std::fs::remove_file(path) {
                     Ok(()) => {
                         tally.files += 1;
                         tally.bytes += size;
@@ -1097,11 +1304,9 @@ fn purge(
                             .get_or_insert(format!("{} could not be removed: {e}", path.display()));
                     }
                 },
-                None => {
+                left => {
                     tally.left += 1;
-                    tally.first.get_or_insert(format!(
-                        "{rel} has no verified copy in the pseudonymised tree"
-                    ));
+                    tally.first.get_or_insert(format!("{rel} {}", left.why()));
                 }
             }
             since += 1;
@@ -1175,6 +1380,7 @@ mod tests {
         place_id: i64,
         rel: &str,
         size: u64,
+        mtime: i64,
         out: &str,
         digest: &str,
         state: &str,
@@ -1184,18 +1390,40 @@ mod tests {
             .store()
             .execute(
                 "INSERT INTO pseudonym_file (place_id, path, dir, size, mtime, state, out_path, out_size, digest, first_seen, code_anyway) \
-                 VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, '2026-09-16T00:00:00Z', 0)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '2026-09-16T00:00:00Z', 0)",
                 &[
                     Param::Int(place_id),
                     Param::from(rel),
                     Param::from(dir),
                     Param::Int(size as i64),
+                    Param::Int(mtime),
                     Param::from(state),
                     Param::from(out),
                     Param::Int(size as i64),
                     Param::from(digest),
                 ],
             )
+            .unwrap();
+    }
+
+    /// The modification time of a file as the walk reads it: what the row
+    /// must still say for the original to be the file that was copied.
+    fn mtime_of(path: &Path) -> i64 {
+        nils_digest::walk::mtime_ns_of(&std::fs::metadata(path).unwrap())
+    }
+
+    /// One file's bytes changed in place, keeping its length, with the
+    /// modification time moved on as a disk moves it (lab 26c).
+    fn change_in_place(path: &Path, bytes: &[u8]) {
+        let was = std::fs::metadata(path).unwrap();
+        let moved = was.modified().unwrap() + std::time::Duration::from_secs(1);
+        assert_eq!(was.len() as usize, bytes.len(), "the same length");
+        std::fs::write(path, bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(moved))
             .unwrap();
     }
 
@@ -1220,7 +1448,7 @@ mod tests {
         )
         .unwrap();
         for (i, (rel, bytes)) in ORIGINALS.iter().enumerate() {
-            dir.file(&format!("{name}/derivatives/dcm-original/{rel}"), bytes);
+            let original = dir.file(&format!("{name}/derivatives/dcm-original/{rel}"), bytes);
             let out = format!("x/001/{:05}.dcm", i + 1);
             let copy = dir.file(&format!("{name}/derivatives/dcm-anon/{out}"), bytes);
             let digest = digest_of(&copy).unwrap();
@@ -1229,6 +1457,7 @@ mod tests {
                 id,
                 rel,
                 bytes.len() as u64,
+                mtime_of(&original),
                 &out,
                 &digest,
                 "written",
@@ -1543,6 +1772,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(survey(&mut registry, &ds).unwrap().held, 2);
+
+        // lab 26c, finding 3: a digest of a dataset read in place records
+        // the file it holds in both tables, and one file waits once. The
+        // quarantined row below is the held row above, the same file.
+        registry
+            .store()
+            .execute(
+                "INSERT INTO source_file (source_id, batch_id, dir, path, size, mtime_ns, status, reason, seen_at) \
+                 VALUES (?, 1, 'a', 'a/3.dcm', 1, 1, 'quarantined', ?, '2026-09-16T00:00:00Z')",
+                &[
+                    Param::Int(source),
+                    Param::from(nils_registry::review::UNMAPPED_KIND),
+                ],
+            )
+            .unwrap();
+        let surveyed = survey(&mut registry, &ds).unwrap();
+        assert_eq!(
+            surveyed.held, 2,
+            "the file held in both tables waits once, not twice"
+        );
+        assert!(
+            surveyed
+                .why
+                .as_deref()
+                .is_some_and(|w| w.starts_with("2 files of the dataset north are held")),
+            "the count a person reads is the count of files: {:?}",
+            surveyed.why
+        );
     }
 
     #[test]
@@ -1589,6 +1846,180 @@ mod tests {
         // a copy that is gone is not verified either
         std::fs::remove_file(&copy).unwrap();
         assert_eq!(survey(&mut registry, &ds).unwrap().verified, 1);
+    }
+
+    /// Lab 26c, finding 1, as the lab wrote it: one original changed in
+    /// place to other bytes of exactly its length, without pseudonymising
+    /// again. Its copy still verifies on its own, so the check that asked
+    /// only about the copy said a purge could run, and the purge then
+    /// deleted the original and left the older copy: the changed bytes
+    /// were gone from the machine. An original is verified only while it
+    /// is still the file that was copied, so the survey says what
+    /// happened, the act refuses in those words, and every original stays.
+    #[test]
+    fn a_purge_is_refused_when_an_original_changed_after_its_copy_was_written() {
+        const CHANGED: &[u8] = b"THE FIRST ORIGINAL";
+        let dir = TempDir::new("originals-changed");
+        let mut registry = lab(&dir);
+        let ds = dataset(&mut registry, &dir, "north");
+        let originals = ds.tree_path("originals").unwrap();
+        let changed = originals.join("a/1.dcm");
+        assert!(
+            survey(&mut registry, &ds).unwrap().ready(),
+            "before the change a purge may run"
+        );
+
+        change_in_place(&changed, CHANGED);
+
+        let surveyed = survey(&mut registry, &ds).unwrap();
+        assert_eq!(
+            (
+                surveyed.files,
+                surveyed.verified,
+                surveyed.unverified,
+                surveyed.changed,
+                surveyed.copy_unverified
+            ),
+            (2, 1, 1, 1, 0),
+            "the file whose bytes moved on is counted as changed and not as a broken copy"
+        );
+        assert!(!surveyed.ready());
+        assert_eq!(surveyed.as_json()["changed"], 1);
+        let why = surveyed.why.clone().unwrap();
+        assert!(
+            why.starts_with("1 file of the dataset north changed after being copied"),
+            "{why}"
+        );
+        assert!(why.contains("would destroy what is newer"), "{why}");
+        // the cure the refusal names is the one that works
+        assert!(why.contains("nils pseudonymize @north"), "{why}");
+
+        // the act refuses in the same words, and claims no job for it
+        let refused = run(
+            &mut registry,
+            &ds,
+            Act::Purge,
+            None,
+            "the originals are no longer needed",
+            WHO,
+            &Cancel::new(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.status, 409);
+        assert_eq!(refused.message, why);
+        assert!(job::list(registry.store(), true, 10).unwrap().is_empty());
+
+        // every original is still on disk, the changed bytes among them
+        assert_eq!(std::fs::read(&changed).unwrap(), CHANGED);
+        assert!(originals.join("a/2.dcm").is_file());
+        // a vault is not refused for it: it keeps every file it moves
+        backup(&mut registry, &dir, "archive");
+        assert!(check(&mut registry, &ds, Act::Vault, Some("archive")).is_ok());
+    }
+
+    /// Lab 26c, finding 6: an original the reader refused has no copy in
+    /// the pseudonymised tree and no run will make one, so a purge stays
+    /// refused. It is counted apart from the rest and said as its own
+    /// sentence, with what a person can do about it; nothing offers to
+    /// delete it.
+    #[test]
+    fn an_original_the_reader_refused_is_counted_and_said_on_its_own() {
+        let dir = TempDir::new("originals-refused");
+        let mut registry = lab(&dir);
+        let ds = dataset(&mut registry, &dir, "north");
+        let stray = dir.file(
+            "north/derivatives/dcm-original/a/NOTES.txt",
+            b"a file that is not DICOM",
+        );
+        registry
+            .store()
+            .execute(
+                "INSERT INTO pseudonym_file (place_id, path, dir, size, mtime, state, first_seen, code_anyway) \
+                 VALUES (?, 'a/NOTES.txt', 'a', ?, ?, 'refused', '2026-09-16T00:00:00Z', 0)",
+                &[
+                    Param::Int(ds.id),
+                    Param::Int(std::fs::metadata(&stray).unwrap().len() as i64),
+                    Param::Int(mtime_of(&stray)),
+                ],
+            )
+            .unwrap();
+
+        let surveyed = survey(&mut registry, &ds).unwrap();
+        assert_eq!(
+            (
+                surveyed.files,
+                surveyed.verified,
+                surveyed.unverified,
+                surveyed.no_copy,
+                surveyed.changed
+            ),
+            (3, 2, 1, 1, 0)
+        );
+        let why = surveyed.why.clone().unwrap();
+        assert!(
+            why.starts_with("1 file of the dataset north is not DICOM and the reader refused it"),
+            "{why}"
+        );
+        assert!(why.contains("Move it out of the originals tree"), "{why}");
+        // and nothing offers to delete it
+        assert!(!why.contains("delete"), "{why}");
+
+        let refused = run(
+            &mut registry,
+            &ds,
+            Act::Purge,
+            None,
+            "the originals are no longer needed",
+            WHO,
+            &Cancel::new(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.message, why);
+        assert!(stray.is_file(), "the file the reader refused stays");
+    }
+
+    /// Lab 26c, finding 9 and the ruling: the survey hashes every copy
+    /// just before the walk, but the walk asks again as it reaches each
+    /// file, so one that changed in between is left rather than destroyed.
+    #[test]
+    fn the_walk_verifies_each_file_again_and_leaves_what_changed_under_it() {
+        let dir = TempDir::new("originals-walk");
+        let mut registry = lab(&dir);
+        let ds = dataset(&mut registry, &dir, "north");
+        let originals = ds.tree_path("originals").unwrap();
+        let anon = ds.tree_path("anon").unwrap();
+        assert!(survey(&mut registry, &ds).unwrap().ready());
+
+        // the survey has passed; now one copy is corrupted, as it might be
+        // in the seconds before its original's turn comes
+        std::fs::write(anon.join("x/001/00001.dcm"), b"the FIRST original").unwrap();
+        let job_id = claim(
+            &mut registry,
+            &ds,
+            Act::Purge,
+            None,
+            "a purge whose tree changed under it",
+        )
+        .unwrap();
+        let tally = purge(&mut registry, &ds, &originals, job_id, &Cancel::new()).unwrap();
+
+        assert_eq!((tally.files, tally.left), (1, 1));
+        assert!(
+            tally
+                .first
+                .as_deref()
+                .is_some_and(|w| w.contains("has no verified copy")),
+            "{:?}",
+            tally.first
+        );
+        assert!(
+            originals.join("a/1.dcm").is_file(),
+            "the original whose copy changed under the walk stays"
+        );
+        assert!(
+            !originals.join("a/2.dcm").exists(),
+            "the one that verified went"
+        );
     }
 
     #[test]

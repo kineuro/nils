@@ -947,6 +947,71 @@ fn an_original_the_tree_already_holds_is_not_written_again() {
     );
 }
 
+/// Lab 26c, finding 3: a copy corrupted after it was written is no longer
+/// what the pseudonymiser recorded, and a purge refuses on it. The advice
+/// such a refusal gives is to pseudonymise the dataset again, so the run
+/// must write that copy again: the original has not changed, its size and
+/// modification time are what they were, and only the copy's digest can
+/// tell. It used to see the size alone and leave the corruption standing,
+/// which left the person no way out.
+#[test]
+fn a_copy_that_is_no_longer_what_was_recorded_is_written_again() {
+    let lab = lab();
+    let dir = dataset();
+    let anon = dir.path().join("derivatives/dcm-anon");
+    let mut registry = lab.home.open().unwrap();
+    import_map(&mut registry);
+    let place = declare(&mut registry, dir.path(), json!({}));
+    let s = settings(&place);
+
+    let first = pseudonymize(&s, &mut registry).unwrap();
+    let written = first.files.written;
+    assert!(written > 0, "{first}");
+    // a second run leaves every copy alone
+    let again = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!((again.files.written, again.files.unchanged), (0, written));
+
+    // one copy changed in place, to other bytes of exactly its length: the
+    // original is untouched, so its size and modification time still match
+    // the row and only the digest can tell
+    let copy = outputs(&anon)[0].clone();
+    let recorded = std::fs::read(&copy).unwrap();
+    let mut broken = recorded.clone();
+    let n = broken.len();
+    for b in &mut broken[n - 32..] {
+        *b ^= 0xFF;
+    }
+    std::fs::write(&copy, &broken).unwrap();
+    assert_eq!(std::fs::metadata(&copy).unwrap().len() as usize, n);
+
+    let third = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(
+        (third.files.written, third.files.unchanged),
+        (1, written - 1),
+        "the copy that no longer verifies is written again: {third}"
+    );
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        recorded,
+        "and what stands is what was recorded"
+    );
+    // the row still points at that copy, with the digest of what is there
+    let row = rows(
+        &mut registry,
+        "SELECT state, digest FROM pseudonym_file WHERE out_path IS NOT NULL AND state = 'written' ORDER BY path",
+    );
+    assert_eq!(row.len() as u64, written);
+
+    // a copy that is gone is written again the same way
+    std::fs::remove_file(&copy).unwrap();
+    let fourth = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(
+        (fourth.files.written, fourth.files.unchanged),
+        (1, written - 1)
+    );
+    assert!(copy.is_file());
+}
+
 #[test]
 fn a_run_asked_to_stop_before_it_began_writes_nothing_and_ends_cancelled() {
     let lab = lab();

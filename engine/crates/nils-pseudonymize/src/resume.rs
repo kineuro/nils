@@ -5,7 +5,11 @@
 //! asks once per directory what an earlier run recorded there in
 //! `pseudonym_file` and decides each file by its size and modification
 //! time. A file recorded as written whose source is unchanged is checked
-//! for its output and otherwise left alone; a held file is read again only
+//! for its output, which must be there at the size and the digest that
+//! were recorded, and is otherwise written again as a changed file is
+//! (lab 26c, finding 3): an original whose copy no longer verifies can
+//! only be mended by writing that copy again, and a purge refuses until it
+//! is. A held file is read again only
 //! once a map released it or a person asked for it to be coded anyway; a
 //! refused file stays refused until it changes; a changed file is read
 //! again with its record beside it, so its old output can be let go.
@@ -48,6 +52,9 @@ pub struct Recorded {
     pub state: &'static str,
     pub out_path: Option<String>,
     pub out_size: Option<i64>,
+    /// The digest of the copy as it was written, which the output must
+    /// still hash to for the record to stand.
+    pub digest: Option<String>,
     pub shape: Option<String>,
     /// A map released the held file.
     pub released: bool,
@@ -80,11 +87,13 @@ pub enum Decision {
     /// Read it, resolve it, write it.
     Read(Option<Prior>),
     /// The source is as recorded: the output is looked for, and the file
-    /// is unchanged when it is there at its size, read again otherwise.
+    /// is unchanged when it is there at its size and its digest, read
+    /// again otherwise.
     Check {
         id: i64,
         out_path: String,
         out_size: i64,
+        digest: Option<String>,
     },
     /// Held and not released: it stays held, its row touched.
     StillHeld { id: i64, shape: Option<String> },
@@ -112,6 +121,7 @@ pub fn decide(recorded: Option<&Recorded>, size: u64, mtime: i64) -> Decision {
             id: r.id,
             out_path: out_path.clone(),
             out_size,
+            digest: r.digest.clone(),
         },
         (state::HELD, _, _) if r.released || r.code_anyway => Decision::Read(Some(Prior {
             id: r.id,
@@ -158,7 +168,7 @@ impl Records {
         let empty = store.query_opt(&probe, &[Param::Int(place_id)])?.is_none();
         let released = d.text_of(t.column("released_at").expect("released_at"));
         let sql = format!(
-            "SELECT path, size, mtime, state, out_path, out_size, shape, {released} IS NOT NULL, code_anyway, id, lookup \
+            "SELECT path, size, mtime, state, out_path, out_size, shape, {released} IS NOT NULL, code_anyway, id, lookup, digest \
              FROM {qualified} WHERE place_id = {} AND dir = {}",
             d.param(1, Type::Int),
             d.param(2, Type::Text)
@@ -201,6 +211,7 @@ impl Records {
                         state,
                         out_path: r.opt_text(4)?.map(str::to_string),
                         out_size: r.opt_int(5)?,
+                        digest: r.opt_text(11)?.map(str::to_string),
                         shape: r.opt_text(6)?.map(str::to_string),
                         released: flag(7),
                         code_anyway: flag(8),
@@ -224,7 +235,8 @@ pub enum Task {
         mtime: i64,
         prior: Option<Prior>,
     },
-    /// Look for the output of an unchanged source.
+    /// Look for the output of an unchanged source, and read it back to see
+    /// that it is still what was written.
     Check {
         path: PathBuf,
         rel: String,
@@ -233,6 +245,7 @@ pub enum Task {
         id: i64,
         out_path: String,
         out_size: i64,
+        digest: Option<String>,
     },
 }
 
@@ -275,6 +288,7 @@ pub fn run(
                         id,
                         out_path,
                         out_size,
+                        digest,
                     } => Task::Check {
                         path,
                         rel,
@@ -283,6 +297,7 @@ pub fn run(
                         id,
                         out_path,
                         out_size,
+                        digest,
                     },
                     Decision::StillHeld { id, shape } => {
                         progress.file(&progress.held, size);
@@ -332,6 +347,7 @@ mod tests {
             state,
             out_path: Some("c/d/001/00001.dcm".into()),
             out_size: Some(9),
+            digest: Some("d0d0".into()),
             shape: Some("999".into()),
             released: false,
             code_anyway: false,
@@ -348,7 +364,8 @@ mod tests {
             Decision::Check {
                 id: 1,
                 out_path: "c/d/001/00001.dcm".into(),
-                out_size: 9
+                out_size: 9,
+                digest: Some("d0d0".into())
             }
         );
         assert_eq!(

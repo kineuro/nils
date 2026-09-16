@@ -216,9 +216,7 @@ pub(crate) fn run(
         // the verb printed last, or its exit status when it printed nothing.
         let printed = tail.and_then(|t| t.join().ok()).unwrap_or_default();
         let (state, error) = match status {
-            Ok(s) if s.success() => (State::Done, None),
-            Ok(s) if printed.is_empty() => (State::Failed, Some(format!("exit status {s}"))),
-            Ok(_) => (State::Failed, Some(printed)),
+            Ok(s) => outcome(s.code(), printed, format!("exit status {s}")),
             Err(e) => (State::Failed, Some(e.to_string())),
         };
         match job::show(store, next.id) {
@@ -265,6 +263,29 @@ pub(crate) fn run(
     };
     let _ = job::finish(store, worker, State::Done, None);
     outcome.map(|()| ran)
+}
+
+/// What a job's row records once the verb's process is over, when the verb
+/// did not finish the row itself. A verb asked to stop exits `STOPPED`
+/// (lab 26c, finding 5): a job that was stopped is cancelled and not
+/// failed, so a person who stopped their own vault is not told it failed,
+/// and `nils jobs` and the desk read it as every other cancelled job. What
+/// the verb printed last is the row's error, and its exit status where it
+/// printed nothing.
+fn outcome(code: Option<i32>, printed: String, status: String) -> (State, Option<String>) {
+    match code {
+        Some(0) => (State::Done, None),
+        Some(c) if c == i32::from(crate::STOPPED) => (
+            State::Cancelled,
+            Some(if printed.is_empty() {
+                "stopped: what was done stays done; run it again to go on".to_string()
+            } else {
+                printed
+            }),
+        ),
+        _ if printed.is_empty() => (State::Failed, Some(status)),
+        _ => (State::Failed, Some(printed)),
+    }
 }
 
 /// Whether a verb reads `--workers`: the two that walk a tree file by file,
@@ -322,6 +343,51 @@ mod tests {
         assert_eq!(
             with_workers(argv("pyramid build --stack 7"), Some(4)),
             argv("pyramid build --stack 7 --workers 4")
+        );
+    }
+
+    /// Lab 26c, finding 5: a verb asked to stop exits 130, and the job it
+    /// ran under was recorded as failed because the worker read the exit
+    /// status alone. A job that was stopped is cancelled, so a person who
+    /// stopped their own vault is not told it failed.
+    #[test]
+    fn a_verb_that_was_stopped_leaves_a_cancelled_job_and_a_failing_one_a_failed_job() {
+        let stopped = i32::from(crate::STOPPED);
+        let (state, error) = outcome(Some(stopped), String::new(), "exit status 130".into());
+        assert_eq!(state, State::Cancelled);
+        assert!(
+            error.as_deref().is_some_and(|e| e.starts_with("stopped:")),
+            "{error:?}"
+        );
+        // what the verb printed last is the row's word for it
+        assert_eq!(
+            outcome(
+                Some(stopped),
+                "stopped: what was done stays done; run it again to go on".into(),
+                "exit status 130".into()
+            ),
+            (
+                State::Cancelled,
+                Some("stopped: what was done stays done; run it again to go on".to_string())
+            )
+        );
+        assert_eq!(
+            outcome(Some(0), String::new(), "exit status 0".into()),
+            (State::Done, None)
+        );
+        assert_eq!(
+            outcome(Some(1), String::new(), "exit status 1".into()),
+            (State::Failed, Some("exit status 1".to_string()))
+        );
+        assert_eq!(
+            outcome(Some(1), "no place 3".into(), "exit status 1".into()),
+            (State::Failed, Some("no place 3".to_string()))
+        );
+        // a verb killed by a signal has no code of its own, and failed is
+        // the honest answer for it
+        assert_eq!(
+            outcome(None, String::new(), "signal: 9 (SIGKILL)".into()).0,
+            State::Failed
         );
     }
 

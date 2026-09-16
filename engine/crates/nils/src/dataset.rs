@@ -34,15 +34,21 @@ const COUNT_FOR: Duration = Duration::from_secs(2);
 
 /// The keys a declaration may set on a dataset, beside the trees the engine
 /// sets itself.
-pub(crate) const FIELDS: [&str; 7] = [
+pub(crate) const FIELDS: [&str; 6] = [
     "arrives",
     "identity",
     "unmapped",
     "cohort",
     "tags",
-    "originals_kept",
     "move_into_anon",
 ];
+
+/// The dataset's own fields the engine writes and a declaration may not
+/// (lab 26c, finding 4): what became of the originals is what an act did
+/// to them. Declaring `purged` on a dataset whose identified files sit on
+/// disk would make every page say they are gone, and would take the acts
+/// themselves off the page that says so.
+pub(crate) const ENGINE_WRITTEN: [&str; 2] = ["originals_kept", "originals_vault"];
 
 /// Why a declaration is refused: the status a door answers with and the
 /// sentence naming what was wrong.
@@ -70,6 +76,17 @@ fn conflict(message: impl Into<String>) -> Refused {
         status: 409,
         message: message.into(),
     }
+}
+
+/// Whether a body declares a field only an act writes, and the words it is
+/// refused with: the act that sets it, by name, so a person who meant to
+/// vault or purge the originals is told how (lab 26c, finding 4).
+pub(crate) fn engine_written_refused(doc: &Value) -> Option<Refused> {
+    let object = doc.as_object()?;
+    let named = ENGINE_WRITTEN.iter().find(|k| object.contains_key(**k))?;
+    Some(bad(format!(
+        "{named} says what became of a dataset's originals and is written by the act that did it, never declared: vault or purge them with nils place originals <dataset> --vault --into PLACE --why TEXT or --purge --why TEXT, or POST /api/places/{{id}}/originals, and the dataset records it when the job succeeds"
+    )))
 }
 
 /// Whether a body names any dataset field, a null (no cohort, no rule) as
@@ -579,6 +596,34 @@ pub(crate) fn unmapped_of(store: &mut Store, path: &Path) -> nils_digest::Unmapp
 mod tests {
     use super::*;
     use nils_dicom::synth::TempDir;
+
+    /// Lab 26c, finding 4: what became of a dataset's originals is what an
+    /// act did to them. A declaration naming it is refused, and the
+    /// refusal says which act writes it, since a person who types
+    /// `purged` means to purge.
+    #[test]
+    fn what_became_of_the_originals_is_never_a_declaration() {
+        let refused =
+            engine_written_refused(&json!({"cohort": "a", "originals_kept": "purged"})).unwrap();
+        assert_eq!(refused.status, 400);
+        assert!(
+            refused.message.contains("nils place originals"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("never declared"),
+            "{}",
+            refused.message
+        );
+        assert!(engine_written_refused(&json!({"originals_vault": "archive"})).is_some());
+        assert!(engine_written_refused(&json!({"cohort": "a"})).is_none());
+        // and neither is a field a declaration may name any more
+        for key in ENGINE_WRITTEN {
+            assert!(!FIELDS.contains(&key), "{key}");
+        }
+        assert!(!fields_given(&json!({"originals_kept": "purged"})));
+    }
 
     fn names(dir: &Path) -> Vec<String> {
         let mut out: Vec<String> = std::fs::read_dir(dir)

@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
+use blake2::{Blake2s256, Digest as _};
 use crossbeam_channel::{Receiver, Sender, select};
 use dicom_core::Tag;
 use nils_digest::cancel::{Cancel, Cancelled};
@@ -54,6 +55,24 @@ const ASK_BATCH: usize = 512;
 
 /// The reason a file that could be read could not be written.
 pub const UNWRITABLE: &str = "unwritable";
+
+/// The digest of a file, hashed as the writer hashes what it writes, read
+/// back through the worker's own buffer. A copy that no longer hashes to
+/// what was recorded is written again (lab 26c, finding 3), which is what
+/// makes the advice a refused purge gives a person true.
+fn digest_of(path: &Path, buf: &mut [u8]) -> Option<String> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Blake2s256::new();
+    loop {
+        match file.read(buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(_) => return None,
+        }
+    }
+    Some(hex::encode(hasher.finalize()))
+}
 
 /// Why a run could not start or finish.
 #[derive(Debug)]
@@ -715,19 +734,35 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                 id,
                 out_path,
                 out_size,
+                digest,
             } => {
                 let out = ctx.settings.anon.join(&out_path);
-                match std::fs::metadata(&out) {
-                    Ok(m) if m.len() as i64 == out_size => {
+                // lab 26c, finding 3: the copy must still be what was
+                // recorded, hashed again here, since that is what a purge
+                // asks of it. A copy corrupted since it was written is
+                // treated as a changed file and written again, which is
+                // what makes "pseudonymise the dataset again" true advice
+                // for a person whose purge was refused.
+                let stands = match std::fs::metadata(&out) {
+                    Ok(m) if m.len() as i64 == out_size => match &digest {
+                        Some(recorded) => {
+                            digest_of(&out, &mut buf).is_some_and(|now| &now == recorded)
+                        }
+                        None => true,
+                    },
+                    _ => false,
+                };
+                match stands {
+                    true => {
                         progress.file(&progress.unchanged, size);
                         if items.send(Item::Unchanged { id }).is_err() {
                             break;
                         }
                         continue;
                     }
-                    // the output is gone or not what was recorded: written
-                    // again, over its own place
-                    _ => (
+                    // the output is gone, or is no longer what was
+                    // recorded: written again, over its own place
+                    false => (
                         path,
                         rel,
                         size,

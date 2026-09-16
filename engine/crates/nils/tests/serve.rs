@@ -2981,9 +2981,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     let (status, changed) = ask(
         "PUT",
         &path,
-        Some(
-            r#"{"cohort": null, "unmapped": "code", "originals_kept": "vaulted", "tags": {"keep_demographics": false}}"#,
-        ),
+        Some(r#"{"cohort": null, "unmapped": "code", "tags": {"keep_demographics": false}}"#),
         ops,
     );
     assert_eq!(status, 200, "{changed}");
@@ -2993,7 +2991,19 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         "{changed}"
     );
     assert_eq!(changed["dataset"]["unmapped"], "code", "{changed}");
-    assert_eq!(changed["dataset"]["originals_kept"], "vaulted", "{changed}");
+    assert_eq!(changed["dataset"]["originals_kept"], "kept", "{changed}");
+    // lab 26c, finding 4: what became of the originals is the act's to
+    // write, and this is the door the desk's Change form sends to. A
+    // declaration naming it is refused, in words naming the act.
+    let (status, refused) = ask("PUT", &path, Some(r#"{"originals_kept": "purged"}"#), ops);
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("nils place originals"),
+        "{refused}"
+    );
     assert_eq!(
         changed["dataset"]["tags"]["keep_demographics"], false,
         "{changed}"
@@ -3045,6 +3055,132 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     while used.get() < LIMIT {
         ask("GET", "/api/capabilities", None, reader);
     }
+    server.finish();
+}
+
+/// Lab 26c, finding 1 at the door: a dataset one of whose originals changed
+/// after its copy was written. GET says a purge is not ready and counts the
+/// file as changed, POST refuses in the same sentence rather than queueing a
+/// job that fails later, and every original is still on disk afterwards.
+#[test]
+fn the_originals_door_refuses_a_purge_when_an_original_changed_after_its_copy() {
+    let home = TempDir::new("originals-door-home");
+    let dir = TempDir::new("originals-door-ds");
+    let patient = "199001011234";
+    for instance in 1..=2u32 {
+        let study = format!("1.2.826.0.1.3680043.8.498.{patient}.1");
+        let series = format!("{study}.1");
+        let sop = format!("{series}.{instance}");
+        let mut e = synth::minimal_mr(&study, &series, &sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+        e.push(synth::text(tags::PATIENT_NAME, VR::PN, "Doe^Jane"));
+        e.push(synth::text(tags::STUDY_DATE, VR::DA, "20240131"));
+        e.push(synth::text(tags::SERIES_NUMBER, VR::IS, "1"));
+        e.push(synth::text(
+            tags::INSTANCE_NUMBER,
+            VR::IS,
+            &instance.to_string(),
+        ));
+        e.push(synth::bytes(
+            tags::PIXEL_DATA,
+            VR::OW,
+            (0..4000u32).map(|i| (i % 251) as u8).collect(),
+        ));
+        dir.file(
+            &format!("sub-0/IM_{instance:04}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    run(&home, &["key", "add", "k"], Some("an originals door key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "ds",
+            dir.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--arrives",
+            "identified",
+            "--unmapped",
+            "code",
+        ],
+        None,
+    );
+    run(&home, &["pseudonymize", "@ds"], None);
+    let places: serde_json::Value =
+        serde_json::from_str(&run(&home, &["place", "list", "--json"], None)).unwrap();
+    let id = places[0]["id"].as_i64().unwrap();
+
+    let server = Server::start(
+        &home,
+        3,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+        &[],
+    );
+    let ops = Some("an-operator-token-of-len");
+    let door = format!("/api/places/{id}/originals");
+
+    let (status, ready) = server.request("GET", &door, None, ops);
+    assert_eq!(status, 200, "{ready}");
+    assert_eq!(ready["files"], 2, "{ready}");
+    assert_eq!(ready["verified"], 2, "{ready}");
+    assert_eq!(ready["ready"], true, "{ready}");
+
+    // one original changed in place, to other bytes of exactly its length,
+    // its modification time moving with them
+    let changed = dir.path().join("derivatives/dcm-original/sub-0/IM_0001");
+    let mut bytes = std::fs::read(&changed).unwrap();
+    let n = bytes.len();
+    for b in &mut bytes[n - 64..] {
+        *b ^= 0xFF;
+    }
+    let moved = std::fs::metadata(&changed).unwrap().modified().unwrap()
+        + std::time::Duration::from_secs(1);
+    std::fs::write(&changed, &bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&changed)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(moved))
+        .unwrap();
+
+    let (status, looked) = server.request("GET", &door, None, ops);
+    assert_eq!(status, 200, "{looked}");
+    assert_eq!(looked["ready"], false, "{looked}");
+    assert_eq!(looked["verified"], 1, "{looked}");
+    assert_eq!(looked["changed"], 1, "{looked}");
+    assert_eq!(looked["copy_unverified"], 0, "{looked}");
+    assert_eq!(looked["no_copy"], 0, "{looked}");
+    let why = looked["why"].as_str().unwrap().to_string();
+    assert!(why.contains("changed after being copied"), "{why}");
+    assert!(why.contains("nils pseudonymize @ds"), "{why}");
+
+    let (status, refused) = server.request(
+        "POST",
+        &door,
+        Some(r#"{"do": "purge", "why": "the study is over"}"#),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(
+        refused["error"].as_str().unwrap(),
+        why,
+        "the door refuses in the sentence it answered with"
+    );
+    assert!(changed.is_file(), "a refused purge deletes nothing");
+    assert!(
+        dir.path()
+            .join("derivatives/dcm-original/sub-0/IM_0002")
+            .is_file()
+    );
     server.finish();
 }
 
