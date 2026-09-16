@@ -79,6 +79,10 @@ pub(crate) struct Options<'a> {
     pub(crate) every: u64,
     /// The registered ingest locations a probe resolves, as `NAME=PATH`.
     pub(crate) ingest_roots: &'a [String],
+    /// Lab 26b, finding 4: the file workers a queued run takes where its own
+    /// command line names none, which is the engine's `--workers`. None
+    /// where nobody set one, and the verb's own default stands.
+    pub(crate) workers: Option<usize>,
     /// A worker beside the doors, whose output no one reads: a job's own
     /// output goes nowhere, since its row says how it ended, and the worker's
     /// lines go to stderr, written so that a closed stream never stops the
@@ -134,7 +138,7 @@ pub(crate) fn run(
             Ok(false) => continue,
             Err(e) => break Err(err(e)),
         }
-        let argv = next.argv().unwrap_or_default();
+        let argv = with_workers(next.argv().unwrap_or_default(), opts.workers);
         let line = format!("job {}: nils {}", next.id, argv.join(" "));
         let _ = if opts.quiet {
             writeln!(std::io::stderr(), "nils serve: {line}")
@@ -261,4 +265,87 @@ pub(crate) fn run(
     };
     let _ = job::finish(store, worker, State::Done, None);
     outcome.map(|()| ran)
+}
+
+/// Whether a verb reads `--workers`: the two that walk a tree file by file,
+/// and the pyramid's encoder. Everything else counts its work in windows or
+/// in rows and has no such flag.
+fn takes_workers(argv: &[String]) -> bool {
+    match argv.first().map(String::as_str) {
+        Some("digest" | "pseudonymize") => true,
+        Some("pyramid") => argv.get(1).is_some_and(|w| w == "build"),
+        _ => false,
+    }
+}
+
+/// Lab 26b, finding 4: a queued run takes the workers the engine was started
+/// with where its own command line names none. A run queued with `--workers`
+/// keeps what was asked for, and a verb with no such flag is left alone, so
+/// the setting reaches the work without rewriting anybody's command line.
+fn with_workers(mut argv: Vec<String>, workers: Option<usize>) -> Vec<String> {
+    let Some(n) = workers.filter(|n| *n > 0) else {
+        return argv;
+    };
+    if !takes_workers(&argv)
+        || argv
+            .iter()
+            .any(|a| a == "--workers" || a.starts_with("--workers="))
+    {
+        return argv;
+    }
+    argv.push("--workers".to_string());
+    argv.push(n.to_string());
+    argv
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(line: &str) -> Vec<String> {
+        line.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn a_queued_run_takes_the_engines_workers_where_it_names_none() {
+        // Lab 26b, finding 4: every pseudonymise and digest ran with one
+        // worker per core under an engine started with four, because the
+        // queued line named none and the verb's own default stood.
+        assert_eq!(
+            with_workers(argv("digest @ward"), Some(4)),
+            argv("digest @ward --workers 4")
+        );
+        assert_eq!(
+            with_workers(argv("pseudonymize @ward --name n"), Some(4)),
+            argv("pseudonymize @ward --name n --workers 4")
+        );
+        assert_eq!(
+            with_workers(argv("pyramid build --stack 7"), Some(4)),
+            argv("pyramid build --stack 7 --workers 4")
+        );
+    }
+
+    #[test]
+    fn what_the_caller_asked_for_stands_and_other_verbs_are_left_alone() {
+        for line in [
+            // named by the caller, in either spelling
+            "digest @ward --workers 16",
+            "digest @ward --workers=16",
+            // no such flag on these
+            "classify --pack mri",
+            "release --name r --out /tmp/r",
+            "pyramid list",
+        ] {
+            assert_eq!(with_workers(argv(line), Some(4)), argv(line), "{line}");
+        }
+        // and a worker started by hand names none, so nothing is added
+        assert_eq!(
+            with_workers(argv("digest @ward"), None),
+            argv("digest @ward")
+        );
+        assert_eq!(
+            with_workers(argv("digest @ward"), Some(0)),
+            argv("digest @ward")
+        );
+    }
 }

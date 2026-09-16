@@ -994,7 +994,10 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         let home = home.clone();
         let roots = args.ingest_root.clone();
         let stop = Arc::clone(&stop_queue);
-        std::thread::spawn(move || queue_worker(&home, &roots, &stop))
+        // lab 26b, finding 4: a job this engine queues runs with the workers
+        // the engine was started with, where the caller named none
+        let workers = args.workers.max(1);
+        std::thread::spawn(move || queue_worker(&home, &roots, workers, &stop))
     });
     // Wave 5 §10.3: the backup schedule beside the queue that runs what it
     // queues, where there is a directory to write to.
@@ -1057,7 +1060,12 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
 /// The queue's worker beside the doors: it takes the queue when no other
 /// worker holds it and runs what is queued; when another worker has it, or
 /// the registry cannot be opened, it looks again a little later.
-fn queue_worker(home: &Home, roots: &[String], stop: &std::sync::atomic::AtomicBool) {
+fn queue_worker(
+    home: &Home,
+    roots: &[String],
+    workers: usize,
+    stop: &std::sync::atomic::AtomicBool,
+) {
     let stopped = || stop.load(Ordering::SeqCst);
     while !stopped() {
         let outcome = match home.open() {
@@ -1072,6 +1080,7 @@ fn queue_worker(home: &Home, roots: &[String], stop: &std::sync::atomic::AtomicB
                             once: false,
                             every: 5,
                             ingest_roots: roots,
+                            workers: Some(workers),
                             quiet: true,
                         },
                         &stopped,

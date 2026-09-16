@@ -6507,6 +6507,10 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                     once,
                     every,
                     ingest_roots: &ingest_root,
+                    // a worker started by hand names no workers of its own:
+                    // each verb's default stands, as it does on the command
+                    // line
+                    workers: None,
                     quiet: false,
                 },
                 &|| cancel.stop(),
