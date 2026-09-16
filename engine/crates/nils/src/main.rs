@@ -260,13 +260,15 @@ struct ReleaseArgs {
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
     /// What happens to every date: as they are, moved by one offset per
-    /// subject, or the year only
-    #[arg(long, default_value = "keep", value_name = "keep|shift|year")]
-    dates: String,
+    /// subject, or the year only. Without --dates and --uids each dataset's
+    /// own leaving policy applies to its files (record 26 section 13); given,
+    /// the run's applies to every file
+    #[arg(long, value_name = "keep|shift|year")]
+    dates: Option<String>,
     /// What happens to UIDs. Remapping is keyed and deterministic, so two
     /// releases of overlapping selections agree
-    #[arg(long, default_value = "remap", value_name = "remap|preserve")]
-    uids: String,
+    #[arg(long, value_name = "remap|preserve")]
+    uids: Option<String>,
     /// The arc new UIDs hang from. The default is DICOM's UUID arc, which is
     /// legal and needs no registration
     #[arg(long, value_name = "OID")]
@@ -291,6 +293,10 @@ struct ReleaseArgs {
     /// Every current member of this cohort, by name (Wave 4a section 8)
     #[arg(long, value_name = "NAME")]
     cohort: Vec<String>,
+    /// Only the files under this dataset's pseudonymised tree, by the source
+    /// place's name (record 26 section 13)
+    #[arg(long, value_name = "NAME")]
+    dataset: Vec<String>,
     /// Only stacks holding this value on this pack axis, as `<axis>=<value>`;
     /// several values of one axis are alternatives, several axes all hold
     #[arg(long, value_name = "AXIS=VALUE")]
@@ -7191,14 +7197,22 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         return release_withdraw(home, name, version, args.why.as_deref().unwrap_or(""));
     }
     let out = args.out.clone().expect("--out, or --history");
-    let dates_policy = dates::Policy::parse(&args.dates).ok_or_else(|| {
-        usage(format!(
-            "--dates is keep, shift or year, not {}",
-            args.dates
-        ))
-    })?;
-    let uids = policy::Uids::parse(&args.uids)
-        .ok_or_else(|| usage(format!("--uids is remap or preserve, not {}", args.uids)))?;
+    // record 26 section 13: without the flags each dataset's leaving policy
+    // applies to its own files, and the run's defaults elsewhere
+    let policy_from = match (&args.dates, &args.uids) {
+        (None, None) => policy::Source::Datasets,
+        _ => policy::Source::Flags,
+    };
+    let dates_policy = match &args.dates {
+        Some(text) => dates::Policy::parse(text)
+            .ok_or_else(|| usage(format!("--dates is keep, shift or year, not {text}")))?,
+        None => dates::Policy::default(),
+    };
+    let uids = match &args.uids {
+        Some(text) => policy::Uids::parse(text)
+            .ok_or_else(|| usage(format!("--uids is remap or preserve, not {text}")))?,
+        None => policy::Uids::default(),
+    };
     let root = match &args.uid_root {
         Some(text) => uid::Root::new(text).map_err(|e| usage(e.to_string()))?,
         None => uid::Root::default(),
@@ -7288,6 +7302,17 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     let mut registry = open(home)?;
     // Wave 5 section 10.2: a release writes only to an export place.
     require_place(&mut registry, nils_registry::place::Role::Export, &out)?;
+    // record 26 section 13: a dataset named is a source place in force
+    for name in &args.dataset {
+        let found = nils_registry::place::by_name(registry.store(), name)
+            .map_err(|e| fail(e.to_string()))?
+            .filter(|p| p.role == nils_registry::place::Role::Source && p.retired_at.is_none());
+        if found.is_none() {
+            return Err(usage(format!(
+                "--dataset {name}: no source place in force is named so; `nils place list` shows them"
+            )));
+        }
+    }
     // Wave 4a section 8: every item resolved up front, and a refusal that
     // names what did not, rather than a smaller release.
     let chosen = resolve_or_refuse(&mut registry, &items, Some(&pack))?.selection;
@@ -7310,6 +7335,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         name: &name,
         root: &out,
         policy: &policy,
+        policy_from,
         categories,
         selection: run::Selection {
             subjects: chosen.subjects,
@@ -7321,6 +7347,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             modality: args.modality.clone(),
             axes: chosen.axes,
             cohorts: chosen.cohorts,
+            datasets: args.dataset.clone(),
         },
         scheme: &scheme,
         // §8.4: dropped by default, and back only by name. The pack declares
@@ -7356,6 +7383,16 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         report.name, report.version, report.layout, report.policy
     );
     println!("  into             {}", report.root);
+    // record 26 section 13: what each dataset's files left under
+    for p in &report.policies {
+        println!(
+            "  dataset          {:<24} dates {}   uids {}   from {}",
+            p["dataset"].as_str().unwrap_or("(none)"),
+            p["dates"].as_str().unwrap_or_default(),
+            p["uids"].as_str().unwrap_or_default(),
+            p["from"].as_str().unwrap_or_default()
+        );
+    }
     if let Some(c) = &report.converter {
         println!("  converted by     {c}");
     }
@@ -7525,13 +7562,20 @@ fn releases_doc(registry: &mut Registry, limit: usize) -> Result<serde_json::Val
     let store = registry.store();
     let started = text_of(store, "release", "started_at");
     let withdrawn = text_of(store, "release", "withdrawn_at");
+    let policy = text_of(store, "release", "policy");
+    let policies = text_of(store, "release", "policies");
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
-         added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why FROM {} \
+         added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
+         {policies} FROM {} \
          ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
     );
+    let json = |s: Option<&str>| {
+        s.and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+            .unwrap_or(serde_json::Value::Null)
+    };
     let rows: Vec<serde_json::Value> = store
         .query(&sql, &[])?
         .iter()
@@ -7554,6 +7598,10 @@ fn releases_doc(registry: &mut Registry, limit: usize) -> Result<serde_json::Val
                 "withdrawn_at": r.opt_text(14)?,
                 "withdrawn_by": r.opt_text(15)?,
                 "withdrawn_why": r.opt_text(16)?,
+                // record 26 section 13: the run's policy, where it came
+                // from, and what each dataset's files left under
+                "policy": json(r.opt_text(17)?),
+                "policies": json(r.opt_text(18)?),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;

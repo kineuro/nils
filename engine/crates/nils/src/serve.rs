@@ -2283,6 +2283,7 @@ fn routed(
             for (flag, key) in [
                 ("--layout", "layout"),
                 ("--dates", "dates"),
+                ("--uids", "uids"),
                 ("--on-unknown", "on_unknown"),
                 ("--pack", "pack"),
                 ("--scheme-name", "scheme_name"),
@@ -2298,6 +2299,8 @@ fn routed(
                 ("--subject", "subjects"),
                 ("--session", "sessions"),
                 ("--cohort", "cohorts"),
+                // record 26 §13: a dataset as a selection
+                ("--dataset", "datasets"),
                 ("--axis", "axes"),
                 ("--observation", "observations"),
             ] {

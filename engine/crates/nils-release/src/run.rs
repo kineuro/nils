@@ -65,6 +65,9 @@ pub struct Selection {
     /// Wave 4a §8: the cohorts the subjects came from, for the record; the
     /// members are already in `subjects`.
     pub cohorts: Vec<String>,
+    /// Record 26 §13: only the files under these datasets' pseudonymised
+    /// trees, by the source places' names.
+    pub datasets: Vec<String>,
 }
 
 impl Selection {
@@ -79,6 +82,7 @@ impl Selection {
             "modality": self.modality,
             "axes": self.axes,
             "cohorts": self.cohorts,
+            "datasets": self.datasets,
         })
     }
 
@@ -98,6 +102,10 @@ pub struct Report {
     pub previous: Option<String>,
     pub root: String,
     pub policy: String,
+    /// Record 26 §13: the leaving policy applied to each dataset's files,
+    /// `[{dataset, dates, uids, from}]`, `dataset` null for the files under
+    /// no dataset.
+    pub policies: Vec<serde_json::Value>,
     pub subjects: i64,
     pub stacks: i64,
     /// Files in the tree at this version, which on a re-run is mostly files
@@ -212,7 +220,12 @@ impl Place {
 pub struct Settings<'a> {
     pub name: &'a str,
     pub root: &'a Path,
+    /// The run's own policy: what every file leaves under when the flags
+    /// were given, and what a file under no dataset leaves under otherwise.
     pub policy: &'a Policy,
+    /// Record 26 §13: whether the flags were given, so the run's policy
+    /// overrides every dataset's, or each dataset's applies to its files.
+    pub policy_from: crate::policy::Source,
     pub categories: Vec<Category>,
     pub selection: Selection,
     pub scheme: &'a Scheme,
@@ -275,6 +288,9 @@ struct Instance {
     id: i64,
     stack: i64,
     study: i64,
+    /// The source root the file was walked from, which says which dataset
+    /// holds it (record 26 §13).
+    root: String,
     path: String,
     /// What the walker of Wave 1 recorded about the source file. A re-run
     /// decides a stack is unchanged partly from these, so it trusts exactly
@@ -301,6 +317,9 @@ struct Job {
     was: Option<State>,
     code: String,
     offset: crate::dates::Offset,
+    /// Which of the policies in play the stack's files leave under
+    /// (record 26 §13), an index into `Policies::all`.
+    policy: usize,
     /// Read only when the stack is written: a planned stack carries no
     /// instances, which is what keeps a version's memory a function of stacks
     /// and not of files.
@@ -397,7 +416,11 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
                     "subjects": report.subjects,
                     "files": report.files,
                 }),
-                policy: Some(settings.policy.as_json()),
+                policy: Some(serde_json::json!({
+                    "policy": settings.policy.as_json(),
+                    "from": settings.policy_from.name(),
+                    "policies": report.policies,
+                })),
                 job_id: Some(job_id),
                 details: Some(settings.selection.as_json()),
             },
@@ -415,14 +438,19 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         .policy
         .check()
         .map_err(|e| Error::Refused(e.to_string()))?;
+    // Record 26 §13: the policies in play, the run's own and each
+    // dataset's, every one checked by name before anything is read.
+    let policies = Policies::resolve(registry.store(), settings)?;
     // And the other half of §4.3: a session label that is a date under a
     // policy that moves dates would put the true date back in the path.
-    if settings.policy.dates.moves_dates() && settings.scheme.naming == session::Naming::Date {
+    if let Some(moving) = policies.all.iter().find(|p| p.dates.moves_dates())
+        && settings.scheme.naming == session::Naming::Date
+    {
         return Err(Error::Refused(format!(
             "dates {} and a session scheme that labels by the date is not a policy: the tree \
              would carry the date the files no longer do (§4.3). Use a months or ordinal \
              scheme, or keep the dates.",
-            settings.policy.dates.name()
+            moving.dates.name()
         )));
     }
 
@@ -492,13 +520,17 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         version: version.clone(),
         previous: earlier.as_ref().map(|p| p.version.clone()),
         root: settings.root.display().to_string(),
-        policy: settings.policy.describe(),
+        policy: policies.describe(),
+        policies: policies.as_json(),
         ..Report::default()
     };
-    let remap = match settings.policy.uids {
-        Uids::Remap => Some(Remap::new(settings.policy.root.clone(), settings.key)),
-        Uids::Preserve => None,
-    };
+    // one remapping for the run, hung from the run's root, handed to the
+    // stacks whose policy remaps
+    let remap = policies
+        .all
+        .iter()
+        .any(|p| p.uids == Uids::Remap)
+        .then(|| Remap::new(settings.policy.root.clone(), settings.key));
     report.release_id = open_row(
         registry.store(),
         settings,
@@ -506,6 +538,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         dataset,
         earlier.as_ref(),
         &report.placements,
+        &report.policies,
     )?;
 
     // The parts of a stack's content digest that are the same for every stack
@@ -550,19 +583,27 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let mut sessions_seen: BTreeMap<(String, String), (i64, Day, crate::dates::Offset)> =
         BTreeMap::new();
     let mut stacks_planned = 0i64;
+    // which policy each planned stack leaves under, read back with the plan
+    let mut policy_of: HashMap<i64, usize> = HashMap::new();
+    let any_shift = policies
+        .all
+        .iter()
+        .any(|p| p.dates == crate::dates::Policy::Shift);
     for (subject, code) in selected_subjects(registry.store(), &settings.selection)? {
         let mine = select_subject(registry.store(), &settings.selection, subject)?;
         if mine.is_empty() {
             continue;
         }
         let labels = session_labels(&mine, &by_study);
-        let offset = match settings.policy.dates {
-            crate::dates::Policy::Shift => {
+        // one offset per subject, drawn once and kept, when any policy in
+        // play shifts; applied to the stacks whose policy does
+        let offset = match any_shift {
+            true => {
                 let o = crate::dates::draw(settings.key, subject);
                 remember_offset(registry, subject, o)?;
                 o
             }
-            _ => crate::dates::Offset(0),
+            false => crate::dates::Offset(0),
         };
         let mut grouped: BTreeMap<i64, Vec<Instance>> = BTreeMap::new();
         for i in mine {
@@ -570,6 +611,9 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         }
         for (stack, instances) in grouped {
             let study = instances[0].study;
+            let under = policies.of_root(&instances[0].root);
+            policy_of.insert(stack, under);
+            let policy = &policies.all[under];
             let label = labels
                 .get(&study)
                 .cloned()
@@ -638,7 +682,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                 continue;
             }
             let content = crate::version::content_of(
-                &subject_policy(settings, &code, offset),
+                &subject_policy(settings, policy, &code, offset),
                 &categories,
                 &private,
                 &pack,
@@ -781,6 +825,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                 was,
                 code: planned.code,
                 offset: planned.offset,
+                policy: policy_of.get(&planned.stack).copied().unwrap_or(0),
                 instances: Vec::new(),
             });
         }
@@ -838,13 +883,16 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             _ => {
                 job.instances = instances_of(registry.store(), job.stack)?;
                 let code = job.code.clone();
+                let policy = &policies.all[job.policy];
                 let plan = Plan {
-                    policy: settings.policy,
+                    policy,
                     categories: &settings.categories,
                     private: settings.private,
                     code: &code,
                     offset: job.offset,
-                    remap: remap.as_ref(),
+                    remap: (policy.uids == Uids::Remap)
+                        .then_some(remap.as_ref())
+                        .flatten(),
                 };
                 let written = match settings.layout {
                     Layout::Descriptive => {
@@ -938,7 +986,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                         filename: file.to_string(),
                         acq_time: acq_times
                             .get(&job.stack)
-                            .and_then(|t| under_policy(t, settings, job.offset)),
+                            .and_then(|t| under_policy(t, &policies.all[job.policy], job.offset)),
                     });
             }
         }
@@ -965,9 +1013,12 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     if settings.layout == Layout::Bids {
         let mut codes: Vec<String> = people.into_iter().collect();
         codes.sort();
+        // the tree's one clinical export leaves under the strictest policy
+        // in play, since a date in it is one file for every dataset
         let clinical = clinical_rows(
             registry.store(),
             settings,
+            policies.strictest(),
             &subjects_seen,
             &sessions_seen,
             &mut report,
@@ -1294,6 +1345,7 @@ struct Clinical {
 fn clinical_rows(
     store: &mut Store,
     settings: &Settings,
+    policy: &Policy,
     subjects: &BTreeMap<String, i64>,
     sessions: &BTreeMap<(String, String), (i64, Day, crate::dates::Offset)>,
     report: &mut Report,
@@ -1383,10 +1435,10 @@ fn clinical_rows(
             };
             row.insert(column.clone(), value);
             row.insert(format!("{column}_days"), near.offset_days.to_string());
-            match settings.policy.dates {
+            match policy.dates {
                 crate::dates::Policy::Year => {}
-                policy => {
-                    let when = crate::dates::apply(policy, *offset, near.date);
+                dates => {
+                    let when = crate::dates::apply(dates, *offset, near.date);
                     row.insert(format!("{column}_date"), when.to_string());
                 }
             }
@@ -1732,10 +1784,10 @@ fn acquisition_times(
 /// date was truncated is not a time.
 fn under_policy(
     (day, time): &(Day, Option<String>),
-    settings: &Settings,
+    policy: &Policy,
     offset: crate::dates::Offset,
 ) -> Option<String> {
-    let day = match settings.policy.dates {
+    let day = match policy.dates {
         crate::dates::Policy::Keep => *day,
         crate::dates::Policy::Shift => Day::from_days(day.to_days() + offset.0),
         crate::dates::Policy::Year => return None,
@@ -1837,10 +1889,15 @@ fn today() -> Day {
 /// key, and neither is anywhere else in the content digest. A release re-run
 /// under a different key writes different bytes into a differently named tree,
 /// and a comparison that could not see that would call it unchanged.
-fn subject_policy(settings: &Settings, code: &str, offset: crate::dates::Offset) -> String {
+fn subject_policy(
+    settings: &Settings,
+    policy: &Policy,
+    code: &str,
+    offset: crate::dates::Offset,
+) -> String {
     format!(
         "{} code={code} offset={} unknown={} layout={} converter={}",
-        settings.policy.as_json(),
+        policy.as_json(),
         offset.0,
         settings.on_unknown.name(),
         settings.layout.name(),
@@ -2118,9 +2175,173 @@ fn selection_where(store: &mut Store, selection: &Selection) -> String {
             store.qualified("pick"),
         ));
     }
+    // Record 26 §13: only the files under the named datasets' pseudonymised
+    // trees; a dataset with no digest yet reaches nothing.
+    if !selection.datasets.is_empty() {
+        let sources = dataset_sources(store, &selection.datasets).unwrap_or_default();
+        wheres.push(match sources.is_empty() {
+            true => "1 = 0".to_string(),
+            false => format!(
+                "sf.source_id IN ({})",
+                sources
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
     match wheres.is_empty() {
         true => String::new(),
         false => format!(" AND {}", wheres.join(" AND ")),
+    }
+}
+
+/// The sources whose root lies under one of the named datasets'
+/// pseudonymised trees (record 26 §13).
+fn dataset_sources(store: &mut Store, names: &[String]) -> Result<Vec<i64>, Error> {
+    let places = nils_registry::place::active(store)?;
+    let trees: Vec<std::path::PathBuf> = places
+        .iter()
+        .filter(|p| p.role == nils_registry::place::Role::Source)
+        .filter(|p| names.iter().any(|n| n == &p.name))
+        .filter_map(|p| p.tree_path("anon"))
+        .map(|t| std::fs::canonicalize(&t).unwrap_or(t))
+        .collect();
+    let sql = format!(
+        "SELECT id, root_canonical FROM {}",
+        store.qualified("source")
+    );
+    let mut out = Vec::new();
+    for r in store.query(&sql, &[])? {
+        let root = Path::new(r.text(1)?);
+        if trees.iter().any(|t| root.starts_with(t)) {
+            out.push(r.int(0)?);
+        }
+    }
+    Ok(out)
+}
+
+/// The policies in play (record 26 §13): the run's own first, then one per
+/// dataset the selection spans when the flags were not given; each source
+/// root leaves under one of them.
+struct Policies {
+    all: Vec<Policy>,
+    /// The dataset each policy is, none for the run's own.
+    datasets: Vec<Option<String>>,
+    by_root: HashMap<String, usize>,
+    from: crate::policy::Source,
+}
+
+impl Policies {
+    fn resolve(store: &mut Store, settings: &Settings) -> Result<Policies, Error> {
+        let mut out = Policies {
+            all: vec![settings.policy.clone()],
+            datasets: vec![None],
+            by_root: HashMap::new(),
+            from: settings.policy_from,
+        };
+        // the source roots the selection reaches, and the dataset holding
+        // each
+        let from = selection_from(store);
+        let filter = selection_where(store, &settings.selection);
+        let sql = format!("SELECT DISTINCT so.root, so.root_canonical {from} WHERE 1 = 1{filter}");
+        let roots: Vec<(String, String)> = store
+            .query(&sql, &[])?
+            .iter()
+            .map(|r| Ok((r.text(0)?.to_string(), r.text(1)?.to_string())))
+            .collect::<Result<_, StoreError>>()?;
+        let mut by_dataset: BTreeMap<String, usize> = BTreeMap::new();
+        for (root, canonical) in roots {
+            let holding = nils_registry::place::tree_holding(store, "anon", Path::new(&canonical))?;
+            let Some(place) = holding else {
+                out.by_root.insert(root, 0);
+                continue;
+            };
+            let index = match by_dataset.get(&place.name) {
+                Some(i) => *i,
+                None => {
+                    let policy = match settings.policy_from {
+                        crate::policy::Source::Flags => settings.policy.clone(),
+                        crate::policy::Source::Datasets => {
+                            Policy::of_handling(&place.handling, &settings.policy.root)
+                        }
+                    };
+                    policy
+                        .check()
+                        .map_err(|e| Error::Refused(format!("dataset {}: {e}", place.name)))?;
+                    out.all.push(policy);
+                    out.datasets.push(Some(place.name.clone()));
+                    let i = out.all.len() - 1;
+                    by_dataset.insert(place.name.clone(), i);
+                    i
+                }
+            };
+            out.by_root.insert(root, index);
+        }
+        Ok(out)
+    }
+
+    /// The policy a file walked from this root leaves under.
+    fn of_root(&self, root: &str) -> usize {
+        self.by_root.get(root).copied().unwrap_or(0)
+    }
+
+    /// The strictest date policy in play, for the one clinical export of the
+    /// tree: the year over a shift over the dates kept, remapped UIDs over
+    /// preserved ones.
+    fn strictest(&self) -> &Policy {
+        self.all
+            .iter()
+            .max_by_key(|p| {
+                (
+                    match p.dates {
+                        crate::dates::Policy::Keep => 0,
+                        crate::dates::Policy::Shift => 1,
+                        crate::dates::Policy::Year => 2,
+                    },
+                    p.uids == Uids::Remap,
+                )
+            })
+            .unwrap_or(&self.all[0])
+    }
+
+    /// How the run and the dataset description say what was done: the run's
+    /// own, then each dataset's where it differs.
+    fn describe(&self) -> String {
+        let mut out = self.all[0].describe();
+        for (i, name) in self.datasets.iter().enumerate().skip(1) {
+            if self.all[i] != self.all[0]
+                && let Some(name) = name
+            {
+                out.push_str(&format!("; {name}: {}", self.all[i].describe()));
+            }
+        }
+        out
+    }
+
+    /// `[{dataset, dates, uids, from}]`: one row per dataset the selection
+    /// spans, and one with `dataset` null when a file is under none.
+    fn as_json(&self) -> Vec<serde_json::Value> {
+        let mut rows = Vec::new();
+        let under_none = self.by_root.values().any(|i| *i == 0);
+        for (i, name) in self.datasets.iter().enumerate() {
+            if i == 0 && !under_none {
+                continue;
+            }
+            let from = match (i, self.from) {
+                (0, _) => "defaults",
+                (_, crate::policy::Source::Flags) => "flags",
+                (_, crate::policy::Source::Datasets) => "dataset",
+            };
+            rows.push(serde_json::json!({
+                "dataset": name,
+                "dates": self.all[i].dates.name(),
+                "uids": self.all[i].uids.name(),
+                "from": from,
+            }));
+        }
+        rows
     }
 }
 
@@ -2255,6 +2476,7 @@ fn rows_to_instances(rows: Vec<nils_registry::store::Row>) -> Result<Vec<Instanc
             id,
             stack: r.int(1)?,
             study: r.int(2)?,
+            root: r.text(3)?.to_string(),
             path: Path::new(r.text(3)?).join(r.text(4)?).display().to_string(),
             size: r.int(5)?,
             mtime: r.int(6)?,
@@ -2582,8 +2804,13 @@ fn open_row(
     dataset: i64,
     earlier: Option<&Earlier>,
     placements: &BTreeMap<String, String>,
+    policies: &[serde_json::Value],
 ) -> Result<i64, Error> {
     let categories: Vec<&str> = settings.categories.iter().map(|c| c.name()).collect();
+    // record 26 §13: the row says where its policy came from, and what each
+    // dataset's files left under
+    let mut policy = settings.policy.as_json();
+    policy["from"] = serde_json::Value::from(settings.policy_from.name());
     let written = store.insert(
         &Insert::new(
             table("release"),
@@ -2611,6 +2838,7 @@ fn open_row(
                 "rewritten",
                 "added",
                 "removed",
+                "policies",
             ],
         )
         .returning(&["id"]),
@@ -2623,7 +2851,7 @@ fn open_row(
                 None => Param::Null,
             },
             Param::from(settings.root.display().to_string()),
-            Param::from(settings.policy.as_json().to_string()),
+            Param::from(policy.to_string()),
             Param::from(settings.selection.as_json().to_string()),
             Param::from(categories.join(",")),
             Param::from(
@@ -2648,6 +2876,7 @@ fn open_row(
             Param::Int(0),
             Param::Int(0),
             Param::Int(0),
+            Param::from(serde_json::Value::Array(policies.to_vec()).to_string()),
         ]],
     )?;
     Ok(written.first().map(|r| r.int(0)).transpose()?.unwrap_or(0))
@@ -3166,6 +3395,7 @@ mod tests {
             was: Some(state(Place::dir(was.to_string()), &[])),
             code: "x".to_string(),
             offset: crate::dates::Offset(0),
+            policy: 0,
             instances: Vec::new(),
         }
     }
@@ -3354,10 +3584,11 @@ mod tests {
         let scheme = session::Scheme::default();
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
         let pack = nils_pack::load(&dir, None).expect("the MRI pack loads");
-        let mut settings = Settings {
+        let settings = Settings {
             name: "t",
             root: Path::new("/tmp"),
             policy: &crate::policy::Policy::default(),
+            policy_from: crate::policy::Source::Flags,
             categories: Vec::new(),
             selection: Selection::default(),
             scheme: &scheme,
@@ -3375,16 +3606,15 @@ mod tests {
         };
         let when = (day, Some("031415".to_string()));
         assert_eq!(
-            under_policy(&when, &settings, crate::dates::Offset(0)).as_deref(),
+            under_policy(&when, settings.policy, crate::dates::Offset(0)).as_deref(),
             Some("2022-01-15T03:14:15")
         );
         let shifted = crate::policy::Policy {
             dates: crate::dates::Policy::Shift,
             ..crate::policy::Policy::default()
         };
-        settings.policy = &shifted;
         assert_eq!(
-            under_policy(&when, &settings, crate::dates::Offset(-10)).as_deref(),
+            under_policy(&when, &shifted, crate::dates::Offset(-10)).as_deref(),
             Some("2022-01-05T03:14:15")
         );
         // A time whose date was truncated is not a time.
@@ -3392,10 +3622,31 @@ mod tests {
             dates: crate::dates::Policy::Year,
             ..crate::policy::Policy::default()
         };
-        settings.policy = &year;
-        assert_eq!(
-            under_policy(&when, &settings, crate::dates::Offset(0)),
-            None
+        assert_eq!(under_policy(&when, &year, crate::dates::Offset(0)), None);
+        // record 26 §13: the strictest policy in play rules the tree's one
+        // clinical export, and the rows say where each came from
+        let policies = Policies {
+            all: vec![
+                crate::policy::Policy::default(),
+                shifted.clone(),
+                year.clone(),
+            ],
+            datasets: vec![None, Some("a".into()), Some("b".into())],
+            by_root: HashMap::from([("/a".to_string(), 1), ("/b".to_string(), 2)]),
+            from: crate::policy::Source::Datasets,
+        };
+        assert_eq!(policies.strictest().dates, crate::dates::Policy::Year);
+        assert_eq!(policies.of_root("/a"), 1);
+        assert_eq!(policies.of_root("/elsewhere"), 0);
+        let rows = policies.as_json();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0]["dataset"], "a");
+        assert_eq!(rows[0]["dates"], "shift");
+        assert_eq!(rows[0]["from"], "dataset");
+        assert!(
+            policies.describe().contains("b: dates year"),
+            "{}",
+            policies.describe()
         );
     }
 }
