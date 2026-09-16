@@ -769,9 +769,21 @@ fn subjects_of_series(store: &mut Store, series: &[i64]) -> Result<HashMap<i64, 
 
 /// Every open review item with the subjects it is about (record 26 §10).
 pub fn open_items(store: &mut Store) -> Result<Vec<OpenItem>, StoreError> {
+    items_about(store, Some("open"))
+}
+
+/// Every review item of a status, or of every status, with the subjects it
+/// is about, newest first.
+pub fn items_about(store: &mut Store, status: Option<&str>) -> Result<Vec<OpenItem>, StoreError> {
     let reference = text_of(store, "review_item", "ref");
+    let d = store.dialect();
+    let filter = match status {
+        Some(_) => format!(" WHERE status = {}", d.param(1, Type::Text)),
+        None => String::new(),
+    };
+    let params: Vec<Param> = status.map(Param::from).into_iter().collect();
     let sql = format!(
-        "SELECT id, kind, scope, {reference} FROM {} WHERE status = 'open' ORDER BY id DESC",
+        "SELECT id, kind, scope, {reference} FROM {}{filter} ORDER BY id DESC",
         store.qualified("review_item")
     );
     struct Raw {
@@ -781,7 +793,7 @@ pub fn open_items(store: &mut Store) -> Result<Vec<OpenItem>, StoreError> {
         reference: Value,
     }
     let raw: Vec<Raw> = store
-        .query(&sql, &[])?
+        .query(&sql, &params)?
         .iter()
         .map(|r| {
             Ok(Raw {
@@ -860,6 +872,50 @@ pub fn open_items(store: &mut Store) -> Result<Vec<OpenItem>, StoreError> {
             }
         })
         .collect())
+}
+
+/// The batches that fed a cohort (record 26 §10): the batches its digest
+/// intervals name, and every batch of a source whose dataset feeds it. A
+/// quarantined file is about no subject, so the quarantine filters by
+/// these. None when there is no cohort so named.
+pub fn batches_feeding(store: &mut Store, name: &str) -> Result<Option<Vec<i64>>, StoreError> {
+    let Some(c) = by_name(store, name)? else {
+        return Ok(None);
+    };
+    let d = store.dialect();
+    let mut out: BTreeSet<i64> = BTreeSet::new();
+    let sql = format!(
+        "SELECT DISTINCT batch_id FROM {} WHERE cohort_id = {} AND batch_id IS NOT NULL",
+        store.qualified("cohort_member"),
+        d.param(1, Type::Int)
+    );
+    for r in store.query(&sql, &[Param::Int(c.id)])? {
+        out.insert(r.int(0)?);
+    }
+    let places = place::active(store)?;
+    let feeding = feeds_of(&places, name);
+    if !feeding.is_empty() {
+        let roots: Vec<(String, std::path::PathBuf)> = places
+            .iter()
+            .filter(|p| feeding.contains(&p.name))
+            .filter_map(|p| p.tree_path("anon").map(|t| (p.name.clone(), t)))
+            .collect();
+        let sql = format!(
+            "SELECT b.id, so.root_canonical FROM {} b JOIN {} so ON so.id = b.source_id",
+            store.qualified("ingest_batch"),
+            store.qualified("source")
+        );
+        for r in store.query(&sql, &[])? {
+            let root = std::path::Path::new(r.text(1)?);
+            if roots.iter().any(|(_, t)| {
+                let real = std::fs::canonicalize(t).unwrap_or_else(|_| t.clone());
+                root.starts_with(&real)
+            }) {
+                out.insert(r.int(0)?);
+            }
+        }
+    }
+    Ok(Some(out.into_iter().collect()))
 }
 
 /// The open memberships of every cohort in force: name to subjects.

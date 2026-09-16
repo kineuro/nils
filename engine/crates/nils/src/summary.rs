@@ -71,7 +71,10 @@ pub fn document(registry: &mut Registry, since: Option<&str>) -> Result<Value, S
 
     // by cohort: a subject in two cohorts counts once in each, so the sums
     // may exceed the totals; the desk reads them as memberships
-    let current = format!("{member} m JOIN {cohort} c ON c.id = m.cohort_id AND m.left_at IS NULL");
+    // record 26 §9: a retired cohort leaves the lists, its members kept
+    let current = format!(
+        "{member} m JOIN {cohort} c ON c.id = m.cohort_id AND m.left_at IS NULL AND c.retired_at IS NULL"
+    );
     let subjects_by_cohort = by(
         store,
         &format!(
@@ -120,7 +123,11 @@ pub fn document(registry: &mut Registry, since: Option<&str>) -> Result<Value, S
         ),
         &[],
     )?;
-    let cohorts = count(store, &format!("SELECT COUNT(*) FROM {cohort}"), &[])?;
+    let cohorts = count(
+        store,
+        &format!("SELECT COUNT(*) FROM {cohort} WHERE retired_at IS NULL"),
+        &[],
+    )?;
     let synthetic = synthetic(store)?;
 
     let since_block = match since {
