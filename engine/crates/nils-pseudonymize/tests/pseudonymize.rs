@@ -674,6 +674,96 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
     );
 }
 
+/// Lab 26, defect 5: the rule reads the third person's identifier as a
+/// patient id and holds her files; a map naming that value as a study id,
+/// with a code of its own, releases the files all the same, says under
+/// which type, and the next `--held` run writes them under that code.
+#[test]
+fn a_map_naming_a_held_value_under_another_type_releases_it_for_the_held_run() {
+    use nils_registry::identity_map::{self, Column, Map, Role, Row};
+    let lab = lab();
+    let dir = dataset();
+    let anon = dir.path().join("derivatives/dcm-anon");
+    let mut registry = lab.home.open().unwrap();
+    import_map(&mut registry);
+    let place = declare(&mut registry, dir.path(), json!({}));
+    let s = settings(&place);
+    let report = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(files_of(&report), (16, 12, 0, 3, 1), "{report}");
+    let keys = Subkeys::derive(KEY);
+    let mut linkage = registry.open_linkage().unwrap();
+    let columns = vec![
+        Column {
+            header: "study".into(),
+            role: Role::parse("identifier:study-id").unwrap(),
+        },
+        Column {
+            header: "code".into(),
+            role: Role::Code,
+        },
+    ];
+    let rows = vec![Row {
+        line: 2,
+        cells: vec![UNMAPPED.to_string(), "subj0003c".to_string()],
+    }];
+    let map = Map {
+        columns: &columns,
+        rows: &rows,
+        dry_run: false,
+        make_types: true,
+        place_id: Some(place.id),
+        actor: "tester@lab",
+        job_id: None,
+    };
+    let filed = identity_map::import(registry.store(), &mut linkage, &keys, None, &map).unwrap();
+    assert!(filed.written(), "{filed}");
+    assert_eq!(filed.held_released, 3, "{filed}");
+    assert_eq!(filed.held_released_by.len(), 1);
+    assert_eq!(filed.held_released_by[0].id_type, "study-id");
+    assert_eq!(filed.held_released_by[0].held_as, "patient-id");
+    assert_eq!(filed.held_released_by[0].files, 3);
+    drop(linkage);
+    // the held run finds the subject under the lookup the map filed
+    let mut held_only = s.clone();
+    held_only.held = true;
+    let run = pseudonymize(&held_only, &mut registry).unwrap();
+    assert_eq!(files_of(&run), (3, 3, 0, 0, 0), "{run}");
+    assert_eq!(run.subjects.seen, 1);
+    assert_eq!(run.subjects.new, 0);
+    assert_eq!(run.subjects.provisional, 0);
+    assert!(anon.join("subj0003c").is_dir());
+    assert_eq!(outputs(&anon).len(), 15);
+    assert_eq!(
+        one(
+            &mut registry,
+            "SELECT COUNT(*) FROM pseudonym_file WHERE state = 'held'"
+        ),
+        0
+    );
+    assert_eq!(
+        one(
+            &mut registry,
+            "SELECT COUNT(*) FROM pseudonym_file WHERE state = 'written' AND out_path LIKE 'subj0003c/%'"
+        ),
+        3
+    );
+    // the unmapped question is answered, and no subject was made
+    assert_eq!(
+        one(
+            &mut registry,
+            &format!(
+                "SELECT COUNT(*) FROM review_item WHERE kind = '{}' AND status = 'open'",
+                review::UNMAPPED_KIND
+            )
+        ),
+        0
+    );
+    assert_eq!(
+        one(&mut registry, "SELECT COUNT(*) FROM subject WHERE provisional = 1"),
+        0
+    );
+}
+
 #[test]
 fn a_run_asked_to_stop_before_it_began_writes_nothing_and_ends_cancelled() {
     let lab = lab();

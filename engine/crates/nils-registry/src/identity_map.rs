@@ -216,6 +216,23 @@ pub struct Merge {
     pub canonical: String,
 }
 
+/// Held files the map released, by the type the map named them under and
+/// the type the pseudonymiser held them as (lab 26, defect 5): a map may
+/// name a held value under another type than the dataset's rule read it
+/// as, and the files are released all the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Released {
+    pub id_type: String,
+    pub held_as: String,
+    pub files: u64,
+}
+
+impl Released {
+    pub fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({ "type": self.id_type, "held_as": self.held_as, "files": self.files })
+    }
+}
+
 /// What the map will do, or did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
@@ -224,6 +241,8 @@ pub struct Report {
     pub identifiers: Identifiers,
     /// Held files whose identifier the map named, released for the next run.
     pub held_released: u64,
+    /// The same, by the type that named them and the type they were held as.
+    pub held_released_by: Vec<Released>,
     pub merges: Vec<Merge>,
     pub conflicts: Vec<Conflict>,
     pub dry_run: bool,
@@ -255,6 +274,7 @@ impl Report {
                 "types_new": self.identifiers.types_new,
             },
             "held_released": self.held_released,
+            "held_released_by": self.held_released_by.iter().map(Released::as_json).collect::<Vec<_>>(),
             "merges": self.merges.iter().map(|m| serde_json::json!({
                 "alias": m.alias, "canonical": m.canonical,
             })).collect::<Vec<_>>(),
@@ -296,6 +316,17 @@ impl fmt::Display for Report {
                 "  {} held file(s) released for the next pseudonymise",
                 self.held_released
             )?;
+            for r in &self.held_released_by {
+                if r.id_type == r.held_as {
+                    writeln!(f, "    {} named as {}", r.files, r.id_type)?;
+                } else {
+                    writeln!(
+                        f,
+                        "    {} named as {}, held as {}",
+                        r.files, r.id_type, r.held_as
+                    )?;
+                }
+            }
         }
         if !self.conflicts.is_empty() {
             writeln!(
@@ -586,6 +617,9 @@ pub fn import(
     let mut typed_now: HashMap<String, HashSet<String>> = HashMap::new();
     let mut codes_ok: BTreeSet<String> = BTreeSet::new();
     let mut digests: HashMap<String, Vec<u8>> = HashMap::new();
+    // every identifier of a row that stands, as (type, value), for the held
+    // files the map releases
+    let mut named: BTreeSet<(String, String)> = BTreeSet::new();
     'rows: for r in resolved {
         if let Some(s) = by_code.get(&r.code)
             && let Some(into) = s.merged_into
@@ -636,6 +670,7 @@ pub fn import(
         // the row stands
         codes_ok.insert(r.code.clone());
         for i in r.idents {
+            named.insert((i.id_type.clone(), i.value.clone()));
             if let Some(e) = existing.get(&i.lookup) {
                 known.insert(i.lookup.clone());
                 let holder = code_of(&subjects, e.subject_id);
@@ -685,9 +720,13 @@ pub fn import(
         report.conflicts.sort_by_key(|c| c.row);
         return Ok(report);
     }
-    let named_lookups: Vec<Vec<u8>> = known.iter().chain(&filed).cloned().collect();
+    // the held files the map names, under the type the map gives each
+    // value and under every type the held rows carry
+    let named: Vec<(String, String)> = named.into_iter().collect();
+    let matches = held_matches(registry, keys, &named)?;
+    report.held_released = matches.len() as u64;
+    report.held_released_by = released_by(&matches);
     if map.dry_run {
-        report.held_released = held_count(registry, &named_lookups)?;
         return Ok(report);
     }
 
@@ -713,13 +752,12 @@ pub fn import(
         &codes_ok,
         &digests,
         to_file,
-        &named_lookups,
+        &matches,
     );
     match applied {
-        Ok(released) => {
+        Ok(()) => {
             registry.commit()?;
             linkage.commit()?;
-            report.held_released = released;
             Ok(report)
         }
         Err(e) => {
@@ -732,7 +770,7 @@ pub fn import(
 
 /// The writes of an import, inside the transactions [`import`] holds:
 /// the types made, the subjects created, the merges, the identities filed,
-/// and the held files released. Answers how many held files were released.
+/// and the held files released.
 #[allow(clippy::too_many_arguments)]
 fn apply(
     registry: &mut Store,
@@ -747,8 +785,8 @@ fn apply(
     codes_ok: &BTreeSet<String>,
     digests: &HashMap<String, Vec<u8>>,
     to_file: Vec<(String, Ident)>,
-    named_lookups: &[Vec<u8>],
-) -> Result<u64, Error> {
+    matches: &[HeldMatch],
+) -> Result<(), Error> {
     for name in types_to_make {
         let t = linkage::add_id_type(linkage, name, None)?;
         type_ids.insert(name.clone(), Some(t.id));
@@ -824,66 +862,144 @@ fn apply(
         });
     }
     linkage::insert_identities(linkage, &rows)?;
-    release_held(registry, named_lookups)
+    release_matches(registry, matches)
 }
 
 /// The table the pseudonymiser records every file in (record 26 §4),
 /// declared by the dataset slice; the map reads it when it is there.
 const HELD_TABLE: &str = "pseudonym_file";
 
-/// `WHERE` the held rows whose identifier is one of `n` lookups, the
-/// placeholders numbered from `first`.
-fn held_where(store: &Store, first: usize, n: usize) -> String {
-    let d = store.dialect();
-    let marks: Vec<String> = (0..n).map(|i| d.param(first + i, Type::Bytes)).collect();
-    format!(
-        "WHERE state = 'held' AND released_at IS NULL AND lookup IN ({})",
-        marks.join(", ")
-    )
+/// One held file the map names: the row, the type the map named the
+/// value under with the lookup under that type, and the type the
+/// pseudonymiser held it as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldMatch {
+    pub row: i64,
+    pub id_type: String,
+    pub held_as: String,
+    pub lookup: Vec<u8>,
 }
 
-/// How many held files an import of these identifiers would release.
-pub fn held_count(registry: &mut Store, lookups: &[Vec<u8>]) -> Result<u64, Error> {
-    if lookups.is_empty() || !migrate::table_exists(registry, HELD_TABLE)? {
-        return Ok(0);
+/// The held files whose identifier the map names, matched by value: the
+/// lookup of each named value is computed under every type the held rows
+/// carry, not only the type the map gives it, since a dataset's rule reads
+/// a study id in `PatientID` as the rule's own type and the map may name it
+/// as what it is (lab 26, defect 5). Where a value is named under a held
+/// row's own type, that match stands. Nothing where the table is not there.
+pub fn held_matches(
+    registry: &mut Store,
+    keys: &Subkeys,
+    named: &[(String, String)],
+) -> Result<Vec<HeldMatch>, Error> {
+    if named.is_empty() || !migrate::table_exists(registry, HELD_TABLE)? {
+        return Ok(Vec::new());
     }
-    let mut n = 0u64;
+    let held_types: Vec<String> = registry
+        .query(
+            &format!(
+                "SELECT DISTINCT id_type FROM {} WHERE state = 'held' AND released_at IS NULL \
+                 AND id_type IS NOT NULL ORDER BY id_type",
+                registry.qualified(HELD_TABLE)
+            ),
+            &[],
+        )?
+        .iter()
+        .map(|r| Ok(r.text(0)?.to_string()))
+        .collect::<Result<_, Error>>()?;
+    if held_types.is_empty() {
+        return Ok(Vec::new());
+    }
+    // the lookup under each held type, to the value's type and the value;
+    // a value named under the held type itself wins over a cross match
+    let mut candidates: HashMap<Vec<u8>, (String, String)> = HashMap::new();
+    for held_type in &held_types {
+        for (id_type, value) in named {
+            if id_type != held_type {
+                candidates
+                    .entry(keys.lookup(held_type, value))
+                    .or_insert_with(|| (id_type.clone(), value.clone()));
+            }
+        }
+        for (id_type, value) in named {
+            if id_type == held_type {
+                candidates.insert(keys.lookup(held_type, value), (id_type.clone(), value.clone()));
+            }
+        }
+    }
+    let lookups: Vec<&Vec<u8>> = candidates.keys().collect();
+    let mut out = Vec::new();
     for chunk in lookups.chunks(crate::store::SQLITE_KEY_CHUNK) {
+        let d = registry.dialect();
+        let marks: Vec<String> = (0..chunk.len())
+            .map(|i| d.param(i + 1, Type::Bytes))
+            .collect();
         let sql = format!(
-            "SELECT COUNT(*) FROM {} {}",
+            "SELECT id, lookup, id_type FROM {} WHERE state = 'held' AND released_at IS NULL \
+             AND lookup IN ({}) ORDER BY id",
             registry.qualified(HELD_TABLE),
-            held_where(registry, 1, chunk.len())
+            marks.join(", ")
         );
-        let params: Vec<Param> = chunk.iter().map(|l| Param::Bytes(l.clone())).collect();
-        n += u64::try_from(registry.query(&sql, &params)?[0].int(0)?).unwrap_or(0);
+        let params: Vec<Param> = chunk.iter().map(|l| Param::Bytes((*l).clone())).collect();
+        for r in registry.query(&sql, &params)? {
+            let lookup = r.bytes(1)?.to_vec();
+            let Some((id_type, value)) = candidates.get(&lookup) else {
+                continue;
+            };
+            out.push(HeldMatch {
+                row: r.int(0)?,
+                id_type: id_type.clone(),
+                held_as: r.opt_text(2)?.unwrap_or("").to_string(),
+                lookup: keys.lookup(id_type, value),
+            });
+        }
     }
-    Ok(n)
+    Ok(out)
 }
 
-/// Release the held files whose identifier the map named: `released_at`
-/// set, and the pseudonymiser writes them on its next run (record 26 §4).
-/// Nothing where the table is not there yet.
-pub fn release_held(registry: &mut Store, lookups: &[Vec<u8>]) -> Result<u64, Error> {
-    if lookups.is_empty() || !migrate::table_exists(registry, HELD_TABLE)? {
-        return Ok(0);
+/// The matches counted by the type that named them and the type they were
+/// held as.
+fn released_by(matches: &[HeldMatch]) -> Vec<Released> {
+    let mut by: Vec<Released> = Vec::new();
+    for m in matches {
+        match by
+            .iter_mut()
+            .find(|r| r.id_type == m.id_type && r.held_as == m.held_as)
+        {
+            Some(r) => r.files += 1,
+            None => by.push(Released {
+                id_type: m.id_type.clone(),
+                held_as: m.held_as.clone(),
+                files: 1,
+            }),
+        }
+    }
+    by
+}
+
+/// Release the held files the map named: `released_at` set, and the row
+/// keyed under the type the map named the value as, so that the
+/// pseudonymiser's next `--held` run finds the identity the map filed and
+/// writes the file (record 26 §4). A match under the held type itself
+/// changes nothing but the stamp.
+pub fn release_matches(registry: &mut Store, matches: &[HeldMatch]) -> Result<(), Error> {
+    if matches.is_empty() {
+        return Ok(());
     }
     let now = now_iso();
-    let mut n = 0u64;
-    for chunk in lookups.chunks(crate::store::SQLITE_KEY_CHUNK) {
-        // the stamp is written as text; the timestamp placeholder casts it
-        // on Postgres, where a bare placeholder would take the column's
-        // type and refuse the text
-        let sql = format!(
-            "UPDATE {} SET released_at = {} {}",
-            registry.qualified(HELD_TABLE),
-            registry.dialect().param(1, Type::Timestamp),
-            held_where(registry, 2, chunk.len())
-        );
-        let mut params: Vec<Param> = vec![Param::from(now.as_str())];
-        params.extend(chunk.iter().map(|l| Param::Bytes(l.clone())));
-        n += registry.execute(&sql, &params)?;
+    let t = table(HELD_TABLE);
+    for m in matches {
+        registry.update_by_id(
+            t,
+            &[
+                ("released_at", Param::from(now.as_str())),
+                ("id_type", Param::from(m.id_type.as_str())),
+                ("lookup", Param::Bytes(m.lookup.clone())),
+            ],
+            "id",
+            m.row,
+        )?;
     }
-    Ok(n)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1383,6 +1499,15 @@ mod tests {
         );
         assert_eq!(r.held_released, 2);
         assert!(r.to_string().contains("2 held file(s) released"));
+        assert_eq!(
+            r.held_released_by,
+            vec![Released {
+                id_type: "patient-id".into(),
+                held_as: "patient-id".into(),
+                files: 2
+            }]
+        );
+        assert!(r.to_string().contains("2 named as patient-id\n"), "{r}");
         let released: Vec<i64> = registry
             .query(
                 "SELECT id FROM pseudonym_file WHERE released_at IS NOT NULL ORDER BY id",
@@ -1518,6 +1643,129 @@ mod tests {
                 }
             }]
         );
+    }
+
+    /// Lab 26, defect 5: the dataset's rule read two study ids in
+    /// `PatientID` as the rule's own type and held their files; a map naming
+    /// them as what they are, `study-id`, releases the files all the same,
+    /// says under which type, and re-keys the rows to the map's type so the
+    /// next run finds the identities the map filed.
+    #[test]
+    fn a_map_naming_a_held_value_under_another_type_releases_its_files() {
+        let (mut registry, mut linkage, keys) = stores();
+        linkage::add_id_type(&mut linkage, "personnummer", None).unwrap();
+        let held = |store: &mut Store, id: i64, id_type: &str, value: &str| {
+            store
+                .execute(
+                    "INSERT INTO pseudonym_file (id, place_id, path, size, mtime, state, shape, lookup, id_type, first_seen, code_anyway) VALUES (?, 1, ?, 0, 0, 'held', 'AA9999', ?, ?, 't', 0)",
+                    &[
+                        Param::Int(id),
+                        Param::from(format!("f{id}")),
+                        Param::Bytes(keys.lookup(id_type, value)),
+                        Param::from(id_type),
+                    ],
+                )
+                .unwrap();
+        };
+        held(&mut registry, 1, "personnummer", "AA1234");
+        held(&mut registry, 2, "personnummer", "AA1234");
+        held(&mut registry, 3, "personnummer", "AA5678");
+        held(&mut registry, 4, "personnummer", "AA9999");
+        // the study ids as identifiers of their type, each with the
+        // person's number as the canonical identifier
+        let cols = columns(&[
+            ("study", "identifier:study-id"),
+            ("nummer", "canonical:personnummer"),
+        ]);
+        let data = rows(&[
+            &["AA1234", "199001011234"],
+            &["AA5678", "198502023456"],
+        ]);
+        let dry = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            true,
+            true,
+        );
+        assert_eq!(dry.held_released, 3, "{dry}");
+        assert_eq!(
+            dry.held_released_by,
+            vec![Released {
+                id_type: "study-id".into(),
+                held_as: "personnummer".into(),
+                files: 3
+            }]
+        );
+        assert!(
+            dry.to_string()
+                .contains("3 named as study-id, held as personnummer"),
+            "{dry}"
+        );
+        assert_eq!(
+            count(
+                &mut registry,
+                "SELECT COUNT(*) FROM pseudonym_file WHERE released_at IS NOT NULL"
+            ),
+            0
+        );
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            true,
+        );
+        assert!(r.written(), "{r}");
+        assert_eq!(r.held_released, 3);
+        let json = r.as_json();
+        assert_eq!(json["held_released_by"][0]["type"], "study-id");
+        assert_eq!(json["held_released_by"][0]["held_as"], "personnummer");
+        assert_eq!(json["held_released_by"][0]["files"], 3);
+        // the released rows are keyed under study-id now, and the fourth,
+        // which no row named, is held as it was
+        let rows_now = registry
+            .query(
+                "SELECT id, id_type, lookup, released_at IS NOT NULL FROM pseudonym_file ORDER BY id",
+                &[],
+            )
+            .unwrap();
+        for r in &rows_now[..3] {
+            assert_eq!(r.text(1).unwrap(), "study-id");
+            assert_eq!(r.int(3).unwrap(), 1);
+        }
+        assert_eq!(
+            rows_now[0].bytes(2).unwrap(),
+            keys.lookup("study-id", "AA1234")
+        );
+        assert_eq!(
+            rows_now[2].bytes(2).unwrap(),
+            keys.lookup("study-id", "AA5678")
+        );
+        assert_eq!(rows_now[3].text(1).unwrap(), "personnummer");
+        assert_eq!(rows_now[3].int(3).unwrap(), 0);
+        // the identities the map filed are found under the rows' new lookups
+        let found = linkage::identities_by_lookup(
+            &mut linkage,
+            &[rows_now[0].bytes(2).unwrap().to_vec()],
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        // the same map again releases nothing more
+        let again = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            true,
+        );
+        assert_eq!(again.held_released, 0);
     }
 
     /// Lab 26, defects 1 and 1b: the pseudonymiser coded a woman's two

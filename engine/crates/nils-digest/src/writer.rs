@@ -364,6 +364,7 @@ impl<'a> Writer<'a> {
                     .row(Level::Subject)
                     .map(|(_, v)| Param::from(v))
                     .collect(),
+                lookup: None,
             })
             .collect();
         let resolved = match self

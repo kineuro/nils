@@ -53,6 +53,9 @@ pub struct Recorded {
     pub released: bool,
     /// A person asked for the held file to be coded anyway.
     pub code_anyway: bool,
+    /// The keyed lookup a held row carries: the rule's, or the one a map
+    /// re-keyed it to when it named the value under another type.
+    pub lookup: Option<Vec<u8>>,
 }
 
 /// What an earlier run recorded for a path that is read again.
@@ -65,6 +68,10 @@ pub struct Prior {
     /// The size or the modification time differ from the record.
     pub changed: bool,
     pub code_anyway: bool,
+    /// The lookup the held row was released under, when a map re-keyed it
+    /// to the type it named the value as: the identity is looked for under
+    /// it first, and under the rule's own lookup otherwise.
+    pub lookup: Option<Vec<u8>>,
 }
 
 /// What to do with a file, given its record.
@@ -97,6 +104,7 @@ pub fn decide(recorded: Option<&Recorded>, size: u64, mtime: i64) -> Decision {
             out_path: r.out_path.clone(),
             changed: true,
             code_anyway: r.code_anyway,
+            lookup: None,
         }));
     }
     match (r.state, &r.out_path, r.out_size) {
@@ -110,6 +118,7 @@ pub fn decide(recorded: Option<&Recorded>, size: u64, mtime: i64) -> Decision {
             out_path: None,
             changed: false,
             code_anyway: r.code_anyway,
+            lookup: if r.released { r.lookup.clone() } else { None },
         })),
         (state::HELD, _, _) => Decision::StillHeld {
             id: r.id,
@@ -122,6 +131,7 @@ pub fn decide(recorded: Option<&Recorded>, size: u64, mtime: i64) -> Decision {
             out_path: r.out_path.clone(),
             changed: false,
             code_anyway: r.code_anyway,
+            lookup: None,
         })),
     }
 }
@@ -148,7 +158,7 @@ impl Records {
         let empty = store.query_opt(&probe, &[Param::Int(place_id)])?.is_none();
         let released = d.text_of(t.column("released_at").expect("released_at"));
         let sql = format!(
-            "SELECT path, size, mtime, state, out_path, out_size, shape, {released} IS NOT NULL, code_anyway, id \
+            "SELECT path, size, mtime, state, out_path, out_size, shape, {released} IS NOT NULL, code_anyway, id, lookup \
              FROM {qualified} WHERE place_id = {} AND dir = {}",
             d.param(1, Type::Int),
             d.param(2, Type::Text)
@@ -194,6 +204,7 @@ impl Records {
                         shape: r.opt_text(6)?.map(str::to_string),
                         released: flag(7),
                         code_anyway: flag(8),
+                        lookup: r.opt_bytes(10)?.map(<[u8]>::to_vec),
                     },
                 );
             }
@@ -324,6 +335,7 @@ mod tests {
             shape: Some("999".into()),
             released: false,
             code_anyway: false,
+            lookup: None,
         }
     }
 
@@ -345,7 +357,8 @@ mod tests {
                 id: 1,
                 out_path: Some("c/d/001/00001.dcm".into()),
                 changed: true,
-                code_anyway: false
+                code_anyway: false,
+                lookup: None
             }))
         );
         assert!(matches!(
@@ -366,6 +379,7 @@ mod tests {
         );
         let released = Recorded {
             released: true,
+            lookup: Some(b"re-keyed".to_vec()),
             ..held.clone()
         };
         assert_eq!(
@@ -374,7 +388,8 @@ mod tests {
                 id: 1,
                 out_path: None,
                 changed: false,
-                code_anyway: false
+                code_anyway: false,
+                lookup: Some(b"re-keyed".to_vec())
             }))
         );
         let anyway = Recorded {
@@ -387,7 +402,8 @@ mod tests {
                 id: 1,
                 out_path: None,
                 changed: false,
-                code_anyway: true
+                code_anyway: true,
+                lookup: None
             }))
         );
         let refused = Recorded {

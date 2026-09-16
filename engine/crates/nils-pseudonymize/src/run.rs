@@ -275,6 +275,9 @@ fn mark_failed(registry: &mut Registry, run: &Run, error: &str) {
 struct Ask {
     ident: Ident,
     make: Make,
+    /// The lookup a map released the file's held row under, when it named
+    /// the value under another type than the rule reads it as.
+    lookup: Option<Vec<u8>>,
     reply: Sender<Answer>,
 }
 
@@ -545,21 +548,48 @@ fn execute(
     recorder.finish(tally, elapsed, cancelled)
 }
 
+/// One held row a `--held` run reads: the row, its path, whether a person
+/// asked for it to be coded anyway, and the lookup a map released it under
+/// when it did.
+struct HeldRow {
+    id: i64,
+    rel: String,
+    code_anyway: bool,
+    released_under: Option<Vec<u8>>,
+}
+
 /// The held rows a map released or a person coded anyway (record 26 §4):
 /// what `--held` reads, and nothing else.
-fn held_rows(store: &mut Store, place_id: i64) -> Result<Vec<(i64, String, bool)>, HomeError> {
+fn held_rows(store: &mut Store, place_id: i64) -> Result<Vec<HeldRow>, HomeError> {
     let d = store.dialect();
     let t = table("pseudonym_file");
     let released = d.text_of(t.column("released_at").expect("released_at"));
     let sql = format!(
-        "SELECT id, path, code_anyway FROM {} WHERE place_id = {} AND state = 'held' \
+        "SELECT id, path, code_anyway, {released} IS NOT NULL, lookup FROM {} \
+         WHERE place_id = {} AND state = 'held' \
          AND ({released} IS NOT NULL OR code_anyway = 1) ORDER BY id",
         store.qualified("pseudonym_file"),
         d.param(1, Type::Int)
     );
     let rows = store.query(&sql, &[Param::Int(place_id)])?;
     rows.iter()
-        .map(|r| Ok((r.int(0)?, r.text(1)?.to_string(), r.int(2)? != 0)))
+        .map(|r| {
+            let released = match r.get(3) {
+                nils_registry::store::Cell::Bool(b) => *b,
+                nils_registry::store::Cell::Int(n) => *n != 0,
+                _ => false,
+            };
+            Ok(HeldRow {
+                id: r.int(0)?,
+                rel: r.text(1)?.to_string(),
+                code_anyway: r.int(2)? != 0,
+                released_under: if released {
+                    r.opt_bytes(4)?.map(<[u8]>::to_vec)
+                } else {
+                    None
+                },
+            })
+        })
         .collect::<Result<_, nils_registry::Error>>()
         .map_err(HomeError::Store)
 }
@@ -568,15 +598,21 @@ fn held_rows(store: &mut Store, place_id: i64) -> Result<Vec<(i64, String, bool)
 /// with its record beside it; a file that is gone is refused.
 fn held_source(
     root: &Path,
-    rows: Vec<(i64, String, bool)>,
+    rows: Vec<HeldRow>,
     tasks: &Sender<Task>,
     items: &Sender<Item>,
     cancel: &Cancel,
 ) {
-    for (id, rel, code_anyway) in rows {
+    for row in rows {
         if cancel.stop() {
             break;
         }
+        let HeldRow {
+            id,
+            rel,
+            code_anyway,
+            released_under,
+        } = row;
         let path = root.join(&rel);
         let (_, dir) = relative(Path::new(""), Path::new(&rel));
         let sent = match std::fs::metadata(&path) {
@@ -591,6 +627,7 @@ fn held_source(
                         out_path: None,
                         changed: false,
                         code_anyway,
+                        lookup: released_under,
                     }),
                 })
                 .is_err(),
@@ -655,6 +692,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                             out_path: Some(out_path),
                             changed: false,
                             code_anyway: false,
+                            lookup: None,
                         }),
                     ),
                 }
@@ -705,6 +743,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
             .send(Ask {
                 ident: prepared.ident.clone(),
                 make,
+                lookup: prior.as_ref().and_then(|p| p.lookup.clone()),
                 reply: reply_tx.clone(),
             })
             .is_err()
@@ -983,6 +1022,7 @@ impl<'a> Recorder<'a> {
                 .map(|a| Who {
                     ident: &a.ident,
                     subject: Vec::new(),
+                    lookup: a.lookup.clone(),
                 })
                 .collect();
             let store = self.registry.store();

@@ -74,6 +74,11 @@ impl From<nils_registry::Error> for ResolveError {
 pub struct Who<'a> {
     pub ident: &'a Ident,
     pub subject: Vec<Param>,
+    /// A keyed lookup to look for the identity under before the rule's
+    /// own: the one a map released a held file's row under when it named
+    /// the value as another type (record 26 §4). A subject found under it
+    /// stands; nothing is made or attached under it.
+    pub lookup: Option<Vec<u8>>,
 }
 
 /// How a file's subject was found.
@@ -221,31 +226,42 @@ impl Resolver {
             found: vec![Found::Unknown; n],
             ..Resolved::default()
         };
-        // the lookups the cache does not hold, with the first file of each
+        // the lookups the cache does not hold, with the first file of each:
+        // the rule's own, and the one a map released the file under
         let mut misses: HashMap<Vec<u8>, usize> = HashMap::new();
+        let mut given: HashMap<Vec<u8>, usize> = HashMap::new();
         let mut lookups: Vec<Vec<u8>> = Vec::with_capacity(n);
         for (i, w) in who.iter().enumerate() {
             let lookup = self.lookup(w.ident);
-            match self.identities.get(&lookup) {
-                Some(&id) => out.found[i] = Found::Known(id),
+            match self.hit(w, &lookup) {
+                Some(id) => out.found[i] = Found::Known(id),
                 None => {
                     misses.entry(lookup.clone()).or_insert(i);
+                    if let Some(g) = &w.lookup {
+                        given.entry(g.clone()).or_insert(i);
+                    }
                 }
             }
             lookups.push(lookup);
         }
         if !misses.is_empty() {
-            let keys: Vec<Vec<u8>> = misses.keys().cloned().collect();
+            let keys: Vec<Vec<u8>> = misses.keys().chain(given.keys()).cloned().collect();
             for row in linkage::identities_by_lookup(&mut self.linkage, &keys)? {
                 self.identities.put(row.lookup.clone(), row.subject_id);
                 out.matched += 1;
                 misses.remove(&row.lookup);
+                if let Some(i) = given.remove(&row.lookup) {
+                    misses.remove(&lookups[i]);
+                }
             }
+            // a file found under the lookup it was released under is not a
+            // miss under its own, whichever file first named that lookup
+            misses.retain(|_, i| self.hit(&who[*i], &lookups[*i]).is_none());
         }
         if make == Make::Nothing {
             // the rest are identifiers no subject holds, and none is made
-            for (i, lookup) in lookups.iter().enumerate() {
-                if let Some(&id) = self.identities.get(lookup) {
+            for (i, w) in who.iter().enumerate() {
+                if let Some(id) = self.hit(w, &lookups[i]) {
                     out.found[i] = Found::Known(id);
                 }
             }
@@ -390,9 +406,9 @@ impl Resolver {
                 }
             }
         }
-        for (i, lookup) in lookups.iter().enumerate() {
+        for (i, w) in who.iter().enumerate() {
             if out.found[i] == Found::Unknown
-                && let Some(&id) = self.identities.get(lookup)
+                && let Some(id) = self.hit(w, &lookups[i])
             {
                 out.found[i] = Found::Known(id);
             }
@@ -401,6 +417,17 @@ impl Resolver {
             return Err(missing_row("subject").into());
         }
         Ok(out)
+    }
+
+    /// The subject the cache holds for a file: under the lookup it was
+    /// released under, if one, else under the rule's own.
+    fn hit(&mut self, w: &Who<'_>, own: &[u8]) -> Option<i64> {
+        if let Some(g) = &w.lookup
+            && let Some(&id) = self.identities.get(g)
+        {
+            return Some(id);
+        }
+        self.identities.get(own).copied()
     }
 
     /// An identity row for the subject, filed after the commit (§9.3), and
