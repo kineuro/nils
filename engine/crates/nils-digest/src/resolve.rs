@@ -397,7 +397,7 @@ impl Resolver {
                 out.found[i] = Found::Known(id);
             }
         }
-        if out.found.iter().any(|f| *f == Found::Unknown) {
+        if out.found.contains(&Found::Unknown) {
             return Err(missing_row("subject").into());
         }
         Ok(out)

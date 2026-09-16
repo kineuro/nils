@@ -217,9 +217,10 @@ pub static MIGRATIONS: &[Migration] = &[
 ];
 
 /// Record 26 §3, §4 and §14: a batch says which step it is, `digest` or
-/// `pseudonymize`, every batch from before being a digest; and a subject
-/// says whether the pseudonymiser made it from an identifier no map named,
-/// which no subject from before was.
+/// `pseudonymize`, every batch from before being a digest; a subject says
+/// whether the pseudonymiser made it from an identifier no map named,
+/// which no subject from before was; and the pseudonymiser's rows carry
+/// their directory, read one directory at a time.
 fn a_batch_has_a_kind_and_a_subject_may_be_provisional(
     store: &mut Store,
     kind: Kind,
@@ -229,6 +230,8 @@ fn a_batch_has_a_kind_and_a_subject_may_be_provisional(
     }
     add_columns(store, "ingest_batch", &["kind"])?;
     add_columns(store, "subject", &["provisional"])?;
+    add_columns(store, "pseudonym_file", &["dir"])?;
+    add_indexes(store, "pseudonym_file")?;
     if table_exists(store, "ingest_batch")? {
         store.execute(
             &format!(

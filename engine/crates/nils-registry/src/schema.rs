@@ -837,8 +837,11 @@ fn build_registry() -> Vec<Table> {
                 col("id", Type::Id),
                 // The dataset, a source place, whose originals hold the file.
                 req("place_id", Type::Int),
-                // The file's path under the originals tree.
+                // The file's path under the originals tree, and its
+                // directory part, so a run reads its records one directory
+                // at a time as the digest reads `source_file`.
                 req("path", Type::Text),
+                col("dir", Type::Text),
                 // Its size and modification time as last read, in
                 // nanoseconds since the epoch as `source_file` keeps them; a
                 // file with both unchanged is not read again.
@@ -879,6 +882,7 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .unique(&["place_id", "path"])
+        .index(&["place_id", "dir"])
         .index(&["place_id", "state"]),
         Table::new(
             "classification",
