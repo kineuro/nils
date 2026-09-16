@@ -487,6 +487,36 @@ want of a map. Wherever a location is named, `@name` is the pseudonymised tree
 and `@name/originals` the originals, which a digest is refused: the registry
 never points at an identified file.
 
+**Acting on the originals** (record 26 §1). `originals_kept` is declared, and
+the acts beside `kept` are `nils place originals <dataset> --vault --into PLACE
+--why TEXT` and `--purge --why TEXT`, and `POST /api/places/{id}/originals
+{do, into, why}` under `data:work` at detail sensitive, since they move and
+delete identified files; both are one job kind, `originals`. `GET
+/api/places/{id}/originals` (`data:see`) answers what the act would do without
+doing it: `{files, bytes, verified, unverified, held, ready, why}`, and the
+keyboard prints the same before it acts. A **vault** moves the originals into
+the place `into` names, a `backup` place in force, the one role the engine never
+reads for data, under `originals/<dataset>` there: a rename where the
+destination is on the same filesystem, and otherwise a copy whose digest is
+compared with the source's before the source is removed, so no file is ever
+removed whose copy did not verify. A **purge** deletes them, and is refused
+while any file of the dataset waits for a map, the pseudonymiser's held rows or
+a digest's `identity.unmapped` quarantine, because those originals are the only
+copy of those people's scans; and unless every original is verified in the
+pseudonymised tree, the copy there at the size and the digest that were
+recorded, hashed again at purge time rather than trusted from the row. A
+dataset read in place, whose folder is its own pseudonymised tree, is refused
+outright: there is nothing to verify against. Each refusal names its count in
+words, and the door refuses in the same words the job does. Both acts resume,
+since a file that has moved is not there the next time, and stop at a heartbeat
+on a cancel with what was done kept. The job's result is
+`{did, files, bytes, into, path, verified, seconds}`. On success the dataset
+records `originals_kept` and `originals_vault`, the place a vault used, and the
+act is audited as `originals.vault` or `originals.purge` with its counts and
+the reason, which moves the epoch; until then the dataset reads `kept`. Neither
+act touches the pseudonymised tree, the registry's rows or the linkage store: a
+person keeps their code and their history whatever becomes of the originals.
+
 **The pseudonymiser** (record 26 §3, §4, §7 and §14). `nils pseudonymize
 @dataset [--name N] [--workers N] [--held] [--dry-run] [--json]` is a verb and a
 job kind, `pseudonymize`, queued through `POST /api/jobs` under `data:work` at
