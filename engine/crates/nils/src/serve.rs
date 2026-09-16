@@ -1280,6 +1280,18 @@ fn routed(
         detail
     };
     caller.allowed(path, need, detail)?;
+    // record 26: the linkage doors, under the table's grants like the rest
+    if let Some(r) = crate::linkage_doors::route(
+        &doors.home,
+        registry,
+        caller,
+        method.as_str(),
+        &segs,
+        query,
+        body,
+    ) {
+        return r;
+    }
     let id_at = |i: usize| -> Result<i64, Reply> {
         segs.get(i)
             .and_then(|s| s.parse::<i64>().ok())
@@ -2198,12 +2210,15 @@ fn routed(
                     ),
                 ));
             }
-            // Wave 4c §6.5: of the linkage verbs only `import` is a job the
-            // door queues; purge and the rest stay on the command line.
-            if command[0] == "linkage" && command.get(1).map(String::as_str) != Some("import") {
+            // Wave 4c §6.5 and record 26 §6: of the linkage verbs `import`
+            // and `merge` are jobs the door queues; purge and the rest stay
+            // on the command line.
+            if command[0] == "linkage"
+                && !matches!(command.get(1).map(String::as_str), Some("import" | "merge"))
+            {
                 return Err(Reply::error(
                     400,
-                    "linkage import is the one linkage verb the door queues",
+                    "linkage import and linkage merge are the linkage verbs the door queues",
                 ));
             }
             // Record 26 §7: the chain, `then: [command, ...]`, each a
@@ -2739,6 +2754,16 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         | ("PUT", ["api", "cohorts", _])
         | ("POST", ["api", "cohorts", _, "members"])
         | ("POST", ["api", "ask", "handles", _, "promote"]) => (Need::One("data:work"), Plain),
+        // record 26 §15: the identifier types and the held list are counts
+        // and shapes; the map applied, the held reveal and the merge read
+        // identifiers. The imports door answers a dry run at plain and
+        // checks sensitive itself for the apply.
+        ("GET", ["api", "linkage", "types" | "held"]) => (Need::One("data:see"), Plain),
+        ("POST", ["api", "linkage", "types" | "imports"])
+        | ("POST", ["api", "linkage", "held", "code"]) => (Need::One("data:work"), Plain),
+        ("POST", ["api", "linkage", "held", "reveal"]) | ("POST", ["api", "linkage", "merge"]) => {
+            (Need::One("data:work"), Detail::Sensitive)
+        }
         // the Review page, and the knob engine of Wave 4c §6.6; record 26
         // §11: why a stack was judged so is a review reading
         ("GET", ["api", "review" | "overlays" | "quarantine"])
@@ -3032,6 +3057,7 @@ fn capabilities(
         "GET /api/instances/{stack}/render/{level}/{z}",
     ]
     .iter()
+    .chain(crate::linkage_doors::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
     .map(|d| (*d).to_string())
     .collect();
@@ -3734,6 +3760,69 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one place",
             "Changing a place",
             "Changed a place",
+        ),
+        row(
+            "GET /api/linkage/types",
+            false,
+            false,
+            "bounded",
+            "every type",
+            "Reading the identifier types",
+            "Read the identifier types",
+        ),
+        row(
+            "POST /api/linkage/types",
+            true,
+            true,
+            "bounded",
+            "one type",
+            "Adding an identifier type",
+            "Added an identifier type",
+        ),
+        row(
+            "POST /api/linkage/imports",
+            true,
+            false,
+            "job",
+            "one report",
+            "Providing an identifier map",
+            "Provided an identifier map",
+        ),
+        row(
+            "GET /api/linkage/held",
+            false,
+            false,
+            "bounded",
+            "one dataset's shapes",
+            "Reading the held files",
+            "Read the held files",
+        ),
+        row(
+            "POST /api/linkage/held/code",
+            true,
+            true,
+            "bounded",
+            "one count",
+            "Coding the held files anyway",
+            "Coded the held files anyway",
+        ),
+        row(
+            "POST /api/linkage/held/reveal",
+            true,
+            false,
+            "bounded",
+            "one dataset's identifiers",
+            "Revealing the held identifiers",
+            "Revealed the held identifiers",
+        ),
+        row(
+            "POST /api/linkage/merge",
+            true,
+            false,
+            "job",
+            "one id",
+            "Merging two subjects",
+            "Merged two subjects",
         ),
         row(
             "GET /api/backups",

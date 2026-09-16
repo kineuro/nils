@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 41;
+pub const SCHEMA_VERSION: i64 = 42;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +218,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 41,
         apply: a_cohort_is_fed_retired_and_released_under_its_policy,
     },
+    Migration {
+        version: 42,
+        apply: a_subject_may_be_merged,
+    },
 ];
 
 /// Record 26 §3, §4 and §14: a batch says which step it is, `digest` or
@@ -305,6 +309,35 @@ fn a_source_place_is_a_dataset(store: &mut Store, kind: Kind) -> Result<(), Erro
         )?;
     }
     Ok(())
+}
+
+/// Record 26 §6: a subject merged into another keeps its row, marked, and
+/// the linkage store has the type its code is filed under on the canonical
+/// subject. A store from before this gains the type; a fresh one has it
+/// from the seed.
+fn a_subject_may_be_merged(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    match kind {
+        Kind::Registry => {
+            add_columns(store, "subject", &["merged_into", "merged_at"])?;
+            add_indexes(store, "subject")
+        }
+        Kind::Linkage => {
+            let (name, description) = ID_TYPES[2];
+            debug_assert_eq!(name, schema::SUBJECT_CODE_TYPE);
+            if crate::linkage::id_type_id(store, name)?.is_some() {
+                return Ok(());
+            }
+            let table = store.qualified("id_type");
+            let d = store.dialect();
+            let sql = format!(
+                "INSERT INTO {table} (name, description) VALUES ({}, {})",
+                d.param(1, crate::schema::Type::Text),
+                d.param(2, crate::schema::Type::Text)
+            );
+            store.execute(&sql, &[Param::from(name), Param::from(description)])?;
+            Ok(())
+        }
+    }
 }
 
 /// Wave 4b §11.3 and §11.4: the case folded companions of the fingerprint's
@@ -1216,7 +1249,7 @@ fn add_columns(store: &mut Store, table: &str, names: &[&str]) -> Result<(), Err
     Ok(())
 }
 
-fn column_exists(store: &mut Store, table: &str, column: &str) -> Result<bool, Error> {
+pub fn column_exists(store: &mut Store, table: &str, column: &str) -> Result<bool, Error> {
     Ok(match store {
         Store::Sqlite(_) => store
             .query(&format!("PRAGMA table_info({table})"), &[])?
@@ -1234,7 +1267,9 @@ fn column_exists(store: &mut Store, table: &str, column: &str) -> Result<bool, E
     })
 }
 
-fn table_exists(store: &mut Store, name: &str) -> Result<bool, Error> {
+/// Whether the store has a table of that name, declared or not: the held
+/// doors read a table another slice declares, when it is there.
+pub fn table_exists(store: &mut Store, name: &str) -> Result<bool, Error> {
     Ok(match store {
         Store::Sqlite(_) => store
             .query_opt(
@@ -1463,11 +1498,36 @@ mod tests {
             .query("SELECT name FROM id_type ORDER BY id", &[])
             .unwrap();
         let names: Vec<&str> = rows.iter().map(|r| r.text(0).unwrap()).collect();
-        assert_eq!(names, vec!["patient-id", "study-instance-uid"]);
+        assert_eq!(
+            names,
+            vec!["patient-id", "study-instance-uid", "subject-code"]
+        );
         assert_eq!(
             standing(&mut store, Kind::Linkage).unwrap(),
             Standing::Current
         );
+    }
+
+    /// A linkage store seeded before record 26 gains `subject-code` from
+    /// migration 39, once.
+    #[test]
+    fn a_linkage_store_from_before_gains_the_subject_code_type() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 38) {
+            (m.apply)(&mut store, Kind::Linkage).unwrap();
+        }
+        store
+            .execute("DELETE FROM id_type WHERE name = 'subject-code'", &[])
+            .unwrap();
+        a_subject_may_be_merged(&mut store, Kind::Linkage).unwrap();
+        a_subject_may_be_merged(&mut store, Kind::Linkage).unwrap();
+        let rows = store
+            .query(
+                "SELECT COUNT(*) FROM id_type WHERE name = 'subject-code'",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rows[0].int(0).unwrap(), 1);
     }
 }
 

@@ -232,7 +232,7 @@ fn source(
 
     let subjects = count(
         store,
-        &format!("SELECT COUNT(*) FROM {subject} x {of_source}"),
+        &format!("SELECT COUNT(*) FROM {subject} x {of_source} AND x.merged_into IS NULL"),
     )?;
     let studies = count(
         store,

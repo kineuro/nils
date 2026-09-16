@@ -859,76 +859,100 @@ pub fn withdraw(registry: &mut Registry, decision: i64, who: &str) -> Result<i64
     Ok(reopened)
 }
 
+// ------------------------------------------------------------ identity items
+
 /// Record 26 §4: the pseudonymiser holds the files of an identifier the
 /// linkage store does not know, and asks once per dataset and shape of
-/// identifier, with the files held and when the first was seen as the
-/// evidence; never the identifier. The item is keyed `place:<id>|shape:<s>`
-/// so a later run finds it, and a run that finds nothing held for the shape
-/// closes it.
+/// identifier (digits as 9, letters as A), with the files held and when the
+/// first was seen as the evidence; never a value. The item is keyed
+/// `place:<id>|shape:<shape>` so a later run finds it, and a run that finds
+/// nothing held under the shape closes it.
 pub const UNMAPPED_KIND: &str = "identity.unmapped";
 
 /// Record 26 §4: a subject the pseudonymiser made from an identifier no
-/// map named, coded anyway under the key: one item per subject, the files
-/// as evidence, so a person knows the subject is provisional until a map
-/// names it.
+/// map named, coded anyway under the key: one open item per subject, the
+/// files written under it as evidence, so a person knows the subject is
+/// provisional until a map names it. A merge of the subject closes it.
 pub const PROVISIONAL_KIND: &str = "identity.provisional";
 
-/// The status a run gives an item it answers itself: nothing to decide,
-/// the files it asked about are no longer held.
-pub const RESOLVED: &str = "resolved";
+/// The status a run gives an item it answers itself: a later run asked
+/// again and found nothing held under the shape, so there is nothing left
+/// to decide. The review-item contract's word for that is superseded.
+pub const RESOLVED: &str = "superseded";
 
-fn group_key_unmapped(place_id: i64, shape: &str) -> String {
+/// What groups the open `identity.unmapped` item of a dataset and shape,
+/// so a later run finds it by an exact text and not by matching JSON.
+pub fn unmapped_key(place_id: i64, shape: &str) -> String {
     format!("place:{place_id}|shape:{shape}")
 }
 
-/// The open `identity.unmapped` item of a dataset and shape, if there is one.
-fn open_unmapped(store: &mut Store, key: &str) -> Result<Option<i64>, StoreError> {
+/// What groups the open `identity.provisional` item of a subject.
+pub fn provisional_key(subject_id: i64) -> String {
+    format!("subject:{subject_id}")
+}
+
+/// The open item of a kind under a group key, if there is one: its id and
+/// its evidence as written.
+fn open_item(
+    store: &mut Store,
+    kind: &str,
+    key: &str,
+) -> Result<Option<(i64, serde_json::Value)>, StoreError> {
     let d = store.dialect();
+    let t = table("review_item");
     let sql = format!(
-        "SELECT id FROM {} WHERE kind = {} AND group_key = {} AND status = 'open' ORDER BY id DESC LIMIT 1",
+        "SELECT id, {} FROM {} WHERE kind = {} AND group_key = {} AND status = 'open' ORDER BY id DESC LIMIT 1",
+        d.text_of(t.column("evidence").expect("evidence")),
         store.qualified("review_item"),
         d.param(1, Type::Text),
         d.param(2, Type::Text),
     );
-    store
-        .query_opt(&sql, &[Param::from(UNMAPPED_KIND), Param::from(key)])?
-        .map(|r| r.int(0))
-        .transpose()
+    let Some(r) = store.query_opt(&sql, &[Param::from(kind), Param::from(key)])? else {
+        return Ok(None);
+    };
+    let id = r.int(0)?;
+    let evidence = r
+        .opt_text(1)?
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    Ok(Some((id, evidence)))
 }
 
-/// Open, or bring up to date, the one item for the files a dataset holds
-/// under one shape of identifier: `{files, first_seen}` as evidence and the
-/// batch that last counted them. Answers the item's id.
-pub fn raise_unmapped(
+/// Bring an open item up to date: its evidence, its members and the job
+/// that last asked.
+fn refresh_item(
     store: &mut Store,
-    place_id: i64,
-    shape: &str,
-    files: i64,
-    first_seen: &str,
-    batch_id: Option<i64>,
+    id: i64,
+    evidence: &serde_json::Value,
+    members: i64,
+    job_id: Option<i64>,
+) -> Result<(), StoreError> {
+    store.update_by_id(
+        table("review_item"),
+        &[
+            ("evidence", Param::from(evidence.to_string())),
+            ("members", Param::Int(members)),
+            ("job_id", job_id.map_or(Param::Null, Param::Int)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(())
+}
+
+/// Open one item of a kind under a group key. Answers its id.
+#[allow(clippy::too_many_arguments)]
+fn open_new(
+    store: &mut Store,
+    kind: &str,
+    scope: &str,
+    key: &str,
+    reference: &serde_json::Value,
+    evidence: &serde_json::Value,
+    members: i64,
+    job_id: Option<i64>,
     now: &str,
 ) -> Result<i64, StoreError> {
-    let key = group_key_unmapped(place_id, shape);
-    let evidence = serde_json::json!({
-        "files": files,
-        "first_seen": first_seen,
-        "shape": shape,
-        "place_id": place_id,
-        "batch_id": batch_id,
-    });
-    if let Some(id) = open_unmapped(store, &key)? {
-        store.update_by_id(
-            table("review_item"),
-            &[
-                ("evidence", Param::from(evidence.to_string())),
-                ("members", Param::Int(files)),
-            ],
-            "id",
-            id,
-        )?;
-        return Ok(id);
-    }
-    let reference = serde_json::json!({ "place_id": place_id, "shape": shape });
     let rows = store.insert(
         &Insert::new(
             table("review_item"),
@@ -939,25 +963,75 @@ pub fn raise_unmapped(
                 "evidence",
                 "status",
                 "created_at",
+                "job_id",
                 "members",
                 "group_key",
             ],
         )
         .returning(&["id"]),
         &[vec![
-            Param::from(UNMAPPED_KIND),
-            Param::from("dataset"),
+            Param::from(kind),
+            Param::from(scope),
             Param::from(reference.to_string()),
             Param::from(evidence.to_string()),
             Param::from("open"),
             Param::from(now),
-            Param::Int(files),
-            Param::from(key.as_str()),
+            job_id.map_or(Param::Null, Param::Int),
+            Param::Int(members),
+            Param::from(key),
         ]],
     )?;
     rows.first()
         .ok_or_else(|| StoreError::Message("the review item was not written back".into()))?
         .int(0)
+}
+
+/// The held files of one dataset and shape, as the pseudonymiser counts them.
+#[derive(Debug, Clone)]
+pub struct Unmapped<'a> {
+    pub place_id: i64,
+    pub place: &'a str,
+    pub shape: &'a str,
+    pub id_type: &'a str,
+    pub files: i64,
+    /// When the first file under the shape was held.
+    pub first_seen: &'a str,
+    pub batch_id: Option<i64>,
+    pub job_id: Option<i64>,
+}
+
+/// Open, or bring up to date, the one `identity.unmapped` item of a dataset
+/// and shape: an open one gets the new count, batch and job, else one is
+/// opened at batch scope with `{place_id, place, shape, id_type}` as its
+/// reference and `{files, first_seen, batch_id, shape, id_type}` as its
+/// evidence. Answers the item's id.
+pub fn raise_unmapped(store: &mut Store, u: &Unmapped<'_>, now: &str) -> Result<i64, StoreError> {
+    let key = unmapped_key(u.place_id, u.shape);
+    let reference = serde_json::json!({
+        "place_id": u.place_id, "place": u.place, "shape": u.shape, "id_type": u.id_type,
+    });
+    let evidence = serde_json::json!({
+        "files": u.files,
+        "first_seen": u.first_seen,
+        "batch_id": u.batch_id,
+        "shape": u.shape,
+        "id_type": u.id_type,
+    });
+    if let Some((id, _)) = open_item(store, UNMAPPED_KIND, &key)? {
+        refresh_item(store, id, &evidence, u.files, u.job_id)?;
+        return Ok(id);
+    }
+    open_new(
+        store,
+        UNMAPPED_KIND,
+        "batch",
+        &key,
+        &reference,
+        &evidence,
+        u.files,
+        u.job_id,
+        now,
+    )
 }
 
 /// Close the item of a dataset and shape, once a run holds nothing under
@@ -968,8 +1042,8 @@ pub fn close_unmapped(
     shape: &str,
     now: &str,
 ) -> Result<bool, StoreError> {
-    let key = group_key_unmapped(place_id, shape);
-    let Some(id) = open_unmapped(store, &key)? else {
+    let key = unmapped_key(place_id, shape);
+    let Some((id, _)) = open_item(store, UNMAPPED_KIND, &key)? else {
         return Ok(false);
     };
     store.update_by_id(
@@ -1010,85 +1084,102 @@ pub fn open_unmapped_shapes(store: &mut Store, place_id: i64) -> Result<Vec<Stri
         .collect()
 }
 
+/// A subject coded from an identifier the map did not know.
+#[derive(Debug, Clone)]
+pub struct Provisional<'a> {
+    pub subject_id: i64,
+    pub code: &'a str,
+    pub id_type: &'a str,
+    pub shape: &'a str,
+    pub place_id: i64,
+    pub place: &'a str,
+    /// The files written under the subject by this run, counted up on an
+    /// item already open.
+    pub files: i64,
+    pub batch_id: Option<i64>,
+    pub job_id: Option<i64>,
+}
+
 /// One `identity.provisional` item per subject: opened when the
-/// pseudonymiser makes the subject, its evidence the files written under
-/// it, counted up by a later run; never an identifier. Answers the item's id.
+/// pseudonymiser makes the subject, with `{subject_id, code}` as its
+/// reference and `{files, id_type, shape, place_id, place, batch_id}` as
+/// its evidence, the files counted up by a later run; never an identifier.
+/// Answers the item's id.
 pub fn raise_provisional(
     store: &mut Store,
-    subject_id: i64,
-    code: &str,
-    files: i64,
-    batch_id: Option<i64>,
+    p: &Provisional<'_>,
     now: &str,
 ) -> Result<i64, StoreError> {
-    let d = store.dialect();
-    let key = format!("subject:{subject_id}");
-    let t = table("review_item");
-    let sql = format!(
-        "SELECT id, {} FROM {} WHERE kind = {} AND group_key = {} AND status = 'open' ORDER BY id DESC LIMIT 1",
-        d.text_of(t.column("evidence").expect("evidence")),
-        store.qualified("review_item"),
-        d.param(1, Type::Text),
-        d.param(2, Type::Text),
-    );
-    if let Some(r) = store.query_opt(
-        &sql,
-        &[Param::from(PROVISIONAL_KIND), Param::from(key.as_str())],
-    )? {
-        let id = r.int(0)?;
-        let mut evidence: serde_json::Value = r
-            .opt_text(1)?
-            .and_then(|t| serde_json::from_str(t).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
+    let key = provisional_key(p.subject_id);
+    let reference = serde_json::json!({ "subject_id": p.subject_id, "code": p.code });
+    if let Some((id, mut evidence)) = open_item(store, PROVISIONAL_KIND, &key)? {
         let before = evidence["files"].as_i64().unwrap_or(0);
-        evidence["files"] = serde_json::json!(before + files);
-        evidence["batch_id"] = serde_json::json!(batch_id);
-        store.update_by_id(
-            t,
-            &[("evidence", Param::from(evidence.to_string()))],
-            "id",
-            id,
-        )?;
+        evidence["files"] = serde_json::json!(before + p.files);
+        evidence["batch_id"] = serde_json::json!(p.batch_id);
+        refresh_item(store, id, &evidence, 1, p.job_id)?;
         return Ok(id);
     }
-    let reference = serde_json::json!({ "subject_id": subject_id, "code": code });
-    let evidence = serde_json::json!({ "files": files, "batch_id": batch_id });
-    let rows = store.insert(
-        &Insert::new(
-            t,
-            &[
-                "kind",
-                "scope",
-                "ref",
-                "evidence",
-                "status",
-                "created_at",
-                "group_key",
-            ],
-        )
-        .returning(&["id"]),
-        &[vec![
+    let evidence = serde_json::json!({
+        "files": p.files,
+        "id_type": p.id_type,
+        "shape": p.shape,
+        "place_id": p.place_id,
+        "place": p.place,
+        "batch_id": p.batch_id,
+    });
+    open_new(
+        store,
+        PROVISIONAL_KIND,
+        "subject",
+        &key,
+        &reference,
+        &evidence,
+        1,
+        p.job_id,
+        now,
+    )
+}
+
+/// Close the open `identity.provisional` item of a subject, when the
+/// subject was merged: the person is now known under the canonical code.
+/// Returns how many closed (one, or none).
+pub fn close_provisional(
+    store: &mut Store,
+    subject_id: i64,
+    actor: &str,
+    decision: &serde_json::Value,
+) -> Result<u64, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET status = 'superseded', decided_at = {}, actor = {}, decision = {} \
+         WHERE kind = {} AND status = 'open' AND group_key = {}",
+        store.qualified("review_item"),
+        d.param(1, Type::Timestamp),
+        d.param(2, Type::Text),
+        d.param(3, Type::Json),
+        d.param(4, Type::Text),
+        d.param(5, Type::Text)
+    );
+    store.execute(
+        &sql,
+        &[
+            Param::from(now_iso()),
+            Param::from(actor),
+            Param::from(decision.to_string()),
             Param::from(PROVISIONAL_KIND),
-            Param::from("subject"),
-            Param::from(reference.to_string()),
-            Param::from(evidence.to_string()),
-            Param::from("open"),
-            Param::from(now),
-            Param::from(key.as_str()),
-        ]],
-    )?;
-    rows.first()
-        .ok_or_else(|| StoreError::Message("the review item was not written back".into()))?
-        .int(0)
+            Param::from(provisional_key(subject_id)),
+        ],
+    )
 }
 
 #[cfg(test)]
-mod tests {
+mod identity_items {
     use super::*;
+    use crate::migrate::{self, Kind};
 
     fn store() -> Store {
         let mut store = Store::sqlite_in_memory().unwrap();
-        crate::migrate::migrate(&mut store, crate::migrate::Kind::Registry).unwrap();
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
         store
     }
 
@@ -1105,39 +1196,89 @@ mod tests {
             .to_string()
     }
 
+    fn unmapped<'a>(place_id: i64, shape: &'a str, files: i64, batch: Option<i64>) -> Unmapped<'a> {
+        Unmapped {
+            place_id,
+            place: "ward-a",
+            shape,
+            id_type: "patient-id",
+            files,
+            first_seen: "t0",
+            batch_id: batch,
+            job_id: batch,
+        }
+    }
+
+    fn provisional<'a>(
+        subject_id: i64,
+        code: &'a str,
+        files: i64,
+        batch: Option<i64>,
+    ) -> Provisional<'a> {
+        Provisional {
+            subject_id,
+            code,
+            id_type: "patient-id",
+            shape: "AAA-9999",
+            place_id: 3,
+            place: "ward-a",
+            files,
+            batch_id: batch,
+            job_id: None,
+        }
+    }
+
     #[test]
     fn an_unmapped_shape_is_one_item_per_dataset_counted_up_and_closed_by_a_run() {
         let mut store = store();
-        let first = raise_unmapped(&mut store, 7, "999999-9999", 3, "t0", Some(1), "t1").unwrap();
-        let again = raise_unmapped(&mut store, 7, "999999-9999", 5, "t0", Some(2), "t2").unwrap();
-        assert_eq!(first, again, "one item per dataset and shape");
-        let other = raise_unmapped(&mut store, 7, "AAA-999", 1, "t0", Some(2), "t2").unwrap();
+        let first =
+            raise_unmapped(&mut store, &unmapped(7, "999999-9999", 3, Some(1)), "t1").unwrap();
+        let again =
+            raise_unmapped(&mut store, &unmapped(7, "999999-9999", 5, Some(2)), "t2").unwrap();
+        assert_eq!(first, again, "one open item per dataset and shape");
+        let other = raise_unmapped(&mut store, &unmapped(7, "AAA-999", 1, Some(2)), "t2").unwrap();
         assert_ne!(first, other);
-        let elsewhere = raise_unmapped(&mut store, 8, "999999-9999", 1, "t0", None, "t2").unwrap();
+        let elsewhere =
+            raise_unmapped(&mut store, &unmapped(8, "999999-9999", 1, None), "t2").unwrap();
         assert_ne!(first, elsewhere);
         let mut shapes = open_unmapped_shapes(&mut store, 7).unwrap();
         shapes.sort();
         assert_eq!(shapes, ["999999-9999", "AAA-999"]);
         let item = item(&mut store, first).unwrap().unwrap();
         assert_eq!(item.kind, UNMAPPED_KIND);
-        assert_eq!(item.scope, "dataset");
+        assert_eq!(item.scope, "batch");
+        assert_eq!(item.reference["place"], "ward-a");
+        assert_eq!(item.reference["id_type"], "patient-id");
         assert_eq!(item.evidence["files"], 5);
         assert_eq!(item.evidence["first_seen"], "t0");
+        assert_eq!(item.evidence["batch_id"], 2);
         assert_eq!(item.members, 5);
+        let key = store
+            .query_opt(
+                &format!("SELECT group_key, job_id FROM review_item WHERE id = {first}"),
+                &[],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(key.text(0).unwrap(), "place:7|shape:999999-9999");
+        assert_eq!(key.int(1).unwrap(), 2);
         assert!(close_unmapped(&mut store, 7, "999999-9999", "t3").unwrap());
         assert_eq!(status_of(&mut store, first), RESOLVED);
         assert!(!close_unmapped(&mut store, 7, "999999-9999", "t3").unwrap());
         assert_eq!(open_unmapped_shapes(&mut store, 7).unwrap(), ["AAA-999"]);
-        // held again after a close: a new item, the old one stays resolved
-        let later = raise_unmapped(&mut store, 7, "999999-9999", 2, "t4", Some(3), "t4").unwrap();
+        // held again after a close: a new item, the old one stays closed
+        let later =
+            raise_unmapped(&mut store, &unmapped(7, "999999-9999", 2, Some(3)), "t4").unwrap();
         assert_ne!(later, first);
     }
 
     #[test]
-    fn a_provisional_subject_is_one_item_whose_files_count_up() {
+    fn a_provisional_subject_is_one_item_whose_files_count_up_and_a_merge_closes_it() {
         let mut store = store();
-        let first = raise_provisional(&mut store, 42, "abc", 10, Some(1), "t1").unwrap();
-        let again = raise_provisional(&mut store, 42, "abc", 4, Some(2), "t2").unwrap();
+        let first =
+            raise_provisional(&mut store, &provisional(42, "abc", 10, Some(1)), "t1").unwrap();
+        let again =
+            raise_provisional(&mut store, &provisional(42, "abc", 4, Some(2)), "t2").unwrap();
         assert_eq!(first, again);
         let item = item(&mut store, first).unwrap().unwrap();
         assert_eq!(item.kind, PROVISIONAL_KIND);
@@ -1145,9 +1286,36 @@ mod tests {
         assert_eq!(item.reference["subject_id"], 42);
         assert_eq!(item.evidence["files"], 14);
         assert_eq!(item.evidence["batch_id"], 2);
+        assert_eq!(item.evidence["shape"], "AAA-9999");
+        assert_eq!(item.members, 1);
         let rendered = item.evidence.to_string() + &item.reference.to_string();
         assert!(!rendered.contains("199"), "{rendered}");
-        let other = raise_provisional(&mut store, 43, "def", 1, None, "t2").unwrap();
+        let other = raise_provisional(&mut store, &provisional(43, "def", 1, None), "t2").unwrap();
         assert_ne!(first, other);
+        assert_eq!(
+            close_provisional(
+                &mut store,
+                42,
+                "anna@lab",
+                &serde_json::json!({"merged_into": "sub-y"})
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            close_provisional(&mut store, 42, "anna@lab", &serde_json::json!({})).unwrap(),
+            0
+        );
+        let row = store
+            .query_opt(
+                "SELECT status, actor, decision FROM review_item WHERE id = ?",
+                &[Param::Int(first)],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.text(0).unwrap(), "superseded");
+        assert_eq!(row.text(1).unwrap(), "anna@lab");
+        assert!(row.text(2).unwrap().contains("sub-y"));
+        assert_eq!(status_of(&mut store, other), "open");
     }
 }

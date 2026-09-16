@@ -34,6 +34,8 @@ declares.
 | kind | scope | who raises it |
 |---|---|---|
 | `identity.collision` | subject | the digest, when two identifiers of one batch derive one code, or a code is another's |
+| `identity.unmapped` | batch | the pseudonymiser (record 26, decision 4), one per dataset and shape of identifier the linkage store did not know, so the files were held; `ref` is `{place_id, place, shape, id_type}` and `evidence` is `{files, first_seen, batch_id, shape, id_type}`, counts, when the first was held and the shape (digits as 9, letters as A), never a value; `group_key` is `place:<id>|shape:<shape>`, a later run brings the open item up to date, and a run that holds nothing under the shape closes it as `superseded` |
+| `identity.provisional` | subject | the pseudonymiser, for a subject coded from an unmapped identifier because the dataset said `code`; `ref` is `{subject_id, code}`, `evidence` `{files, id_type, shape, place_id, place, batch_id}` with the files counted up by a later run, `group_key` `subject:<id>`, one open per subject; a merge of the subject closes it as `superseded` with the merge as its decision |
 | `ingest.quarantine` | batch | the digest, one per batch and class of refused file |
 | `<axis>:low_confidence` | stack | the classifier, below the pack's threshold for that axis |
 | `<axis>:missing` | stack | the classifier, for an axis the pack says is always expected |

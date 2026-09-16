@@ -40,7 +40,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | owner | the registry's operator; the identifiers are the clinic's |
 | kept | until purged; a purged identifier is filed again only when its file is parsed again (changed, or new), not by a digest that finds the file unchanged |
 | read | `nils linkage show <code> [--why <text>]` (every read is audited) |
-| change | `nils digest <root>`<br>`nils linkage import <csv>`<br>`nils linkage link \| unlink`<br>`nils linkage id-type add` |
+| change | `nils digest <root>`<br>`nils linkage import <csv>`<br>`nils linkage link \| unlink \| merge`<br>`nils linkage id-type add` |
 | export | none in Wave 1 |
 | delete | `nils linkage purge --subject <code> \| --all` (the read audit and the id types stay) |
 

@@ -29,8 +29,15 @@
 # door answers what nils explain prints; a release reads each dataset's
 # leaving policy when the flags are not given, takes datasets as a
 # selection, and its row records the policies applied.
-# The slices after edit this document in place: the map in any shape, the
-# held doors, the merge, and the packs' word lists.
+# The identity slice (record 26 sections 5, 6 and 15): the identifier
+# types under /api/linkage/types, the map in any shape with its dry run
+# under /api/linkage/imports, the held files of a dataset by shape under
+# /api/linkage/held with code and reveal beside it, and the merge under
+# /api/linkage/merge; every door carries data:see unless said otherwise,
+# and what reads an identifier (the map applied, the held reveal, the
+# merge) needs data:work and detail sensitive. The review item kinds
+# identity.unmapped and identity.provisional are in contracts/review-item.
+# The rules slice edits this document in place after: the packs' word lists.
 # Version 4 was version 3 with grants and detail in place of the role ladder
 # (suite contract version 2). A caller holds a set of grants, each naming a
 # page and how far the caller goes there (see, or work, which includes see;
@@ -633,6 +640,89 @@ paths:
       responses:
         "200": {description: "{stack, pack, version, contract, overlay, review_items, axes: [{axis, value, label, confidence, tier, evidence: [{rule_set, rule, source, matched, value, tier, confidence, pass, reference}], decision: {kind, actor, why, version} | null}]}"}
         "404": {description: The stack has not been classified}
+  /api/linkage/types:
+    get:
+      summary: The identifier types, each with how many identifiers and subjects it holds (nils linkage types)
+      description: "The types are the site's own, made from the list or on the fly; patient-id, study-instance-uid and subject-code exist always (the last is what a merge files the alias's code under). Counts only, never a value."
+      responses:
+        "200": {description: "[{id, name, description, identifiers, subjects}]"}
+    post:
+      summary: Make an identifier type, once (nils linkage id-type add; data:work)
+      description: "Idempotent by name: a name that exists answers 200 with the type as it is, a new one 201. A name is lower case letters, digits and hyphens, like study-id."
+      requestBody: {content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}, description: {type: string}}}}}}
+      responses:
+        "200": {description: "{id, name, description, identifiers, subjects, created: false}"}
+        "201": {description: "{id, name, description, identifiers, subjects, created: true}"}
+        "400": {description: Not a name}
+  /api/linkage/imports:
+    post:
+      summary: Provide the identifier map, in any shape (nils linkage import; data:work, detail sensitive to apply)
+      description: "The columns are named for what they are: an identifier of a type, the canonical identifier that stands for the person (the subject's code derives from it under the registry's scheme and key, exactly as a digest would), the code itself, or ignored. Several identifier columns in one row are several identifiers of one subject; an empty cell is skipped. A row resolves to one subject by its code, by its canonical identifier, or by an identifier already known (the row then adds the others); otherwise it is a conflict. Validated whole, then applied: conflicts (an identifier filed on another subject than the row resolves to, two rows disagreeing, a type the map does not make) are listed and nothing is written. A row that maps an identifier of an existing subject to the canonical identifier of another merges the first into the second, listed under merges first. A held file whose identifier the map names is released for the next pseudonymise. A dry run answers the report here, at the caller's detail, and writes nothing; otherwise the map is written under the registry home (mode 600, removed when the job ends) and a linkage import job is queued under the caller's principal and detail, which must be sensitive. The report never carries an identifier: counts, codes and reasons only."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [columns, rows]
+              properties:
+                place: {type: string, description: The dataset the map is for, by place name; recorded on the job, never a filter}
+                columns:
+                  type: array
+                  items:
+                    type: object
+                    required: [header, role]
+                    properties:
+                      header: {type: string}
+                      role: {type: string, enum: [identifier, canonical, code, ignore]}
+                      id_type: {type: string, description: The type an identifier or canonical column files under}
+                rows: {type: array, items: {type: array, items: {type: [string, number, "null"]}}, description: At most 100,000 in one call, in the columns' order}
+                dry_run: {type: boolean, default: false}
+                make_types: {type: boolean, default: false, description: Make the types the columns name that the store has not got; a conflict otherwise}
+      responses:
+        "200": {description: "The dry run's report: {rows, subjects: {named, known, new}, identifiers: {filed, known, new, types_new}, held_released, merges: [{alias, canonical}], conflicts: [{row, why}], dry_run: true, written: false}"}
+        "202": {description: "{job, state: queued, rows}; the job's result is the same report, written: true, or with the conflicts and the job failed"}
+        "400": {description: A column without a role or a type, a header named twice, more cells than columns, or a map with no identifier column}
+        "403": {description: The caller does not hold data:work, or applies the map below detail sensitive}
+        "404": {description: No place of that name}
+        "413": {description: More than 100,000 rows in one call; a larger map goes in as a file under a registered location through POST /api/jobs}
+  /api/linkage/held:
+    get:
+      summary: The held files of a dataset, by shape (data:see)
+      description: "A file whose identifier the linkage store did not know was held by the pseudonymiser (record 26, decision 4) and recorded with the identifier's shape, digits as 9 and letters as A. One row per shape and type, with the count, when the first was seen and the batch: never a value. Empty until the pseudonymiser has run."
+      parameters:
+        - {name: place, in: query, required: true, schema: {type: string}, description: The dataset's name}
+      responses:
+        "200": {description: "[{shape, id_type, files, first_seen, batch}]"}
+        "400": {description: No place named}
+        "404": {description: No place of that name}
+  /api/linkage/held/code:
+    post:
+      summary: Code the held files of a dataset anyway on the next pseudonymise (data:work)
+      description: "Every held file of the dataset is marked code_anyway; the pseudonymiser derives a code from the identifier under the key and marks the subject provisional (the review item identity.provisional), until a map names the identifier and a merge folds it in."
+      requestBody: {content: {application/json: {schema: {type: object, required: [place], properties: {place: {type: string}}}}}}
+      responses:
+        "200": {description: "{place, files}: how many were marked now"}
+        "404": {description: No place of that name}
+  /api/linkage/held/reveal:
+    post:
+      summary: The held identifiers of a dataset themselves, by shape (data:work, detail sensitive, audited)
+      description: "Opens the sealed identifier of every held file and answers the distinct identifiers under each shape and type with the files each holds. One read_audit row per identifier revealed, why held reveal, the held row's id where an identity's would stand; and one linkage.reveal row in the registry's audit with the count."
+      requestBody: {content: {application/json: {schema: {type: object, required: [place], properties: {place: {type: string}}}}}}
+      responses:
+        "200": {description: "[{shape, id_type, files, identifiers: [{value, files}]}]"}
+        "403": {description: The caller does not hold data:work at detail sensitive}
+        "404": {description: No place of that name}
+  /api/linkage/merge:
+    post:
+      summary: Merge an alias subject into a canonical one, as a queued job (nils linkage merge; data:work, detail sensitive)
+      description: "Every row of the alias that carries a subject (studies, series, fingerprints, memberships, clinical rows, picks, handover subjects, handle and list members, decisions at subject scope) is re-pointed to the canonical subject in one transaction; the session cache of both is dropped for the next rebuild; a membership of the alias that duplicates an open one of the canonical is closed with left_by merge; the alias's identities move; the alias's code is filed on the canonical subject as an identifier of type subject-code; the alias row stays, marked merged, and leaves every listing; its provisional item closes; subject.merge is recorded with both codes and the epoch moves. nils linkage link records the same-person link and then merges the same way. The job's result is {canonical, alias, moved: {table: rows}, memberships_closed, provisional_closed, audit}."
+      requestBody: {content: {application/json: {schema: {type: object, required: [canonical, alias, why], properties: {canonical: {type: string, description: The canonical subject's code}, alias: {type: string, description: The alias subject's code}, why: {type: string, description: What shows they are one person; written to the audit}}}}}}
+      responses:
+        "202": {description: "{job, state: queued}"}
+        "400": {description: A code missing, the two the same, or no why}
+        "403": {description: The caller does not hold data:work at detail sensitive}
+        "404": {description: No subject with one of the codes (gated)}
+        "409": {description: One of the subjects was merged already (gated)}
   /api/classify/signals:
     get:
       summary: The classifier's own signals over a scope (Wave 4c section 6.6; review:see)

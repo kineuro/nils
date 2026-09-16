@@ -61,7 +61,12 @@ pub fn document(registry: &mut Registry, since: Option<&str>) -> Result<Value, S
     let win = d.param(1, Type::Int);
     let window_p = [Param::Int(window)];
 
-    let subjects = count(store, &format!("SELECT COUNT(*) FROM {subject}"), &[])?;
+    // a subject merged into another is not one the counts see (record 26 §6)
+    let subjects = count(
+        store,
+        &format!("SELECT COUNT(*) FROM {subject} WHERE merged_into IS NULL"),
+        &[],
+    )?;
     let sessions = count(
         store,
         &format!("SELECT COUNT(*) FROM {session} WHERE window_days = {win}"),
@@ -137,7 +142,9 @@ pub fn document(registry: &mut Registry, since: Option<&str>) -> Result<Value, S
             let dp = [Param::from(date)];
             let subjects = count(
                 store,
-                &format!("SELECT COUNT(*) FROM {subject} WHERE created_at > {p}"),
+                &format!(
+                    "SELECT COUNT(*) FROM {subject} WHERE merged_into IS NULL AND created_at > {p}"
+                ),
                 &dp,
             )?;
             let sessions = count(

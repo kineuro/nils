@@ -867,6 +867,9 @@ struct Recorder<'a> {
     provisional_seen: HashSet<i64>,
     /// The subjects this run made, with their files written.
     made: BTreeMap<i64, (String, u64)>,
+    /// The shape of the identifier each subject this run made was coded
+    /// from, for its provisional item; never the identifier.
+    shapes: HashMap<i64, String>,
     /// A dry run's identifiers that would be coded.
     would_make: HashSet<Vec<u8>>,
     held_by_shape: BTreeMap<String, u64>,
@@ -899,6 +902,7 @@ impl<'a> Recorder<'a> {
             subjects_seen: HashSet::new(),
             provisional_seen: HashSet::new(),
             made: BTreeMap::new(),
+            shapes: HashMap::new(),
             would_make: HashSet::new(),
             held_by_shape: BTreeMap::new(),
             skipped: 0,
@@ -1041,6 +1045,10 @@ impl<'a> Recorder<'a> {
                     }
                     Found::Known(id) | Found::Created(id) => {
                         let created = matches!(found, Found::Created(_));
+                        if created {
+                            self.shapes
+                                .insert(id, nils_dicom::diagnostic::shape(&ask.ident.value));
+                        }
                         let (code, provisional) = match self.codes.get(&id) {
                             Some((c, p)) => (c.clone(), *p),
                             None => {
@@ -1498,7 +1506,10 @@ impl<'a> Recorder<'a> {
             "done"
         };
         let place_id = self.settings.place_id;
+        let place = self.settings.dataset.as_str();
+        let rule_type = self.settings.identity.id_type.as_str();
         let made = std::mem::take(&mut self.made);
+        let shapes = std::mem::take(&mut self.shapes);
         let created = made.len() as u64;
         let registry = &mut *self.registry;
         registry.store().begin()?;
@@ -1507,10 +1518,17 @@ impl<'a> Recorder<'a> {
             for (subject, (code, files)) in &made {
                 review::raise_provisional(
                     store,
-                    *subject,
-                    code,
-                    *files as i64,
-                    Some(run.batch_id),
+                    &review::Provisional {
+                        subject_id: *subject,
+                        code,
+                        id_type: rule_type,
+                        shape: shapes.get(subject).map_or("", String::as_str),
+                        place_id,
+                        place,
+                        files: *files as i64,
+                        batch_id: Some(run.batch_id),
+                        job_id: Some(run.job_id),
+                    },
                     &now,
                 )?;
             }
@@ -1521,7 +1539,7 @@ impl<'a> Recorder<'a> {
                 .dialect()
                 .text_of(t.column("first_seen").expect("first_seen"));
             let sql = format!(
-                "SELECT shape, COUNT(*), MIN({first_seen}) FROM {} WHERE place_id = {} \
+                "SELECT shape, COUNT(*), MIN({first_seen}), MIN(id_type) FROM {} WHERE place_id = {} \
                  AND state = 'held' AND shape IS NOT NULL GROUP BY shape",
                 store.qualified("pseudonym_file"),
                 store.dialect().param(1, Type::Int)
@@ -1532,13 +1550,19 @@ impl<'a> Recorder<'a> {
                 let shape = r.text(0)?.to_string();
                 let files = r.int(1)?;
                 let since = r.opt_text(2)?.unwrap_or(now.as_str()).to_string();
+                let id_type = r.opt_text(3)?.unwrap_or(rule_type).to_string();
                 review::raise_unmapped(
                     store,
-                    place_id,
-                    &shape,
-                    files,
-                    &since,
-                    Some(run.batch_id),
+                    &review::Unmapped {
+                        place_id,
+                        place,
+                        shape: &shape,
+                        id_type: &id_type,
+                        files,
+                        first_seen: &since,
+                        batch_id: Some(run.batch_id),
+                        job_id: Some(run.job_id),
+                    },
                     &now,
                 )?;
                 open.push(shape);
