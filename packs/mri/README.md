@@ -32,7 +32,11 @@ blind overwrite into a diff.
 If the change is one site's word for the same thing, it is an **overlay** and
 not a change to this pack: provenance-scoped, applied at load, recorded on the
 row, and carrying its own cases (§5.3). A site never forks the pack to add a
-contrast agent.
+contrast agent. Every word list here is a site's to amend that way: the four
+`buckets` by name, and every axis value's `keywords` as `lists.<axis>.<value>`
+(pack contract 5). The flags, the physics windows, the review thresholds and
+the order the values are tried in are this pack's, and an overlay that
+reaches for them is refused.
 
     nils pack validate packs/mri
     nils pack show mri --pack-dir packs
