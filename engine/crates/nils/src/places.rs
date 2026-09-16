@@ -9,13 +9,16 @@
 //! keeps the flags it had, and the capabilities say so.
 //!
 //! A source place is never written by a verb that takes a path: a release,
-//! a handover, a backup and a subset are refused under one. The two writes
-//! the engine makes under a source place are the dataset's own (record
-//! 26): the look at the folder when a dataset is declared, which renames
-//! v0's `dcm-raw` to `dcm-anon` and moves loose entries into the dataset's
-//! trees by a rename inside the folder (`crate::dataset::look`), and the
-//! pseudonymiser writing the pseudonymised tree. Neither reaches outside
-//! the dataset's own folder, and neither goes through `require`.
+//! a handover, a backup and a subset are refused under one. The writes the
+//! engine makes under a source place are the dataset's own (record 26):
+//! the look at the folder when a dataset is declared, which renames v0's
+//! `dcm-raw` to `dcm-anon` and moves loose entries into the dataset's trees
+//! by a rename inside the folder (`crate::dataset::look`); the
+//! pseudonymiser writing the pseudonymised tree; and the acts on the
+//! originals, which move them into a place of another role or delete them
+//! (`crate::originals`). The first two reach nowhere outside the dataset's
+//! own folder and go through no `require`; a vault's destination is a
+//! `backup` place and is checked by `require` like any other write.
 
 use std::path::{Component, Path, PathBuf};
 
