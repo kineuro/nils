@@ -469,8 +469,10 @@ it, or null, which a digest of the dataset takes when it names none of its own;
 `hold` (the default for identified arrivals) or `code`; `cohort`, the one every
 digest of it feeds, or null; `tags`, `keep_demographics` (sex, weight and size,
 kept unless said), `remove` and `keep`, each tag as `gggg,eeee`, applied beside
-the four groups the pseudonymiser always removes; `originals_kept`, `kept`,
-`vaulted` or `purged`. Declaring a source place, or changing its dataset, looks
+the four groups the pseudonymiser always removes. What became of the originals,
+`originals_kept` and `originals_vault`, is not declared at all: the acts on them
+write it, and a body naming either is refused in words naming the act that sets
+it. Declaring a source place, or changing its dataset, looks
 at the folder: `derivatives/dcm-raw`, a v0 cohort folder's, is renamed
 `derivatives/dcm-anon` and nothing else is rewritten; an identified folder's
 loose entries beside `derivatives/` are moved into the originals and an empty
@@ -487,29 +489,47 @@ want of a map. Wherever a location is named, `@name` is the pseudonymised tree
 and `@name/originals` the originals, which a digest is refused: the registry
 never points at an identified file.
 
-**Acting on the originals** (record 26 §1). `originals_kept` is declared, and
-the acts beside `kept` are `nils place originals <dataset> --vault --into PLACE
---why TEXT` and `--purge --why TEXT`, and `POST /api/places/{id}/originals
-{do, into, why}` under `data:work` at detail sensitive, since they move and
-delete identified files; both are one job kind, `originals`. `GET
-/api/places/{id}/originals` (`data:see`) answers what the act would do without
-doing it: `{files, bytes, verified, unverified, held, ready, why}`, and the
-keyboard prints the same before it acts. A **vault** moves the originals into
-the place `into` names, a `backup` place in force, the one role the engine never
-reads for data, under `originals/<dataset>` there: a rename where the
-destination is on the same filesystem, and otherwise a copy whose digest is
-compared with the source's before the source is removed, so no file is ever
-removed whose copy did not verify. A **purge** deletes them, and is refused
-while any file of the dataset waits for a map, the pseudonymiser's held rows or
-a digest's `identity.unmapped` quarantine, because those originals are the only
-copy of those people's scans; and unless every original is verified in the
-pseudonymised tree, the copy there at the size and the digest that were
-recorded, hashed again at purge time rather than trusted from the row. A
-dataset read in place, whose folder is its own pseudonymised tree, is refused
-outright: there is nothing to verify against. Each refusal names its count in
-words, and the door refuses in the same words the job does. Both acts resume,
-since a file that has moved is not there the next time, and stop at a heartbeat
-on a cancel with what was done kept. The job's result is
+**Acting on the originals** (record 26 §1). What became of them is the acts'
+to write, and the acts beside `kept` are `nils place originals <dataset> --vault
+--into PLACE --why TEXT` and `--purge --why TEXT`, and `POST
+/api/places/{id}/originals {do, into, why}` under `data:work` at detail
+sensitive, since they move and delete identified files; both are one job kind,
+`originals`. `GET /api/places/{id}/originals` (`data:see`) answers what the act
+would do without doing it: `{files, bytes, verified, unverified,
+copy_unverified, changed, no_copy, held, ready, why}`, and the keyboard prints
+the same before it acts. A **vault** moves the originals into the place `into`
+names, a `backup` place in force, the one role the engine never reads for data,
+under `originals/<dataset>` there: a rename where the destination is on the same
+filesystem, and otherwise a copy whose digest is compared with the source's
+before the source is removed, so no file is ever removed whose copy did not
+verify. A **purge** deletes them, and is refused while any file of the dataset
+waits for a map, the pseudonymiser's held rows or a digest's
+`identity.unmapped` quarantine, counted once however many tables hold the file,
+because those originals are the only copy of those people's scans.
+
+**An original is verified only while it is still the file that was copied**
+(lab 26c): its size and modification time are what the row recorded, *and* its
+copy is there at the recorded size with the digest hashed again now. The copy's
+half alone would pass a file whose bytes changed after the copy was written,
+and purging that file destroys the only version of it anybody has; the
+asymmetry decides it, since a false refusal costs a run of the pseudonymiser
+and a false acceptance costs the data. A modification time that moved
+innocently, after a restore or a copy between disks, is refused too, and that is
+the price. The counts keep the three cases apart because their cures differ:
+`copy_unverified` (the copy is missing or is not what was recorded) and
+`changed` (the original moved on) are both mended by pseudonymising the dataset
+again, which writes either again, and `no_copy` (the reader refused the file,
+so it is not DICOM and was never copied) is mended only by moving the file out
+of the originals tree, which nothing offers to do for a person. A dataset read
+in place, whose folder is its own pseudonymised tree, is refused outright:
+there is nothing to verify against. Each refusal names its count in words and
+the cure that works for it, the door refuses in the same words the job would,
+and the verification runs three times over: in the survey, at the door before a
+job is queued, and on each file immediately before it is removed, so a file
+that changes while the walk runs is left rather than destroyed. Both acts
+resume, since a file that has moved is not there the next time, and stop at a
+heartbeat on a cancel with what was done kept, the job reading `cancelled` and
+not `failed`. The job's result is
 `{did, files, bytes, into, path, verified, seconds}`. On success the dataset
 records `originals_kept` and `originals_vault`, the place a vault used, and the
 act is audited as `originals.vault` or `originals.purge` with its counts and
