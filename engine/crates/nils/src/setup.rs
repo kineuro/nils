@@ -89,7 +89,7 @@ fn image_tag(version: &str) -> String {
 const KVASIR_REPO: &str = "https://github.com/kineuro/kvasir";
 const ASSISTANT_REPO: &str = "https://github.com/kineuro/nils-assistant";
 const KVASIR_REF: &str = "v1.0.0-alpha.7";
-const ASSISTANT_REF: &str = "v1.0.0-alpha.24";
+const ASSISTANT_REF: &str = "v1.0.0-alpha.25";
 
 /// llama.cpp's server, which runs the models Kvasir downloads once an admin
 /// starts one (record 24): the build this version takes, where its archives
@@ -12114,7 +12114,7 @@ mod tests {
     #[test]
     fn the_clones_are_pinned_to_release_tags_and_a_lab_may_name_another_ref() {
         assert_eq!(KVASIR_REF, "v1.0.0-alpha.7");
-        assert_eq!(ASSISTANT_REF, "v1.0.0-alpha.24");
+        assert_eq!(ASSISTANT_REF, "v1.0.0-alpha.25");
         assert_eq!(source_ref(KVASIR_REF, None), "v1.0.0-alpha.7");
         assert_eq!(
             source_ref(KVASIR_REF, Some("models-held")),
@@ -12123,7 +12123,7 @@ mod tests {
         );
         assert_eq!(
             source_ref(ASSISTANT_REF, Some("  ")),
-            "v1.0.0-alpha.24",
+            "v1.0.0-alpha.25",
             "an empty variable names nothing"
         );
 
@@ -12152,7 +12152,7 @@ mod tests {
         let steps = source_steps(ASSISTANT_REPO, ASSISTANT_REF, into, true);
         assert_eq!(
             source_label(&steps[0], "the assistant", ASSISTANT_REF),
-            "fetching the assistant at v1.0.0-alpha.24"
+            "fetching the assistant at v1.0.0-alpha.25"
         );
         assert_eq!(
             source_label(&steps[1], "Kvasir", KVASIR_REF),
