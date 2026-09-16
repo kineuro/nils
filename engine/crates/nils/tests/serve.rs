@@ -3991,7 +3991,7 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         ],
         None,
     );
-    const LIMIT: usize = 220;
+    const LIMIT: usize = 320;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -4260,6 +4260,21 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         "{sources}"
     );
     assert!(sources["rates"]["digest"].as_f64().is_some(), "{sources}");
+
+    // a dry run at the door answers its report as the job's result (lab
+    // 26, defect 17)
+    let (status, queued) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["pseudonymize", "@ds", "--dry-run"]}"#),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let dry = wait(queued["job"].as_i64().unwrap());
+    assert_eq!(dry["state"], "done", "{dry}");
+    assert_eq!(dry["result"]["dry_run"], true, "{dry}");
+    assert_eq!(dry["result"]["files"]["seen"], 6, "{dry}");
+    assert_eq!(dry["result"]["files"]["unchanged"], 6, "{dry}");
 
     // a step the caller may not queue ends the chain, and the job says why
     let (status, queued) = ask(

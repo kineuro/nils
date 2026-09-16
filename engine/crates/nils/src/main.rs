@@ -3251,6 +3251,12 @@ fn pseudonymize(home: &Home, args: PseudonymizeArgs) -> Result<(), Exit> {
             } else {
                 print!("{report}");
             }
+            // a dry run claims no job of its own; run from the queue, the
+            // report is the queued job's result (lab 26, defect 17)
+            if settings.dry_run {
+                let doc = serde_json::to_value(&report).unwrap_or_default();
+                record_result(home, &doc)?;
+            }
             match report.cancelled {
                 None => Ok(()),
                 Some(Cancelled::Stopped) => Err(Exit {
