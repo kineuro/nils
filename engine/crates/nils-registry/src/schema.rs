@@ -301,6 +301,11 @@ fn build_registry() -> Vec<Table> {
                 col("counts", Type::Json),
                 col("epoch_after", Type::Int),
                 col("reparse_from", Type::Timestamp),
+                // Record 26 §3 and §14: which step the batch is, `digest` or
+                // `pseudonymize`. A pseudonymise step and the digest that
+                // follows it share a name on one source, so a batch page
+                // ties the two; a row from before reads as a digest.
+                col("kind", Type::Text),
             ],
         )
         .index(&["source_id"]),
@@ -347,6 +352,11 @@ fn build_registry() -> Vec<Table> {
                     // overwrite (§13.3). What no file carries is when the
                     // subject died.
                     col("deceased_at", Type::Date),
+                    // Record 26 §4: 1 on a subject the pseudonymiser made
+                    // from an identifier no map named, coded anyway under
+                    // the key; a map that names the identifier later merges
+                    // it. Null or 0 on every other subject.
+                    col("provisional", Type::Int),
                 ],
             ),
         )
@@ -827,8 +837,11 @@ fn build_registry() -> Vec<Table> {
                 col("id", Type::Id),
                 // The dataset, a source place, whose originals hold the file.
                 req("place_id", Type::Int),
-                // The file's path under the originals tree.
+                // The file's path under the originals tree, and its
+                // directory part, so a run reads its records one directory
+                // at a time as the digest reads `source_file`.
                 req("path", Type::Text),
+                col("dir", Type::Text),
                 // Its size and modification time as last read, in
                 // nanoseconds since the epoch as `source_file` keeps them; a
                 // file with both unchanged is not read again.
@@ -869,6 +882,7 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .unique(&["place_id", "path"])
+        .index(&["place_id", "dir"])
         .index(&["place_id", "state"]),
         Table::new(
             "classification",

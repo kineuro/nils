@@ -858,3 +858,296 @@ pub fn withdraw(registry: &mut Registry, decision: i64, who: &str) -> Result<i64
     )?;
     Ok(reopened)
 }
+
+/// Record 26 §4: the pseudonymiser holds the files of an identifier the
+/// linkage store does not know, and asks once per dataset and shape of
+/// identifier, with the files held and when the first was seen as the
+/// evidence; never the identifier. The item is keyed `place:<id>|shape:<s>`
+/// so a later run finds it, and a run that finds nothing held for the shape
+/// closes it.
+pub const UNMAPPED_KIND: &str = "identity.unmapped";
+
+/// Record 26 §4: a subject the pseudonymiser made from an identifier no
+/// map named, coded anyway under the key: one item per subject, the files
+/// as evidence, so a person knows the subject is provisional until a map
+/// names it.
+pub const PROVISIONAL_KIND: &str = "identity.provisional";
+
+/// The status a run gives an item it answers itself: nothing to decide,
+/// the files it asked about are no longer held.
+pub const RESOLVED: &str = "resolved";
+
+fn group_key_unmapped(place_id: i64, shape: &str) -> String {
+    format!("place:{place_id}|shape:{shape}")
+}
+
+/// The open `identity.unmapped` item of a dataset and shape, if there is one.
+fn open_unmapped(store: &mut Store, key: &str) -> Result<Option<i64>, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id FROM {} WHERE kind = {} AND group_key = {} AND status = 'open' ORDER BY id DESC LIMIT 1",
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+    );
+    store
+        .query_opt(&sql, &[Param::from(UNMAPPED_KIND), Param::from(key)])?
+        .map(|r| r.int(0))
+        .transpose()
+}
+
+/// Open, or bring up to date, the one item for the files a dataset holds
+/// under one shape of identifier: `{files, first_seen}` as evidence and the
+/// batch that last counted them. Answers the item's id.
+pub fn raise_unmapped(
+    store: &mut Store,
+    place_id: i64,
+    shape: &str,
+    files: i64,
+    first_seen: &str,
+    batch_id: Option<i64>,
+    now: &str,
+) -> Result<i64, StoreError> {
+    let key = group_key_unmapped(place_id, shape);
+    let evidence = serde_json::json!({
+        "files": files,
+        "first_seen": first_seen,
+        "shape": shape,
+        "place_id": place_id,
+        "batch_id": batch_id,
+    });
+    if let Some(id) = open_unmapped(store, &key)? {
+        store.update_by_id(
+            table("review_item"),
+            &[
+                ("evidence", Param::from(evidence.to_string())),
+                ("members", Param::Int(files)),
+            ],
+            "id",
+            id,
+        )?;
+        return Ok(id);
+    }
+    let reference = serde_json::json!({ "place_id": place_id, "shape": shape });
+    let rows = store.insert(
+        &Insert::new(
+            table("review_item"),
+            &[
+                "kind",
+                "scope",
+                "ref",
+                "evidence",
+                "status",
+                "created_at",
+                "members",
+                "group_key",
+            ],
+        )
+        .returning(&["id"]),
+        &[vec![
+            Param::from(UNMAPPED_KIND),
+            Param::from("dataset"),
+            Param::from(reference.to_string()),
+            Param::from(evidence.to_string()),
+            Param::from("open"),
+            Param::from(now),
+            Param::Int(files),
+            Param::from(key.as_str()),
+        ]],
+    )?;
+    rows.first()
+        .ok_or_else(|| StoreError::Message("the review item was not written back".into()))?
+        .int(0)
+}
+
+/// Close the item of a dataset and shape, once a run holds nothing under
+/// it: the run answered the question itself. Answers whether one was open.
+pub fn close_unmapped(
+    store: &mut Store,
+    place_id: i64,
+    shape: &str,
+    now: &str,
+) -> Result<bool, StoreError> {
+    let key = group_key_unmapped(place_id, shape);
+    let Some(id) = open_unmapped(store, &key)? else {
+        return Ok(false);
+    };
+    store.update_by_id(
+        table("review_item"),
+        &[
+            ("status", Param::from(RESOLVED)),
+            ("decided_at", Param::from(now)),
+        ],
+        "id",
+        id,
+    )?;
+    Ok(true)
+}
+
+/// The shapes a dataset has an open `identity.unmapped` item for.
+pub fn open_unmapped_shapes(store: &mut Store, place_id: i64) -> Result<Vec<String>, StoreError> {
+    let d = store.dialect();
+    let t = table("review_item");
+    let sql = format!(
+        "SELECT {} FROM {} WHERE kind = {} AND status = 'open' AND group_key LIKE {}",
+        d.text_of(t.column("ref").expect("ref")),
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+    );
+    let prefix = format!("place:{place_id}|shape:%");
+    store
+        .query(&sql, &[Param::from(UNMAPPED_KIND), Param::from(prefix)])?
+        .iter()
+        .filter_map(|r| {
+            r.opt_text(0)
+                .ok()
+                .flatten()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+                .and_then(|v| v["shape"].as_str().map(str::to_string))
+        })
+        .map(Ok)
+        .collect()
+}
+
+/// One `identity.provisional` item per subject: opened when the
+/// pseudonymiser makes the subject, its evidence the files written under
+/// it, counted up by a later run; never an identifier. Answers the item's id.
+pub fn raise_provisional(
+    store: &mut Store,
+    subject_id: i64,
+    code: &str,
+    files: i64,
+    batch_id: Option<i64>,
+    now: &str,
+) -> Result<i64, StoreError> {
+    let d = store.dialect();
+    let key = format!("subject:{subject_id}");
+    let t = table("review_item");
+    let sql = format!(
+        "SELECT id, {} FROM {} WHERE kind = {} AND group_key = {} AND status = 'open' ORDER BY id DESC LIMIT 1",
+        d.text_of(t.column("evidence").expect("evidence")),
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+    );
+    if let Some(r) = store.query_opt(
+        &sql,
+        &[Param::from(PROVISIONAL_KIND), Param::from(key.as_str())],
+    )? {
+        let id = r.int(0)?;
+        let mut evidence: serde_json::Value = r
+            .opt_text(1)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let before = evidence["files"].as_i64().unwrap_or(0);
+        evidence["files"] = serde_json::json!(before + files);
+        evidence["batch_id"] = serde_json::json!(batch_id);
+        store.update_by_id(
+            t,
+            &[("evidence", Param::from(evidence.to_string()))],
+            "id",
+            id,
+        )?;
+        return Ok(id);
+    }
+    let reference = serde_json::json!({ "subject_id": subject_id, "code": code });
+    let evidence = serde_json::json!({ "files": files, "batch_id": batch_id });
+    let rows = store.insert(
+        &Insert::new(
+            t,
+            &[
+                "kind",
+                "scope",
+                "ref",
+                "evidence",
+                "status",
+                "created_at",
+                "group_key",
+            ],
+        )
+        .returning(&["id"]),
+        &[vec![
+            Param::from(PROVISIONAL_KIND),
+            Param::from("subject"),
+            Param::from(reference.to_string()),
+            Param::from(evidence.to_string()),
+            Param::from("open"),
+            Param::from(now),
+            Param::from(key.as_str()),
+        ]],
+    )?;
+    rows.first()
+        .ok_or_else(|| StoreError::Message("the review item was not written back".into()))?
+        .int(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> Store {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        crate::migrate::migrate(&mut store, crate::migrate::Kind::Registry).unwrap();
+        store
+    }
+
+    fn status_of(store: &mut Store, id: i64) -> String {
+        store
+            .query_opt(
+                &format!("SELECT status FROM review_item WHERE id = {id}"),
+                &[],
+            )
+            .unwrap()
+            .unwrap()
+            .text(0)
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn an_unmapped_shape_is_one_item_per_dataset_counted_up_and_closed_by_a_run() {
+        let mut store = store();
+        let first = raise_unmapped(&mut store, 7, "999999-9999", 3, "t0", Some(1), "t1").unwrap();
+        let again = raise_unmapped(&mut store, 7, "999999-9999", 5, "t0", Some(2), "t2").unwrap();
+        assert_eq!(first, again, "one item per dataset and shape");
+        let other = raise_unmapped(&mut store, 7, "AAA-999", 1, "t0", Some(2), "t2").unwrap();
+        assert_ne!(first, other);
+        let elsewhere = raise_unmapped(&mut store, 8, "999999-9999", 1, "t0", None, "t2").unwrap();
+        assert_ne!(first, elsewhere);
+        let mut shapes = open_unmapped_shapes(&mut store, 7).unwrap();
+        shapes.sort();
+        assert_eq!(shapes, ["999999-9999", "AAA-999"]);
+        let item = item(&mut store, first).unwrap().unwrap();
+        assert_eq!(item.kind, UNMAPPED_KIND);
+        assert_eq!(item.scope, "dataset");
+        assert_eq!(item.evidence["files"], 5);
+        assert_eq!(item.evidence["first_seen"], "t0");
+        assert_eq!(item.members, 5);
+        assert!(close_unmapped(&mut store, 7, "999999-9999", "t3").unwrap());
+        assert_eq!(status_of(&mut store, first), RESOLVED);
+        assert!(!close_unmapped(&mut store, 7, "999999-9999", "t3").unwrap());
+        assert_eq!(open_unmapped_shapes(&mut store, 7).unwrap(), ["AAA-999"]);
+        // held again after a close: a new item, the old one stays resolved
+        let later = raise_unmapped(&mut store, 7, "999999-9999", 2, "t4", Some(3), "t4").unwrap();
+        assert_ne!(later, first);
+    }
+
+    #[test]
+    fn a_provisional_subject_is_one_item_whose_files_count_up() {
+        let mut store = store();
+        let first = raise_provisional(&mut store, 42, "abc", 10, Some(1), "t1").unwrap();
+        let again = raise_provisional(&mut store, 42, "abc", 4, Some(2), "t2").unwrap();
+        assert_eq!(first, again);
+        let item = item(&mut store, first).unwrap().unwrap();
+        assert_eq!(item.kind, PROVISIONAL_KIND);
+        assert_eq!(item.scope, "subject");
+        assert_eq!(item.reference["subject_id"], 42);
+        assert_eq!(item.evidence["files"], 14);
+        assert_eq!(item.evidence["batch_id"], 2);
+        let rendered = item.evidence.to_string() + &item.reference.to_string();
+        assert!(!rendered.contains("199"), "{rendered}");
+        let other = raise_provisional(&mut store, 43, "def", 1, None, "t2").unwrap();
+        assert_ne!(first, other);
+    }
+}

@@ -181,6 +181,33 @@ pub(crate) fn run(
             }
             Err(e) => break Err(err(e)),
         }
+        // Record 26 §7: a job that ended done queues the next step of its
+        // chain, under what the first job recorded; a step the recorded
+        // grants do not reach ends the chain, and the job's result says so.
+        match job::show(store, next.id) {
+            Ok(Some(ended)) if ended.state == State::Done => {
+                match crate::chain::continue_chain(store, &ended) {
+                    Ok(Some(queued)) => {
+                        let line = format!("job {}: then queued job {queued}", next.id);
+                        let _ = if opts.quiet {
+                            writeln!(std::io::stderr(), "nils serve: {line}")
+                        } else {
+                            writeln!(std::io::stdout(), "{line}")
+                        };
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "nils: job {}: the chain could not go on: {e}",
+                            next.id
+                        );
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => break Err(err(e)),
+        }
         ran += 1;
         if asked_to_stop {
             break Ok(());

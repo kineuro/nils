@@ -288,13 +288,7 @@ pub fn extract_header(
     }
     let modality = modality_of(&dataset, &charset)?;
 
-    let identity = Identity {
-        values: fields
-            .fields
-            .iter()
-            .map(|(_, tag)| text_of(&dataset, *tag, &charset))
-            .collect(),
-    };
+    let identity = identity_values(&dataset, fields, &charset);
 
     let mut values = Vec::with_capacity(CATALOGUE.len());
     for field in CATALOGUE {
@@ -424,6 +418,31 @@ fn declared_charset(dataset: &InMemDicomObject) -> Option<String> {
     };
     let joined = parts.join("\\");
     (!joined.trim_matches(['\\', ' ']).is_empty()).then_some(joined)
+}
+
+/// The identifying values of a header, one per field of the rule, read as
+/// the digest reads them: under the file's character set, trimmed, none
+/// when absent, empty or not text. The pseudonymiser reads a header it
+/// goes on to rewrite through this, so that the identifier it resolves is
+/// the one a digest of the same file would.
+pub fn identity_values(
+    dataset: &InMemDicomObject,
+    fields: &IdentityFields,
+    charset: &Charset,
+) -> Identity {
+    Identity {
+        values: fields
+            .fields
+            .iter()
+            .map(|(_, tag)| text_of(dataset, *tag, charset))
+            .collect(),
+    }
+}
+
+/// The character set a header declares, resolved as the digest resolves it
+/// (§6.2), for a reader of the header outside the extraction.
+pub fn charset_of(dataset: &InMemDicomObject) -> Charset {
+    Charset::resolve(declared_charset(dataset).as_deref())
 }
 
 /// The text of a top-level element, or none when absent, empty or not text.

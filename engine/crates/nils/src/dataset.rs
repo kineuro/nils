@@ -508,9 +508,58 @@ pub(crate) fn identity_from_file(path: &Path) -> Result<Value, String> {
         .ok_or_else(|| format!("{}: no identity block", path.display()))
 }
 
+/// The rule a pseudonymised tree is read under (record 26 §3): the code the
+/// pseudonymiser wrote into `PatientID`, taken verbatim as the subject's
+/// own, filed under the `subject-code` type, and never a pseudonym of the
+/// pseudonym. The pattern is the shape of a code under the registry's
+/// scheme, its alphabet and its length exactly, so that a file the
+/// pseudonymiser did not write falls back to its study UID unless it
+/// happens to carry that very shape; the tree is the pseudonymiser's alone,
+/// so the shape is a check and not the guard.
+pub(crate) fn anon_rule(scheme: nils_registry::Scheme, display_length: usize) -> String {
+    let pattern = match scheme {
+        nils_registry::Scheme::Blake2b8 => "^(?<id>[0-9a-f]{16})$".to_string(),
+        nils_registry::Scheme::Blake2b32 => {
+            format!("^(?<id>[0-9a-hjkmnp-tv-z]{{{display_length}}})$")
+        }
+    };
+    format!(
+        "identity:\n  id_type: subject-code\n  from:\n    - field: PatientID\n      pattern: '{pattern}'\n  code: verbatim\n"
+    )
+}
+
+/// The registry's pseudonym scheme and display length, from its meta rows;
+/// the defaults where a row is missing.
+fn scheme_of(store: &mut Store) -> (nils_registry::Scheme, usize) {
+    let mut scheme = nils_registry::Scheme::DEFAULT;
+    let mut length = nils_registry::pseudonym::DEFAULT_DISPLAY_LENGTH;
+    let sql = format!(
+        "SELECT key, value FROM {} WHERE key IN ('pseudonym_scheme', 'display_length')",
+        store.qualified("registry_meta")
+    );
+    for r in store.query(&sql, &[]).unwrap_or_default() {
+        match (r.text(0), r.text(1)) {
+            (Ok("pseudonym_scheme"), Ok(v)) => {
+                if let Ok(s) = v.parse() {
+                    scheme = s;
+                }
+            }
+            (Ok("display_length"), Ok(v)) => {
+                if let Ok(n) = v.parse() {
+                    length = n;
+                }
+            }
+            _ => {}
+        }
+    }
+    (scheme, length)
+}
+
 /// The rule stored on the dataset whose pseudonymised tree holds a path,
 /// for a digest that names none of its own; none where no dataset holds the
-/// path or the dataset stores no rule.
+/// path or the dataset stores no rule. An identified dataset's own rule is
+/// for its originals, which the pseudonymiser reads; its pseudonymised
+/// tree carries codes, read under [`ANON_RULE`].
 pub(crate) fn stored_rule(
     store: &mut Store,
     path: &Path,
@@ -518,6 +567,13 @@ pub(crate) fn stored_rule(
     let Some(p) = place::tree_holding(store, "anon", path).map_err(|e| e.to_string())? else {
         return Ok(None);
     };
+    if p.dataset["arrives"].as_str() == Some("identified") {
+        let (scheme, length) = scheme_of(store);
+        let mut rule =
+            nils_digest::Rule::parse(&anon_rule(scheme, length)).map_err(|e| e.to_string())?;
+        rule.source = Some(format!("the pseudonymised tree of the dataset {}", p.name));
+        return Ok(Some(rule));
+    }
     let identity = &p.dataset["identity"];
     if !identity.is_object() {
         return Ok(None);
@@ -710,6 +766,49 @@ mod tests {
             Path::new("/data/scans/originals")
         );
         assert_eq!(plain.as_json()["originals"], Value::Null);
+    }
+
+    #[test]
+    fn the_pseudonymised_tree_is_read_under_the_verbatim_code_rule() {
+        use nils_registry::Scheme;
+        let rule = nils_digest::Rule::parse(&anon_rule(Scheme::Blake2b32, 12)).unwrap();
+        assert!(rule.verbatim);
+        assert_eq!(rule.id_type, "subject-code");
+        let mut x = {
+            use nils_dicom::synth::{MetaFields, TempDir, minimal_mr, part10};
+            let dir = TempDir::new("anon-rule");
+            let path = dir.file(
+                "a.dcm",
+                &part10(
+                    &MetaFields::mr("1.2.3.4.5"),
+                    &minimal_mr("1.2.3", "1.2.3.4", "1.2.3.4.5"),
+                    true,
+                ),
+            );
+            nils_dicom::extract(&path).unwrap()
+        };
+        let read = |rule: &nils_digest::Rule, x: &mut nils_dicom::Extracted, value: &str| {
+            x.identity = nils_dicom::Identity {
+                values: vec![Some(value.into())],
+            };
+            rule.apply(x, "s/1.dcm")
+        };
+        let ident = read(&rule, &mut x, "xg5pf9g20xwm");
+        assert_eq!(ident.value, "xg5pf9g20xwm");
+        assert!(!ident.fell_back);
+        // not the shape of a code: the fallback, never a pseudonym of it
+        assert!(read(&rule, &mut x, "19900101-1234").fell_back);
+        assert!(read(&rule, &mut x, "xg5pf9g20xw").fell_back, "too short");
+        assert!(read(&rule, &mut x, "xg5pf9g20xwmi").fell_back, "too long");
+        assert!(
+            read(&rule, &mut x, "xg5pf9g20xwl").fell_back,
+            "no l in the alphabet"
+        );
+        let ten = nils_digest::Rule::parse(&anon_rule(Scheme::Blake2b32, 10)).unwrap();
+        assert!(!read(&ten, &mut x, "xg5pf9g20x").fell_back);
+        let v0 = nils_digest::Rule::parse(&anon_rule(Scheme::Blake2b8, 12)).unwrap();
+        assert!(!read(&v0, &mut x, "771c4326c89c082c").fell_back);
+        assert!(read(&v0, &mut x, "xg5pf9g20xwm").fell_back);
     }
 
     #[test]

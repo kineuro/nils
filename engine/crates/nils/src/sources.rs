@@ -79,7 +79,13 @@ pub fn document(registry: &mut Registry, recent: usize) -> Result<Value, StoreEr
             .collect();
         sources.push(source(store, p, &ids, window, recent)?);
     }
-    Ok(json!({"count": sources.len(), "window_days": window, "sources": sources}))
+    // record 26 §14: what this machine does per second, from the last run
+    // of each step that ended here
+    let rates = json!({
+        "pseudonymize": crate::batches::rate_of(store, "pseudonymize")?,
+        "digest": crate::batches::rate_of(store, "digest")?,
+    });
+    Ok(json!({"count": sources.len(), "window_days": window, "sources": sources, "rates": rates}))
 }
 
 fn source(
@@ -126,9 +132,12 @@ fn source(
         format!("JOIN {batch} b ON b.id = x.first_batch_id WHERE b.source_id IN ({sources})");
     let open = "ri.status IN ('open', 'staged')";
 
+    // the digests: a pseudonymise step is not one, and shows on the
+    // digest it shares a name with (record 26 §14)
     let rows = store.query(
         &format!(
-            "SELECT id, name, state, {}, {}, job_id, {} FROM {batch} WHERE source_id IN ({sources}) ORDER BY id DESC",
+            "SELECT id, name, state, {}, {}, job_id, {} FROM {batch} WHERE source_id IN ({sources}) \
+             AND (kind IS NULL OR kind = 'digest') ORDER BY id DESC",
             crate::text_of(store, "ingest_batch", "started_at"),
             crate::text_of(store, "ingest_batch", "finished_at"),
             crate::text_of(store, "ingest_batch", "counts"),
@@ -170,6 +179,17 @@ fn source(
                 "pseudonymised": null,
             }),
         ));
+    }
+    for (id, doc) in shown.iter_mut() {
+        if let Some(b) = crate::batches::row(store, *id)?
+            && let Some(step) = crate::batches::other_side(store, &b)?
+        {
+            let step = crate::batches::pseudonymised(&step);
+            doc["pseudonymised"] = json!({
+                "files": step["files"], "changed": step["changed"], "held": step["held"],
+                "job": step["job"], "batch": step["batch"],
+            });
+        }
     }
     let first_last = |r: &nils_registry::store::Row| -> Result<Value, StoreError> {
         Ok(

@@ -487,6 +487,86 @@ want of a map. Wherever a location is named, `@name` is the pseudonymised tree
 and `@name/originals` the originals, which a digest is refused: the registry
 never points at an identified file.
 
+**The pseudonymiser** (record 26 §3, §4, §7 and §14). `nils pseudonymize
+@dataset [--name N] [--workers N] [--held] [--dry-run] [--json]` is a verb and a
+job kind, `pseudonymize`, queued through `POST /api/jobs` under `data:work` at
+detail sensitive, since it reads the identifiers it replaces. It takes an
+identified dataset by its name and refuses one that arrives de-identified or
+coded, whose tree is read in place. For every file of the originals it reads
+the header and no more, resolves who the file is about through the dataset's
+identity rule and the linkage store exactly as the digest does, the same
+resolver and the same key, and writes a copy into the pseudonymised tree: the
+code in `PatientID`, the patient, provider, trial and institution groups removed
+tag for tag (v0's four lists, never the times), `PatientAge` computed before the
+birth date goes, `PatientSex`, `PatientWeight` and `PatientSize` kept unless the
+dataset says `keep_demographics: false`, the dataset's `remove` list removed and
+its `keep` list kept, keep winning; every date and every UID kept; the private
+elements dropped except what the pack's release list names by creator and
+offset (`--pack`, `mri` by default), the overlays and curves dropped; the pixel
+data never parsed but copied from the source byte for byte, whatever follows it
+in the file left behind. The copy goes to a place made from facts and never
+from the path it came in on:
+`<code>/<StudyDate>-<8 hex of the study UID's blake2>/<SeriesNumber, 3 digits>/<InstanceNumber, 5 digits>.dcm`,
+a counter before the extension on a clash. It is written as `.part` through a
+256 KiB buffer, hashed on the way (the release's manifest digest), renamed into
+place; directories are made once each; nothing is synced per file and the
+tree's directory once per batch. The walker, the bounded channels and the
+per-file workers are the digest's; one thread holds the registry and the key,
+answers each worker the code, and records a row per file in `pseudonym_file`
+by size and modification time, so a second run over an unchanged tree costs a
+row touch per file and a changed source is written again over its own place.
+
+A file whose identifier the linkage store does not know is held when the
+dataset says `hold` (the default for identified arrivals): not written, its row
+`held` with the shape of the identifier (digits as `9`, letters as `A` or `a`),
+the keyed lookup the store would file it under, the identifier sealed under the
+store's encrypt key for the one door that reveals it, and the id type; never the
+identifier in the clear. A run that holds files opens one review item
+`identity.unmapped` per dataset and shape, `{files, first_seen}` as evidence,
+and a run that finds nothing held under a shape closes it. When the dataset
+says `code`, or a person asked for a held file to be coded anyway, the code is
+derived from the identifier under the key as the digest derives it, the subject
+is made and marked `provisional`, and one `identity.provisional` item per
+subject counts its files. `--held` reads only the held rows a map released or a
+person coded anyway, and nothing else; a plain run reads them too, among the
+rest. A file the reader refuses is a `refused` row with the reader's class, not
+read again until it changes. A cancel through the door stops the run at its next
+heartbeat; what was written stays written. The run is a batch of kind
+`pseudonymize` on the pseudonymised tree's source, its report the batch's
+counts and the job's result:
+`{files {seen, written, unchanged, held, refused, skipped}, subjects {new, seen, provisional}, tags_removed {tag: count}, private_removed, refused_by, held_by_shape, bytes, seconds, files_per_s}`.
+A digest of the tree reads the codes verbatim under the `subject-code` type, a
+pattern shaped by the registry's scheme and display length, so a subject the
+pseudonymiser made is found by its code and never coded again; the type is
+seeded by the identifiers slice, and until then `nils linkage id-type add
+subject-code` makes it. A change to the dataset's tag lists reaches the files
+written after it; an unchanged source is not written again for a new list.
+
+**The chain.** `POST /api/jobs` takes `then: [command, ...]`, the command
+lines queued one after another by the worker when the job before ends done,
+under the principal, grants and detail recorded on the first; each step is a
+verb the door queues, located at the door, its grant checked when its turn
+comes, and a step the recorded grants do not reach ends the chain with
+`result.chain_stopped {step, why}` on the job before it. A job answers `then`
+and `chain {before, after}`, on `GET /api/jobs/{id}` and in the event stream.
+`bring-in @dataset [--name N] [--pack P]` is sugar, at the door and at the
+keyboard: `pseudonymize @dataset --name N` then `digest @dataset --name N`,
+`fingerprint` and `classify --pack P` for an identified dataset, or the digest
+and the rest for any other, the digest sharing the pseudonymise step's name.
+
+**The batch is the thread** (record 26 §14). A pseudonymise step and the digest
+after it share a name on one source, and `GET /api/batches/{id}` reads five
+stages off the pair: `pseudonymised {files, changed, held, refused, job}` or
+null, `walked {files, new, changed, unchanged, refused, job}`,
+`digested {stacks, sessions, subjects, moved, job}`,
+`classified {stacks, of, unsure, pack, jobs, by_base}` and
+`reviewed {done, of, since}`; `GET /api/batches` says each batch's `kind`;
+`GET /api/timeline/batch/{id}` serves the batch's events, the other side of its
+thread among them; `GET /api/sources` fills each recent digest's
+`pseudonymised {files, changed, held, job, batch}` and carries
+`rates {pseudonymize, digest}`, the files per second of the last run of each
+step that ended on this machine.
+
 ### 10.3 Database (D75)
 
 Which place the registry is on and whether it passes the rule; the registry's
