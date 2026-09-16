@@ -31,7 +31,7 @@ use crate::batch::{Batch, Batcher, Item, ParsedFile, RowHashes, Task};
 use crate::cancel::{Cancel, Cancelled, Scripted};
 use crate::knobs::Settings;
 use crate::progress::{PROGRESS_EVERY, Progress};
-use crate::report::{Counts, Report, Setup, Written};
+use crate::report::{Counts, Joined, Report, Setup, Written};
 use crate::resume::{self, Records};
 use crate::rss::peak_rss;
 use crate::rule::Rule;
@@ -518,6 +518,9 @@ fn finish(
     } else {
         "done"
     };
+    // Record 26 §8: a digest of a dataset feeds its cohort, in its own
+    // transaction before the batch closes, so the batch's record carries it.
+    let joined = feed_cohort(registry, run, settings)?;
     let store = registry.store();
     store.begin()?;
     let result = (|| -> Result<Report, DigestError> {
@@ -546,6 +549,7 @@ fn finish(
         }
         let mut report = Report::new(setup, counts, elapsed, peak_rss());
         report.written = Some(written.clone());
+        report.joined = joined;
         report.cancelled = cancelled;
         // one review item per class the run quarantined into (§5.3): the
         // count is the evidence, the paths stay in the quarantine list
@@ -612,6 +616,49 @@ fn finish(
             let _ = store.rollback();
             Err(e)
         }
+    }
+}
+
+/// Record 26 §8: when the tree is a dataset's pseudonymised tree and the
+/// dataset names a cohort, every subject the batch created joins it, and so
+/// does one it met whose membership is not open; the cohort is made on
+/// first use, owned by the job's principal. A name that cannot be a
+/// cohort's is a refusal on the report, never a failed digest: the files
+/// are written by now.
+fn feed_cohort(
+    registry: &mut Registry,
+    run: &Run,
+    settings: &Settings,
+) -> Result<Option<Joined>, DigestError> {
+    let store = registry.store();
+    let Some(place) = nils_registry::place::tree_holding(store, "anon", &settings.root)? else {
+        return Ok(None);
+    };
+    let Some(name) = place.dataset["cohort"].as_str().map(str::to_string) else {
+        return Ok(None);
+    };
+    let actor = nils_registry::principal::Principal::current().to_string();
+    match nils_registry::cohort::feed(
+        registry,
+        &name,
+        &place.name,
+        run.batch_id,
+        Some(run.job_id),
+        &actor,
+    ) {
+        Ok(fed) => Ok(Some(Joined {
+            cohort: fed.cohort,
+            subjects: fed.subjects as u64,
+            met: fed.met as u64,
+            created: fed.created,
+            refused: None,
+        })),
+        Err(nils_registry::cohort::Error::Store(e)) => Err(e.into()),
+        Err(e) => Ok(Some(Joined {
+            cohort: name,
+            refused: Some(e.to_string()),
+            ..Joined::default()
+        })),
     }
 }
 
