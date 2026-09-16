@@ -7,7 +7,7 @@
 //! `read_audit` row. Everything here works on both backends through the
 //! store, and the import is validate-then-apply.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 
 use chacha20poly1305::aead::{Aead, Generate, KeyInit};
@@ -137,6 +137,76 @@ pub fn id_type_id(store: &mut Store, name: &str) -> Result<Option<i64>, Error> {
     }
 }
 
+/// The type of that name, made when it is not there (`POST
+/// /api/linkage/types`, an import with `--make-types`): idempotent by
+/// name, and refuses a name that is not one. Says whether it was made.
+pub fn ensure_id_type(
+    store: &mut Store,
+    name: &str,
+    description: Option<&str>,
+) -> Result<(IdType, bool), Error> {
+    if !valid_id_type_name(name) {
+        return Err(Error::Message(format!(
+            "{name:?} is not an id type name (lower case letters, digits and hyphens, like patient-id)"
+        )));
+    }
+    if let Some(t) = id_types(store)?.into_iter().find(|t| t.name == name) {
+        return Ok((t, false));
+    }
+    Ok((add_id_type(store, name, description)?, true))
+}
+
+/// One identifier type with what is filed under it, for the types door
+/// and `nils linkage types`: counts, never a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeCount {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub identifiers: i64,
+    pub subjects: i64,
+}
+
+impl TypeCount {
+    pub fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "identifiers": self.identifiers,
+            "subjects": self.subjects,
+        })
+    }
+}
+
+/// Every identifier type with how many identifiers and subjects it holds.
+pub fn id_type_counts(store: &mut Store) -> Result<Vec<TypeCount>, Error> {
+    let identity = store.qualified("identity");
+    let counts: HashMap<i64, (i64, i64)> = store
+        .query(
+            &format!(
+                "SELECT id_type_id, COUNT(*), COUNT(DISTINCT subject_id) FROM {identity} GROUP BY id_type_id"
+            ),
+            &[],
+        )?
+        .iter()
+        .map(|r| Ok((r.int(0)?, (r.int(1)?, r.int(2)?))))
+        .collect::<Result<_, Error>>()?;
+    Ok(id_types(store)?
+        .into_iter()
+        .map(|t| {
+            let (identifiers, subjects) = counts.get(&t.id).copied().unwrap_or((0, 0));
+            TypeCount {
+                id: t.id,
+                name: t.name,
+                description: t.description,
+                identifiers,
+                subjects,
+            }
+        })
+        .collect())
+}
+
 /// Add an identifier type (`nils linkage id-type add`). Refuses a name that
 /// exists or one that is not a name.
 pub fn add_id_type(
@@ -227,7 +297,8 @@ pub struct NewIdentity {
     pub id_type_id: i64,
     pub lookup: Vec<u8>,
     pub ciphertext: Vec<u8>,
-    /// `dicom`, `csv` or `manual`.
+    /// `dicom`, `csv`, `manual`, or `merge` for an alias's code filed on
+    /// the subject it was merged into.
     pub source: &'static str,
     pub first_batch_id: Option<i64>,
 }
@@ -523,48 +594,56 @@ pub fn linkages_of(store: &mut Store, subject_id: i64) -> Result<Vec<Linkage>, E
         .collect()
 }
 
-/// A subject as the registry has it: id and code.
+/// A subject as the registry has it: id, code, and the subject it was
+/// merged into, if it was (record 26 §6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subject {
     pub id: i64,
     pub code: String,
+    pub merged_into: Option<i64>,
 }
 
-/// The subjects with the given codes.
+const SUBJECT_COLUMNS: [&str; 3] = ["id", "code", "merged_into"];
+
+fn subject_of(r: &Row) -> Result<Subject, Error> {
+    Ok(Subject {
+        id: r.int(0)?,
+        code: r.text(1)?.to_string(),
+        merged_into: r.opt_int(2)?,
+    })
+}
+
+/// The subjects with the given codes, merged or not.
 pub fn subjects_by_code(registry: &mut Store, codes: &[String]) -> Result<Vec<Subject>, Error> {
     if codes.is_empty() {
         return Ok(Vec::new());
     }
     let t = table("subject");
-    let cols = [t.column("id").unwrap(), t.column("code").unwrap()];
+    let cols: Vec<_> = SUBJECT_COLUMNS
+        .iter()
+        .map(|c| t.column(c).unwrap())
+        .collect();
     registry
         .select_by_keys(t, &cols, "code", codes)?
         .iter()
-        .map(|r| {
-            Ok(Subject {
-                id: r.int(0)?,
-                code: r.text(1)?.to_string(),
-            })
-        })
+        .map(subject_of)
         .collect()
 }
 
-/// The subjects with the given ids.
+/// The subjects with the given ids, merged or not.
 pub fn subjects_by_id(registry: &mut Store, ids: &[i64]) -> Result<Vec<Subject>, Error> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
     let t = table("subject");
-    let cols = [t.column("id").unwrap(), t.column("code").unwrap()];
+    let cols: Vec<_> = SUBJECT_COLUMNS
+        .iter()
+        .map(|c| t.column(c).unwrap())
+        .collect();
     registry
         .select_by_ids(t, &cols, "id", ids)?
         .iter()
-        .map(|r| {
-            Ok(Subject {
-                id: r.int(0)?,
-                code: r.text(1)?.to_string(),
-            })
-        })
+        .map(subject_of)
         .collect()
 }
 
@@ -615,9 +694,13 @@ pub struct ImportRow {
     pub code: String,
 }
 
-/// `nils linkage import` (§7.4): the subject per code exactly as given, the
-/// identifier filed under `id_type` with source `csv`. Validate-then-apply:
-/// every fault is returned and nothing is written when there is one.
+/// `nils linkage import` in its first shape (§7.4): one identifier column
+/// of one type and one code column, the subject per code exactly as given,
+/// the identifier filed under `id_type` with source `csv`. The map in any
+/// shape is [`crate::identity_map`], which this runs through; the faults
+/// are that module's conflicts in the words this shape has always used.
+/// Validate-then-apply: every fault is returned and nothing is written
+/// when there is one.
 pub fn import(
     registry: &mut Store,
     linkage: &mut Store,
@@ -625,174 +708,69 @@ pub fn import(
     id_type: &str,
     rows: &[ImportRow],
 ) -> Result<ImportReport, ImportError> {
-    let type_id = id_type_id(linkage, id_type)?.ok_or_else(|| {
-        Error::Message(format!(
+    use crate::identity_map::{self, Column, Map, Role, Why};
+    if id_type_id(linkage, id_type)?.is_none() {
+        return Err(Error::Message(format!(
             "no id type named {id_type}; nils linkage id-type list shows them, id-type add creates one"
         ))
-    })?;
-    let mut faults = Vec::new();
-    // identifiers that join a code another identifier already names: one
-    // person under several identifiers of one type (§7.4)
-    let mut second = 0usize;
-    // within the file
-    let mut by_identifier: HashMap<&str, (usize, &str)> = HashMap::new();
-    let mut distinct: Vec<&ImportRow> = Vec::new();
-    for r in rows {
-        if r.identifier.is_empty() || r.code.is_empty() {
-            faults.push(ImportFault::Empty { line: r.line });
-            continue;
-        }
-        match by_identifier.get(r.identifier.as_str()) {
-            Some(&(first_line, code)) => {
-                if code != r.code {
-                    faults.push(ImportFault::IdentifierRepeated {
-                        line: r.line,
-                        first_line,
-                    });
-                }
-                continue;
-            }
-            None => {
-                by_identifier.insert(&r.identifier, (r.line, &r.code));
-            }
-        }
-        distinct.push(r);
+        .into());
     }
-    // against the stores
-    let lookups: Vec<Vec<u8>> = distinct
+    let columns = [
+        Column {
+            header: "identifier".to_string(),
+            role: Role::Identifier(id_type.to_string()),
+        },
+        Column {
+            header: "code".to_string(),
+            role: Role::Code,
+        },
+    ];
+    let cells: Vec<identity_map::Row> = rows
         .iter()
-        .map(|r| keys.lookup(id_type, &r.identifier))
+        .map(|r| identity_map::Row {
+            line: r.line,
+            cells: vec![r.identifier.clone(), r.code.clone()],
+        })
         .collect();
-    let existing: HashMap<Vec<u8>, Identity> = identities_by_lookup(linkage, &lookups)?
-        .into_iter()
-        .filter(|i| i.id_type_id == type_id)
-        .map(|i| (i.lookup.clone(), i))
-        .collect();
-    let codes: Vec<String> = distinct.iter().map(|r| r.code.clone()).collect();
-    let subjects: HashMap<String, i64> = subjects_by_code(registry, &codes)?
-        .into_iter()
-        .map(|s| (s.code, s.id))
-        .collect();
-    let subject_ids: Vec<i64> = subjects.values().copied().collect();
-    let subject_codes: HashMap<i64, String> =
-        subjects.iter().map(|(c, id)| (*id, c.clone())).collect();
-    let mut typed: HashMap<i64, HashSet<Vec<u8>>> = HashMap::new();
-    for i in identities_of_subjects(linkage, &subject_ids)? {
-        if i.id_type_id == type_id {
-            typed.entry(i.subject_id).or_default().insert(i.lookup);
-        }
-    }
-    let mut to_create: Vec<&ImportRow> = Vec::new();
-    let mut queued: HashSet<&str> = HashSet::new();
-    let mut to_file: Vec<(&ImportRow, i64, Vec<u8>)> = Vec::new();
-    let mut unchanged = 0;
-    for (r, lookup) in distinct.iter().zip(lookups) {
-        if let Some(i) = existing.get(&lookup) {
-            match subject_codes.get(&i.subject_id) {
-                Some(code) if *code == r.code => unchanged += 1,
-                Some(code) => faults.push(ImportFault::IdentifierMapped {
-                    line: r.line,
-                    code: code.clone(),
-                }),
-                None => {
-                    // the identity names a subject with another code
-                    let code = subjects_by_id(registry, &[i.subject_id])?
-                        .into_iter()
-                        .next()
-                        .map(|s| s.code)
-                        .unwrap_or_else(|| format!("#{}", i.subject_id));
-                    faults.push(ImportFault::IdentifierMapped { line: r.line, code });
-                }
-            }
-            continue;
-        }
-        match subjects.get(&r.code) {
-            Some(&subject_id) => {
-                if typed
-                    .get(&subject_id)
-                    .is_some_and(|set| !set.is_empty() && !set.contains(&lookup))
-                {
-                    second += 1;
-                }
-                to_file.push((r, subject_id, lookup));
-            }
-            None => {
-                // one insert per code, however many identifiers name it
-                if queued.insert(r.code.as_str()) {
-                    to_create.push(r);
-                } else {
-                    second += 1;
-                }
-                to_file.push((r, 0, lookup));
-            }
-        }
-    }
-    if !faults.is_empty() {
-        faults.sort_by_key(|f| match f {
-            ImportFault::Empty { line }
-            | ImportFault::IdentifierRepeated { line, .. }
-            | ImportFault::IdentifierMapped { line, .. } => *line,
-        });
-        return Err(ImportError::Faults(faults));
-    }
-    // apply: the registry first, then the linkage store (§9.3)
-    let now = now_iso();
-    let mut created: HashMap<String, i64> = HashMap::new();
-    if !to_create.is_empty() {
-        let t = table("subject");
-        let values: Vec<Vec<Param>> = to_create
+    let report = identity_map::import(
+        registry,
+        linkage,
+        keys,
+        None,
+        &Map {
+            columns: &columns,
+            rows: &cells,
+            dry_run: false,
+            make_types: false,
+            place_id: None,
+            actor: "",
+            job_id: None,
+        },
+    )?;
+    if !report.conflicts.is_empty() {
+        let faults = report
+            .conflicts
             .iter()
-            .map(|r| vec![Param::from(r.code.as_str()), Param::from(now.as_str())])
+            .map(|c| match &c.why {
+                Why::Repeated { first_line } => ImportFault::IdentifierRepeated {
+                    line: c.row,
+                    first_line: *first_line,
+                },
+                Why::Mapped { code } => ImportFault::IdentifierMapped {
+                    line: c.row,
+                    code: code.clone(),
+                },
+                _ => ImportFault::Empty { line: c.row },
+            })
             .collect();
-        registry.begin()?;
-        let inserted = registry.insert(
-            &Insert::new(t, &["code", "created_at"]).returning(&["id", "code"]),
-            &values,
-        );
-        let inserted = match inserted {
-            Ok(rows) => rows,
-            Err(e) => {
-                let _ = registry.rollback();
-                return Err(e.into());
-            }
-        };
-        registry.commit()?;
-        for row in &inserted {
-            created.insert(row.text(1)?.to_string(), row.int(0)?);
-        }
-    }
-    let mut new_rows = Vec::with_capacity(to_file.len());
-    for (r, subject_id, lookup) in to_file {
-        let subject_id = if subject_id == 0 {
-            *created.get(&r.code).ok_or_else(|| {
-                Error::Message(format!("line {}: the subject was not created", r.line))
-            })?
-        } else {
-            subject_id
-        };
-        new_rows.push(NewIdentity {
-            subject_id,
-            id_type_id: type_id,
-            lookup,
-            ciphertext: keys.seal(&r.identifier),
-            source: "csv",
-            first_batch_id: None,
-        });
-    }
-    linkage.begin()?;
-    match insert_identities(linkage, &new_rows) {
-        Ok(_) => linkage.commit()?,
-        Err(e) => {
-            let _ = linkage.rollback();
-            return Err(e.into());
-        }
+        return Err(ImportError::Faults(faults));
     }
     Ok(ImportReport {
         rows: rows.len(),
-        subjects_created: created.len(),
-        identities_added: new_rows.len(),
-        unchanged,
-        second_identifiers: second,
+        subjects_created: report.subjects.new,
+        identities_added: report.identifiers.new,
+        unchanged: report.identifiers.known,
+        second_identifiers: report.further,
     })
 }
 
@@ -877,13 +855,22 @@ mod tests {
             .into_iter()
             .map(|t| t.name)
             .collect();
-        assert_eq!(names, ["patient-id", "study-instance-uid"]);
+        assert_eq!(names, ["patient-id", "study-instance-uid", "subject-code"]);
         assert_eq!(id_type_id(&mut store, "patient-id").unwrap(), Some(1));
         assert_eq!(id_type_id(&mut store, "nope").unwrap(), None);
         let t = add_id_type(&mut store, "personal-number", Some("the Swedish one")).unwrap();
-        assert_eq!(t.id, 3);
+        assert_eq!(t.id, 4);
         assert!(add_id_type(&mut store, "personal-number", None).is_err());
         assert!(add_id_type(&mut store, "Personal Number", None).is_err());
+        // made once, found after
+        let (again, made) = ensure_id_type(&mut store, "personal-number", None).unwrap();
+        assert_eq!((again.id, made), (4, false));
+        let (t, made) = ensure_id_type(&mut store, "study-id", Some("a study's own")).unwrap();
+        assert_eq!((t.id, made), (5, true));
+        assert!(ensure_id_type(&mut store, "Bad Name", None).is_err());
+        let counts = id_type_counts(&mut store).unwrap();
+        assert_eq!(counts.len(), 5);
+        assert_eq!((counts[0].identifiers, counts[0].subjects), (0, 0));
         assert!(valid_id_type_name("a1-b2"));
         assert!(!valid_id_type_name("-a"));
         assert!(!valid_id_type_name(""));

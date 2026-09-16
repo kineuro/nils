@@ -31,9 +31,9 @@ pub mod value;
 pub use catalogue::{CATALOGUE, Field, Level, Sensitivity, Source};
 pub use diagnostic::{Diagnostic, DiagnosticKind};
 pub use extract::{
-    Extracted, Identity, IdentityFields, UnknownKeyword, extract, extract_header, extract_with,
-    tag_of,
+    Extracted, Identity, IdentityFields, UnknownKeyword, charset_of, extract, extract_header,
+    extract_with, identity_values, tag_of,
 };
-pub use read::{Form, Header, ParseKind, ReadFailure, read};
+pub use read::{Form, Framed, Header, ParseKind, ReadFailure, read, read_framed};
 pub use refusal::{QuarantineClass, Refusal};
 pub use value::{Converter, Value};

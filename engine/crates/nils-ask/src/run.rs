@@ -39,6 +39,8 @@ pub enum RunError {
     Measure(MeasureError),
     /// The principal may not project identifiers.
     Forbidden(String),
+    /// A kept handle of the name asked for exists already.
+    NameTaken(String),
     Message(String),
 }
 
@@ -52,6 +54,10 @@ impl fmt::Display for RunError {
             RunError::Handle(e) => write!(f, "{e}"),
             RunError::Selection(e) => write!(f, "{e}"),
             RunError::Measure(e) => write!(f, "{e}"),
+            RunError::NameTaken(name) => write!(
+                f,
+                "a kept handle named {name} exists; name this run otherwise, or run it without a name"
+            ),
             RunError::Forbidden(m) | RunError::Message(m) => f.write_str(m),
         }
     }
@@ -492,6 +498,13 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
         suppression,
     };
     let store = registry.store();
+    // a handle's name is its own: a name in use is refused in words before
+    // anything is written, never as the store's constraint (lab 26, defect 18)
+    if let Some(name) = req.name
+        && !handle::by_name(store, name)?.is_empty()
+    {
+        return Err(RunError::NameTaken(name.to_string()));
+    }
     store.begin()?;
     let saved = (|| -> Result<(Handle, Vec<Handle>), RunError> {
         let spec = Spec {

@@ -71,7 +71,10 @@ pub enum Clause {
         tier: Tier,
         confidence: f64,
         field: usize,
+        /// The words, after any overlay.
         list: Vec<String>,
+        /// The bucket the list was taken from, when the pack named one.
+        bucket: Option<String>,
     },
     /// Any one of the named flags holds. Cites the one that did.
     AnyFlag {
@@ -286,6 +289,145 @@ pub struct AxisValue {
     pub label: String,
     /// The physics family, when the axis has them.
     pub family: Option<String>,
+    /// Whether the axis's own rules try this value: a flag, a word or a
+    /// window of the axis file reaches it. A value none reaches is
+    /// vocabulary a route sets, or the axis's default, and an overlay may
+    /// not make the axis try it.
+    pub tried: bool,
+    /// The words that reach this value in the text, after any overlay: the
+    /// list a site amends as `lists.<axis>.<value>` (pack contract 5). The
+    /// axis file's own list, or a longhand keyword rule's, or a bucket's.
+    pub keywords: Vec<String>,
+    /// The bucket the list is taken from, when the pack names one.
+    pub bucket: Option<String>,
+    /// How the value is reached other than by a word, as the pack wrote it.
+    pub detection: Detection,
+}
+
+/// How an axis value is reached other than by a word, kept in the words the
+/// pack wrote so that the packs door can say so (record 26, decision 12).
+/// The flags and the physics stay the pack's: an overlay amends none of it.
+#[derive(Debug, Clone, Default)]
+pub struct Detection {
+    /// The one flag that decides the value outright.
+    pub exclusive: Option<String>,
+    /// Any one of these flags decides it.
+    pub alternative: Vec<String>,
+    /// Sets of flags that together decide it, each written `a+b` as the
+    /// evidence cites it.
+    pub combination: Vec<String>,
+    /// The physics windows that reach it, tried after the vocabulary.
+    pub physics: Vec<Window>,
+}
+
+/// One physics window of an axis value: the condition as the pack wrote it.
+#[derive(Debug, Clone)]
+pub struct Window {
+    /// The `when` expression as written, or what a longhand rule cites.
+    pub when: String,
+    /// The confidence the window states, when it states one.
+    pub confidence: Option<f64>,
+    pub why: Option<String>,
+}
+
+/// The word lists a site may amend, as `axis.value` by identity (pack
+/// contract 5): every value an axis's own rules try, and every value a
+/// longhand rule reaches by a keyword clause. In the order the axes are
+/// decided and their values tried, so that a door lists them the same way.
+pub fn amendable(axes: &[Axis], rule_sets: &[RuleSet]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for a in axes {
+        for v in &a.values {
+            let by_rule = rule_sets.iter().any(|s| {
+                s.rules.iter().any(|r| {
+                    r.clauses
+                        .iter()
+                        .any(|c| matches!(c, Clause::Keywords { .. }))
+                        && r.sets.iter().any(|s| {
+                            axes[s.axis].name == a.name
+                                && s.values.iter().any(|sv| {
+                                    matches!(sv.value, Which::Fixed(i) if a.values[i].id == v.id)
+                                })
+                        })
+                })
+            });
+            if v.tried || by_rule {
+                out.push(format!("{}.{}", a.name, v.id));
+            }
+        }
+    }
+    out
+}
+
+/// What each axis value's rules say about it, gathered from the rule sets
+/// once they are loaded: its words after any overlay, the bucket they came
+/// from, and the flags and windows that reach it. The axis file's own
+/// physics windows are written by the loader, which has them as written;
+/// a longhand rule's are its citation.
+pub fn describe(axes: &mut [Axis], rule_sets: &[RuleSet]) {
+    for set in rule_sets {
+        for rule in &set.rules {
+            for s in &rule.sets {
+                let own = set.name == axes[s.axis].name;
+                let targets: Vec<usize> = s
+                    .values
+                    .iter()
+                    .filter_map(|v| match v.value {
+                        Which::Fixed(i) => Some(i),
+                        _ => None,
+                    })
+                    .collect();
+                for i in targets {
+                    let value = &mut axes[s.axis].values[i];
+                    for c in &rule.clauses {
+                        match c {
+                            Clause::Keywords { list, bucket, .. } => {
+                                value.keywords = crate::overlay::merge(
+                                    &value.keywords,
+                                    &crate::overlay::Edit {
+                                        add: list.clone(),
+                                        remove: Vec::new(),
+                                    },
+                                );
+                                if value.bucket.is_none() {
+                                    value.bucket = bucket.clone();
+                                }
+                            }
+                            Clause::Flag { name, .. } => {
+                                if value.detection.exclusive.is_none() {
+                                    value.detection.exclusive = Some(name.clone());
+                                } else if !value.detection.alternative.contains(name) {
+                                    value.detection.alternative.push(name.clone());
+                                }
+                            }
+                            Clause::AnyFlag { names, .. } => {
+                                for n in names {
+                                    if !value.detection.alternative.contains(n) {
+                                        value.detection.alternative.push(n.clone());
+                                    }
+                                }
+                            }
+                            Clause::Combination { names, .. } => {
+                                let joined = names.join("+");
+                                if !value.detection.combination.contains(&joined) {
+                                    value.detection.combination.push(joined);
+                                }
+                            }
+                            Clause::When { tier, cite, .. } => {
+                                if *tier == Tier::Physics && !own {
+                                    value.detection.physics.push(Window {
+                                        when: cite.clone(),
+                                        confidence: rule.confidence,
+                                        why: rule.why.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Axis {

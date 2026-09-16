@@ -40,7 +40,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | owner | the registry's operator; the identifiers are the clinic's |
 | kept | until purged; a purged identifier is filed again only when its file is parsed again (changed, or new), not by a digest that finds the file unchanged |
 | read | `nils linkage show <code> [--why <text>]` (every read is audited) |
-| change | `nils digest <root>`<br>`nils linkage import <csv>`<br>`nils linkage link \| unlink`<br>`nils linkage id-type add` |
+| change | `nils digest <root>`<br>`nils linkage import <csv>`<br>`nils linkage link \| unlink \| merge`<br>`nils linkage id-type add` |
 | export | none in Wave 1 |
 | delete | `nils linkage purge --subject <code> \| --all` (the read audit and the id types stay) |
 
@@ -109,8 +109,8 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | holds | quasi-identifying: birth dates, sex, dates of death, the dates of diagnoses, onsets, treatments and every observation<br>clinical: diagnoses and their types, the scales and their values, the treatments |
 | owner | the research group that owns the cohort |
 | kept | for ever; a correction supersedes the old row and the old row stays (section 13.2) |
-| read | `nils clinical vocabulary list`<br>`nils custody` |
-| change | `nils clinical vocabulary load` |
+| read | `nils clinical vocabulary list`<br>`nils clinical cohort list`<br>`nils clinical cohort show <name>`<br>`nils custody` |
+| change | `nils clinical vocabulary load`<br>`nils clinical cohort make \| rename \| set \| retire \| add \| remove`<br>`nils ask promote`<br>a digest of a dataset that feeds a cohort |
 | export | `nils release` |
 | delete | remove `<home>/registry.db` (nils has no command for it) |
 

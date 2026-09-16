@@ -26,6 +26,7 @@ pub mod knobs;
 pub mod probe;
 pub mod progress;
 pub mod report;
+pub mod resolve;
 pub mod resume;
 pub mod rss;
 pub mod rule;
@@ -35,7 +36,7 @@ pub mod writer;
 
 pub use cancel::{Cancel, Cancelled, Scripted};
 pub use digest::{DigestError, digest, digest_with, dry_run};
-pub use knobs::{KNOBS, Knob, Settings};
-pub use report::{Report, Written};
+pub use knobs::{KNOBS, Knob, Settings, Unmapped};
+pub use report::{Joined, Report, Written};
 pub use rule::{Ident, Outcome, Rule, RuleError, Traced};
 pub use walk::{Filter, SkipReason, WalkEvent, walk};

@@ -41,8 +41,12 @@ pub fn synthetic(store: &mut Store) -> Result<Option<String>, StoreError> {
 /// The summary document.
 pub fn document(registry: &mut Registry, since: Option<&str>) -> Result<Value, StoreError> {
     let epoch = registry.meta().epoch;
-    let window = Scheme::default().window_days;
     let store = registry.store();
+    // record 26: the window the session cache was built under, which is
+    // what every count of sessions here is of; the scheme's own where
+    // nobody has built it yet
+    let window = nils_registry::cohort::built_window(store)?
+        .unwrap_or_else(|| Scheme::default().window_days);
     let d = store.dialect();
     let q = |t: &str| store.qualified(t);
     let (subject, session, stack, series, study, member, cohort, class, handle, release, batch) = (
@@ -61,7 +65,12 @@ pub fn document(registry: &mut Registry, since: Option<&str>) -> Result<Value, S
     let win = d.param(1, Type::Int);
     let window_p = [Param::Int(window)];
 
-    let subjects = count(store, &format!("SELECT COUNT(*) FROM {subject}"), &[])?;
+    // a subject merged into another is not one the counts see (record 26 §6)
+    let subjects = count(
+        store,
+        &format!("SELECT COUNT(*) FROM {subject} WHERE merged_into IS NULL"),
+        &[],
+    )?;
     let sessions = count(
         store,
         &format!("SELECT COUNT(*) FROM {session} WHERE window_days = {win}"),
@@ -71,7 +80,10 @@ pub fn document(registry: &mut Registry, since: Option<&str>) -> Result<Value, S
 
     // by cohort: a subject in two cohorts counts once in each, so the sums
     // may exceed the totals; the desk reads them as memberships
-    let current = format!("{member} m JOIN {cohort} c ON c.id = m.cohort_id AND m.left_at IS NULL");
+    // record 26 §9: a retired cohort leaves the lists, its members kept
+    let current = format!(
+        "{member} m JOIN {cohort} c ON c.id = m.cohort_id AND m.left_at IS NULL AND c.retired_at IS NULL"
+    );
     let subjects_by_cohort = by(
         store,
         &format!(
@@ -120,7 +132,11 @@ pub fn document(registry: &mut Registry, since: Option<&str>) -> Result<Value, S
         ),
         &[],
     )?;
-    let cohorts = count(store, &format!("SELECT COUNT(*) FROM {cohort}"), &[])?;
+    let cohorts = count(
+        store,
+        &format!("SELECT COUNT(*) FROM {cohort} WHERE retired_at IS NULL"),
+        &[],
+    )?;
     let synthetic = synthetic(store)?;
 
     let since_block = match since {
@@ -130,7 +146,9 @@ pub fn document(registry: &mut Registry, since: Option<&str>) -> Result<Value, S
             let dp = [Param::from(date)];
             let subjects = count(
                 store,
-                &format!("SELECT COUNT(*) FROM {subject} WHERE created_at > {p}"),
+                &format!(
+                    "SELECT COUNT(*) FROM {subject} WHERE merged_into IS NULL AND created_at > {p}"
+                ),
                 &dp,
             )?;
             let sessions = count(

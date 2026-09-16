@@ -5376,6 +5376,9 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Result<Vec<Pla
                 }),
                 probed: crate::places::probe(Path::new(&path)),
                 handling: serde_json::Value::Null,
+                // a source place setup declares reads its folder itself
+                // until a dataset is declared on it (record 26)
+                dataset: serde_json::Value::Null,
             },
         );
         match made {

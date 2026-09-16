@@ -258,6 +258,21 @@ source:
 - **A release always writes the date it used into the tree** (§9.4), because for
   a study whose date came from a UID, remapping the UID means the tree can never
   re-derive it.
+- **A session labelled by its date is no label for files whose dates moved**,
+  since the path would carry what the files no longer do. What happens then
+  turns on where the policy came from. **Asked for on the run itself**, by
+  `--dates shift` or `--dates year`, it is refused like the first rule and no
+  tree is written: the caller named both halves of the contradiction, and a
+  warning is read after the tree exists. **Declared by a dataset** (record 26,
+  the leaving policy), with the run giving neither `--dates` nor `--uids`, the
+  tree gives way rather than the release: the sessions are numbered in date
+  order, the release row records the scheme that named them, and the report
+  says why. Refusing there would make a declared policy one nobody could ever
+  release, and it is the registry resolving a standing rule rather than a
+  person's instruction being quietly altered. Either way the policy keeps
+  doing its work, because an ordinal label leaks no date, which is what this
+  section protects. A months or ordinal scheme named by the caller stands as
+  it is.
 
 ## 5. Repair three: the session scheme
 

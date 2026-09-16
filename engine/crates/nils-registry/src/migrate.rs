@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 38;
+pub const SCHEMA_VERSION: i64 = 44;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,7 +206,175 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 38,
         apply: a_place_declares_how_it_is_handled,
     },
+    Migration {
+        version: 39,
+        apply: a_source_place_is_a_dataset,
+    },
+    Migration {
+        version: 40,
+        apply: a_batch_has_a_kind_and_a_subject_may_be_provisional,
+    },
+    Migration {
+        version: 41,
+        apply: a_cohort_is_fed_retired_and_released_under_its_policy,
+    },
+    Migration {
+        version: 42,
+        apply: a_subject_may_be_merged,
+    },
+    Migration {
+        version: 43,
+        apply: a_release_says_why_its_sessions_were_numbered,
+    },
+    Migration {
+        version: 44,
+        apply: an_original_is_proved_by_its_own_digest,
+    },
 ];
+
+/// Record 26 §3, §4 and §14: a batch says which step it is, `digest` or
+/// `pseudonymize`, every batch from before being a digest; a subject says
+/// whether the pseudonymiser made it from an identifier no map named,
+/// which no subject from before was; and the pseudonymiser's rows carry
+/// their directory, read one directory at a time.
+fn a_batch_has_a_kind_and_a_subject_may_be_provisional(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "ingest_batch", &["kind"])?;
+    add_columns(store, "subject", &["provisional"])?;
+    add_columns(store, "pseudonym_file", &["dir"])?;
+    add_indexes(store, "pseudonym_file")?;
+    if table_exists(store, "ingest_batch")? {
+        store.execute(
+            &format!(
+                "UPDATE {} SET kind = 'digest' WHERE kind IS NULL",
+                store.qualified("ingest_batch")
+            ),
+            &[],
+        )?;
+    }
+    Ok(())
+}
+
+/// Record 26 §8, §9 and §13: a membership interval names the batch of the
+/// digest that opened it, a cohort may be retired, and a release records the
+/// leaving policy of each dataset it spanned.
+fn a_cohort_is_fed_retired_and_released_under_its_policy(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "cohort", &["retired_at"])?;
+    add_columns(store, "cohort_member", &["batch_id"])?;
+    add_columns(store, "release", &["policies"])
+}
+
+/// Record 26 §1: a source place is a dataset, with what arrives, its two
+/// trees, its identity rule, what an unmapped identifier does, the cohort it
+/// feeds, its tag lists and what becomes of the originals; and the table the
+/// pseudonymiser records every file of the originals in. A source place from
+/// before reads the folder itself as its pseudonymised tree, arriving as its
+/// handling said, or de-identified where none was declared, so every place
+/// declared before this keeps working as it did.
+fn a_source_place_is_a_dataset(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "place", &["dataset"])?;
+    add_tables(store, kind, &["pseudonym_file"])?;
+    if !table_exists(store, "place")? {
+        return Ok(());
+    }
+    let t = schema::table("place");
+    let handling = store
+        .dialect()
+        .text_of(t.column("handling").expect("place.handling"));
+    let rows = store.query(
+        &format!(
+            "SELECT id, {handling} FROM {} WHERE role = 'source' AND dataset IS NULL ORDER BY id",
+            store.qualified("place")
+        ),
+        &[],
+    )?;
+    for r in &rows {
+        let id = r.int(0)?;
+        let arrives = r
+            .opt_text(1)?
+            .and_then(|h| serde_json::from_str::<serde_json::Value>(h).ok())
+            .and_then(|h| h["arrives"].as_str().map(str::to_string));
+        let dataset = crate::place::default_dataset(arrives.as_deref());
+        store.update_by_id(
+            t,
+            &[("dataset", Param::from(dataset.to_string()))],
+            "id",
+            id,
+        )?;
+    }
+    Ok(())
+}
+
+/// Record 26 §6: a subject merged into another keeps its row, marked, and
+/// the linkage store has the type its code is filed under on the canonical
+/// subject. A store from before this gains the type; a fresh one has it
+/// from the seed.
+fn a_subject_may_be_merged(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    match kind {
+        Kind::Registry => {
+            add_columns(store, "subject", &["merged_into", "merged_at"])?;
+            add_indexes(store, "subject")
+        }
+        Kind::Linkage => {
+            let (name, description) = ID_TYPES[2];
+            debug_assert_eq!(name, schema::SUBJECT_CODE_TYPE);
+            if crate::linkage::id_type_id(store, name)?.is_some() {
+                return Ok(());
+            }
+            let table = store.qualified("id_type");
+            let d = store.dialect();
+            let sql = format!(
+                "INSERT INTO {table} (name, description) VALUES ({}, {})",
+                d.param(1, crate::schema::Type::Text),
+                d.param(2, crate::schema::Type::Text)
+            );
+            store.execute(&sql, &[Param::from(name), Param::from(description)])?;
+            Ok(())
+        }
+    }
+}
+
+/// §4.3 with record 26 §13: a release says why its sessions were numbered in
+/// date order, where a dataset's own declaration moved the dates under a
+/// scheme that labels by them. A row written before this says nothing, which
+/// is what a run whose scheme stood has to say for itself anyway.
+fn a_release_says_why_its_sessions_were_numbered(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "release", &["session_naming"])
+}
+
+/// Lab 26d, finding 2: the pseudonymiser records the digest of the original
+/// it read beside the digest of the copy it wrote, so that what a purge
+/// destroys is proved by its content and not by a size and a modification
+/// time anything may set. A row written before this has none, and no reading
+/// of the file can supply it after the fact: it stays null until a run of the
+/// pseudonymiser reads that original again, and until then a purge of the
+/// dataset is refused in words naming that run.
+fn an_original_is_proved_by_its_own_digest(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "pseudonym_file", &["original_digest"])
+}
 
 /// Wave 4b §11.3 and §11.4: the case folded companions of the fingerprint's
 /// eight text columns and the two numbers of the spacing string, filled for
@@ -1117,7 +1285,7 @@ fn add_columns(store: &mut Store, table: &str, names: &[&str]) -> Result<(), Err
     Ok(())
 }
 
-fn column_exists(store: &mut Store, table: &str, column: &str) -> Result<bool, Error> {
+pub fn column_exists(store: &mut Store, table: &str, column: &str) -> Result<bool, Error> {
     Ok(match store {
         Store::Sqlite(_) => store
             .query(&format!("PRAGMA table_info({table})"), &[])?
@@ -1135,7 +1303,9 @@ fn column_exists(store: &mut Store, table: &str, column: &str) -> Result<bool, E
     })
 }
 
-fn table_exists(store: &mut Store, name: &str) -> Result<bool, Error> {
+/// Whether the store has a table of that name, declared or not: the held
+/// doors read a table another slice declares, when it is there.
+pub fn table_exists(store: &mut Store, name: &str) -> Result<bool, Error> {
     Ok(match store {
         Store::Sqlite(_) => store
             .query_opt(
@@ -1364,11 +1534,36 @@ mod tests {
             .query("SELECT name FROM id_type ORDER BY id", &[])
             .unwrap();
         let names: Vec<&str> = rows.iter().map(|r| r.text(0).unwrap()).collect();
-        assert_eq!(names, vec!["patient-id", "study-instance-uid"]);
+        assert_eq!(
+            names,
+            vec!["patient-id", "study-instance-uid", "subject-code"]
+        );
         assert_eq!(
             standing(&mut store, Kind::Linkage).unwrap(),
             Standing::Current
         );
+    }
+
+    /// A linkage store seeded before record 26 gains `subject-code` from
+    /// migration 39, once.
+    #[test]
+    fn a_linkage_store_from_before_gains_the_subject_code_type() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 38) {
+            (m.apply)(&mut store, Kind::Linkage).unwrap();
+        }
+        store
+            .execute("DELETE FROM id_type WHERE name = 'subject-code'", &[])
+            .unwrap();
+        a_subject_may_be_merged(&mut store, Kind::Linkage).unwrap();
+        a_subject_may_be_merged(&mut store, Kind::Linkage).unwrap();
+        let rows = store
+            .query(
+                "SELECT COUNT(*) FROM id_type WHERE name = 'subject-code'",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rows[0].int(0).unwrap(), 1);
     }
 }
 
@@ -1398,5 +1593,145 @@ mod column_migration {
         assert!(column_exists(&mut store, "classification_evidence", "reference").unwrap());
         // and again, because a migration that has run must be safe to run
         evidence_says_which_pass(&mut store, Kind::Registry).unwrap();
+    }
+
+    /// A registry from before record 26's pseudonymiser opens with every
+    /// batch a digest and no subject provisional, and a row written after
+    /// keeps what it said.
+    #[test]
+    fn every_batch_from_before_is_a_digest_and_no_subject_is_provisional() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 39) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        store
+            .batch("ALTER TABLE ingest_batch DROP COLUMN kind")
+            .unwrap();
+        store
+            .batch("ALTER TABLE subject DROP COLUMN provisional")
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO ingest_batch (id, source_id, job_id, name, config, started_at, state) VALUES (1, 1, 1, 'n', '{}', 't', 'done')",
+                &[],
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO subject (id, code, created_at) VALUES (1, 'abc', 't')",
+                &[],
+            )
+            .unwrap();
+
+        a_batch_has_a_kind_and_a_subject_may_be_provisional(&mut store, Kind::Registry).unwrap();
+        assert!(column_exists(&mut store, "ingest_batch", "kind").unwrap());
+        assert!(column_exists(&mut store, "subject", "provisional").unwrap());
+        let kind = store
+            .query_opt("SELECT kind FROM ingest_batch WHERE id = 1", &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(kind.text(0).unwrap(), "digest");
+        let provisional = store
+            .query_opt("SELECT provisional FROM subject WHERE id = 1", &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(provisional.opt_int(0).unwrap(), None);
+        // and again: a batch that says what it is keeps saying it
+        store
+            .execute(
+                "INSERT INTO ingest_batch (id, source_id, job_id, name, config, started_at, state, kind) VALUES (2, 1, 2, 'n', '{}', 't', 'done', 'pseudonymize')",
+                &[],
+            )
+            .unwrap();
+        a_batch_has_a_kind_and_a_subject_may_be_provisional(&mut store, Kind::Registry).unwrap();
+        let kind = store
+            .query_opt("SELECT kind FROM ingest_batch WHERE id = 2", &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(kind.text(0).unwrap(), "pseudonymize");
+    }
+
+    /// A registry from before record 26 opens with every source place a
+    /// dataset reading its folder itself, arriving as its handling said and
+    /// de-identified where none was declared; a place of another role has
+    /// none; and the pseudonymiser's table is there, empty.
+    #[test]
+    fn a_source_place_from_before_becomes_a_dataset_reading_its_folder() {
+        use crate::schema::table;
+        use crate::store::Insert;
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 38) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        store
+            .batch("ALTER TABLE place DROP COLUMN dataset")
+            .unwrap();
+        store.batch("DROP TABLE pseudonym_file").unwrap();
+        assert!(!column_exists(&mut store, "place", "dataset").unwrap());
+        let row = |name: &str, role: &str, handling: Option<&str>| {
+            vec![
+                Param::from(name),
+                Param::from(role),
+                Param::from(format!("/data/{name}")),
+                Param::from("{}"),
+                Param::from("2026-09-01T00:00:00Z"),
+                handling.map_or(Param::Null, Param::from),
+            ]
+        };
+        let spec = Insert::new(
+            table("place"),
+            &[
+                "name",
+                "role",
+                "path",
+                "guarantees",
+                "created_at",
+                "handling",
+            ],
+        );
+        store
+            .insert(
+                &spec,
+                &[
+                    row("plain", "source", None),
+                    row("named", "source", Some(r#"{"arrives": "identified", "on_release": {"dates": "keep", "uids": "remap", "deface": false}}"#)),
+                    row("out", "export", None),
+                ],
+            )
+            .unwrap();
+
+        a_source_place_is_a_dataset(&mut store, Kind::Registry).unwrap();
+        assert!(column_exists(&mut store, "place", "dataset").unwrap());
+        assert!(table_exists(&mut store, "pseudonym_file").unwrap());
+        let places = crate::place::list(&mut store).unwrap();
+        let of = |name: &str| {
+            places
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+                .dataset
+                .clone()
+        };
+        assert_eq!(of("plain")["arrives"], "deidentified");
+        assert_eq!(
+            of("plain")["trees"],
+            serde_json::json!({"originals": null, "anon": "."})
+        );
+        assert_eq!(of("plain")["unmapped"], "code");
+        assert_eq!(of("named")["arrives"], "identified");
+        assert_eq!(of("named")["unmapped"], "hold");
+        assert!(of("out").is_null());
+        // and again, because a migration that has run must be safe to run,
+        // and a dataset once filled is not filled over
+        store
+            .execute(
+                "UPDATE place SET dataset = '{\"arrives\": \"coded\"}' WHERE name = 'plain'",
+                &[],
+            )
+            .unwrap();
+        a_source_place_is_a_dataset(&mut store, Kind::Registry).unwrap();
+        let places = crate::place::list(&mut store).unwrap();
+        let plain = places.iter().find(|p| p.name == "plain").unwrap();
+        assert_eq!(plain.dataset["arrives"], "coded");
     }
 }

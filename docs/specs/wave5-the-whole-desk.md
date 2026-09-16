@@ -446,13 +446,227 @@ than typed. The roles:
 The rules are checked, not documented: a release writes only to an `export`
 place; a question's subset writes only to a `share` place; the `registry` role is
 refused on a place without a backup; a `source` place is never written except
-beside the original by the anonymiser. The engine probes what it can, the mount,
-the free space, the presence of snapshots where the filesystem shows them, and
-records what it cannot as a declaration by the operator. On a laptop a place is a
-directory and its guarantees are what the person declares; the rules are the
-same. The Settings page shows every place, its role, its guarantees and which
-paths are bound to it, and lets an operator add, bind and retire places. The
-group's own places are the record's (`20 §6`).
+inside the dataset's own trees by the pseudonymiser. The engine probes what it
+can, the mount, the free space, the presence of snapshots where the filesystem
+shows them, and records what it cannot as a declaration by the operator. On a
+laptop a place is a directory and its guarantees are what the person declares;
+the rules are the same. The Settings page shows every place, its role, its
+guarantees and which paths are bound to it, and lets an operator add, bind and
+retire places. The group's own places are the record's (`20 §6`).
+
+**A source place is a dataset** (record 26, HTTP API contract version 5). One
+folder with one name, and on it: `arrives`, what comes in, `identified` (to be
+pseudonymised into the tree before anything reads it), `deidentified` (moved into
+the tree as sent, its identifiers mapped at read time) or `coded` (our codes in
+PatientID already, taken verbatim); `trees`, the originals at
+`derivatives/dcm-original`, read by the pseudonymiser and nothing else, and the
+pseudonymised tree at `derivatives/dcm-anon`, the registry's only source, or the
+folder itself, `.`, where there is no such layout, which is how every place
+declared before the record keeps working; `identity`, the rule its files are read
+under, the `identity` block of a rule file as `nils digest --identity-rule` reads
+it, or null, which a digest of the dataset takes when it names none of its own;
+`unmapped`, what a file whose identifier the linkage store does not know does,
+`hold` (the default for identified arrivals) or `code`; `cohort`, the one every
+digest of it feeds, or null; `tags`, `keep_demographics` (sex, weight and size,
+kept unless said), `remove` and `keep`, each tag as `gggg,eeee`, applied beside
+the four groups the pseudonymiser always removes. What became of the originals,
+`originals_kept` and `originals_vault`, is not declared at all: the acts on them
+write it, and a body naming either is refused in words naming the act that sets
+it. Declaring a source place, or changing its dataset, looks
+at the folder: `derivatives/dcm-raw`, a v0 cohort folder's, is renamed
+`derivatives/dcm-anon` and nothing else is rewritten; an identified folder's
+loose entries beside `derivatives/` are moved into the originals and an empty
+pseudonymised tree is made; a de-identified or coded folder's are moved into the
+pseudonymised tree when `move_into_anon` asks. Every move is a rename inside the
+folder, top-level entries only; nothing is copied and nothing is read. A folder
+that is a tree of another dataset is refused. `POST /api/places` and `PUT
+/api/places/{id}` take the fields under `data:work` beside `places:work` and
+answer `layout`; `POST /api/ingest/look` answers `layout` before a folder is
+declared; `GET /api/sources` and `GET /api/places` show the dataset with each
+tree's path and the files, bytes and last write the last probe counted
+(`?probe=1` counts again, bounded), and `held`, what the pseudonymiser holds for
+want of a map. Wherever a location is named, `@name` is the pseudonymised tree
+and `@name/originals` the originals, which a digest is refused: the registry
+never points at an identified file.
+
+**Acting on the originals** (record 26 §1). What became of them is the acts'
+to write, and the acts beside `kept` are `nils place originals <dataset> --vault
+--into PLACE --why TEXT` and `--purge --why TEXT`, and `POST
+/api/places/{id}/originals {do, into, why}` under `data:work` at detail
+sensitive, since they move and delete identified files; both are one job kind,
+`originals`. `GET /api/places/{id}/originals` (`data:see`) answers what the act
+would do without doing it: `{files, bytes, verified, unverified,
+copy_unverified, changed, no_copy, held, ready, why}`, and the keyboard prints
+the same before it acts. A **vault** moves the originals into the place `into`
+names, a `backup` place in force, the one role the engine never reads for data,
+under `originals/<dataset>` there: a rename where the destination is on the same
+filesystem, and otherwise a copy whose digest is compared with the source's
+before the source is removed, so no file is ever removed whose copy did not
+verify. A **purge** deletes them, and is refused while any file of the dataset
+waits for a map, the pseudonymiser's held rows or a digest's
+`identity.unmapped` quarantine, counted once however many tables hold the file,
+because those originals are the only copy of those people's scans.
+
+**An original is verified only while it is still the file that was copied**
+(lab 26c): its size and modification time are what the row recorded, *and* its
+copy is there at the recorded size with the digest hashed again now. The copy's
+half alone would pass a file whose bytes changed after the copy was written,
+and purging that file destroys the only version of it anybody has; the
+asymmetry decides it, since a false refusal costs a run of the pseudonymiser
+and a false acceptance costs the data. A modification time that moved
+innocently, after a restore or a copy between disks, is refused too, and that is
+the price. The counts keep the four cases apart because their cures differ:
+`copy_unverified` (the copy is missing or is not what was recorded),
+`changed` (the original moved on) and `unproved` (the row says nothing about
+what the original hashed to, being a row written before that digest was
+recorded) are all mended by pseudonymising the dataset again, which writes a
+copy again or reads an original again and records what it is, and `no_copy`
+(the reader refused the file, so it is not DICOM and was never copied) is
+mended only by moving the file out of the originals tree, which nothing offers
+to do for a person. A dataset read in place, whose folder is its own
+pseudonymised tree, is refused outright: there is nothing to verify against.
+Each refusal names its count in words and the cure that works for it, and the
+door refuses in the same words the job would. Both acts resume, since a file
+that has moved is not there the next time, and stop at a heartbeat on a cancel
+with what was done kept, the job reading `cancelled` and not `failed`.
+
+**A purge proves each original by its content, and reads every one of them to
+do it** (lab 26d). Two ways of losing data came of judging a file by anything
+else. The walk lists a directory and then reaches its files one by one, so the
+size and the modification time it captured may be many files old when a file's
+turn comes: the lab wrote into the originals under a running purge, as an
+rsync, a re-export or a corrected study copied over the old one does, and lost
+one file in its first run and five consecutive files of one directory in its
+second. And the copy was proved honestly, by a digest hashed on the spot, while
+the original was proved by two numbers anything may set: an original changed in
+place whose modification time was then put back to the recorded value passed as
+`verified` and was destroyed. So the pseudonymiser records the digest of the
+original it read beside the digest of the copy it wrote, and the purge,
+immediately before it removes a file, opens that file, measures it and hashes
+every byte of it, judging that reading and no other. One read of the original
+serves both: what the file is now, and whether it is the file that was copied.
+A purge therefore reads every original once, whole, and that is the point of
+it, not a cost to be trimmed. What fails is left, not removed, the first reason
+named as before, and the job ends refused. The survey and the door stay cheap,
+on the rows and on each original's size and modification time, and say so in
+`forecast`, a sentence they always carry: a person told `ready` is told in the
+same breath that the purge proves each file by its content as it goes, so that
+a refusal afterwards is never without a sentence explaining it. A row written
+before the digest was recorded is counted as `unproved` in the forecast too,
+so that its cure is named before a purge is asked for rather than at the last
+moment. Migration 44 adds `pseudonym_file.original_digest`. The job's result is
+`{did, files, bytes, into, path, verified, seconds}`. On success the dataset
+records `originals_kept` and `originals_vault`, the place a vault used, and the
+act is audited as `originals.vault` or `originals.purge` with its counts and
+the reason, which moves the epoch; until then the dataset reads `kept`. Neither
+act touches the pseudonymised tree, the registry's rows or the linkage store: a
+person keeps their code and their history whatever becomes of the originals.
+
+**The pseudonymiser** (record 26 §3, §4, §7 and §14). `nils pseudonymize
+@dataset [--name N] [--workers N] [--held] [--dry-run] [--json]` is a verb and a
+job kind, `pseudonymize`, queued through `POST /api/jobs` under `data:work` at
+detail sensitive, since it reads the identifiers it replaces. It takes an
+identified dataset by its name and refuses one that arrives de-identified or
+coded, whose tree is read in place. For every file of the originals it reads
+the header and no more, resolves who the file is about through the dataset's
+identity rule and the linkage store exactly as the digest does, the same
+resolver and the same key, and writes a copy into the pseudonymised tree: the
+code in `PatientID`, the patient, provider, trial and institution groups removed
+tag for tag (v0's four lists, never the times), `PatientAge` computed before the
+birth date goes, `PatientSex`, `PatientWeight` and `PatientSize` kept unless the
+dataset says `keep_demographics: false`, the dataset's `remove` list removed and
+its `keep` list kept, keep winning; every date and every UID kept; the private
+elements dropped except what the pack's release list names by creator and
+offset (`--pack`, `mri` by default), the overlays and curves dropped; the pixel
+data never parsed but copied from the source byte for byte, whatever follows it
+in the file left behind. The copy goes to a place made from facts and never
+from the path it came in on:
+`<code>/<StudyDate>-<8 hex of the study UID's blake2>/<SeriesNumber, 3 digits>/<InstanceNumber, 5 digits>.dcm`,
+a counter before the extension on a clash. It is written as `.part` through a
+256 KiB buffer, hashed on the way (the release's manifest digest), renamed into
+place; directories are made once each; nothing is synced per file and the
+tree's directory once per batch. The original is hashed in that same pass, from
+its first byte to its last, and its digest is recorded beside the copy's, since
+a purge proves what it destroys by content (lab 26d); the pass reads the file
+once, the header the reader has already seen costing a page or two more. The walker, the bounded channels and the
+per-file workers are the digest's; one thread holds the registry and the key,
+answers each worker the code, and records a row per file in `pseudonym_file`.
+A run resumes by size and modification time, and a file those bring back is
+then proved on both sides, the copy against the digest that was recorded and
+the original against its own, so a second run over an unchanged tree reads
+both files and touches a row per file. A changed source is written again over
+its own place, and so is one whose bytes moved under a modification time that
+did not and one whose row is from before the original's digest was recorded:
+that run is the cure a refused purge names, and it has to be a run that
+notices.
+
+A file whose identifier the linkage store does not know is held when the
+dataset says `hold` (the default for identified arrivals): not written, its row
+`held` with the shape of the identifier (digits as `9`, letters as `A` or `a`),
+the keyed lookup the store would file it under, the identifier sealed under the
+store's encrypt key for the one door that reveals it, and the id type; never the
+identifier in the clear. A run that holds files opens one review item
+`identity.unmapped` per dataset and shape, `{files, first_seen}` as evidence,
+and a run that finds nothing held under a shape closes it. When the dataset
+says `code`, or a person asked for a held file to be coded anyway, the code is
+derived from the identifier under the key as the digest derives it, the subject
+is made and marked `provisional`, and one `identity.provisional` item per
+subject counts its files. `--held` reads only the held rows a map released or a
+person coded anyway, and nothing else; a plain run reads them too, among the
+rest. A file the reader refuses is a `refused` row with the reader's class, not
+read again until it changes. A cancel through the door stops the run at its next
+heartbeat; what was written stays written. The run is a batch of kind
+`pseudonymize` on the pseudonymised tree's source, its report the batch's
+counts and the job's result:
+`{files {seen, written, unchanged, held, refused, skipped}, subjects {new, seen, provisional}, tags_removed {tag: count}, private_removed, refused_by, held_by_shape, bytes, seconds, files_per_s}`.
+A digest of the tree reads the codes verbatim under the `subject-code` type,
+any value of the code alphabet whatever its length, so a subject the
+pseudonymiser made is found by its code and never coded again, and so is a
+subject whose code was made elsewhere, a v0 cohort's sixteen hex characters
+under a registry that derives twelve among them: every person keeps the code
+they had. A value no subject holds stands as its own code where it has the
+shape this registry makes, its scheme's alphabet and its display length, and
+is otherwise no code of this registry, so a code is derived from it as from
+any identifier. A value outside the alphabet is no identifier the rule can
+read and falls back to the study UID. The type is seeded by the identifiers
+slice, and until then `nils linkage id-type add subject-code` makes it. A change to the dataset's tag lists reaches the files
+written after it; an unchanged source is not written again for a new list.
+
+A dataset read in place, de-identified or coded, has no pseudonymise step, so
+its digest answers `unmapped` itself. Where the dataset says `hold`, a file
+whose identifier the linkage store does not know is not filed: its
+`source_file` row is quarantined under `identity.unmapped` with the shape of
+the identifier as its detail, no subject and no row of any other table is
+made for it, and one review item per dataset and shape says how many, opened
+and closed exactly as the pseudonymiser's are. A held file is read again by
+the next digest whatever it was asked, so a map filed since releases it.
+Where the dataset says `code`, the subject is made and marked provisional, as
+the pseudonymiser marks the one it codes from an identifier no map named.
+
+**The chain.** `POST /api/jobs` takes `then: [command, ...]`, the command
+lines queued one after another by the worker when the job before ends done,
+under the principal, grants and detail recorded on the first; each step is a
+verb the door queues, located at the door, its grant checked when its turn
+comes, and a step the recorded grants do not reach ends the chain with
+`result.chain_stopped {step, why}` on the job before it. A job answers `then`
+and `chain {before, after}`, on `GET /api/jobs/{id}` and in the event stream.
+`bring-in @dataset [--name N] [--pack P]` is sugar, at the door and at the
+keyboard: `pseudonymize @dataset --name N` then `digest @dataset --name N`,
+`fingerprint` and `classify --pack P` for an identified dataset, or the digest
+and the rest for any other, the digest sharing the pseudonymise step's name.
+
+**The batch is the thread** (record 26 §14). A pseudonymise step and the digest
+after it share a name on one source, and `GET /api/batches/{id}` reads five
+stages off the pair: `pseudonymised {files, changed, held, refused, job}` or
+null, `walked {files, new, changed, unchanged, refused, job}`,
+`digested {stacks, sessions, subjects, moved, job}`,
+`classified {stacks, of, unsure, pack, jobs, by_base}` and
+`reviewed {done, of, since}`; `GET /api/batches` says each batch's `kind`;
+`GET /api/timeline/batch/{id}` serves the batch's events, the other side of its
+thread among them; `GET /api/sources` fills each recent digest's
+`pseudonymised {files, changed, held, job, batch}` and carries
+`rates {pseudonymize, digest}`, the files per second of the last run of each
+step that ended on this machine.
 
 ### 10.3 Database (D75)
 

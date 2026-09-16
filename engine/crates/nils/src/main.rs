@@ -27,14 +27,20 @@ mod ask_cli;
 mod ask_doors;
 mod assist_cli;
 mod backup;
+mod batches;
 mod browse;
+mod chain;
+mod dataset;
 mod depends;
 mod door_client;
+mod explain;
 mod folders;
 mod gate;
 mod grants;
+mod linkage_doors;
 mod login;
 mod mcp;
+mod originals;
 mod places;
 mod profile;
 mod pyramid;
@@ -54,7 +60,7 @@ use nils_registry::home::{
     Config, DSN_ENV, Home, InitOptions, LINKAGE_DB, REGISTRY_DB, REGISTRY_ENV,
 };
 use nils_registry::keys::strip_newline;
-use nils_registry::linkage::{self, ImportError, ImportRow, Subkeys};
+use nils_registry::linkage::{self, Subkeys};
 use nils_registry::schema::{Type, table};
 use nils_registry::session;
 use nils_registry::{Backend, Insert, Param, Registry, Scheme, Store};
@@ -87,6 +93,12 @@ enum Command {
     },
     /// Walk a tree of DICOM files, read every header and digest it into the registry
     Digest(DigestArgs),
+    /// Rewrite a dataset's originals into its pseudonymised tree: the code
+    /// in, the identifiers out, the pixels untouched (record 26)
+    Pseudonymize(PseudonymizeArgs),
+    /// Bring in what is new: pseudonymise a dataset, then digest, fingerprint
+    /// and classify it, as one chain of queued jobs (record 26)
+    BringIn(BringInArgs),
     /// Derive the per-stack values a classifier reads, once, and store them
     Fingerprint(FingerprintArgs),
     /// Judge every stack with a pack, and write the verdict with its evidence
@@ -95,6 +107,10 @@ enum Command {
     Explain {
         /// The stack's id
         stack: i64,
+        /// Where the packs are, for the labels of the values; $NILS_PACK_DIR,
+        /// else `packs/` in the registry home
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -254,13 +270,15 @@ struct ReleaseArgs {
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
     /// What happens to every date: as they are, moved by one offset per
-    /// subject, or the year only
-    #[arg(long, default_value = "keep", value_name = "keep|shift|year")]
-    dates: String,
+    /// subject, or the year only. Without --dates and --uids each dataset's
+    /// own leaving policy applies to its files (record 26 section 13); given,
+    /// the run's applies to every file
+    #[arg(long, value_name = "keep|shift|year")]
+    dates: Option<String>,
     /// What happens to UIDs. Remapping is keyed and deterministic, so two
     /// releases of overlapping selections agree
-    #[arg(long, default_value = "remap", value_name = "remap|preserve")]
-    uids: String,
+    #[arg(long, value_name = "remap|preserve")]
+    uids: Option<String>,
     /// The arc new UIDs hang from. The default is DICOM's UUID arc, which is
     /// legal and needs no registration
     #[arg(long, value_name = "OID")]
@@ -285,6 +303,10 @@ struct ReleaseArgs {
     /// Every current member of this cohort, by name (Wave 4a section 8)
     #[arg(long, value_name = "NAME")]
     cohort: Vec<String>,
+    /// Only the files under this dataset's pseudonymised tree, by the source
+    /// place's name (record 26 section 13)
+    #[arg(long, value_name = "NAME")]
+    dataset: Vec<String>,
     /// Only stacks holding this value on this pack axis, as `<axis>=<value>`;
     /// several values of one axis are alternatives, several axes all hold
     #[arg(long, value_name = "AXIS=VALUE")]
@@ -686,7 +708,9 @@ enum PlaceCommand {
         probe: bool,
     },
     /// Declare a place: a name, a role and a path; the guarantees are what
-    /// the operator declares, the probe what the engine finds
+    /// the operator declares, the probe what the engine finds. A source
+    /// place is a dataset: its folder is looked at, and the dataset flags
+    /// say what arrives in it and how it is read
     Add {
         /// One word, the name other places and verbs refer to
         name: String,
@@ -707,10 +731,12 @@ enum PlaceCommand {
         /// The storage is fast
         #[arg(long)]
         fast: bool,
+        #[command(flatten)]
+        dataset: DatasetFlags,
         #[arg(long)]
         json: bool,
     },
-    /// Change a place's path or guarantees
+    /// Change a place's path or guarantees, or a dataset's fields
     Set {
         id: i64,
         #[arg(long, value_name = "DIR")]
@@ -723,16 +749,125 @@ enum PlaceCommand {
         protected: Option<bool>,
         #[arg(long)]
         fast: Option<bool>,
+        #[command(flatten)]
+        dataset: DatasetFlags,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What becomes of a dataset's originals (record 26): vault them into a
+    /// backup place, or purge them. What the act would do is printed
+    /// first; with neither flag that is all it does
+    Originals {
+        /// The dataset, by the name of its source place
+        name: String,
+        /// Move the originals into another place, which keeps them
+        #[arg(long)]
+        vault: bool,
+        /// Delete the originals, which keeps nothing
+        #[arg(long, conflicts_with = "vault")]
+        purge: bool,
+        /// The backup place a vault moves them to
+        #[arg(long, value_name = "PLACE")]
+        into: Option<String>,
+        /// Why, in a sentence, which the audit row keeps
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
         #[arg(long)]
         json: bool,
     },
     /// Retire a place: it binds nothing from now on and stays as history
     Retire { id: i64 },
-    /// The verbs that take a path and the role each needs
+    /// The verbs that take a path and the role each needs, and where @name
+    /// points for each dataset
     Bindings {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Record 26: the dataset a source place is, as the command line declares
+/// it. A flag not given keeps what is in force, or takes its default.
+#[derive(Debug, Args, Default)]
+struct DatasetFlags {
+    /// What arrives: identified, deidentified or coded
+    #[arg(long, value_name = "HOW")]
+    arrives: Option<String>,
+    /// The identity rule its files are read under, as nils digest --identity-rule reads it
+    #[arg(long, value_name = "FILE")]
+    identity: Option<PathBuf>,
+    /// Forget the identity rule
+    #[arg(long, conflicts_with = "identity")]
+    no_identity: bool,
+    /// What an identifier the linkage store does not know does: hold its files, or code them
+    #[arg(long, value_name = "hold|code")]
+    unmapped: Option<String>,
+    /// The cohort every digest of the dataset feeds
+    #[arg(long, value_name = "NAME")]
+    cohort: Option<String>,
+    /// Feed no cohort
+    #[arg(long, conflicts_with = "cohort")]
+    no_cohort: bool,
+    /// Keep sex, weight and size when pseudonymising (the default)
+    #[arg(long)]
+    keep_demographics: bool,
+    /// Remove sex, weight and size when pseudonymising
+    #[arg(long, conflicts_with = "keep_demographics")]
+    no_keep_demographics: bool,
+    /// A tag to remove beside the four groups always removed, as gggg,eeee (repeatable)
+    #[arg(long, value_name = "TAG")]
+    remove: Vec<String>,
+    /// A tag to keep out of those groups, as gggg,eeee (repeatable)
+    #[arg(long, value_name = "TAG")]
+    keep: Vec<String>,
+    /// Move the loose entries of a de-identified or coded folder into its pseudonymised tree
+    #[arg(long)]
+    move_into_anon: bool,
+}
+
+impl DatasetFlags {
+    /// The fields as the declaration takes them, only those given.
+    fn asked(&self) -> Result<serde_json::Value, Exit> {
+        let mut asked = serde_json::Map::new();
+        if let Some(a) = &self.arrives {
+            asked.insert("arrives".into(), serde_json::json!(a));
+        }
+        if let Some(file) = &self.identity {
+            asked.insert(
+                "identity".into(),
+                dataset::identity_from_file(file).map_err(|e| usage(format!("--identity {e}")))?,
+            );
+        } else if self.no_identity {
+            asked.insert("identity".into(), serde_json::Value::Null);
+        }
+        if let Some(u) = &self.unmapped {
+            asked.insert("unmapped".into(), serde_json::json!(u));
+        }
+        if let Some(c) = &self.cohort {
+            asked.insert("cohort".into(), serde_json::json!(c));
+        } else if self.no_cohort {
+            asked.insert("cohort".into(), serde_json::Value::Null);
+        }
+        let mut tags = serde_json::Map::new();
+        if self.keep_demographics || self.no_keep_demographics {
+            tags.insert(
+                "keep_demographics".into(),
+                serde_json::json!(!self.no_keep_demographics),
+            );
+        }
+        if !self.remove.is_empty() {
+            tags.insert("remove".into(), serde_json::json!(self.remove));
+        }
+        if !self.keep.is_empty() {
+            tags.insert("keep".into(), serde_json::json!(self.keep));
+        }
+        if !tags.is_empty() {
+            asked.insert("tags".into(), serde_json::Value::Object(tags));
+        }
+        if self.move_into_anon {
+            asked.insert("move_into_anon".into(), serde_json::json!(true));
+        }
+        Ok(serde_json::Value::Object(asked))
+    }
 }
 
 /// Wave 4c §6.6: what is asked of a tree before it is digested.
@@ -780,8 +915,98 @@ enum ClinicalCommand {
 
 #[derive(Debug, Subcommand)]
 enum CohortCommand {
-    /// Every cohort, with its owner and its current member count
+    /// Every cohort with its counts and where it came from, retired ones
+    /// marked (record 26 section 9)
     List {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// One cohort in full: its joins, the sources holding its members and
+    /// the releases naming it
+    Show {
+        /// The cohort's name
+        name: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make a cohort; refused when a cohort or a selection is named so
+    Make {
+        /// One word, without @, / or spaces
+        name: String,
+        /// Whose it is; you, unless said
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rename a cohort: the id stays, and what recorded the old name keeps it
+    Rename {
+        /// The cohort's name
+        name: String,
+        /// The new name
+        #[arg(long)]
+        to: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set a cohort's owner or description
+    Set {
+        /// The cohort's name
+        name: String,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long, conflicts_with = "no_description")]
+        description: Option<String>,
+        /// Clear the description
+        #[arg(long)]
+        no_description: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retire a cohort, or bring it back with --back: the members and the
+    /// history are kept, and a retired cohort leaves the lists
+    Retire {
+        /// The cohort's name
+        name: String,
+        /// Bring a retired cohort back
+        #[arg(long)]
+        back: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add members by code, with a reason; a code the registry does not
+    /// hold is refused before anything is written
+    Add {
+        /// The cohort's name
+        name: String,
+        /// The subjects, by code
+        #[arg(required = true)]
+        codes: Vec<String>,
+        /// Why, on the intervals and the audit row
+        #[arg(long)]
+        why: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove members by code, with a reason; the interval closes and stays
+    Remove {
+        /// The cohort's name
+        name: String,
+        /// The subjects, by code
+        #[arg(required = true)]
+        codes: Vec<String>,
+        /// Why, on the intervals and the audit row
+        #[arg(long)]
+        why: Option<String>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -1260,14 +1485,79 @@ struct DigestArgs {
     json: bool,
 }
 
+#[derive(Debug, Args)]
+struct PseudonymizeArgs {
+    /// The dataset, as @name: a source place whose data arrives identified
+    dataset: String,
+    /// The batch's label; the dataset's name and today's date by default
+    #[arg(long)]
+    name: Option<String>,
+    /// File workers; one per core by default
+    #[arg(long, value_name = "N")]
+    workers: Option<usize>,
+    /// Walker threads
+    #[arg(long, value_name = "N")]
+    walk_threads: Option<usize>,
+    /// Rows per write to the registry
+    #[arg(long, value_name = "N")]
+    batch_rows: Option<usize>,
+    /// The pack whose release list says which private elements are kept
+    #[arg(long, default_value = "mri", value_name = "PACK")]
+    pack: String,
+    /// Where the packs are; $NILS_PACK_DIR, else `packs/` in the registry home
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<PathBuf>,
+    /// Read only the held files a map released or a person asked to code anyway
+    #[arg(long)]
+    held: bool,
+    /// Walk, read and resolve everything, print the report, write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Machine-readable output: the report as one JSON document, progress as JSON lines
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct BringInArgs {
+    /// The dataset, as @name
+    dataset: String,
+    /// The name the pseudonymise step and the digest share; the dataset's
+    /// name and today's date by default
+    #[arg(long)]
+    name: Option<String>,
+    /// The pack the classify step judges with
+    #[arg(long, value_name = "PACK")]
+    pack: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 enum LinkageCommand {
-    /// File the identifier → code pairs of a CSV, creating the subjects the codes name
+    /// File the identifier map of a CSV, in any shape, creating the subjects it names
     Import(ImportArgs),
     /// The identifier types
     IdType {
         #[command(subcommand)]
         command: IdTypeCommand,
+    },
+    /// The identifier types with how many identifiers and subjects each holds
+    Types {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Merge an alias subject into a canonical one: every row of the alias moves
+    Merge {
+        /// The canonical subject's code
+        canonical: String,
+        /// The alias subject's code
+        alias: String,
+        /// Why they are one person; written to the audit
+        #[arg(long, value_name = "TEXT")]
+        why: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
     },
     /// Decrypt the identifiers of a subject; every read is audited
     Show {
@@ -1277,7 +1567,7 @@ enum LinkageCommand {
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
     },
-    /// Record that two subjects are one person: A is canonical, B the alias
+    /// Record that two subjects are one person, A canonical and B the alias, and merge B into A
     Link {
         /// The canonical subject's code
         a: String,
@@ -1308,17 +1598,36 @@ enum LinkageCommand {
 
 #[derive(Debug, Args)]
 struct ImportArgs {
-    /// The CSV: a header row, then one identifier and its code per row
+    /// The CSV: a header row, then one subject per row
     csv: PathBuf,
-    /// The type the identifiers are filed under
+    /// A column's role: HEADER=identifier:<type>, HEADER=canonical:<type> (the code derives from it), HEADER=code or HEADER=ignore; without any, the two flags below name the columns
+    #[arg(long, value_name = "HEADER=ROLE")]
+    column: Vec<String>,
+    /// The type the identifiers are filed under, without --column
     #[arg(long, default_value = "patient-id", value_name = "NAME")]
     id_type: String,
-    /// The header of the identifier column
+    /// The header of the identifier column, without --column
     #[arg(long, default_value = "identifier", value_name = "HEADER")]
     id_column: String,
-    /// The header of the code column
+    /// The header of the code column, without --column
     #[arg(long, default_value = "code", value_name = "HEADER")]
     code_column: String,
+    /// Make the types the columns name that the store has not got
+    #[arg(long)]
+    make_types: bool,
+    /// Print the report and write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// The dataset the map is for, by place name; recorded, never a filter
+    #[arg(long, value_name = "NAME")]
+    place: Option<String>,
+    /// Machine-readable output: the report as one JSON document
+    #[arg(long)]
+    json: bool,
+    /// Delete the CSV when the import ends, however it ends: the imports
+    /// door writes one for a job and wants it gone
+    #[arg(long, hide = true)]
+    consume: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1350,9 +1659,15 @@ fn main() -> ExitCode {
         Command::Init(args) => init(&home, args),
         Command::Key { command } => key(&home, command),
         Command::Digest(args) => digest(&home, args),
+        Command::Pseudonymize(args) => pseudonymize(&home, args),
+        Command::BringIn(args) => bring_in(&home, args),
         Command::Fingerprint(args) => fingerprint(&home, args),
         Command::Classify(args) => classify(&home, args),
-        Command::Explain { stack, json } => explain(&home, stack, json),
+        Command::Explain {
+            stack,
+            pack_dir,
+            json,
+        } => explain(&home, stack, pack_dir, json),
         Command::Pack { command } => pack_command(&home, command),
         Command::Status(args) => status(&home, args),
         Command::Backup(args) => backup_command(&home, args),
@@ -1645,146 +1960,33 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
 }
 
 /// `nils explain` (Wave 2 §12): small, and load-bearing. It is the answer to
-/// "why is this a T2w", which v0 cannot give at all.
-fn explain(home: &Home, stack: i64, json: bool) -> Result<(), Exit> {
+/// "why is this a T2w", which v0 cannot give at all. Record 26 §11: the
+/// door `GET /api/explain/{stack}` answers the same document.
+fn explain(
+    home: &Home,
+    stack: i64,
+    pack_dir_given: Option<PathBuf>,
+    json: bool,
+) -> Result<(), Exit> {
     let mut registry = open(home)?;
-    let store = registry.store();
-    let meta = store
-        .query(
-            &format!(
-                "SELECT pack, pack_version, contract, overlay, review_items FROM {} WHERE stack_id = {}",
-                store.qualified("classification"),
-                store.dialect().param(1, nils_registry::schema::Type::Int)
-            ),
-            &[nils_registry::store::Param::Int(stack)],
-        )
-        .map_err(|e| fail(e.to_string()))?;
-    let Some(m) = meta.first() else {
-        return Err(fail(format!("stack {stack} has not been classified")));
+    // the pack, for the labels of the values; best effort, since the
+    // explanation stands without it
+    let dir = match pack_dir_given {
+        Some(d) => Some(d),
+        None => pack_dir(home, None).ok(),
     };
-    let pack = format!(
-        "{}@{}",
-        m.text(0).map_err(|e| fail(e.to_string()))?,
-        m.text(1).map_err(|e| fail(e.to_string()))?
-    );
-    let overlay = m
-        .opt_text(3)
+    let doc = explain::document(registry.store(), stack, dir.as_deref())
         .map_err(|e| fail(e.to_string()))?
-        .map(str::to_string);
-    let review_items = m.int(4).map_err(|e| fail(e.to_string()))?;
-
-    let axes = store
-        .query(
-            &format!(
-                "SELECT axis, value, confidence, tier FROM {} WHERE stack_id = {} ORDER BY axis",
-                store.qualified("classification_axis"),
-                store.dialect().param(1, nils_registry::schema::Type::Int)
-            ),
-            &[nils_registry::store::Param::Int(stack)],
-        )
-        .map_err(|e| fail(e.to_string()))?;
-    let ev = store
-        .query(
-            &format!(
-                "SELECT axis, value, tier, confidence, rule_set, rule, source, matched, \
-                        author, author_kind FROM {} \
-                 WHERE stack_id = {} ORDER BY axis, id",
-                store.qualified("classification_evidence"),
-                store.dialect().param(1, nils_registry::schema::Type::Int)
-            ),
-            &[nils_registry::store::Param::Int(stack)],
-        )
-        .map_err(|e| fail(e.to_string()))?;
-
+        .ok_or_else(|| fail(format!("stack {stack} has not been classified")))?;
     if json {
-        let axes_json: Vec<serde_json::Value> = axes
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "axis": r.text(0).unwrap_or_default(),
-                    "value": r.opt_text(1).ok().flatten(),
-                    "confidence": r.double(2).unwrap_or(0.0),
-                    "tier": r.text(3).unwrap_or_default(),
-                })
-            })
-            .collect();
-        let ev_json: Vec<serde_json::Value> = ev
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "axis": r.text(0).unwrap_or_default(),
-                    "value": r.text(1).unwrap_or_default(),
-                    "tier": r.text(2).unwrap_or_default(),
-                    "confidence": r.double(3).unwrap_or(0.0),
-                    "rule_set": r.text(4).unwrap_or_default(),
-                    "rule": r.text(5).unwrap_or_default(),
-                    "source": r.text(6).unwrap_or_default(),
-                    "matched": r.opt_text(7).ok().flatten(),
-                    "author": r.opt_text(8).ok().flatten(),
-                    "author_kind": r.opt_text(9).ok().flatten(),
-                })
-            })
-            .collect();
-        let v = serde_json::json!({
-            "stack": stack, "pack": pack, "overlay": overlay,
-            "review_items": review_items, "axes": axes_json, "evidence": ev_json,
-        });
         println!(
             "{}",
-            serde_json::to_string_pretty(&v)
+            serde_json::to_string_pretty(&doc)
                 .map_err(|e| fail(format!("will not serialize: {e}")))?
         );
         return Ok(());
     }
-
-    println!("stack {stack}, judged by {pack}");
-    if let Some(o) = &overlay {
-        println!("  under overlay {o}");
-    }
-    for r in &axes {
-        let axis = r.text(0).unwrap_or_default();
-        let value = r.opt_text(1).ok().flatten().unwrap_or("");
-        println!(
-            "  {axis:16} {:20} {:.2}  {}",
-            if value.is_empty() { "(nothing)" } else { value },
-            r.double(2).unwrap_or(0.0),
-            r.text(3).unwrap_or_default()
-        );
-        for e in ev.iter().filter(|e| e.text(0).unwrap_or_default() == axis) {
-            // §10.1. A value somebody decided says who, and with what
-            // standing, in the same place a rule's answer says which rule.
-            // Whether a model produced it has to be readable here, or it
-            // reads exactly like a rule's answer, which is v0's 4,692 body
-            // parts.
-            match e.opt_text(9).ok().flatten() {
-                Some(kind) => println!(
-                    "      a {kind}, {}, decided {} for the {}{}",
-                    e.opt_text(8).ok().flatten().unwrap_or("unnamed"),
-                    e.text(1).unwrap_or_default(),
-                    e.text(5).unwrap_or_default(),
-                    match e.opt_text(7).ok().flatten() {
-                        Some(v) => format!(" (version {v})"),
-                        None => String::new(),
-                    }
-                ),
-                None => println!(
-                    "{}",
-                    format!(
-                        "      {} said {} by {}, from {} {}",
-                        e.text(4).unwrap_or_default(),
-                        e.text(1).unwrap_or_default(),
-                        e.text(2).unwrap_or_default(),
-                        e.text(6).unwrap_or_default(),
-                        e.opt_text(7).ok().flatten().unwrap_or("")
-                    )
-                    .trim_end()
-                ),
-            }
-        }
-    }
-    if review_items > 0 {
-        println!("  {review_items} review item(s) were raised for this stack");
-    }
+    print!("{}", explain::text(&doc));
     Ok(())
 }
 
@@ -1909,6 +2111,44 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             "fast": fast,
         })
     };
+    // what a dataset's trees are, for the listing
+    let trees_line = |p: &place::Place| -> Option<String> {
+        if p.role != Role::Source {
+            return None;
+        }
+        let d = p.dataset_doc();
+        let tree = |t: &serde_json::Value| match t["files"].as_u64() {
+            Some(n) => format!("{} ({n} files)", t["path"].as_str().unwrap_or("")),
+            None => t["path"].as_str().unwrap_or("").to_string(),
+        };
+        let originals = if d["trees"]["originals"].is_object() {
+            format!("originals {}", tree(&d["trees"]["originals"]))
+        } else {
+            "no originals".to_string()
+        };
+        Some(format!(
+            "arrives {}, {originals}, reads {}",
+            d["arrives"].as_str().unwrap_or(""),
+            tree(&d["trees"]["anon"])
+        ))
+    };
+    let show_layout = |layout: &serde_json::Value| {
+        if let Some(v0) = layout["v0"].as_object() {
+            println!(
+                "  a v0 cohort folder: {} original files, {} pseudonymised files{}",
+                v0["original_files"],
+                v0["raw_files"],
+                if v0["renamed"].as_bool() == Some(true) {
+                    "; dcm-raw is now dcm-anon"
+                } else {
+                    ""
+                }
+            );
+        }
+        if let Some(n) = layout["loose"].as_u64().filter(|n| *n > 0) {
+            println!("  {n} loose entries beside derivatives/, not read");
+        }
+    };
     match command {
         PlaceCommand::List { json, probe } => {
             let rows = place::list(registry.store()).map_err(|e| fail(e.to_string()))?;
@@ -1919,7 +2159,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                         fresh.push(p);
                         continue;
                     }
-                    let probed = places::probe(Path::new(&p.path));
+                    let probed = dataset::probe_place(&p);
                     fresh.push(
                         place::set(registry.store(), p.id, None, None, Some(&probed))
                             .map_err(|e| fail(e.to_string()))?,
@@ -1955,6 +2195,9 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                         p.guarantees
                     );
                     println!("      {}", p.path);
+                    if let Some(line) = trees_line(p) {
+                        println!("      {line}");
+                    }
                     if !p.probed.is_null() {
                         println!("      probed {}", p.probed);
                     }
@@ -1970,6 +2213,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             snapshots,
             protected,
             fast,
+            dataset,
             json,
         } => {
             let role = Role::parse(&role).ok_or_else(|| {
@@ -1989,7 +2233,32 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     path.display()
                 )));
             }
-            let probed = places::probe(&path);
+            // record 26: a source place is a dataset, and its folder is
+            // looked at before anything reads it
+            let asked = dataset.asked()?;
+            if dataset::fields_given(&asked) && role != Role::Source {
+                return Err(usage(format!(
+                    "the dataset flags belong to a source place, not a {} place",
+                    role.name()
+                )));
+            }
+            let (probed, dataset, layout) = if role == Role::Source {
+                if place::by_name(registry.store(), &name)
+                    .map_err(|e| fail(e.to_string()))?
+                    .is_some()
+                {
+                    return Err(fail(format!("a place is already named {name}")));
+                }
+                let d = dataset::declare(registry.store(), &path, &asked, None)
+                    .map_err(|r| fail(r.message))?;
+                (d.probed, d.dataset, d.layout)
+            } else {
+                (
+                    places::probe(&path),
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                )
+            };
             let id = place::add(
                 registry.store(),
                 &place::New {
@@ -1999,6 +2268,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     guarantees: guarantees(backup.as_deref(), snapshots, protected, fast),
                     probed,
                     handling: serde_json::Value::Null,
+                    dataset,
                 },
             )
             .map_err(|e| fail(e.to_string()))?;
@@ -2006,16 +2276,17 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 &mut registry,
                 nils_registry::audit::Action::PlaceAdd,
                 serde_json::json!({"place": id, "name": name, "role": role.name()}),
-                None,
+                layout
+                    .is_object()
+                    .then(|| serde_json::json!({"layout": layout})),
             )?;
             let p = place::show(registry.store(), id)
                 .map_err(|e| fail(e.to_string()))?
                 .ok_or_else(|| fail(format!("no place {id}")))?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&p.as_json()).unwrap_or_default()
-                );
+                let mut doc = p.as_json();
+                doc["layout"] = layout;
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
             } else {
                 println!(
                     "place {}: {} ({}) at {}",
@@ -2024,6 +2295,10 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     p.role.name(),
                     p.path
                 );
+                if let Some(line) = trees_line(&p) {
+                    println!("  {line}");
+                }
+                show_layout(&layout);
                 println!("  probed {}", p.probed);
             }
             Ok(())
@@ -2035,6 +2310,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             snapshots,
             protected,
             fast,
+            dataset,
             json,
         } => {
             let current = place::show(registry.store(), id)
@@ -2054,8 +2330,31 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     None
                 };
             let path = path.map(|p| fs::canonicalize(&p).unwrap_or(p));
-            let probed = path.as_deref().map(places::probe);
-            let p = place::set(
+            // record 26: a dataset's fields, and its folder looked at again
+            // when they or its path change
+            let asked = dataset.asked()?;
+            let dataset_given = dataset::fields_given(&asked);
+            if dataset_given && current.role != Role::Source {
+                return Err(usage(format!(
+                    "the dataset flags belong to a source place; {} is a {} place",
+                    current.name,
+                    current.role.name()
+                )));
+            }
+            let declared = if current.role == Role::Source && (dataset_given || path.is_some()) {
+                let folder = path.clone().unwrap_or_else(|| PathBuf::from(&current.path));
+                Some(
+                    dataset::declare(registry.store(), &folder, &asked, Some(&current))
+                        .map_err(|r| fail(r.message))?,
+                )
+            } else {
+                None
+            };
+            let probed = match &declared {
+                Some(d) => Some(d.probed.clone()),
+                None => path.as_deref().map(places::probe),
+            };
+            let mut p = place::set(
                 registry.store(),
                 id,
                 path.as_deref().map(|p| p.display().to_string()).as_deref(),
@@ -2063,17 +2362,25 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 probed.as_ref(),
             )
             .map_err(|e| fail(e.to_string()))?;
+            if let Some(d) = &declared {
+                p = place::set_dataset(registry.store(), id, &d.dataset)
+                    .map_err(|e| fail(e.to_string()))?;
+            }
             audit(
                 &mut registry,
                 nils_registry::audit::Action::PlaceSet,
                 serde_json::json!({"place": id, "name": p.name}),
-                None,
+                declared.as_ref().map(|d| {
+                    serde_json::json!({"dataset": {"before": current.as_json()["dataset"], "after": d.dataset, "layout": d.layout}})
+                }),
             )?;
+            let layout = declared
+                .map(|d| d.layout)
+                .unwrap_or(serde_json::Value::Null);
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&p.as_json()).unwrap_or_default()
-                );
+                let mut doc = p.as_json();
+                doc["layout"] = layout;
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
             } else {
                 println!(
                     "place {}: {} ({}) at {}",
@@ -2082,6 +2389,79 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     p.role.name(),
                     p.path
                 );
+                if let Some(line) = trees_line(&p) {
+                    println!("  {line}");
+                }
+                show_layout(&layout);
+            }
+            Ok(())
+        }
+        PlaceCommand::Originals {
+            name,
+            vault,
+            purge,
+            into,
+            why,
+            json,
+        } => {
+            use crate::originals::Act;
+            let name = name.trim_start_matches('@').to_string();
+            let dataset =
+                match place::by_name(registry.store(), &name).map_err(|e| fail(e.to_string()))? {
+                    Some(p) if p.role == Role::Source && p.retired_at.is_none() => p,
+                    _ => {
+                        return Err(usage(format!(
+                            "{name} is not a dataset; nils place list shows the source places"
+                        )));
+                    }
+                };
+            // what the door answers, worked out before anything is acted on
+            let surveyed =
+                originals::survey(&mut registry, &dataset).map_err(|e| fail(e.to_string()))?;
+            let asked = match (vault, purge) {
+                (true, _) => Some(Act::Vault),
+                (_, true) => Some(Act::Purge),
+                _ => None,
+            };
+            let Some(act) = asked else {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&surveyed.as_json()).unwrap_or_default()
+                    );
+                } else {
+                    print!("{}", originals::as_text(&dataset, &surveyed));
+                }
+                return Ok(());
+            };
+            if !json {
+                print!("{}", originals::as_text(&dataset, &surveyed));
+            }
+            let cancel = stop_on_signal()?;
+            let done = originals::run(
+                &mut registry,
+                &dataset,
+                act,
+                into.as_deref(),
+                why.as_deref().unwrap_or_default(),
+                &actor(),
+                &cancel,
+            )
+            .map_err(|r| Exit {
+                code: if r.status == 400 { USAGE } else { FAILED },
+                message: r.message,
+            })?;
+            if json {
+                let doc = serde_json::json!({"survey": surveyed.as_json(), "done": done.as_json()});
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+            } else {
+                print!("{}", originals::done_text(&dataset, &done));
+            }
+            if done.cancelled {
+                return Err(Exit {
+                    code: STOPPED,
+                    message: "stopped: what was done stays done; run it again to go on".into(),
+                });
             }
             Ok(())
         }
@@ -2097,14 +2477,32 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             Ok(())
         }
         PlaceCommand::Bindings { json } => {
+            // where @name points for each of the registry's own source
+            // places: the pseudonymised tree, and the originals beside it
+            let given = dataset::place_roots(registry.store());
+            let roots: Vec<_> = dataset::roots(registry.store(), &given)
+                .into_values()
+                .map(|r| r.as_json())
+                .collect();
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&places::bindings_doc()).unwrap_or_default()
-                );
+                let doc = serde_json::json!({"bindings": places::bindings_doc(), "roots": roots});
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
             } else {
                 for b in places::BINDINGS {
                     println!("{:<22} {}", b.verb, b.role.name());
+                }
+                for r in &roots {
+                    println!(
+                        "@{:<21} {}",
+                        r["name"].as_str().unwrap_or(""),
+                        r["path"].as_str().unwrap_or("")
+                    );
+                    if let Some(originals) = r["originals"].as_str() {
+                        println!(
+                            "@{:<21} {originals}",
+                            format!("{}/originals", r["name"].as_str().unwrap_or(""))
+                        );
+                    }
                 }
             }
             Ok(())
@@ -2181,6 +2579,33 @@ fn overlay_command(home: &Home, command: OverlayCommand) -> Result<(), Exit> {
                     );
                 }
                 println!("  scope {}", o.scope);
+                // What it amends: each bucket and each list (pack contract
+                // 5), the words added with a plus and the removed with a
+                // minus, as the document holds them.
+                for (what, edits) in [
+                    ("bucket", &o.document["buckets"]),
+                    ("list", &o.document["lists"]),
+                ] {
+                    let Some(m) = edits.as_object() else {
+                        continue;
+                    };
+                    for (name, e) in m {
+                        let signed = |key: &str, sign: char| -> Vec<String> {
+                            e[key]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|w| w.as_str())
+                                        .map(|w| format!("{sign}{w}"))
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        };
+                        let mut words = signed("add", '+');
+                        words.extend(signed("remove", '-'));
+                        println!("  {what} {name}: {}", words.join(" "));
+                    }
+                }
                 let moves = o.tried["moves"].as_array().map(|m| m.len()).unwrap_or(0);
                 println!(
                     "  rehearsal: {moves} move(s), review items close {} open {}, cases passed {} failed {}",
@@ -2258,21 +2683,20 @@ fn ingest_roots(flags: &[String]) -> Result<std::collections::BTreeMap<String, P
 fn ingest_command(home: &Home, command: IngestCommand) -> Result<(), Exit> {
     let IngestCommand::Probe(args) = command;
     use nils_registry::job::{self, Claim, State};
+    let mut registry = open(home)?;
     // Where to read: a registered name, or a directory from the keyboard.
+    // Record 26: `@name` is the dataset's pseudonymised tree and
+    // `@name/originals` its originals, which a probe may read, shapes only.
     let root = if let Some(rest) = args.location.strip_prefix('@') {
-        let roots = ingest_roots(&args.ingest_root)?;
+        let roots = dataset::roots(registry.store(), &ingest_roots(&args.ingest_root)?);
         let (name, rel) = rest.split_once('/').unwrap_or((rest, ""));
         if rel.split('/').any(|s| s == "..") {
             return Err(fail("a location's relative part stays inside it"));
         }
-        let base = roots
+        roots
             .get(name)
-            .ok_or_else(|| fail(format!("no registered location named {name}")))?;
-        if rel.is_empty() {
-            base.clone()
-        } else {
-            base.join(rel)
-        }
+            .ok_or_else(|| fail(format!("no registered location named {name}")))?
+            .resolve(rel)
     } else {
         PathBuf::from(&args.location)
     };
@@ -2298,7 +2722,6 @@ fn ingest_command(home: &Home, command: IngestCommand) -> Result<(), Exit> {
     if candidates.is_empty() {
         candidates.push(("default".into(), nils_digest::Rule::default()));
     }
-    let mut registry = open(home)?;
     let job = job::claim(
         registry.store(),
         &Claim {
@@ -2472,46 +2895,13 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
             let ov = load_overlay(overlay.as_ref())?;
             let pack = nils_pack::load(&found, ov.as_ref()).map_err(|e| fail(e.to_string()))?;
             if json {
-                let v = serde_json::json!({
-                    "pack": pack.name,
-                    "version": pack.version.to_string(),
-                    "contract": pack.contract,
-                    "fields": pack.fields.iter().map(|(f, v)| (f.clone(), serde_json::Value::from(v.name()))).collect::<serde_json::Map<_, _>>(),
-                    "modality": pack.modality,
-                    "parsers": pack.parsers.iter().map(|p| serde_json::json!({
-                        "name": p.name, "predicates": p.preds.len()
-                    })).collect::<Vec<_>>(),
-                    "flags": pack.flags.len(),
-                    "axes": pack.axes.iter().map(|a| serde_json::json!({
-                        "axis": a.name, "multi": a.multi, "values": a.values.len(),
-                        "review_below": pack.review.below(&a.name),
-                        "asks_when_missing": pack.review.asks_when_missing(&a.name),
-                    })).collect::<Vec<_>>(),
-                    "passes": pack.passes.iter().map(|p| serde_json::json!({
-                        "pass": p.name, "kind": p.kind_name(),
-                        "phase": format!("{:?}", p.phase).to_lowercase(),
-                        "reference": p.reference.scope,
-                    })).collect::<Vec<_>>(),
-                    "rule_sets": pack.rule_sets.iter().map(|r| serde_json::json!({
-                        "rule_set": r.name, "rules": r.rules.len(),
-                        "decides": r.decides, "entered": r.enter_when.is_some(),
-                    })).collect::<Vec<_>>(),
-                    "buckets": pack.buckets,
-                    "cases": pack.cases,
-                    "overlay": pack.overlay,
-                    "private": serde_json::json!({
-                        "coverage": pack.private_coverage,
-                        "ingest": pack.ingest.iter().map(|i| serde_json::json!({
-                            "name": i.name, "address": i.text(), "vr": i.vr,
-                            "dictionary_name": i.dictionary_name, "kind": i.kind,
-                        })).collect::<Vec<_>>(),
-                        "release": pack.release.iter().map(|a| a.text()).collect::<Vec<_>>(),
-                        "dictionary": {
-                            "creators": pack.dictionary.creators(),
-                            "elements": pack.dictionary.len(),
-                        },
-                    }),
-                });
+                // The site's adopted overlays, when this home holds a
+                // registry; a pack author's directory need not.
+                let adopted = open(home)
+                    .ok()
+                    .and_then(|mut r| nils_registry::overlay::list(r.store()).ok())
+                    .unwrap_or_default();
+                let v = pack_document(&pack, &adopted);
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&v)
@@ -2597,6 +2987,11 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                         println!("  bucket  {name:20} {:3} terms", values.len());
                     }
                 }
+                println!(
+                    "  lists   {:20} {:3} word lists a site may amend by axis.value",
+                    "",
+                    pack.lists.len()
+                );
                 if let Some(o) = &pack.overlay {
                     println!("  under overlay {o}");
                 }
@@ -2687,8 +3082,57 @@ fn fingerprint(home: &Home, args: FingerprintArgs) -> Result<(), Exit> {
     Ok(())
 }
 
+/// Record 26: the tree a digest reads. `@name` is the dataset's pseudonymised
+/// tree, resolved against the worker's registered locations and then the
+/// registry's own source places; a tree inside a dataset's originals is
+/// refused, whatever names it, since the registry never points at an
+/// identified file.
+fn digest_tree(home: &Home, root: &Path) -> Result<PathBuf, Exit> {
+    let named = root.to_str().and_then(|s| s.strip_prefix('@'));
+    if named.is_none() && !home.exists() {
+        return Ok(root.to_path_buf());
+    }
+    let mut registry = open(home)?;
+    let store = registry.store();
+    let path = match named {
+        Some(rest) => {
+            let (name, rel) = rest.split_once('/').unwrap_or((rest, ""));
+            if rel.split('/').any(|s| s == "..") || rel.starts_with('/') {
+                return Err(usage(format!("@{name}/{rel} steps outside its location")));
+            }
+            let mut given = ingest_roots(&[])?;
+            for (n, p) in dataset::place_roots(store) {
+                given.entry(n).or_insert(p);
+            }
+            let roots = dataset::roots(store, &given);
+            let root = roots.get(name).ok_or_else(|| {
+                usage(format!(
+                    "@{name} is neither a registered ingest location nor a source place; those are {}",
+                    if roots.is_empty() {
+                        "none".to_string()
+                    } else {
+                        roots.keys().cloned().collect::<Vec<_>>().join(", ")
+                    }
+                ))
+            })?;
+            root.resolve(rel)
+        }
+        None => root.to_path_buf(),
+    };
+    if let Some(p) = dataset::originals_holding(store, &path) {
+        return Err(fail(format!(
+            "{} is in the originals of the dataset {}, which the pseudonymiser alone reads; a digest reads @{} (record 26)",
+            path.display(),
+            p.name,
+            p.name
+        )));
+    }
+    Ok(path)
+}
+
 fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
-    let mut settings = Settings::new(args.root);
+    let root = digest_tree(home, &args.root)?;
+    let mut settings = Settings::new(root);
     settings.dry_run = args.dry_run;
     settings.json = args.json;
     settings.retry_quarantine = args.retry_quarantine;
@@ -2721,6 +3165,20 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
             .map_err(|e| usage(format!("--identity-rule {}: {e}", path.display())))?;
         rule.source = Some(path.display().to_string());
         settings.identity = rule;
+    }
+    if home.exists() {
+        // record 26: the rule the dataset stores, when the tree is a
+        // dataset's, it stores one and the run named none of its own; and
+        // what the dataset says of a file whose identifier the linkage
+        // store does not know, whichever rule reads the files
+        let mut registry = open(home)?;
+        if args.identity_rule.is_none()
+            && let Some(rule) =
+                dataset::stored_rule(registry.store(), &settings.root).map_err(fail)?
+        {
+            settings.identity = rule;
+        }
+        settings.unmapped = dataset::unmapped_of(registry.store(), &settings.root);
     }
     // Wave 4a §5.2: the private elements the pack asks for are read at
     // digest time. A pack that cannot be found is not an error unless one was
@@ -2797,6 +3255,171 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
         }),
         Err(e) => Err(fail(e.to_string())),
     }
+}
+
+/// A dataset named as `@name`: a source place in force.
+fn dataset_named(
+    registry: &mut Registry,
+    given: &str,
+) -> Result<nils_registry::place::Place, Exit> {
+    use nils_registry::place::{self, Role};
+    let Some(name) = given.strip_prefix('@') else {
+        return Err(usage(format!(
+            "{given}: a dataset is named as @name, the name of its source place"
+        )));
+    };
+    match place::by_name(registry.store(), name).map_err(|e| fail(e.to_string()))? {
+        Some(p) if p.role == Role::Source && p.retired_at.is_none() => Ok(p),
+        _ => Err(usage(format!(
+            "@{name} is not a dataset; nils place list shows the source places"
+        ))),
+    }
+}
+
+/// Record 26 §3: `nils pseudonymize @dataset`.
+fn pseudonymize(home: &Home, args: PseudonymizeArgs) -> Result<(), Exit> {
+    use nils_pseudonymize::{PseudonymizeError, Settings};
+    let mut registry = open(home)?;
+    let dataset = dataset_named(&mut registry, &args.dataset)?;
+    let mut settings = Settings::for_dataset(&dataset).map_err(fail)?;
+    if let Some(name) = args.name {
+        settings.name = name;
+    }
+    for (flag, value, slot) in [
+        ("--workers", args.workers, &mut settings.workers),
+        (
+            "--walk-threads",
+            args.walk_threads,
+            &mut settings.walk_threads,
+        ),
+        ("--batch-rows", args.batch_rows, &mut settings.batch_rows),
+    ] {
+        if let Some(n) = value {
+            if n == 0 {
+                return Err(usage(format!("{flag} must be at least 1")));
+            }
+            *slot = n;
+        }
+    }
+    settings.held = args.held;
+    settings.dry_run = args.dry_run;
+    settings.json = args.json;
+    // The private elements the pack keeps on release are the ones the
+    // pseudonymised tree keeps (record 26 §3), as the release reads them. A
+    // pack that cannot be found is not an error unless one was asked for by
+    // name or by directory: every private element then goes.
+    let asked = args.pack_dir.is_some() || args.pack != "mri";
+    match pack_dir(home, args.pack_dir.clone()) {
+        Ok(dir) => {
+            let found = packs_in(&dir)?
+                .into_iter()
+                .find(|p| p.file_name().is_some_and(|f| f == args.pack.as_str()));
+            match found {
+                Some(found) => {
+                    let pack = nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
+                    settings.private = pack.release.clone();
+                    settings.pack = Some(pack.id());
+                }
+                None if asked => {
+                    return Err(fail(format!(
+                        "no pack named {} in {}",
+                        args.pack,
+                        dir.display()
+                    )));
+                }
+                None => {}
+            }
+        }
+        Err(e) if asked => return Err(e),
+        Err(_) => {}
+    }
+    let cancel = stop_on_signal()?;
+    match nils_pseudonymize::pseudonymize_with(&settings, &mut registry, &cancel) {
+        Ok(report) => {
+            if settings.json {
+                let text = serde_json::to_string_pretty(&report)
+                    .map_err(|e| fail(format!("cannot render the report: {e}")))?;
+                println!("{text}");
+            } else {
+                print!("{report}");
+            }
+            // a dry run claims no job of its own; run from the queue, the
+            // report is the queued job's result (lab 26, defect 17)
+            if settings.dry_run {
+                let doc = serde_json::to_value(&report).unwrap_or_default();
+                record_result(home, &doc)?;
+            }
+            match report.cancelled {
+                None => Ok(()),
+                Some(Cancelled::Stopped) => Err(Exit {
+                    code: STOPPED,
+                    message: "stopped: what was written stays written; run again to go on".into(),
+                }),
+                Some(Cancelled::Aborted) => Err(Exit {
+                    code: STOPPED,
+                    message: "aborted: what was written stays written; run again to go on".into(),
+                }),
+            }
+        }
+        Err(e @ PseudonymizeError::Busy { .. }) => Err(Exit {
+            code: BUSY,
+            message: e.to_string(),
+        }),
+        Err(e) => Err(fail(e.to_string())),
+    }
+}
+
+/// Record 26 §7: `nils bring-in @dataset`, the thread of a dataset queued
+/// as a chain, from the keyboard with the keyboard's reach.
+fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
+    use nils_registry::job;
+    let mut registry = open(home)?;
+    let dataset = dataset_named(&mut registry, &args.dataset)?;
+    // a tree holding files no digest has read is digested first, so the
+    // pseudonymiser knows what the tree holds (lab 26, defect 7)
+    let unread = chain::unread_in_tree(registry.store(), &dataset);
+    let (first, then) = chain::bring_in(
+        &dataset,
+        args.name.as_deref(),
+        args.pack.as_deref(),
+        unread.is_some(),
+    );
+    let name = first
+        .iter()
+        .position(|w| w == "--name")
+        .and_then(|i| first.get(i + 1))
+        .cloned();
+    let grants: Vec<&str> = crate::grants::GRANTS.to_vec();
+    let mut extra = serde_json::json!({
+        "detail": crate::grants::Detail::Sensitive.name(),
+        "grants": grants,
+        "then": then,
+    });
+    if let Some(n) = unread {
+        extra["digest_first"] = serde_json::json!({
+            "files": n,
+            "why": "the pseudonymised tree holds files no digest has read",
+        });
+    }
+    let id = job::enqueue_with(
+        registry.store(),
+        &first,
+        name.as_deref(),
+        Some(&actor()),
+        extra,
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    if let Some(n) = unread {
+        println!(
+            "the pseudonymised tree holds {n} file(s) no digest has read: a digest goes first"
+        );
+    }
+    println!("queued job {id}: nils {}", first.join(" "));
+    for step in &then {
+        println!("  then nils {}", step.join(" "));
+    }
+    println!("a worker runs them in turn: nils jobs work, or nils serve --worker");
+    Ok(())
 }
 
 /// The token a run is asked to stop through (§10): one signal asks for a
@@ -3053,7 +3676,7 @@ fn status_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value,
         .collect::<Result<_, nils_registry::Error>>()?;
 
     let batches_sql = format!(
-        "SELECT id, name, state, {}, {}, epoch_after, {} FROM {} ORDER BY id DESC LIMIT 10",
+        "SELECT id, name, state, {}, {}, epoch_after, {}, kind FROM {} ORDER BY id DESC LIMIT 10",
         text_of(store, "ingest_batch", "started_at"),
         text_of(store, "ingest_batch", "finished_at"),
         text_of(store, "ingest_batch", "counts"),
@@ -3073,6 +3696,9 @@ fn status_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value,
                 }
                 v.as_u64()
             };
+            // record 26 §14: which step the batch is; a pseudonymise step
+            // counts its files where a digest counts what it parsed
+            let kind = r.opt_text(7)?.unwrap_or("digest");
             Ok(serde_json::json!({
                 "id": r.int(0)?,
                 "name": r.text(1)?,
@@ -3080,10 +3706,11 @@ fn status_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value,
                 "started_at": r.opt_text(3)?,
                 "finished_at": r.opt_text(4)?,
                 "epoch_after": r.opt_int(5)?,
-                "seen": pick(&["seen"]),
-                "parsed": pick(&["parsed"]),
-                "quarantined": pick(&["quarantined"]),
-                "ingested": pick(&["written", "ingested"]),
+                "kind": kind,
+                "seen": pick(&["seen"]).or_else(|| pick(&["files", "seen"])),
+                "parsed": pick(&["parsed"]).or_else(|| pick(&["files", "written"])),
+                "quarantined": pick(&["quarantined"]).or_else(|| pick(&["files", "refused"])),
+                "ingested": pick(&["written", "ingested"]).or_else(|| pick(&["files", "written"])),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
@@ -3275,6 +3902,48 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
                 Ok(())
             }
         },
+        LinkageCommand::Types { json } => {
+            let types = linkage::id_type_counts(&mut store)?;
+            if json {
+                let doc: Vec<_> = types.iter().map(|t| t.as_json()).collect();
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+                return Ok(());
+            }
+            println!(
+                "{:>3}  {:<24} {:>11} {:>9}  description",
+                "id", "name", "identifiers", "subjects"
+            );
+            for t in &types {
+                println!(
+                    "{:>3}  {:<24} {:>11} {:>9}  {}",
+                    t.id,
+                    t.name,
+                    t.identifiers,
+                    t.subjects,
+                    t.description.as_deref().unwrap_or("")
+                );
+            }
+            Ok(())
+        }
+        LinkageCommand::Merge {
+            canonical,
+            alias,
+            why,
+            json,
+        } => {
+            let canonical_id = subject_of(&mut registry, &canonical)?;
+            let alias_id = subject_of(&mut registry, &alias)?;
+            let merged = merge_subjects(&mut registry, &mut store, canonical_id, alias_id, &why)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&merged.as_json()).unwrap_or_default()
+                );
+            } else {
+                println!("{}", merged_line(&merged));
+            }
+            Ok(())
+        }
         LinkageCommand::Show { code, why } => {
             let subject = subject_of(&mut registry, &code)?;
             let keys = Subkeys::derive(&registry.pseudonym_key()?);
@@ -3285,7 +3954,21 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
                 serde_json::json!({ "subject": subject, "identifiers": shown.len() }),
                 why.as_ref().map(|w| serde_json::json!({ "why": w })),
             )?;
-            println!("subject {code} (id {subject})");
+            let merged_into = linkage::subjects_by_id(registry.store(), &[subject])?
+                .into_iter()
+                .next()
+                .and_then(|s| s.merged_into);
+            match merged_into {
+                Some(into) => {
+                    let into = linkage::subjects_by_id(registry.store(), &[into])?
+                        .into_iter()
+                        .next()
+                        .map(|s| s.code)
+                        .unwrap_or_else(|| format!("#{into}"));
+                    println!("subject {code} (id {subject}), merged into {into}");
+                }
+                None => println!("subject {code} (id {subject})"),
+            }
             if shown.is_empty() {
                 println!("  no identifiers");
             }
@@ -3345,6 +4028,10 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
                 Some(serde_json::json!({ "evidence": evidence })),
             )?;
             println!("linked {b} to {a} (linkage {id})");
+            // record 26 §6: a later link merges
+            let merged =
+                merge_subjects(&mut registry, &mut store, subject_a, subject_b, &evidence)?;
+            println!("{}", merged_line(&merged));
             Ok(())
         }
         LinkageCommand::Unlink { id } => {
@@ -3365,6 +4052,88 @@ fn linkage_command(home: &Home, command: LinkageCommand) -> Result<(), Exit> {
             purge(&mut registry, &mut store, subject.as_deref(), all, yes)
         }
     }
+}
+
+/// `nils linkage merge`, and the merge a link ends with (record 26 §6):
+/// recorded as a `linkage-merge` job, adopting the queued row when a
+/// worker runs it, and its report is the job's result.
+fn merge_subjects(
+    registry: &mut Registry,
+    store: &mut Store,
+    canonical: i64,
+    alias: i64,
+    why: &str,
+) -> Result<nils_registry::merge::Merged, Exit> {
+    use nils_registry::job::{self, Claim, State};
+    let keys = Subkeys::derive(&registry.pseudonym_key()?);
+    let job_id = job::claim(
+        registry.store(),
+        &Claim {
+            kind: "linkage-merge",
+            name: "merge",
+            args: serde_json::json!({ "canonical": canonical, "alias": alias, "actor": actor() }),
+        },
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    let merged = nils_registry::merge::merge(
+        registry.store(),
+        store,
+        &keys,
+        &nils_registry::merge::Ask {
+            canonical,
+            alias,
+            why,
+            actor: &actor(),
+            job_id: Some(job_id),
+            place_id: None,
+        },
+    );
+    let merged = match merged {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = job::finish(
+                registry.store(),
+                job_id,
+                State::Failed,
+                Some(&e.to_string()),
+            );
+            return Err(fail(e.to_string()));
+        }
+    };
+    job::set_result(registry.store(), job_id, &merged.as_json())
+        .map_err(|e| fail(e.to_string()))?;
+    job::finish(registry.store(), job_id, State::Done, None).map_err(|e| fail(e.to_string()))?;
+    registry.refresh_meta()?;
+    Ok(merged)
+}
+
+fn merged_line(m: &nils_registry::merge::Merged) -> String {
+    let moved: Vec<String> = m
+        .moved
+        .iter()
+        .filter(|(_, n)| **n > 0)
+        .map(|(t, n)| format!("{n} {t}"))
+        .collect();
+    format!(
+        "merged {} into {}: {}{}{}",
+        m.alias.code,
+        m.canonical.code,
+        if moved.is_empty() {
+            "no rows to move".to_string()
+        } else {
+            moved.join(", ")
+        },
+        match (m.memberships_closed, m.memberships_dropped) {
+            (0, 0) => String::new(),
+            (n, 0) => format!("; {n} duplicate membership(s) closed"),
+            (0, n) => format!("; {n} shared membership(s) dropped"),
+            (c, d) => format!("; {c} duplicate membership(s) closed, {d} shared dropped"),
+        },
+        match m.provisional_closed {
+            0 => String::new(),
+            _ => "; the provisional item closed".to_string(),
+        }
+    )
 }
 
 /// `nils linkage purge`: what it would delete is said first, and nothing is
@@ -3478,7 +4247,7 @@ fn confirm(prompt: &str) -> Result<bool, Exit> {
 fn quarantine_command(home: &Home, command: QuarantineCommand) -> Result<(), Exit> {
     let QuarantineCommand::List { batch, class, json } = command;
     let mut registry = open(home)?;
-    let doc = quarantine_doc(&mut registry, batch, class.as_deref())?;
+    let doc = quarantine_doc(&mut registry, batch, class.as_deref(), None)?;
     let files: Vec<serde_json::Value> = doc["files"].as_array().cloned().unwrap_or_default();
     if json {
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
@@ -3861,6 +4630,20 @@ fn about(item: &serde_json::Value) -> String {
             s(&e["reason"]),
             e["batch_id"]
         ),
+        "identity.unmapped" => format!(
+            "dataset {}, shape {} under {}, {} file(s) held",
+            s(&r["place"]),
+            s(&r["shape"]),
+            s(&r["id_type"]),
+            e["files"]
+        ),
+        "identity.provisional" => format!(
+            "subject {} coded from an unmapped {} (shape {}) in dataset {}",
+            s(&r["code"]),
+            s(&e["id_type"]),
+            s(&e["shape"]),
+            s(&e["place"])
+        ),
         _ if s(&item["scope"]) == "group" => format!(
             "{} stack(s): {} = {} ({})",
             item["members"],
@@ -3934,6 +4717,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let fingerprints = count_of(store, "stack_fingerprint", "")?;
     let classified = count_of(store, "classification", "")?;
     let decisions = count_of(store, "decision", " WHERE withdrawn_at IS NULL")?;
+    // custody is what is retained: a merged subject's row is still a row
     let subjects = count_of(store, "subject", "")?;
     let studies = count_of(store, "study", "")?;
     let series = count_of(store, "series", "")?;
@@ -4071,7 +4855,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "kept": "until purged; a purged identifier is filed again only when its file is parsed again (changed, or new), not by a digest that finds the file unchanged",
             "commands": {
                 "read": ["nils linkage show <code> [--why <text>] (every read is audited)"],
-                "change": ["nils digest <root>", "nils linkage import <csv>", "nils linkage link | unlink", "nils linkage id-type add"],
+                "change": ["nils digest <root>", "nils linkage import <csv>", "nils linkage link | unlink | merge", "nils linkage id-type add"],
                 "export": ["none in Wave 1"],
                 "delete": "nils linkage purge --subject <code> | --all (the read audit and the id types stay)",
             },
@@ -4153,8 +4937,8 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "counts": { "cohorts": cohorts, "members": members, "diseases": diseases, "observation_types": kinds, "events": events, "subjects_with_birth_date": with_birth_date },
             "kept": "for ever; a correction supersedes the old row and the old row stays (section 13.2)",
             "commands": {
-                "read": ["nils clinical vocabulary list", "nils custody"],
-                "change": ["nils clinical vocabulary load"],
+                "read": ["nils clinical vocabulary list", "nils clinical cohort list", "nils clinical cohort show <name>", "nils custody"],
+                "change": ["nils clinical vocabulary load", "nils clinical cohort make | rename | set | retire | add | remove", "nils ask promote", "a digest of a dataset that feeds a cohort"],
                 "export": ["nils release"],
                 "delete": delete_db(REGISTRY_DB, &registry_schema),
             },
@@ -4564,8 +5348,21 @@ fn subject_of(registry: &mut Registry, code: &str) -> Result<i64, Exit> {
         .ok_or_else(|| fail(format!("no subject with code {code}")))
 }
 
-/// `nils linkage import`: the CSV read whole, checked whole, then filed.
+/// `nils linkage import`: the CSV read whole, checked whole, then filed,
+/// in any shape (record 26 §5). Recorded as a `linkage-import` job whose
+/// result is the report; under a worker it adopts the queued row. A CSV
+/// the imports door wrote is removed when the import ends, however it ends.
 fn import(registry: &mut Registry, store: &mut Store, args: ImportArgs) -> Result<(), Exit> {
+    let outcome = import_map(registry, store, &args);
+    if args.consume {
+        let _ = fs::remove_file(&args.csv);
+    }
+    outcome
+}
+
+fn import_map(registry: &mut Registry, store: &mut Store, args: &ImportArgs) -> Result<(), Exit> {
+    use nils_registry::identity_map::{self, Column, Derive, Map, Role, Row};
+    use nils_registry::job::{self, Claim, State};
     let mut reader = csv::ReaderBuilder::new()
         .trim(csv::Trim::All)
         .flexible(true)
@@ -4584,51 +5381,174 @@ fn import(registry: &mut Registry, store: &mut Store, args: ImportArgs) -> Resul
             ))
         })
     };
-    let id_col = column(&args.id_column, "--id-column")?;
-    let code_col = column(&args.code_column, "--code-column")?;
+    // the roles, by column: --column names them, else the first shape's
+    // three flags do
+    let mut roles: Vec<Role> = vec![Role::Ignore; headers.len()];
+    if args.column.is_empty() {
+        roles[column(&args.id_column, "--id-column")?] = Role::Identifier(args.id_type.clone());
+        roles[column(&args.code_column, "--code-column")?] = Role::Code;
+    } else {
+        for spec in &args.column {
+            let (header, role) = spec
+                .split_once('=')
+                .ok_or_else(|| usage(format!("--column {spec}: HEADER=ROLE")))?;
+            let role = Role::parse(role).map_err(|e| usage(format!("--column {spec}: {e}")))?;
+            let i = column(header.trim(), "--column")?;
+            if roles[i] != Role::Ignore {
+                return Err(usage(format!(
+                    "--column {spec}: {} was given a role already",
+                    header.trim()
+                )));
+            }
+            roles[i] = role;
+        }
+    }
+    let columns: Vec<Column> = headers
+        .iter()
+        .zip(roles)
+        .map(|(h, role)| Column {
+            header: h.to_string(),
+            role,
+        })
+        .collect();
     let mut rows = Vec::new();
     for (i, record) in reader.records().enumerate() {
         let line = i + 2;
         let record =
             record.map_err(|e| usage(format!("{} line {line}: {e}", args.csv.display())))?;
-        rows.push(ImportRow {
+        rows.push(Row {
             line,
-            identifier: record.get(id_col).unwrap_or("").to_string(),
-            code: record.get(code_col).unwrap_or("").to_string(),
+            cells: record.iter().map(str::to_string).collect(),
         });
     }
-    let keys = Subkeys::derive(&registry.pseudonym_key()?);
-    match linkage::import(registry.store(), store, &keys, &args.id_type, &rows) {
-        Ok(report) => {
-            audit(
-                registry,
-                nils_registry::audit::Action::LinkageImport,
-                serde_json::json!({
-                    "id_type": args.id_type, "rows": report.rows,
-                    "subjects_created": report.subjects_created,
-                    "identities_added": report.identities_added,
-                    "unchanged": report.unchanged,
-                    "second_identifiers": report.second_identifiers,
-                }),
-                None,
-            )?;
-            println!(
-                "imported {} row(s) as {}: {} subject(s) created, {} identifier(s) filed, {} already filed{}",
-                report.rows,
-                args.id_type,
-                report.subjects_created,
-                report.identities_added,
-                report.unchanged,
-                match report.second_identifiers {
-                    0 => String::new(),
-                    n => format!("; {n} of them a further identifier of a subject that had one"),
-                }
-            );
-            Ok(())
+    let place_id = match &args.place {
+        Some(name) => Some(
+            nils_registry::place::by_name(registry.store(), name)?
+                .ok_or_else(|| usage(format!("no place named {name}")))?
+                .id,
+        ),
+        None => None,
+    };
+    let key = registry.pseudonym_key()?;
+    let keys = Subkeys::derive(&key);
+    let derive = Derive {
+        scheme: registry.meta().pseudonym_scheme,
+        key: &key,
+        display_length: registry.meta().display_length,
+    };
+    // a dry run is not a job: it writes nothing, so nothing records it
+    let job_id = if args.dry_run {
+        None
+    } else {
+        Some(
+            job::claim(
+                registry.store(),
+                &Claim {
+                    kind: "linkage-import",
+                    name: args.place.as_deref().unwrap_or("identifier map"),
+                    args: serde_json::json!({
+                        "rows": rows.len(), "columns": columns.iter().map(|c| c.role.name()).collect::<Vec<_>>(),
+                        "make_types": args.make_types, "place": args.place, "actor": actor(),
+                    }),
+                },
+            )
+            .map_err(|e| fail(e.to_string()))?,
+        )
+    };
+    let report = identity_map::import(
+        registry.store(),
+        store,
+        &keys,
+        Some(&derive),
+        &Map {
+            columns: &columns,
+            rows: &rows,
+            dry_run: args.dry_run,
+            make_types: args.make_types,
+            place_id,
+            actor: &actor(),
+            job_id,
+        },
+    );
+    let report = match report {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(job) = job_id {
+                let _ = job::finish(registry.store(), job, State::Failed, Some(&e.to_string()));
+            }
+            return Err(fail(e.to_string()));
         }
-        Err(e @ ImportError::Faults(_)) => Err(fail(e.to_string().trim_end().to_string())),
-        Err(ImportError::Store(e)) => Err(fail(e.to_string())),
+    };
+    registry.refresh_meta()?;
+    if let Some(job) = job_id {
+        job::set_result(registry.store(), job, &report.as_json())
+            .map_err(|e| fail(e.to_string()))?;
+        let (state, error) = if report.conflicts.is_empty() {
+            (State::Done, None)
+        } else {
+            (
+                State::Failed,
+                Some(format!(
+                    "{} row(s) refused; nothing was written",
+                    report.conflicts.len()
+                )),
+            )
+        };
+        job::finish(registry.store(), job, state, error.as_deref())
+            .map_err(|e| fail(e.to_string()))?;
     }
+    if !report.conflicts.is_empty() {
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report.as_json()).unwrap_or_default()
+            );
+        }
+        return Err(fail(report.to_string().trim_end().to_string()));
+    }
+    if report.written() {
+        audit(
+            registry,
+            nils_registry::audit::Action::LinkageImport,
+            serde_json::json!({
+                "rows": report.rows, "place": place_id,
+                "subjects": { "named": report.subjects.named, "known": report.subjects.known, "new": report.subjects.new },
+                "identifiers": { "filed": report.identifiers.filed, "known": report.identifiers.known, "new": report.identifiers.new, "types_new": report.identifiers.types_new },
+                "held_released": report.held_released,
+                "merges": report.merges.len(),
+            }),
+            job_id.map(|j| serde_json::json!({ "job": j })),
+        )?;
+    }
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report.as_json()).unwrap_or_default()
+        );
+    } else if args.column.is_empty() && !args.dry_run {
+        // the first shape's line, as it has always read
+        println!(
+            "imported {} row(s) as {}: {} subject(s) created, {} identifier(s) filed, {} already filed{}",
+            report.rows,
+            args.id_type,
+            report.subjects.new,
+            report.identifiers.new,
+            report.identifiers.known,
+            match report.further {
+                0 => String::new(),
+                n => format!("; {n} of them a further identifier of a subject that had one"),
+            }
+        );
+        if report.held_released > 0 {
+            println!(
+                "  {} held file(s) released for the next pseudonymise",
+                report.held_released
+            );
+        }
+    } else {
+        print!("{report}");
+    }
+    Ok(())
 }
 
 fn s(v: &serde_json::Value) -> &str {
@@ -5574,11 +6494,8 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             if let Some(p) = &j.progress {
                 println!("  progress    {p}");
             }
-            if let Some(argv) = j.argv() {
-                println!(
-                    "  command     nils {}",
-                    argv.iter().skip(1).cloned().collect::<Vec<_>>().join(" ")
-                );
+            if let Some(words) = j.queued() {
+                println!("  command     nils {}", words.join(" "));
             }
             Ok(())
         }
@@ -5675,6 +6592,10 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                     once,
                     every,
                     ingest_roots: &ingest_root,
+                    // a worker started by hand names no workers of its own:
+                    // each verb's default stands, as it does on the command
+                    // line
+                    workers: None,
                     quiet: false,
                 },
                 &|| cancel.stop(),
@@ -5777,55 +6698,255 @@ fn size_text(bytes: i64) -> String {
     }
 }
 
-/// `nils clinical cohort list`.
+/// `nils clinical cohort list`: what `GET /api/cohorts` answers.
 fn cohort_list(home: &Home, json: bool) -> Result<(), Exit> {
     let mut registry = open(home)?;
-    let store = registry.store();
-    let sql = format!(
-        "SELECT c.id, c.name, c.owner, c.description, \
-                (SELECT COUNT(*) FROM {} m WHERE m.cohort_id = c.id AND m.left_at IS NULL) \
-         FROM {} c ORDER BY c.name",
-        store.qualified("cohort_member"),
-        store.qualified("cohort")
-    );
-    let mut rows = Vec::new();
-    for r in store.query(&sql, &[]).map_err(|e| fail(e.to_string()))? {
-        rows.push((
-            r.int(0).map_err(|e| fail(e.to_string()))?,
-            r.text(1).map_err(|e| fail(e.to_string()))?.to_string(),
-            r.text(2).map_err(|e| fail(e.to_string()))?.to_string(),
-            r.opt_text(3)
-                .map_err(|e| fail(e.to_string()))?
-                .map(str::to_string),
-            r.int(4).map_err(|e| fail(e.to_string()))?,
-        ));
-    }
+    let rows = nils_registry::cohort::list(registry.store()).map_err(|e| fail(e.to_string()))?;
     if json {
-        let doc: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|(id, name, owner, description, members)| {
-                serde_json::json!({
-                    "id": id, "name": name, "owner": owner,
-                    "description": description, "members": members,
-                })
-            })
-            .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&doc).map_err(|e| fail(e.to_string()))?
+            serde_json::to_string_pretty(&rows).map_err(|e| fail(e.to_string()))?
         );
         return Ok(());
     }
     if rows.is_empty() {
-        println!("no cohorts; `nils clinical import` with a cohort mapping makes one");
+        println!(
+            "no cohorts; `nils clinical cohort make`, a dataset that feeds one, `nils ask promote` or `nils clinical import` with a cohort mapping makes one"
+        );
         return Ok(());
     }
-    for (_, name, owner, description, members) in &rows {
+    for c in &rows {
         println!(
-            "  {name:<24} {members:>6} member(s)   {owner}   {}",
-            description.as_deref().unwrap_or("")
+            "  {:<24} {:>6} subject(s)   {:>6} stack(s)   {}   {}{}",
+            c["name"].as_str().unwrap_or_default(),
+            c["subjects"].as_i64().unwrap_or(0),
+            c["stacks"].as_i64().unwrap_or(0),
+            c["owner"].as_str().unwrap_or_default(),
+            c["description"].as_str().unwrap_or(""),
+            if c["retired_at"].is_string() {
+                "   (retired)"
+            } else {
+                ""
+            }
         );
     }
+    Ok(())
+}
+
+/// One cohort as the door shows it, printed or as JSON.
+fn cohort_print(doc: &serde_json::Value, json: bool) -> Result<(), Exit> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(doc).map_err(|e| fail(e.to_string()))?
+        );
+        return Ok(());
+    }
+    println!(
+        "cohort {}   owner {}   subjects {}   sessions {}   stacks {}{}",
+        doc["name"].as_str().unwrap_or_default(),
+        doc["owner"].as_str().unwrap_or_default(),
+        doc["subjects"].as_i64().unwrap_or(0),
+        doc["sessions"].as_i64().unwrap_or(0),
+        doc["stacks"].as_i64().unwrap_or(0),
+        match doc["retired_at"].as_str() {
+            Some(at) => format!("   retired {at}"),
+            None => String::new(),
+        }
+    );
+    if let Some(d) = doc["description"].as_str() {
+        println!("  {d}");
+    }
+    println!(
+        "  from {}   fed by {}   waiting {}   releases {}",
+        doc["from"]["kind"].as_str().unwrap_or("manual"),
+        match doc["feeds"].as_array() {
+            Some(f) if !f.is_empty() => f
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            _ => "no dataset".to_string(),
+        },
+        doc["waiting"].as_i64().unwrap_or(0),
+        match &doc["releases"] {
+            serde_json::Value::Array(a) => a.len() as i64,
+            other => other.as_i64().unwrap_or(0),
+        }
+    );
+    for j in doc["joins"].as_array().into_iter().flatten() {
+        println!(
+            "  {}   {:<10} {:>6} subject(s)   {}{}",
+            j["when"].as_str().unwrap_or_default(),
+            j["what"].as_str().unwrap_or_default(),
+            j["subjects"].as_i64().unwrap_or(0),
+            j["by"].as_str().unwrap_or(""),
+            match (
+                j["batch"].as_i64(),
+                j["handle"].as_i64(),
+                j["reason"].as_str()
+            ) {
+                (Some(b), _, _) => format!("   batch {b}"),
+                (_, Some(h), _) => format!("   handle {h}"),
+                (_, _, Some(r)) => format!("   {r}"),
+                _ => String::new(),
+            }
+        );
+    }
+    Ok(())
+}
+
+/// The cohort verbs beside `list` (record 26 section 9), each what its
+/// door does, under your name.
+fn cohort_command(home: &Home, command: CohortCommand) -> Result<(), Exit> {
+    use nils_registry::cohort;
+    let who = actor();
+    let mut registry = open(home)?;
+    let err = |e: cohort::Error| match e {
+        cohort::Error::Store(e) => fail(e.to_string()),
+        other => usage(other.to_string()),
+    };
+    match command {
+        CohortCommand::List { json } => cohort_list(home, json),
+        CohortCommand::Show { name, json } => {
+            let doc = cohort::show(registry.store(), &name)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| usage(format!("no cohort named {name}")))?;
+            cohort_print(&doc, json)
+        }
+        CohortCommand::Make {
+            name,
+            owner,
+            description,
+            json,
+        } => {
+            let made = cohort::create(
+                &mut registry,
+                &name,
+                owner.as_deref().unwrap_or(&who),
+                description.as_deref(),
+                &who,
+            )
+            .map_err(err)?;
+            let doc = cohort::show(registry.store(), &made.name)
+                .map_err(|e| fail(e.to_string()))?
+                .unwrap_or_default();
+            cohort_print(&doc, json)
+        }
+        CohortCommand::Rename { name, to, json } => {
+            let change = cohort::Change {
+                name: Some(&to),
+                ..cohort::Change::default()
+            };
+            let set = cohort::set(&mut registry, &name, &change, &who).map_err(err)?;
+            let doc = cohort::show(registry.store(), &set.name)
+                .map_err(|e| fail(e.to_string()))?
+                .unwrap_or_default();
+            cohort_print(&doc, json)
+        }
+        CohortCommand::Set {
+            name,
+            owner,
+            description,
+            no_description,
+            json,
+        } => {
+            let change = cohort::Change {
+                owner: owner.as_deref(),
+                description: if no_description {
+                    Some(None)
+                } else {
+                    description.as_deref().map(Some)
+                },
+                ..cohort::Change::default()
+            };
+            let set = cohort::set(&mut registry, &name, &change, &who).map_err(err)?;
+            let doc = cohort::show(registry.store(), &set.name)
+                .map_err(|e| fail(e.to_string()))?
+                .unwrap_or_default();
+            cohort_print(&doc, json)
+        }
+        CohortCommand::Retire { name, back, json } => {
+            let change = cohort::Change {
+                retired: Some(!back),
+                ..cohort::Change::default()
+            };
+            let set = cohort::set(&mut registry, &name, &change, &who).map_err(err)?;
+            let doc = cohort::show(registry.store(), &set.name)
+                .map_err(|e| fail(e.to_string()))?
+                .unwrap_or_default();
+            cohort_print(&doc, json)
+        }
+        CohortCommand::Add {
+            name,
+            codes,
+            why,
+            json,
+        } => cohort_members(
+            &mut registry,
+            &name,
+            &codes,
+            &[],
+            why.as_deref(),
+            &who,
+            json,
+        ),
+        CohortCommand::Remove {
+            name,
+            codes,
+            why,
+            json,
+        } => cohort_members(
+            &mut registry,
+            &name,
+            &[],
+            &codes,
+            why.as_deref(),
+            &who,
+            json,
+        ),
+    }
+}
+
+/// `nils clinical cohort add|remove`: what `POST /api/cohorts/{name}/members`
+/// does, the counts printed.
+fn cohort_members(
+    registry: &mut Registry,
+    name: &str,
+    add: &[String],
+    remove: &[String],
+    why: Option<&str>,
+    who: &str,
+    json: bool,
+) -> Result<(), Exit> {
+    use nils_registry::cohort;
+    let done = cohort::members(registry, name, add, remove, why, who).map_err(|e| match e {
+        cohort::Error::Store(e) => fail(e.to_string()),
+        other => usage(other.to_string()),
+    })?;
+    registry.refresh_meta().map_err(|e| fail(e.to_string()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "cohort": name,
+                "added": done.added,
+                "already": done.already,
+                "removed": done.removed,
+                "not_members": done.not_members,
+                "epoch": registry.meta().epoch,
+            })
+        );
+        return Ok(());
+    }
+    println!(
+        "cohort {name}   added {}   already {}   removed {}   not members {}   epoch {}",
+        done.added,
+        done.already,
+        done.removed,
+        done.not_members,
+        registry.meta().epoch
+    );
     Ok(())
 }
 
@@ -6225,7 +7346,7 @@ fn yaml_text(s: &str) -> String {
 fn clinical_command(home: &Home, command: ClinicalCommand) -> Result<(), Exit> {
     match command {
         ClinicalCommand::Import(args) => clinical_import(home, args),
-        ClinicalCommand::Cohort(CohortCommand::List { json }) => cohort_list(home, json),
+        ClinicalCommand::Cohort(command) => cohort_command(home, command),
         ClinicalCommand::Vocabulary(VocabularyCommand::Load {
             file,
             pack_dir: dir,
@@ -6725,14 +7846,22 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         return release_withdraw(home, name, version, args.why.as_deref().unwrap_or(""));
     }
     let out = args.out.clone().expect("--out, or --history");
-    let dates_policy = dates::Policy::parse(&args.dates).ok_or_else(|| {
-        usage(format!(
-            "--dates is keep, shift or year, not {}",
-            args.dates
-        ))
-    })?;
-    let uids = policy::Uids::parse(&args.uids)
-        .ok_or_else(|| usage(format!("--uids is remap or preserve, not {}", args.uids)))?;
+    // record 26 section 13: without the flags each dataset's leaving policy
+    // applies to its own files, and the run's defaults elsewhere
+    let policy_from = match (&args.dates, &args.uids) {
+        (None, None) => policy::Source::Datasets,
+        _ => policy::Source::Flags,
+    };
+    let dates_policy = match &args.dates {
+        Some(text) => dates::Policy::parse(text)
+            .ok_or_else(|| usage(format!("--dates is keep, shift or year, not {text}")))?,
+        None => dates::Policy::default(),
+    };
+    let uids = match &args.uids {
+        Some(text) => policy::Uids::parse(text)
+            .ok_or_else(|| usage(format!("--uids is remap or preserve, not {text}")))?,
+        None => policy::Uids::default(),
+    };
     let root = match &args.uid_root {
         Some(text) => uid::Root::new(text).map_err(|e| usage(e.to_string()))?,
         None => uid::Root::default(),
@@ -6822,6 +7951,17 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     let mut registry = open(home)?;
     // Wave 5 section 10.2: a release writes only to an export place.
     require_place(&mut registry, nils_registry::place::Role::Export, &out)?;
+    // record 26 section 13: a dataset named is a source place in force
+    for name in &args.dataset {
+        let found = nils_registry::place::by_name(registry.store(), name)
+            .map_err(|e| fail(e.to_string()))?
+            .filter(|p| p.role == nils_registry::place::Role::Source && p.retired_at.is_none());
+        if found.is_none() {
+            return Err(usage(format!(
+                "--dataset {name}: no source place in force is named so; `nils place list` shows them"
+            )));
+        }
+    }
     // Wave 4a section 8: every item resolved up front, and a refusal that
     // names what did not, rather than a smaller release.
     let chosen = resolve_or_refuse(&mut registry, &items, Some(&pack))?.selection;
@@ -6844,6 +7984,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         name: &name,
         root: &out,
         policy: &policy,
+        policy_from,
         categories,
         selection: run::Selection {
             subjects: chosen.subjects,
@@ -6855,6 +7996,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             modality: args.modality.clone(),
             axes: chosen.axes,
             cohorts: chosen.cohorts,
+            datasets: args.dataset.clone(),
         },
         scheme: &scheme,
         // §8.4: dropped by default, and back only by name. The pack declares
@@ -6890,6 +8032,20 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         report.name, report.version, report.layout, report.policy
     );
     println!("  into             {}", report.root);
+    // record 26 section 13: what each dataset's files left under
+    for p in &report.policies {
+        println!(
+            "  dataset          {:<24} dates {}   uids {}   from {}",
+            p["dataset"].as_str().unwrap_or("(none)"),
+            p["dates"].as_str().unwrap_or_default(),
+            p["uids"].as_str().unwrap_or_default(),
+            p["from"].as_str().unwrap_or_default()
+        );
+    }
+    // section 4.3: the sessions were numbered because a dataset's dates moved
+    if let Some(why) = &report.session_naming {
+        println!("  sessions         {why}");
+    }
     if let Some(c) = &report.converter {
         println!("  converted by     {c}");
     }
@@ -6901,7 +8057,23 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     }
     println!("  subjects         {:>12}", report.subjects);
     println!("  stacks           {:>12}", report.stacks);
-    println!("  files            {:>12}", report.files);
+    // §9.3 with lab 26b, finding 5: a layout that has no place for a stack
+    // leaves it out, and the tree then holds fewer stacks than the archive
+    // does. The reasons are under "where they went" below.
+    if report.left_out > 0 {
+        println!(
+            "  left out         {:>12}   stacks the layout has no name for",
+            report.left_out
+        );
+    }
+    println!(
+        "  files            {:>12}{}",
+        report.files,
+        match report.layout.as_str() {
+            "bids" => "   NIfTI and its sidecars, with DICOM under sourcedata/",
+            _ => "",
+        }
+    );
     println!(
         "  in the tree      {:>9.2} GiB",
         report.bytes as f64 / (1u64 << 30) as f64
@@ -7054,24 +8226,50 @@ fn release_withdraw(home: &Home, name: &str, version: &str, why: &str) -> Result
     Ok(())
 }
 
-/// The releases the registry holds, newest first (`GET /api/releases`).
-fn releases_doc(registry: &mut Registry, limit: usize) -> Result<serde_json::Value, Exit> {
+/// The releases the registry holds, newest first (`GET /api/releases`, and
+/// `nils release --history --json`); every version of one dataset where a
+/// name is given.
+fn releases_doc(
+    registry: &mut Registry,
+    limit: usize,
+    name: Option<&str>,
+) -> Result<serde_json::Value, Exit> {
     let store = registry.store();
     let started = text_of(store, "release", "started_at");
     let withdrawn = text_of(store, "release", "withdrawn_at");
+    let policy = text_of(store, "release", "policy");
+    let policies = text_of(store, "release", "policies");
+    let scheme = text_of(store, "release", "session_scheme");
+    let mut wheres = String::new();
+    let mut params: Vec<Param> = Vec::new();
+    if let Some(name) = name {
+        wheres = format!(" WHERE name = {}", store.dialect().param(1, Type::Text));
+        params.push(Param::from(name));
+    }
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
-         added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why FROM {} \
+         added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
+         {policies}, {scheme}, session_naming FROM {}{wheres} \
          ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
     );
-    let rows: Vec<serde_json::Value> = store
-        .query(&sql, &[])?
+    let json = |s: Option<&str>| {
+        s.and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+            .unwrap_or(serde_json::Value::Null)
+    };
+    let found = store.query(&sql, &params)?;
+    let ids: Vec<i64> = found
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<_, nils_registry::Error>>()?;
+    let sessions = sessions_of(store, &ids)?;
+    let rows: Vec<serde_json::Value> = found
         .iter()
         .map(|r| {
+            let id = r.int(0)?;
             Ok(serde_json::json!({
-                "id": r.int(0)?,
+                "id": id,
                 "name": r.text(1)?,
                 "version": r.text(2)?,
                 "root": r.text(3)?,
@@ -7088,10 +8286,67 @@ fn releases_doc(registry: &mut Registry, limit: usize) -> Result<serde_json::Val
                 "withdrawn_at": r.opt_text(14)?,
                 "withdrawn_by": r.opt_text(15)?,
                 "withdrawn_why": r.opt_text(16)?,
+                // record 26 section 13: the run's policy, where it came
+                // from, and what each dataset's files left under
+                "policy": json(r.opt_text(17)?),
+                "policies": json(r.opt_text(18)?),
+                // How many sessions the release holds, the scheme that named
+                // them, and, where §4.3 numbered them in date order under a
+                // dataset's declared shift, the engine's own sentence for why
+                // they are not labelled the way the scheme asked.
+                "sessions": sessions.get(&id).copied(),
+                "session_scheme": json(r.opt_text(19)?),
+                "session_naming": r.opt_text(20)?,
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
     Ok(serde_json::json!({ "count": rows.len(), "releases": rows }))
+}
+
+/// How many sessions each of these releases holds.
+///
+/// A release records its sessions nowhere but in the places of its stacks:
+/// every place of §9 begins `sub-<code>/ses-<label>`, whatever the layout put
+/// in front of it, so the distinct pairs are the sessions of the tree. A state
+/// row says which version last wrote it, so a release a later version has
+/// written over holds none of them and answers nothing at all, rather than a
+/// count that is really its successor's.
+fn sessions_of(store: &mut Store, ids: &[i64]) -> Result<BTreeMap<i64, i64>, nils_registry::Error> {
+    if ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    // The ids are the ones just read out of the release table, so the list is
+    // the rows' own integers and never a caller's text.
+    let list: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    let sql = format!(
+        "SELECT release_id, dir FROM {} WHERE release_id IN ({})",
+        store.qualified("release_stack"),
+        list.join(", ")
+    );
+    let mut seen: BTreeMap<i64, std::collections::BTreeSet<String>> = BTreeMap::new();
+    store.query_stream(&sql, &[], |r| {
+        if let Some(session) = session_of(r.text(1)?) {
+            seen.entry(r.int(0)?).or_default().insert(session);
+        }
+        Ok(true)
+    })?;
+    Ok(seen
+        .into_iter()
+        .map(|(id, sessions)| (id, sessions.len() as i64))
+        .collect())
+}
+
+/// The session a released stack's directory is in: the `sub-…/ses-…` pair
+/// every layout of §9 puts in the path, whatever it puts in front of it.
+fn session_of(dir: &str) -> Option<String> {
+    dir.split('/')
+        .collect::<Vec<&str>>()
+        .windows(2)
+        .find_map(|pair| {
+            let (subject, session) = (pair[0], pair[1]);
+            (subject.starts_with("sub-") && session.starts_with("ses-"))
+                .then(|| format!("{subject}/{session}"))
+        })
 }
 
 /// One row of the version history.
@@ -7113,6 +8368,17 @@ struct Version {
 /// left everything alone says so.
 fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
     let mut registry = home.open().map_err(|e| fail(e.to_string()))?;
+    // Asked for by machine, the history is the document the door answers, so
+    // that a caller reads one shape of a release row and not two.
+    if args.json {
+        let doc = releases_doc(&mut registry, i64::MAX as usize, args.name.as_deref())?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&doc)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
     let store = registry.store();
     let mut wheres = String::new();
     let mut params: Vec<nils_registry::store::Param> = Vec::new();
@@ -7221,6 +8487,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_released_stack_says_which_session_it_is_in() {
+        // Every layout of §9 writes the pair; what differs is only what it
+        // puts in front of it, which is why the pair is looked for anywhere.
+        assert_eq!(
+            session_of("sub-a/ses-20220115/t1-mprage").as_deref(),
+            Some("sub-a/ses-20220115")
+        );
+        assert_eq!(
+            session_of("sourcedata/sub-a/ses-01/misc/stack-00000001").as_deref(),
+            Some("sub-a/ses-01")
+        );
+        assert_eq!(
+            session_of("derivatives/nils/sub-b/ses-M06/anat").as_deref(),
+            Some("sub-b/ses-M06")
+        );
+        // and a directory in no session is in none, rather than in a guess
+        assert_eq!(session_of("misc/stack-00000001"), None);
+        assert_eq!(session_of("sub-a/anat"), None);
+    }
+
+    #[test]
     fn a_count_names_its_noun() {
         assert_eq!(counted("subjects", 1), "subject");
         assert_eq!(counted("subjects", 2), "subjects");
@@ -7295,7 +8582,9 @@ struct RestoreArgs {
     yes: bool,
 }
 
-/// Wave 4c §6.5: the packs a directory holds, for the door.
+/// Wave 4c §6.5: the packs a directory holds, for the door. Record 26: with
+/// how many word lists each opens to an overlay, by `axis.value` and by
+/// bucket.
 pub(crate) fn packs_doc(dir: &Path) -> Result<serde_json::Value, Exit> {
     let mut packs = Vec::new();
     for p in packs_in(dir)? {
@@ -7303,6 +8592,7 @@ pub(crate) fn packs_doc(dir: &Path) -> Result<serde_json::Value, Exit> {
             Ok(pack) => packs.push(serde_json::json!({
                 "name": pack.name, "version": pack.version.to_string(), "contract": pack.contract,
                 "modality": pack.modality, "cases": pack.cases,
+                "lists": pack.lists.len(), "buckets": pack.buckets.len(),
             })),
             Err(e) => packs.push(serde_json::json!({
                 "name": p.file_name().unwrap_or_default().to_string_lossy(), "error": e.to_string(),
@@ -7312,8 +8602,13 @@ pub(crate) fn packs_doc(dir: &Path) -> Result<serde_json::Value, Exit> {
     Ok(serde_json::json!({"packs": packs}))
 }
 
-/// Wave 4c §6.5: one pack, for the door: what a person tunes.
-pub(crate) fn pack_doc(dir: &Path, name: &str) -> Result<Option<serde_json::Value>, Exit> {
+/// Wave 4c §6.5: one pack, for the door: what a person tunes. The adopted
+/// overlays of the registry give the site's terms per list.
+pub(crate) fn pack_doc(
+    dir: &Path,
+    name: &str,
+    overlays: &[nils_registry::overlay::Overlay],
+) -> Result<Option<serde_json::Value>, Exit> {
     let Some(found) = packs_in(dir)?
         .into_iter()
         .find(|p| p.file_name().is_some_and(|f| f == name))
@@ -7321,24 +8616,161 @@ pub(crate) fn pack_doc(dir: &Path, name: &str) -> Result<Option<serde_json::Valu
         return Ok(None);
     };
     let pack = nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
-    Ok(Some(serde_json::json!({
+    Ok(Some(pack_document(&pack, overlays)))
+}
+
+/// One pack as a document (`nils pack show --json`, `GET /api/packs/{name}`).
+/// Record 26, decision 12: every axis in the order it is decided, its values
+/// in the order they are tried, each with its words after any overlay and
+/// how else it is reached (a flag alone, any of several, all of several, a
+/// physics window), the flags count, the review thresholds, the lists a
+/// site may amend, and the terms the site's adopted overlays put on each
+/// list, when a registry's overlays are at hand.
+pub(crate) fn pack_document(
+    pack: &nils_pack::Pack,
+    overlays: &[nils_registry::overlay::Overlay],
+) -> serde_json::Value {
+    use serde_json::json;
+    // The site's adopted edits per list, named as the pack names it: a
+    // bucket by name, a value as axis.identity whatever the overlay wrote.
+    #[derive(Default)]
+    struct Site {
+        add: Vec<String>,
+        remove: Vec<String>,
+        overlays: Vec<i64>,
+    }
+    let list_of = |name: &str| -> String {
+        let Some((axis, value)) = name.split_once('.') else {
+            return name.to_string();
+        };
+        pack.axes
+            .iter()
+            .find(|a| a.name == axis)
+            .and_then(|a| a.values.iter().find(|v| v.id == value || v.label == value))
+            .map(|v| format!("{axis}.{}", v.id))
+            .unwrap_or_else(|| name.to_string())
+    };
+    let words = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|w| w.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut site: std::collections::BTreeMap<String, Site> = std::collections::BTreeMap::new();
+    let adopted: Vec<&nils_registry::overlay::Overlay> = overlays
+        .iter()
+        .filter(|o| o.status == nils_registry::overlay::ADOPTED && o.pack == pack.name)
+        .collect();
+    for o in &adopted {
+        for (key, resolve) in [("buckets", false), ("lists", true)] {
+            let Some(m) = o.document[key].as_object() else {
+                continue;
+            };
+            for (name, edit) in m {
+                let list = if resolve { list_of(name) } else { name.clone() };
+                let s = site.entry(list).or_default();
+                for w in words(&edit["add"]) {
+                    if !s.add.iter().any(|x| x.eq_ignore_ascii_case(&w)) {
+                        s.add.push(w);
+                    }
+                }
+                for w in words(&edit["remove"]) {
+                    if !s.remove.iter().any(|x| x.eq_ignore_ascii_case(&w)) {
+                        s.remove.push(w);
+                    }
+                }
+                if !s.overlays.contains(&o.id) {
+                    s.overlays.push(o.id);
+                }
+            }
+        }
+    }
+    let site_json = |s: &Site| json!({"add": s.add, "remove": s.remove, "overlays": s.overlays});
+
+    json!({
         "pack": pack.name,
         "version": pack.version.to_string(),
         "contract": pack.contract,
         "modality": pack.modality,
-        "axes": pack.axes.iter().map(|a| serde_json::json!({
-            "axis": a.name, "multi": a.multi, "values": a.values.len(),
+        "fields": pack.fields.iter().map(|(f, v)| (f.clone(), serde_json::Value::from(v.name()))).collect::<serde_json::Map<_, _>>(),
+        "parsers": pack.parsers.iter().map(|p| json!({
+            "name": p.name, "predicates": p.preds.len()
+        })).collect::<Vec<_>>(),
+        "flags": pack.flags.len(),
+        "review": {
+            "low_confidence": {
+                "default": pack.review.low_confidence,
+                "per_axis": pack.review.per_axis,
+            },
+            "missing": pack.review.missing,
+            "silent_when": pack.review.silent_when.is_some(),
+        },
+        "axes": pack.axes.iter().map(|a| json!({
+            "axis": a.name,
+            "multi": a.multi,
+            "phase": a.phase.name(),
+            "stores": if a.stores_label { "label" } else { "id" },
+            "default": a.default,
+            "count": a.values.len(),
             "review_below": pack.review.below(&a.name),
             "asks_when_missing": pack.review.asks_when_missing(&a.name),
+            "values": a.values.iter().map(|v| {
+                let list = format!("{}.{}", a.name, v.id);
+                let amendable = pack.lists.contains(&list);
+                json!({
+                    "name": v.id,
+                    "label": v.label,
+                    "family": v.family,
+                    "tried": v.tried,
+                    "keywords": v.keywords,
+                    "bucket": v.bucket,
+                    "list": amendable.then_some(&list),
+                    "detection": {
+                        "exclusive": v.detection.exclusive,
+                        "alternative": v.detection.alternative,
+                        "combination": v.detection.combination,
+                        "physics": v.detection.physics.iter().map(|w| json!({
+                            "when": w.when, "confidence": w.confidence, "why": w.why,
+                        })).collect::<Vec<_>>(),
+                    },
+                    "site": site.get(&list).map(site_json),
+                })
+            }).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
-        "rule_sets": pack.rule_sets.iter().map(|r| serde_json::json!({
-            "rule_set": r.name, "rules": r.rules.len(), "decides": r.decides,
+        "passes": pack.passes.iter().map(|p| json!({
+            "pass": p.name, "kind": p.kind_name(),
+            "phase": format!("{:?}", p.phase).to_lowercase(),
+            "reference": p.reference.scope,
         })).collect::<Vec<_>>(),
-        "passes": pack.passes.iter().map(|p| serde_json::json!({"pass": p.name, "kind": p.kind_name()})).collect::<Vec<_>>(),
+        "rule_sets": pack.rule_sets.iter().map(|r| json!({
+            "rule_set": r.name, "rules": r.rules.len(),
+            "decides": r.decides, "entered": r.enter_when.is_some(),
+        })).collect::<Vec<_>>(),
         "buckets": pack.buckets,
+        "lists": pack.lists,
+        "site": site.iter().map(|(l, s)| (l.clone(), site_json(s))).collect::<serde_json::Map<_, _>>(),
+        "adopted": adopted.iter().map(|o| json!({
+            "id": o.id, "name": o.name, "version": o.version, "scope": o.scope,
+        })).collect::<Vec<_>>(),
         "cases": pack.cases,
-        "mcp": pack.mcp.as_ref().map(|m| serde_json::json!({"version": m.version, "tools": m.tools.len(), "examples": m.examples.len()})),
-    })))
+        "overlay": pack.overlay,
+        "mcp": pack.mcp.as_ref().map(|m| json!({"version": m.version, "tools": m.tools.len(), "examples": m.examples.len()})),
+        "private": json!({
+            "coverage": pack.private_coverage,
+            "ingest": pack.ingest.iter().map(|i| json!({
+                "name": i.name, "address": i.text(), "vr": i.vr,
+                "dictionary_name": i.dictionary_name, "kind": i.kind,
+            })).collect::<Vec<_>>(),
+            "release": pack.release.iter().map(|a| a.text()).collect::<Vec<_>>(),
+            "dictionary": {
+                "creators": pack.dictionary.creators(),
+                "elements": pack.dictionary.len(),
+            },
+        }),
+    })
 }
 
 /// Wave 4c §6.5: the batches, newest first, as the status document lists them.
@@ -7348,7 +8780,7 @@ pub(crate) fn batches_doc(
 ) -> Result<serde_json::Value, Exit> {
     let store = registry.store();
     let sql = format!(
-        "SELECT id, name, state, {}, {}, epoch_after, {} FROM {} ORDER BY id DESC LIMIT {}",
+        "SELECT id, name, state, {}, {}, epoch_after, {}, kind FROM {} ORDER BY id DESC LIMIT {}",
         text_of(store, "ingest_batch", "started_at"),
         text_of(store, "ingest_batch", "finished_at"),
         text_of(store, "ingest_batch", "counts"),
@@ -7369,6 +8801,9 @@ pub(crate) fn batches_doc(
                 }
                 v.as_u64()
             };
+            // record 26 §14: which step the batch is; a pseudonymise step
+            // counts its files where a digest counts what it parsed
+            let kind = r.opt_text(7)?.unwrap_or("digest");
             Ok(serde_json::json!({
                 "id": r.int(0)?,
                 "name": r.text(1)?,
@@ -7376,10 +8811,11 @@ pub(crate) fn batches_doc(
                 "started_at": r.opt_text(3)?,
                 "finished_at": r.opt_text(4)?,
                 "epoch_after": r.opt_int(5)?,
-                "seen": pick(&["seen"]),
-                "parsed": pick(&["parsed"]),
-                "quarantined": pick(&["quarantined"]),
-                "ingested": pick(&["written", "ingested"]),
+                "kind": kind,
+                "seen": pick(&["seen"]).or_else(|| pick(&["files", "seen"])),
+                "parsed": pick(&["parsed"]).or_else(|| pick(&["files", "written"])),
+                "quarantined": pick(&["quarantined"]).or_else(|| pick(&["files", "refused"])),
+                "ingested": pick(&["written", "ingested"]).or_else(|| pick(&["files", "written"])),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
@@ -7392,32 +8828,25 @@ pub(crate) fn batch_doc(
     id: i64,
 ) -> Result<Option<serde_json::Value>, Exit> {
     let store = registry.store();
-    let sql = format!(
-        "SELECT state, name, {}, {}, {} FROM {} WHERE id = {}",
-        text_of(store, "ingest_batch", "started_at"),
-        text_of(store, "ingest_batch", "finished_at"),
-        text_of(store, "ingest_batch", "counts"),
-        store.qualified("ingest_batch"),
-        store.dialect().param(1, Type::Int)
-    );
-    let Some(row) = store.query_opt(&sql, &[Param::Int(id)])? else {
+    let Some(batch) = crate::batches::row(store, id)? else {
         return Ok(None);
     };
-    let report = row
-        .opt_text(4)?
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
-    let started_at = row.opt_text(2)?.map(str::to_string);
-    let finished_at = row.opt_text(3)?.map(str::to_string);
-    let (state, name) = (row.text(0)?.to_string(), row.text(1)?.to_string());
+    // record 26 §14: the batch is the thread, its five stages read off
+    // this row, the one it shares a name with, its jobs and its questions
+    let stages = crate::batches::stages(store, &batch)?;
+    let report = (!batch.counts.is_null()).then(|| batch.counts.clone());
     // Wave 5 §12.7: the pyramid is offered as a follow-on when a working place is bound
     let working = crate::pyramid::working_place(store, None).ok();
     Ok(Some(serde_json::json!({
         "id": id,
-        "state": state,
-        "name": name,
-        "started_at": started_at,
-        "finished_at": finished_at,
+        "kind": batch.kind,
+        "state": batch.state,
+        "name": batch.name,
+        "job_id": batch.job_id,
+        "started_at": batch.started_at,
+        "finished_at": batch.finished_at,
         "report": report,
+        "stages": stages,
         "pyramid": working.map(|w| serde_json::json!({
             "offered": true, "place": w.name,
             "command": ["pyramid", "build", "--stack", "<stack id>"],
@@ -7430,6 +8859,7 @@ pub(crate) fn quarantine_doc(
     registry: &mut Registry,
     batch: Option<i64>,
     class: Option<&str>,
+    batches: Option<&[i64]>,
 ) -> Result<serde_json::Value, Exit> {
     let store = registry.store();
     let d = store.dialect();
@@ -7452,6 +8882,22 @@ pub(crate) fn quarantine_doc(
         sql.push_str(&format!(
             " AND f.reason = {}",
             d.param(params.len(), Type::Text)
+        ));
+    }
+    // record 26 §10: the batches that fed a cohort; none reaches nothing
+    if let Some(ids) = batches {
+        let list = ids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(
+            " AND f.batch_id IN ({})",
+            if list.is_empty() {
+                "-1".to_string()
+            } else {
+                list
+            }
         ));
     }
     sql.push_str(" ORDER BY f.batch_id, f.path");

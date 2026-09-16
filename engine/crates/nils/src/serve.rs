@@ -994,7 +994,10 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         let home = home.clone();
         let roots = args.ingest_root.clone();
         let stop = Arc::clone(&stop_queue);
-        std::thread::spawn(move || queue_worker(&home, &roots, &stop))
+        // lab 26b, finding 4: a job this engine queues runs with the workers
+        // the engine was started with, where the caller named none
+        let workers = args.workers.max(1);
+        std::thread::spawn(move || queue_worker(&home, &roots, workers, &stop))
     });
     // Wave 5 §10.3: the backup schedule beside the queue that runs what it
     // queues, where there is a directory to write to.
@@ -1057,7 +1060,12 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
 /// The queue's worker beside the doors: it takes the queue when no other
 /// worker holds it and runs what is queued; when another worker has it, or
 /// the registry cannot be opened, it looks again a little later.
-fn queue_worker(home: &Home, roots: &[String], stop: &std::sync::atomic::AtomicBool) {
+fn queue_worker(
+    home: &Home,
+    roots: &[String],
+    workers: usize,
+    stop: &std::sync::atomic::AtomicBool,
+) {
     let stopped = || stop.load(Ordering::SeqCst);
     while !stopped() {
         let outcome = match home.open() {
@@ -1072,6 +1080,7 @@ fn queue_worker(home: &Home, roots: &[String], stop: &std::sync::atomic::AtomicB
                             once: false,
                             every: 5,
                             ingest_roots: roots,
+                            workers: Some(workers),
                             quiet: true,
                         },
                         &stopped,
@@ -1159,7 +1168,8 @@ fn handle(
     if path == "/api/events" && method == Method::Get {
         // Display plumbing: the open jobs, every second, until the client
         // goes away. Never the execution context.
-        events(doors, registry, request);
+        let all = query.get("all").is_some_and(|a| a == "1" || a == "true");
+        events(doors, registry, request, all);
         return;
     }
     let caller = doors.auth.caller(&request);
@@ -1280,6 +1290,18 @@ fn routed(
         detail
     };
     caller.allowed(path, need, detail)?;
+    // record 26: the linkage doors, under the table's grants like the rest
+    if let Some(r) = crate::linkage_doors::route(
+        &doors.home,
+        registry,
+        caller,
+        method.as_str(),
+        &segs,
+        query,
+        body,
+    ) {
+        return r;
+    }
     let id_at = |i: usize| -> Result<i64, Reply> {
         segs.get(i)
             .and_then(|s| s.parse::<i64>().ok())
@@ -1327,7 +1349,9 @@ fn routed(
                 .pack_dir
                 .clone()
                 .ok_or_else(|| Reply::error(404, "no pack directory"))?;
-            match crate::pack_doc(&dir, name)? {
+            // Record 26: the site's adopted overlays give the terms per list.
+            let overlays = nils_registry::overlay::list(registry.store())?;
+            match crate::pack_doc(&dir, name, &overlays)? {
                 Some(doc) => Ok(Reply::ok(doc)),
                 None => Err(Reply::error(404, format!("no pack named {name}"))),
             }
@@ -1348,11 +1372,127 @@ fn routed(
         }
         ["api", "quarantine"] if get => {
             let batch = query.get("batch").and_then(|b| b.parse::<i64>().ok());
+            // record 26 §10: a quarantined file is about no subject, so a
+            // cohort narrows to the batches that fed it
+            let batches = match query.get("cohort") {
+                Some(name) => Some(
+                    nils_registry::cohort::batches_feeding(registry.store(), name)?
+                        .ok_or_else(|| Reply::error(404, format!("no cohort named {name}")))?,
+                ),
+                None => None,
+            };
             Ok(Reply::ok(crate::quarantine_doc(
                 registry,
                 batch,
                 query.get("class").map(String::as_str),
+                batches.as_deref(),
             )?))
+        }
+        // record 26 §9: the cohort doors, Data work
+        ["api", "cohorts"] if get => Ok(Reply::ok(serde_json::Value::Array(
+            nils_registry::cohort::list(registry.store())?,
+        ))),
+        ["api", "cohorts", name] if get => {
+            match nils_registry::cohort::show(registry.store(), name)? {
+                Some(doc) => Ok(Reply::ok(doc)),
+                None => Err(Reply::error(404, format!("no cohort named {name}"))),
+            }
+        }
+        ["api", "cohorts"] if post => {
+            let doc = json_body(body)?;
+            let name = doc["name"]
+                .as_str()
+                .ok_or_else(|| Reply::error(400, "name is required"))?;
+            let owner = doc["owner"].as_str().unwrap_or(principal);
+            let made = nils_registry::cohort::create(
+                registry,
+                name,
+                owner,
+                doc["description"].as_str(),
+                principal,
+            )
+            .map_err(cohort_err)?;
+            let shown = nils_registry::cohort::show(registry.store(), &made.name)?
+                .unwrap_or_else(|| serde_json::json!({"name": made.name}));
+            Ok(Reply::created(shown))
+        }
+        ["api", "cohorts", name] if put => {
+            let doc = json_body(body)?;
+            for key in ["name", "owner", "description"] {
+                if !(doc[key].is_null() || doc[key].is_string()) {
+                    return Err(Reply::error(400, format!("{key} is a string")));
+                }
+            }
+            if !(doc["retired"].is_null() || doc["retired"].is_boolean()) {
+                return Err(Reply::error(400, "retired is true or false"));
+            }
+            let change = nils_registry::cohort::Change {
+                name: doc["name"].as_str(),
+                owner: doc["owner"].as_str(),
+                description: doc.get("description").map(|d| d.as_str()),
+                retired: doc["retired"].as_bool(),
+            };
+            let set = nils_registry::cohort::set(registry, name, &change, principal)
+                .map_err(cohort_err)?;
+            let shown = nils_registry::cohort::show(registry.store(), &set.name)?
+                .unwrap_or_else(|| serde_json::json!({"name": set.name}));
+            Ok(Reply::ok(shown))
+        }
+        ["api", "cohorts", name, "members"] if post => {
+            let doc = json_body(body)?;
+            let codes = |key: &str| -> Result<Vec<String>, Reply> {
+                match doc.get(key) {
+                    None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+                    Some(serde_json::Value::Array(a)) => a
+                        .iter()
+                        .map(|v| {
+                            v.as_str()
+                                .map(str::to_string)
+                                .ok_or_else(|| Reply::error(400, format!("{key}: a list of codes")))
+                        })
+                        .collect(),
+                    Some(_) => Err(Reply::error(400, format!("{key}: a list of codes"))),
+                }
+            };
+            let add = codes("add")?;
+            let remove = codes("remove")?;
+            if add.is_empty() && remove.is_empty() {
+                return Err(Reply::error(
+                    400,
+                    "add or remove: the codes to add or remove",
+                ));
+            }
+            let done = nils_registry::cohort::members(
+                registry,
+                name,
+                &add,
+                &remove,
+                doc["why"].as_str(),
+                principal,
+            )
+            .map_err(cohort_err)?;
+            registry
+                .refresh_meta()
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            Ok(Reply::ok(serde_json::json!({
+                "cohort": name,
+                "added": done.added,
+                "already": done.already,
+                "removed": done.removed,
+                "not_members": done.not_members,
+                "epoch": registry.meta().epoch,
+            })))
+        }
+        // record 26 §11: why one stack was judged so, as `nils explain` says it
+        ["api", "explain", _] if get => {
+            let stack = id_at(2)?;
+            match crate::explain::document(registry.store(), stack, doors.pack_dir.as_deref())? {
+                Some(doc) => Ok(Reply::ok(doc)),
+                None => Err(Reply::error(
+                    404,
+                    format!("stack {stack} has not been classified"),
+                )),
+            }
         }
         // Wave 4c §6.6: the knob engine.
         ["api", "classify", "signals"] if get => {
@@ -1459,12 +1599,23 @@ fn routed(
             Ok(Reply::ok(crate::schedule::calendar(registry)))
         }
         ["api", "sources"] if get => {
-            // the Data page: each source place, how it is handled, its digests and totals
+            // the Data page: each source place, its dataset, its digests and
+            // totals; `?probe=1` counts the trees again first, since a page
+            // reads the counts the last probe kept and never walks a tree
             let recent = query
                 .get("recent")
                 .and_then(|l| l.parse::<usize>().ok())
                 .unwrap_or(12)
                 .clamp(1, 100);
+            if query.get("probe").is_some_and(|p| p == "1" || p == "true") {
+                use nils_registry::place;
+                for p in place::active(registry.store())? {
+                    if p.role == place::Role::Source {
+                        let probed = crate::dataset::probe_place(&p);
+                        place::set(registry.store(), p.id, None, None, Some(&probed))?;
+                    }
+                }
+            }
             Ok(Reply::ok(
                 crate::sources::document(registry, recent)
                     .map_err(|e| Reply::error(500, e.to_string()))?,
@@ -1484,7 +1635,7 @@ fn routed(
                         fresh.push(p);
                         continue;
                     }
-                    let probed = crate::places::probe(std::path::Path::new(&p.path));
+                    let probed = crate::dataset::probe_place(&p);
                     fresh.push(place::set(
                         registry.store(),
                         p.id,
@@ -1524,9 +1675,77 @@ fn routed(
                 "bindings": crate::places::bindings_doc(),
             })))
         }
+        ["api", "places", _, "originals"] if get => {
+            // record 26 §1: what a vault or a purge would do, without doing
+            // it. Every original is checked against the pseudonymised tree
+            // exactly as a purge checks it, so this answer costs what a
+            // purge costs and is never read off the rows alone.
+            let id = id_at(2)?;
+            let dataset = crate::originals::dataset_at(registry.store(), id)
+                .map_err(|r| Reply::error(r.status, r.message))?;
+            let surveyed = crate::originals::survey(registry, &dataset)
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            Ok(Reply::ok(surveyed.as_json()))
+        }
+        ["api", "places", _, "originals"] if post => {
+            // record 26 §1: the act itself, as an `originals` job. What can
+            // be known without reading every file is refused here in words;
+            // the job asks again when it runs and refuses in the same words.
+            let id = id_at(2)?;
+            let dataset = crate::originals::dataset_at(registry.store(), id)
+                .map_err(|r| Reply::error(r.status, r.message))?;
+            let doc = json_body(body)?;
+            let asked = doc["do"].as_str().unwrap_or_default();
+            let act = crate::originals::Act::parse(asked)
+                .ok_or_else(|| Reply::error(400, format!("do is vault or purge, not {asked:?}")))?;
+            let why = doc["why"]
+                .as_str()
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .ok_or_else(|| {
+                    Reply::error(400, "why: a sentence saying why, which the audit row keeps")
+                })?;
+            let into = doc["into"]
+                .as_str()
+                .map(str::trim)
+                .filter(|i| !i.is_empty());
+            crate::originals::check(registry, &dataset, act, into)
+                .map_err(|r| Reply::error(r.status, r.message))?;
+            let mut command = vec![
+                "place".to_string(),
+                "originals".to_string(),
+                dataset.name.clone(),
+                format!("--{}", act.name()),
+            ];
+            if let Some(into) = into {
+                command.extend(["--into".to_string(), into.to_string()]);
+            }
+            command.extend(["--why".to_string(), why.to_string()]);
+            let job = nils_registry::job::enqueue_with(
+                registry.store(),
+                &command,
+                Some(&dataset.name),
+                Some(principal),
+                queued_by(caller),
+            )
+            .map_err(job_err)?;
+            Ok(Reply::accepted(serde_json::json!({
+                "job": job,
+                "state": "queued",
+                "do": act.name(),
+                "place": dataset.name,
+                "into": into,
+                "command": command,
+            })))
+        }
         ["api", "places"] if post => {
             use nils_registry::place::{self, Role as PlaceRole};
             let doc = json_body(body)?;
+            // lab 26c, finding 4: what became of the originals is an act's
+            // to write, never a declaration's
+            if let Some(refused) = crate::dataset::engine_written_refused(&doc) {
+                return Err(Reply::error(refused.status, refused.message));
+            }
             let name = doc["name"]
                 .as_str()
                 .filter(|n| !n.trim().is_empty())
@@ -1562,7 +1781,44 @@ fn routed(
             } else {
                 serde_json::json!({"backup": null, "snapshots": false, "protected": false, "fast": false})
             };
-            let probed = crate::places::probe(&path);
+            // record 26: a source place is a dataset. Its fields need
+            // data:work beside places:work, and the folder is looked at
+            // whichever were given, so a v0 folder is recognised and the
+            // trees are set before anything reads it.
+            let asked = dataset_asked(&doc);
+            if crate::dataset::fields_given(&asked) {
+                if role != PlaceRole::Source {
+                    return Err(Reply::error(
+                        400,
+                        format!(
+                            "a dataset is a source place; {name} is declared as a {} place",
+                            role.name()
+                        ),
+                    ));
+                }
+                caller.allowed(
+                    "POST /api/places with dataset fields",
+                    Need::One("data:work"),
+                    Detail::Plain,
+                )?;
+            }
+            let (probed, dataset, layout) = if role == PlaceRole::Source {
+                if place::by_name(registry.store(), name)?.is_some() {
+                    return Err(Reply::error(
+                        409,
+                        format!("a place is already named {name}"),
+                    ));
+                }
+                let d = crate::dataset::declare(registry.store(), &path, &asked, None)
+                    .map_err(|r| Reply::error(r.status, r.message))?;
+                (d.probed, d.dataset, d.layout)
+            } else {
+                (
+                    crate::places::probe(&path),
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                )
+            };
             let id = place::add(
                 registry.store(),
                 &place::New {
@@ -1572,6 +1828,7 @@ fn routed(
                     guarantees,
                     probed,
                     handling: doc["handling"].clone(),
+                    dataset,
                 },
             )
             .map_err(|e| match e {
@@ -1586,17 +1843,26 @@ fn routed(
                     scope: serde_json::json!({"place": id, "name": name, "role": role.name()}),
                     policy: None,
                     job_id: None,
-                    details: None,
+                    details: layout
+                        .is_object()
+                        .then(|| serde_json::json!({"layout": layout})),
                 },
             )?;
             let p = place::show(registry.store(), id)?
                 .ok_or_else(|| Reply::error(500, format!("place {id} was not written")))?;
-            Ok(Reply::created(p.as_json()))
+            let mut answer = p.as_json();
+            answer["layout"] = layout;
+            Ok(Reply::created(answer))
         }
         ["api", "places", _] if put => {
             use nils_registry::place;
             let id = id_at(2)?;
             let doc = json_body(body)?;
+            // lab 26c, finding 4: the same at the door that changes a
+            // dataset, which is the one the desk's Change form sends to
+            if let Some(refused) = crate::dataset::engine_written_refused(&doc) {
+                return Err(Reply::error(refused.status, refused.message));
+            }
             let current = place::show(registry.store(), id)?
                 .ok_or_else(|| Reply::error(404, format!("no place {id}")))?;
             if doc["retired"].as_bool() == Some(true) {
@@ -1633,7 +1899,39 @@ fn routed(
                 None | Some(serde_json::Value::Null) => None,
                 Some(h) => Some(place::handling_of(h).map_err(|m| Reply::error(400, m))?),
             };
-            let probed = path.as_deref().map(crate::places::probe);
+            // record 26: the dataset fields need data:work beside
+            // places:work; a source place whose dataset, path or arrival
+            // changes has its folder looked at again
+            let asked = dataset_asked(&doc);
+            let dataset_given = crate::dataset::fields_given(&asked);
+            if dataset_given {
+                if current.role != place::Role::Source {
+                    return Err(Reply::error(
+                        400,
+                        format!(
+                            "a dataset is a source place; {} is a {} place",
+                            current.name,
+                            current.role.name()
+                        ),
+                    ));
+                }
+                caller.allowed(
+                    "PUT /api/places/{id} with dataset fields",
+                    Need::One("data:work"),
+                    Detail::Plain,
+                )?;
+            }
+            let looked = current.role == place::Role::Source && (dataset_given || path.is_some());
+            let (probed, declared) = if looked {
+                let folder = path
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from(&current.path));
+                let d = crate::dataset::declare(registry.store(), &folder, &asked, Some(&current))
+                    .map_err(|r| Reply::error(r.status, r.message))?;
+                (Some(d.probed.clone()), Some(d))
+            } else {
+                (path.as_deref().map(crate::places::probe), None)
+            };
             let mut p = place::set(
                 registry.store(),
                 id,
@@ -1651,6 +1949,26 @@ fn routed(
                     other => Reply::error(500, other.to_string()),
                 })?;
             }
+            if let Some(d) = &declared {
+                p = place::set_dataset(registry.store(), id, &d.dataset).map_err(|e| match e {
+                    nils_registry::store::Error::Message(m) => Reply::error(409, m),
+                    other => Reply::error(500, other.to_string()),
+                })?;
+            }
+            let before = current.as_json();
+            let mut details = serde_json::Map::new();
+            if let Some(h) = &handling {
+                details.insert(
+                    "handling".into(),
+                    serde_json::json!({"before": before["handling"], "after": h}),
+                );
+            }
+            if let Some(d) = &declared {
+                details.insert(
+                    "dataset".into(),
+                    serde_json::json!({"before": before["dataset"], "after": d.dataset, "layout": d.layout}),
+                );
+            }
             nils_registry::audit::record(
                 registry,
                 &nils_registry::audit::Entry {
@@ -1659,12 +1977,14 @@ fn routed(
                     scope: serde_json::json!({"place": id, "name": current.name}),
                     policy: None,
                     job_id: None,
-                    details: handling.as_ref().map(|h| {
-                        serde_json::json!({"handling": {"before": current.as_json()["handling"], "after": h}})
-                    }),
+                    details: (!details.is_empty()).then(|| serde_json::Value::Object(details)),
                 },
             )?;
-            Ok(Reply::ok(p.as_json()))
+            let mut answer = p.as_json();
+            answer["layout"] = declared
+                .map(|d| d.layout)
+                .unwrap_or(serde_json::Value::Null);
+            Ok(Reply::ok(answer))
         }
         ["api", "overlays"] if get => {
             let rows = nils_registry::overlay::list(registry.store())?;
@@ -1840,7 +2160,7 @@ fn routed(
         }
         ["api", "ingest", "look"] if post => {
             let doc = json_body(body)?;
-            crate::browse::look_door(&doors.ingest_roots, &doc)
+            crate::browse::look_door(&doors.ingest_roots, registry.store(), &doc)
         }
         ["api", "ingest", "probe"] if post => {
             let doc = json_body(body)?;
@@ -1941,7 +2261,13 @@ fn routed(
         }
         ["api", "jobs"] if get => {
             let all = query.get("all").is_some_and(|a| a == "1" || a == "true");
-            let jobs = nils_registry::job::list(registry.store(), all, limit).map_err(job_err)?;
+            // the queue's worker is a row of its own kind, and not a job a
+            // person queued or would cancel: listed with ?all only
+            let jobs: Vec<_> = nils_registry::job::list(registry.store(), all, limit)
+                .map_err(job_err)?
+                .into_iter()
+                .filter(|j| all || j.kind != "worker")
+                .collect();
             Ok(Reply::ok(serde_json::json!({
                 "count": jobs.len(),
                 "jobs": jobs.iter().map(nils_registry::job::Job::as_json).collect::<Vec<_>>(),
@@ -1975,13 +2301,63 @@ fn routed(
                     ),
                 ));
             }
-            // Wave 4c §6.5: of the linkage verbs only `import` is a job the
-            // door queues; purge and the rest stay on the command line.
-            if command[0] == "linkage" && command.get(1).map(String::as_str) != Some("import") {
+            // Wave 4c §6.5 and record 26 §6: of the linkage verbs `import`
+            // and `merge` are jobs the door queues; purge and the rest stay
+            // on the command line.
+            if command[0] == "linkage"
+                && !matches!(command.get(1).map(String::as_str), Some("import" | "merge"))
+            {
                 return Err(Reply::error(
                     400,
-                    "linkage import is the one linkage verb the door queues",
+                    "linkage import and linkage merge are the linkage verbs the door queues",
                 ));
+            }
+            // Record 26 §1: of the place verbs only the acts on a dataset's
+            // originals are jobs; the rest declare a place and are not.
+            if command[0] == "place" && command.get(1).map(String::as_str) != Some("originals") {
+                return Err(Reply::error(
+                    400,
+                    "place originals is the place verb the door queues",
+                ));
+            }
+            // Record 26 §7: the chain, `then: [command, ...]`, each a
+            // command line queued when the one before ends done; and
+            // `bring-in @dataset`, which stands for the thread of a
+            // dataset with its own steps in front of whatever follows.
+            let mut then = crate::chain::parse_then(&doc).map_err(|e| Reply::error(400, e))?;
+            let mut command = command;
+            let mut digest_first: Option<u64> = None;
+            if command[0] == "bring-in" {
+                let asked =
+                    crate::chain::BringIn::parse(&command).map_err(|e| Reply::error(400, e))?;
+                let place = nils_registry::place::by_name(registry.store(), &asked.dataset)?
+                    .filter(|p| {
+                        p.role == nils_registry::place::Role::Source && p.retired_at.is_none()
+                    })
+                    .ok_or_else(|| {
+                        Reply::error(
+                            400,
+                            format!(
+                                "@{} is not a dataset; bring-in names a source place",
+                                asked.dataset
+                            ),
+                        )
+                    })?;
+                // a tree holding files no digest has read is digested
+                // first, so the pseudonymiser knows what the tree holds
+                let unread = crate::chain::unread_in_tree(registry.store(), &place);
+                let (first, mut rest) = crate::chain::bring_in(
+                    &place,
+                    asked.name.as_deref(),
+                    asked.pack.as_deref(),
+                    unread.is_some(),
+                );
+                command = first;
+                rest.append(&mut then);
+                then = rest;
+                if let Some(n) = unread {
+                    digest_first = Some(n);
+                }
             }
             // Wave 4c §6.5: a tree is named by a registered location, as
             // @name/relative, never by a path a caller composes; backup and
@@ -2002,18 +2378,48 @@ fn routed(
             };
             let verb = command[..words.min(command.len())].join(" ");
             caller.allowed(&format!("{path} {verb}"), Need::One(grant), detail)?;
-            let command = located(doors, command)?;
+            let command = located(doors, registry.store(), command)?;
+            // each step of the chain a verb the door queues, its tree
+            // located now; its grant is checked when its turn comes, and a
+            // refusal then ends the chain (record 26 §7)
+            let mut steps = Vec::with_capacity(then.len());
+            for step in then {
+                let verb = step[0].as_str();
+                if verb == "bring-in" || !QUEUEABLE.contains(&verb) || verb_needs(&step).is_none() {
+                    return Err(Reply::error(
+                        400,
+                        format!("then: {verb} is not a verb the chain queues"),
+                    ));
+                }
+                steps.push(located(doors, registry.store(), step)?);
+            }
+            let mut extra = queued_by(caller);
+            if !steps.is_empty() {
+                extra["then"] = serde_json::json!(steps);
+            }
+            if let Some(n) = digest_first {
+                extra["digest_first"] = serde_json::json!({
+                    "files": n,
+                    "why": "the pseudonymised tree holds files no digest has read",
+                });
+            }
             let id = nils_registry::job::enqueue_with(
                 registry.store(),
                 &command,
                 doc["name"].as_str(),
                 Some(principal),
-                queued_by(caller),
+                extra,
             )
             .map_err(job_err)?;
-            Ok(Reply::accepted(
-                serde_json::json!({ "job": id, "state": "queued" }),
-            ))
+            // the command as located, so a caller sees which tree @name was,
+            // and why a digest goes first when one does
+            Ok(Reply::accepted(serde_json::json!({
+                "job": id, "state": "queued", "command": command, "then": steps,
+                "digest_first": digest_first.map(|n| serde_json::json!({
+                    "files": n,
+                    "why": "the pseudonymised tree holds files no digest has read",
+                })),
+            })))
         }
         ["api", "jobs", _] if get => {
             let id = id_at(2)?;
@@ -2036,7 +2442,7 @@ fn routed(
                 None => Err(Reply::error(404, format!("no job {id}"))),
             }
         }
-        ["api", "releases"] if get => Ok(Reply::ok(crate::releases_doc(registry, limit)?)),
+        ["api", "releases"] if get => Ok(Reply::ok(crate::releases_doc(registry, limit, None)?)),
         ["api", "releases"] if post => {
             // Heavy: a queued `nils release`, 202.
             let doc = json_body(body)?;
@@ -2059,6 +2465,7 @@ fn routed(
             for (flag, key) in [
                 ("--layout", "layout"),
                 ("--dates", "dates"),
+                ("--uids", "uids"),
                 ("--on-unknown", "on_unknown"),
                 ("--pack", "pack"),
                 ("--scheme-name", "scheme_name"),
@@ -2074,6 +2481,8 @@ fn routed(
                 ("--subject", "subjects"),
                 ("--session", "sessions"),
                 ("--cohort", "cohorts"),
+                // record 26 §13: a dataset as a selection
+                ("--dataset", "datasets"),
                 ("--axis", "axes"),
                 ("--observation", "observations"),
             ] {
@@ -2189,15 +2598,54 @@ fn routed(
             Ok(Reply::ok(out))
         }
         ["api", "review"] if get => {
-            let rows = review_list(
+            let status = query.get("status").map(String::as_str);
+            // record 26 §10: a cohort keeps the items whose subject, through
+            // the item's stack, series or subject, holds an open membership
+            let keep = match query.get("cohort") {
+                Some(name) => {
+                    let members =
+                        nils_registry::cohort::open_members_of(registry.store(), name)?
+                            .ok_or_else(|| Reply::error(404, format!("no cohort named {name}")))?;
+                    let about = nils_registry::cohort::items_about(registry.store(), status)?;
+                    Some(
+                        about
+                            .iter()
+                            .filter(|it| it.subjects.iter().any(|s| members.contains(s)))
+                            .map(|it| it.id)
+                            .collect::<std::collections::HashSet<i64>>(),
+                    )
+                }
+                None => None,
+            };
+            let mut rows = review_list(
                 registry.store(),
-                query.get("status").map(String::as_str),
+                status,
                 query.get("kind").map(String::as_str),
-                limit,
+                if keep.is_some() {
+                    i64::MAX as usize
+                } else {
+                    limit
+                },
             )?;
+            if let Some(keep) = keep {
+                rows.retain(|r| r["id"].as_i64().is_some_and(|id| keep.contains(&id)));
+                rows.truncate(limit.max(1));
+            }
             Ok(Reply::ok(
                 serde_json::json!({ "count": rows.len(), "items": rows }),
             ))
+        }
+        ["api", "review", "summary"] if get => {
+            let cohort = query.get("cohort").map(String::as_str);
+            if let Some(name) = cohort
+                && nils_registry::cohort::by_name(registry.store(), name)?.is_none()
+            {
+                return Err(Reply::error(404, format!("no cohort named {name}")));
+            }
+            Ok(Reply::ok(nils_registry::cohort::review_summary(
+                registry.store(),
+                cohort,
+            )?))
         }
         ["api", "review", _] if get => {
             let id = id_at(2)?;
@@ -2340,6 +2788,13 @@ const QUEUEABLE: &[&str] = &[
     "backup",
     "verify",
     "digest",
+    // Record 26 §3 and §7: the pseudonymise step of a dataset, and the
+    // whole thread of one as a chain.
+    "pseudonymize",
+    "bring-in",
+    // Record 26 §1: `place originals`, the acts on a dataset's originals;
+    // no other place verb is a job.
+    "place",
     "fingerprint",
     "classify",
     "pick",
@@ -2412,12 +2867,36 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("GET", ["api", "sources" | "packs" | "batches"])
         | ("GET", ["api", "packs" | "batches", _]) => (Need::One("data:see"), Plain),
         ("GET", ["api", "places"]) => (Need::AnyOf(&["data:see", "places:see"]), Plain),
+        // record 26 §1: what becomes of a dataset's originals. What an act
+        // would do is Data reading; the acts themselves move and delete
+        // identified files, so they are Data work at detail sensitive.
+        ("GET", ["api", "places", _, "originals"]) => (Need::One("data:see"), Plain),
+        ("POST", ["api", "places", _, "originals"]) => (Need::One("data:work"), Detail::Sensitive),
         ("POST", ["api", "ingest", "folders" | "look" | "probe"]) => {
             (Need::One("data:work"), Plain)
         }
-        // the Review page, and the knob engine of Wave 4c §6.6
+        // record 26 §9: the cohorts are Data work, a promotion among them
+        ("GET", ["api", "cohorts"]) | ("GET", ["api", "cohorts", _]) => {
+            (Need::One("data:see"), Plain)
+        }
+        ("POST", ["api", "cohorts"])
+        | ("PUT", ["api", "cohorts", _])
+        | ("POST", ["api", "cohorts", _, "members"])
+        | ("POST", ["api", "ask", "handles", _, "promote"]) => (Need::One("data:work"), Plain),
+        // record 26 §15: the identifier types and the held list are counts
+        // and shapes; the map applied, the held reveal and the merge read
+        // identifiers. The imports door answers a dry run at plain and
+        // checks sensitive itself for the apply.
+        ("GET", ["api", "linkage", "types" | "held"]) => (Need::One("data:see"), Plain),
+        ("POST", ["api", "linkage", "types" | "imports"])
+        | ("POST", ["api", "linkage", "held", "code"]) => (Need::One("data:work"), Plain),
+        ("POST", ["api", "linkage", "held", "reveal"]) | ("POST", ["api", "linkage", "merge"]) => {
+            (Need::One("data:work"), Detail::Sensitive)
+        }
+        // the Review page, and the knob engine of Wave 4c §6.6; record 26
+        // §11: why a stack was judged so is a review reading
         ("GET", ["api", "review" | "overlays" | "quarantine"])
-        | ("GET", ["api", "review" | "overlays", _])
+        | ("GET", ["api", "review" | "overlays" | "explain", _])
         | ("GET", ["api", "classify", "signals"]) => (Need::One("review:see"), Plain),
         ("POST", ["api", "review", _, "apply" | "accept"])
         | ("POST", ["api", "decisions", _, "commit" | "withdraw"])
@@ -2431,8 +2910,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("GET", ["api", "releases"]) | ("POST", ["api", "select"]) => {
             (Need::One("release:see"), Plain)
         }
-        ("POST", ["api", "releases" | "handovers"])
-        | ("POST", ["api", "ask", "handles", _, "promote"]) => (Need::One("release:work"), Plain),
+        ("POST", ["api", "releases" | "handovers"]) => (Need::One("release:work"), Plain),
         // the Pipelines page; a queued verb needs its own grant and a cancel
         // the grant of the job's verb, both checked at the door itself
         ("GET", ["api", "jobs"]) | ("GET", ["api", "jobs", _]) => {
@@ -2461,9 +2939,19 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
     let verb = command.first().map(String::as_str).unwrap_or_default();
     Some(match (verb, command.get(1).map(String::as_str)) {
         ("digest", _) => ("data:work", Detail::Plain),
+        // record 26 §3: the pseudonymiser reads the identifiers it replaces;
+        // bring-in is checked by its first step at the door, and this is
+        // what a cancel of it needs
+        ("pseudonymize", _) => ("data:work", Detail::Sensitive),
+        ("bring-in", _) => ("data:work", Detail::Plain),
+        // record 26 §1: vaulting or purging a dataset's originals moves and
+        // deletes the identified files themselves
+        ("place", Some("originals")) => ("data:work", Detail::Sensitive),
         // a linkage import reads the identifiers it links
         ("linkage", _) => ("data:work", Detail::Sensitive),
-        ("release" | "handover", _) | ("ask", Some("promote")) => ("release:work", Detail::Plain),
+        ("release" | "handover", _) => ("release:work", Detail::Plain),
+        // record 26 §9: a promotion is a cohort act, which is Data work
+        ("ask", Some("promote")) => ("data:work", Detail::Plain),
         ("ask", Some("run")) => ("query:work", Detail::Plain),
         ("fingerprint" | "classify" | "pick" | "session" | "pyramid", _) => {
             ("pipelines:work", Detail::Plain)
@@ -2477,14 +2965,15 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
 /// queued names its command line; one the command line claimed names its
 /// verb as its kind, and a kind no door queues is a pipeline's.
 fn cancel_needs(job: &nils_registry::job::Job) -> &'static str {
-    if let Some((grant, _)) = job.argv().as_deref().and_then(verb_needs) {
+    if let Some((grant, _)) = job.queued().as_deref().and_then(verb_needs) {
         return grant;
     }
     match job.kind.as_str() {
-        "digest" | "ingest" | "linkage" | "linkage-purge" | "clinical-import" => "data:work",
+        "digest" | "ingest" | "pseudonymize" | "bring-in" | "linkage" | "linkage-purge"
+        | "clinical-import" | "originals" | "place" => "data:work",
         "release" | "handover" => "release:work",
         "backup" | "verify" => "database:work",
-        "ask" if job.args["cohort"].is_string() => "release:work",
+        "ask" if job.args["cohort"].is_string() => "data:work",
         "ask" => "query:work",
         _ => "pipelines:work",
     }
@@ -2493,7 +2982,31 @@ fn cancel_needs(job: &nils_registry::job::Job) -> &'static str {
 /// What a queued job records of its caller beside the principal: the detail
 /// the verb runs under, never the worker's own, and who acted.
 pub(crate) fn queued_by(caller: &Caller) -> serde_json::Value {
-    serde_json::json!({ "detail": caller.access.detail.name(), "actor": caller.actor })
+    // record 26 §7: the grants too, which a chain's later steps are
+    // checked against when their turn comes
+    let grants: Vec<&str> = caller.access.grants.iter().copied().collect();
+    serde_json::json!({
+        "detail": caller.access.detail.name(),
+        "actor": caller.actor,
+        "grants": grants,
+    })
+}
+
+/// Record 26: the dataset fields a places body names, as the declaration
+/// takes them, a null among them (no cohort, no rule) as much as a value;
+/// `handling.arrives` stands for `arrives` for a caller from before, when
+/// the body names no `arrives` of its own.
+fn dataset_asked(doc: &serde_json::Value) -> serde_json::Value {
+    let mut asked = serde_json::Map::new();
+    for key in crate::dataset::FIELDS {
+        if let Some(v) = doc.get(key) {
+            asked.insert(key.to_string(), v.clone());
+        }
+    }
+    if !asked.contains_key("arrives") && doc["handling"]["arrives"].is_string() {
+        asked.insert("arrives".into(), doc["handling"]["arrives"].clone());
+    }
+    serde_json::Value::Object(asked)
 }
 
 /// Wave 4c §6.6: the scope a body names.
@@ -2576,6 +3089,23 @@ pub(crate) fn job_err(e: nils_registry::job::Error) -> Reply {
     }
 }
 
+/// A cohort refusal: a name that is taken is 409, a code the registry does
+/// not hold is 400 with the codes beside the text, and no cohort is 404.
+fn cohort_err(e: nils_registry::cohort::Error) -> Reply {
+    use nils_registry::cohort::Error;
+    match &e {
+        Error::NotFound(n) => Reply::error(404, format!("no cohort named {n}")),
+        Error::Taken(_) => Reply::error(409, e.to_string()),
+        Error::Unknown(codes) => {
+            let mut r = Reply::error(400, e.to_string());
+            r.body["unknown"] = serde_json::json!(codes);
+            r
+        }
+        Error::Message(m) => Reply::error(400, m.clone()),
+        Error::Store(e) => Reply::error(500, e.to_string()),
+    }
+}
+
 /// A review refusal quotes what it refuses: a reference, a header value, a
 /// name, the person who decided; every one is gated.
 fn review_err(e: nils_registry::review::Error) -> Reply {
@@ -2629,6 +3159,13 @@ fn capabilities(
         "GET /api/batches",
         "GET /api/batches/{id}",
         "GET /api/quarantine",
+        "GET /api/cohorts",
+        "GET /api/cohorts/{name}",
+        "POST /api/cohorts",
+        "PUT /api/cohorts/{name}",
+        "POST /api/cohorts/{name}/members",
+        "GET /api/review/summary",
+        "GET /api/explain/{stack}",
         "GET /api/classify/signals",
         "POST /api/classify/try",
         "GET /api/overlays",
@@ -2642,6 +3179,8 @@ fn capabilities(
         "GET /api/places",
         "POST /api/places",
         "PUT /api/places/{id}",
+        "GET /api/places/{id}/originals",
+        "POST /api/places/{id}/originals",
         "GET /api/backups",
         "PUT /api/backups/schedule",
         "GET /api/settings",
@@ -2652,6 +3191,7 @@ fn capabilities(
         "GET /api/instances/{stack}/render/{level}/{z}",
     ]
     .iter()
+    .chain(crate::linkage_doors::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
     .map(|d| (*d).to_string())
     .collect();
@@ -2757,8 +3297,9 @@ fn review_list(
 }
 
 /// `GET /api/events`: server-sent events with the open jobs, every second,
-/// until the client goes away. Display plumbing only.
-fn events(doors: &Doors, registry: &mut Registry, request: Request) {
+/// until the client goes away. Display plumbing only. The queue's worker is
+/// left out unless `?all` asks for it, as `GET /api/jobs` leaves it out.
+fn events(doors: &Doors, registry: &mut Registry, request: Request, all: bool) {
     let caller = match doors.auth.caller(&request) {
         Ok(c) => c,
         Err(reply) => {
@@ -2799,7 +3340,11 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request) {
     let _ = writer.write_all(b"event: hello\ndata: {}\n\n");
     let once = std::env::var("NILS_EVENTS_ONCE").is_ok();
     loop {
-        let jobs = nils_registry::job::list(registry.store(), false, 50).unwrap_or_default();
+        let jobs: Vec<_> = nils_registry::job::list(registry.store(), false, 50)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|j| all || j.kind != "worker")
+            .collect();
         let data = serde_json::json!({
             "epoch": registry.meta().epoch,
             "jobs": jobs.iter().map(nils_registry::job::Job::as_json).collect::<Vec<_>>(),
@@ -2820,7 +3365,7 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request) {
 /// resolves against a registered ingest root and may not escape it; an
 /// absolute path, or one with a parent step, is refused. `backup` takes
 /// the deployment's directory; `verify NAME` checks one archive in it.
-fn located(doors: &Doors, command: Vec<String>) -> Result<Vec<String>, Reply> {
+fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec<String>, Reply> {
     let verb = command[0].as_str();
     match verb {
         "backup" => {
@@ -2893,35 +3438,58 @@ fn located(doors: &Doors, command: Vec<String>) -> Result<Vec<String>, Reply> {
     }
     let takes_a_tree =
         verb == "digest" || (verb == "linkage" && command.get(1).is_some_and(|c| c == "import"));
+    // record 26: `@name` is the dataset's pseudonymised tree, and its
+    // originals, `@name/originals`, are the pseudonymiser's alone
+    let roots = crate::dataset::roots(store, &doors.ingest_roots);
+    let digests = verb == "digest";
+    // record 26 §3 and §1: the pseudonymiser reads a dataset by its name,
+    // both trees at once, and an act on a dataset's originals names it the
+    // same way, so `@name` stays a name for them
+    let by_name = verb == "pseudonymize"
+        || (verb == "place" && command.get(1).is_some_and(|c| c == "originals"));
+    let named = match command.get(1) {
+        Some(second) if verb == "place" => format!("{verb} {second}"),
+        _ => verb.to_string(),
+    };
     let mut out = Vec::with_capacity(command.len());
     for arg in command {
         if let Some(rest) = arg.strip_prefix('@') {
             let (name, rel) = rest.split_once('/').unwrap_or((rest, ""));
-            let root = doors.ingest_roots.get(name).ok_or_else(|| {
+            let root = roots.get(name).ok_or_else(|| {
                 Reply::error(
                     400,
                     format!(
                         "@{name} is not a registered ingest location; those are {}",
-                        doors
-                            .ingest_roots
-                            .keys()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        roots.keys().cloned().collect::<Vec<_>>().join(", ")
                     ),
                 )
             })?;
+            if by_name {
+                if root.place.is_none() || !rel.is_empty() {
+                    return Err(Reply::error(
+                        400,
+                        format!("{named} takes a dataset as @name; @{name} is not one"),
+                    ));
+                }
+                out.push(arg);
+                continue;
+            }
             if rel.split('/').any(|seg| seg == "..") || rel.starts_with('/') {
                 return Err(Reply::error(
                     400,
                     format!("@{name}/{rel} steps outside its location"),
                 ));
             }
-            let path = if rel.is_empty() {
-                root.clone()
-            } else {
-                root.join(rel)
-            };
+            let path = root.resolve(rel);
+            if digests && let Some(p) = crate::dataset::originals_holding(store, &path) {
+                return Err(Reply::error(
+                    409,
+                    format!(
+                        "@{name}/{rel} is in the originals of the dataset {}, which the pseudonymiser alone reads; a digest reads @{name} (record 26)",
+                        p.name
+                    ),
+                ));
+            }
             out.push(path.display().to_string());
         } else if takes_a_tree
             && !arg.starts_with('-')
@@ -2960,6 +3528,11 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             }
             if detail > Detail::Plain {
                 r["detail"] = serde_json::Value::from(detail.name());
+            }
+            // record 26: the dataset fields of a place need data:work
+            // beside places:work, checked at the door itself
+            if matches!(name, "POST /api/places" | "PUT /api/places/{id}") {
+                r["dataset"] = serde_json::Value::from("data:work");
             }
             r
         };
@@ -3181,6 +3754,69 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Listed quarantine",
         ),
         row(
+            "GET /api/cohorts",
+            false,
+            false,
+            "bounded",
+            "every cohort",
+            "Listing cohorts",
+            "Listed cohorts",
+        ),
+        row(
+            "GET /api/cohorts/{name}",
+            false,
+            false,
+            "bounded",
+            "one cohort",
+            "Reading a cohort",
+            "Read a cohort",
+        ),
+        row(
+            "POST /api/cohorts",
+            true,
+            false,
+            "free",
+            "one cohort",
+            "Making a cohort",
+            "Made a cohort",
+        ),
+        row(
+            "PUT /api/cohorts/{name}",
+            true,
+            false,
+            "free",
+            "one cohort",
+            "Changing a cohort",
+            "Changed a cohort",
+        ),
+        row(
+            "POST /api/cohorts/{name}/members",
+            true,
+            false,
+            "bounded",
+            "the counts",
+            "Changing a cohort's members",
+            "Changed a cohort's members",
+        ),
+        row(
+            "GET /api/review/summary",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading the review summary",
+            "Read the review summary",
+        ),
+        row(
+            "GET /api/explain/{stack}",
+            false,
+            false,
+            "free",
+            "one document",
+            "Reading why a stack was judged so",
+            "Read why a stack was judged so",
+        ),
+        row(
             "GET /api/classify/signals",
             false,
             false,
@@ -3269,6 +3905,87 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one place",
             "Changing a place",
             "Changed a place",
+        ),
+        row(
+            "GET /api/places/{id}/originals",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading what an act on the originals would do",
+            "Read what an act on the originals would do",
+        ),
+        row(
+            "POST /api/places/{id}/originals",
+            true,
+            false,
+            "job",
+            "one job",
+            "Acting on a dataset's originals",
+            "Acted on a dataset's originals",
+        ),
+        row(
+            "GET /api/linkage/types",
+            false,
+            false,
+            "bounded",
+            "every type",
+            "Reading the identifier types",
+            "Read the identifier types",
+        ),
+        row(
+            "POST /api/linkage/types",
+            true,
+            true,
+            "bounded",
+            "one type",
+            "Adding an identifier type",
+            "Added an identifier type",
+        ),
+        row(
+            "POST /api/linkage/imports",
+            true,
+            false,
+            "job",
+            "one report",
+            "Providing an identifier map",
+            "Provided an identifier map",
+        ),
+        row(
+            "GET /api/linkage/held",
+            false,
+            false,
+            "bounded",
+            "one dataset's shapes",
+            "Reading the held files",
+            "Read the held files",
+        ),
+        row(
+            "POST /api/linkage/held/code",
+            true,
+            true,
+            "bounded",
+            "one count",
+            "Coding the held files anyway",
+            "Coded the held files anyway",
+        ),
+        row(
+            "POST /api/linkage/held/reveal",
+            true,
+            false,
+            "bounded",
+            "one dataset's identifiers",
+            "Revealing the held identifiers",
+            "Revealed the held identifiers",
+        ),
+        row(
+            "POST /api/linkage/merge",
+            true,
+            false,
+            "job",
+            "one id",
+            "Merging two subjects",
+            "Merged two subjects",
         ),
         row(
             "GET /api/backups",

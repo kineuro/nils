@@ -459,10 +459,10 @@ fn import_digest_show_and_link_go_round() {
         "hospital number",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out), "added id type mrn (id 3)\n");
+    assert_eq!(stdout(&out), "added id type mrn (id 4)\n");
     let out = run(&["linkage", "id-type", "list"]);
     assert!(
-        stdout(&out).contains("  3  mrn                      hospital number"),
+        stdout(&out).contains("  4  mrn                      hospital number"),
         "{}",
         stdout(&out)
     );
@@ -581,7 +581,8 @@ fn import_digest_show_and_link_go_round() {
     assert_eq!(report["unchanged"], 4);
     assert_eq!(report["written"]["subjects_created"], 0);
 
-    // a linkage joins two subjects and can be reversed once
+    // a linkage joins two subjects, merges the alias into the canonical
+    // one (record 26), and the record can be reversed once
     let out = run(&[
         "linkage",
         "link",
@@ -591,12 +592,26 @@ fn import_digest_show_and_link_go_round() {
         "the clinic renamed P1 to P2",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(
-        stdout(&out),
-        format!("linked {p2} to legacy-0001 (linkage 1)\n")
+    let text = stdout(&out);
+    assert!(
+        text.starts_with(&format!(
+            "linked {p2} to legacy-0001 (linkage 1)\nmerged {p2} into legacy-0001: "
+        )),
+        "{text}"
     );
+    assert!(text.contains("1 study"), "{text}");
     let out = run(&["linkage", "show", "legacy-0001"]);
     let text = stdout(&out);
+    // the alias's identifier and its code moved to the canonical subject
+    assert!(
+        text.contains("  patient-id               P2   (identity "),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("  subject-code             {p2}   (identity ")),
+        "{text}"
+    );
+    assert!(text.contains(", from merge)"), "{text}");
     assert!(text.contains("linkages\n"), "{text}");
     assert!(
         text.contains(&format!("     1  canonical of {p2}   ")),
@@ -606,11 +621,14 @@ fn import_digest_show_and_link_go_round() {
     assert!(text.contains("   by tester@"), "{text}");
     assert!(text.trim_end().ends_with("   open"), "{text}");
     let out = run(&["linkage", "show", &p2]);
+    let text = stdout(&out);
     assert!(
-        stdout(&out).contains("     1  alias of legacy-0001   "),
-        "{}",
-        stdout(&out)
+        text.starts_with(&format!(
+            "subject {p2} (id 2), merged into legacy-0001\n  no identifiers\n"
+        )),
+        "{text}"
     );
+    assert!(text.contains("     1  alias of legacy-0001   "), "{text}");
     let out = run(&["linkage", "unlink", "1"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(stdout(&out), "reversed linkage 1\n");
@@ -1330,13 +1348,15 @@ fn custody_quarantine_review_and_purge_go_round() {
     let out = run(&["linkage", "show", &p2]);
     assert!(stdout(&out).contains("P2   (identity "), "{}", stdout(&out));
 
-    // with a yes the subject's identifiers and linkages go; the audit and the subject stay
+    // with a yes the subject's identifiers and linkages go; the audit and
+    // the subject stay. The link merged P3 into P2, so P2 holds its own
+    // identifier, P3's and P3's code.
     let out = run(&["linkage", "purge", "--subject", &p2, "--yes"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         stdout(&out),
         format!(
-            "purged 1 identifier(s) and 1 linkage(s) of subject {p2}; the read audit and the registry's subjects stay, and a file parsed again files its identifier again (an unchanged file does not)\n"
+            "purged 3 identifier(s) and 1 linkage(s) of subject {p2}; the read audit and the registry's subjects stay, and a file parsed again files its identifier again (an unchanged file does not)\n"
         )
     );
     let out = run(&["linkage", "show", &p2]);
@@ -1345,7 +1365,11 @@ fn custody_quarantine_review_and_purge_go_round() {
     assert!(text.contains("  no identifiers\n"), "{text}");
     assert!(!text.contains("linkages"), "{text}");
     let out = run(&["linkage", "show", &p3]);
-    assert!(stdout(&out).contains("P3   (identity "), "{}", stdout(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains(&format!("), merged into {p2}\n  no identifiers\n")),
+        "{text}"
+    );
     let out = run(&["custody", "--json"]);
     let doc = json(&out);
     let by_name = |name: &str| {
@@ -1357,15 +1381,15 @@ fn custody_quarantine_review_and_purge_go_round() {
             .unwrap()
             .clone()
     };
-    assert_eq!(by_name("linkage store")["counts"]["identities"], 2);
+    assert_eq!(by_name("linkage store")["counts"]["identities"], 1);
     assert_eq!(by_name("linkage store")["counts"]["open_linkages"], 0);
     assert_eq!(
         by_name("linkage store")["counts"]["audited_reads"],
-        2,
+        3,
         "one row per identifier revealed; a show of a subject without identifiers reads nothing"
     );
     assert_eq!(by_name("registry")["counts"]["subjects"], 3);
-    assert_eq!(by_name("job records")["counts"]["jobs"], 2);
+    assert_eq!(by_name("job records")["counts"]["jobs"], 3);
 
     // an unchanged digest does not file the identifier again; a parsed file does
     let out = nils()
@@ -1408,7 +1432,7 @@ fn custody_quarantine_review_and_purge_go_round() {
     let out = run(&["linkage", "purge", "--all", "--yes"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
-        stdout(&out).starts_with("purged 3 identifier(s) and 0 linkage(s) of every subject;"),
+        stdout(&out).starts_with("purged 2 identifier(s) and 0 linkage(s) of every subject;"),
         "{}",
         stdout(&out)
     );
@@ -1416,7 +1440,7 @@ fn custody_quarantine_review_and_purge_go_round() {
     let rows = store.query("SELECT COUNT(*) FROM identity", &[]).unwrap();
     assert_eq!(rows[0].int(0).unwrap(), 0);
     let rows = store.query("SELECT COUNT(*) FROM read_audit", &[]).unwrap();
-    assert_eq!(rows[0].int(0).unwrap(), 3, "the audit survives the purge");
+    assert_eq!(rows[0].int(0).unwrap(), 4, "the audit survives the purge");
     let out = run(&["linkage", "show", &p2]);
     assert!(
         stdout(&out).contains("  no identifiers\n"),
@@ -1424,17 +1448,17 @@ fn custody_quarantine_review_and_purge_go_round() {
         stdout(&out)
     );
     let rows = store.query("SELECT COUNT(*) FROM id_type", &[]).unwrap();
-    assert_eq!(rows[0].int(0).unwrap(), 2);
+    assert_eq!(rows[0].int(0).unwrap(), 3);
     // status lists the purges as the jobs they were
     let out = run(&["status", "--json"]);
     let doc = json(&out);
     assert_eq!(doc["jobs"].as_array().unwrap().len(), 0, "{doc}");
     let purges = doc["other_jobs"].as_array().unwrap();
-    assert_eq!(purges.len(), 2, "{doc}");
+    assert_eq!(purges.len(), 3, "{doc}");
     assert_eq!(purges[0]["kind"], "linkage-purge");
     assert_eq!(purges[0]["name"], "every subject");
     assert_eq!(purges[0]["state"], "done");
-    assert_eq!(purges[0]["args"]["identities"], 3);
+    assert_eq!(purges[0]["args"]["identities"], 2);
     // Wave 4a section 9.2: the actor is a principal, user@node.
     assert!(
         purges[0]["args"]["actor"]
@@ -1444,9 +1468,12 @@ fn custody_quarantine_review_and_purge_go_round() {
     );
     assert_eq!(purges[1]["name"], format!("subject {p2}"));
     assert_eq!(purges[1]["args"]["linkages"], 1);
+    // and the merge the link ended with, as the job it was
+    assert_eq!(purges[2]["kind"], "linkage-merge");
+    assert_eq!(purges[2]["state"], "done");
     let out = run(&["status"]);
     let text = stdout(&out);
-    assert!(text.contains("other jobs (last 2)\n"), "{text}");
+    assert!(text.contains("other jobs (last 3)\n"), "{text}");
     assert!(
         text.contains("   linkage-purge every subject   done on "),
         "{text}"
@@ -1642,6 +1669,31 @@ fn pack_list_and_show_read_the_pack_directory() {
             .len()
             >= 10
     );
+    // record 26: every axis with its values and their words, and the lists
+    // a site may amend by axis.value
+    let technique = shown["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "technique")
+        .unwrap();
+    let tse = technique["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "TSE")
+        .unwrap();
+    assert_eq!(tse["keywords"][0], "tse", "{tse}");
+    assert_eq!(tse["list"], "technique.TSE", "{tse}");
+    assert!(
+        shown["lists"].as_array().unwrap().len() > 100,
+        "{}",
+        shown["lists"]
+    );
+    assert!(
+        shown["site"].as_object().unwrap().is_empty(),
+        "no registry here"
+    );
 
     // a name that is not there says so rather than listing nothing
     let out = nils()
@@ -1741,12 +1793,14 @@ fn classify_explains_itself_and_a_decision_closes_the_question() {
             .unwrap_or(serde_json::Value::Null)
     };
     assert_eq!(axis(&shown, "technique")["value"], "MPRAGE", "{shown}");
+    // record 26 section 11: the evidence sits under its axis, as the door
+    // answers it
     assert!(
-        shown["evidence"]
+        axis(&shown, "technique")["evidence"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|e| e["axis"] == "technique" && e["rule"].is_string()),
+            .any(|e| e["rule"].is_string()),
         "{shown}"
     );
 
@@ -1887,6 +1941,155 @@ fn a_release_is_versioned_and_a_re_run_writes_nothing() {
     assert!(text.contains("a-dataset"), "{text}");
     assert!(text.contains("stacks new"), "{text}");
     assert!(text.contains("stacks left alone"), "{text}");
+}
+
+/// Two studies of one person six months apart, so that a release has two
+/// sessions to hold and a scheme has something to name them by.
+fn sessions_tree() -> TempDir {
+    let dir = TempDir::new("cli-sessions");
+    for (n, day) in [("A", "20220115"), ("B", "20220715")] {
+        let study = format!("1.2.3.{n}");
+        let series = format!("{study}.1");
+        let sop = format!("{series}.1");
+        let mut e = synth::minimal_mr(&study, &series, &sop);
+        e.extend([
+            synth::text(
+                dicom_dictionary_std::tags::PATIENT_ID,
+                dicom_core::VR::LO,
+                "P1",
+            ),
+            synth::text(
+                dicom_dictionary_std::tags::STUDY_DATE,
+                dicom_core::VR::DA,
+                day,
+            ),
+            synth::text(
+                dicom_dictionary_std::tags::SERIES_DESCRIPTION,
+                dicom_core::VR::LO,
+                "sag T1 mprage",
+            ),
+        ]);
+        dir.file(
+            &format!("{n}/1"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    dir
+}
+
+#[test]
+fn a_release_says_how_many_sessions_it_holds_and_what_named_them() {
+    // §4.3 with record 26 section 13, as a caller reads it. The history asked
+    // for by machine is the document the door answers, so a release says how
+    // many sessions it holds and under which scheme; and where a dataset's
+    // own declared shift had the sessions numbered in date order rather than
+    // labelled the way the scheme asked, it says so in words.
+    let home = home();
+    let dir = sessions_tree();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let release = |name: &str, out: &std::path::Path| {
+        let done = nils()
+            .args(registry)
+            .args([
+                "release",
+                "--name",
+                name,
+                "--on-unknown",
+                "write",
+                "--pack-dir",
+                packs.to_str().unwrap(),
+                "--out",
+                out.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(done.status.success(), "{}", stderr(&done));
+    };
+
+    let done = nils()
+        .args(registry)
+        .args(["digest", "--name", "first"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", stderr(&done));
+
+    let plainly = TempDir::new("cli-sessions-plain");
+    release("plain", plainly.path());
+
+    // Now the folder is a dataset whose files leave with their dates moved,
+    // which nobody asked for on the run: the release numbers its sessions
+    // rather than refusing, and records why. A declared place puts the rules
+    // of Wave 5 §10.2 in force, so the tree leaves into an export place.
+    let exports = TempDir::new("cli-sessions-exports");
+    {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        let mut declare = |name: &str, role, path: &std::path::Path, handling| {
+            nils_registry::place::add(
+                &mut store,
+                &nils_registry::place::New {
+                    name,
+                    role,
+                    path: path.to_str().unwrap(),
+                    guarantees: serde_json::json!({}),
+                    probed: serde_json::json!({}),
+                    handling,
+                    dataset: serde_json::Value::Null,
+                },
+            )
+            .unwrap();
+        };
+        declare(
+            "ds-shifted",
+            nils_registry::place::Role::Source,
+            dir.path(),
+            serde_json::json!({"on_release": {"dates": "shift", "uids": "remap"}}),
+        );
+        declare(
+            "exports",
+            nils_registry::place::Role::Export,
+            exports.path(),
+            serde_json::Value::Null,
+        );
+    }
+    let shifted = exports.path().join("shifted");
+    release("shifted", &shifted);
+
+    let history = nils()
+        .args(registry)
+        .args(["release", "--history", "--json"])
+        .output()
+        .unwrap();
+    assert!(history.status.success(), "{}", stderr(&history));
+    let doc: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
+    let of = |name: &str| {
+        doc["releases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap_or_else(|| panic!("no release {name} in {doc}"))
+            .clone()
+    };
+
+    // Made plainly: the scheme it used, and nothing to explain.
+    let plain = of("plain");
+    assert_eq!(plain["sessions"], 2, "{plain}");
+    assert_eq!(plain["session_scheme"]["naming"], "date", "{plain}");
+    assert!(plain["session_naming"].is_null(), "{plain}");
+
+    // Made under the dataset's declaration: numbered, and why.
+    let declared = of("shifted");
+    assert_eq!(declared["sessions"], 2, "{declared}");
+    assert_eq!(
+        declared["session_scheme"]["naming"], "ordinal",
+        "{declared}"
+    );
+    let why = declared["session_naming"].as_str().unwrap_or_default();
+    assert!(why.contains("ds-shifted"), "{why}");
+    assert!(why.contains("numbered in date order"), "{why}");
 }
 
 /// A tree whose files carry a Siemens block: a b value that varies, a
@@ -2885,7 +3088,7 @@ fn nils_select_shows_a_cohort_before_it_leaves_and_a_release_refuses_what_did_no
     ]);
     let listed = run(&["clinical", "cohort", "list"]);
     assert!(listed.contains("MS-2026"), "{listed}");
-    assert!(listed.contains("1 member(s)"), "{listed}");
+    assert!(listed.contains("1 subject(s)"), "{listed}");
 
     // The preview: the identifier the digest filed resolves to the code,
     // the cohort to its member, the axis to its count, and the whole is
@@ -3028,9 +3231,23 @@ fn nils_jobs_lists_shows_cancels_queues_works_and_resumes() {
     assert_eq!(doc[0]["kind"], "digest", "{doc}");
     assert_eq!(doc[0]["state"], "done", "{doc}");
     let shown = run(&["jobs", "show", &digest_id.to_string()]);
-    assert!(shown.contains("command     nils --registry"), "{shown}");
-    assert!(shown.contains("digest --name a"), "{shown}");
+    // the command line as words after nils and its registry under queued
+    // (lab 26, defect 19); what ran, binary and registry included, is argv
+    assert!(
+        shown.contains("command     nils digest --name a"),
+        "{shown}"
+    );
+    assert!(!shown.contains("--registry"), "{shown}");
     assert!(shown.contains("progress"), "{shown}");
+    assert_eq!(doc[0]["args"]["queued"][0], "digest", "{doc}");
+    assert!(
+        doc[0]["args"]["argv"][0]
+            .as_str()
+            .unwrap()
+            .ends_with("nils"),
+        "{doc}"
+    );
+    assert_eq!(doc[0]["args"]["argv"][1], "--registry", "{doc}");
 
     // Queued, listed as queued, cancelled, gone from the queue.
     let queued = run(&[
@@ -3102,9 +3319,22 @@ fn nils_jobs_lists_shows_cancels_queues_works_and_resumes() {
         .iter()
         .find(|j| j["kind"] == "fingerprint" && j["state"] == "done")
         .unwrap();
-    assert!(adopted["args"]["argv"].is_array(), "{adopted}");
+    assert_eq!(
+        adopted["args"]["queued"],
+        serde_json::json!(["fingerprint", "--name", "queued-run"]),
+        "the command line as queued: {adopted}"
+    );
+    assert!(
+        adopted["args"]["argv"][0]
+            .as_str()
+            .unwrap()
+            .ends_with("nils"),
+        "what ran: {adopted}"
+    );
     assert!(adopted["heartbeat_at"].is_string(), "{adopted}");
-    // A queued command that fails ends failed with the exit status.
+    // A queued command that fails ends failed with the reason the verb
+    // printed, as a job run from the command line records it (lab 26,
+    // defect 6), never a bare exit status.
     run(&["jobs", "enqueue", "--", "explain", "999999"]);
     let worked = run(&["jobs", "work", "--once"]);
     assert!(worked.contains("nils explain"), "{worked}");
@@ -3117,13 +3347,8 @@ fn nils_jobs_lists_shows_cancels_queues_works_and_resumes() {
         .find(|j| j["kind"] == "explain")
         .unwrap();
     assert_eq!(failed["state"], "failed", "{failed}");
-    assert!(
-        failed["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("exit status"),
-        "{failed}"
-    );
+    let error = failed["error"].as_str().unwrap_or("");
+    assert_eq!(error, "stack 999999 has not been classified", "{failed}");
 
     // Resume: the digest runs again from its recorded command line, and
     // finds nothing changed.
@@ -3844,6 +4069,174 @@ fn a_laptop_binds_directories_as_places_and_a_release_keeps_to_the_export_one() 
     assert_eq!(rows.as_array().unwrap().len(), 2, "{rows}");
 }
 
+/// Record 26 at the keyboard: `nils place add --role source` declares a
+/// dataset, its folder looked at and its loose entries moved into the
+/// originals when the data arrives identified; `nils place list` shows the
+/// trees; `nils digest @name` reads the pseudonymised tree under the rule
+/// the dataset stores, and its originals are refused; `nils place set`
+/// changes the dataset; the flags belong to a source place alone.
+#[test]
+fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
+    let home = home();
+    let dir = TempDir::new("cli-dataset");
+    let mr = synth::minimal_mr("1.2.3.A", "1.2.3.A.1", "1.2.3.A.1.1");
+    dir.file(
+        "sub-1/IM_0001",
+        &synth::part10(&MetaFields::mr("1.2.3.A.1.1"), &mr, true),
+    );
+    let rule = dir.file(
+        "rule.yml",
+        b"identity:\n  id_type: study-id\n  from:\n    - field: PatientID\n",
+    );
+    let elsewhere = TempDir::new("cli-dataset-out");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+
+    // the rule file is a loose entry too, and moves with the rest
+    let added = nils()
+        .args(registry)
+        .args(["place", "add", "ds"])
+        .arg(dir.path())
+        .args(["--role", "source", "--arrives", "identified", "--identity"])
+        .arg(&rule)
+        .args(["--cohort", "study-a", "--remove", "0010,1010", "--json"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr(&added));
+    let ds: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(ds["dataset"]["arrives"], "identified", "{ds}");
+    assert_eq!(ds["dataset"]["identity"]["id_type"], "study-id", "{ds}");
+    assert_eq!(ds["dataset"]["cohort"], "study-a", "{ds}");
+    assert_eq!(ds["dataset"]["tags"]["remove"][0], "0010,1010", "{ds}");
+    assert_eq!(ds["layout"]["loose"], 0, "{ds}");
+    assert!(
+        dir.path()
+            .join("derivatives/dcm-original/sub-1/IM_0001")
+            .is_file()
+    );
+    assert!(dir.path().join("derivatives/dcm-anon").is_dir());
+    let id = ds["id"].as_i64().unwrap().to_string();
+
+    let listed = nils()
+        .args(registry)
+        .args(["place", "list"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let text = stdout(&listed);
+    assert!(text.contains("arrives identified"), "{text}");
+    assert!(text.contains("derivatives/dcm-anon"), "{text}");
+
+    // @ds is the pseudonymised tree, read under the stored rule
+    let described = nils()
+        .args(registry)
+        .args(["digest", "@ds", "--describe"])
+        .output()
+        .unwrap();
+    assert!(described.status.success(), "{}", stderr(&described));
+    let text = stdout(&described);
+    assert!(text.contains("derivatives/dcm-anon"), "{text}");
+    // record 26 §3: the tree of an identified dataset carries the codes
+    // the pseudonymiser wrote, read verbatim; the dataset's own rule is
+    // for its originals
+    assert!(
+        text.contains("as subject-code")
+            && text.contains("the value read is the code itself")
+            && text.contains("from the pseudonymised tree of the dataset ds"),
+        "{text}"
+    );
+    let refused = nils()
+        .args(registry)
+        .args(["digest", "@ds/originals"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("pseudonymiser"),
+        "{}",
+        stderr(&refused)
+    );
+    let refused = nils()
+        .args(registry)
+        .arg("digest")
+        .arg(dir.path().join("derivatives/dcm-original"))
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("pseudonymiser"),
+        "{}",
+        stderr(&refused)
+    );
+    let bindings = nils()
+        .args(registry)
+        .args(["place", "bindings"])
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&bindings).contains("@ds/originals"),
+        "{}",
+        stdout(&bindings)
+    );
+
+    // the dataset changed keeps what the change does not name
+    let set = nils()
+        .args(registry)
+        .args([
+            "place",
+            "set",
+            &id,
+            "--no-cohort",
+            "--no-keep-demographics",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(set.status.success(), "{}", stderr(&set));
+    let changed: serde_json::Value = serde_json::from_slice(&set.stdout).unwrap();
+    assert_eq!(
+        changed["dataset"]["cohort"],
+        serde_json::Value::Null,
+        "{changed}"
+    );
+    assert_eq!(
+        changed["dataset"]["tags"]["keep_demographics"], false,
+        "{changed}"
+    );
+    assert_eq!(
+        changed["dataset"]["tags"]["remove"][0], "0010,1010",
+        "{changed}"
+    );
+    assert_eq!(changed["dataset"]["originals_kept"], "kept", "{changed}");
+    assert_eq!(
+        changed["dataset"]["identity"]["id_type"], "study-id",
+        "{changed}"
+    );
+
+    // lab 26c, finding 4: what became of the originals is what an act did,
+    // so it is no flag on a declaration
+    let refused = nils()
+        .args(registry)
+        .args(["place", "set", &id, "--originals", "purged"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "{}", stdout(&refused));
+
+    // the dataset flags belong to a source place
+    let refused = nils()
+        .args(registry)
+        .args(["place", "add", "out"])
+        .arg(elsewhere.path())
+        .args(["--role", "export", "--arrives", "coded"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("source place"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
 /// Wave 5 §10.2: `nils backup` with no directory writes to the backup place
 /// the registry's own place names, the one an install declares, rather than
 /// to a directory of its own that the rule refuses.
@@ -3878,4 +4271,479 @@ fn a_backup_with_no_directory_goes_to_the_place_the_registry_names() {
     let manifest: serde_json::Value = serde_json::from_slice(&backed.stdout).unwrap();
     let archive = manifest["archive"].as_str().unwrap();
     assert!(vault.path().join(archive).exists(), "{manifest}");
+}
+
+/// Record 26 section 1 at the keyboard: `nils place originals` says what an
+/// act would do before it acts, refuses a purge in words and writes
+/// nothing, and vaults the originals into a backup place, which the dataset
+/// then records and the audit log keeps.
+#[test]
+fn a_dataset_s_originals_are_surveyed_then_vaulted_at_the_keyboard() {
+    let home = home();
+    let dir = TempDir::new("cli-originals");
+    dir.file("sub-1/IM_0001", &identified("P1", 1, 1));
+    let vault = TempDir::new("cli-originals-vault");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let original = dir.path().join("derivatives/dcm-original/sub-1/IM_0001");
+
+    let added = nils()
+        .args(registry)
+        .args(["place", "add", "ds"])
+        .arg(dir.path())
+        .args(["--role", "source", "--arrives", "identified"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr(&added));
+    let added = nils()
+        .args(registry)
+        .args(["place", "add", "vault"])
+        .arg(vault.path())
+        .args(["--role", "backup"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    // with neither flag, what the door answers and nothing done
+    let said = nils()
+        .args(registry)
+        .args(["place", "originals", "ds"])
+        .output()
+        .unwrap();
+    assert!(said.status.success(), "{}", stderr(&said));
+    let text = stdout(&said);
+    assert!(text.contains("originals of ds   kept"), "{text}");
+    assert!(text.contains("files            1"), "{text}");
+    assert!(text.contains("verified         0 of 1"), "{text}");
+    assert!(text.contains("purge            is refused:"), "{text}");
+    assert!(original.is_file());
+
+    // a purge is refused in the same words, and writes nothing
+    let refused = nils()
+        .args(registry)
+        .args([
+            "place",
+            "originals",
+            "ds",
+            "--purge",
+            "--why",
+            "the study is over",
+        ])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("not verified in its pseudonymised tree"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(original.is_file(), "a refused purge deletes nothing");
+
+    // a vault moves them into the backup place
+    let vaulted = nils()
+        .args(registry)
+        .args([
+            "place",
+            "originals",
+            "ds",
+            "--vault",
+            "--into",
+            "vault",
+            "--why",
+            "the originals leave the working disk",
+        ])
+        .output()
+        .unwrap();
+    assert!(vaulted.status.success(), "{}", stderr(&vaulted));
+    let text = stdout(&vaulted);
+    assert!(text.contains("vaulted 1 file of the dataset ds"), "{text}");
+    assert!(!original.exists());
+    assert!(vault.path().join("originals/ds/sub-1/IM_0001").is_file());
+
+    // and the dataset says what became of them, and where they went
+    let listed = nils()
+        .args(registry)
+        .args(["place", "list", "--json"])
+        .output()
+        .unwrap();
+    let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let ds = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "ds")
+        .unwrap();
+    assert_eq!(ds["dataset"]["originals_kept"], "vaulted", "{ds}");
+    assert_eq!(ds["dataset"]["originals_vault"], "vault", "{ds}");
+
+    let audited = nils()
+        .args(registry)
+        .args(["audit", "list", "--action", "originals.vault", "--json"])
+        .output()
+        .unwrap();
+    assert!(audited.status.success(), "{}", stderr(&audited));
+    let rows: serde_json::Value = serde_json::from_slice(&audited.stdout).unwrap();
+    assert_eq!(rows[0]["details"]["files"], 1, "{rows}");
+    assert_eq!(rows[0]["scope"]["into"], "vault", "{rows}");
+}
+
+/// Lab 26c, finding 1 at the keyboard, written as the lab wrote it: one
+/// original changed in place to other bytes of exactly its length, and no
+/// second run of the pseudonymiser. Its copy still verifies on its own, so
+/// the purge used to run, delete the original and leave the older copy,
+/// and the newer bytes were gone from the machine. Now the survey counts
+/// the file as changed, the keyboard refuses in words naming the cure,
+/// every original stays, and the cure the words name does the work.
+#[test]
+fn a_changed_original_refuses_a_purge_until_the_dataset_is_pseudonymised_again() {
+    let home = home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = TempDir::new("cli-originals-changed");
+    for instance in 1..=2u32 {
+        dir.file(
+            &format!("sub-0/IM_{instance:04}"),
+            &identified("199001011234", 1, instance),
+        );
+    }
+    let go = |args: &[&str]| {
+        let out = nils()
+            .args(registry)
+            .args(args)
+            .env("NILS_PACK_DIR", packs_dir())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}: {}", args.join(" "), stderr(&out));
+        stdout(&out)
+    };
+    let refused = |args: &[&str]| {
+        let out = nils()
+            .args(registry)
+            .args(args)
+            .env("NILS_PACK_DIR", packs_dir())
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{}: {}",
+            args.join(" "),
+            stdout(&out)
+        );
+        stderr(&out)
+    };
+    go(&[
+        "place",
+        "add",
+        "ds",
+        dir.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--arrives",
+        "identified",
+        "--unmapped",
+        "code",
+    ]);
+    go(&["pseudonymize", "@ds"]);
+
+    // every original is verified, so a purge may run
+    let text = go(&["place", "originals", "ds"]);
+    assert!(text.contains("verified         2 of 2"), "{text}");
+    assert!(text.contains("purge            may run"), "{text}");
+
+    // one original changed in place, to other bytes of exactly its length,
+    // its modification time moving with them as a disk moves it
+    let changed = dir.path().join("derivatives/dcm-original/sub-0/IM_0001");
+    let mut bytes = std::fs::read(&changed).unwrap();
+    let n = bytes.len();
+    for b in &mut bytes[n - 64..] {
+        *b ^= 0xFF;
+    }
+    let moved = std::fs::metadata(&changed).unwrap().modified().unwrap()
+        + std::time::Duration::from_secs(1);
+    std::fs::write(&changed, &bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&changed)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(moved))
+        .unwrap();
+    assert_eq!(std::fs::metadata(&changed).unwrap().len() as usize, n);
+
+    // the survey says which of the problems this is, and the keyboard
+    // refuses in the same words the door answers
+    let text = go(&["place", "originals", "ds"]);
+    assert!(text.contains("verified         1 of 2"), "{text}");
+    assert!(
+        text.contains("changed          1 that changed after being copied"),
+        "{text}"
+    );
+    assert!(text.contains("purge            is refused:"), "{text}");
+    let why = refused(&[
+        "place",
+        "originals",
+        "ds",
+        "--purge",
+        "--why",
+        "the study is over and the originals are no longer needed",
+    ]);
+    assert!(why.contains("changed after being copied"), "{why}");
+    assert!(why.contains("nils pseudonymize @ds"), "{why}");
+    assert!(changed.is_file(), "a refused purge deletes nothing");
+    assert!(
+        dir.path()
+            .join("derivatives/dcm-original/sub-0/IM_0002")
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read(&changed).unwrap(),
+        bytes,
+        "the changed bytes are still on the machine"
+    );
+
+    // the cure the refusal names: the run writes the changed original
+    // again, and only then may a purge run
+    let text = go(&["pseudonymize", "@ds"]);
+    assert!(text.contains("2 seen   1 written   1 unchanged"), "{text}");
+    let text = go(&["place", "originals", "ds"]);
+    assert!(text.contains("verified         2 of 2"), "{text}");
+    assert!(text.contains("purge            may run"), "{text}");
+}
+
+/// An identified file for the pseudonymiser's tests: a patient with a
+/// name and a number, a study, a series, a slice, and pixels.
+fn identified(patient: &str, series: u32, instance: u32) -> Vec<u8> {
+    use dicom_core::VR;
+    use dicom_dictionary_std::tags;
+    let study = format!("1.2.826.0.1.3680043.8.498.{patient}.1");
+    let series_uid = format!("{study}.{series}");
+    let sop = format!("{series_uid}.{instance}");
+    let mut e = synth::minimal_mr(&study, &series_uid, &sop);
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+    e.push(synth::text(tags::PATIENT_NAME, VR::PN, "Doe^Jane"));
+    e.push(synth::text(tags::PATIENT_BIRTH_DATE, VR::DA, "19900101"));
+    e.push(synth::text(tags::STUDY_DATE, VR::DA, "20240131"));
+    e.push(synth::text(
+        tags::SERIES_NUMBER,
+        VR::IS,
+        &series.to_string(),
+    ));
+    e.push(synth::text(
+        tags::INSTANCE_NUMBER,
+        VR::IS,
+        &instance.to_string(),
+    ));
+    e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+    e.push(synth::bytes(
+        tags::PIXEL_DATA,
+        VR::OW,
+        (0..4000u32).map(|i| (i % 251) as u8).collect(),
+    ));
+    synth::part10(&MetaFields::mr(&sop), &e, true)
+}
+
+/// Record 26 §3 and §7 at the keyboard: `nils pseudonymize @dataset`
+/// rewrites an identified dataset's originals into its pseudonymised tree
+/// and refuses a dataset read in place; a dry run writes nothing; the
+/// digest of the tree reads the codes verbatim and finds the subjects the
+/// pseudonymiser made; `nils bring-in` queues the thread as a chain a
+/// worker runs step by step.
+#[test]
+fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
+    let home = home();
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = TempDir::new("cli-pseudonymize");
+    for (p, patient) in ["199001011234", "198502023456"].iter().enumerate() {
+        for instance in 1..=3 {
+            dir.file(
+                &format!("sub-{p}/IM_{instance:04}"),
+                &identified(patient, 1, instance),
+            );
+        }
+    }
+    let plain = TempDir::new("cli-pseudonymize-plain");
+    plain.file(
+        "sub-1/IM_0001",
+        &synth::part10(
+            &MetaFields::mr("1.2.3.A.1.1"),
+            &synth::minimal_mr("1.2.3.A", "1.2.3.A.1", "1.2.3.A.1.1"),
+            true,
+        ),
+    );
+    let run = |args: &[&str]| {
+        let out = nils()
+            .args(registry)
+            .args(args)
+            .env("NILS_PACK_DIR", packs_dir())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}: {}\n{}",
+            args.join(" "),
+            stderr(&out),
+            stdout(&out)
+        );
+        stdout(&out)
+    };
+    let refused = |args: &[&str]| {
+        let out = nils().args(registry).args(args).output().unwrap();
+        assert!(
+            !out.status.success(),
+            "{}: {}",
+            args.join(" "),
+            stdout(&out)
+        );
+        stderr(&out)
+    };
+    run(&[
+        "place",
+        "add",
+        "ds",
+        dir.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--arrives",
+        "identified",
+        "--unmapped",
+        "code",
+    ]);
+    run(&[
+        "place",
+        "add",
+        "plain",
+        plain.path().to_str().unwrap(),
+        "--role",
+        "source",
+    ]);
+    // a dataset read in place has nothing to pseudonymise
+    let why = refused(&["pseudonymize", "@plain"]);
+    assert!(why.contains("read in place"), "{why}");
+    assert!(
+        refused(&["pseudonymize", "ds"]).contains("@name"),
+        "a dataset is named as @name"
+    );
+
+    // a dry run walks and resolves and writes nothing
+    let doc: serde_json::Value =
+        serde_json::from_str(&run(&["pseudonymize", "@ds", "--dry-run", "--json"])).unwrap();
+    assert_eq!(doc["dry_run"], true, "{doc}");
+    assert_eq!(doc["files"]["seen"], 6, "{doc}");
+    assert_eq!(doc["files"]["written"], 6, "{doc}");
+    assert_eq!(doc["subjects"]["new"], 2, "{doc}");
+    let anon = dir.path().join("derivatives/dcm-anon");
+    assert!(std::fs::read_dir(&anon).unwrap().next().is_none());
+
+    // the run: six files written under two codes, the report printed
+    let text = run(&["pseudonymize", "@ds", "--name", "first", "--workers", "2"]);
+    assert!(
+        text.starts_with("nils pseudonymize   name first   dataset ds"),
+        "{text}"
+    );
+    assert!(
+        text.contains("6 seen   6 written   0 unchanged   0 held   0 refused"),
+        "{text}"
+    );
+    assert!(text.contains("2 seen   2 new   2 provisional"), "{text}");
+    assert!(
+        !text.contains("199001011234") && !text.contains("Doe"),
+        "{text}"
+    );
+    let codes: Vec<String> = std::fs::read_dir(&anon)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(codes.len(), 2, "{codes:?}");
+    assert!(codes.iter().all(|c| c.len() == 10), "{codes:?}");
+    let listed: serde_json::Value =
+        serde_json::from_str(&run(&["jobs", "list", "--all", "--json"])).unwrap();
+    let job = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["kind"] == "pseudonymize")
+        .unwrap();
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(job["result"]["files"]["written"], 6, "{job}");
+    assert_eq!(job["then"], serde_json::json!([]), "{job}");
+    assert_eq!(job["chain"]["after"], serde_json::Value::Null, "{job}");
+
+    // the tree digested under the code rule: the subjects the pseudonymiser
+    // made are found by their codes, none made again
+    let digest: serde_json::Value = serde_json::from_str(&run(&[
+        "digest",
+        "@ds",
+        "--name",
+        "first",
+        "--no-private",
+        "--json",
+    ]))
+    .unwrap();
+    assert_eq!(digest["parsed"], 6, "{digest}");
+    assert_eq!(digest["subjects"], 2, "{digest}");
+    assert_eq!(digest["written"]["ingested"], 6, "{digest}");
+    assert_eq!(digest["written"]["subjects_created"], 0, "{digest}");
+    assert_eq!(digest["written"]["identities_attached"], 2, "{digest}");
+    let status: serde_json::Value = serde_json::from_str(&run(&["status", "--json"])).unwrap();
+    let kinds: Vec<&str> = status["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["digest", "pseudonymize"], "{status}");
+    // the originals are never digested
+    assert!(
+        refused(&["digest", "@ds/originals"]).contains("pseudonymiser"),
+        "the originals are the pseudonymiser's"
+    );
+    // a second run leaves everything alone
+    let text = run(&["pseudonymize", "@ds", "--name", "first"]);
+    assert!(text.contains("6 seen   0 written   6 unchanged"), "{text}");
+
+    // bring-in: the thread queued as a chain, run by a worker in turn
+    let queued = run(&["bring-in", "@ds", "--name", "second", "--pack", "mri"]);
+    assert!(queued.starts_with("queued job "), "{queued}");
+    assert!(
+        queued.contains("pseudonymize @ds --name second"),
+        "{queued}"
+    );
+    assert!(
+        queued.contains("then nils digest @ds --name second"),
+        "{queued}"
+    );
+    assert!(queued.contains("then nils classify --pack mri"), "{queued}");
+    run(&["jobs", "work", "--once"]);
+    let listed: serde_json::Value =
+        serde_json::from_str(&run(&["jobs", "list", "--all", "--json"])).unwrap();
+    let jobs = listed.as_array().unwrap();
+    // the chain, followed link by link from the queued job
+    let first = jobs
+        .iter()
+        .find(|j| j["kind"] == "pseudonymize" && j["name"] == "second")
+        .unwrap_or_else(|| panic!("{listed}"));
+    let mut ran: Vec<(String, String, Option<i64>, Option<i64>)> = Vec::new();
+    let mut next = Some(first["id"].as_i64().unwrap());
+    while let Some(id) = next {
+        let j = jobs.iter().find(|j| j["id"] == id).unwrap();
+        ran.push((
+            j["kind"].as_str().unwrap().to_string(),
+            j["state"].as_str().unwrap().to_string(),
+            j["chain"]["before"].as_i64(),
+            j["chain"]["after"].as_i64(),
+        ));
+        next = j["chain"]["after"].as_i64();
+    }
+    let kinds: Vec<&str> = ran.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(
+        kinds,
+        ["pseudonymize", "digest", "fingerprint", "classify"],
+        "{listed}"
+    );
+    assert!(ran.iter().all(|r| r.1 == "done"), "{listed}");
+    assert!(ran[0].2.is_none() && ran[0].3.is_some(), "{listed}");
+    assert!(ran[3].2.is_some() && ran[3].3.is_none(), "{listed}");
+    assert_eq!(first["then"].as_array().unwrap().len(), 3, "{first}");
+}
+
+fn packs_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs")
 }

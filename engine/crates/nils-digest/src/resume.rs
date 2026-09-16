@@ -64,6 +64,11 @@ pub struct Recorded {
     /// The row was recorded in the last second of a batch that failed: its
     /// identity rows may be missing (§9.3), so the file is read again.
     pub reparse: bool,
+    /// The row is a file held for want of a map (record 26 §4), quarantined
+    /// under `identity.unmapped`: it is read again on the next run, so that
+    /// a map filed since releases it without anyone asking for quarantine
+    /// to be retried.
+    pub held: bool,
 }
 
 /// What to do with a file, given its record.
@@ -112,6 +117,9 @@ pub fn decide(
             id: r.id,
             quarantined: false,
         },
+        // a file held for want of a map is read again whatever the run was
+        // asked, since the map that releases it is filed elsewhere
+        status::QUARANTINED if same && r.held => Decision::Parse(None),
         status::QUARANTINED if same && !retry_quarantine => Decision::Unchanged {
             id: r.id,
             quarantined: true,
@@ -154,12 +162,13 @@ impl Records {
         let batch = store.qualified("ingest_batch");
         let sql = format!(
             "SELECT f.path, f.size, f.mtime_ns, f.status, f.instance_id, i.source_file_id = f.id, f.id, \
-             b.reparse_from IS NOT NULL AND f.seen_at >= b.reparse_from \
+             b.reparse_from IS NOT NULL AND f.seen_at >= b.reparse_from, f.reason = '{held}' \
              FROM {table} AS f LEFT JOIN {instance} AS i ON i.id = f.instance_id \
              LEFT JOIN {batch} AS b ON b.id = f.batch_id \
              WHERE f.source_id = {} AND f.dir = {}",
             d.param(1, Type::Int),
-            d.param(2, Type::Text)
+            d.param(2, Type::Text),
+            held = nils_registry::review::UNMAPPED_KIND
         );
         Ok(Records {
             store,
@@ -199,6 +208,7 @@ impl Records {
                         instance_id: r.opt_int(4)?,
                         own: flag(5),
                         reparse: flag(7),
+                        held: flag(8),
                     },
                 );
             }
@@ -336,6 +346,7 @@ mod tests {
             instance_id: instance,
             own: instance.is_some(),
             reparse: false,
+            held: false,
         }
     }
 
@@ -367,6 +378,16 @@ mod tests {
         );
         assert_eq!(
             decide(Some(&quarantined), 10, 5, true, false),
+            Decision::Parse(None)
+        );
+        // a file held for want of a map is read again without being asked
+        // for, since the map that releases it is filed elsewhere
+        let held = Recorded {
+            held: true,
+            ..quarantined.clone()
+        };
+        assert_eq!(
+            decide(Some(&held), 10, 5, false, false),
             Decision::Parse(None)
         );
         assert_eq!(
@@ -533,6 +554,7 @@ mod tests {
                 instance_id: Some(42),
                 own: true,
                 reparse: false,
+                held: false,
             })
         );
         // the failed batch's last second is read again, the one before not

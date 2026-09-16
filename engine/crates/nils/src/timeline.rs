@@ -31,7 +31,7 @@ pub(crate) struct Event {
 
 /// The kinds the door serves.
 pub(crate) const KINDS: &[&str] = &[
-    "document", "handle", "subject", "session", "stack", "job", "release", "review",
+    "document", "handle", "subject", "session", "stack", "job", "release", "review", "batch",
 ];
 
 pub(crate) enum Outcome {
@@ -52,6 +52,7 @@ pub(crate) fn of(registry: &mut Registry, kind: &str, id: i64) -> Result<Outcome
         "job" => job(registry, id),
         "release" => release(registry, id),
         "review" => review(registry, id),
+        "batch" => batch(registry.store(), id),
         _ => return Ok(Outcome::NoKind),
     }?;
     Ok(match found {
@@ -1386,6 +1387,140 @@ fn review(registry: &mut Registry, id: i64) -> Result<Option<Vec<Event>>, String
         for r in store.query(&sql, &[]).map_err(err)? {
             events.extend(decision_events(&r)?);
         }
+    }
+    Ok(Some(events))
+}
+
+// ------------------------------------------------------------------- batch
+
+/// Record 26 §14: a batch's events. Started and finished, with the step's
+/// own counts; the batch on the other side of its thread (the pseudonymise
+/// step before a digest, the digest after a pseudonymise step); the
+/// classifications over its stacks by job; the questions it opened.
+fn batch(store: &mut Store, id: i64) -> Result<Option<Vec<Event>>, String> {
+    let Some(b) = crate::batches::row(store, id).map_err(err)? else {
+        return Ok(None);
+    };
+    let stages = crate::batches::stages(store, &b).map_err(err)?;
+    let mut events = Vec::new();
+    let step = |b: &crate::batches::Batch| {
+        if b.kind == "pseudonymize" {
+            "pseudonymised"
+        } else {
+            "digested"
+        }
+    };
+    events.push(event(
+        b.started_at.clone().unwrap_or_default(),
+        "started",
+        None,
+        format!("{} {} started: {}", b.kind, b.name, step(&b)),
+        b.job_id.map_or(Value::Null, |j| produced("job", j)),
+        "ingest_batch",
+    ));
+    if let Some(at) = &b.finished_at {
+        let summary = if b.kind == "pseudonymize" {
+            let p = &stages["pseudonymised"];
+            format!(
+                "{} {}: {} files pseudonymised, {} changed, {} held, {} refused",
+                b.kind, b.state, p["files"], p["changed"], p["held"], p["refused"]
+            )
+        } else {
+            let (w, d) = (&stages["walked"], &stages["digested"]);
+            format!(
+                "{} {}: {} files seen, {} new, {} changed, {} refused; {} stacks, {} subjects",
+                b.kind,
+                b.state,
+                w["files"],
+                w["new"],
+                w["changed"],
+                w["refused"],
+                d["stacks"],
+                d["subjects"]
+            )
+        };
+        events.push(event(
+            at.clone(),
+            "finished",
+            None,
+            summary,
+            produced("batch", b.id),
+            "ingest_batch",
+        ));
+    }
+    if let Some(other) = crate::batches::other_side(store, &b).map_err(err)? {
+        events.push(event(
+            other
+                .finished_at
+                .clone()
+                .or(other.started_at.clone())
+                .unwrap_or_default(),
+            step(&other),
+            None,
+            format!(
+                "{} {} {} under the same name",
+                other.kind, other.id, other.state
+            ),
+            produced("batch", other.id),
+            "ingest_batch",
+        ));
+    }
+    let finished = text_of(store, "job", "finished_at");
+    let started = text_of(store, "job", "started_at");
+    for job in stages["classified"]["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+    {
+        let d = store.dialect();
+        let sql = format!(
+            "SELECT {finished}, {started} FROM {} WHERE id = {}",
+            store.qualified("job"),
+            d.param(1, Type::Int)
+        );
+        let at = store
+            .query_opt(&sql, &[Param::Int(job)])
+            .map_err(err)?
+            .and_then(|r| {
+                r.opt_text(0)
+                    .ok()
+                    .flatten()
+                    .or(r.opt_text(1).ok().flatten())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        events.push(event(
+            at,
+            "classified",
+            None,
+            format!(
+                "classified by job {job}: {} of {} stacks, {} unsure",
+                stages["classified"]["stacks"],
+                stages["classified"]["of"],
+                stages["classified"]["unsure"]
+            ),
+            produced("job", job),
+            "classification",
+        ));
+    }
+    let reviewed = &stages["reviewed"];
+    if reviewed["of"].as_u64().unwrap_or(0) > 0 {
+        events.push(event(
+            reviewed["since"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| b.finished_at.clone())
+                .unwrap_or_default(),
+            "review",
+            None,
+            format!(
+                "{} of {} questions decided",
+                reviewed["done"], reviewed["of"]
+            ),
+            Value::Null,
+            "review_item",
+        ));
     }
     Ok(Some(events))
 }

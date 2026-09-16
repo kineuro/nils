@@ -260,7 +260,7 @@ fn the_door_serves_what_the_command_line_has() {
     // C26: the capabilities name the contracts, the pack, the epoch.
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
-    assert_eq!(caps["contracts"]["openapi"], "4", "{caps}");
+    assert_eq!(caps["contracts"]["openapi"], "5", "{caps}");
     assert_eq!(caps["contracts"]["review_item"], "4", "{caps}");
     // Wave 4c §4.5: the engine's document is the `engine` part of the
     // deployment capabilities document, and carries what the suite requires.
@@ -1035,6 +1035,56 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
         pack["axes"].as_array().is_some_and(|a| !a.is_empty()),
         "{pack}"
     );
+    // record 26: every axis with its values, their words and how else they
+    // are reached, the flags count, the thresholds and the amendable lists
+    let technique = pack["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "technique")
+        .unwrap_or_else(|| panic!("{pack}"));
+    assert_eq!(
+        technique["count"],
+        technique["values"].as_array().unwrap().len()
+    );
+    let tse = technique["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "TSE")
+        .unwrap_or_else(|| panic!("{technique}"));
+    assert_eq!(tse["label"], "TSE", "{tse}");
+    assert_eq!(tse["family"], "SE", "{tse}");
+    assert_eq!(tse["tried"], true, "{tse}");
+    assert_eq!(tse["list"], "technique.TSE", "{tse}");
+    assert_eq!(tse["keywords"][0], "tse", "{tse}");
+    assert!(tse["site"].is_null(), "no overlay adopted: {tse}");
+    let mprage = technique["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "MPRAGE")
+        .unwrap();
+    assert_eq!(mprage["detection"]["exclusive"], "is_mprage", "{mprage}");
+    assert!(pack["flags"].as_i64().unwrap() > 100, "{pack}");
+    assert_eq!(pack["review"]["low_confidence"]["default"], 0.7, "{pack}");
+    assert_eq!(
+        pack["review"]["low_confidence"]["per_axis"]["body_part"], 0.65,
+        "{pack}"
+    );
+    assert_eq!(
+        pack["review"]["missing"],
+        serde_json::json!(["technique"]),
+        "{pack}"
+    );
+    let lists = pack["lists"].as_array().unwrap();
+    assert!(lists.len() > 100, "{}", lists.len());
+    assert!(
+        lists.iter().any(|l| l == "base.T1w"),
+        "a longhand rule's words"
+    );
+    assert_eq!(packs_doc["packs"][0]["lists"], lists.len(), "{packs_doc}");
+    assert_eq!(packs_doc["packs"][0]["contract"], 4, "{packs_doc}");
     let (status, batches) = server.request("GET", "/api/batches", None, reader);
     assert_eq!(status, 200, "{batches}");
     assert!(batches["count"].as_i64().unwrap() >= 1, "{batches}");
@@ -1442,6 +1492,26 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
         "{signals}"
     );
     assert!(signals["diagnostics"].is_object(), "{signals}");
+    // record 26: the same by value, and the origins for the scope chips
+    let by_value = signals["by_value"]["technique"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{signals}"));
+    assert_eq!(
+        by_value
+            .values()
+            .map(|v| v["decided"].as_i64().unwrap())
+            .sum::<i64>(),
+        2,
+        "{signals}"
+    );
+    assert!(
+        signals["origins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["name"] == "SYNTHETIC" && o["kind"] == "manufacturer" && o["stacks"] == 2),
+        "{signals}"
+    );
 
     // 4: a rehearsal writes nothing and names what would move
     let body = format!(r#"{{"overlay": {SITE_OVERLAY}, "scope": "batch:1", "sample": 100}}"#);
@@ -1563,11 +1633,13 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
             serde_json::from_str(&text).unwrap()
         })
         .collect();
+    // record 26 section 11: the evidence sits under each axis
     let cites = |doc: &serde_json::Value| {
-        doc["evidence"]
+        doc["axes"]
             .as_array()
             .unwrap()
             .iter()
+            .flat_map(|a| a["evidence"].as_array().into_iter().flatten())
             .any(|e| e["matched"] == "zzgado")
     };
     let moved = explained
@@ -2352,6 +2424,23 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
         &["place", "add", "incoming", tree, "--role", "source"],
         None,
     );
+    // record 26: the map makes the subject and the digest meets it, which
+    // is what a dataset with a map looks like; the door counts the subjects
+    // whose files the tree holds, not the ones a digest made
+    let map = home.file("map.csv", b"PatientID,subject_code\nP1,mapped-0001\n");
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
+        None,
+    );
     run(
         &home,
         &["digest", "--name", "first", "--no-private", tree],
@@ -2390,12 +2479,30 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
     assert_eq!(doc["count"], 1, "{doc}");
     let source = &doc["sources"][0];
     assert_eq!(source["name"], "incoming", "{doc}");
-    assert_eq!(source["handling"]["arrives"], "identified", "{doc}");
+    // record 26: a source declared with nothing said is a dataset reading
+    // its folder itself, de-identified, and the handling mirrors it
+    assert_eq!(source["handling"]["arrives"], "deidentified", "{doc}");
     assert_eq!(source["handling_declared"], false, "{doc}");
+    assert_eq!(source["arrives"], "deidentified", "{doc}");
+    assert_eq!(
+        source["trees"]["originals"],
+        serde_json::Value::Null,
+        "{doc}"
+    );
+    assert_eq!(source["trees"]["anon"]["path"], tree, "{doc}");
+    assert_eq!(
+        source["held"],
+        serde_json::json!({"files": 0, "identifiers": 0}),
+        "{doc}"
+    );
+    assert_eq!(source["unmapped"], "code", "{doc}");
+    assert_eq!(source["originals_kept"], "kept", "{doc}");
+    assert_eq!(source["dataset"]["arrives"], "deidentified", "{doc}");
     assert_eq!(source["digests"]["count"], 1, "{doc}");
     assert_eq!(source["digests"]["last"]["name"], "first", "{doc}");
     let digest = &source["digests"]["recent"][0];
     assert_eq!(digest["files"]["seen"], 2, "{doc}");
+    assert_eq!(digest["pseudonymised"], serde_json::Value::Null, "{doc}");
     assert_eq!(digest["stacks_added"], 2, "{doc}");
     assert_eq!(digest["classified"], 2, "{doc}");
     assert_eq!(source["totals"]["stacks"], 2, "{doc}");
@@ -2438,6 +2545,7 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
         doc["sources"][0]["handling"]["arrives"], "deidentified",
         "{doc}"
     );
+    assert_eq!(doc["sources"][0]["arrives"], "deidentified", "{doc}");
     let (status, caps) = server.request("GET", "/api/capabilities", None, reader);
     assert_eq!(status, 200, "{caps}");
     assert!(
@@ -2455,6 +2563,623 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
             .iter()
             .any(|p| p["door"] == "GET /api/sources"),
         "{caps}"
+    );
+    server.finish();
+}
+
+/// Record 26: a source place is a dataset. Declaring one looks at its
+/// folder: an identified dataset's loose entries move into the originals and
+/// an empty pseudonymised tree is made; a v0 cohort folder has `dcm-raw`
+/// renamed; a de-identified folder moves into the tree only when asked, and
+/// reads itself otherwise. The dataset fields need `data:work` beside
+/// `places:work`, a folder that is another dataset's tree is refused,
+/// `@name` is the pseudonymised tree and its originals are never digested,
+/// and the sources and places doors show the dataset.
+#[test]
+fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
+    let home = registry();
+    let identified = TempDir::new("ds-identified");
+    let v0 = TempDir::new("ds-v0");
+    let plain = TempDir::new("ds-plain");
+    let bare = TempDir::new("ds-bare");
+    let dicom = |study: &str, sop: &str| {
+        let e = synth::minimal_mr(study, &format!("{study}.1"), sop);
+        synth::part10(&MetaFields::mr(sop), &e, true)
+    };
+    identified.file("sub-1/ses-1/a.dcm", &dicom("1.2.3.C", "1.2.3.C.1.1"));
+    identified.file("notes.txt", b"n");
+    v0.file(
+        "derivatives/dcm-original/sub-1/a.dcm",
+        &dicom("1.2.3.D", "1.2.3.D.1.1"),
+    );
+    v0.file(
+        "derivatives/dcm-raw/sub-1/a.dcm",
+        &dicom("1.2.3.D", "1.2.3.D.1.1"),
+    );
+    plain.file("sub-1/a.dcm", &dicom("1.2.3.E", "1.2.3.E.1.1"));
+    const LIMIT: usize = 42;
+    let used = std::cell::Cell::new(0usize);
+    let server = Server::start(
+        &home,
+        LIMIT,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--token",
+            "a-places-token-of-length=pl@lab:places:work,data:see",
+            "--ingest-root",
+            &format!("ds={}", identified.path().display()),
+            "--ingest-root",
+            &format!("old={}", v0.path().display()),
+        ],
+        &[],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let ops = Some("an-operator-token-of-len");
+    let places_only = Some("a-places-token-of-length");
+    let ask = |method: &str, path: &str, body: Option<&str>, token: Option<&str>| {
+        used.set(used.get() + 1);
+        server.request(method, path, body, token)
+    };
+    let ends = |v: &serde_json::Value, tail: &str| v.as_str().is_some_and(|s| s.ends_with(tail));
+
+    // before anything is declared, a look says what the folder holds
+    let (status, look) = ask("POST", "/api/ingest/look", Some(r#"{"at": "@old"}"#), ops);
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(look["layout"]["v0"]["original_files"], 1, "{look}");
+    assert_eq!(look["layout"]["v0"]["raw_files"], 1, "{look}");
+    assert_eq!(look["layout"]["v0"]["renamed"], false, "{look}");
+    let (_, look) = ask("POST", "/api/ingest/look", Some(r#"{"at": "@ds"}"#), ops);
+    assert_eq!(look["layout"]["v0"], serde_json::Value::Null, "{look}");
+    assert_eq!(look["layout"]["loose"], 2, "{look}");
+    // record 26: a folder under no location, by its absolute path, which is
+    // how the desk looks at what it is about to declare; the same look,
+    // bounded the same way, and the answer names no location
+    let (status, look) = ask(
+        "POST",
+        "/api/ingest/look",
+        Some(&serde_json::json!({"path": plain.path().display().to_string()}).to_string()),
+        ops,
+    );
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(look["at"], serde_json::Value::Null, "{look}");
+    assert_eq!(look["root"], serde_json::Value::Null, "{look}");
+    assert_eq!(look["layout"]["v0"], serde_json::Value::Null, "{look}");
+    assert_eq!(look["layout"]["loose"], 1, "{look}");
+    assert_eq!(look["folders"][0]["name"], "sub-1", "{look}");
+    assert_eq!(look["folders"][0]["dicom"], 1, "{look}");
+    // a path that is not absolute is refused in words
+    let (status, refused) = ask(
+        "POST",
+        "/api/ingest/look",
+        Some(r#"{"path": "sub-1"}"#),
+        ops,
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("absolute path"),
+        "{refused}"
+    );
+
+    // the dataset fields need data:work beside places:work, and a source place
+    let body = |name: &str, role: &str, path: &std::path::Path, more: serde_json::Value| {
+        let mut doc =
+            serde_json::json!({"name": name, "role": role, "path": path.display().to_string()});
+        for (k, v) in more.as_object().into_iter().flatten() {
+            doc[k] = v.clone();
+        }
+        doc.to_string()
+    };
+    let (status, refused) = ask(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "ds",
+            "source",
+            identified.path(),
+            serde_json::json!({"arrives": "identified"}),
+        )),
+        places_only,
+    );
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("data:work"),
+        "{refused}"
+    );
+    let (status, refused) = ask(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "out",
+            "export",
+            bare.path(),
+            serde_json::json!({"arrives": "coded"}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(identified.path().join("sub-1").is_dir());
+
+    // an identified dataset: the loose entries move into the originals
+    let (status, ds) = ask(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "ds",
+            "source",
+            identified.path(),
+            serde_json::json!({
+                "arrives": "identified",
+                "identity": {"id_type": "study-id", "from": [{"field": "PatientID"}]},
+                "cohort": "study-a",
+                "tags": {"remove": ["0010,1010"]},
+            }),
+        )),
+        ops,
+    );
+    assert_eq!(status, 201, "{ds}");
+    let ds_id = ds["id"].as_i64().unwrap();
+    assert_eq!(ds["dataset"]["arrives"], "identified", "{ds}");
+    assert_eq!(ds["handling"]["arrives"], "identified", "{ds}");
+    assert_eq!(ds["dataset"]["unmapped"], "hold", "{ds}");
+    assert_eq!(ds["dataset"]["cohort"], "study-a", "{ds}");
+    assert_eq!(ds["dataset"]["identity"]["id_type"], "study-id", "{ds}");
+    assert!(
+        ends(
+            &ds["dataset"]["trees"]["originals"]["path"],
+            "derivatives/dcm-original"
+        ),
+        "{ds}"
+    );
+    assert!(
+        ends(
+            &ds["dataset"]["trees"]["anon"]["path"],
+            "derivatives/dcm-anon"
+        ),
+        "{ds}"
+    );
+    assert_eq!(ds["dataset"]["trees"]["originals"]["files"], 2, "{ds}");
+    assert_eq!(ds["dataset"]["trees"]["anon"]["files"], 0, "{ds}");
+    assert_eq!(ds["layout"]["v0"], serde_json::Value::Null, "{ds}");
+    assert_eq!(ds["layout"]["loose"], 0, "{ds}");
+    assert!(
+        identified
+            .path()
+            .join("derivatives/dcm-original/sub-1/ses-1/a.dcm")
+            .is_file()
+    );
+    assert!(
+        identified
+            .path()
+            .join("derivatives/dcm-original/notes.txt")
+            .is_file()
+    );
+    assert!(identified.path().join("derivatives/dcm-anon").is_dir());
+    assert!(!identified.path().join("sub-1").exists());
+
+    // a v0 cohort folder: dcm-raw is renamed, nothing else touched
+    let (status, old) = ask(
+        "POST",
+        "/api/places",
+        Some(&body("old", "source", v0.path(), serde_json::json!({}))),
+        ops,
+    );
+    assert_eq!(status, 201, "{old}");
+    assert_eq!(old["dataset"]["arrives"], "deidentified", "{old}");
+    assert_eq!(
+        old["layout"]["v0"],
+        serde_json::json!({"original_files": 1, "raw_files": 1, "partial": false, "renamed": true}),
+        "{old}"
+    );
+    assert!(
+        ends(
+            &old["dataset"]["trees"]["originals"]["path"],
+            "derivatives/dcm-original"
+        ),
+        "{old}"
+    );
+    assert!(
+        ends(
+            &old["dataset"]["trees"]["anon"]["path"],
+            "derivatives/dcm-anon"
+        ),
+        "{old}"
+    );
+    assert!(!v0.path().join("derivatives/dcm-raw").exists());
+    assert!(v0.path().join("derivatives/dcm-anon/sub-1/a.dcm").is_file());
+
+    // a de-identified folder moves into the tree when asked; a bare one reads itself
+    let (status, moved) = ask(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "plain",
+            "source",
+            plain.path(),
+            serde_json::json!({"arrives": "coded", "move_into_anon": true}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 201, "{moved}");
+    assert_eq!(
+        moved["dataset"]["trees"]["originals"],
+        serde_json::Value::Null,
+        "{moved}"
+    );
+    assert!(
+        ends(
+            &moved["dataset"]["trees"]["anon"]["path"],
+            "derivatives/dcm-anon"
+        ),
+        "{moved}"
+    );
+    assert!(
+        plain
+            .path()
+            .join("derivatives/dcm-anon/sub-1/a.dcm")
+            .is_file()
+    );
+    let (status, bare_place) = ask(
+        "POST",
+        "/api/places",
+        Some(&body("bare", "source", bare.path(), serde_json::json!({}))),
+        ops,
+    );
+    assert_eq!(status, 201, "{bare_place}");
+    assert_eq!(
+        bare_place["dataset"]["trees"]["anon"]["path"],
+        bare.path().display().to_string(),
+        "{bare_place}"
+    );
+    assert_eq!(
+        bare_place["dataset"]["trees"]["originals"],
+        serde_json::Value::Null,
+        "{bare_place}"
+    );
+
+    // a folder that is another dataset's tree is refused
+    let (status, refused) = ask(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "inside",
+            "source",
+            &identified.path().join("derivatives/dcm-original"),
+            serde_json::json!({}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("originals of the dataset ds"),
+        "{refused}"
+    );
+    let (status, refused) = ask(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "deeper",
+            "source",
+            &v0.path().join("derivatives/dcm-anon/sub-1"),
+            serde_json::json!({}),
+        )),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+
+    // @name is the pseudonymised tree, and the originals are never digested
+    let (status, queued) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@ds"]}"#),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    assert!(
+        ends(&queued["command"][1], "derivatives/dcm-anon"),
+        "{queued}"
+    );
+    let (status, refused) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@ds/originals"]}"#),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("pseudonymiser"),
+        "{refused}"
+    );
+    let (status, refused) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@old/originals/sub-1"]}"#),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    // the picker reads the trees the same way
+    let (status, roots) = ask("POST", "/api/ingest/folders", Some("{}"), ops);
+    assert_eq!(status, 200, "{roots}");
+    let ds_root = roots["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "ds")
+        .unwrap();
+    assert!(ends(&ds_root["path"], "derivatives/dcm-anon"), "{roots}");
+    assert!(
+        ends(&ds_root["originals"], "derivatives/dcm-original"),
+        "{roots}"
+    );
+    assert_eq!(ds_root["place"]["name"], "ds", "{roots}");
+    let (status, look) = ask(
+        "POST",
+        "/api/ingest/look",
+        Some(r#"{"at": "@ds/originals"}"#),
+        ops,
+    );
+    assert_eq!(status, 200, "{look}");
+    assert!(ends(&look["path"], "derivatives/dcm-original"), "{look}");
+    assert_eq!(look["here"]["files"]["count"], 1, "{look}");
+    let (_, look) = ask("POST", "/api/ingest/look", Some(r#"{"at": "@ds"}"#), ops);
+    assert!(ends(&look["path"], "derivatives/dcm-anon"), "{look}");
+
+    // the sources door shows the dataset, with the counts the probe kept
+    let (status, doc) = ask("GET", "/api/sources?probe=1", None, reader);
+    assert_eq!(status, 200, "{doc}");
+    let source = doc["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "ds")
+        .unwrap();
+    assert_eq!(source["arrives"], "identified", "{doc}");
+    assert_eq!(source["trees"]["originals"]["files"], 2, "{doc}");
+    assert_eq!(source["trees"]["anon"]["files"], 0, "{doc}");
+    assert_eq!(
+        source["trees"]["anon"]["last_written"],
+        serde_json::Value::Null,
+        "{doc}"
+    );
+    assert_eq!(source["identity"]["from"][0]["field"], "PatientID", "{doc}");
+    assert_eq!(source["unmapped"], "hold", "{doc}");
+    assert_eq!(source["cohort"], "study-a", "{doc}");
+    assert_eq!(
+        source["tags"],
+        serde_json::json!({"keep_demographics": true, "remove": ["0010,1010"], "keep": []}),
+        "{doc}"
+    );
+    assert_eq!(source["originals_kept"], "kept", "{doc}");
+    assert_eq!(
+        source["held"],
+        serde_json::json!({"files": 0, "identifiers": 0}),
+        "{doc}"
+    );
+
+    // changing the dataset needs data:work too; the rest of a place does not
+    let path = format!("/api/places/{ds_id}");
+    let (status, refused) = ask("PUT", &path, Some(r#"{"cohort": null}"#), places_only);
+    assert_eq!(status, 403, "{refused}");
+    let (status, kept) = ask(
+        "PUT",
+        &path,
+        Some(r#"{"guarantees": {"snapshots": true}}"#),
+        places_only,
+    );
+    assert_eq!(status, 200, "{kept}");
+    assert_eq!(kept["dataset"]["cohort"], "study-a", "{kept}");
+    let (status, changed) = ask(
+        "PUT",
+        &path,
+        Some(r#"{"cohort": null, "unmapped": "code", "tags": {"keep_demographics": false}}"#),
+        ops,
+    );
+    assert_eq!(status, 200, "{changed}");
+    assert_eq!(
+        changed["dataset"]["cohort"],
+        serde_json::Value::Null,
+        "{changed}"
+    );
+    assert_eq!(changed["dataset"]["unmapped"], "code", "{changed}");
+    assert_eq!(changed["dataset"]["originals_kept"], "kept", "{changed}");
+    // lab 26c, finding 4: what became of the originals is the act's to
+    // write, and this is the door the desk's Change form sends to. A
+    // declaration naming it is refused, in words naming the act.
+    let (status, refused) = ask("PUT", &path, Some(r#"{"originals_kept": "purged"}"#), ops);
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("nils place originals"),
+        "{refused}"
+    );
+    assert_eq!(
+        changed["dataset"]["tags"]["keep_demographics"], false,
+        "{changed}"
+    );
+    assert_eq!(
+        changed["dataset"]["tags"]["remove"],
+        serde_json::json!(["0010,1010"]),
+        "{changed}"
+    );
+    assert_eq!(
+        changed["dataset"]["identity"]["id_type"], "study-id",
+        "{changed}"
+    );
+    let (status, refused) = ask("PUT", &path, Some(r#"{"unmapped": "ask"}"#), ops);
+    assert_eq!(status, 400, "{refused}");
+
+    // the places door shows the same, and the capabilities say what the fields need
+    let (status, listed) = ask("GET", "/api/places", None, reader);
+    assert_eq!(status, 200, "{listed}");
+    let shown = listed["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "ds")
+        .unwrap();
+    assert_eq!(shown["dataset"]["arrives"], "identified", "{listed}");
+    assert!(
+        ends(
+            &shown["dataset"]["trees"]["anon"]["path"],
+            "derivatives/dcm-anon"
+        ),
+        "{listed}"
+    );
+    let (status, caps) = ask("GET", "/api/capabilities", None, reader);
+    assert_eq!(status, 200, "{caps}");
+    assert_eq!(caps["places"]["dataset"]["grant"], "data:work", "{caps}");
+    assert_eq!(
+        caps["places"]["dataset"]["trees"]["anon"], "derivatives/dcm-anon",
+        "{caps}"
+    );
+    let row = caps["policy"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["door"] == "POST /api/places")
+        .unwrap();
+    assert_eq!(row["grant"], "places:work", "{row}");
+    assert_eq!(row["dataset"], "data:work", "{row}");
+    while used.get() < LIMIT {
+        ask("GET", "/api/capabilities", None, reader);
+    }
+    server.finish();
+}
+
+/// Lab 26c, finding 1 at the door: a dataset one of whose originals changed
+/// after its copy was written. GET says a purge is not ready and counts the
+/// file as changed, POST refuses in the same sentence rather than queueing a
+/// job that fails later, and every original is still on disk afterwards.
+#[test]
+fn the_originals_door_refuses_a_purge_when_an_original_changed_after_its_copy() {
+    let home = TempDir::new("originals-door-home");
+    let dir = TempDir::new("originals-door-ds");
+    let patient = "199001011234";
+    for instance in 1..=2u32 {
+        let study = format!("1.2.826.0.1.3680043.8.498.{patient}.1");
+        let series = format!("{study}.1");
+        let sop = format!("{series}.{instance}");
+        let mut e = synth::minimal_mr(&study, &series, &sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+        e.push(synth::text(tags::PATIENT_NAME, VR::PN, "Doe^Jane"));
+        e.push(synth::text(tags::STUDY_DATE, VR::DA, "20240131"));
+        e.push(synth::text(tags::SERIES_NUMBER, VR::IS, "1"));
+        e.push(synth::text(
+            tags::INSTANCE_NUMBER,
+            VR::IS,
+            &instance.to_string(),
+        ));
+        e.push(synth::bytes(
+            tags::PIXEL_DATA,
+            VR::OW,
+            (0..4000u32).map(|i| (i % 251) as u8).collect(),
+        ));
+        dir.file(
+            &format!("sub-0/IM_{instance:04}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    run(&home, &["key", "add", "k"], Some("an originals door key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "ds",
+            dir.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--arrives",
+            "identified",
+            "--unmapped",
+            "code",
+        ],
+        None,
+    );
+    run(&home, &["pseudonymize", "@ds"], None);
+    let places: serde_json::Value =
+        serde_json::from_str(&run(&home, &["place", "list", "--json"], None)).unwrap();
+    let id = places[0]["id"].as_i64().unwrap();
+
+    let server = Server::start(
+        &home,
+        3,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+        &[],
+    );
+    let ops = Some("an-operator-token-of-len");
+    let door = format!("/api/places/{id}/originals");
+
+    let (status, ready) = server.request("GET", &door, None, ops);
+    assert_eq!(status, 200, "{ready}");
+    assert_eq!(ready["files"], 2, "{ready}");
+    assert_eq!(ready["verified"], 2, "{ready}");
+    assert_eq!(ready["ready"], true, "{ready}");
+
+    // one original changed in place, to other bytes of exactly its length,
+    // its modification time moving with them
+    let changed = dir.path().join("derivatives/dcm-original/sub-0/IM_0001");
+    let mut bytes = std::fs::read(&changed).unwrap();
+    let n = bytes.len();
+    for b in &mut bytes[n - 64..] {
+        *b ^= 0xFF;
+    }
+    let moved = std::fs::metadata(&changed).unwrap().modified().unwrap()
+        + std::time::Duration::from_secs(1);
+    std::fs::write(&changed, &bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&changed)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(moved))
+        .unwrap();
+
+    let (status, looked) = server.request("GET", &door, None, ops);
+    assert_eq!(status, 200, "{looked}");
+    assert_eq!(looked["ready"], false, "{looked}");
+    assert_eq!(looked["verified"], 1, "{looked}");
+    assert_eq!(looked["changed"], 1, "{looked}");
+    assert_eq!(looked["copy_unverified"], 0, "{looked}");
+    assert_eq!(looked["no_copy"], 0, "{looked}");
+    let why = looked["why"].as_str().unwrap().to_string();
+    assert!(why.contains("changed after being copied"), "{why}");
+    assert!(why.contains("nils pseudonymize @ds"), "{why}");
+
+    let (status, refused) = server.request(
+        "POST",
+        &door,
+        Some(r#"{"do": "purge", "why": "the study is over"}"#),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(
+        refused["error"].as_str().unwrap(),
+        why,
+        "the door refuses in the sentence it answered with"
+    );
+    assert!(changed.is_file(), "a refused purge deletes nothing");
+    assert!(
+        dir.path()
+            .join("derivatives/dcm-original/sub-0/IM_0002")
+            .is_file()
     );
     server.finish();
 }
@@ -2998,11 +3723,12 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
         ),
         ("pipelines-work", r#"["backup"]"#, 403, "database:work"),
         ("database-work", r#"["backup"]"#, 409, "no backup directory"),
+        // record 26 section 9: a promotion is a cohort act, Data work
         (
             "query-work",
             r#"["ask", "promote", "--handle", "1", "--cohort", "c"]"#,
             403,
-            "release:work",
+            "data:work",
         ),
         (
             "query-work",
@@ -3389,4 +4115,675 @@ fn the_grants_vectors_hold() {
         compare(name, status, &doc, &case["expect"]);
     }
     server.finish();
+}
+
+/// Record 26 §7 and §14 through the doors: `bring-in @dataset` queues the
+/// thread of a dataset as a chain the serve worker runs step by step,
+/// each job naming the one before and after it; the batch page reads the
+/// five stages off the thread and the timeline serves the batch; the
+/// sources door fills the pseudonymise step in and the machine's rates; a
+/// step the caller who queued the chain may not queue ends the chain and
+/// the job says why; a chain that is not one is refused at the door; and
+/// a dataset's originals are never digested.
+#[test]
+fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
+    let home = registry();
+    let dir = TempDir::new("chain-ds");
+    let identified = |patient: &str, instance: u32| {
+        let study = format!("1.2.826.0.1.3680043.8.498.{patient}.1");
+        let series = format!("{study}.1");
+        let sop = format!("{series}.{instance}");
+        let mut e = synth::minimal_mr(&study, &series, &sop);
+        e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+        e.push(synth::text(tags::PATIENT_NAME, VR::PN, "Doe^Jane"));
+        e.push(synth::text(tags::STUDY_DATE, VR::DA, "20240131"));
+        e.push(synth::text(tags::SERIES_NUMBER, VR::IS, "1"));
+        e.push(synth::text(
+            tags::INSTANCE_NUMBER,
+            VR::IS,
+            &instance.to_string(),
+        ));
+        e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1 mprage"));
+        e.push(synth::bytes(
+            tags::PIXEL_DATA,
+            VR::OW,
+            (0..2000u32).map(|i| (i % 251) as u8).collect(),
+        ));
+        synth::part10(&MetaFields::mr(&sop), &e, true)
+    };
+    for (p, patient) in ["199001011234", "198502023456"].iter().enumerate() {
+        for instance in 1..=3 {
+            dir.file(
+                &format!("sub-{p}/IM_{instance:04}"),
+                &identified(patient, instance),
+            );
+        }
+    }
+    run(
+        &home,
+        &[
+            "place",
+            "add",
+            "ds",
+            dir.path().to_str().unwrap(),
+            "--role",
+            "source",
+            "--arrives",
+            "identified",
+            "--unmapped",
+            "code",
+        ],
+        None,
+    );
+    const LIMIT: usize = 320;
+    let used = std::cell::Cell::new(0usize);
+    let server = Server::start(
+        &home,
+        LIMIT,
+        &[
+            "--worker",
+            "--auth",
+            "token",
+            "--token",
+            "a-reader-token-of-length=reader@lab:reader",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+            "--token",
+            "a-data-token-of-length-x=data@lab:reviewer,data:work",
+            "--ingest-root",
+            &format!("ds={}", dir.path().display()),
+        ],
+        &[("NILS_PACK_DIR", packs().to_str().unwrap())],
+    );
+    let reader = Some("a-reader-token-of-length");
+    let ops = Some("an-operator-token-of-len");
+    let data = Some("a-data-token-of-length-x");
+    let ask = |method: &str, path: &str, body: Option<&str>, token: Option<&str>| {
+        used.set(used.get() + 1);
+        server.request(method, path, body, token)
+    };
+    let wait = |job: i64| -> serde_json::Value {
+        let mut shown = serde_json::Value::Null;
+        for _ in 0..150 {
+            let (status, now) = ask("GET", &format!("/api/jobs/{job}"), None, ops);
+            assert_eq!(status, 200, "{now}");
+            shown = now;
+            if matches!(
+                shown["state"].as_str(),
+                Some("done" | "failed" | "cancelled")
+            ) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        shown
+    };
+
+    // the originals are the pseudonymiser's: a digest of them is refused
+    let (status, refused) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@ds/originals"]}"#),
+        ops,
+    );
+    assert_eq!(status, 409, "{refused}");
+    // a chain that is not one, and a verb the door does not queue
+    let (status, refused) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@ds"], "then": [["bring-in", "@ds"]]}"#),
+        ops,
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["digest", "@ds"], "then": [["restore", "x"]]}"#),
+        ops,
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["pseudonymize", "@ds"]}"#),
+        reader,
+    );
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("data:work"),
+        "{refused}"
+    );
+    let (status, refused) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["pseudonymize", "@ds"]}"#),
+        data,
+    );
+    assert_eq!(
+        status, 403,
+        "the pseudonymiser reads identifiers: {refused}"
+    );
+    assert!(
+        refused["error"].as_str().unwrap().contains("sensitive"),
+        "{refused}"
+    );
+
+    // bring-in: the thread queued as a chain
+    let (status, queued) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["bring-in", "@ds", "--name", "chain-1"], "name": "chain-1"}"#),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    assert_eq!(queued["command"][0], "pseudonymize", "{queued}");
+    assert_eq!(queued["command"][1], "@ds", "{queued}");
+    let then = queued["then"].as_array().unwrap();
+    assert_eq!(then.len(), 3, "{queued}");
+    assert_eq!(then[0][0], "digest", "{queued}");
+    assert!(
+        then[0][1]
+            .as_str()
+            .unwrap()
+            .ends_with("derivatives/dcm-anon"),
+        "the digest's tree located: {queued}"
+    );
+    assert_eq!(then[1], serde_json::json!(["fingerprint"]), "{queued}");
+    assert_eq!(then[2], serde_json::json!(["classify"]), "{queued}");
+    let first = queued["job"].as_i64().unwrap();
+    let mut ids = vec![first];
+    let mut job = wait(first);
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(job["kind"], "pseudonymize", "{job}");
+    assert_eq!(job["result"]["files"]["written"], 6, "{job}");
+    assert_eq!(job["then"].as_array().unwrap().len(), 3, "{job}");
+    assert_eq!(job["chain"]["before"], serde_json::Value::Null, "{job}");
+    // the chain, step by step, each job naming the one before
+    for expected in ["digest", "fingerprint", "classify"] {
+        let mut next = job["chain"]["after"].as_i64();
+        for _ in 0..50 {
+            if next.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let (_, again) = ask(
+                "GET",
+                &format!("/api/jobs/{}", ids.last().unwrap()),
+                None,
+                ops,
+            );
+            next = again["chain"]["after"].as_i64();
+        }
+        let next = next.unwrap_or_else(|| panic!("no job after {expected}: {job}"));
+        job = wait(next);
+        assert_eq!(job["state"], "done", "{job}");
+        assert_eq!(job["kind"], expected, "{job}");
+        assert_eq!(
+            job["chain"]["before"],
+            serde_json::json!(ids.last().unwrap()),
+            "{job}"
+        );
+        assert_eq!(job["args"]["principal"], "ops@lab", "{job}");
+        assert_eq!(job["args"]["detail"], "sensitive", "{job}");
+        ids.push(next);
+    }
+    assert_eq!(job["then"], serde_json::json!([]), "{job}");
+    assert_eq!(job["chain"]["after"], serde_json::Value::Null, "{job}");
+
+    // the batch is the thread: the two batches of one name, the stages
+    let (status, batches) = ask("GET", "/api/batches", None, reader);
+    assert_eq!(status, 200, "{batches}");
+    let of = |kind: &str| {
+        batches["batches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["name"] == "chain-1" && b["kind"] == kind)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {kind} batch chain-1: {batches}"))
+    };
+    let pseudonymise = of("pseudonymize");
+    let digest = of("digest");
+    assert_eq!(pseudonymise["seen"], 6, "{pseudonymise}");
+    let (status, page) = ask(
+        "GET",
+        &format!("/api/batches/{}", digest["id"]),
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["kind"], "digest", "{page}");
+    let stages = &page["stages"];
+    assert_eq!(stages["pseudonymised"]["files"], 6, "{page}");
+    assert_eq!(stages["pseudonymised"]["changed"], 6, "{page}");
+    assert_eq!(stages["pseudonymised"]["held"], 0, "{page}");
+    assert_eq!(stages["pseudonymised"]["job"], first, "{page}");
+    assert_eq!(
+        stages["pseudonymised"]["batch"], pseudonymise["id"],
+        "{page}"
+    );
+    assert_eq!(stages["walked"]["files"], 6, "{page}");
+    assert_eq!(stages["walked"]["new"], 6, "{page}");
+    assert_eq!(stages["walked"]["job"], ids[1], "{page}");
+    assert_eq!(stages["digested"]["stacks"], 2, "{page}");
+    // record 26 §14: the subjects whose files the batch holds, which the
+    // pseudonymiser made and the digest found by their codes
+    assert_eq!(stages["digested"]["subjects"], 2, "{page}");
+    assert_eq!(stages["classified"]["of"], 2, "{page}");
+    assert_eq!(stages["classified"]["stacks"], 2, "{page}");
+    assert_eq!(
+        stages["classified"]["jobs"],
+        serde_json::json!([ids[3]]),
+        "{page}"
+    );
+    assert!(
+        stages["classified"]["pack"]
+            .as_str()
+            .unwrap()
+            .starts_with("mri"),
+        "{page}"
+    );
+    assert!(stages["classified"]["by_base"].is_object(), "{page}");
+    assert!(stages["reviewed"]["of"].as_u64().is_some(), "{page}");
+    let (status, page) = ask(
+        "GET",
+        &format!("/api/batches/{}", pseudonymise["id"]),
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["kind"], "pseudonymize", "{page}");
+    assert_eq!(
+        page["stages"]["pseudonymised"]["batch"], pseudonymise["id"],
+        "{page}"
+    );
+    assert_eq!(page["stages"]["walked"]["batch"], digest["id"], "{page}");
+    assert_eq!(page["report"]["files"]["written"], 6, "{page}");
+
+    // the timeline of a batch
+    let (status, line) = ask(
+        "GET",
+        &format!("/api/timeline/batch/{}", digest["id"]),
+        None,
+        reader,
+    );
+    assert_eq!(status, 200, "{line}");
+    let kinds: Vec<&str> = line["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    for k in ["started", "finished", "pseudonymised", "classified"] {
+        assert!(kinds.contains(&k), "{k} missing: {line}");
+    }
+    let (status, _) = ask("GET", "/api/timeline/batch/999999", None, reader);
+    assert_eq!(status, 404);
+
+    // the sources door: the pseudonymise step on the digest, the rates
+    let (status, sources) = ask("GET", "/api/sources", None, reader);
+    assert_eq!(status, 200, "{sources}");
+    let source = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "ds")
+        .unwrap();
+    let recent = &source["digests"]["recent"][0];
+    assert_eq!(recent["name"], "chain-1", "{sources}");
+    assert_eq!(recent["pseudonymised"]["files"], 6, "{sources}");
+    assert_eq!(recent["pseudonymised"]["changed"], 6, "{sources}");
+    assert_eq!(recent["pseudonymised"]["job"], first, "{sources}");
+    // record 26 §14: the jobs of the thread by stage, the whole way from
+    // the pseudonymise step to the runs that sorted the stacks
+    assert_eq!(recent["chain"]["pseudonymize"], first, "{sources}");
+    assert_eq!(recent["chain"]["digest"], ids[1], "{sources}");
+    assert_eq!(
+        recent["chain"]["classify"],
+        serde_json::json!([ids[3]]),
+        "{sources}"
+    );
+    assert_eq!(
+        source["digests"]["count"], 1,
+        "a pseudonymise step is not a digest: {sources}"
+    );
+    // record 26 §14: a rate says what it was measured over, so that a page
+    // can say what the number is worth
+    for step in ["pseudonymize", "digest"] {
+        let rate = &sources["rates"][step];
+        assert!(rate["files_per_s"].as_f64().is_some(), "{step}: {sources}");
+        assert_eq!(rate["files"], 6, "{step}: {sources}");
+    }
+
+    // the jobs read as queued (lab 26, defect 19): the command line the
+    // door located, what ran beside it, and the queue's worker left out
+    // of the list unless asked for
+    let (_, shown) = ask("GET", &format!("/api/jobs/{first}"), None, ops);
+    assert_eq!(shown["args"]["queued"][0], "pseudonymize", "{shown}");
+    assert_eq!(shown["args"]["queued"][2], "--name", "{shown}");
+    assert!(
+        shown["args"]["argv"][0].as_str().unwrap().ends_with("nils"),
+        "what ran: {shown}"
+    );
+    assert_eq!(job["args"]["queued"][0], "classify", "{job}");
+    let (_, open) = ask("GET", "/api/jobs", None, ops);
+    assert!(
+        !open["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["kind"] == "worker"),
+        "{open}"
+    );
+    let (_, every) = ask("GET", "/api/jobs?all=1", None, ops);
+    assert!(
+        every["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["kind"] == "worker"),
+        "{every}"
+    );
+
+    // a dry run at the door answers its report as the job's result (lab
+    // 26, defect 17)
+    let (status, queued) = ask(
+        "POST",
+        "/api/jobs",
+        Some(r#"{"command": ["pseudonymize", "@ds", "--dry-run"]}"#),
+        ops,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let dry = wait(queued["job"].as_i64().unwrap());
+    assert_eq!(dry["state"], "done", "{dry}");
+    assert_eq!(dry["result"]["dry_run"], true, "{dry}");
+    assert_eq!(dry["result"]["files"]["seen"], 6, "{dry}");
+    assert_eq!(dry["result"]["files"]["unchanged"], 6, "{dry}");
+
+    // a step the caller may not queue ends the chain, and the job says why
+    let (status, queued) = ask(
+        "POST",
+        "/api/jobs",
+        Some(
+            r#"{"command": ["digest", "@ds", "--name", "chain-2"], "then": [["fingerprint"], ["classify"]]}"#,
+        ),
+        data,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let second = queued["job"].as_i64().unwrap();
+    let job = wait(second);
+    assert_eq!(job["state"], "done", "{job}");
+    let mut stopped = job["result"]["chain_stopped"].clone();
+    for _ in 0..50 {
+        if !stopped.is_null() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (_, again) = ask("GET", &format!("/api/jobs/{second}"), None, ops);
+        stopped = again["result"]["chain_stopped"].clone();
+    }
+    assert_eq!(stopped["step"], serde_json::json!(["fingerprint"]), "{job}");
+    assert!(
+        stopped["why"].as_str().unwrap().contains("pipelines:work"),
+        "{stopped}"
+    );
+    let (_, again) = ask("GET", &format!("/api/jobs/{second}"), None, ops);
+    assert_eq!(again["chain"]["after"], serde_json::Value::Null, "{again}");
+    let (_, jobs) = ask("GET", "/api/jobs?all=1", None, ops);
+    assert!(
+        !jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["chain"]["before"] == second),
+        "nothing queued after the refused step: {jobs}"
+    );
+
+    while used.get() < LIMIT {
+        ask("GET", "/api/capabilities", None, reader);
+    }
+    server.finish();
+}
+
+const LIST_OVERLAY: &str = r#"{
+  "overlay": "site-lists", "version": "1.0.0", "pack": "mri",
+  "scope": {"manufacturer": "SYNTHETIC"},
+  "lists": {"technique.TSE": {"add": ["zzgado"]}},
+  "cases": [{"name": "the site's own turbo word",
+             "stack": {"text_series_description": "zzgado"},
+             "axes": {"technique": "TSE"}}]
+}"#;
+
+/// Record 26, decision 12 (pack contract 5): a word added to an axis
+/// value's list through an overlay moves a verdict in a rehearsal and after
+/// adoption exactly as a bucket's does, the packs door then names the
+/// site's term on that list, the overlay commands print and export it, and
+/// the exported document loads on the command line.
+#[test]
+fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
+    let home = knob_registry();
+    let server = Server::start(
+        &home,
+        8,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reviewer",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+        &[],
+    );
+    let reviewer = Some("a-reviewer-token-of-len");
+    let ops = Some("an-operator-token-of-len");
+
+    // 1: the rehearsal moves the one stack that carries the word, from the
+    // technique the pack's own words decided to the one the site's word does
+    let body = format!(r#"{{"overlay": {LIST_OVERLAY}, "scope": "batch:1", "sample": 100}}"#);
+    let (status, tried) = server.request("POST", "/api/classify/try", Some(&body), reviewer);
+    assert_eq!(status, 200, "{tried}");
+    assert_eq!(tried["cases"]["passed"], 1, "{tried}");
+    assert_eq!(tried["cases"]["failed"], 0, "{tried}");
+    let moves = tried["moves"].as_array().unwrap();
+    assert!(
+        moves
+            .iter()
+            .any(|m| m["axis"] == "technique" && m["to"] == "TSE" && m["stacks"] == 1),
+        "the site's word moves technique: {tried}"
+    );
+    // 2: a list an overlay names that the pack cannot reach is refused with why
+    let bad = LIST_OVERLAY.replace("technique.TSE", "provenance.RawRecon");
+    let body = format!(r#"{{"overlay": {bad}, "scope": "batch:1"}}"#);
+    let (status, refused) = server.request("POST", "/api/classify/try", Some(&body), reviewer);
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused
+            .to_string()
+            .contains("no word of the pack's reaches RawRecon on provenance"),
+        "{refused}"
+    );
+    // 3-4: proposed with its rehearsal, adopted by an operator
+    let body = format!(
+        r#"{{"name": "site lists", "overlay": {LIST_OVERLAY}, "scope": "batch:1", "why": "the site's turbo word"}}"#
+    );
+    let (status, proposed) = server.request("POST", "/api/overlays", Some(&body), reviewer);
+    assert_eq!(status, 201, "{proposed}");
+    let id = proposed["overlay"]["id"].as_i64().unwrap();
+    assert_eq!(
+        proposed["overlay"]["document"]["lists"]["technique.TSE"]["add"],
+        serde_json::json!(["zzgado"]),
+        "{proposed}"
+    );
+    let (status, adopted) = server.request("POST", &format!("/api/overlays/{id}/adopt"), None, ops);
+    assert_eq!(status, 202, "{adopted}");
+    let adopt_job = adopted["job"].as_i64().unwrap();
+    // 5: the packs door names the site's term on the list, on the value and
+    // per list, and the overlay it came from
+    let (status, pack) = server.request("GET", "/api/packs/mri", None, reviewer);
+    assert_eq!(status, 200, "{pack}");
+    assert_eq!(
+        pack["site"]["technique.TSE"]["add"],
+        serde_json::json!(["zzgado"]),
+        "{}",
+        pack["site"]
+    );
+    assert_eq!(
+        pack["site"]["technique.TSE"]["overlays"],
+        serde_json::json!([id])
+    );
+    let tse = pack["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "technique")
+        .and_then(|a| a["values"].as_array())
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "TSE")
+        .cloned()
+        .unwrap();
+    assert_eq!(tse["site"]["add"], serde_json::json!(["zzgado"]), "{tse}");
+    assert_eq!(
+        tse["keywords"][0], "tse",
+        "the pack's own words are the pack's, unamended on disk: {tse}"
+    );
+    assert_eq!(pack["adopted"][0]["id"], id, "{}", pack["adopted"]);
+    // 6-8: the overlay row keeps the document; the signals by value after
+    // the rehearsal are unchanged, since a rehearsal writes nothing
+    let (status, row) = server.request("GET", &format!("/api/overlays/{id}"), None, reviewer);
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(
+        row["document"]["lists"]["technique.TSE"]["add"][0], "zzgado",
+        "{row}"
+    );
+    let (status, signals) =
+        server.request("GET", "/api/classify/signals?scope=batch:1", None, reviewer);
+    assert_eq!(status, 200, "{signals}");
+    assert!(
+        signals["by_value"]["technique"]["TSE"].is_null(),
+        "{signals}"
+    );
+    let (status, doc) = server.request("GET", "/api/overlays", None, reviewer);
+    assert_eq!(status, 200, "{doc}");
+    server.finish();
+
+    // the worker runs the reclassify under the adopted overlay, and the
+    // stack citing the site's word is TSE now, the other unchanged
+    run(&home, &["jobs", "work", "--once"], None);
+    let job = run(
+        &home,
+        &["jobs", "show", &adopt_job.to_string(), "--json"],
+        None,
+    );
+    let job: serde_json::Value = serde_json::from_str(&job).unwrap();
+    assert_eq!(job["state"], "done", "{job}");
+    let explained: Vec<serde_json::Value> = [1, 2]
+        .iter()
+        .map(|id| {
+            let text = run(&home, &["explain", &id.to_string(), "--json"], None);
+            serde_json::from_str(&text).unwrap()
+        })
+        .collect();
+    let technique_of = |doc: &serde_json::Value| -> String {
+        doc["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["axis"] == "technique")
+            .and_then(|a| a["value"].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let cites = |doc: &serde_json::Value| {
+        doc["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["axis"] == "technique")
+            .flat_map(|a| a["evidence"].as_array().cloned().unwrap_or_default())
+            .any(|e| e["matched"] == "zzgado")
+    };
+    let moved = explained
+        .iter()
+        .find(|d| cites(d))
+        .expect("one stack cites the site's word");
+    let still = explained
+        .iter()
+        .find(|d| !cites(d))
+        .expect("and one does not");
+    assert_eq!(technique_of(moved), "TSE", "{moved}");
+    assert_eq!(moved["overlay"], "site-lists@1.0.0", "{moved}");
+    assert_ne!(technique_of(still), "TSE", "{still}");
+    assert_eq!(still["overlay"], "site-lists@1.0.0", "{still}");
+
+    // `nils overlay show` prints the list, and the export loads on the
+    // command line as `nils classify --overlay` loads it
+    let shown = run(&home, &["overlay", "show", &id.to_string()], None);
+    assert!(shown.contains("list technique.TSE: +zzgado"), "{shown}");
+    let out = TempDir::new("overlay-export");
+    let wrote = run(
+        &home,
+        &[
+            "overlay",
+            "export",
+            &id.to_string(),
+            "--to",
+            out.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(wrote.contains("site-lists-1.0.0.overlay.json"), "{wrote}");
+    let file = out.path().join("site-lists-1.0.0.overlay.json");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("\"lists\""), "{text}");
+    let pack = run(
+        &home,
+        &[
+            "pack",
+            "show",
+            "mri",
+            "--json",
+            "--overlay",
+            file.to_str().unwrap(),
+            "--pack-dir",
+            packs().to_str().unwrap(),
+        ],
+        None,
+    );
+    let pack: serde_json::Value = serde_json::from_str(&pack).unwrap();
+    assert_eq!(pack["overlay"], "site-lists@1.0.0", "{}", pack["overlay"]);
+    let tse = pack["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "technique")
+        .and_then(|a| a["values"].as_array())
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "TSE")
+        .cloned()
+        .unwrap();
+    assert!(
+        tse["keywords"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k == "zzgado"),
+        "loaded under the overlay, the value carries the site's word: {tse}"
+    );
+    let classified = run(
+        &home,
+        &[
+            "classify",
+            "--overlay",
+            file.to_str().unwrap(),
+            "--pack-dir",
+            packs().to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
+    assert_eq!(classified["pack"], "mri@0.1.1", "{classified}");
 }

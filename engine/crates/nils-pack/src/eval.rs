@@ -647,6 +647,7 @@ impl Evaluated<'_> {
                     confidence,
                     field,
                     list,
+                    ..
                 } => {
                     // v0 matches a keyword as a case-insensitive substring and
                     // cites the first in the list that hits, not the longest.

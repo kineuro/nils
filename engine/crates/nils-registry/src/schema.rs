@@ -301,6 +301,11 @@ fn build_registry() -> Vec<Table> {
                 col("counts", Type::Json),
                 col("epoch_after", Type::Int),
                 col("reparse_from", Type::Timestamp),
+                // Record 26 §3 and §14: which step the batch is, `digest` or
+                // `pseudonymize`. A pseudonymise step and the digest that
+                // follows it share a name on one source, so a batch page
+                // ties the two; a row from before reads as a digest.
+                col("kind", Type::Text),
             ],
         )
         .index(&["source_id"]),
@@ -347,10 +352,22 @@ fn build_registry() -> Vec<Table> {
                     // overwrite (§13.3). What no file carries is when the
                     // subject died.
                     col("deceased_at", Type::Date),
+                    // Record 26 §4: 1 on a subject the pseudonymiser made
+                    // from an identifier no map named, coded anyway under
+                    // the key; a map that names the identifier later merges
+                    // it. Null or 0 on every other subject.
+                    col("provisional", Type::Int),
+                    // Record 26 §6: a subject merged into another stays as a
+                    // row that says so, and every listing leaves it out. Its
+                    // code is filed on the canonical subject as an identifier
+                    // of type `subject-code`.
+                    col("merged_into", Type::Int),
+                    col("merged_at", Type::Timestamp),
                 ],
             ),
         )
-        .unique(&["code"]),
+        .unique(&["code"])
+        .index(&["merged_into"]),
         Table::new(
             "study",
             with_catalogue(
@@ -440,6 +457,9 @@ fn build_registry() -> Vec<Table> {
                 req("owner", Type::Text),
                 col("description", Type::Text),
                 req("created_at", Type::Timestamp),
+                // Record 26 §9: a retired cohort keeps its members and its
+                // history and leaves the lists the ask and the summary read.
+                col("retired_at", Type::Timestamp),
             ],
         )
         .unique(&["name"]),
@@ -458,9 +478,11 @@ fn build_registry() -> Vec<Table> {
                 col("left_at", Type::Timestamp),
                 col("notes", Type::Text),
                 col("actor", Type::Text),
-                // `import`, `promotion`, `manual`
+                // `import`, `promotion`, `manual`, and since record 26 §8
+                // `digest`: the batch of the dataset that fed the cohort.
                 col("source", Type::Text),
                 col("handle_id", Type::Int),
+                col("batch_id", Type::Int),
                 col("epoch", Type::Int),
                 col("scheme_digest", Type::Text),
                 col("params", Type::Json),
@@ -802,10 +824,87 @@ fn build_registry() -> Vec<Table> {
                 // operator declared it: whether it arrives identified, and
                 // what a release does to it on the way out.
                 col("handling", Type::Json),
+                // Record 26: the dataset a source place is. What arrives
+                // (identified, deidentified, coded), the two trees under the
+                // path (the originals the pseudonymiser reads and the
+                // pseudonymised tree the registry reads, or the folder itself
+                // as `.`), the identity rule, what an unmapped identifier
+                // does (hold, code), the cohort every digest feeds, the tag
+                // lists and what becomes of the originals. Null on any other
+                // role; `place::dataset_of` reads it whole.
+                col("dataset", Type::Json),
             ],
         )
         .unique(&["name"])
         .index(&["role"]),
+        // Record 26 §3 and §4: every file of a dataset's originals as the
+        // pseudonymiser last saw it, one row per file, so a run resumes by
+        // size and modification time, a held file waits for its map with
+        // nothing but its shape and a keyed lookup here, and a page counts
+        // what was written, held and refused. Never a name, never an
+        // identifier in the clear.
+        Table::new(
+            "pseudonym_file",
+            vec![
+                col("id", Type::Id),
+                // The dataset, a source place, whose originals hold the file.
+                req("place_id", Type::Int),
+                // The file's path under the originals tree, and its
+                // directory part, so a run reads its records one directory
+                // at a time as the digest reads `source_file`.
+                req("path", Type::Text),
+                col("dir", Type::Text),
+                // Its size and modification time as last read, in
+                // nanoseconds since the epoch as `source_file` keeps them; a
+                // file with both unchanged is not read again.
+                req("size", Type::Int),
+                req("mtime", Type::Int),
+                // written: a pseudonymised copy is in the anon tree;
+                // unchanged: the copy from before still stands; held: the
+                // linkage store does not know its identifier and the
+                // dataset holds; refused: the file could not be read or
+                // written, with the reason on the job.
+                req("state", Type::Text),
+                // Of a held file: the shape of its identifier, digits as 9
+                // and letters as A, which a review item groups by.
+                col("shape", Type::Text),
+                // The keyed lookup of the identifier, as the linkage store
+                // keys it, so that a map naming the identifier releases the
+                // file without the identifier being kept here.
+                col("lookup", Type::Bytes),
+                // The identifier sealed under the registry's key, for the
+                // reveal door alone: read at detail sensitive and audited.
+                col("sealed", Type::Bytes),
+                // The id type the rule read the identifier as.
+                col("id_type", Type::Text),
+                // Where the copy was written under the anon tree, its size
+                // and its digest, hashed while writing.
+                col("out_path", Type::Text),
+                col("out_size", Type::Int),
+                col("digest", Type::Text),
+                // The digest of the original itself, hashed while the run
+                // read it (lab 26d, finding 2). The copy is proved by
+                // content and the original was proved by two numbers
+                // anything may set, so a file changed in place under its own
+                // modification time passed as verified and a purge destroyed
+                // it. A purge proves each original by this digest, read from
+                // the file at the moment it removes it; a row without one
+                // cannot be proved and is refused.
+                col("original_digest", Type::Text),
+                // The pseudonymise batch that last touched the row.
+                col("batch_id", Type::Int),
+                req("first_seen", Type::Timestamp),
+                col("written_at", Type::Timestamp),
+                // When a map released a held file.
+                col("released_at", Type::Timestamp),
+                // 1 when a person asked for the held file to be coded
+                // anyway, from the identifier under the key; 0 otherwise.
+                req("code_anyway", Type::Int),
+            ],
+        )
+        .unique(&["place_id", "path"])
+        .index(&["place_id", "dir"])
+        .index(&["place_id", "state"]),
         Table::new(
             "classification",
             vec![
@@ -1040,6 +1139,17 @@ fn build_registry() -> Vec<Table> {
                 req("added", Type::Int),
                 req("removed", Type::Int),
                 col("error", Type::Text),
+                // Record 26 §13: the leaving policy of each dataset the
+                // release spanned, `[{dataset, dates, uids, from}]`, beside
+                // the run's own `policy`.
+                col("policies", Type::Json),
+                // §4.3 with record 26 §13: why this release's sessions were
+                // numbered in date order rather than labelled the way its
+                // scheme asked, in the engine's own words. The scheme in
+                // `session_scheme` is the one that named them, so without
+                // this the row says what happened and never why. Null on a
+                // run whose scheme stood, which is nearly every one.
+                col("session_naming", Type::Text),
             ],
         )
         .index(&["name"]),
@@ -1620,12 +1730,20 @@ fn build_linkage() -> Vec<Table> {
     ]
 }
 
-/// The id types seeded at `nils init` (§7.2).
-pub const ID_TYPES: [(&str, &str); 2] = [
+/// The id type a merge files the alias's code under (record 26 §6).
+pub const SUBJECT_CODE_TYPE: &str = "subject-code";
+
+/// The id types seeded at `nils init` (§7.2), and the one a merge needs,
+/// which migration 39 adds to a store from before it.
+pub const ID_TYPES: [(&str, &str); 3] = [
     ("patient-id", "PatientID (0010,0020) as written, trimmed"),
     (
         "study-instance-uid",
         "StudyInstanceUID, the fallback when PatientID is absent",
+    ),
+    (
+        SUBJECT_CODE_TYPE,
+        "the code of a subject merged into this one",
     ),
 ];
 

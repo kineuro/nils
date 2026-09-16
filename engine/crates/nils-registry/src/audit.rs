@@ -46,6 +46,13 @@ pub enum Action {
     CohortMemberAdd,
     CohortMemberRemove,
     CohortPromote,
+    /// Record 26 §8 and §9: a digest of a dataset fed its cohort; a cohort
+    /// was renamed, its owner or description set, retired, or brought back.
+    CohortJoin,
+    CohortRename,
+    CohortSet,
+    CohortRetire,
+    CohortRestore,
     SelectionSave,
     /// Wave 5 §12.8: a handle stopped reproducing under a change the
     /// dependency door named.
@@ -62,6 +69,15 @@ pub enum Action {
     SettingsSet,
     /// Wave 5 §10.3: the backup schedule set.
     BackupSchedule,
+    /// Record 26 §6: an alias subject merged into a canonical one, which
+    /// moves every row of the alias and so the epoch.
+    SubjectMerge,
+    /// Record 26 §1: a dataset's originals moved into another place, and a
+    /// dataset's originals deleted. What the row holds is the shape of the
+    /// act: the dataset, where they went, how many files and bytes, and
+    /// the reason the person gave.
+    OriginalsVault,
+    OriginalsPurge,
 }
 
 impl Action {
@@ -87,6 +103,11 @@ impl Action {
             Action::CohortMemberAdd => "cohort.member.add",
             Action::CohortMemberRemove => "cohort.member.remove",
             Action::CohortPromote => "cohort.promote",
+            Action::CohortJoin => "cohort.join",
+            Action::CohortRename => "cohort.rename",
+            Action::CohortSet => "cohort.set",
+            Action::CohortRetire => "cohort.retire",
+            Action::CohortRestore => "cohort.restore",
             Action::SelectionSave => "selection.save",
             Action::HandleInvalidate => "handle.invalidate",
             Action::InstanceOpen => "instance.open",
@@ -95,6 +116,9 @@ impl Action {
             Action::PlaceRetire => "place.retire",
             Action::SettingsSet => "settings.set",
             Action::BackupSchedule => "backup.schedule",
+            Action::SubjectMerge => "subject.merge",
+            Action::OriginalsVault => "originals.vault",
+            Action::OriginalsPurge => "originals.purge",
         }
     }
 
@@ -145,8 +169,24 @@ pub fn record(registry: &mut Registry, entry: &Entry<'_>) -> Result<i64, StoreEr
     } else {
         None
     };
+    write(registry.store(), entry, epoch)
+}
+
+/// [`record`] on a registry store held without its [`Registry`]: a merge
+/// run inside an import. The epoch is read from the store and bumped
+/// there, so a `Registry` open beside it reads the new value on its next
+/// refresh.
+pub fn record_in(store: &mut Store, entry: &Entry<'_>) -> Result<i64, StoreError> {
+    let epoch = if entry.action.changes_judgement() {
+        Some(crate::home::next_epoch_in(store)?)
+    } else {
+        None
+    };
+    write(store, entry, epoch)
+}
+
+fn write(store: &mut Store, entry: &Entry<'_>, epoch: Option<i64>) -> Result<i64, StoreError> {
     let now = now_iso();
-    let store = registry.store();
     let rows = store.insert(
         &Insert::new(
             table("audit"),

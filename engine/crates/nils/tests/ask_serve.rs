@@ -193,11 +193,11 @@ fn body(v: serde_json::Value) -> String {
 #[test]
 fn the_ask_doors_run_a_document_to_a_handle_and_its_affordances_answer() {
     let home = synthetic();
-    let server = Server::start(&home, 22, &[]);
+    let server = Server::start(&home, 23, &[]);
     // the capabilities carry the ask block and the contract version
     let (status, caps) = server.request("GET", "/api/capabilities", None, None);
     assert_eq!(status, 200, "{caps}");
-    assert_eq!(caps["contracts"]["openapi"], "4");
+    assert_eq!(caps["contracts"]["openapi"], "5");
     // the synthetic marker: `nils synth` set it, a desk shows a banner on it
     assert_eq!(caps["registry"]["synthetic"], "nils-synth", "{caps}");
     let ask = &caps["ask"];
@@ -289,6 +289,25 @@ fn the_ask_doors_run_a_document_to_a_handle_and_its_affordances_answer() {
     assert_eq!(status, 200, "{h}");
     assert_eq!(h["name"], "converters");
     assert_eq!(h["pages"], 1);
+    // the name is taken: refused in words, never as the store's constraint
+    // (lab 26, defect 18)
+    let (status, taken) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(
+            serde_json::json!({"document": doc, "name": "converters", "keep": true, "fresh": true}),
+        )),
+        None,
+    );
+    assert_eq!(status, 409, "{taken}");
+    assert!(
+        taken["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("a kept handle named converters exists"),
+        "{taken}"
+    );
+    assert!(!taken.to_string().contains("UNIQUE"), "{taken}");
     // Wave 4c §7.4: the list door names the handle newest first with what
     // the result surface reads, and the policy table carries the door.
     let (status, list) = server.request("GET", "/api/ask/handles?limit=5", None, None);
@@ -473,7 +492,7 @@ fn a_capped_run_is_truncated_and_a_token_with_no_grant_is_refused() {
     assert!(ran["content_hash"].is_null(), "{ran}");
     assert_eq!(ran["row_count"], 3);
     // the promotion of a truncated handle is refused before it is queued? No: the
-    // job refuses it; the door needs release:work
+    // job refuses it; the door needs data:work (record 26 section 9)
     let handle = ran["handle"].as_i64().unwrap();
     let (status, doc) = server.request(
         "POST",
@@ -482,7 +501,7 @@ fn a_capped_run_is_truncated_and_a_token_with_no_grant_is_refused() {
         reader,
     );
     assert_eq!(status, 403, "{doc}");
-    assert!(doc["error"].as_str().unwrap().contains("release:work"));
+    assert!(doc["error"].as_str().unwrap().contains("data:work"));
     // a token with no grant is refused at every door, and says so
     let (status, doc) = server.request(
         "GET",

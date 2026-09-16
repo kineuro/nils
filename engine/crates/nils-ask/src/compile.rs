@@ -619,7 +619,9 @@ impl<'a> Builder<'a> {
                 study_k: None,
                 series_k: None,
                 stack_k: None,
-                standing: Vec::new(),
+                // record 26 §6: a subject merged into another is not a
+                // subject any listing sees; its rows moved with the merge
+                standing: vec!["su.merged_into IS NULL".into()],
             },
             Grain::Session => {
                 let digest = self.p(Param::from(self.ctx.scheme_digest.as_str()), Type::Text);

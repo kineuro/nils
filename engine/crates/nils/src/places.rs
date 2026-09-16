@@ -7,6 +7,18 @@
 //! here. The rules are enforced once a deployment has declared any place;
 //! a registry from before this slice, or a laptop that has declared none,
 //! keeps the flags it had, and the capabilities say so.
+//!
+//! A source place is never written by a verb that takes a path: a release,
+//! a handover, a backup and a subset are refused under one. The writes the
+//! engine makes under a source place are the dataset's own (record 26):
+//! the look at the folder when a dataset is declared, which renames v0's
+//! `dcm-raw` to `dcm-anon` and moves loose entries into the dataset's trees
+//! by a rename inside the folder (`crate::dataset::look`); the
+//! pseudonymiser writing the pseudonymised tree; and the acts on the
+//! originals, which move them into a place of another role or delete them
+//! (`crate::originals`). The first two reach nowhere outside the dataset's
+//! own folder and go through no `require`; a vault's destination is a
+//! `backup` place and is checked by `require` like any other write.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -100,7 +112,7 @@ pub fn require(store: &mut Store, role: Role, path: &Path) -> Result<Option<Plac
     {
         return Err(Refusal {
             message: format!(
-                "{} is under the source place {}, which the engine never writes (Wave 5 section 10.2)",
+                "{} is under the source place {}, which the engine never writes outside the dataset's own trees (Wave 5 section 10.2)",
                 path.display(),
                 source.name
             ),
@@ -515,13 +527,21 @@ pub fn bound_paths(place: &Place, configured: &[(&str, &Path)]) -> Vec<Value> {
         .collect()
 }
 
-/// The capabilities block: whether the rules are in force and how many
-/// places are declared.
+/// The capabilities block: whether the rules are in force, how many places
+/// are declared, and the dataset a source place is (record 26): the fields
+/// a declaration takes, the grant they need beside `places:work`, and the
+/// two trees by name.
 pub fn capabilities(store: &mut Store) -> Value {
     let places = place::active(store).unwrap_or_default();
     json!({
         "enforced": !places.is_empty(),
         "count": places.len(),
         "roles": Role::ALL.iter().map(|r| r.name()).collect::<Vec<_>>(),
+        "dataset": {
+            "grant": "data:work",
+            "fields": crate::dataset::FIELDS,
+            "arrives": place::ARRIVALS,
+            "trees": {"originals": place::ORIGINALS_TREE, "anon": place::ANON_TREE},
+        },
     })
 }

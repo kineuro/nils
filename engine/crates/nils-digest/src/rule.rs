@@ -69,6 +69,15 @@ pub struct Rule {
     /// fallback identifier is derived as always, since a study UID is no
     /// code.
     pub verbatim: bool,
+    /// The tree the rule reads is this registry's own pseudonymised tree
+    /// (record 26 §3), so a value read verbatim there is one of this
+    /// registry's codes: a code a subject holds already, or a value of the
+    /// shape this registry makes. A value that is neither is no code of
+    /// ours, and a code is derived from it as from any identifier. The
+    /// engine sets it on the rule it writes for a pseudonymised tree; a
+    /// rule file cannot, and its `code: verbatim` files what it reads as
+    /// the code as it always did.
+    pub own_codes: bool,
     /// Where the rule came from, for `--describe`: a path, or none for the
     /// default.
     pub source: Option<String>,
@@ -184,6 +193,7 @@ impl Default for Rule {
                 pattern: None,
             }],
             verbatim: false,
+            own_codes: false,
             source: None,
             fields: IdentityFields::default(),
         }
@@ -298,6 +308,7 @@ impl Rule {
             id_type: spec.id_type,
             from,
             verbatim,
+            own_codes: false,
             source: None,
             fields,
         })
@@ -339,6 +350,9 @@ impl Rule {
         out.push_str(&format!(", then {FALLBACK_FIELD}"));
         if self.verbatim {
             out.push_str("; the value read is the code itself");
+            if self.own_codes {
+                out.push_str(", a code this registry holds or a value of its own shape");
+            }
         }
         if let Some(src) = &self.source {
             out.push_str(&format!(" (from {src})"));

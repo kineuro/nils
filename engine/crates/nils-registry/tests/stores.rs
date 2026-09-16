@@ -426,10 +426,12 @@ fn a_home_on_postgres_initialises_and_reopens() {
     assert_eq!(reg.meta().epoch, 1);
     let mut linkage = reg.open_linkage().unwrap();
     assert_eq!(linkage.schema(), Some("nils_home_test_linkage"));
+    // the seeded types: patient-id, study-instance-uid and, since record
+    // 26, subject-code
     let n = linkage.query("SELECT COUNT(*) FROM id_type", &[]).unwrap()[0]
         .int(0)
         .unwrap();
-    assert_eq!(n, 2);
+    assert_eq!(n, 3);
     drop(linkage);
     reg.store()
         .batch("DROP SCHEMA nils_home_test CASCADE; DROP SCHEMA nils_home_test_linkage CASCADE")

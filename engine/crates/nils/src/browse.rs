@@ -17,6 +17,10 @@
 //! folders. Both read the disk in a thread of their own, since a network
 //! mount that does not answer would otherwise hold the handler behind it;
 //! past the wait the answer says so, with what was known by then.
+//!
+//! A root is read as `@name` resolves it (record 26): the pseudonymised
+//! tree of the dataset declared on it, with `@name/originals` its
+//! originals; a root no dataset is declared on is the folder it was given.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
@@ -28,6 +32,7 @@ use nils_registry::place::{self, Place, Role};
 use nils_registry::store::Store;
 use serde_json::{Map, Value, json};
 
+use crate::dataset::{self, Root};
 use crate::folders::within;
 use crate::places::may_enter;
 use crate::serve::Reply;
@@ -66,6 +71,10 @@ const SLICE_MIN: Duration = Duration::from_millis(250);
 const MARGIN: Duration = Duration::from_secs(2);
 
 const NAMED: &str = "at: a folder of an ingest location, as @root/relative";
+/// What a look takes, which is either of those (record 26): the desk looks
+/// at a folder before a dataset is declared on it, and such a folder is
+/// under no location yet.
+const GIVEN: &str = "at: a folder of an ingest location, as @root/relative, or path: the absolute path of a folder on this host";
 const OUTSIDE: &str = "at: the path steps outside its location";
 
 /// A folder of an ingest root, named as `@root/relative`.
@@ -117,13 +126,9 @@ impl At {
         })
     }
 
-    /// The folder under its root, as the root was given.
-    fn under(&self, root: &Path) -> PathBuf {
-        if self.rel.is_empty() {
-            root.to_path_buf()
-        } else {
-            root.join(&self.rel)
-        }
+    /// The folder under its root, as the root resolves it.
+    fn under(&self, root: &Root) -> PathBuf {
+        root.resolve(&self.rel)
     }
 }
 
@@ -132,7 +137,7 @@ fn plain_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
 }
 
-fn root_of(roots: &BTreeMap<String, PathBuf>, at: &At) -> Result<PathBuf, Reply> {
+fn root_of(roots: &BTreeMap<String, Root>, at: &At) -> Result<Root, Reply> {
     roots.get(&at.root).cloned().ok_or_else(|| {
         Reply::error(
             400,
@@ -161,12 +166,13 @@ enum Spot {
     Folder(PathBuf),
 }
 
-/// The folder an `@root/relative` names: its path under the root as the root
-/// was given, and where it is with links followed, which must be inside the
-/// root's real path.
-fn resolve(root: &Path, at: &At) -> Result<(PathBuf, Spot), Reply> {
+/// The folder an `@root/relative` names: its path under the root's tree as
+/// the root resolves it, and where it is with links followed, which must be
+/// inside that tree's real path.
+fn resolve(root: &Root, at: &At) -> Result<(PathBuf, Spot), Reply> {
     let path = at.under(root);
-    let spot = match (std::fs::canonicalize(root), std::fs::canonicalize(&path)) {
+    let (base, _) = root.base(&at.rel);
+    let spot = match (std::fs::canonicalize(base), std::fs::canonicalize(&path)) {
         (Ok(base), Ok(real)) => {
             if !real.starts_with(&base) {
                 return Err(Reply::error(400, OUTSIDE));
@@ -213,24 +219,29 @@ fn holder(held: &[Held], real: &Path) -> Value {
         )
 }
 
-/// The ingest roots, each with the place that holds it, sources first.
-fn roots_doc(roots: &BTreeMap<String, PathBuf>, places: Vec<Place>) -> Value {
-    let given: Vec<(String, PathBuf)> = roots.iter().map(|(n, p)| (n.clone(), p.clone())).collect();
-    let row = |name: &str, path: &Path, place: Value| json!({"name": name, "path": path.display().to_string(), "place": place});
+/// The ingest roots, each as `@name` resolves it and with the place that
+/// holds it, sources first.
+fn roots_doc(roots: &BTreeMap<String, Root>, places: Vec<Place>) -> Value {
+    let given: Vec<Root> = roots.values().cloned().collect();
+    let row = |root: &Root, place: Value| {
+        let mut r = root.as_json();
+        r["place"] = place;
+        r
+    };
     // what is known without the disk, for an answer past the wait
     let known = json!({
         "at": null,
-        "roots": given.iter().map(|(n, p)| row(n, p, Value::Null)).collect::<Vec<_>>(),
+        "roots": given.iter().map(|r| row(r, Value::Null)).collect::<Vec<_>>(),
         "timed_out": true,
     });
     within(WAIT, move || {
         let held = held(&places);
         let mut rows: Vec<(bool, Value)> = given
             .iter()
-            .map(|(name, path)| {
-                let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            .map(|root| {
+                let real = std::fs::canonicalize(&root.anon).unwrap_or_else(|_| root.anon.clone());
                 let place = holder(&held, &real);
-                (place["role"] == "source", row(name, path, place))
+                (place["role"] == "source", row(root, place))
             })
             .collect();
         // the map gave them by name, and the sort keeps that order within each
@@ -545,7 +556,7 @@ fn paged(mut doc: Value, page: Taken, held: &[Held], real: &Path, ended: bool) -
 
 /// The listing itself, which reads the disk.
 fn listing(
-    root: &Path,
+    root: &Root,
     places: &[Place],
     asked: &Asked,
     known: &Mutex<Known>,
@@ -585,7 +596,7 @@ fn listing(
 
 /// A listing's answer past the wait: what the call knew by then, and the
 /// folders read so far.
-fn late(known: &Mutex<Known>, asked: &Asked, root: &Path) -> Value {
+fn late(known: &Mutex<Known>, asked: &Asked, root: &Root) -> Value {
     let doc = known.try_lock().ok().and_then(|k| {
         let mut doc = k.doc.clone()?;
         if let (Some(read), Some(real)) = (&k.read, &k.real)
@@ -617,12 +628,13 @@ pub(crate) fn folders_door(
     doc: &Value,
 ) -> Result<Reply, Reply> {
     let places = place::active(store)?;
+    let roots = dataset::roots(store, roots);
     let at = match &doc["at"] {
-        Value::Null => return Ok(Reply::ok(roots_doc(roots, places))),
+        Value::Null => return Ok(Reply::ok(roots_doc(&roots, places))),
         Value::String(text) => At::parse(text).map_err(|m| Reply::error(400, m))?,
         _ => return Err(Reply::error(400, NAMED)),
     };
-    let root = root_of(roots, &at)?;
+    let root = root_of(&roots, &at)?;
     let filter = match &doc["filter"] {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
@@ -779,8 +791,27 @@ fn what(sampled: &Sampled, until: Instant) -> Map<String, Value> {
 /// What a look is asked.
 struct LookAsked {
     at: At,
+    /// Record 26: the absolute path the call named, for a folder under no
+    /// ingest location. The look is the same one, bounded the same way, on
+    /// a root made of that folder; the answer names no location.
+    given: Option<PathBuf>,
     names: Option<Vec<String>>,
     budget: Duration,
+}
+
+impl LookAsked {
+    /// How the answer names the folder: the location and the part under it,
+    /// or nothing where the call gave a path of its own.
+    fn named(&self) -> (Value, Value, Value) {
+        match self.given {
+            Some(_) => (Value::Null, Value::Null, Value::Null),
+            None => (
+                json!(self.at.text()),
+                json!(self.at.root),
+                json!(self.at.rel),
+            ),
+        }
+    }
 }
 
 /// What a look knows as the disk answers, for an answer past the wait.
@@ -793,17 +824,19 @@ struct LookKnown {
 }
 
 /// The look itself, which reads the disk.
-fn looking(root: &Path, asked: &LookAsked, known: &Mutex<LookKnown>) -> Result<Value, Reply> {
+fn looking(root: &Root, asked: &LookAsked, known: &Mutex<LookKnown>) -> Result<Value, Reply> {
     let begun = Instant::now();
     let (path, spot) = resolve(root, &asked.at)?;
+    let (at, in_root, rel) = asked.named();
     let mut doc = json!({
-        "at": asked.at.text(),
-        "root": asked.at.root,
-        "rel": asked.at.rel,
+        "at": at,
+        "root": in_root,
+        "rel": rel,
         "path": path.display().to_string(),
         "exists": true,
         "directory": true,
         "readable": true,
+        "layout": null,
         "here": null,
         "folders": [],
         "timed_out": false,
@@ -811,6 +844,8 @@ fn looking(root: &Path, asked: &LookAsked, known: &Mutex<LookKnown>) -> Result<V
     let Some(real) = unread(&mut doc, spot) else {
         return Ok(doc);
     };
+    // record 26: what the folder holds before it is declared a dataset
+    doc["layout"] = dataset::layout_doc(&real, &dataset::detect(&real));
     let names = match &asked.names {
         Some(names) => names.clone(),
         None => {
@@ -881,7 +916,7 @@ fn looking(root: &Path, asked: &LookAsked, known: &Mutex<LookKnown>) -> Result<V
 
 /// A look's answer past its budget and the margin: what the look knew by
 /// then, and every folder it did not reach as not looked.
-fn look_late(known: &Mutex<LookKnown>, asked: &LookAsked, root: &Path) -> Value {
+fn look_late(known: &Mutex<LookKnown>, asked: &LookAsked, root: &Root) -> Value {
     let not_looked = |name: &String| json!({"name": name, "looked": false});
     let doc = known.try_lock().ok().and_then(|k| {
         let mut doc = k.doc.clone()?;
@@ -891,15 +926,17 @@ fn look_late(known: &Mutex<LookKnown>, asked: &LookAsked, root: &Path) -> Value 
         doc["folders"] = json!(folders);
         Some(doc)
     });
+    let (at, in_root, rel) = asked.named();
     let mut doc = doc.unwrap_or_else(|| {
         json!({
-            "at": asked.at.text(),
-            "root": asked.at.root,
-            "rel": asked.at.rel,
+            "at": at,
+            "root": in_root,
+            "rel": rel,
             "path": asked.at.under(root).display().to_string(),
             "exists": null,
             "directory": null,
             "readable": null,
+            "layout": null,
             "here": null,
             "folders": asked.names.iter().flatten().map(not_looked).collect::<Vec<_>>(),
         })
@@ -909,13 +946,38 @@ fn look_late(known: &Mutex<LookKnown>, asked: &LookAsked, root: &Path) -> Value 
 }
 
 /// `POST /api/ingest/look`: what the files directly inside a folder of an
-/// ingest root are, and what a sample of each folder inside it holds.
-pub(crate) fn look_door(roots: &BTreeMap<String, PathBuf>, doc: &Value) -> Result<Reply, Reply> {
-    let at = match doc["at"].as_str() {
-        Some(text) => At::parse(text).map_err(|m| Reply::error(400, m))?,
-        None => return Err(Reply::error(400, NAMED)),
+/// ingest root are, what a sample of each folder inside it holds, and the
+/// layout a dataset declared on it would find.
+pub(crate) fn look_door(
+    roots: &BTreeMap<String, PathBuf>,
+    store: &mut Store,
+    doc: &Value,
+) -> Result<Reply, Reply> {
+    // A folder of a location, or, for a folder no dataset is declared on
+    // yet, the path itself: the desk asks what a folder holds before it
+    // declares a dataset on it, and such a folder is under no location
+    // (record 26). The path is read under `data:work`, as the door is, and
+    // the look is bounded exactly as a location's is.
+    let (at, root, given) = match (doc["at"].as_str(), doc["path"].as_str()) {
+        (Some(text), _) => {
+            let at = At::parse(text).map_err(|m| Reply::error(400, m))?;
+            let root = root_of(&dataset::roots(store, roots), &at)?;
+            (at, root, None)
+        }
+        (None, Some(text)) => {
+            let path = PathBuf::from(text.trim());
+            if !path.is_absolute() || path.components().any(|c| c.as_os_str() == "..") {
+                return Err(Reply::error(400, GIVEN));
+            }
+            let at = At {
+                root: String::new(),
+                rel: String::new(),
+            };
+            let root = Root::plain("", &path);
+            (at, root, Some(path))
+        }
+        (None, None) => return Err(Reply::error(400, GIVEN)),
     };
-    let root = root_of(roots, &at)?;
     let names = match &doc["names"] {
         Value::Null => None,
         Value::Array(list) => {
@@ -950,6 +1012,7 @@ pub(crate) fn look_door(roots: &BTreeMap<String, PathBuf>, doc: &Value) -> Resul
     };
     let asked = Arc::new(LookAsked {
         at,
+        given,
         names,
         budget: Duration::from_millis(budget),
     });
@@ -985,7 +1048,9 @@ mod tests {
         );
         assert_eq!(At::parse("@scans").unwrap().parent(), None);
         assert_eq!(
-            At::parse("@scans").unwrap().under(Path::new("/srv/scans")),
+            At::parse("@scans")
+                .unwrap()
+                .under(&Root::plain("scans", Path::new("/srv/scans"))),
             Path::new("/srv/scans")
         );
         for bad in ["/etc", "scans/a", "@", "@/a", ""] {

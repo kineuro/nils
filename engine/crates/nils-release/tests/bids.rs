@@ -140,6 +140,7 @@ fn settings<'a>(
         name: "a cohort",
         root: out,
         policy,
+        policy_from: nils_release::policy::Source::Flags,
         categories: categories::Category::every(),
         selection: Selection::default(),
         scheme,
