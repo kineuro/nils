@@ -248,6 +248,7 @@ fn start_job(registry: &mut Registry, settings: &Settings) -> Result<Run, Digest
                     "config",
                     "started_at",
                     "state",
+                    "kind",
                 ],
             )
             .returning(&["id"]),
@@ -258,6 +259,7 @@ fn start_job(registry: &mut Registry, settings: &Settings) -> Result<Run, Digest
                 Param::from(config.to_string()),
                 Param::from(now.as_str()),
                 Param::from("running"),
+                Param::from("digest"),
             ]],
         )?;
         let batch_id = batch.first().ok_or_else(no_id)?.int(0)?;

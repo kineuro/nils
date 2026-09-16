@@ -39,6 +39,11 @@ pub struct Plan<'a> {
     pub offset: Offset,
     /// None when the policy preserves UIDs.
     pub remap: Option<&'a Remap>,
+    /// Tags kept whatever a category says (record 26 §3: a dataset's `keep`
+    /// list, and the demographics it keeps). Keep wins over remove.
+    pub keep: &'a [Tag],
+    /// Tags removed beside the categories (a dataset's `remove` list).
+    pub remove: &'a [Tag],
 }
 
 /// What was done, counted per tag so the audit can say so without saying what
@@ -100,8 +105,13 @@ pub fn apply(object: &mut DefaultDicomObject, plan: &Plan) -> Applied {
         done.age = Some(years);
     }
 
-    // 2. The declared categories, less what makes a file a file.
-    for tag in crate::tags::tags_of(plan.categories) {
+    // 2. The declared categories and the named removals, less what makes a
+    //    file a file and less what is named to keep.
+    let mut removals = crate::tags::tags_of(plan.categories);
+    removals.extend_from_slice(plan.remove);
+    removals.sort_unstable();
+    removals.dedup();
+    for tag in removals {
         if MANDATORY.iter().any(|(g, e)| Tag(*g, *e) == tag) {
             continue;
         }
@@ -109,6 +119,9 @@ pub fn apply(object: &mut DefaultDicomObject, plan: &Plan) -> Applied {
         // category holds it, which is why v0 cannot both remove the birth date
         // and keep an age.
         if tag == tags::PATIENT_AGE || tag == tags::PATIENT_ID {
+            continue;
+        }
+        if plan.keep.contains(&tag) {
             continue;
         }
         if object.remove_element(tag) {
@@ -281,6 +294,8 @@ mod tests {
             code: "a1b2c3d4",
             offset: Offset(offset),
             remap,
+            keep: &[],
+            remove: &[],
         }
     }
 
@@ -499,6 +514,43 @@ mod tests {
         assert!(!rendered.contains("SVENSSON"), "{rendered}");
         assert!(!rendered.contains("Karolinska"), "{rendered}");
         assert!(rendered.contains("(0010,0010)"), "{rendered}");
+    }
+
+    #[test]
+    fn a_named_tag_is_kept_over_its_category_and_another_removed_beside_them() {
+        // Record 26 §3: a dataset keeps its demographics and names what
+        // else to keep or remove; keep wins.
+        let mut o = object(&[
+            (tags::PATIENT_ID, VR::LO, "x"),
+            (tags::PATIENT_SEX, VR::CS, "F"),
+            (tags::PATIENT_WEIGHT, VR::DS, "62"),
+            (tags::PATIENT_NAME, VR::PN, "SVENSSON^ANNA"),
+            (tags::STATION_NAME, VR::SH, "MR1"),
+            (tags::DEVICE_SERIAL_NUMBER, VR::LO, "12345"),
+        ]);
+        let policy = Policy::default();
+        let keep = [tags::PATIENT_SEX, tags::PATIENT_WEIGHT, tags::STATION_NAME];
+        let remove = [tags::DEVICE_SERIAL_NUMBER, tags::STATION_NAME];
+        let plan = Plan {
+            keep: &keep,
+            remove: &remove,
+            ..plan(&policy, None, 0)
+        };
+        let done = apply(&mut o, &plan);
+        assert_eq!(text(&o, tags::PATIENT_SEX).as_deref(), Some("F"));
+        assert_eq!(text(&o, tags::PATIENT_WEIGHT).as_deref(), Some("62"));
+        assert_eq!(
+            text(&o, tags::STATION_NAME).as_deref(),
+            Some("MR1"),
+            "keep wins"
+        );
+        assert_eq!(text(&o, tags::PATIENT_NAME), None);
+        assert_eq!(text(&o, tags::DEVICE_SERIAL_NUMBER), None);
+        assert_eq!(done.total("removed"), 2);
+        assert!(
+            done.changes
+                .contains_key(&("(0018,1000)".to_string(), "removed"))
+        );
     }
 
     #[test]

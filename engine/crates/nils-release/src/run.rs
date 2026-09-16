@@ -845,6 +845,8 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                     code: &code,
                     offset: job.offset,
                     remap: remap.as_ref(),
+                    keep: &[],
+                    remove: &[],
                 };
                 let written = match settings.layout {
                     Layout::Descriptive => {

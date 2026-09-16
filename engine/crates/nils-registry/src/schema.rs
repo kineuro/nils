@@ -301,6 +301,11 @@ fn build_registry() -> Vec<Table> {
                 col("counts", Type::Json),
                 col("epoch_after", Type::Int),
                 col("reparse_from", Type::Timestamp),
+                // Record 26 §3 and §14: which step the batch is, `digest` or
+                // `pseudonymize`. A pseudonymise step and the digest that
+                // follows it share a name on one source, so a batch page
+                // ties the two; a row from before reads as a digest.
+                col("kind", Type::Text),
             ],
         )
         .index(&["source_id"]),
@@ -347,6 +352,11 @@ fn build_registry() -> Vec<Table> {
                     // overwrite (§13.3). What no file carries is when the
                     // subject died.
                     col("deceased_at", Type::Date),
+                    // Record 26 §4: 1 on a subject the pseudonymiser made
+                    // from an identifier no map named, coded anyway under
+                    // the key; a map that names the identifier later merges
+                    // it. Null or 0 on every other subject.
+                    col("provisional", Type::Int),
                 ],
             ),
         )

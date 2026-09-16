@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 39;
+pub const SCHEMA_VERSION: i64 = 40;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,7 +210,36 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 39,
         apply: a_source_place_is_a_dataset,
     },
+    Migration {
+        version: 40,
+        apply: a_batch_has_a_kind_and_a_subject_may_be_provisional,
+    },
 ];
+
+/// Record 26 §3, §4 and §14: a batch says which step it is, `digest` or
+/// `pseudonymize`, every batch from before being a digest; and a subject
+/// says whether the pseudonymiser made it from an identifier no map named,
+/// which no subject from before was.
+fn a_batch_has_a_kind_and_a_subject_may_be_provisional(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "ingest_batch", &["kind"])?;
+    add_columns(store, "subject", &["provisional"])?;
+    if table_exists(store, "ingest_batch")? {
+        store.execute(
+            &format!(
+                "UPDATE {} SET kind = 'digest' WHERE kind IS NULL",
+                store.qualified("ingest_batch")
+            ),
+            &[],
+        )?;
+    }
+    Ok(())
+}
 
 /// Record 26 §1: a source place is a dataset, with what arrives, its two
 /// trees, its identity rule, what an unmapped identifier does, the cohort it
@@ -1446,6 +1475,62 @@ mod column_migration {
         assert!(column_exists(&mut store, "classification_evidence", "reference").unwrap());
         // and again, because a migration that has run must be safe to run
         evidence_says_which_pass(&mut store, Kind::Registry).unwrap();
+    }
+
+    /// A registry from before record 26's pseudonymiser opens with every
+    /// batch a digest and no subject provisional, and a row written after
+    /// keeps what it said.
+    #[test]
+    fn every_batch_from_before_is_a_digest_and_no_subject_is_provisional() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 39) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        store
+            .batch("ALTER TABLE ingest_batch DROP COLUMN kind")
+            .unwrap();
+        store
+            .batch("ALTER TABLE subject DROP COLUMN provisional")
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO ingest_batch (id, source_id, job_id, name, config, started_at, state) VALUES (1, 1, 1, 'n', '{}', 't', 'done')",
+                &[],
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO subject (id, code, created_at) VALUES (1, 'abc', 't')",
+                &[],
+            )
+            .unwrap();
+
+        a_batch_has_a_kind_and_a_subject_may_be_provisional(&mut store, Kind::Registry).unwrap();
+        assert!(column_exists(&mut store, "ingest_batch", "kind").unwrap());
+        assert!(column_exists(&mut store, "subject", "provisional").unwrap());
+        let kind = store
+            .query_opt("SELECT kind FROM ingest_batch WHERE id = 1", &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(kind.text(0).unwrap(), "digest");
+        let provisional = store
+            .query_opt("SELECT provisional FROM subject WHERE id = 1", &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(provisional.opt_int(0).unwrap(), None);
+        // and again: a batch that says what it is keeps saying it
+        store
+            .execute(
+                "INSERT INTO ingest_batch (id, source_id, job_id, name, config, started_at, state, kind) VALUES (2, 1, 2, 'n', '{}', 't', 'done', 'pseudonymize')",
+                &[],
+            )
+            .unwrap();
+        a_batch_has_a_kind_and_a_subject_may_be_provisional(&mut store, Kind::Registry).unwrap();
+        let kind = store
+            .query_opt("SELECT kind FROM ingest_batch WHERE id = 2", &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(kind.text(0).unwrap(), "pseudonymize");
     }
 
     /// A registry from before record 26 opens with every source place a
