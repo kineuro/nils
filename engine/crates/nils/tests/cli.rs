@@ -1741,12 +1741,14 @@ fn classify_explains_itself_and_a_decision_closes_the_question() {
             .unwrap_or(serde_json::Value::Null)
     };
     assert_eq!(axis(&shown, "technique")["value"], "MPRAGE", "{shown}");
+    // record 26 section 11: the evidence sits under its axis, as the door
+    // answers it
     assert!(
-        shown["evidence"]
+        axis(&shown, "technique")["evidence"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|e| e["axis"] == "technique" && e["rule"].is_string()),
+            .any(|e| e["rule"].is_string()),
         "{shown}"
     );
 
@@ -2885,7 +2887,7 @@ fn nils_select_shows_a_cohort_before_it_leaves_and_a_release_refuses_what_did_no
     ]);
     let listed = run(&["clinical", "cohort", "list"]);
     assert!(listed.contains("MS-2026"), "{listed}");
-    assert!(listed.contains("1 member(s)"), "{listed}");
+    assert!(listed.contains("1 subject(s)"), "{listed}");
 
     // The preview: the identifier the digest filed resolves to the code,
     // the cohort to its member, the axis to its count, and the whole is

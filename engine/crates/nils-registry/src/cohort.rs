@@ -322,6 +322,8 @@ pub fn create(
     actor: &str,
 ) -> Result<Cohort, Error> {
     let name = checked_name(name)?;
+    // the epoch moves from what the store holds, not from a stale reading
+    registry.refresh_meta()?;
     let store = registry.store();
     if by_name(store, name)?.is_some() || selection_named(store, name)? {
         return Err(Error::Taken(name.to_string()));
@@ -371,6 +373,8 @@ pub fn set(
     change: &Change<'_>,
     actor: &str,
 ) -> Result<Cohort, Error> {
+    // the epoch moves from what the store holds, not from a stale reading
+    registry.refresh_meta()?;
     let store = registry.store();
     let current = by_name(store, name)?.ok_or_else(|| Error::NotFound(name.to_string()))?;
     let new_name = match change.name {
@@ -484,6 +488,8 @@ pub fn members(
     why: Option<&str>,
     actor: &str,
 ) -> Result<Members, Error> {
+    // the epoch moves from what the store holds, not from a stale reading
+    registry.refresh_meta()?;
     let store = registry.store();
     let cohort = by_name(store, name)?.ok_or_else(|| Error::NotFound(name.to_string()))?;
     let mut all: Vec<String> = add.iter().chain(remove).cloned().collect();
@@ -651,6 +657,8 @@ pub fn feed(
     actor: &str,
 ) -> Result<Fed, Error> {
     let name = checked_name(name)?;
+    // the epoch moves from what the store holds, not from a stale reading
+    registry.refresh_meta()?;
     let store = registry.store();
     let subjects = subjects_of_batch(store, batch_id)?;
     let existing = by_name(store, name)?;
@@ -1176,7 +1184,12 @@ fn joins_of(intervals: &[Interval]) -> Vec<Value> {
         }
     }
     let mut out: Vec<Group> = groups.into_values().collect();
-    out.sort_by(|a, b| b.when.cmp(&a.when));
+    // newest first; at one stamp a removal before the join it closed
+    out.sort_by(|a, b| {
+        b.when
+            .cmp(&a.when)
+            .then_with(|| (b.what == "remove").cmp(&(a.what == "remove")))
+    });
     out.into_iter()
         .map(|g| {
             let mut doc = json!({
