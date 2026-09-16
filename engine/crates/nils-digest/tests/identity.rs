@@ -1005,3 +1005,284 @@ fn a_code_a_subject_holds_is_read_verbatim_whatever_its_length() {
         assert_eq!(derived.len(), 12, "{name}");
     }
 }
+
+/// The dataset a folder read in place is (record 26 §1): the folder itself is
+/// its pseudonymised tree, and the identifiers its files carry are mapped at
+/// read time.
+fn in_place_dataset(reg: &mut Registry, dir: &TempDir, name: &str, unmapped: &str) -> i64 {
+    nils_registry::place::add(
+        reg.store(),
+        &nils_registry::place::New {
+            name,
+            role: nils_registry::place::Role::Source,
+            path: dir.path().to_str().unwrap(),
+            guarantees: serde_json::json!({}),
+            probed: serde_json::json!({}),
+            handling: serde_json::json!({}),
+            dataset: dataset_doc(unmapped),
+        },
+    )
+    .unwrap()
+}
+
+fn dataset_doc(unmapped: &str) -> serde_json::Value {
+    serde_json::json!({
+        "arrives": "deidentified",
+        "trees": {"originals": null, "anon": "."},
+        "unmapped": unmapped,
+    })
+}
+
+/// What a person changes on the Pseudonymisation page when they stop waiting
+/// for a map and have the identifiers coded instead.
+fn set_unmapped(reg: &mut Registry, place: i64, unmapped: &str) {
+    nils_registry::place::set_dataset(reg.store(), place, &dataset_doc(unmapped)).unwrap();
+}
+
+/// The open review items of a kind, as `(group_key, members, evidence, ref)`.
+fn items_of(
+    reg: &mut Registry,
+    kind: &str,
+) -> Vec<(String, i64, serde_json::Value, serde_json::Value)> {
+    let sql = format!(
+        "SELECT group_key, members, CAST(evidence AS TEXT), CAST(ref AS TEXT) FROM {{review_item}} \
+         WHERE kind = '{kind}' AND status = 'open' ORDER BY id"
+    );
+    rows(reg, &sql)
+        .iter()
+        .map(|r| {
+            let json = |i: usize| -> serde_json::Value {
+                serde_json::from_str(r.text(i).unwrap()).unwrap()
+            };
+            (
+                r.text(0).unwrap().to_string(),
+                r.int(1).unwrap(),
+                json(2),
+                json(3),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_dataset_read_in_place_records_what_it_holds_and_asks_about_whom_it_codes() {
+    // Lab 26b, findings 1, 2 and 3, on the lab's own case: a de-identified
+    // dataset whose identifiers no map names, held and then coded. What the
+    // digest holds waits for a map where the pseudonymiser's held files wait,
+    // so the held doors answer for it and a map can release it; what the
+    // digest codes instead raises one question per subject, as the
+    // pseudonymiser raises one; and the questions about the files it held are
+    // answered by the run that holds nothing any more, rather than left open
+    // to count as waiting files that a person has since had coded.
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("identity-in-place");
+        dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", "P1", &[]));
+        dir.file("a/IM_0002", &mr("A", "A.1", "A.1.2", "P1", &[]));
+        dir.file("b/IM_0001", &mr("B", "B.1", "B.1.1", "P2", &[]));
+        let mut s = settings(&dir);
+        s.unmapped = nils_digest::Unmapped::Hold;
+        let mut reg = lab.open();
+        let place = in_place_dataset(&mut reg, &dir, "south", "hold");
+
+        let first = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = first.written.clone().unwrap();
+        assert_eq!(w.held, 3, "{name}");
+        assert_eq!(w.subjects_created, 0, "{name}");
+        // finding 3: one row per held file, with the shape, the keyed lookup
+        // and the identifier sealed, which is what the held doors read and
+        // what a map matches against
+        let held = rows(
+            &mut reg,
+            "SELECT path, state, shape, id_type, place_id, code_anyway FROM {pseudonym_file} ORDER BY path",
+        );
+        assert_eq!(held.len(), 3, "{name}");
+        for row in &held {
+            assert_eq!(row.text(1).unwrap(), "held", "{name}");
+            assert_eq!(row.text(2).unwrap(), "A9", "{name}");
+            assert_eq!(row.text(3).unwrap(), "patient-id", "{name}");
+            assert_eq!(row.int(4).unwrap(), place, "{name}");
+            assert_eq!(row.int(5).unwrap(), 0, "{name}");
+        }
+        assert_eq!(held[0].text(0).unwrap(), "a/IM_0001", "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {pseudonym_file} WHERE lookup IS NOT NULL AND sealed IS NOT NULL"
+            ),
+            3,
+            "{name}"
+        );
+        // two identifiers behind the three files, which is what the doors and
+        // the sources count say
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(DISTINCT lookup) FROM {pseudonym_file} WHERE state = 'held'"
+            ),
+            2,
+            "{name}"
+        );
+        assert_eq!(items_of(&mut reg, "identity.unmapped").len(), 1, "{name}");
+
+        // the dataset is set to code them instead
+        set_unmapped(&mut reg, place, "code");
+        s.unmapped = nils_digest::Unmapped::Code;
+        let coded = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = coded.written.clone().unwrap();
+        assert_eq!(w.held, 0, "{name}");
+        assert_eq!(w.subjects_created, 2, "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {subject} WHERE provisional = 1"
+            ),
+            2,
+            "{name}"
+        );
+        // finding 2: nothing waits for a map, so nothing is left open saying
+        // it does, and the rows those files waited under are gone
+        assert_eq!(
+            one(&mut reg, "SELECT COUNT(*) FROM {pseudonym_file}"),
+            0,
+            "{name}"
+        );
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT status FROM {review_item} WHERE kind = 'identity.unmapped'"
+            ),
+            ["superseded"],
+            "{name}"
+        );
+        // finding 1: one open question per subject coded without a map, with
+        // the files under it, the shape and the dataset, and never a value
+        let items = items_of(&mut reg, "identity.provisional");
+        assert_eq!(items.len(), 2, "{name}");
+        let mut codes: BTreeMap<i64, String> = BTreeMap::new();
+        for r in &rows(
+            &mut reg,
+            "SELECT id, code FROM {subject} WHERE provisional = 1",
+        ) {
+            codes.insert(r.int(0).unwrap(), r.text(1).unwrap().to_string());
+        }
+        let mut files = 0;
+        for (group_key, members, evidence, reference) in &items {
+            let subject = reference["subject_id"].as_i64().unwrap();
+            assert_eq!(*group_key, format!("subject:{subject}"), "{name}");
+            assert_eq!(*members, 1, "{name}");
+            assert_eq!(reference["code"], codes[&subject].as_str(), "{name}");
+            assert_eq!(evidence["shape"], "A9", "{name}");
+            assert_eq!(evidence["place"], "south", "{name}");
+            assert_eq!(evidence["id_type"], "patient-id", "{name}");
+            let text = evidence.to_string();
+            assert!(
+                !text.contains("P1") && !text.contains("P2"),
+                "{name}: {text}"
+            );
+            files += evidence["files"].as_i64().unwrap();
+        }
+        assert_eq!(files, 3, "{name}");
+    }
+}
+
+#[test]
+fn a_map_releases_the_files_a_digest_held_and_the_next_digest_reads_them_again() {
+    // Lab 26b, finding 3, the other half: a map that names an identifier a
+    // digest held releases its files exactly as it releases the
+    // pseudonymiser's, and the next digest reads them again and files them;
+    // what is left can still be coded anyway from the door.
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("identity-in-place-map");
+        dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", "P1", &[]));
+        dir.file("b/IM_0001", &mr("B", "B.1", "B.1.1", "P2", &[]));
+        let mut s = settings(&dir);
+        s.unmapped = nils_digest::Unmapped::Hold;
+        let mut reg = lab.open();
+        in_place_dataset(&mut reg, &dir, "south", "hold");
+        digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {pseudonym_file} WHERE state = 'held' AND released_at IS NULL"
+            ),
+            2,
+            "{name}"
+        );
+
+        // the map names one of the two
+        let mut store = reg.open_linkage().unwrap();
+        let keys = Subkeys::derive(&reg.pseudonym_key().unwrap());
+        linkage::import(
+            reg.store(),
+            &mut store,
+            &keys,
+            "patient-id",
+            &[ImportRow {
+                line: 2,
+                identifier: "P1".to_string(),
+                code: "mapped-0001".to_string(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {pseudonym_file} WHERE released_at IS NOT NULL"
+            ),
+            1,
+            "{name}"
+        );
+
+        let again = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = again.written.clone().unwrap();
+        assert_eq!(w.held, 1, "{name}");
+        assert_eq!(w.subjects_matched, 1, "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {study}"), 1, "{name}");
+        // the released file is filed and waits for nothing any more; the
+        // other still waits, and the question about it stays open
+        assert_eq!(
+            one(&mut reg, "SELECT COUNT(*) FROM {pseudonym_file}"),
+            1,
+            "{name}"
+        );
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT status FROM {review_item} WHERE kind = 'identity.unmapped'"
+            ),
+            ["open"],
+            "{name}"
+        );
+
+        // and a person asks for what is left to be coded anyway, as the held
+        // door marks it
+        let sql = rows_sql(
+            &mut reg,
+            "UPDATE {pseudonym_file} SET code_anyway = 1 WHERE state = 'held'",
+        );
+        reg.store().execute(&sql, &[]).unwrap();
+        let coded = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(coded.written.clone().unwrap().held, 0, "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {subject} WHERE provisional = 1"
+            ),
+            1,
+            "{name}"
+        );
+        assert_eq!(
+            one(&mut reg, "SELECT COUNT(*) FROM {pseudonym_file}"),
+            0,
+            "{name}"
+        );
+        assert_eq!(
+            items_of(&mut reg, "identity.provisional").len(),
+            1,
+            "{name}"
+        );
+        assert_eq!(items_of(&mut reg, "identity.unmapped").len(), 0, "{name}");
+    }
+}

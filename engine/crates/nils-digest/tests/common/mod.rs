@@ -152,6 +152,10 @@ pub fn rows_sql(reg: &mut Registry, sql: &str) -> String {
         "job",
         "source",
         "review_item",
+        // record 26 §4: where a held file waits for a map, whichever verb
+        // held it, and the dataset it belongs to
+        "pseudonym_file",
+        "place",
     ] {
         text = text.replace(&format!("{{{t}}}"), &reg.store().qualified(t));
     }

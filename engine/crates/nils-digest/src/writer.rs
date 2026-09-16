@@ -27,7 +27,7 @@ use lru::LruCache;
 use nils_dicom::{Diagnostic, DiagnosticKind, Level, Value};
 use nils_registry::dialect::Conflict;
 use nils_registry::schema::{Column, Table, Type, table};
-use nils_registry::store::{Insert, Param, Store};
+use nils_registry::store::{Cell, Insert, Param, Store};
 use nils_registry::time::now_iso;
 use nils_registry::{HomeError, Registry};
 
@@ -41,7 +41,7 @@ use crate::knobs::Unmapped;
 use crate::progress::{PROGRESS_EVERY, Progress};
 use crate::report::{Counts, Written};
 use crate::resolve::{
-    Collision, Found, Make, ResolveError, Resolver, Who, collision_message, missing_row,
+    Collision, Found, Make, ResolveError, Resolved, Resolver, Who, collision_message, missing_row,
 };
 use crate::resume::status;
 use crate::rule::Rule;
@@ -58,6 +58,42 @@ pub const QUARANTINE_KIND: &str = "ingest.quarantine";
 /// The error a batch ends with when an abort is asked while it is in flight
 /// (§10): its transaction rolls back, and the run ends as aborted.
 pub const ABORTED: &str = "aborted: the batch in flight rolled back";
+
+/// Record 26 §1 and §4: the dataset a run reads in place, whose held files
+/// are the digest's own to record. A dataset that arrives identified has
+/// none here: the pseudonymiser held or coded every file of its originals
+/// before it wrote the tree a digest reads, and those rows are its own.
+#[derive(Debug, Clone)]
+pub struct Dataset {
+    pub id: i64,
+    pub name: String,
+}
+
+/// What an earlier run recorded of a file it held, and what has been said
+/// about it since: the lookup a map released it under, where the map named
+/// the value as another type, and whether a person asked for it to be coded
+/// anyway.
+#[derive(Debug, Clone, Default)]
+struct PriorHeld {
+    released: Option<Vec<u8>>,
+    code_anyway: bool,
+}
+
+/// A subject this run coded from an identifier no map named (record 26 §4):
+/// the shape of that identifier and how many of the run's files are about
+/// the person, which is what the `identity.provisional` item carries.
+#[derive(Debug, Clone, Default)]
+pub struct Provisional {
+    pub shape: String,
+    pub files: i64,
+}
+
+/// The state of a `pseudonym_file` row whose file waits for a map, as the
+/// pseudonymiser writes it.
+const HELD: &str = "held";
+
+/// The table both verbs record a held file in.
+const HELD_TABLE: &str = "pseudonym_file";
 
 struct SubjectEntry {
     hashes: Box<[u32]>,
@@ -149,6 +185,19 @@ pub struct Writer<'a> {
     /// Record 26 §4: what the run does with a file whose identifier the
     /// linkage store does not know.
     unmapped: Unmapped,
+    /// Record 26 §4: the dataset read in place, whose held files this run
+    /// records in `pseudonym_file` as the pseudonymiser records its own, so
+    /// that the map, the held doors and the counts are one path whichever
+    /// verb held the file.
+    dataset: Option<Dataset>,
+    /// Those rows for the files of the batch in hand.
+    prior_held: HashMap<String, PriorHeld>,
+    /// Whether the dataset holds any such row at all, asked once: a dataset
+    /// that has never held a file asks nothing per batch.
+    any_held: Option<bool>,
+    /// The subjects this run coded from an identifier no map named, for the
+    /// items it raises when it ends.
+    pub provisional: BTreeMap<i64, Provisional>,
     /// Subject id → the row's field hashes.
     subjects: LruCache<i64, SubjectEntry>,
     studies: LruCache<String, StudyEntry>,
@@ -194,6 +243,10 @@ impl<'a> Writer<'a> {
             batch_id,
             job_id,
             unmapped: Unmapped::Subject,
+            dataset: None,
+            prior_held: HashMap::new(),
+            any_held: None,
+            provisional: BTreeMap::new(),
             subjects: LruCache::new(cap),
             studies: LruCache::new(cap),
             series: LruCache::new(cap),
@@ -219,9 +272,11 @@ impl<'a> Writer<'a> {
     /// The private elements the files were extracted with, in order, so the
     /// writer knows the address of each slot (Wave 4a §5.2).
     /// Record 26 §4: what the dataset says of a file whose identifier the
-    /// linkage store does not know.
-    pub fn holding(mut self, unmapped: Unmapped) -> Writer<'a> {
+    /// linkage store does not know, and the dataset itself where the tree is
+    /// one read in place, whose held files this run records.
+    pub fn holding(mut self, unmapped: Unmapped, dataset: Option<Dataset>) -> Writer<'a> {
         self.unmapped = unmapped;
+        self.dataset = dataset;
         self
     }
 
@@ -378,18 +433,26 @@ impl<'a> Writer<'a> {
         now: &str,
         tally: &mut Counts,
     ) -> Result<(Vec<i64>, Vec<bool>), HomeError> {
-        let who: Vec<Who<'_>> = parsed
-            .iter()
-            .map(|p| Who {
+        // record 26 §4: what an earlier run held of these files, and what a
+        // map or a person has said about them since
+        self.prior_held = self.held_prior(parsed)?;
+        let mut who: Vec<Who<'_>> = Vec::with_capacity(parsed.len());
+        for p in parsed {
+            who.push(Who {
                 ident: &p.ident,
                 subject: p
                     .extracted
                     .row(Level::Subject)
                     .map(|(_, v)| Param::from(v))
                     .collect(),
-                lookup: None,
-            })
-            .collect();
+                // a map that named the value as another type released the
+                // row under its own lookup, and the identity is found there
+                lookup: self
+                    .prior_held
+                    .get(&p.path)
+                    .and_then(|h| h.released.clone()),
+            });
+        }
         // record 26 §4: the dataset says what an identifier no subject holds
         // does, and a run that holds makes nothing for one
         let make = match self.unmapped {
@@ -397,17 +460,44 @@ impl<'a> Writer<'a> {
             Unmapped::Hold => Make::Nothing,
             Unmapped::Code => Make::Provisional,
         };
-        let resolved = match self
-            .resolver
-            .resolve(self.registry.store(), &who, now, make)
-        {
-            Ok(r) => r,
-            Err(ResolveError::Collision(c)) => {
-                self.collision = Some(c);
-                return Err(HomeError::Message("identity collision".into()));
+        let mut resolved = self.resolve_who(&who, now, make)?;
+        // the files coded from an identifier no map named, whose subjects are
+        // provisional: every one of them where the dataset says `code`, and
+        // where it holds, the ones a person asked to be coded anyway
+        let mut coded = vec![make == Make::Provisional; parsed.len()];
+        if make == Make::Nothing && !self.prior_held.is_empty() {
+            let anyway: Vec<usize> = (0..parsed.len())
+                .filter(|&i| {
+                    resolved.found[i].id().is_none()
+                        && self
+                            .prior_held
+                            .get(&parsed[i].path)
+                            .is_some_and(|h| h.code_anyway)
+                })
+                .collect();
+            if !anyway.is_empty() {
+                let mut asked: Vec<Who<'_>> = Vec::with_capacity(anyway.len());
+                for &i in &anyway {
+                    asked.push(Who {
+                        ident: &parsed[i].ident,
+                        subject: parsed[i]
+                            .extracted
+                            .row(Level::Subject)
+                            .map(|(_, v)| Param::from(v))
+                            .collect(),
+                        lookup: None,
+                    });
+                }
+                let second = self.resolve_who(&asked, now, Make::Provisional)?;
+                resolved.matched += second.matched;
+                resolved.created += second.created;
+                resolved.attached += second.attached;
+                for (k, &i) in anyway.iter().enumerate() {
+                    resolved.found[i] = second.found[k];
+                    coded[i] = true;
+                }
             }
-            Err(ResolveError::Home(e)) => return Err(e),
-        };
+        }
         self.written.subjects_matched += resolved.matched;
         self.written.subjects_created += resolved.created;
         self.written.identities_attached += resolved.attached;
@@ -429,6 +519,9 @@ impl<'a> Writer<'a> {
                         kept: Kept::default(),
                     },
                 );
+            }
+            if coded[i] {
+                self.note_provisional(id, matches!(f, Found::Created(_)), &p.ident.value);
             }
             ids.push(id);
         }
@@ -501,6 +594,173 @@ impl<'a> Writer<'a> {
         }
         self.note(tally, diags);
         Ok((ids, held))
+    }
+
+    /// One call to the resolver, with a collision kept for the rollback that
+    /// follows, as the batch's own error is not the collision itself.
+    fn resolve_who(
+        &mut self,
+        who: &[Who<'_>],
+        now: &str,
+        make: Make,
+    ) -> Result<Resolved, HomeError> {
+        match self.resolver.resolve(self.registry.store(), who, now, make) {
+            Ok(r) => Ok(r),
+            Err(ResolveError::Collision(c)) => {
+                self.collision = Some(c);
+                Err(HomeError::Message("identity collision".into()))
+            }
+            Err(ResolveError::Home(e)) => Err(e),
+        }
+    }
+
+    /// Record 26 §4: the subject a file was coded into and the shape of the
+    /// identifier it was coded from, so the run can ask about the person when
+    /// it ends. Counted per file, as the pseudonymiser counts them.
+    fn note_provisional(&mut self, id: i64, created: bool, value: &str) {
+        if created {
+            self.provisional.insert(
+                id,
+                Provisional {
+                    shape: nils_dicom::diagnostic::shape(value),
+                    files: 1,
+                },
+            );
+        } else if let Some(p) = self.provisional.get_mut(&id) {
+            p.files += 1;
+        }
+    }
+
+    /// Record 26 §4: what `pseudonym_file` holds of these files, where the
+    /// tree is a dataset read in place. Nothing at all for a dataset that has
+    /// never held one, which costs one question for the run and none per
+    /// batch.
+    fn held_prior(
+        &mut self,
+        parsed: &[&ParsedFile],
+    ) -> Result<HashMap<String, PriorHeld>, HomeError> {
+        let Some(place_id) = self.dataset.as_ref().map(|d| d.id) else {
+            return Ok(HashMap::new());
+        };
+        if self.any_held.is_none() {
+            let store = self.registry.store();
+            let sql = format!(
+                "SELECT COUNT(*) FROM {} WHERE place_id = {}",
+                store.qualified(HELD_TABLE),
+                store.dialect().param(1, Type::Int)
+            );
+            let any = store.query(&sql, &[Param::Int(place_id)])?[0].int(0)? > 0;
+            self.any_held = Some(any);
+        }
+        if self.any_held != Some(true) || parsed.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut out = HashMap::new();
+        let paths: Vec<&str> = parsed.iter().map(|p| p.path.as_str()).collect();
+        for chunk in paths.chunks(nils_registry::store::SQLITE_KEY_CHUNK) {
+            let store = self.registry.store();
+            let d = store.dialect();
+            let released = d.text_of(
+                table(HELD_TABLE)
+                    .column("released_at")
+                    .expect("pseudonym_file.released_at"),
+            );
+            let marks: Vec<String> = (0..chunk.len())
+                .map(|i| d.param(i + 2, Type::Text))
+                .collect();
+            let sql = format!(
+                "SELECT path, lookup, {released} IS NOT NULL, code_anyway FROM {} \
+                 WHERE place_id = {} AND state = '{HELD}' AND path IN ({})",
+                store.qualified(HELD_TABLE),
+                d.param(1, Type::Int),
+                marks.join(", ")
+            );
+            let mut params: Vec<Param> = Vec::with_capacity(chunk.len() + 1);
+            params.push(Param::Int(place_id));
+            params.extend(chunk.iter().map(|p| Param::from(*p)));
+            for r in &store.query(&sql, &params)? {
+                let released = match r.get(2) {
+                    Cell::Bool(b) => *b,
+                    Cell::Int(n) => *n != 0,
+                    _ => false,
+                };
+                out.insert(
+                    r.text(0)?.to_string(),
+                    PriorHeld {
+                        released: match released {
+                            true => r.opt_bytes(1)?.map(<[u8]>::to_vec),
+                            false => None,
+                        },
+                        code_anyway: r.int(3)? != 0,
+                    },
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    /// Record 26 §4: what a dataset read in place holds waits for a map in
+    /// `pseudonym_file`, beside what the pseudonymiser holds of an identified
+    /// one, so that the map, the held doors and the counts read one table
+    /// whichever verb held the file. A file this batch filed is no longer
+    /// held, and its row goes.
+    fn record_held(
+        &mut self,
+        place_id: i64,
+        held: &[Vec<Param>],
+        filed: &[&str],
+    ) -> Result<(), HomeError> {
+        let store = self.registry.store();
+        if !held.is_empty() {
+            store.insert(
+                &Insert::new(
+                    table(HELD_TABLE),
+                    &[
+                        "place_id",
+                        "path",
+                        "dir",
+                        "size",
+                        "mtime",
+                        "state",
+                        "shape",
+                        "lookup",
+                        "sealed",
+                        "id_type",
+                        "batch_id",
+                        "first_seen",
+                        "code_anyway",
+                    ],
+                )
+                .on_conflict(Conflict::Update {
+                    // `released_at` and `code_anyway` stay as they are, as
+                    // they do for the pseudonymiser: a file held again after
+                    // a release keeps its release
+                    target: &["place_id", "path"],
+                    set: &[
+                        "dir", "size", "mtime", "state", "shape", "lookup", "sealed", "id_type",
+                        "batch_id",
+                    ],
+                }),
+                held,
+            )?;
+        }
+        for chunk in filed.chunks(nils_registry::store::SQLITE_KEY_CHUNK) {
+            let d = store.dialect();
+            let marks: Vec<String> = (0..chunk.len())
+                .map(|i| d.param(i + 2, Type::Text))
+                .collect();
+            let sql = format!(
+                "DELETE FROM {} WHERE place_id = {} AND path IN ({})",
+                store.qualified(HELD_TABLE),
+                d.param(1, Type::Int),
+                marks.join(", ")
+            );
+            let mut params: Vec<Param> = Vec::with_capacity(chunk.len() + 1);
+            params.push(Param::Int(place_id));
+            params.extend(chunk.iter().map(|p| Param::from(*p)));
+            store.execute(&sql, &params)?;
+        }
+        Ok(())
     }
 
     /// Studies: a row per study UID the registry does not hold, filed under
@@ -1304,6 +1564,12 @@ impl<'a> Writer<'a> {
         };
         let mut rows = Vec::with_capacity(batch.items.len());
         let mut unchanged = Vec::new();
+        // record 26 §4: the dataset read in place, whose held files are
+        // recorded beside the pseudonymiser's, and the rows of files this
+        // batch filed, which wait for a map no longer
+        let place_id = self.dataset.as_ref().map(|d| d.id);
+        let mut now_held: Vec<Vec<Param>> = Vec::new();
+        let mut now_filed: Vec<&str> = Vec::new();
         // path → (instance id, the file is its own, the instance it left)
         let mut wanted: HashMap<&str, (i64, bool, Option<i64>)> = HashMap::new();
         let mut ingested = 0;
@@ -1333,8 +1599,32 @@ impl<'a> Writer<'a> {
                             Some(shape.as_str()),
                             None,
                         ));
+                        // and, for a dataset read in place, the row a map
+                        // releases and the held doors answer: the shape, the
+                        // keyed lookup and the identifier sealed, never the
+                        // identifier itself
+                        if let Some(place_id) = place_id {
+                            now_held.push(vec![
+                                Param::Int(place_id),
+                                Param::from(p.path.as_str()),
+                                Param::from(p.dir.as_str()),
+                                Param::Int(p.size as i64),
+                                Param::Int(p.mtime_ns),
+                                Param::from(HELD),
+                                Param::from(shape.as_str()),
+                                Param::Bytes(self.resolver.lookup(&p.ident)),
+                                Param::Bytes(self.resolver.seal(&p.ident.value)),
+                                Param::from(self.resolver.type_of(&p.ident).name.as_str()),
+                                Param::Int(self.batch_id),
+                                Param::from(now),
+                                Param::Int(0),
+                            ]);
+                        }
                         self.written.held += 1;
                         continue;
+                    }
+                    if place_id.is_some() && self.prior_held.contains_key(&p.path) {
+                        now_filed.push(p.path.as_str());
                     }
                     let f = next.next().ok_or_else(|| missing_row("instance"))?;
                     rows.push(row(
@@ -1439,6 +1729,9 @@ impl<'a> Writer<'a> {
             for (old, file_id) in orphans {
                 store.execute(&sql, &[Param::Int(old), Param::Int(file_id)])?;
             }
+        }
+        if let Some(place_id) = place_id {
+            self.record_held(place_id, &now_held, &now_filed)?;
         }
         progress.ingested(ingested);
         Ok(())

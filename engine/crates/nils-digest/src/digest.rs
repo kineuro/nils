@@ -15,6 +15,7 @@
 //! the rest go; those files are read again next time. Either way the batch
 //! and the job end as `cancelled`, and nothing is marked gone.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::time::Instant;
@@ -336,6 +337,15 @@ fn execute(
         (Some(reg), Some(r)) => Some(Records::new(reg.open_reader()?, r.source_id)?),
         _ => None,
     };
+    // Record 26 §4: the dataset whose pseudonymised tree this run reads,
+    // where it is one read in place. What such a run holds is recorded in the
+    // table the pseudonymiser records an identified dataset's held files in,
+    // so a map releases them, the held doors answer for them, and the counts
+    // are one number whichever verb held the file.
+    let dataset = match registry.as_deref_mut() {
+        Some(reg) if settings.unmapped != Unmapped::Subject => read_in_place(reg, &root)?,
+        _ => None,
+    };
     let mut writer = match (registry.as_deref_mut(), run) {
         (Some(reg), Some(r)) => Some(
             Writer::new(
@@ -346,7 +356,7 @@ fn execute(
                 Some(r.job_id),
             )?
             .with_ingest(&settings.ingest)
-            .holding(settings.unmapped)
+            .holding(settings.unmapped, dataset)
             .cancelled_by(cancel.clone(), script),
         ),
         _ => None,
@@ -445,12 +455,13 @@ fn execute(
         (walked, resumed, counts, wrote)
     });
 
-    let (written, own) = match writer.take() {
+    let (written, own, provisional) = match writer.take() {
         Some(mut w) => (
             Some(std::mem::take(&mut w.written)),
             Some(std::mem::take(&mut w.counts)),
+            std::mem::take(&mut w.provisional),
         ),
-        None => (None, None),
+        None => (None, None, BTreeMap::new()),
     };
     // the writer's borrow of the registry ends here
     drop(writer);
@@ -488,7 +499,15 @@ fn execute(
     let elapsed = start.elapsed().as_secs_f64();
     match (registry, run, written) {
         (Some(reg), Some(r), Some(written)) => finish(
-            reg, r, settings, setup, &counts, written, elapsed, cancelled,
+            reg,
+            r,
+            settings,
+            setup,
+            &counts,
+            written,
+            &provisional,
+            elapsed,
+            cancelled,
         ),
         _ => {
             let mut report = Report::new(setup, &counts, elapsed, peak_rss());
@@ -509,6 +528,7 @@ fn finish(
     setup: Setup,
     counts: &Counts,
     mut written: Written,
+    provisional: &BTreeMap<i64, writer::Provisional>,
     elapsed: f64,
     cancelled: Option<Cancelled>,
 ) -> Result<Report, DigestError> {
@@ -525,8 +545,10 @@ fn finish(
     // transaction before the batch closes, so the batch's record carries it.
     let joined = feed_cohort(registry, run, settings)?;
     // Record 26 §4: the question the files this run held raise, one item
-    // per dataset and shape, in a transaction of its own as the cohort is.
+    // per dataset and shape, in a transaction of its own as the cohort is,
+    // and the one each subject it coded instead raises.
     ask_about_held(registry, run, settings, &now)?;
+    ask_about_provisional(registry, run, settings, provisional, &now)?;
     let store = registry.store();
     store.begin()?;
     let result = (|| -> Result<Report, DigestError> {
@@ -672,43 +694,53 @@ fn feed_cohort(
 /// the dataset holds files under, opened or brought up to date by every run
 /// and closed by a run that holds nothing under a shape any more, exactly as
 /// the pseudonymiser raises them for the files it holds. Only a dataset that
-/// says `hold` has any; the shape and the count are all the item carries.
+/// says `hold` opens one; the shape and the count are all the item carries.
+///
+/// A run under any other word still closes what is open, since a dataset set
+/// to code its unmapped identifiers holds nothing at all any more, and an
+/// item left open would count files as waiting that a person has since had
+/// coded. The held rows of a dataset that arrives identified are the
+/// pseudonymiser's own, against its originals: a digest of the tree it wrote
+/// knows nothing of them and answers none of them.
 fn ask_about_held(
     registry: &mut Registry,
     run: &Run,
     settings: &Settings,
     now: &str,
 ) -> Result<(), DigestError> {
-    if settings.unmapped != Unmapped::Hold {
-        return Ok(());
-    }
     let store = registry.store();
     let Some(place) = nils_registry::place::tree_holding(store, "anon", &settings.root)? else {
         return Ok(());
     };
-    let d = store.dialect();
-    let seen = d.text_of(table("source_file").column("seen_at").expect("seen_at"));
-    let sql = format!(
-        "SELECT detail, COUNT(*), MIN({seen}) FROM {} WHERE source_id = {} AND status = 'quarantined' \
-         AND reason = {} AND detail IS NOT NULL GROUP BY detail",
-        store.qualified("source_file"),
-        d.param(1, Type::Int),
-        d.param(2, Type::Text),
-    );
-    let rows = store.query(
-        &sql,
-        &[
-            Param::Int(run.source_id),
-            Param::from(nils_registry::review::UNMAPPED_KIND),
-        ],
-    )?;
-    let mut holding: Vec<(String, i64, String)> = Vec::with_capacity(rows.len());
-    for r in &rows {
-        holding.push((
-            r.text(0)?.to_string(),
-            r.int(1)?,
-            r.opt_text(2)?.unwrap_or(now).to_string(),
-        ));
+    if place.dataset["arrives"].as_str() == Some("identified") {
+        return Ok(());
+    }
+    let mut holding: Vec<(String, i64, String)> = Vec::new();
+    if settings.unmapped == Unmapped::Hold {
+        let d = store.dialect();
+        let seen = d.text_of(table("source_file").column("seen_at").expect("seen_at"));
+        let sql = format!(
+            "SELECT detail, COUNT(*), MIN({seen}) FROM {} WHERE source_id = {} AND status = 'quarantined' \
+             AND reason = {} AND detail IS NOT NULL GROUP BY detail",
+            store.qualified("source_file"),
+            d.param(1, Type::Int),
+            d.param(2, Type::Text),
+        );
+        let rows = store.query(
+            &sql,
+            &[
+                Param::Int(run.source_id),
+                Param::from(nils_registry::review::UNMAPPED_KIND),
+            ],
+        )?;
+        holding.reserve(rows.len());
+        for r in &rows {
+            holding.push((
+                r.text(0)?.to_string(),
+                r.int(1)?,
+                r.opt_text(2)?.unwrap_or(now).to_string(),
+            ));
+        }
     }
     store.begin()?;
     let result = (|| -> Result<(), DigestError> {
@@ -732,6 +764,92 @@ fn ask_about_held(
             if !holding.iter().any(|(s, _, _)| *s == shape) {
                 nils_registry::review::close_unmapped(store, place.id, &shape, now)?;
             }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            store.commit()?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = store.rollback();
+            Err(e)
+        }
+    }
+}
+
+/// The dataset a path is the pseudonymised tree of, where the dataset is one
+/// read in place (record 26 §1). A dataset that arrives identified has none:
+/// the pseudonymiser held or coded every file of its originals before it
+/// wrote the tree a digest reads, and those held rows are its own.
+fn read_in_place(
+    registry: &mut Registry,
+    root: &std::path::Path,
+) -> Result<Option<writer::Dataset>, DigestError> {
+    let store = registry.store();
+    let Some(place) = nils_registry::place::tree_holding(store, "anon", root)? else {
+        return Ok(None);
+    };
+    if place.dataset["arrives"].as_str() == Some("identified") {
+        return Ok(None);
+    }
+    Ok(Some(writer::Dataset {
+        id: place.id,
+        name: place.name,
+    }))
+}
+
+/// Record 26 §4: one `identity.provisional` item per subject the run coded
+/// from an identifier no map named, as the pseudonymiser opens one for every
+/// subject it codes. The item carries the subject and its code, the shape of
+/// the identifier and how many of the run's files are about the person, and
+/// never an identifier. A merge of the subject closes it.
+fn ask_about_provisional(
+    registry: &mut Registry,
+    run: &Run,
+    settings: &Settings,
+    provisional: &BTreeMap<i64, writer::Provisional>,
+    now: &str,
+) -> Result<(), DigestError> {
+    if provisional.is_empty() {
+        return Ok(());
+    }
+    let store = registry.store();
+    let Some(place) = nils_registry::place::tree_holding(store, "anon", &settings.root)? else {
+        return Ok(());
+    };
+    let t = table("subject");
+    let cols = [
+        t.column("id").expect("subject.id"),
+        t.column("code").expect("subject.code"),
+    ];
+    let ids: Vec<i64> = provisional.keys().copied().collect();
+    let mut codes: BTreeMap<i64, String> = BTreeMap::new();
+    for r in &store.select_by_ids(t, &cols, "id", &ids)? {
+        codes.insert(r.int(0)?, r.text(1)?.to_string());
+    }
+    store.begin()?;
+    let result = (|| -> Result<(), DigestError> {
+        for (id, p) in provisional {
+            let Some(code) = codes.get(id) else {
+                continue;
+            };
+            nils_registry::review::raise_provisional(
+                store,
+                &nils_registry::review::Provisional {
+                    subject_id: *id,
+                    code,
+                    id_type: &settings.identity.id_type,
+                    shape: &p.shape,
+                    place_id: place.id,
+                    place: &place.name,
+                    files: p.files,
+                    batch_id: Some(run.batch_id),
+                    job_id: Some(run.job_id),
+                },
+                now,
+            )?;
         }
         Ok(())
     })();

@@ -1184,4 +1184,136 @@ mod tests {
             assert_eq!(r.status, status, "{body}: {}", r.body);
         }
     }
+
+    /// One synthetic MR file about a person, for a dataset read in place.
+    fn dicom_of(patient: &str, sop: &str) -> Vec<u8> {
+        use dicom_core::VR;
+        use dicom_dictionary_std::tags;
+        use nils_dicom::synth::{self, MetaFields};
+        let study = &sop[..1];
+        let mut elems = synth::minimal_mr(study, &format!("{study}.1"), sop);
+        elems.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+        synth::part10(&MetaFields::mr(sop), &elems, true)
+    }
+
+    #[test]
+    fn the_held_doors_answer_for_the_files_a_digest_held() {
+        // Lab 26b, finding 3: a dataset read in place holds its files at the
+        // digest, where an identified one holds them at the pseudonymiser.
+        // The doors and the sources count answer for both, so a person sees
+        // what waits for a map, can reveal it, and can have it coded anyway.
+        let dir = TempDir::new("linkage-doors-digest");
+        let (home, mut registry) = registry(&dir);
+        let see = caller("data:see");
+        let work = caller("data:work,sensitive");
+        let tree = dir.path().join("south");
+        for (path, patient, sop) in [
+            ("a/IM_0001", "P1", "A.1.1"),
+            ("a/IM_0002", "P1", "A.1.2"),
+            ("b/IM_0001", "P2", "B.1.1"),
+        ] {
+            let file = tree.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, dicom_of(patient, sop)).unwrap();
+        }
+        place::add(
+            registry.store(),
+            &place::New {
+                name: "south",
+                role: place::Role::Source,
+                path: &tree.display().to_string(),
+                guarantees: serde_json::json!({}),
+                probed: serde_json::json!({}),
+                handling: serde_json::json!({}),
+                dataset: serde_json::json!({
+                    "arrives": "deidentified",
+                    "trees": {"originals": null, "anon": "."},
+                    "unmapped": "hold",
+                }),
+            },
+        )
+        .unwrap();
+        let mut settings = nils_digest::Settings::new(&tree);
+        settings.unmapped = nils_digest::Unmapped::Hold;
+        nils_digest::digest(&settings, &mut registry).unwrap();
+
+        // what waits, by shape, with no value on the list
+        let r = call(
+            &home,
+            &mut registry,
+            &see,
+            "GET",
+            "/api/linkage/held?place=south",
+            "",
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body.as_array().unwrap().len(), 1, "{}", r.body);
+        assert_eq!(r.body[0]["files"], 3);
+        assert_eq!(r.body[0]["shape"], "A9");
+        assert_eq!(r.body[0]["id_type"], "patient-id");
+        assert!(!r.body.to_string().contains("P1"));
+        // and the dataset's own card says the same, so it is not empty while
+        // its files sit quarantined
+        let sources = crate::sources::document(&mut registry, 5).unwrap();
+        assert_eq!(
+            sources["sources"][0]["held"],
+            serde_json::json!({"files": 3, "identifiers": 2})
+        );
+
+        // the identifiers themselves, at sensitive detail
+        let r = call(
+            &home,
+            &mut registry,
+            &work,
+            "POST",
+            "/api/linkage/held/reveal",
+            r#"{"place": "south"}"#,
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        // sorted here rather than by the door: the identifiers of a shape
+        // come back in the order their rows were written, and the digest's
+        // workers hold the files of a batch in whatever order they read them
+        let mut values: Vec<&str> = r.body[0]["identifiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["value"].as_str().unwrap())
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, ["P1", "P2"]);
+
+        // coded anyway: the next digest of the dataset codes them, marks the
+        // subjects provisional, and the door empties
+        let r = call(
+            &home,
+            &mut registry,
+            &work,
+            "POST",
+            "/api/linkage/held/code",
+            r#"{"place": "south"}"#,
+        );
+        assert_eq!(r.body, serde_json::json!({"place": "south", "files": 3}));
+        nils_digest::digest(&settings, &mut registry).unwrap();
+        let r = call(
+            &home,
+            &mut registry,
+            &see,
+            "GET",
+            "/api/linkage/held?place=south",
+            "",
+        );
+        assert_eq!(r.body, serde_json::json!([]));
+        let sources = crate::sources::document(&mut registry, 5).unwrap();
+        assert_eq!(
+            sources["sources"][0]["held"],
+            serde_json::json!({"files": 0, "identifiers": 0})
+        );
+        let provisional = registry
+            .store()
+            .query("SELECT COUNT(*) FROM subject WHERE provisional = 1", &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(provisional, 2);
+    }
 }
