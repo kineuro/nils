@@ -116,6 +116,38 @@ pub static KNOBS: &[Knob] = &[
 /// their default.
 pub const SLICE: u8 = 4;
 
+/// Record 26 §4: what a run does with a file whose identifier the linkage
+/// store does not know. The dataset says it, and a digest of a dataset read
+/// in place reads it; a dataset whose tree the pseudonymiser wrote had the
+/// question answered there, so its digest makes subjects as every digest
+/// has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Unmapped {
+    /// A subject for every identifier, which is what a digest has always
+    /// done.
+    #[default]
+    Subject,
+    /// Hold the file: no subject and no rows of its own, its `source_file`
+    /// row quarantined under `identity.unmapped` with the shape of the
+    /// identifier as its detail, and one review item per dataset and shape,
+    /// as the pseudonymiser raises for the files it holds.
+    Hold,
+    /// A subject as always, marked provisional, as the pseudonymiser marks
+    /// the subject it codes from an identifier no map named.
+    Code,
+}
+
+impl Unmapped {
+    /// The word the dataset uses for it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Unmapped::Subject => "subject",
+            Unmapped::Hold => "hold",
+            Unmapped::Code => "code",
+        }
+    }
+}
+
 /// The settings of one run.
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -124,6 +156,9 @@ pub struct Settings {
     pub filter: Filter,
     /// The identity rule (§7.3): the default, or the file of `--identity-rule`.
     pub identity: Rule,
+    /// Record 26 §4: what the dataset says of a file whose identifier the
+    /// linkage store does not know.
+    pub unmapped: Unmapped,
     pub workers: usize,
     pub walk_threads: usize,
     /// Instances per write (§9.1).
@@ -152,6 +187,7 @@ impl Settings {
             root,
             filter: Filter::All,
             identity: Rule::default(),
+            unmapped: Unmapped::default(),
             workers: default_workers(),
             walk_threads: DEFAULT_WALK_THREADS,
             batch_rows: DEFAULT_BATCH_ROWS,
@@ -194,6 +230,7 @@ impl Settings {
             "sop_classes": SOP_CLASSES,
             "modalities": MODALITIES,
             "identity": self.identity.to_json(),
+            "unmapped": self.unmapped.name(),
             "workers": self.workers,
             "walk_threads": self.walk_threads,
             "batch_rows": self.batch_rows,

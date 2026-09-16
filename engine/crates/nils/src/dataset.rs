@@ -555,6 +555,26 @@ pub(crate) fn stored_rule(
     Ok(Some(rule))
 }
 
+/// Record 26 §4: what a digest of the dataset whose pseudonymised tree
+/// holds a path does with a file whose identifier the linkage store does
+/// not know. A dataset that arrives identified had the question answered by
+/// the pseudonymiser, which held or coded the file before it wrote the tree
+/// the digest reads, so a digest of that tree makes subjects as every
+/// digest has; a dataset read in place answers it here.
+pub(crate) fn unmapped_of(store: &mut Store, path: &Path) -> nils_digest::Unmapped {
+    let Ok(Some(p)) = place::tree_holding(store, "anon", path) else {
+        return nils_digest::Unmapped::Subject;
+    };
+    if p.dataset["arrives"].as_str() == Some("identified") {
+        return nils_digest::Unmapped::Subject;
+    }
+    match p.dataset["unmapped"].as_str() {
+        Some("hold") => nils_digest::Unmapped::Hold,
+        Some("code") => nils_digest::Unmapped::Code,
+        _ => nils_digest::Unmapped::Subject,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

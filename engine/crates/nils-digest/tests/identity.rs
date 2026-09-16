@@ -803,6 +803,133 @@ fn a_path_segment_is_a_source_and_a_constant_tag_says_so() {
 }
 
 #[test]
+fn a_dataset_that_holds_unmapped_identifiers_files_no_subject_and_asks() {
+    // Record 26 §4: a dataset read in place says what a file whose
+    // identifier the linkage store does not know does. Under `hold` the
+    // file is quarantined under `identity.unmapped` with the shape of the
+    // identifier, no subject is made for it, and one review item per
+    // dataset and shape says how many. A map filed later releases it: the
+    // next digest reads it again without being asked to retry quarantine.
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("identity-held");
+        dir.file("a/IM_0001", &mr("A", "A.1", "A.1.1", "P1", &[]));
+        dir.file("b/IM_0001", &mr("B", "B.1", "B.1.1", "P2", &[]));
+        let mut s = settings(&dir);
+        s.unmapped = nils_digest::Unmapped::Hold;
+        let mut reg = lab.open();
+        let mut store = reg.open_linkage().unwrap();
+        let keys = Subkeys::derive(&reg.pseudonym_key().unwrap());
+        // the dataset the folder is: read in place, its files mapped when
+        // someone files a map
+        nils_registry::place::add(
+            reg.store(),
+            &nils_registry::place::New {
+                name: "held-set",
+                role: nils_registry::place::Role::Source,
+                path: dir.path().to_str().unwrap(),
+                guarantees: serde_json::json!({}),
+                probed: serde_json::json!({}),
+                handling: serde_json::json!({}),
+                dataset: serde_json::json!({
+                    "arrives": "deidentified",
+                    "trees": {"originals": null, "anon": "."},
+                    "unmapped": "hold",
+                }),
+            },
+        )
+        .unwrap();
+        // one of the two identifiers is mapped, the other is not
+        let rows = [ImportRow {
+            line: 2,
+            identifier: "P1".to_string(),
+            code: "mapped-0001".to_string(),
+        }];
+        linkage::import(reg.store(), &mut store, &keys, "patient-id", &rows).unwrap();
+
+        let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = report.written.clone().unwrap();
+        assert_eq!(w.held, 1, "{name}");
+        assert_eq!(w.subjects_created, 0, "{name}");
+        assert_eq!(w.subjects_matched, 1, "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {subject}"), 1, "{name}");
+        // the held file is a quarantined row under the shape of what it
+        // carries, and no study of its own
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT detail FROM {source_file} WHERE status = 'quarantined'"
+            ),
+            ["A9"],
+            "{name}"
+        );
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT reason FROM {source_file} WHERE status = 'quarantined'"
+            ),
+            ["identity.unmapped"],
+            "{name}"
+        );
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {study}"), 1, "{name}");
+        // and the question, one item for the dataset and the shape
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT kind FROM {review_item} WHERE status = 'open'"
+            ),
+            ["identity.unmapped"],
+            "{name}"
+        );
+
+        // the map arrives: the next digest reads the held file again and
+        // files it, and the question is answered
+        let rows = [ImportRow {
+            line: 2,
+            identifier: "P2".to_string(),
+            code: "mapped-0002".to_string(),
+        }];
+        linkage::import(reg.store(), &mut store, &keys, "patient-id", &rows).unwrap();
+        let again = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let w = again.written.clone().unwrap();
+        assert_eq!(w.held, 0, "{name}");
+        assert_eq!(w.subjects_matched, 1, "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {study}"), 2, "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {source_file} WHERE status = 'quarantined'"
+            ),
+            0,
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE status = 'open'"
+            ),
+            0,
+            "{name}"
+        );
+
+        // and under `code` a subject is made for an identifier no map
+        // named, marked provisional as the pseudonymiser marks it
+        dir.file("c/IM_0001", &mr("C", "C.1", "C.1.1", "P3", &[]));
+        s.unmapped = nils_digest::Unmapped::Code;
+        let coded = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(coded.written.clone().unwrap().subjects_created, 1, "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {subject} WHERE provisional = 1"
+            ),
+            1,
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn a_code_a_subject_holds_is_read_verbatim_whatever_its_length() {
     // Record 26 §3: a dataset's pseudonymised tree is read under the rule
     // the engine writes for it, which takes whatever the code alphabet can

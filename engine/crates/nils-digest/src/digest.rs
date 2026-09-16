@@ -29,7 +29,7 @@ use nils_registry::{HomeError, Registry};
 
 use crate::batch::{Batch, Batcher, Item, ParsedFile, RowHashes, Task};
 use crate::cancel::{Cancel, Cancelled, Scripted};
-use crate::knobs::Settings;
+use crate::knobs::{Settings, Unmapped};
 use crate::progress::{PROGRESS_EVERY, Progress};
 use crate::report::{Counts, Joined, Report, Setup, Written};
 use crate::resume::{self, Records};
@@ -346,6 +346,7 @@ fn execute(
                 Some(r.job_id),
             )?
             .with_ingest(&settings.ingest)
+            .holding(settings.unmapped)
             .cancelled_by(cancel.clone(), script),
         ),
         _ => None,
@@ -523,6 +524,9 @@ fn finish(
     // Record 26 §8: a digest of a dataset feeds its cohort, in its own
     // transaction before the batch closes, so the batch's record carries it.
     let joined = feed_cohort(registry, run, settings)?;
+    // Record 26 §4: the question the files this run held raise, one item
+    // per dataset and shape, in a transaction of its own as the cohort is.
+    ask_about_held(registry, run, settings, &now)?;
     let store = registry.store();
     store.begin()?;
     let result = (|| -> Result<Report, DigestError> {
@@ -661,6 +665,85 @@ fn feed_cohort(
             refused: Some(e.to_string()),
             ..Joined::default()
         })),
+    }
+}
+
+/// Record 26 §4: one `identity.unmapped` review item per dataset and shape
+/// the dataset holds files under, opened or brought up to date by every run
+/// and closed by a run that holds nothing under a shape any more, exactly as
+/// the pseudonymiser raises them for the files it holds. Only a dataset that
+/// says `hold` has any; the shape and the count are all the item carries.
+fn ask_about_held(
+    registry: &mut Registry,
+    run: &Run,
+    settings: &Settings,
+    now: &str,
+) -> Result<(), DigestError> {
+    if settings.unmapped != Unmapped::Hold {
+        return Ok(());
+    }
+    let store = registry.store();
+    let Some(place) = nils_registry::place::tree_holding(store, "anon", &settings.root)? else {
+        return Ok(());
+    };
+    let d = store.dialect();
+    let seen = d.text_of(table("source_file").column("seen_at").expect("seen_at"));
+    let sql = format!(
+        "SELECT detail, COUNT(*), MIN({seen}) FROM {} WHERE source_id = {} AND status = 'quarantined' \
+         AND reason = {} AND detail IS NOT NULL GROUP BY detail",
+        store.qualified("source_file"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Text),
+    );
+    let rows = store.query(
+        &sql,
+        &[
+            Param::Int(run.source_id),
+            Param::from(nils_registry::review::UNMAPPED_KIND),
+        ],
+    )?;
+    let mut holding: Vec<(String, i64, String)> = Vec::with_capacity(rows.len());
+    for r in &rows {
+        holding.push((
+            r.text(0)?.to_string(),
+            r.int(1)?,
+            r.opt_text(2)?.unwrap_or(now).to_string(),
+        ));
+    }
+    store.begin()?;
+    let result = (|| -> Result<(), DigestError> {
+        for (shape, files, first_seen) in &holding {
+            nils_registry::review::raise_unmapped(
+                store,
+                &nils_registry::review::Unmapped {
+                    place_id: place.id,
+                    place: &place.name,
+                    shape,
+                    id_type: &settings.identity.id_type,
+                    files: *files,
+                    first_seen,
+                    batch_id: Some(run.batch_id),
+                    job_id: Some(run.job_id),
+                },
+                now,
+            )?;
+        }
+        for shape in nils_registry::review::open_unmapped_shapes(store, place.id)? {
+            if !holding.iter().any(|(s, _, _)| *s == shape) {
+                nils_registry::review::close_unmapped(store, place.id, &shape, now)?;
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            store.commit()?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = store.rollback();
+            Err(e)
+        }
     }
 }
 

@@ -37,6 +37,7 @@ use crate::batch::{
 };
 use crate::cancel::{Cancel, Scripted};
 use crate::date;
+use crate::knobs::Unmapped;
 use crate::progress::{PROGRESS_EVERY, Progress};
 use crate::report::{Counts, Written};
 use crate::resolve::{
@@ -145,6 +146,9 @@ pub struct Writer<'a> {
     source_id: i64,
     batch_id: i64,
     job_id: Option<i64>,
+    /// Record 26 §4: what the run does with a file whose identifier the
+    /// linkage store does not know.
+    unmapped: Unmapped,
     /// Subject id → the row's field hashes.
     subjects: LruCache<i64, SubjectEntry>,
     studies: LruCache<String, StudyEntry>,
@@ -189,6 +193,7 @@ impl<'a> Writer<'a> {
             source_id,
             batch_id,
             job_id,
+            unmapped: Unmapped::Subject,
             subjects: LruCache::new(cap),
             studies: LruCache::new(cap),
             series: LruCache::new(cap),
@@ -213,6 +218,13 @@ impl<'a> Writer<'a> {
     /// The run's stop token, and the scripted stop of a test if there is one.
     /// The private elements the files were extracted with, in order, so the
     /// writer knows the address of each slot (Wave 4a §5.2).
+    /// Record 26 §4: what the dataset says of a file whose identifier the
+    /// linkage store does not know.
+    pub fn holding(mut self, unmapped: Unmapped) -> Writer<'a> {
+        self.unmapped = unmapped;
+        self
+    }
+
     pub fn with_ingest(mut self, ingest: &[nils_dicom::private::Ingest]) -> Writer<'a> {
         self.ingest = ingest.iter().map(|i| i.address()).collect();
         self
@@ -320,7 +332,18 @@ impl<'a> Writer<'a> {
             }
         }
         self.checkpoint()?;
-        let subject_ids = self.subjects(&parsed, &now, &mut tally)?;
+        let (subject_ids, held) = self.subjects(&parsed, &now, &mut tally)?;
+        // record 26 §4: a file the dataset holds for want of a map is no
+        // part of what this batch writes; its `source_file` row says why
+        let parsed: Vec<&ParsedFile> = match held.iter().any(|h| *h) {
+            false => parsed,
+            true => parsed
+                .into_iter()
+                .zip(&held)
+                .filter(|(_, h)| !**h)
+                .map(|(p, _)| p)
+                .collect(),
+        };
         self.checkpoint()?;
         let study_ids = self.studies(&parsed, &subject_ids, &mut tally)?;
         self.checkpoint()?;
@@ -330,7 +353,7 @@ impl<'a> Writer<'a> {
         self.checkpoint()?;
         let filed = self.instances(&parsed, &series_ids, &stack_ids, &mut tally)?;
         self.checkpoint()?;
-        self.source_files(batch, &filed, &now, progress)?;
+        self.source_files(batch, &filed, &held, &now, progress)?;
         self.checkpoint()?;
         self.diagnostics(&tally, &now)?;
         self.written.epoch = self.registry.next_epoch()?;
@@ -354,7 +377,7 @@ impl<'a> Writer<'a> {
         parsed: &[&ParsedFile],
         now: &str,
         tally: &mut Counts,
-    ) -> Result<Vec<i64>, HomeError> {
+    ) -> Result<(Vec<i64>, Vec<bool>), HomeError> {
         let who: Vec<Who<'_>> = parsed
             .iter()
             .map(|p| Who {
@@ -367,9 +390,16 @@ impl<'a> Writer<'a> {
                 lookup: None,
             })
             .collect();
+        // record 26 §4: the dataset says what an identifier no subject holds
+        // does, and a run that holds makes nothing for one
+        let make = match self.unmapped {
+            Unmapped::Subject => Make::Subject,
+            Unmapped::Hold => Make::Nothing,
+            Unmapped::Code => Make::Provisional,
+        };
         let resolved = match self
             .resolver
-            .resolve(self.registry.store(), &who, now, Make::Subject)
+            .resolve(self.registry.store(), &who, now, make)
         {
             Ok(r) => r,
             Err(ResolveError::Collision(c)) => {
@@ -382,8 +412,14 @@ impl<'a> Writer<'a> {
         self.written.subjects_created += resolved.created;
         self.written.identities_attached += resolved.attached;
         let mut ids = Vec::with_capacity(parsed.len());
-        for (p, f) in parsed.iter().zip(&resolved.found) {
-            let id = f.id().ok_or_else(|| missing_row("subject"))?;
+        // the files the dataset holds for want of a map, in the order the
+        // batch parsed them: no subject, and no row of any other table
+        let mut held = vec![false; parsed.len()];
+        for (i, (p, f)) in parsed.iter().zip(&resolved.found).enumerate() {
+            let Some(id) = f.id() else {
+                held[i] = true;
+                continue;
+            };
             if let Found::Created(_) = f {
                 let x = &p.extracted;
                 self.subjects.put(
@@ -421,7 +457,16 @@ impl<'a> Writer<'a> {
             }
         }
         let mut diags = Vec::new();
-        for (p, &id) in parsed.iter().zip(&ids) {
+        let filed: Vec<&ParsedFile> = match held.iter().any(|h| *h) {
+            false => parsed.to_vec(),
+            true => parsed
+                .iter()
+                .zip(&held)
+                .filter(|(_, h)| !**h)
+                .map(|(p, _)| *p)
+                .collect(),
+        };
+        for (p, &id) in filed.iter().zip(&ids) {
             let x = &p.extracted;
             let h: Box<[u32]> = x.row(Level::Subject).map(|(_, v)| hash_value(v)).collect();
             let entry = self
@@ -455,7 +500,7 @@ impl<'a> Writer<'a> {
             )?;
         }
         self.note(tally, diags);
-        Ok(ids)
+        Ok((ids, held))
     }
 
     /// Studies: a row per study UID the registry does not hold, filed under
@@ -1200,6 +1245,7 @@ impl<'a> Writer<'a> {
         &mut self,
         batch: &Batch,
         filed: &[Filed],
+        held: &[bool],
         now: &str,
         progress: &Progress,
     ) -> Result<(), HomeError> {
@@ -1262,9 +1308,34 @@ impl<'a> Writer<'a> {
         let mut wanted: HashMap<&str, (i64, bool, Option<i64>)> = HashMap::new();
         let mut ingested = 0;
         let mut next = filed.iter();
+        // the parsed files in the order the batch holds them, which is the
+        // order the held flags are in
+        let mut nth = 0;
         for item in &batch.items {
             match item {
                 Item::Parsed(p) => {
+                    let holds = held.get(nth).copied().unwrap_or(false);
+                    nth += 1;
+                    if holds {
+                        // record 26 §4: no instance and no row of its own, a
+                        // quarantined row under `identity.unmapped` whose
+                        // detail is the shape of the identifier, which is
+                        // what the review item asks about; never the
+                        // identifier itself
+                        let shape = nils_dicom::diagnostic::shape(&p.ident.value);
+                        rows.push(row(
+                            &p.path,
+                            &p.dir,
+                            p.size,
+                            p.mtime_ns,
+                            status::QUARANTINED,
+                            Some(nils_registry::review::UNMAPPED_KIND),
+                            Some(shape.as_str()),
+                            None,
+                        ));
+                        self.written.held += 1;
+                        continue;
+                    }
                     let f = next.next().ok_or_else(|| missing_row("instance"))?;
                     rows.push(row(
                         &p.path,

@@ -548,6 +548,17 @@ read and falls back to the study UID. The type is seeded by the identifiers
 slice, and until then `nils linkage id-type add subject-code` makes it. A change to the dataset's tag lists reaches the files
 written after it; an unchanged source is not written again for a new list.
 
+A dataset read in place, de-identified or coded, has no pseudonymise step, so
+its digest answers `unmapped` itself. Where the dataset says `hold`, a file
+whose identifier the linkage store does not know is not filed: its
+`source_file` row is quarantined under `identity.unmapped` with the shape of
+the identifier as its detail, no subject and no row of any other table is
+made for it, and one review item per dataset and shape says how many, opened
+and closed exactly as the pseudonymiser's are. A held file is read again by
+the next digest whatever it was asked, so a map filed since releases it.
+Where the dataset says `code`, the subject is made and marked provisional, as
+the pseudonymiser marks the one it codes from an identifier no map named.
+
 **The chain.** `POST /api/jobs` takes `then: [command, ...]`, the command
 lines queued one after another by the worker when the job before ends done,
 under the principal, grants and detail recorded on the first; each step is a

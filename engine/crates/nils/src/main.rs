@@ -3080,13 +3080,20 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
             .map_err(|e| usage(format!("--identity-rule {}: {e}", path.display())))?;
         rule.source = Some(path.display().to_string());
         settings.identity = rule;
-    } else if home.exists() {
+    }
+    if home.exists() {
         // record 26: the rule the dataset stores, when the tree is a
-        // dataset's and it stores one
+        // dataset's, it stores one and the run named none of its own; and
+        // what the dataset says of a file whose identifier the linkage
+        // store does not know, whichever rule reads the files
         let mut registry = open(home)?;
-        if let Some(rule) = dataset::stored_rule(registry.store(), &settings.root).map_err(fail)? {
+        if args.identity_rule.is_none()
+            && let Some(rule) =
+                dataset::stored_rule(registry.store(), &settings.root).map_err(fail)?
+        {
             settings.identity = rule;
         }
+        settings.unmapped = dataset::unmapped_of(registry.store(), &settings.root);
     }
     // Wave 4a §5.2: the private elements the pack asks for are read at
     // digest time. A pack that cannot be found is not an error unless one was

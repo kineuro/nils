@@ -383,6 +383,10 @@ pub struct Written {
     pub changed: u64,
     /// Files an earlier run quarantined, left as they were.
     pub quarantine_kept: u64,
+    /// Record 26 §4: files held for want of a map, quarantined under
+    /// `identity.unmapped` instead of filed, where the dataset says `hold`.
+    #[serde(default)]
+    pub held: u64,
     /// Records marked gone at the end of the walk.
     pub gone: u64,
     pub subjects_created: u64,
