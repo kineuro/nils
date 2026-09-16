@@ -17,6 +17,10 @@
 //! folders. Both read the disk in a thread of their own, since a network
 //! mount that does not answer would otherwise hold the handler behind it;
 //! past the wait the answer says so, with what was known by then.
+//!
+//! A root is read as `@name` resolves it (record 26): the pseudonymised
+//! tree of the dataset declared on it, with `@name/originals` its
+//! originals; a root no dataset is declared on is the folder it was given.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
@@ -28,6 +32,7 @@ use nils_registry::place::{self, Place, Role};
 use nils_registry::store::Store;
 use serde_json::{Map, Value, json};
 
+use crate::dataset::{self, Root};
 use crate::folders::within;
 use crate::places::may_enter;
 use crate::serve::Reply;
@@ -117,13 +122,9 @@ impl At {
         })
     }
 
-    /// The folder under its root, as the root was given.
-    fn under(&self, root: &Path) -> PathBuf {
-        if self.rel.is_empty() {
-            root.to_path_buf()
-        } else {
-            root.join(&self.rel)
-        }
+    /// The folder under its root, as the root resolves it.
+    fn under(&self, root: &Root) -> PathBuf {
+        root.resolve(&self.rel)
     }
 }
 
@@ -132,7 +133,7 @@ fn plain_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
 }
 
-fn root_of(roots: &BTreeMap<String, PathBuf>, at: &At) -> Result<PathBuf, Reply> {
+fn root_of(roots: &BTreeMap<String, Root>, at: &At) -> Result<Root, Reply> {
     roots.get(&at.root).cloned().ok_or_else(|| {
         Reply::error(
             400,
@@ -161,12 +162,13 @@ enum Spot {
     Folder(PathBuf),
 }
 
-/// The folder an `@root/relative` names: its path under the root as the root
-/// was given, and where it is with links followed, which must be inside the
-/// root's real path.
-fn resolve(root: &Path, at: &At) -> Result<(PathBuf, Spot), Reply> {
+/// The folder an `@root/relative` names: its path under the root's tree as
+/// the root resolves it, and where it is with links followed, which must be
+/// inside that tree's real path.
+fn resolve(root: &Root, at: &At) -> Result<(PathBuf, Spot), Reply> {
     let path = at.under(root);
-    let spot = match (std::fs::canonicalize(root), std::fs::canonicalize(&path)) {
+    let (base, _) = root.base(&at.rel);
+    let spot = match (std::fs::canonicalize(base), std::fs::canonicalize(&path)) {
         (Ok(base), Ok(real)) => {
             if !real.starts_with(&base) {
                 return Err(Reply::error(400, OUTSIDE));
@@ -213,24 +215,29 @@ fn holder(held: &[Held], real: &Path) -> Value {
         )
 }
 
-/// The ingest roots, each with the place that holds it, sources first.
-fn roots_doc(roots: &BTreeMap<String, PathBuf>, places: Vec<Place>) -> Value {
-    let given: Vec<(String, PathBuf)> = roots.iter().map(|(n, p)| (n.clone(), p.clone())).collect();
-    let row = |name: &str, path: &Path, place: Value| json!({"name": name, "path": path.display().to_string(), "place": place});
+/// The ingest roots, each as `@name` resolves it and with the place that
+/// holds it, sources first.
+fn roots_doc(roots: &BTreeMap<String, Root>, places: Vec<Place>) -> Value {
+    let given: Vec<Root> = roots.values().cloned().collect();
+    let row = |root: &Root, place: Value| {
+        let mut r = root.as_json();
+        r["place"] = place;
+        r
+    };
     // what is known without the disk, for an answer past the wait
     let known = json!({
         "at": null,
-        "roots": given.iter().map(|(n, p)| row(n, p, Value::Null)).collect::<Vec<_>>(),
+        "roots": given.iter().map(|r| row(r, Value::Null)).collect::<Vec<_>>(),
         "timed_out": true,
     });
     within(WAIT, move || {
         let held = held(&places);
         let mut rows: Vec<(bool, Value)> = given
             .iter()
-            .map(|(name, path)| {
-                let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            .map(|root| {
+                let real = std::fs::canonicalize(&root.anon).unwrap_or_else(|_| root.anon.clone());
                 let place = holder(&held, &real);
-                (place["role"] == "source", row(name, path, place))
+                (place["role"] == "source", row(root, place))
             })
             .collect();
         // the map gave them by name, and the sort keeps that order within each
@@ -545,7 +552,7 @@ fn paged(mut doc: Value, page: Taken, held: &[Held], real: &Path, ended: bool) -
 
 /// The listing itself, which reads the disk.
 fn listing(
-    root: &Path,
+    root: &Root,
     places: &[Place],
     asked: &Asked,
     known: &Mutex<Known>,
@@ -585,7 +592,7 @@ fn listing(
 
 /// A listing's answer past the wait: what the call knew by then, and the
 /// folders read so far.
-fn late(known: &Mutex<Known>, asked: &Asked, root: &Path) -> Value {
+fn late(known: &Mutex<Known>, asked: &Asked, root: &Root) -> Value {
     let doc = known.try_lock().ok().and_then(|k| {
         let mut doc = k.doc.clone()?;
         if let (Some(read), Some(real)) = (&k.read, &k.real)
@@ -617,12 +624,13 @@ pub(crate) fn folders_door(
     doc: &Value,
 ) -> Result<Reply, Reply> {
     let places = place::active(store)?;
+    let roots = dataset::roots(store, roots);
     let at = match &doc["at"] {
-        Value::Null => return Ok(Reply::ok(roots_doc(roots, places))),
+        Value::Null => return Ok(Reply::ok(roots_doc(&roots, places))),
         Value::String(text) => At::parse(text).map_err(|m| Reply::error(400, m))?,
         _ => return Err(Reply::error(400, NAMED)),
     };
-    let root = root_of(roots, &at)?;
+    let root = root_of(&roots, &at)?;
     let filter = match &doc["filter"] {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
@@ -793,7 +801,7 @@ struct LookKnown {
 }
 
 /// The look itself, which reads the disk.
-fn looking(root: &Path, asked: &LookAsked, known: &Mutex<LookKnown>) -> Result<Value, Reply> {
+fn looking(root: &Root, asked: &LookAsked, known: &Mutex<LookKnown>) -> Result<Value, Reply> {
     let begun = Instant::now();
     let (path, spot) = resolve(root, &asked.at)?;
     let mut doc = json!({
@@ -804,6 +812,7 @@ fn looking(root: &Path, asked: &LookAsked, known: &Mutex<LookKnown>) -> Result<V
         "exists": true,
         "directory": true,
         "readable": true,
+        "layout": null,
         "here": null,
         "folders": [],
         "timed_out": false,
@@ -811,6 +820,8 @@ fn looking(root: &Path, asked: &LookAsked, known: &Mutex<LookKnown>) -> Result<V
     let Some(real) = unread(&mut doc, spot) else {
         return Ok(doc);
     };
+    // record 26: what the folder holds before it is declared a dataset
+    doc["layout"] = dataset::layout_doc(&real, &dataset::detect(&real));
     let names = match &asked.names {
         Some(names) => names.clone(),
         None => {
@@ -881,7 +892,7 @@ fn looking(root: &Path, asked: &LookAsked, known: &Mutex<LookKnown>) -> Result<V
 
 /// A look's answer past its budget and the margin: what the look knew by
 /// then, and every folder it did not reach as not looked.
-fn look_late(known: &Mutex<LookKnown>, asked: &LookAsked, root: &Path) -> Value {
+fn look_late(known: &Mutex<LookKnown>, asked: &LookAsked, root: &Root) -> Value {
     let not_looked = |name: &String| json!({"name": name, "looked": false});
     let doc = known.try_lock().ok().and_then(|k| {
         let mut doc = k.doc.clone()?;
@@ -900,6 +911,7 @@ fn look_late(known: &Mutex<LookKnown>, asked: &LookAsked, root: &Path) -> Value 
             "exists": null,
             "directory": null,
             "readable": null,
+            "layout": null,
             "here": null,
             "folders": asked.names.iter().flatten().map(not_looked).collect::<Vec<_>>(),
         })
@@ -909,13 +921,18 @@ fn look_late(known: &Mutex<LookKnown>, asked: &LookAsked, root: &Path) -> Value 
 }
 
 /// `POST /api/ingest/look`: what the files directly inside a folder of an
-/// ingest root are, and what a sample of each folder inside it holds.
-pub(crate) fn look_door(roots: &BTreeMap<String, PathBuf>, doc: &Value) -> Result<Reply, Reply> {
+/// ingest root are, what a sample of each folder inside it holds, and the
+/// layout a dataset declared on it would find.
+pub(crate) fn look_door(
+    roots: &BTreeMap<String, PathBuf>,
+    store: &mut Store,
+    doc: &Value,
+) -> Result<Reply, Reply> {
     let at = match doc["at"].as_str() {
         Some(text) => At::parse(text).map_err(|m| Reply::error(400, m))?,
         None => return Err(Reply::error(400, NAMED)),
     };
-    let root = root_of(roots, &at)?;
+    let root = root_of(&dataset::roots(store, roots), &at)?;
     let names = match &doc["names"] {
         Value::Null => None,
         Value::Array(list) => {
@@ -985,7 +1002,9 @@ mod tests {
         );
         assert_eq!(At::parse("@scans").unwrap().parent(), None);
         assert_eq!(
-            At::parse("@scans").unwrap().under(Path::new("/srv/scans")),
+            At::parse("@scans")
+                .unwrap()
+                .under(&Root::plain("scans", Path::new("/srv/scans"))),
             Path::new("/srv/scans")
         );
         for bad in ["/etc", "scans/a", "@", "@/a", ""] {

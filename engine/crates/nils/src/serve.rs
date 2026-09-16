@@ -1459,12 +1459,23 @@ fn routed(
             Ok(Reply::ok(crate::schedule::calendar(registry)))
         }
         ["api", "sources"] if get => {
-            // the Data page: each source place, how it is handled, its digests and totals
+            // the Data page: each source place, its dataset, its digests and
+            // totals; `?probe=1` counts the trees again first, since a page
+            // reads the counts the last probe kept and never walks a tree
             let recent = query
                 .get("recent")
                 .and_then(|l| l.parse::<usize>().ok())
                 .unwrap_or(12)
                 .clamp(1, 100);
+            if query.get("probe").is_some_and(|p| p == "1" || p == "true") {
+                use nils_registry::place;
+                for p in place::active(registry.store())? {
+                    if p.role == place::Role::Source {
+                        let probed = crate::dataset::probe_place(&p);
+                        place::set(registry.store(), p.id, None, None, Some(&probed))?;
+                    }
+                }
+            }
             Ok(Reply::ok(
                 crate::sources::document(registry, recent)
                     .map_err(|e| Reply::error(500, e.to_string()))?,
@@ -1484,7 +1495,7 @@ fn routed(
                         fresh.push(p);
                         continue;
                     }
-                    let probed = crate::places::probe(std::path::Path::new(&p.path));
+                    let probed = crate::dataset::probe_place(&p);
                     fresh.push(place::set(
                         registry.store(),
                         p.id,
@@ -1562,7 +1573,44 @@ fn routed(
             } else {
                 serde_json::json!({"backup": null, "snapshots": false, "protected": false, "fast": false})
             };
-            let probed = crate::places::probe(&path);
+            // record 26: a source place is a dataset. Its fields need
+            // data:work beside places:work, and the folder is looked at
+            // whichever were given, so a v0 folder is recognised and the
+            // trees are set before anything reads it.
+            let asked = dataset_asked(&doc);
+            if crate::dataset::fields_given(&asked) {
+                if role != PlaceRole::Source {
+                    return Err(Reply::error(
+                        400,
+                        format!(
+                            "a dataset is a source place; {name} is declared as a {} place",
+                            role.name()
+                        ),
+                    ));
+                }
+                caller.allowed(
+                    "POST /api/places with dataset fields",
+                    Need::One("data:work"),
+                    Detail::Plain,
+                )?;
+            }
+            let (probed, dataset, layout) = if role == PlaceRole::Source {
+                if place::by_name(registry.store(), name)?.is_some() {
+                    return Err(Reply::error(
+                        409,
+                        format!("a place is already named {name}"),
+                    ));
+                }
+                let d = crate::dataset::declare(registry.store(), &path, &asked, None)
+                    .map_err(|r| Reply::error(r.status, r.message))?;
+                (d.probed, d.dataset, d.layout)
+            } else {
+                (
+                    crate::places::probe(&path),
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                )
+            };
             let id = place::add(
                 registry.store(),
                 &place::New {
@@ -1572,6 +1620,7 @@ fn routed(
                     guarantees,
                     probed,
                     handling: doc["handling"].clone(),
+                    dataset,
                 },
             )
             .map_err(|e| match e {
@@ -1586,12 +1635,16 @@ fn routed(
                     scope: serde_json::json!({"place": id, "name": name, "role": role.name()}),
                     policy: None,
                     job_id: None,
-                    details: None,
+                    details: layout
+                        .is_object()
+                        .then(|| serde_json::json!({"layout": layout})),
                 },
             )?;
             let p = place::show(registry.store(), id)?
                 .ok_or_else(|| Reply::error(500, format!("place {id} was not written")))?;
-            Ok(Reply::created(p.as_json()))
+            let mut answer = p.as_json();
+            answer["layout"] = layout;
+            Ok(Reply::created(answer))
         }
         ["api", "places", _] if put => {
             use nils_registry::place;
@@ -1633,7 +1686,39 @@ fn routed(
                 None | Some(serde_json::Value::Null) => None,
                 Some(h) => Some(place::handling_of(h).map_err(|m| Reply::error(400, m))?),
             };
-            let probed = path.as_deref().map(crate::places::probe);
+            // record 26: the dataset fields need data:work beside
+            // places:work; a source place whose dataset, path or arrival
+            // changes has its folder looked at again
+            let asked = dataset_asked(&doc);
+            let dataset_given = crate::dataset::fields_given(&asked);
+            if dataset_given {
+                if current.role != place::Role::Source {
+                    return Err(Reply::error(
+                        400,
+                        format!(
+                            "a dataset is a source place; {} is a {} place",
+                            current.name,
+                            current.role.name()
+                        ),
+                    ));
+                }
+                caller.allowed(
+                    "PUT /api/places/{id} with dataset fields",
+                    Need::One("data:work"),
+                    Detail::Plain,
+                )?;
+            }
+            let looked = current.role == place::Role::Source && (dataset_given || path.is_some());
+            let (probed, declared) = if looked {
+                let folder = path
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from(&current.path));
+                let d = crate::dataset::declare(registry.store(), &folder, &asked, Some(&current))
+                    .map_err(|r| Reply::error(r.status, r.message))?;
+                (Some(d.probed.clone()), Some(d))
+            } else {
+                (path.as_deref().map(crate::places::probe), None)
+            };
             let mut p = place::set(
                 registry.store(),
                 id,
@@ -1651,6 +1736,26 @@ fn routed(
                     other => Reply::error(500, other.to_string()),
                 })?;
             }
+            if let Some(d) = &declared {
+                p = place::set_dataset(registry.store(), id, &d.dataset).map_err(|e| match e {
+                    nils_registry::store::Error::Message(m) => Reply::error(409, m),
+                    other => Reply::error(500, other.to_string()),
+                })?;
+            }
+            let before = current.as_json();
+            let mut details = serde_json::Map::new();
+            if let Some(h) = &handling {
+                details.insert(
+                    "handling".into(),
+                    serde_json::json!({"before": before["handling"], "after": h}),
+                );
+            }
+            if let Some(d) = &declared {
+                details.insert(
+                    "dataset".into(),
+                    serde_json::json!({"before": before["dataset"], "after": d.dataset, "layout": d.layout}),
+                );
+            }
             nils_registry::audit::record(
                 registry,
                 &nils_registry::audit::Entry {
@@ -1659,12 +1764,14 @@ fn routed(
                     scope: serde_json::json!({"place": id, "name": current.name}),
                     policy: None,
                     job_id: None,
-                    details: handling.as_ref().map(|h| {
-                        serde_json::json!({"handling": {"before": current.as_json()["handling"], "after": h}})
-                    }),
+                    details: (!details.is_empty()).then(|| serde_json::Value::Object(details)),
                 },
             )?;
-            Ok(Reply::ok(p.as_json()))
+            let mut answer = p.as_json();
+            answer["layout"] = declared
+                .map(|d| d.layout)
+                .unwrap_or(serde_json::Value::Null);
+            Ok(Reply::ok(answer))
         }
         ["api", "overlays"] if get => {
             let rows = nils_registry::overlay::list(registry.store())?;
@@ -1840,7 +1947,7 @@ fn routed(
         }
         ["api", "ingest", "look"] if post => {
             let doc = json_body(body)?;
-            crate::browse::look_door(&doors.ingest_roots, &doc)
+            crate::browse::look_door(&doors.ingest_roots, registry.store(), &doc)
         }
         ["api", "ingest", "probe"] if post => {
             let doc = json_body(body)?;
@@ -2002,7 +2109,7 @@ fn routed(
             };
             let verb = command[..words.min(command.len())].join(" ");
             caller.allowed(&format!("{path} {verb}"), Need::One(grant), detail)?;
-            let command = located(doors, command)?;
+            let command = located(doors, registry.store(), command)?;
             let id = nils_registry::job::enqueue_with(
                 registry.store(),
                 &command,
@@ -2011,8 +2118,9 @@ fn routed(
                 queued_by(caller),
             )
             .map_err(job_err)?;
+            // the command as located, so a caller sees which tree @name was
             Ok(Reply::accepted(
-                serde_json::json!({ "job": id, "state": "queued" }),
+                serde_json::json!({ "job": id, "state": "queued", "command": command }),
             ))
         }
         ["api", "jobs", _] if get => {
@@ -2496,6 +2604,23 @@ pub(crate) fn queued_by(caller: &Caller) -> serde_json::Value {
     serde_json::json!({ "detail": caller.access.detail.name(), "actor": caller.actor })
 }
 
+/// Record 26: the dataset fields a places body names, as the declaration
+/// takes them, a null among them (no cohort, no rule) as much as a value;
+/// `handling.arrives` stands for `arrives` for a caller from before, when
+/// the body names no `arrives` of its own.
+fn dataset_asked(doc: &serde_json::Value) -> serde_json::Value {
+    let mut asked = serde_json::Map::new();
+    for key in crate::dataset::FIELDS {
+        if let Some(v) = doc.get(key) {
+            asked.insert(key.to_string(), v.clone());
+        }
+    }
+    if !asked.contains_key("arrives") && doc["handling"]["arrives"].is_string() {
+        asked.insert("arrives".into(), doc["handling"]["arrives"].clone());
+    }
+    serde_json::Value::Object(asked)
+}
+
 /// Wave 4c §6.6: the scope a body names.
 fn scope_of(doc: &serde_json::Value) -> Result<nils_classify::scope::Scope, Reply> {
     let text = doc["scope"]
@@ -2820,7 +2945,7 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request) {
 /// resolves against a registered ingest root and may not escape it; an
 /// absolute path, or one with a parent step, is refused. `backup` takes
 /// the deployment's directory; `verify NAME` checks one archive in it.
-fn located(doors: &Doors, command: Vec<String>) -> Result<Vec<String>, Reply> {
+fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec<String>, Reply> {
     let verb = command[0].as_str();
     match verb {
         "backup" => {
@@ -2893,21 +3018,20 @@ fn located(doors: &Doors, command: Vec<String>) -> Result<Vec<String>, Reply> {
     }
     let takes_a_tree =
         verb == "digest" || (verb == "linkage" && command.get(1).is_some_and(|c| c == "import"));
+    // record 26: `@name` is the dataset's pseudonymised tree, and its
+    // originals, `@name/originals`, are the pseudonymiser's alone
+    let roots = crate::dataset::roots(store, &doors.ingest_roots);
+    let digests = verb == "digest";
     let mut out = Vec::with_capacity(command.len());
     for arg in command {
         if let Some(rest) = arg.strip_prefix('@') {
             let (name, rel) = rest.split_once('/').unwrap_or((rest, ""));
-            let root = doors.ingest_roots.get(name).ok_or_else(|| {
+            let root = roots.get(name).ok_or_else(|| {
                 Reply::error(
                     400,
                     format!(
                         "@{name} is not a registered ingest location; those are {}",
-                        doors
-                            .ingest_roots
-                            .keys()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        roots.keys().cloned().collect::<Vec<_>>().join(", ")
                     ),
                 )
             })?;
@@ -2917,11 +3041,16 @@ fn located(doors: &Doors, command: Vec<String>) -> Result<Vec<String>, Reply> {
                     format!("@{name}/{rel} steps outside its location"),
                 ));
             }
-            let path = if rel.is_empty() {
-                root.clone()
-            } else {
-                root.join(rel)
-            };
+            let path = root.resolve(rel);
+            if digests && let Some(p) = crate::dataset::originals_holding(store, &path) {
+                return Err(Reply::error(
+                    409,
+                    format!(
+                        "@{name}/{rel} is in the originals of the dataset {}, which the pseudonymiser alone reads; a digest reads @{name} (record 26)",
+                        p.name
+                    ),
+                ));
+            }
             out.push(path.display().to_string());
         } else if takes_a_tree
             && !arg.starts_with('-')
@@ -2960,6 +3089,11 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             }
             if detail > Detail::Plain {
                 r["detail"] = serde_json::Value::from(detail.name());
+            }
+            // record 26: the dataset fields of a place need data:work
+            // beside places:work, checked at the door itself
+            if matches!(name, "POST /api/places" | "PUT /api/places/{id}") {
+                r["dataset"] = serde_json::Value::from("data:work");
             }
             r
         };

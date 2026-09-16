@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The sources door, for the desk's Data page: every place with the source
-//! role, how what comes in through it is handled, what its digests added
+//! role, the dataset it is (record 26: what arrives, its two trees with the
+//! counts the last probe kept, its identity rule, what an unmapped
+//! identifier does, the cohort it feeds, its tag lists, what becomes of the
+//! originals, and what the pseudonymiser holds), what its digests added
 //! over time, and what they still need. A source's rows are the `source`
 //! roots under the place's path. Its subjects, studies, sessions and stacks
 //! are the ones its digests created first, so something seen from two
@@ -34,6 +37,17 @@ fn list(ids: &[i64]) -> String {
         .map(i64::to_string)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// What the pseudonymiser holds of a dataset for want of a map: the files,
+/// and the identifiers they carry, counted by their keyed lookup.
+fn held(store: &mut Store, place_id: i64) -> Result<Value, StoreError> {
+    let sql = format!(
+        "SELECT COUNT(*), COUNT(DISTINCT lookup) FROM {} WHERE place_id = {place_id} AND state = 'held'",
+        store.qualified("pseudonym_file")
+    );
+    let row = &store.query(&sql, &[])?[0];
+    Ok(json!({"files": row.int(0)?, "identifiers": row.int(1)?}))
 }
 
 /// The sources document: each active source place with its digests, the
@@ -76,6 +90,19 @@ fn source(
     recent: usize,
 ) -> Result<Value, StoreError> {
     let mut doc = p.as_json();
+    // the dataset's fields at the top, as the page reads them
+    for key in [
+        "arrives",
+        "trees",
+        "identity",
+        "unmapped",
+        "cohort",
+        "tags",
+        "originals_kept",
+    ] {
+        doc[key] = doc["dataset"][key].clone();
+    }
+    doc["held"] = held(store, p.id)?;
     doc["roots"] = json!(ids.len());
     if ids.is_empty() {
         doc["digests"] = json!({"count": 0, "first": null, "last": null, "recent": []});
@@ -139,6 +166,8 @@ fn source(
                 },
                 "subjects_added": n(&["written", "subjects_created"]),
                 "stacks_added": n(&["written", "stacks_created"]),
+                // the pseudonymise step before the digest, once there is one
+                "pseudonymised": null,
             }),
         ));
     }

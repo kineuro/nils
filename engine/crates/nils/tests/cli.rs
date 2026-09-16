@@ -3844,6 +3844,162 @@ fn a_laptop_binds_directories_as_places_and_a_release_keeps_to_the_export_one() 
     assert_eq!(rows.as_array().unwrap().len(), 2, "{rows}");
 }
 
+/// Record 26 at the keyboard: `nils place add --role source` declares a
+/// dataset, its folder looked at and its loose entries moved into the
+/// originals when the data arrives identified; `nils place list` shows the
+/// trees; `nils digest @name` reads the pseudonymised tree under the rule
+/// the dataset stores, and its originals are refused; `nils place set`
+/// changes the dataset; the flags belong to a source place alone.
+#[test]
+fn a_dataset_is_declared_at_the_keyboard_and_digested_by_its_name() {
+    let home = home();
+    let dir = TempDir::new("cli-dataset");
+    let mr = synth::minimal_mr("1.2.3.A", "1.2.3.A.1", "1.2.3.A.1.1");
+    dir.file(
+        "sub-1/IM_0001",
+        &synth::part10(&MetaFields::mr("1.2.3.A.1.1"), &mr, true),
+    );
+    let rule = dir.file(
+        "rule.yml",
+        b"identity:\n  id_type: study-id\n  from:\n    - field: PatientID\n",
+    );
+    let elsewhere = TempDir::new("cli-dataset-out");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+
+    // the rule file is a loose entry too, and moves with the rest
+    let added = nils()
+        .args(registry)
+        .args(["place", "add", "ds"])
+        .arg(dir.path())
+        .args(["--role", "source", "--arrives", "identified", "--identity"])
+        .arg(&rule)
+        .args(["--cohort", "study-a", "--remove", "0010,1010", "--json"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr(&added));
+    let ds: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(ds["dataset"]["arrives"], "identified", "{ds}");
+    assert_eq!(ds["dataset"]["identity"]["id_type"], "study-id", "{ds}");
+    assert_eq!(ds["dataset"]["cohort"], "study-a", "{ds}");
+    assert_eq!(ds["dataset"]["tags"]["remove"][0], "0010,1010", "{ds}");
+    assert_eq!(ds["layout"]["loose"], 0, "{ds}");
+    assert!(
+        dir.path()
+            .join("derivatives/dcm-original/sub-1/IM_0001")
+            .is_file()
+    );
+    assert!(dir.path().join("derivatives/dcm-anon").is_dir());
+    let id = ds["id"].as_i64().unwrap().to_string();
+
+    let listed = nils()
+        .args(registry)
+        .args(["place", "list"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let text = stdout(&listed);
+    assert!(text.contains("arrives identified"), "{text}");
+    assert!(text.contains("derivatives/dcm-anon"), "{text}");
+
+    // @ds is the pseudonymised tree, read under the stored rule
+    let described = nils()
+        .args(registry)
+        .args(["digest", "@ds", "--describe"])
+        .output()
+        .unwrap();
+    assert!(described.status.success(), "{}", stderr(&described));
+    let text = stdout(&described);
+    assert!(text.contains("derivatives/dcm-anon"), "{text}");
+    assert!(
+        text.contains("as study-id") && text.contains("from dataset ds"),
+        "{text}"
+    );
+    let refused = nils()
+        .args(registry)
+        .args(["digest", "@ds/originals"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("pseudonymiser"),
+        "{}",
+        stderr(&refused)
+    );
+    let refused = nils()
+        .args(registry)
+        .arg("digest")
+        .arg(dir.path().join("derivatives/dcm-original"))
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("pseudonymiser"),
+        "{}",
+        stderr(&refused)
+    );
+    let bindings = nils()
+        .args(registry)
+        .args(["place", "bindings"])
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&bindings).contains("@ds/originals"),
+        "{}",
+        stdout(&bindings)
+    );
+
+    // the dataset changed keeps what the change does not name
+    let set = nils()
+        .args(registry)
+        .args([
+            "place",
+            "set",
+            &id,
+            "--no-cohort",
+            "--no-keep-demographics",
+            "--originals",
+            "vaulted",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(set.status.success(), "{}", stderr(&set));
+    let changed: serde_json::Value = serde_json::from_slice(&set.stdout).unwrap();
+    assert_eq!(
+        changed["dataset"]["cohort"],
+        serde_json::Value::Null,
+        "{changed}"
+    );
+    assert_eq!(
+        changed["dataset"]["tags"]["keep_demographics"], false,
+        "{changed}"
+    );
+    assert_eq!(
+        changed["dataset"]["tags"]["remove"][0], "0010,1010",
+        "{changed}"
+    );
+    assert_eq!(changed["dataset"]["originals_kept"], "vaulted", "{changed}");
+    assert_eq!(
+        changed["dataset"]["identity"]["id_type"], "study-id",
+        "{changed}"
+    );
+
+    // the dataset flags belong to a source place
+    let refused = nils()
+        .args(registry)
+        .args(["place", "add", "out"])
+        .arg(elsewhere.path())
+        .args(["--role", "export", "--arrives", "coded"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("source place"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
 /// Wave 5 §10.2: `nils backup` with no directory writes to the backup place
 /// the registry's own place names, the one an install declares, rather than
 /// to a directory of its own that the rule refuses.

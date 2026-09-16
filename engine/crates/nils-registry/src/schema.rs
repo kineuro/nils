@@ -802,10 +802,74 @@ fn build_registry() -> Vec<Table> {
                 // operator declared it: whether it arrives identified, and
                 // what a release does to it on the way out.
                 col("handling", Type::Json),
+                // Record 26: the dataset a source place is. What arrives
+                // (identified, deidentified, coded), the two trees under the
+                // path (the originals the pseudonymiser reads and the
+                // pseudonymised tree the registry reads, or the folder itself
+                // as `.`), the identity rule, what an unmapped identifier
+                // does (hold, code), the cohort every digest feeds, the tag
+                // lists and what becomes of the originals. Null on any other
+                // role; `place::dataset_of` reads it whole.
+                col("dataset", Type::Json),
             ],
         )
         .unique(&["name"])
         .index(&["role"]),
+        // Record 26 §3 and §4: every file of a dataset's originals as the
+        // pseudonymiser last saw it, one row per file, so a run resumes by
+        // size and modification time, a held file waits for its map with
+        // nothing but its shape and a keyed lookup here, and a page counts
+        // what was written, held and refused. Never a name, never an
+        // identifier in the clear.
+        Table::new(
+            "pseudonym_file",
+            vec![
+                col("id", Type::Id),
+                // The dataset, a source place, whose originals hold the file.
+                req("place_id", Type::Int),
+                // The file's path under the originals tree.
+                req("path", Type::Text),
+                // Its size and modification time as last read, in
+                // nanoseconds since the epoch as `source_file` keeps them; a
+                // file with both unchanged is not read again.
+                req("size", Type::Int),
+                req("mtime", Type::Int),
+                // written: a pseudonymised copy is in the anon tree;
+                // unchanged: the copy from before still stands; held: the
+                // linkage store does not know its identifier and the
+                // dataset holds; refused: the file could not be read or
+                // written, with the reason on the job.
+                req("state", Type::Text),
+                // Of a held file: the shape of its identifier, digits as 9
+                // and letters as A, which a review item groups by.
+                col("shape", Type::Text),
+                // The keyed lookup of the identifier, as the linkage store
+                // keys it, so that a map naming the identifier releases the
+                // file without the identifier being kept here.
+                col("lookup", Type::Bytes),
+                // The identifier sealed under the registry's key, for the
+                // reveal door alone: read at detail sensitive and audited.
+                col("sealed", Type::Bytes),
+                // The id type the rule read the identifier as.
+                col("id_type", Type::Text),
+                // Where the copy was written under the anon tree, its size
+                // and its digest, hashed while writing.
+                col("out_path", Type::Text),
+                col("out_size", Type::Int),
+                col("digest", Type::Text),
+                // The pseudonymise batch that last touched the row.
+                col("batch_id", Type::Int),
+                req("first_seen", Type::Timestamp),
+                col("written_at", Type::Timestamp),
+                // When a map released a held file.
+                col("released_at", Type::Timestamp),
+                // 1 when a person asked for the held file to be coded
+                // anyway, from the identifier under the key; 0 otherwise.
+                req("code_anyway", Type::Int),
+            ],
+        )
+        .unique(&["place_id", "path"])
+        .index(&["place_id", "state"]),
         Table::new(
             "classification",
             vec![
