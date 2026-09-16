@@ -321,28 +321,93 @@ pub(crate) fn stages(store: &mut Store, batch: &Batch) -> Result<Value, StoreErr
     }))
 }
 
-/// Files per second of the last run of a kind that ended done on this
-/// host, from the batch's own counts; none when there was no such run.
-pub(crate) fn rate_of(store: &mut Store, kind: &str) -> Result<Option<f64>, StoreError> {
+/// The files a run read or wrote, as its own counts record them: the
+/// digest's `seen`, the pseudonymiser's `files.seen`.
+fn files_of(counts: &Value) -> u64 {
+    n(counts, &["seen"]).max(n(counts, &["files", "seen"]))
+}
+
+/// The files a run must have read or written for its rate to say anything
+/// about the machine rather than about the cost of starting a run.
+const ENOUGH: u64 = 100;
+
+/// The runs of a kind a rate looks back over.
+const RUNS: usize = 50;
+
+/// What this machine does per second at a step, `{files_per_s, files}`: the
+/// last run of the kind that ended done here and read or wrote at least a
+/// hundred files, else the largest run there was; null where there was no
+/// run at all. The files it was measured over come with it, because a run
+/// of twenty files times the cost of starting a run and says nothing about
+/// the disk (record 26 §14).
+pub(crate) fn rate_of(store: &mut Store, kind: &str) -> Result<Value, StoreError> {
     let d = store.dialect();
     let counts = crate::text_of(store, "ingest_batch", "counts");
     let sql = format!(
         "SELECT {counts} FROM {} b JOIN {} j ON j.id = b.job_id WHERE b.kind = {} AND b.state = 'done' \
-         AND j.host = {} ORDER BY b.id DESC LIMIT 1",
+         AND j.host = {} ORDER BY b.id DESC LIMIT {RUNS}",
         store.qualified("ingest_batch"),
         store.qualified("job"),
         d.param(1, Type::Text),
         d.param(2, Type::Text),
     );
     let host = nils_registry::job::hostname();
-    Ok(store
-        .query_opt(&sql, &[Param::from(kind), Param::from(host.as_str())])?
-        .and_then(|r| {
-            r.opt_text(0)
-                .ok()
-                .flatten()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        })
-        .and_then(|c| c["files_per_s"].as_f64())
-        .map(|f| (f * 10.0).round() / 10.0))
+    let rows = store.query(&sql, &[Param::from(kind), Param::from(host.as_str())])?;
+    let mut runs: Vec<(u64, f64)> = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let Some(counts) = r
+            .opt_text(0)?
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        else {
+            continue;
+        };
+        if let Some(rate) = counts["files_per_s"].as_f64() {
+            runs.push((files_of(&counts), rate));
+        }
+    }
+    Ok(match pick(&runs) {
+        Some((files, rate)) => json!({
+            "files_per_s": (rate * 10.0).round() / 10.0,
+            "files": files,
+        }),
+        None => Value::Null,
+    })
+}
+
+/// The run a rate is taken from, given the runs newest first: the first
+/// that read or wrote enough files, else the largest of them.
+fn pick(runs: &[(u64, f64)]) -> Option<(u64, f64)> {
+    runs.iter()
+        .find(|(files, _)| *files >= ENOUGH)
+        .or_else(|| runs.iter().max_by_key(|(files, _)| *files))
+        .copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{files_of, pick};
+    use serde_json::json;
+
+    #[test]
+    fn a_rate_comes_from_a_run_big_enough_to_mean_something() {
+        // record 26 §14: a resume run that wrote ten of a thousand files
+        // said 80,995 files a second, which is the cost of starting a run
+        // and not the disk. The newest run of a hundred files or more wins.
+        let runs = [(20, 80_995.0), (960, 9_964.1), (800, 17_755.5)];
+        assert_eq!(pick(&runs), Some((960, 9_964.1)));
+        // with none that big, the largest there was, so a small archive
+        // still says something
+        let small = [(20, 80_995.0), (40, 3_115.0)];
+        assert_eq!(pick(&small), Some((40, 3_115.0)));
+        assert_eq!(pick(&[]), None);
+    }
+
+    #[test]
+    fn the_files_of_a_run_are_the_ones_its_own_counts_name() {
+        // the digest counts what it saw at the top; the pseudonymiser
+        // counts its files under `files`
+        assert_eq!(files_of(&json!({"seen": 960, "files_per_s": 1.0})), 960);
+        assert_eq!(files_of(&json!({"files": {"seen": 160}})), 160);
+        assert_eq!(files_of(&json!({})), 0);
+    }
 }

@@ -4302,11 +4302,13 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         source["digests"]["count"], 1,
         "a pseudonymise step is not a digest: {sources}"
     );
-    assert!(
-        sources["rates"]["pseudonymize"].as_f64().is_some(),
-        "{sources}"
-    );
-    assert!(sources["rates"]["digest"].as_f64().is_some(), "{sources}");
+    // record 26 §14: a rate says what it was measured over, so that a page
+    // can say what the number is worth
+    for step in ["pseudonymize", "digest"] {
+        let rate = &sources["rates"][step];
+        assert!(rate["files_per_s"].as_f64().is_some(), "{step}: {sources}");
+        assert_eq!(rate["files"], 6, "{step}: {sources}");
+    }
 
     // the jobs read as queued (lab 26, defect 19): the command line the
     // door located, what ran beside it, and the queue's worker left out
