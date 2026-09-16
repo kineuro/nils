@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# The engine's HTTP API, version 5: version 4 with the dataset on a source
-# place (record 26). A source place is a dataset: what arrives in it
+# The engine's HTTP API, version 5: version 4 with record 26 in five
+# slices, the dataset on a source place, the pseudonymiser and its chain,
+# the identifier map and the merge, cohorts with doors, and every word
+# list a site's to amend. A source place is a dataset: what arrives in it
 # (identified, deidentified or coded), its two trees (the originals the
 # pseudonymiser reads and the pseudonymised tree the registry reads, or the
 # folder itself), the identity rule its files are read under, what an
