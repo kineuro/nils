@@ -7968,7 +7968,23 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     }
     println!("  subjects         {:>12}", report.subjects);
     println!("  stacks           {:>12}", report.stacks);
-    println!("  files            {:>12}", report.files);
+    // §9.3 with lab 26b, finding 5: a layout that has no place for a stack
+    // leaves it out, and the tree then holds fewer stacks than the archive
+    // does. The reasons are under "where they went" below.
+    if report.left_out > 0 {
+        println!(
+            "  left out         {:>12}   stacks the layout has no name for",
+            report.left_out
+        );
+    }
+    println!(
+        "  files            {:>12}{}",
+        report.files,
+        match report.layout.as_str() {
+            "bids" => "   NIfTI and its sidecars, with DICOM under sourcedata/",
+            _ => "",
+        }
+    );
     println!(
         "  in the tree      {:>9.2} GiB",
         report.bytes as f64 / (1u64 << 30) as f64

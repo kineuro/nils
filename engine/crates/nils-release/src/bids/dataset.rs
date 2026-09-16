@@ -203,7 +203,12 @@ pub fn bidsignore(lines: &[String]) -> String {
 
 /// The `README`, which BIDS requires and which is the one file in the tree
 /// written for a person.
-pub fn readme(name: &str, made_by: &MadeBy, counts: &BTreeMap<String, i64>) -> String {
+pub fn readme(
+    name: &str,
+    made_by: &MadeBy,
+    counts: &BTreeMap<String, i64>,
+    nowhere: &BTreeMap<String, i64>,
+) -> String {
     let mut out = format!("# {name}\n\n");
     let _ = writeln!(
         out,
@@ -233,12 +238,30 @@ pub fn readme(name: &str, made_by: &MadeBy, counts: &BTreeMap<String, i64>) -> S
         }
         out.push('\n');
     }
+    // Lab 26b, finding 5: a tree with fewer files than the archive holds says
+    // so itself, with the number and the reasons, rather than leaving a reader
+    // to compare two trees and guess.
+    if !nowhere.is_empty() {
+        let left_out: i64 = nowhere.values().sum();
+        let _ = writeln!(
+            out,
+            "## What is not here\n\n\
+             {left_out} stack(s) are not in this tree: the standard has no name for them, \
+             and a name nobody chose would be worse than their absence.\n"
+        );
+        out.push_str("| why | stacks |\n|---|---|\n");
+        for (why, n) in nowhere {
+            let _ = writeln!(out, "| {why} | {n} |");
+        }
+        out.push('\n');
+    }
     out.push_str(
         "Less than half of a clinical archive has a BIDS name, and that is not a defect in\n\
          BIDS: a localizer, a reformat, a projection and a synthetic contrast are not\n\
          acquisitions and the standard has no word for them. What is here is what the\n\
          standard admits; `sourcedata/` and `derivatives/nils/` hold the rest, and the\n\
-         run reports anything it could place nowhere.\n",
+         run reports anything it could place nowhere. The files here are NIfTI and their\n\
+         sidecars, so there are fewer of them than the DICOM a descriptive tree holds.\n",
     );
     out
 }
@@ -364,10 +387,24 @@ mod tests {
     #[test]
     fn the_readme_says_where_things_were_put() {
         let counts = [("raw".to_string(), 12i64), ("nowhere".to_string(), 3)].into();
-        let text = readme("a cohort", &made_by(), &counts);
+        let nowhere = [("no_task".to_string(), 2i64), ("no_suffix".to_string(), 1)].into();
+        let text = readme("a cohort", &made_by(), &counts, &nowhere);
         assert!(text.contains("2026.09.05.1"), "{text}");
         assert!(text.contains("localizers: sourcedata"), "{text}");
         assert!(text.contains("| nowhere | 3 |"), "{text}");
+        // lab 26b, finding 5: how many stacks are not here, and why, so a
+        // reader never has to compare two trees to find out
+        assert!(text.contains("3 stack(s) are not in this tree"), "{text}");
+        assert!(text.contains("| no_task | 2 |"), "{text}");
+        assert!(text.contains("| no_suffix | 1 |"), "{text}");
+        assert!(text.contains("NIfTI and their\nsidecars"), "{text}");
+    }
+
+    #[test]
+    fn a_tree_that_left_nothing_out_says_nothing_about_it() {
+        let counts = [("raw".to_string(), 12i64)].into();
+        let text = readme("a cohort", &made_by(), &counts, &BTreeMap::new());
+        assert!(!text.contains("What is not here"), "{text}");
     }
 
     #[test]

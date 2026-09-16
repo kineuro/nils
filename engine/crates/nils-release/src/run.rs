@@ -144,6 +144,12 @@ pub struct Report {
     pub routes: BTreeMap<String, i64>,
     /// And, for the ones that went nowhere, why. Never a silent drop.
     pub nowhere: BTreeMap<String, i64>,
+    /// How many stacks those are, in one number (lab 26b, finding 5): a tree
+    /// with fewer files than the archive holds says how many it left out
+    /// without anyone adding up reasons. A BIDS tree holds the stacks the
+    /// standard admits and writes them as NIfTI, so neither its stack count
+    /// nor its file count is a descriptive tree's.
+    pub left_out: i64,
     /// Stacks written as DICOM because the converter would not convert them.
     /// v0 carries a hard-coded list of vendors instead, so a stack it could
     /// have converted is skipped and one it cannot is a failure.
@@ -406,6 +412,14 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
         Ok(_) => (job::State::Done, None),
         Err(e) => (job::State::Failed, Some(e.to_string())),
     };
+    // Lab 26b, finding 5: the report is the job's result, so a release queued
+    // at a door says what it wrote, where each stack went and what it left
+    // out, as the command line says it. Counts and reasons, never a path.
+    if let Ok(report) = &result
+        && let Ok(doc) = serde_json::to_value(report)
+    {
+        let _ = job::set_result(registry.store(), job_id, &doc);
+    }
     let _ = job::finish(registry.store(), job_id, state, error.as_deref());
     // Wave 4a §9.2: the audit row, under the policy it ran under.
     if let Ok(report) = &result {
@@ -724,6 +738,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             if let crate::bids::place::Route::Nowhere(why) = &route {
                 *report.nowhere.entry(why.kind().to_string()).or_insert(0) += 1;
                 *report.routes.entry("nowhere".to_string()).or_insert(0) += 1;
+                report.left_out += 1;
                 absent.push((stack, why.kind().to_string(), why.to_string()));
                 continue;
             }
@@ -1580,7 +1595,7 @@ fn write_dataset(
     )?;
     std::fs::write(
         root.join("README"),
-        dataset::readme(settings.name, &made_by, &report.routes),
+        dataset::readme(settings.name, &made_by, &report.routes, &report.nowhere),
     )?;
 
     // One row per subject the release wrote, and nothing about them that the
