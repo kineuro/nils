@@ -147,6 +147,25 @@ pub(crate) fn stages(store: &mut Store, batch: &Batch) -> Result<Value, StoreErr
                 ),
                 &[Param::Int(b.id)],
             )?;
+            // record 26 §14: the subjects whose files this batch holds,
+            // whoever made them. A map makes the subjects of a dataset and
+            // the digest meets them, so counting what the digest created
+            // answers nothing for exactly the dataset that has a map.
+            let subjects = count(
+                store,
+                &format!(
+                    "SELECT COUNT(DISTINCT se.subject_id) FROM {} f \
+                     JOIN {} i ON i.id = f.instance_id JOIN {} se ON se.id = i.series_id \
+                     JOIN {} su ON su.id = se.subject_id \
+                     WHERE f.batch_id = {} AND su.merged_into IS NULL",
+                    store.qualified("source_file"),
+                    store.qualified("instance"),
+                    store.qualified("series"),
+                    store.qualified("subject"),
+                    d.param(1, Type::Int)
+                ),
+                &[Param::Int(b.id)],
+            )?;
             (
                 json!({
                     "batch": b.id,
@@ -162,7 +181,7 @@ pub(crate) fn stages(store: &mut Store, batch: &Batch) -> Result<Value, StoreErr
                     "batch": b.id,
                     "stacks": n(c, &["written", "stacks_created"]),
                     "sessions": sessions,
-                    "subjects": n(c, &["written", "subjects_created"]),
+                    "subjects": subjects,
                     "moved": n(c, &["written", "gone"]),
                     "job": b.job_id,
                 }),

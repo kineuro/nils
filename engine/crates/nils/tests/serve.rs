@@ -2424,6 +2424,23 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
         &["place", "add", "incoming", tree, "--role", "source"],
         None,
     );
+    // record 26: the map makes the subject and the digest meets it, which
+    // is what a dataset with a map looks like; the door counts the subjects
+    // whose files the tree holds, not the ones a digest made
+    let map = home.file("map.csv", b"PatientID,subject_code\nP1,mapped-0001\n");
+    run(
+        &home,
+        &[
+            "linkage",
+            "import",
+            map.to_str().unwrap(),
+            "--id-column",
+            "PatientID",
+            "--code-column",
+            "subject_code",
+        ],
+        None,
+    );
     run(
         &home,
         &["digest", "--name", "first", "--no-private", tree],
@@ -4213,10 +4230,9 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(stages["walked"]["new"], 6, "{page}");
     assert_eq!(stages["walked"]["job"], ids[1], "{page}");
     assert_eq!(stages["digested"]["stacks"], 2, "{page}");
-    assert_eq!(
-        stages["digested"]["subjects"], 0,
-        "found by their codes: {page}"
-    );
+    // record 26 §14: the subjects whose files the batch holds, which the
+    // pseudonymiser made and the digest found by their codes
+    assert_eq!(stages["digested"]["subjects"], 2, "{page}");
     assert_eq!(stages["classified"]["of"], 2, "{page}");
     assert_eq!(stages["classified"]["stacks"], 2, "{page}");
     assert_eq!(

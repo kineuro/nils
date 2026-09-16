@@ -128,6 +128,7 @@ fn source(
         q("review_item"),
         q("classification"),
     );
+    let (instance, series) = (q("instance"), q("series"));
     let of_source =
         format!("JOIN {batch} b ON b.id = x.first_batch_id WHERE b.source_id IN ({sources})");
     let open = "ri.status IN ('open', 'staged')";
@@ -230,9 +231,18 @@ fn source(
         }
     }
 
+    // record 26 §14: the subjects whose files this dataset's tree holds,
+    // whoever made them. A map makes the subjects of a dataset and its
+    // digests meet them, so counting what a digest created answers nothing
+    // for exactly the dataset that has a map.
     let subjects = count(
         store,
-        &format!("SELECT COUNT(*) FROM {subject} x {of_source} AND x.merged_into IS NULL"),
+        &format!(
+            "SELECT COUNT(DISTINCT se.subject_id) FROM {file} f \
+             JOIN {instance} i ON i.id = f.instance_id JOIN {series} se ON se.id = i.series_id \
+             JOIN {subject} su ON su.id = se.subject_id \
+             WHERE f.source_id IN ({sources}) AND su.merged_into IS NULL"
+        ),
     )?;
     let studies = count(
         store,
