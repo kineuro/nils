@@ -25,6 +25,14 @@ and gets a version; nothing is amended in place.
 | 2 | [`v2/pack.schema.json`](v2/pack.schema.json) | Wave 4a slice 15, 2026-09-06: the optional `fields` key, a visibility (`local`, `federated`, `sensitive`) the pack puts on a catalogue field (C27) |
 | 3 | [`v3/pack.schema.json`](v3/pack.schema.json) | Wave 4b slice 4, 2026-09-07: the optional `levels` key, the comparability level files that say what the same acquisition means at each named level (Wave 4b section 6) |
 | 4 | [`v4/pack.schema.json`](v4/pack.schema.json) | Wave 4b slice 11, 2026-09-07: the optional `mcp` key, what the MCP door tells a model and which doors it opts in as tools (Wave 4b section 12.3) |
+| 5 | [`v5/pack.schema.json`](v5/pack.schema.json), [`v5/overlay.schema.json`](v5/overlay.schema.json) | 2026-09-16: no manifest key changes; every axis value's `keywords` list is a site's to amend through an overlay, named `lists.<axis>.<value>` beside the `buckets`, and the overlay document has a schema of its own. The flags, the physics, the thresholds and the order values are tried in stay the pack's. An engine at 5 loads a contract-4 pack unchanged |
 
 The engine's own copy of the version is `nils_pack::CONTRACT`; a test keeps
 the two the same and keeps every manifest key the loader reads on the schema.
+
+**The overlay** (`v5/overlay.schema.json`) is the one document a site writes
+against a pack: `overlay`, `version`, `pack`, an origin `scope`, the
+`buckets` and `lists` it amends (each an `add` and a `remove`), and its
+`cases`. The same document is what `POST /api/classify/try` rehearses and
+`POST /api/overlays` proposes. An engine refuses an overlay that names
+anything the schema does not, and says what stays the pack's.

@@ -97,6 +97,95 @@ fn every_manifest_key_the_loader_reads_is_on_the_schema() {
 }
 
 #[test]
+fn every_overlay_key_the_loader_reads_is_on_the_overlay_schema() {
+    // Pack contract 5 writes the overlay document down. The keys
+    // `nils_pack::Overlay::parse` reads, and nothing else: an overlay naming
+    // anything more is refused by the loader and by the schema alike.
+    const READ: &[&str] = &[
+        "overlay", "version", "pack", "scope", "buckets", "lists", "cases",
+    ];
+    let version: u32 = std::fs::read_to_string(contracts().join("pack/VERSION"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(version >= 5, "the overlay schema is contract 5's");
+    let text =
+        std::fs::read_to_string(contracts().join(format!("pack/v{version}/overlay.schema.json")))
+            .expect("the overlay schema of the published version exists");
+    let schema: serde_json::Value = serde_json::from_str(&text).expect("the schema is JSON");
+    let properties = schema["properties"].as_object().expect("properties");
+    for key in READ {
+        assert!(
+            properties.contains_key(*key),
+            "{key} is read by the loader and not on the overlay schema"
+        );
+    }
+    for key in properties.keys() {
+        assert!(
+            READ.contains(&key.as_str()),
+            "{key} is on the overlay schema and the loader never reads it"
+        );
+    }
+    assert_eq!(schema["additionalProperties"], false);
+    let scopes: Vec<&str> = schema["properties"]["scope"]["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        scopes,
+        nils_pack::overlay::SCOPES,
+        "an overlay is keyed on an origin"
+    );
+    let edit = &schema["$defs"]["edit"];
+    assert_eq!(
+        edit["additionalProperties"], false,
+        "an edit adds and removes, nothing else"
+    );
+    for (key, p) in properties {
+        assert!(
+            p.get("description")
+                .and_then(|d| d.as_str())
+                .is_some_and(|d| !d.is_empty()),
+            "{key} has no description"
+        );
+    }
+}
+
+#[test]
+fn a_pack_of_an_earlier_contract_loads_under_this_one() {
+    // A contract-4 pack is what every pack written before 5 is, the shipped
+    // MRI pack among them, and version 5 changed no manifest key.
+    let mri = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let pack = nils_pack::load(&mri, None).expect("the MRI pack loads");
+    assert!(
+        pack.contract < nils_pack::CONTRACT,
+        "the MRI pack stays at contract {} in this slice",
+        pack.contract
+    );
+    assert!(
+        pack.lists.len() > 100,
+        "every axis value's word list is a site's to amend: {}",
+        pack.lists.len()
+    );
+    assert!(
+        pack.lists.iter().any(|l| l == "technique.TSE"),
+        "{:?}",
+        pack.lists
+    );
+    assert!(
+        pack.lists.iter().any(|l| l == "base.T1w"),
+        "a longhand rule's words too"
+    );
+    assert!(
+        !pack.lists.iter().any(|l| l == "provenance.RawRecon"),
+        "the default is reached by no word"
+    );
+}
+
+#[test]
 fn the_mri_pack_s_manifest_keeps_to_the_contract() {
     // The shipped pack's manifest, key by key, against the schema's
     // properties and required keys, without a validator: a key the schema

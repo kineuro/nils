@@ -1339,7 +1339,9 @@ fn routed(
                 .pack_dir
                 .clone()
                 .ok_or_else(|| Reply::error(404, "no pack directory"))?;
-            match crate::pack_doc(&dir, name)? {
+            // Record 26: the site's adopted overlays give the terms per list.
+            let overlays = nils_registry::overlay::list(registry.store())?;
+            match crate::pack_doc(&dir, name, &overlays)? {
                 Some(doc) => Ok(Reply::ok(doc)),
                 None => Err(Reply::error(404, format!("no pack named {name}"))),
             }

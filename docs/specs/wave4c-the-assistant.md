@@ -511,6 +511,30 @@ Built to Wave 2 §10's names, which the code never implemented (C44):
    through or failed to parse, the subject and study counts under that rule, and the
    reader's diagnostics. Shapes, never values; no path in any response; nothing
    written. Two candidates side by side is the whole point.
+6. **Every word list is the site's to amend** (added 2026-09-16, pack contract 5).
+   An overlay names `lists.<axis>.<value>` beside its `buckets`, each an `add` and a
+   `remove`, and the merge is the buckets' (the pack's words, then the additions
+   deduplicated case-insensitively with the first spelling kept, then the removals),
+   applied at load and never written into the pack. The value is named by its
+   identity or its label. A value the axis tries by a flag alone gains a word tier
+   from a list; a value no word of the pack's reaches (a route sets it, or it is the
+   default) is refused, because amending its words would make the axis try it and
+   the order values are tried in stays the pack's. So do the flags, the physics
+   windows and the review thresholds: an overlay naming any of them, at the top or
+   inside an edit, is refused with why. The overlay document is written down as
+   `contracts/pack/v5/overlay.schema.json`. `overlay_unused` counts a list's terms
+   as it counts a bucket's. `GET /api/packs/{name}` and `nils pack show --json`
+   answer every axis in the order it is decided with its values in the order they
+   are tried, each with its words after any overlay, the bucket they came from, the
+   list an overlay amends it by, the detection clauses in words (the exclusive flag,
+   the alternative flags, the combinations, the physics windows as written), and the
+   terms the registry's adopted overlays put on it; beside the axes the flags count,
+   the review thresholds and every amendable list. `GET /api/packs` says how many
+   lists and buckets each pack opens. `GET /api/classify/signals` answers the same
+   signals `by_value` (decided, by flag, by word, by physics, unsure, the shadowed
+   words, the words a person overrode) and the `origins` of the scope for its chips,
+   bounded as the rest. `nils overlay show` prints the lists and `export` writes
+   them; `nils classify --overlay` applies them; adoption re-sorts as before.
 
 ### 6.7 The contracts (A7)
 

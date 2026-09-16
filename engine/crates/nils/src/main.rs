@@ -2494,6 +2494,33 @@ fn overlay_command(home: &Home, command: OverlayCommand) -> Result<(), Exit> {
                     );
                 }
                 println!("  scope {}", o.scope);
+                // What it amends: each bucket and each list (pack contract
+                // 5), the words added with a plus and the removed with a
+                // minus, as the document holds them.
+                for (what, edits) in [
+                    ("bucket", &o.document["buckets"]),
+                    ("list", &o.document["lists"]),
+                ] {
+                    let Some(m) = edits.as_object() else {
+                        continue;
+                    };
+                    for (name, e) in m {
+                        let signed = |key: &str, sign: char| -> Vec<String> {
+                            e[key]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|w| w.as_str())
+                                        .map(|w| format!("{sign}{w}"))
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        };
+                        let mut words = signed("add", '+');
+                        words.extend(signed("remove", '-'));
+                        println!("  {what} {name}: {}", words.join(" "));
+                    }
+                }
                 let moves = o.tried["moves"].as_array().map(|m| m.len()).unwrap_or(0);
                 println!(
                     "  rehearsal: {moves} move(s), review items close {} open {}, cases passed {} failed {}",
@@ -2783,46 +2810,13 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
             let ov = load_overlay(overlay.as_ref())?;
             let pack = nils_pack::load(&found, ov.as_ref()).map_err(|e| fail(e.to_string()))?;
             if json {
-                let v = serde_json::json!({
-                    "pack": pack.name,
-                    "version": pack.version.to_string(),
-                    "contract": pack.contract,
-                    "fields": pack.fields.iter().map(|(f, v)| (f.clone(), serde_json::Value::from(v.name()))).collect::<serde_json::Map<_, _>>(),
-                    "modality": pack.modality,
-                    "parsers": pack.parsers.iter().map(|p| serde_json::json!({
-                        "name": p.name, "predicates": p.preds.len()
-                    })).collect::<Vec<_>>(),
-                    "flags": pack.flags.len(),
-                    "axes": pack.axes.iter().map(|a| serde_json::json!({
-                        "axis": a.name, "multi": a.multi, "values": a.values.len(),
-                        "review_below": pack.review.below(&a.name),
-                        "asks_when_missing": pack.review.asks_when_missing(&a.name),
-                    })).collect::<Vec<_>>(),
-                    "passes": pack.passes.iter().map(|p| serde_json::json!({
-                        "pass": p.name, "kind": p.kind_name(),
-                        "phase": format!("{:?}", p.phase).to_lowercase(),
-                        "reference": p.reference.scope,
-                    })).collect::<Vec<_>>(),
-                    "rule_sets": pack.rule_sets.iter().map(|r| serde_json::json!({
-                        "rule_set": r.name, "rules": r.rules.len(),
-                        "decides": r.decides, "entered": r.enter_when.is_some(),
-                    })).collect::<Vec<_>>(),
-                    "buckets": pack.buckets,
-                    "cases": pack.cases,
-                    "overlay": pack.overlay,
-                    "private": serde_json::json!({
-                        "coverage": pack.private_coverage,
-                        "ingest": pack.ingest.iter().map(|i| serde_json::json!({
-                            "name": i.name, "address": i.text(), "vr": i.vr,
-                            "dictionary_name": i.dictionary_name, "kind": i.kind,
-                        })).collect::<Vec<_>>(),
-                        "release": pack.release.iter().map(|a| a.text()).collect::<Vec<_>>(),
-                        "dictionary": {
-                            "creators": pack.dictionary.creators(),
-                            "elements": pack.dictionary.len(),
-                        },
-                    }),
-                });
+                // The site's adopted overlays, when this home holds a
+                // registry; a pack author's directory need not.
+                let adopted = open(home)
+                    .ok()
+                    .and_then(|mut r| nils_registry::overlay::list(r.store()).ok())
+                    .unwrap_or_default();
+                let v = pack_document(&pack, &adopted);
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&v)
@@ -2908,6 +2902,11 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                         println!("  bucket  {name:20} {:3} terms", values.len());
                     }
                 }
+                println!(
+                    "  lists   {:20} {:3} word lists a site may amend by axis.value",
+                    "",
+                    pack.lists.len()
+                );
                 if let Some(o) = &pack.overlay {
                     println!("  under overlay {o}");
                 }
@@ -8338,7 +8337,9 @@ struct RestoreArgs {
     yes: bool,
 }
 
-/// Wave 4c §6.5: the packs a directory holds, for the door.
+/// Wave 4c §6.5: the packs a directory holds, for the door. Record 26: with
+/// how many word lists each opens to an overlay, by `axis.value` and by
+/// bucket.
 pub(crate) fn packs_doc(dir: &Path) -> Result<serde_json::Value, Exit> {
     let mut packs = Vec::new();
     for p in packs_in(dir)? {
@@ -8346,6 +8347,7 @@ pub(crate) fn packs_doc(dir: &Path) -> Result<serde_json::Value, Exit> {
             Ok(pack) => packs.push(serde_json::json!({
                 "name": pack.name, "version": pack.version.to_string(), "contract": pack.contract,
                 "modality": pack.modality, "cases": pack.cases,
+                "lists": pack.lists.len(), "buckets": pack.buckets.len(),
             })),
             Err(e) => packs.push(serde_json::json!({
                 "name": p.file_name().unwrap_or_default().to_string_lossy(), "error": e.to_string(),
@@ -8355,8 +8357,13 @@ pub(crate) fn packs_doc(dir: &Path) -> Result<serde_json::Value, Exit> {
     Ok(serde_json::json!({"packs": packs}))
 }
 
-/// Wave 4c §6.5: one pack, for the door: what a person tunes.
-pub(crate) fn pack_doc(dir: &Path, name: &str) -> Result<Option<serde_json::Value>, Exit> {
+/// Wave 4c §6.5: one pack, for the door: what a person tunes. The adopted
+/// overlays of the registry give the site's terms per list.
+pub(crate) fn pack_doc(
+    dir: &Path,
+    name: &str,
+    overlays: &[nils_registry::overlay::Overlay],
+) -> Result<Option<serde_json::Value>, Exit> {
     let Some(found) = packs_in(dir)?
         .into_iter()
         .find(|p| p.file_name().is_some_and(|f| f == name))
@@ -8364,24 +8371,161 @@ pub(crate) fn pack_doc(dir: &Path, name: &str) -> Result<Option<serde_json::Valu
         return Ok(None);
     };
     let pack = nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
-    Ok(Some(serde_json::json!({
+    Ok(Some(pack_document(&pack, overlays)))
+}
+
+/// One pack as a document (`nils pack show --json`, `GET /api/packs/{name}`).
+/// Record 26, decision 12: every axis in the order it is decided, its values
+/// in the order they are tried, each with its words after any overlay and
+/// how else it is reached (a flag alone, any of several, all of several, a
+/// physics window), the flags count, the review thresholds, the lists a
+/// site may amend, and the terms the site's adopted overlays put on each
+/// list, when a registry's overlays are at hand.
+pub(crate) fn pack_document(
+    pack: &nils_pack::Pack,
+    overlays: &[nils_registry::overlay::Overlay],
+) -> serde_json::Value {
+    use serde_json::json;
+    // The site's adopted edits per list, named as the pack names it: a
+    // bucket by name, a value as axis.identity whatever the overlay wrote.
+    #[derive(Default)]
+    struct Site {
+        add: Vec<String>,
+        remove: Vec<String>,
+        overlays: Vec<i64>,
+    }
+    let list_of = |name: &str| -> String {
+        let Some((axis, value)) = name.split_once('.') else {
+            return name.to_string();
+        };
+        pack.axes
+            .iter()
+            .find(|a| a.name == axis)
+            .and_then(|a| a.values.iter().find(|v| v.id == value || v.label == value))
+            .map(|v| format!("{axis}.{}", v.id))
+            .unwrap_or_else(|| name.to_string())
+    };
+    let words = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|w| w.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut site: std::collections::BTreeMap<String, Site> = std::collections::BTreeMap::new();
+    let adopted: Vec<&nils_registry::overlay::Overlay> = overlays
+        .iter()
+        .filter(|o| o.status == nils_registry::overlay::ADOPTED && o.pack == pack.name)
+        .collect();
+    for o in &adopted {
+        for (key, resolve) in [("buckets", false), ("lists", true)] {
+            let Some(m) = o.document[key].as_object() else {
+                continue;
+            };
+            for (name, edit) in m {
+                let list = if resolve { list_of(name) } else { name.clone() };
+                let s = site.entry(list).or_default();
+                for w in words(&edit["add"]) {
+                    if !s.add.iter().any(|x| x.eq_ignore_ascii_case(&w)) {
+                        s.add.push(w);
+                    }
+                }
+                for w in words(&edit["remove"]) {
+                    if !s.remove.iter().any(|x| x.eq_ignore_ascii_case(&w)) {
+                        s.remove.push(w);
+                    }
+                }
+                if !s.overlays.contains(&o.id) {
+                    s.overlays.push(o.id);
+                }
+            }
+        }
+    }
+    let site_json = |s: &Site| json!({"add": s.add, "remove": s.remove, "overlays": s.overlays});
+
+    json!({
         "pack": pack.name,
         "version": pack.version.to_string(),
         "contract": pack.contract,
         "modality": pack.modality,
-        "axes": pack.axes.iter().map(|a| serde_json::json!({
-            "axis": a.name, "multi": a.multi, "values": a.values.len(),
+        "fields": pack.fields.iter().map(|(f, v)| (f.clone(), serde_json::Value::from(v.name()))).collect::<serde_json::Map<_, _>>(),
+        "parsers": pack.parsers.iter().map(|p| json!({
+            "name": p.name, "predicates": p.preds.len()
+        })).collect::<Vec<_>>(),
+        "flags": pack.flags.len(),
+        "review": {
+            "low_confidence": {
+                "default": pack.review.low_confidence,
+                "per_axis": pack.review.per_axis,
+            },
+            "missing": pack.review.missing,
+            "silent_when": pack.review.silent_when.is_some(),
+        },
+        "axes": pack.axes.iter().map(|a| json!({
+            "axis": a.name,
+            "multi": a.multi,
+            "phase": a.phase.name(),
+            "stores": if a.stores_label { "label" } else { "id" },
+            "default": a.default,
+            "count": a.values.len(),
             "review_below": pack.review.below(&a.name),
             "asks_when_missing": pack.review.asks_when_missing(&a.name),
+            "values": a.values.iter().map(|v| {
+                let list = format!("{}.{}", a.name, v.id);
+                let amendable = pack.lists.contains(&list);
+                json!({
+                    "name": v.id,
+                    "label": v.label,
+                    "family": v.family,
+                    "tried": v.tried,
+                    "keywords": v.keywords,
+                    "bucket": v.bucket,
+                    "list": amendable.then_some(&list),
+                    "detection": {
+                        "exclusive": v.detection.exclusive,
+                        "alternative": v.detection.alternative,
+                        "combination": v.detection.combination,
+                        "physics": v.detection.physics.iter().map(|w| json!({
+                            "when": w.when, "confidence": w.confidence, "why": w.why,
+                        })).collect::<Vec<_>>(),
+                    },
+                    "site": site.get(&list).map(site_json),
+                })
+            }).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
-        "rule_sets": pack.rule_sets.iter().map(|r| serde_json::json!({
-            "rule_set": r.name, "rules": r.rules.len(), "decides": r.decides,
+        "passes": pack.passes.iter().map(|p| json!({
+            "pass": p.name, "kind": p.kind_name(),
+            "phase": format!("{:?}", p.phase).to_lowercase(),
+            "reference": p.reference.scope,
         })).collect::<Vec<_>>(),
-        "passes": pack.passes.iter().map(|p| serde_json::json!({"pass": p.name, "kind": p.kind_name()})).collect::<Vec<_>>(),
+        "rule_sets": pack.rule_sets.iter().map(|r| json!({
+            "rule_set": r.name, "rules": r.rules.len(),
+            "decides": r.decides, "entered": r.enter_when.is_some(),
+        })).collect::<Vec<_>>(),
         "buckets": pack.buckets,
+        "lists": pack.lists,
+        "site": site.iter().map(|(l, s)| (l.clone(), site_json(s))).collect::<serde_json::Map<_, _>>(),
+        "adopted": adopted.iter().map(|o| json!({
+            "id": o.id, "name": o.name, "version": o.version, "scope": o.scope,
+        })).collect::<Vec<_>>(),
         "cases": pack.cases,
-        "mcp": pack.mcp.as_ref().map(|m| serde_json::json!({"version": m.version, "tools": m.tools.len(), "examples": m.examples.len()})),
-    })))
+        "overlay": pack.overlay,
+        "mcp": pack.mcp.as_ref().map(|m| json!({"version": m.version, "tools": m.tools.len(), "examples": m.examples.len()})),
+        "private": json!({
+            "coverage": pack.private_coverage,
+            "ingest": pack.ingest.iter().map(|i| json!({
+                "name": i.name, "address": i.text(), "vr": i.vr,
+                "dictionary_name": i.dictionary_name, "kind": i.kind,
+            })).collect::<Vec<_>>(),
+            "release": pack.release.iter().map(|a| a.text()).collect::<Vec<_>>(),
+            "dictionary": {
+                "creators": pack.dictionary.creators(),
+                "elements": pack.dictionary.len(),
+            },
+        }),
+    })
 }
 
 /// Wave 4c §6.5: the batches, newest first, as the status document lists them.

@@ -1035,6 +1035,56 @@ fn the_deployment_surface_has_doors_locations_and_an_archive_that_verifies() {
         pack["axes"].as_array().is_some_and(|a| !a.is_empty()),
         "{pack}"
     );
+    // record 26: every axis with its values, their words and how else they
+    // are reached, the flags count, the thresholds and the amendable lists
+    let technique = pack["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "technique")
+        .unwrap_or_else(|| panic!("{pack}"));
+    assert_eq!(
+        technique["count"],
+        technique["values"].as_array().unwrap().len()
+    );
+    let tse = technique["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "TSE")
+        .unwrap_or_else(|| panic!("{technique}"));
+    assert_eq!(tse["label"], "TSE", "{tse}");
+    assert_eq!(tse["family"], "SE", "{tse}");
+    assert_eq!(tse["tried"], true, "{tse}");
+    assert_eq!(tse["list"], "technique.TSE", "{tse}");
+    assert_eq!(tse["keywords"][0], "tse", "{tse}");
+    assert!(tse["site"].is_null(), "no overlay adopted: {tse}");
+    let mprage = technique["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "MPRAGE")
+        .unwrap();
+    assert_eq!(mprage["detection"]["exclusive"], "is_mprage", "{mprage}");
+    assert!(pack["flags"].as_i64().unwrap() > 100, "{pack}");
+    assert_eq!(pack["review"]["low_confidence"]["default"], 0.7, "{pack}");
+    assert_eq!(
+        pack["review"]["low_confidence"]["per_axis"]["body_part"], 0.65,
+        "{pack}"
+    );
+    assert_eq!(
+        pack["review"]["missing"],
+        serde_json::json!(["technique"]),
+        "{pack}"
+    );
+    let lists = pack["lists"].as_array().unwrap();
+    assert!(lists.len() > 100, "{}", lists.len());
+    assert!(
+        lists.iter().any(|l| l == "base.T1w"),
+        "a longhand rule's words"
+    );
+    assert_eq!(packs_doc["packs"][0]["lists"], lists.len(), "{packs_doc}");
+    assert_eq!(packs_doc["packs"][0]["contract"], 4, "{packs_doc}");
     let (status, batches) = server.request("GET", "/api/batches", None, reader);
     assert_eq!(status, 200, "{batches}");
     assert!(batches["count"].as_i64().unwrap() >= 1, "{batches}");
@@ -1442,6 +1492,26 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
         "{signals}"
     );
     assert!(signals["diagnostics"].is_object(), "{signals}");
+    // record 26: the same by value, and the origins for the scope chips
+    let by_value = signals["by_value"]["technique"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{signals}"));
+    assert_eq!(
+        by_value
+            .values()
+            .map(|v| v["decided"].as_i64().unwrap())
+            .sum::<i64>(),
+        2,
+        "{signals}"
+    );
+    assert!(
+        signals["origins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["name"] == "SYNTHETIC" && o["kind"] == "manufacturer" && o["stacks"] == 2),
+        "{signals}"
+    );
 
     // 4: a rehearsal writes nothing and names what would move
     let body = format!(r#"{{"overlay": {SITE_OVERLAY}, "scope": "batch:1", "sample": 100}}"#);
@@ -3921,7 +3991,6 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         ],
         None,
     );
-    run(&home, &["linkage", "id-type", "add", "subject-code"], None);
     const LIMIT: usize = 220;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
@@ -4235,4 +4304,247 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         ask("GET", "/api/capabilities", None, reader);
     }
     server.finish();
+}
+
+const LIST_OVERLAY: &str = r#"{
+  "overlay": "site-lists", "version": "1.0.0", "pack": "mri",
+  "scope": {"manufacturer": "SYNTHETIC"},
+  "lists": {"technique.TSE": {"add": ["zzgado"]}},
+  "cases": [{"name": "the site's own turbo word",
+             "stack": {"text_series_description": "zzgado"},
+             "axes": {"technique": "TSE"}}]
+}"#;
+
+/// Record 26, decision 12 (pack contract 5): a word added to an axis
+/// value's list through an overlay moves a verdict in a rehearsal and after
+/// adoption exactly as a bucket's does, the packs door then names the
+/// site's term on that list, the overlay commands print and export it, and
+/// the exported document loads on the command line.
+#[test]
+fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
+    let home = knob_registry();
+    let server = Server::start(
+        &home,
+        8,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reviewer",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+        &[],
+    );
+    let reviewer = Some("a-reviewer-token-of-len");
+    let ops = Some("an-operator-token-of-len");
+
+    // 1: the rehearsal moves the one stack that carries the word, from the
+    // technique the pack's own words decided to the one the site's word does
+    let body = format!(r#"{{"overlay": {LIST_OVERLAY}, "scope": "batch:1", "sample": 100}}"#);
+    let (status, tried) = server.request("POST", "/api/classify/try", Some(&body), reviewer);
+    assert_eq!(status, 200, "{tried}");
+    assert_eq!(tried["cases"]["passed"], 1, "{tried}");
+    assert_eq!(tried["cases"]["failed"], 0, "{tried}");
+    let moves = tried["moves"].as_array().unwrap();
+    assert!(
+        moves
+            .iter()
+            .any(|m| m["axis"] == "technique" && m["to"] == "TSE" && m["stacks"] == 1),
+        "the site's word moves technique: {tried}"
+    );
+    // 2: a list an overlay names that the pack cannot reach is refused with why
+    let bad = LIST_OVERLAY.replace("technique.TSE", "provenance.RawRecon");
+    let body = format!(r#"{{"overlay": {bad}, "scope": "batch:1"}}"#);
+    let (status, refused) = server.request("POST", "/api/classify/try", Some(&body), reviewer);
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused
+            .to_string()
+            .contains("no word of the pack's reaches RawRecon on provenance"),
+        "{refused}"
+    );
+    // 3-4: proposed with its rehearsal, adopted by an operator
+    let body = format!(
+        r#"{{"name": "site lists", "overlay": {LIST_OVERLAY}, "scope": "batch:1", "why": "the site's turbo word"}}"#
+    );
+    let (status, proposed) = server.request("POST", "/api/overlays", Some(&body), reviewer);
+    assert_eq!(status, 201, "{proposed}");
+    let id = proposed["overlay"]["id"].as_i64().unwrap();
+    assert_eq!(
+        proposed["overlay"]["document"]["lists"]["technique.TSE"]["add"],
+        serde_json::json!(["zzgado"]),
+        "{proposed}"
+    );
+    let (status, adopted) = server.request("POST", &format!("/api/overlays/{id}/adopt"), None, ops);
+    assert_eq!(status, 202, "{adopted}");
+    let adopt_job = adopted["job"].as_i64().unwrap();
+    // 5: the packs door names the site's term on the list, on the value and
+    // per list, and the overlay it came from
+    let (status, pack) = server.request("GET", "/api/packs/mri", None, reviewer);
+    assert_eq!(status, 200, "{pack}");
+    assert_eq!(
+        pack["site"]["technique.TSE"]["add"],
+        serde_json::json!(["zzgado"]),
+        "{}",
+        pack["site"]
+    );
+    assert_eq!(
+        pack["site"]["technique.TSE"]["overlays"],
+        serde_json::json!([id])
+    );
+    let tse = pack["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "technique")
+        .and_then(|a| a["values"].as_array())
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "TSE")
+        .cloned()
+        .unwrap();
+    assert_eq!(tse["site"]["add"], serde_json::json!(["zzgado"]), "{tse}");
+    assert_eq!(
+        tse["keywords"][0], "tse",
+        "the pack's own words are the pack's, unamended on disk: {tse}"
+    );
+    assert_eq!(pack["adopted"][0]["id"], id, "{}", pack["adopted"]);
+    // 6-8: the overlay row keeps the document; the signals by value after
+    // the rehearsal are unchanged, since a rehearsal writes nothing
+    let (status, row) = server.request("GET", &format!("/api/overlays/{id}"), None, reviewer);
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(
+        row["document"]["lists"]["technique.TSE"]["add"][0], "zzgado",
+        "{row}"
+    );
+    let (status, signals) =
+        server.request("GET", "/api/classify/signals?scope=batch:1", None, reviewer);
+    assert_eq!(status, 200, "{signals}");
+    assert!(
+        signals["by_value"]["technique"]["TSE"].is_null(),
+        "{signals}"
+    );
+    let (status, doc) = server.request("GET", "/api/overlays", None, reviewer);
+    assert_eq!(status, 200, "{doc}");
+    server.finish();
+
+    // the worker runs the reclassify under the adopted overlay, and the
+    // stack citing the site's word is TSE now, the other unchanged
+    run(&home, &["jobs", "work", "--once"], None);
+    let job = run(
+        &home,
+        &["jobs", "show", &adopt_job.to_string(), "--json"],
+        None,
+    );
+    let job: serde_json::Value = serde_json::from_str(&job).unwrap();
+    assert_eq!(job["state"], "done", "{job}");
+    let explained: Vec<serde_json::Value> = [1, 2]
+        .iter()
+        .map(|id| {
+            let text = run(&home, &["explain", &id.to_string(), "--json"], None);
+            serde_json::from_str(&text).unwrap()
+        })
+        .collect();
+    let technique_of = |doc: &serde_json::Value| -> String {
+        doc["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["axis"] == "technique")
+            .and_then(|a| a["value"].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let cites = |doc: &serde_json::Value| {
+        doc["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["axis"] == "technique")
+            .flat_map(|a| a["evidence"].as_array().cloned().unwrap_or_default())
+            .any(|e| e["matched"] == "zzgado")
+    };
+    let moved = explained
+        .iter()
+        .find(|d| cites(d))
+        .expect("one stack cites the site's word");
+    let still = explained
+        .iter()
+        .find(|d| !cites(d))
+        .expect("and one does not");
+    assert_eq!(technique_of(moved), "TSE", "{moved}");
+    assert_eq!(moved["overlay"], "site-lists@1.0.0", "{moved}");
+    assert_ne!(technique_of(still), "TSE", "{still}");
+    assert_eq!(still["overlay"], "site-lists@1.0.0", "{still}");
+
+    // `nils overlay show` prints the list, and the export loads on the
+    // command line as `nils classify --overlay` loads it
+    let shown = run(&home, &["overlay", "show", &id.to_string()], None);
+    assert!(shown.contains("list technique.TSE: +zzgado"), "{shown}");
+    let out = TempDir::new("overlay-export");
+    let wrote = run(
+        &home,
+        &[
+            "overlay",
+            "export",
+            &id.to_string(),
+            "--to",
+            out.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(wrote.contains("site-lists-1.0.0.overlay.json"), "{wrote}");
+    let file = out.path().join("site-lists-1.0.0.overlay.json");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("\"lists\""), "{text}");
+    let pack = run(
+        &home,
+        &[
+            "pack",
+            "show",
+            "mri",
+            "--json",
+            "--overlay",
+            file.to_str().unwrap(),
+            "--pack-dir",
+            packs().to_str().unwrap(),
+        ],
+        None,
+    );
+    let pack: serde_json::Value = serde_json::from_str(&pack).unwrap();
+    assert_eq!(pack["overlay"], "site-lists@1.0.0", "{}", pack["overlay"]);
+    let tse = pack["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "technique")
+        .and_then(|a| a["values"].as_array())
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "TSE")
+        .cloned()
+        .unwrap();
+    assert!(
+        tse["keywords"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k == "zzgado"),
+        "loaded under the overlay, the value carries the site's word: {tse}"
+    );
+    let classified = run(
+        &home,
+        &[
+            "classify",
+            "--overlay",
+            file.to_str().unwrap(),
+            "--pack-dir",
+            packs().to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
+    assert_eq!(classified["pack"], "mri@0.1.1", "{classified}");
 }

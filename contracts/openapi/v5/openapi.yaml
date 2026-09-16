@@ -37,7 +37,12 @@
 # and what reads an identifier (the map applied, the held reveal, the
 # merge) needs data:work and detail sensitive. The review item kinds
 # identity.unmapped and identity.provisional are in contracts/review-item.
-# The rules slice edits this document in place after: the packs' word lists.
+# The rules slice (record 26 section 12, pack contract 5): every axis
+# value's word list is a site's to amend through an overlay, which names
+# lists beside its buckets; /api/packs/{name} answers every axis with its
+# values, labels, keywords, flags and thresholds and the site's terms;
+# /api/classify/signals answers by value; /api/classify/try and
+# /api/overlays take lists.
 # Version 4 was version 3 with grants and detail in place of the role ladder
 # (suite contract version 2). A caller holds a set of grants, each naming a
 # page and how far the caller goes there (see, or work, which includes see;
@@ -552,16 +557,17 @@ paths:
         "404": {description: No such level or field in this scope}
   /api/packs:
     get:
-      summary: The loaded packs (Wave 4c section 6.5)
+      summary: The loaded packs (Wave 4c section 6.5; data:see)
       responses:
-        "200": {description: "{packs[{name, version, contract}]}"}
+        "200": {description: "{packs[{name, version, contract, modality, cases, lists, buckets}]}; lists is how many axis value word lists the pack opens to an overlay, buckets how many named lists"}
   /api/packs/{name}:
     get:
-      summary: One pack, as nils pack show prints it (Wave 4c section 6.5)
+      summary: One pack, as nils pack show --json prints it (Wave 4c section 6.5; data:see)
+      description: Every axis in the order it is decided, with its values in the order they are tried. Each value carries its name and label, its family, whether the axis tries it, its keywords after any overlay, the bucket they came from, the list an overlay amends it by (axis.value, or null when no word reaches it), the detection clauses in words (the exclusive flag, the alternative flags, the flag combinations as a+b, the physics windows as written with their confidence and why), and site, the terms the registry's adopted overlays put on that list. Beside the axes, the flags count, the review thresholds (the default and per axis, the axes asked about when missing, whether some stacks are silent), the buckets, the lists a site may amend, site per list, and the adopted overlays.
       parameters:
         - {name: name, in: path, required: true, schema: {type: string}}
       responses:
-        "200": {description: The pack document}
+        "200": {description: "{pack, version, contract, modality, flags, review{low_confidence{default, per_axis}, missing[], silent_when}, axes[{axis, multi, phase, stores, default, count, review_below, asks_when_missing, values[{name, label, family, tried, keywords[], bucket, list, detection{exclusive, alternative[], combination[], physics[{when, confidence, why}]}, site{add[], remove[], overlays[]}}]}], buckets{name: [words]}, lists[axis.value], site{list: {add[], remove[], overlays[]}}, adopted[{id, name, version, scope}], rule_sets, passes, cases, mcp, parsers, fields, private}"}
         "404": {description: No such pack}
   /api/batches:
     get:
@@ -726,27 +732,31 @@ paths:
   /api/classify/signals:
     get:
       summary: The classifier's own signals over a scope (Wave 4c section 6.6; review:see)
-      description: Per axis over a batch, an origin or a pack version, how many stacks resolved at each tier, the confidence spread, the open review items by kind, the shadowed keywords, the unused overlay terms, and the terms that carried the most decisions that disagreed with the rules.
+      description: Per axis over a batch, an origin or a pack version, how many stacks resolved at each tier, the confidence spread, the open review items by kind, the shadowed keywords, the unused overlay terms, and the terms that carried the most decisions that disagreed with the rules. And the same by value, so a person tuning one value's words sees what reaches it, with the origins of the scope for the scope chips. Bounded as before, at most twelve words per value and twelve origins per kind, two hundred values per axis.
       parameters:
         - {name: scope, in: query, required: true, schema: {type: string}, description: "batch:<id> | origin:<name> | pack:<version>"}
       responses:
-        "200": {description: The signals, per axis}
+        "200": {description: "The signals, per axis, plus by_value{axis: {value: {decided, by_flag, by_word, by_physics, unsure, shadowed[words], overrode_with[{word, count}]}}} (decided counts the rows that store the value whoever decided it; by_flag, by_word and by_physics the rows the rules decided by that kind of clause; unsure the stacks a person is still asked about on that axis; shadowed the words that matched on the way to it and were never cited, from the batch samples; overrode_with the words the rule cited on stacks a person then decided otherwise) and origins[{name, kind: manufacturer|model|station, stacks}]"}
   /api/classify/try:
     post:
       summary: A candidate overlay rehearsed over a sample, writing nothing (Wave 4c section 6.6; review:work)
-      requestBody: {content: {application/json: {schema: {type: object, required: [overlay, scope], properties: {overlay: {type: object}, scope: {type: string}, sample: {type: integer}}}}}}
+      description: The overlay document as the pack contract's overlay schema (contracts/pack/v5/overlay.schema.json) has it. It amends the pack's buckets by name and, since pack contract 5, every axis value's keywords list as lists.<axis>.<value>, each an add and a remove. An overlay naming a value no word of the pack's reaches, or anything but words (a flag, a window, a threshold, the order), is refused with 400 and why.
+      requestBody: {content: {application/json: {schema: {type: object, required: [overlay, scope], properties: {overlay: {type: object, description: "{overlay, version, pack, scope, buckets?, lists?, cases}"}, scope: {type: string}, sample: {type: integer}}}}}}
       responses:
-        "200": {description: "{moves[{axis, from, to, stacks}], review_items{close, open}, cases{passed, failed}}"}
+        "200": {description: "{moves[{axis, from, to, stacks}], review_items{close, open}, cases{passed, failed, failures}, sample{asked, read}, overlay, pack}"}
+        "400": {description: The overlay is refused, and the answer says why}
   /api/overlays:
     get:
-      summary: The overlay objects (Wave 4c section 6.6)
+      summary: The overlay objects (Wave 4c section 6.6; review:see)
       responses:
-        "200": {description: "{overlays[{id, name, version, status, scope, author, actor}]}"}
+        "200": {description: "{overlays[{id, name, version, pack, status, scope, author, author_kind, actor, created_at, decided_at, decided_by, review_item, job}]}"}
     post:
       summary: Propose an overlay as a registry object, with a review item beside it (Wave 4c section 6.6; review:work)
-      requestBody: {content: {application/json: {schema: {type: object, required: [name, overlay, scope], properties: {name: {type: string}, overlay: {type: object}, scope: {type: string}, try_ref: {type: string}, why: {type: string}}}}}}
+      description: The overlay document may carry lists beside buckets (pack contract 5); it is rehearsed as POST /api/classify/try rehearses it and stored as written, so GET /api/overlays/{id} answers document.lists and nils overlay show and export print and write them. Adoption re-sorts the scope as before.
+      requestBody: {content: {application/json: {schema: {type: object, required: [name, overlay, scope], properties: {name: {type: string}, overlay: {type: object, description: "{overlay, version, pack, scope, buckets?, lists?, cases}"}, scope: {type: string}, sample: {type: integer}, why: {type: string}}}}}}
       responses:
         "201": {description: "{overlay, review_item, status: proposed}"}
+        "400": {description: The overlay is refused, and the answer says why}
   /api/overlays/{id}:
     get:
       summary: One overlay with its try result (Wave 4c section 6.6)

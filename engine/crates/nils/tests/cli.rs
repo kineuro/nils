@@ -1669,6 +1669,31 @@ fn pack_list_and_show_read_the_pack_directory() {
             .len()
             >= 10
     );
+    // record 26: every axis with its values and their words, and the lists
+    // a site may amend by axis.value
+    let technique = shown["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "technique")
+        .unwrap();
+    let tse = technique["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "TSE")
+        .unwrap();
+    assert_eq!(tse["keywords"][0], "tse", "{tse}");
+    assert_eq!(tse["list"], "technique.TSE", "{tse}");
+    assert!(
+        shown["lists"].as_array().unwrap().len() > 100,
+        "{}",
+        shown["lists"]
+    );
+    assert!(
+        shown["site"].as_object().unwrap().is_empty(),
+        "no registry here"
+    );
 
     // a name that is not there says so rather than listing nothing
     let out = nils()
@@ -4176,9 +4201,6 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         "--role",
         "source",
     ]);
-    // the type the pseudonymised tree's digest files the codes under
-    run(&["linkage", "id-type", "add", "subject-code"]);
-
     // a dataset read in place has nothing to pseudonymise
     let why = refused(&["pseudonymize", "@plain"]);
     assert!(why.contains("read in place"), "{why}");

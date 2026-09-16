@@ -3,10 +3,11 @@
 //! Loading a pack (`docs/specs/wave2-fingerprint-and-classify.md`, §5).
 //!
 //! A pack is vocabulary and grammar as data, versioned and diffable. This
-//! module reads one, checks it, applies an overlay to its editable buckets,
-//! compiles its parsers and flags, and runs its own corpus before handing it
-//! back. A pack whose corpus fails does not load: that is what makes one
-//! written elsewhere safe to install.
+//! module reads one, checks it, applies an overlay to its editable buckets
+//! and to its axis values' word lists (pack contract 5), compiles its
+//! parsers and flags, and runs its own corpus before handing it back. A pack
+//! whose corpus fails does not load: that is what makes one written
+//! elsewhere safe to install.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -32,8 +33,11 @@ use crate::yaml::{self, File};
 
 /// The pack contract this engine implements. A pack declaring a higher one is
 /// refused rather than half-understood. Version 2 (Wave 4a §11.2, C27) adds
-/// the optional `fields` key: a visibility on a catalogue field.
-pub const CONTRACT: u32 = 4;
+/// the optional `fields` key: a visibility on a catalogue field. Version 5
+/// (record 26, decision 12) changes no manifest key: it opens every axis
+/// value's word list to an overlay, as `lists.<axis>.<value>` beside the
+/// `buckets`, and writes the overlay document down as a schema of its own.
+pub const CONTRACT: u32 = 5;
 
 /// What a field may be shown to (Wave 4a §11.2, C27): `local` (this node
 /// only: free text, paths, exact dates, identifiers), `federated` (on the
@@ -85,6 +89,11 @@ pub struct Pack {
     pub dir: PathBuf,
     /// The editable lists, after any overlay.
     pub buckets: BTreeMap<String, Vec<String>>,
+    /// The word lists a site may amend by `axis.value` (pack contract 5),
+    /// in the order the axes are decided and their values tried: every
+    /// value the axis's own rules try, and every value a longhand rule
+    /// reaches by a word. The buckets are the other lists.
+    pub lists: Vec<String>,
     pub parsers: Vec<ParserDef>,
     pub flag_names: Vec<String>,
     pub flags: Vec<Expr>,
@@ -525,6 +534,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             &parsers,
             &parser_ix,
             &buckets,
+            overlay,
             &mut regexes,
         )?;
         if axes.iter().any(|a| a.name == loaded.axis.name) {
@@ -572,6 +582,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
             &parsers,
             &parser_ix,
             &buckets,
+            overlay,
             &mut regexes,
         )?;
         if rule_sets.iter().any(|r| r.name == set.name) {
@@ -604,6 +615,16 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         }
         rule_sets.sort_by_key(|r| want.iter().position(|n| *n == r.name).unwrap_or(usize::MAX));
     }
+
+    // Pack contract 5: the word lists a site may amend, and what each value
+    // is reached by, gathered now that every rule set is loaded. An overlay
+    // naming a list nothing reaches is refused here, once the rules can
+    // say which values a word reaches at all.
+    let lists = crate::rules::amendable(&axes, &rule_sets);
+    if let Some(o) = overlay {
+        o.check_lists(&axes, &lists)?;
+    }
+    crate::rules::describe(&mut axes, &rule_sets);
 
     // §9.2. The pack's half of BIDS: which of its values means `T1w`. The
     // other half, the standard itself, is the engine's.
@@ -716,6 +737,7 @@ fn build(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
         modality,
         dir: dir.to_path_buf(),
         buckets,
+        lists,
         parsers,
         flag_names,
         flags,
@@ -1461,6 +1483,11 @@ struct AxisFile {
 /// `order`, with up to three clauses in v0's order. Writing four hundred
 /// keyword rules longhand would be worse than v0, which is why the dense form
 /// stays and the loader expands it.
+///
+/// Pack contract 5: an overlay's `lists.<axis>.<value>` amends the word
+/// list of any value the axis tries, and gives a value a word tier that had
+/// only flags. A value nothing reaches takes no list: an overlay may not
+/// make the axis try a value it did not.
 #[allow(clippy::too_many_arguments)]
 fn load_axis(
     f: &File,
@@ -1472,6 +1499,7 @@ fn load_axis(
     parsers: &[ParserDef],
     parser_ix: &HashMap<String, usize>,
     buckets: &BTreeMap<String, Vec<String>>,
+    overlay: Option<&Overlay>,
     regexes: &mut Vec<Regex>,
 ) -> R<AxisFile> {
     let m = f.blame(yaml::obj(&f.value, "axis"))?;
@@ -1582,6 +1610,10 @@ fn load_axis(
                 Some(x) => Some(f.blame(yaml::text(x, &at))?),
                 None => None,
             },
+            tried: false,
+            keywords: Vec::new(),
+            bucket: None,
+            detection: crate::rules::Detection::default(),
         });
     }
 
@@ -1608,6 +1640,17 @@ fn load_axis(
     // declaration order: the order is a partial ordering, not a filter. A
     // value no clause can reach produces no rule at all, which is what its
     // loop does when it finds nothing to check.
+    // A value a physics window reaches is tried too, so an overlay may give
+    // it words; the windows themselves are read below, after the vocabulary.
+    let windowed: Vec<String> = m
+        .get("physics")
+        .and_then(Value::as_array)
+        .map(|ws| {
+            ws.iter()
+                .filter_map(|w| w.get("value").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut rules = Vec::with_capacity(vocabulary.len());
     for id in vocabulary.iter() {
         let i = vocabulary
@@ -1656,30 +1699,28 @@ fn load_axis(
                 });
             }
         }
+        // The words, as the axis file wrote them or from a bucket.
+        let mut list = Vec::new();
+        let mut bucket = None;
         if let Some(k) = v.get("keywords").or_else(|| detection.get("keywords")) {
             let at_k = format!("{at}.keywords");
-            let list = match k {
+            list = match k {
                 Value::Object(mm) if mm.contains_key("bucket") => {
                     let b = f.blame(yaml::text(&mm["bucket"], &at_k))?;
-                    buckets.get(&b).cloned().ok_or_else(|| {
+                    let taken = buckets.get(&b).cloned().ok_or_else(|| {
                         Error::at(
                             &at_k,
                             format!("no bucket named {b} is declared by the pack"),
                         )
                         .in_file(&f.path, Some(&f.source))
-                    })?
+                    })?;
+                    bucket = Some(b);
+                    taken
                 }
                 _ => f.blame(yaml::texts(k, &at_k))?,
             };
-            if !list.is_empty() {
-                clauses.push(Clause::Keywords {
-                    tier: Tier::Keywords,
-                    confidence: tier_of(Tier::Keywords),
-                    field: search,
-                    list,
-                });
-            }
         }
+        let mut combination = None;
         if let Some(c) = detection.get("combination") {
             let at_c = format!("{at}.detection.combination");
             let names = f.blame(yaml::texts(c, &at_c))?;
@@ -1691,7 +1732,7 @@ fn load_axis(
                 })?);
             }
             if !flags.is_empty() {
-                clauses.push(Clause::Combination {
+                combination = Some(Clause::Combination {
                     tier: Tier::Combination,
                     confidence: tier_of(Tier::Combination),
                     names,
@@ -1699,6 +1740,31 @@ fn load_axis(
                 });
             }
         }
+
+        // Whether the axis tries this value at all, as the pack wrote it.
+        // Only then may an overlay's list amend its words, or give it a
+        // word tier it did not have: the pack decides what is tried.
+        let tried = !clauses.is_empty()
+            || !list.is_empty()
+            || combination.is_some()
+            || windowed.contains(id);
+        if tried && let Some(edit) = overlay.and_then(|o| o.list_edit(&name, id, &values[i].label))
+        {
+            list = crate::overlay::merge(&list, edit);
+        }
+        if !list.is_empty() {
+            clauses.push(Clause::Keywords {
+                tier: Tier::Keywords,
+                confidence: tier_of(Tier::Keywords),
+                field: search,
+                list,
+                bucket,
+            });
+        }
+        if let Some(c) = combination {
+            clauses.push(c);
+        }
+        values[i].tried = tried;
 
         if clauses.is_empty() {
             // Vocabulary only: a route sets it, or it is the axis's default.
@@ -1766,15 +1832,21 @@ fn load_axis(
                 regexes,
                 deps: HashSet::new(),
             };
-            let expr = f.blame(compile(
-                yaml::get(rm, "when", &at)?,
-                &format!("{at}.when"),
-                &mut sc,
-            ))?;
+            let when = yaml::get(rm, "when", &at)?;
+            let expr = f.blame(compile(when, &format!("{at}.when"), &mut sc))?;
             let confidence = match rm.get("confidence") {
                 Some(c) => Some(f.blame(yaml::number(c, &at))?),
                 None => None,
             };
+            let why = rm.get("why").map(|w| yaml::text(w, &at)).transpose()?;
+            // The window as written, for the packs door: the flags and the
+            // physics stay the pack's, and a person reads what they are.
+            values[value].detection.physics.push(crate::rules::Window {
+                when: serde_json::to_string(when).unwrap_or_default(),
+                confidence,
+                why: why.clone(),
+            });
+            values[value].tried = true;
             rules.push(Rule {
                 id: format!("physics:{id}"),
                 requires: None,
@@ -1793,7 +1865,7 @@ fn load_axis(
                     }],
                 }],
                 confidence,
-                why: rm.get("why").map(|w| yaml::text(w, &at)).transpose()?,
+                why,
             });
         }
     }
@@ -1990,6 +2062,7 @@ fn load_rule_set(
     parsers: &[ParserDef],
     parser_ix: &HashMap<String, usize>,
     buckets: &BTreeMap<String, Vec<String>>,
+    overlay: Option<&Overlay>,
     regexes: &mut Vec<Regex>,
 ) -> R<RuleSet> {
     let m = f.blame(yaml::obj(&f.value, "rule_set"))?;
@@ -2188,16 +2261,19 @@ fn load_rule_set(
                 // Wave 4c §6.6: a keyword list may be an editable bucket,
                 // so that a site adds a contrast word through an overlay
                 // and a rehearsal names the stacks it would move.
+                let mut bucket = None;
                 let list = match kw.get("bucket") {
                     Some(b) => {
                         let name = f.blame(yaml::text(b, &format!("{cat}.bucket")))?;
-                        buckets.get(&name).cloned().ok_or_else(|| {
+                        let taken = buckets.get(&name).cloned().ok_or_else(|| {
                             Error::at(
                                 format!("{cat}.bucket"),
                                 format!("no bucket named {name} is declared by the pack"),
                             )
                             .in_file(&f.path, Some(&f.source))
-                        })?
+                        })?;
+                        bucket = Some(name);
+                        taken
                     }
                     None => f.blame(yaml::texts(kw, &cat))?,
                 };
@@ -2206,6 +2282,7 @@ fn load_rule_set(
                     confidence,
                     field,
                     list,
+                    bucket,
                 }
             } else {
                 Clause::When {
@@ -2309,6 +2386,28 @@ fn load_rule_set(
         }
         if sets.is_empty() {
             return Err(Error::at(&rat, "sets nothing").in_file(&f.path, Some(&f.source)));
+        }
+
+        // Pack contract 5: a longhand rule's words are the list of every
+        // value it sets, so an overlay's `lists.<axis>.<value>` amends them.
+        if let Some(o) = overlay {
+            for s in &sets {
+                let axis = &axes[s.axis];
+                for sv in &s.values {
+                    let Which::Fixed(i) = sv.value else {
+                        continue;
+                    };
+                    let value = &axis.values[i];
+                    let Some(edit) = o.list_edit(&axis.name, &value.id, &value.label) else {
+                        continue;
+                    };
+                    for c in clauses.iter_mut() {
+                        if let Clause::Keywords { list, .. } = c {
+                            *list = crate::overlay::merge(list, edit);
+                        }
+                    }
+                }
+            }
         }
 
         let confidence = match r.get("confidence") {
