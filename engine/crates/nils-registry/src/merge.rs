@@ -182,7 +182,11 @@ fn memberships(
     );
     let moved = registry.execute(
         &sql,
-        &[Param::Int(canonical), Param::Int(alias), Param::Int(canonical)],
+        &[
+            Param::Int(canonical),
+            Param::Int(alias),
+            Param::Int(canonical),
+        ],
     )?;
     Ok(Memberships {
         moved,
@@ -964,10 +968,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(third.memberships_dropped, 1);
-        assert_eq!(
-            one(&mut registry, "SELECT COUNT(*) FROM cohort_member"),
-            4
-        );
+        assert_eq!(one(&mut registry, "SELECT COUNT(*) FROM cohort_member"), 4);
     }
 
     /// A merge that fails leaves nothing behind in either store.

@@ -759,7 +759,10 @@ fn a_map_naming_a_held_value_under_another_type_releases_it_for_the_held_run() {
         0
     );
     assert_eq!(
-        one(&mut registry, "SELECT COUNT(*) FROM subject WHERE provisional = 1"),
+        one(
+            &mut registry,
+            "SELECT COUNT(*) FROM subject WHERE provisional = 1"
+        ),
         0
     );
 }

@@ -1119,10 +1119,7 @@ impl<'a> Recorder<'a> {
         }
         // a file no run recorded whose SOP instance the tree holds already
         // is answered from the tree, and never resolved or written
-        let uids: Vec<&str> = batch
-            .iter()
-            .filter_map(|a| a.sop_uid.as_deref())
-            .collect();
+        let uids: Vec<&str> = batch.iter().filter_map(|a| a.sop_uid.as_deref()).collect();
         let held_by_tree = if uids.is_empty() {
             HashMap::new()
         } else {
@@ -1136,10 +1133,8 @@ impl<'a> Recorder<'a> {
         };
         let mut rest = Vec::with_capacity(batch.len());
         for ask in batch {
-            if let Some((out_path, out_size)) = ask
-                .sop_uid
-                .as_deref()
-                .and_then(|u| held_by_tree.get(u))
+            if let Some((out_path, out_size)) =
+                ask.sop_uid.as_deref().and_then(|u| held_by_tree.get(u))
             {
                 let _ = ask.reply.send(Answer::InTree {
                     out_path: out_path.clone(),

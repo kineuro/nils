@@ -210,9 +210,7 @@ pub(crate) fn run(
         // The verb adopted the row and finished it itself; the worker writes
         // the outcome only when the verb did not, and then the error is what
         // the verb printed last, or its exit status when it printed nothing.
-        let printed = tail
-            .and_then(|t| t.join().ok())
-            .unwrap_or_default();
+        let printed = tail.and_then(|t| t.join().ok()).unwrap_or_default();
         let (state, error) = match status {
             Ok(s) if s.success() => (State::Done, None),
             Ok(s) if printed.is_empty() => (State::Failed, Some(format!("exit status {s}"))),

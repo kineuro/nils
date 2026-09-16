@@ -3084,7 +3084,10 @@ fn nils_jobs_lists_shows_cancels_queues_works_and_resumes() {
     let shown = run(&["jobs", "show", &digest_id.to_string()]);
     // the command line as words after nils and its registry under queued
     // (lab 26, defect 19); what ran, binary and registry included, is argv
-    assert!(shown.contains("command     nils digest --name a"), "{shown}");
+    assert!(
+        shown.contains("command     nils digest --name a"),
+        "{shown}"
+    );
     assert!(!shown.contains("--registry"), "{shown}");
     assert!(shown.contains("progress"), "{shown}");
     assert_eq!(doc[0]["args"]["queued"][0], "digest", "{doc}");

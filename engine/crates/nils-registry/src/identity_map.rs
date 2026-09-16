@@ -922,7 +922,10 @@ pub fn held_matches(
         }
         for (id_type, value) in named {
             if id_type == held_type {
-                candidates.insert(keys.lookup(held_type, value), (id_type.clone(), value.clone()));
+                candidates.insert(
+                    keys.lookup(held_type, value),
+                    (id_type.clone(), value.clone()),
+                );
             }
         }
     }
@@ -1677,19 +1680,8 @@ mod tests {
             ("study", "identifier:study-id"),
             ("nummer", "canonical:personnummer"),
         ]);
-        let data = rows(&[
-            &["AA1234", "199001011234"],
-            &["AA5678", "198502023456"],
-        ]);
-        let dry = run(
-            &mut registry,
-            &mut linkage,
-            &keys,
-            &cols,
-            &data,
-            true,
-            true,
-        );
+        let data = rows(&[&["AA1234", "199001011234"], &["AA5678", "198502023456"]]);
+        let dry = run(&mut registry, &mut linkage, &keys, &cols, &data, true, true);
         assert_eq!(dry.held_released, 3, "{dry}");
         assert_eq!(
             dry.held_released_by,
@@ -1749,11 +1741,9 @@ mod tests {
         assert_eq!(rows_now[3].text(1).unwrap(), "personnummer");
         assert_eq!(rows_now[3].int(3).unwrap(), 0);
         // the identities the map filed are found under the rows' new lookups
-        let found = linkage::identities_by_lookup(
-            &mut linkage,
-            &[rows_now[0].bytes(2).unwrap().to_vec()],
-        )
-        .unwrap();
+        let found =
+            linkage::identities_by_lookup(&mut linkage, &[rows_now[0].bytes(2).unwrap().to_vec()])
+                .unwrap();
         assert_eq!(found.len(), 1);
         // the same map again releases nothing more
         let again = run(
