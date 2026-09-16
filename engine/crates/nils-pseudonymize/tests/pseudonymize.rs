@@ -764,6 +764,186 @@ fn a_map_naming_a_held_value_under_another_type_releases_it_for_the_held_run() {
     );
 }
 
+/// v0's copy of an original: the same UIDs, the code in `PatientID`, no
+/// name and no birth date, as `dcm-raw` holds it.
+fn v0_copy(code: &str, patient: &str, study: u32, series: u32, instance: u32) -> Vec<u8> {
+    let study_uid = format!("1.2.826.0.1.3680043.8.498.{patient}.{study}");
+    let series_uid = format!("{study_uid}.{series}");
+    let sop = format!("{series_uid}.{instance}");
+    let mut e = synth::minimal_mr(&study_uid, &series_uid, &sop);
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, code));
+    e.push(synth::text(tags::PATIENT_SEX, VR::CS, "F"));
+    e.push(synth::text(
+        tags::STUDY_DATE,
+        VR::DA,
+        &format!("2024010{study}"),
+    ));
+    e.push(synth::text(
+        tags::SERIES_NUMBER,
+        VR::IS,
+        &series.to_string(),
+    ));
+    e.push(synth::text(
+        tags::INSTANCE_NUMBER,
+        VR::IS,
+        &instance.to_string(),
+    ));
+    e.push(synth::bytes(
+        tags::PIXEL_DATA,
+        VR::OW,
+        pixels(study * 100 + series * 10 + instance),
+    ));
+    synth::part10(&MetaFields::mr(&sop), &e, true)
+}
+
+/// v0's 16 hex characters for a person, as `blake2b(..., digest_size=8)`
+/// writes them: any sixteen will do here, since the map files them.
+const V0_CODES: [&str; 2] = ["771c4326c89c082c", "0a1b2c3d4e5f6071"];
+
+/// A v0 cohort folder after its declaration: the originals of two people,
+/// ten files each, and the pseudonymised tree holding v0's copy of every
+/// one of them under v0's code.
+fn v0_dataset() -> TempDir {
+    let dir = TempDir::new("pseudonymize-v0");
+    let originals = Path::new("derivatives/dcm-original");
+    let anon = Path::new("derivatives/dcm-anon");
+    for (p, (patient, _)) in MAPPED.iter().enumerate() {
+        let code = V0_CODES[p];
+        let mut n = 0;
+        for series in 1..=2 {
+            for instance in 1..=5 {
+                n += 1;
+                dir.file(
+                    &originals
+                        .join(format!("sub-{p}/ses-1/IM_{n:04}"))
+                        .display()
+                        .to_string(),
+                    &original(patient, 1, series, instance, "t1_mprage"),
+                );
+                dir.file(
+                    &anon
+                        .join(format!("{code}/ses-1/IM_{n:04}"))
+                        .display()
+                        .to_string(),
+                    &v0_copy(code, patient, 1, series, instance),
+                );
+            }
+        }
+    }
+    dir
+}
+
+/// Lab 26, defect 7: a v0 folder's tree holds every original already, and
+/// the pseudonymiser wrote each one again beside v0's copy. Once a digest
+/// has read the tree, an original whose SOP instance the tree holds is
+/// left as it is, recorded as unchanged against the tree's own file, and
+/// the next run finds it so; a new original is written as before.
+#[test]
+fn an_original_the_tree_already_holds_is_not_written_again() {
+    let lab = lab();
+    let dir = v0_dataset();
+    let anon = dir.path().join("derivatives/dcm-anon");
+    let mut registry = lab.home.open().unwrap();
+    // v0's map: the numbers to v0's codes
+    {
+        let mut linkage = registry.open_linkage().unwrap();
+        let keys = Subkeys::derive(KEY);
+        let rows: Vec<ImportRow> = MAPPED
+            .iter()
+            .enumerate()
+            .map(|(i, (identifier, _))| ImportRow {
+                line: i + 2,
+                identifier: identifier.to_string(),
+                code: V0_CODES[i].to_string(),
+            })
+            .collect();
+        linkage::import(registry.store(), &mut linkage, &keys, "patient-id", &rows).unwrap();
+    }
+    let place = declare(&mut registry, dir.path(), json!({}));
+    let s = settings(&place);
+    assert_eq!(outputs(&anon).len(), 20);
+
+    // before any digest, the registry knows nothing of the tree: a dry run
+    // would write everything again, which is what bring-in's digest-first
+    // step is for
+    let mut dry = s.clone();
+    dry.dry_run = true;
+    let report = pseudonymize(&dry, &mut registry).unwrap();
+    assert_eq!(files_of(&report), (20, 20, 0, 0, 0), "{report}");
+    assert_eq!(report.in_tree, 0);
+
+    // the tree digested under v0's code shape, read verbatim
+    let mut d = nils_digest::Settings::new(anon.clone());
+    d.name = "v0".into();
+    d.workers = 2;
+    d.identity = nils_digest::Rule::parse(
+        "identity:\n  id_type: subject-code\n  from:\n    - field: PatientID\n      pattern: '^(?<id>[0-9a-f]{16})$'\n  code: verbatim\n",
+    )
+    .unwrap();
+    let digested = nils_digest::digest(&d, &mut registry).unwrap();
+    assert_eq!(digested.parsed, 20, "{digested}");
+    assert_eq!(digested.subjects, 2, "{digested}");
+
+    // the run: every original is in the tree already, nothing written
+    let report = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(files_of(&report), (20, 0, 20, 0, 0), "{report}");
+    assert_eq!(report.in_tree, 20);
+    assert_eq!(report.subjects.seen, 0);
+    assert!(
+        report
+            .to_string()
+            .contains("20 original(s) the tree held already"),
+        "{report}"
+    );
+    assert_eq!(outputs(&anon).len(), 20, "the tree holds 20 files, not 40");
+    let rows_now = rows(
+        &mut registry,
+        "SELECT state, out_path, out_size, digest, written_at FROM pseudonym_file ORDER BY path",
+    );
+    assert_eq!(rows_now.len(), 20);
+    for r in &rows_now {
+        assert_eq!(r.text(0).unwrap(), "unchanged");
+        let out = r.text(1).unwrap();
+        assert!(
+            out.starts_with(V0_CODES[0]) || out.starts_with(V0_CODES[1]),
+            "{out}"
+        );
+        assert!(anon.join(out).is_file(), "{out}");
+        assert_eq!(
+            r.int(2).unwrap() as u64,
+            std::fs::metadata(anon.join(out)).unwrap().len()
+        );
+        assert!(r.opt_text(3).unwrap().is_none());
+        assert!(r.opt_text(4).unwrap().is_none());
+    }
+    // the next run finds the records and checks the tree's files
+    let again = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(files_of(&again), (20, 0, 20, 0, 0), "{again}");
+    assert_eq!(again.in_tree, 0);
+    assert_eq!(outputs(&anon).len(), 20);
+
+    // a new original the tree does not hold is written as before, under
+    // the code the map filed
+    dir.file(
+        "derivatives/dcm-original/sub-0/ses-1/IM_0011",
+        &original(MAPPED[0].0, 1, 3, 1, "t2_tse"),
+    );
+    let third = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(files_of(&third), (21, 1, 20, 0, 0), "{third}");
+    assert_eq!(third.in_tree, 0);
+    assert_eq!(outputs(&anon).len(), 21);
+    assert_eq!(
+        one(
+            &mut registry,
+            &format!(
+                "SELECT COUNT(*) FROM pseudonym_file WHERE state = 'written' AND out_path LIKE '{}/%'",
+                V0_CODES[0]
+            )
+        ),
+        1
+    );
+}
+
 #[test]
 fn a_run_asked_to_stop_before_it_began_writes_nothing_and_ends_cancelled() {
     let lab = lab();

@@ -2236,6 +2236,7 @@ fn routed(
             // dataset with its own steps in front of whatever follows.
             let mut then = crate::chain::parse_then(&doc).map_err(|e| Reply::error(400, e))?;
             let mut command = command;
+            let mut digest_first: Option<u64> = None;
             if command[0] == "bring-in" {
                 let asked =
                     crate::chain::BringIn::parse(&command).map_err(|e| Reply::error(400, e))?;
@@ -2252,11 +2253,21 @@ fn routed(
                             ),
                         )
                     })?;
-                let (first, mut rest) =
-                    crate::chain::bring_in(&place, asked.name.as_deref(), asked.pack.as_deref());
+                // a tree holding files no digest has read is digested
+                // first, so the pseudonymiser knows what the tree holds
+                let unread = crate::chain::unread_in_tree(registry.store(), &place);
+                let (first, mut rest) = crate::chain::bring_in(
+                    &place,
+                    asked.name.as_deref(),
+                    asked.pack.as_deref(),
+                    unread.is_some(),
+                );
                 command = first;
                 rest.append(&mut then);
                 then = rest;
+                if let Some(n) = unread {
+                    digest_first = Some(n);
+                }
             }
             // Wave 4c §6.5: a tree is named by a registered location, as
             // @name/relative, never by a path a caller composes; backup and
@@ -2296,6 +2307,12 @@ fn routed(
             if !steps.is_empty() {
                 extra["then"] = serde_json::json!(steps);
             }
+            if let Some(n) = digest_first {
+                extra["digest_first"] = serde_json::json!({
+                    "files": n,
+                    "why": "the pseudonymised tree holds files no digest has read",
+                });
+            }
             let id = nils_registry::job::enqueue_with(
                 registry.store(),
                 &command,
@@ -2304,9 +2321,14 @@ fn routed(
                 extra,
             )
             .map_err(job_err)?;
-            // the command as located, so a caller sees which tree @name was
+            // the command as located, so a caller sees which tree @name was,
+            // and why a digest goes first when one does
             Ok(Reply::accepted(serde_json::json!({
                 "job": id, "state": "queued", "command": command, "then": steps,
+                "digest_first": digest_first.map(|n| serde_json::json!({
+                    "files": n,
+                    "why": "the pseudonymised tree holds files no digest has read",
+                })),
             })))
         }
         ["api", "jobs", _] if get => {

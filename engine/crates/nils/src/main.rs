@@ -3283,25 +3283,45 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
     use nils_registry::job;
     let mut registry = open(home)?;
     let dataset = dataset_named(&mut registry, &args.dataset)?;
-    let (first, then) = chain::bring_in(&dataset, args.name.as_deref(), args.pack.as_deref());
+    // a tree holding files no digest has read is digested first, so the
+    // pseudonymiser knows what the tree holds (lab 26, defect 7)
+    let unread = chain::unread_in_tree(registry.store(), &dataset);
+    let (first, then) = chain::bring_in(
+        &dataset,
+        args.name.as_deref(),
+        args.pack.as_deref(),
+        unread.is_some(),
+    );
     let name = first
         .iter()
         .position(|w| w == "--name")
         .and_then(|i| first.get(i + 1))
         .cloned();
     let grants: Vec<&str> = crate::grants::GRANTS.to_vec();
+    let mut extra = serde_json::json!({
+        "detail": crate::grants::Detail::Sensitive.name(),
+        "grants": grants,
+        "then": then,
+    });
+    if let Some(n) = unread {
+        extra["digest_first"] = serde_json::json!({
+            "files": n,
+            "why": "the pseudonymised tree holds files no digest has read",
+        });
+    }
     let id = job::enqueue_with(
         registry.store(),
         &first,
         name.as_deref(),
         Some(&actor()),
-        serde_json::json!({
-            "detail": crate::grants::Detail::Sensitive.name(),
-            "grants": grants,
-            "then": then,
-        }),
+        extra,
     )
     .map_err(|e| fail(e.to_string()))?;
+    if let Some(n) = unread {
+        println!(
+            "the pseudonymised tree holds {n} file(s) no digest has read: a digest goes first"
+        );
+    }
     println!("queued job {id}: nils {}", first.join(" "));
     for step in &then {
         println!("  then nils {}", step.join(" "));

@@ -147,6 +147,26 @@ pub fn pseudonymize_with(
 struct Run {
     job_id: i64,
     batch_id: i64,
+    /// The source row of the pseudonymised tree, whose files a digest
+    /// filed: what the in-tree check reads.
+    source_id: i64,
+}
+
+/// The source row of a tree the registry has read, by its real path; none
+/// where no digest and no pseudonymise step has named it yet.
+fn source_of(store: &mut Store, tree: &Path) -> Result<Option<i64>, nils_registry::Error> {
+    let Ok(canonical) = std::fs::canonicalize(tree) else {
+        return Ok(None);
+    };
+    let sql = format!(
+        "SELECT id FROM {} WHERE root_canonical = {}",
+        store.qualified("source"),
+        store.dialect().param(1, Type::Text)
+    );
+    store
+        .query_opt(&sql, &[Param::from(canonical.display().to_string())])?
+        .map(|r| r.int(0))
+        .transpose()
 }
 
 /// Claim the registry through the one job model (Wave 4a §9.1), then the
@@ -235,7 +255,11 @@ fn start_job(registry: &mut Registry, settings: &Settings) -> Result<Run, Pseudo
             ]],
         )?;
         let batch_id = batch.first().ok_or_else(no_id)?.int(0)?;
-        Ok(Run { job_id, batch_id })
+        Ok(Run {
+            job_id,
+            batch_id,
+            source_id,
+        })
     })();
     match result {
         Ok(run) => {
@@ -278,6 +302,10 @@ struct Ask {
     /// The lookup a map released the file's held row under, when it named
     /// the value under another type than the rule reads it as.
     lookup: Option<Vec<u8>>,
+    /// The file's SOPInstanceUID, for a file no run recorded: a tree that
+    /// holds it already holds this file, as a v0 tree holds every original
+    /// it was made from (lab 26, defect 7).
+    sop_uid: Option<String>,
     reply: Sender<Answer>,
 }
 
@@ -296,6 +324,13 @@ enum Answer {
         sealed: Vec<u8>,
         id_type: String,
     },
+    /// The tree holds a file of this SOP instance already, read by a
+    /// digest: the original is left as it is and recorded as unchanged
+    /// against that file.
+    InTree {
+        out_path: String,
+        out_size: u64,
+    },
     Failed(String),
 }
 
@@ -312,6 +347,16 @@ pub enum Item {
         subject: i64,
         created: bool,
         provisional: bool,
+    },
+    /// An original whose SOP instance the tree holds already: recorded as
+    /// unchanged against the tree's own file, never written again.
+    InTree {
+        rel: String,
+        dir: String,
+        size: u64,
+        mtime: i64,
+        out_path: String,
+        out_size: u64,
     },
     Held {
         rel: String,
@@ -443,7 +488,7 @@ fn execute(
     let (ask_tx, ask_rx) = crossbeam_channel::bounded::<Ask>(workers * 2);
     let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(0);
 
-    let mut recorder = Recorder::new(registry, resolver, settings, run, &progress, cancel);
+    let mut recorder = Recorder::new(registry, resolver, settings, run, &progress, cancel)?;
     let (walked, resumed, mut tally) = std::thread::scope(|s| {
         let source = {
             let root = settings.originals.clone();
@@ -744,6 +789,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                 ident: prepared.ident.clone(),
                 make,
                 lookup: prior.as_ref().and_then(|p| p.lookup.clone()),
+                sop_uid: prior.is_none().then(|| prepared.sop_uid.clone()),
                 reply: reply_tx.clone(),
             })
             .is_err()
@@ -755,6 +801,23 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
             Answer::Failed(why) => {
                 tally.error = Some(why);
                 break;
+            }
+            Answer::InTree { out_path, out_size } => {
+                progress.file(&progress.unchanged, size);
+                if items
+                    .send(Item::InTree {
+                        rel,
+                        dir,
+                        size,
+                        mtime,
+                        out_path,
+                        out_size,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
             }
             Answer::Unknown {
                 lookup,
@@ -916,6 +979,11 @@ struct Recorder<'a> {
     /// A dry run's identifiers that would be coded.
     would_make: HashSet<Vec<u8>>,
     held_by_shape: BTreeMap<String, u64>,
+    /// The source row of the pseudonymised tree, whose files a digest
+    /// filed, when there is one; none when nothing has read the tree yet.
+    tree_source: Option<i64>,
+    /// Originals the tree held already, by their SOP instance.
+    in_tree: u64,
     skipped: u64,
     walk_errors: u64,
     last_heartbeat: Instant,
@@ -932,8 +1000,12 @@ impl<'a> Recorder<'a> {
         run: Option<&'a Run>,
         progress: &'a Progress,
         cancel: &'a Cancel,
-    ) -> Recorder<'a> {
-        Recorder {
+    ) -> Result<Recorder<'a>, HomeError> {
+        let tree_source = match run {
+            Some(r) => Some(r.source_id),
+            None => source_of(registry.store(), &settings.anon)?,
+        };
+        Ok(Recorder {
             registry,
             resolver,
             settings,
@@ -949,11 +1021,51 @@ impl<'a> Recorder<'a> {
             shapes: HashMap::new(),
             would_make: HashSet::new(),
             held_by_shape: BTreeMap::new(),
+            tree_source,
+            in_tree: 0,
             skipped: 0,
             walk_errors: 0,
             last_heartbeat: Instant::now(),
             error: None,
+        })
+    }
+
+    /// The files of the tree a digest filed under these SOP instances:
+    /// the UID to the file's path under the tree and its size. Nothing
+    /// where no digest has read the tree.
+    fn in_tree(
+        &mut self,
+        uids: &[&str],
+    ) -> Result<HashMap<String, (String, u64)>, nils_registry::Error> {
+        let mut out = HashMap::new();
+        let Some(source) = self.tree_source else {
+            return Ok(out);
+        };
+        let store = self.registry.store();
+        for chunk in uids.chunks(nils_registry::store::SQLITE_KEY_CHUNK) {
+            let d = store.dialect();
+            let marks: Vec<String> = (0..chunk.len())
+                .map(|i| d.param(i + 2, Type::Text))
+                .collect();
+            let sql = format!(
+                "SELECT i.sop_instance_uid, f.path, f.size FROM {} i \
+                 JOIN {} f ON f.id = i.source_file_id \
+                 WHERE f.source_id = {} AND f.status <> 'gone' AND i.sop_instance_uid IN ({})",
+                store.qualified("instance"),
+                store.qualified("source_file"),
+                d.param(1, Type::Int),
+                marks.join(", ")
+            );
+            let mut params = vec![Param::Int(source)];
+            params.extend(chunk.iter().map(|u| Param::from(*u)));
+            for r in store.query(&sql, &params)? {
+                out.insert(
+                    r.text(0)?.to_string(),
+                    (r.text(1)?.to_string(), r.int(2)?.max(0) as u64),
+                );
+            }
         }
+        Ok(out)
     }
 
     /// The loop: resolve requests as they come, in batches; items into
@@ -1005,9 +1117,41 @@ impl<'a> Recorder<'a> {
             }
             return;
         }
+        // a file no run recorded whose SOP instance the tree holds already
+        // is answered from the tree, and never resolved or written
+        let uids: Vec<&str> = batch
+            .iter()
+            .filter_map(|a| a.sop_uid.as_deref())
+            .collect();
+        let held_by_tree = if uids.is_empty() {
+            HashMap::new()
+        } else {
+            match self.in_tree(&uids) {
+                Ok(found) => found,
+                Err(e) => {
+                    self.fail(e.to_string(), batch);
+                    return;
+                }
+            }
+        };
+        let mut rest = Vec::with_capacity(batch.len());
+        for ask in batch {
+            if let Some((out_path, out_size)) = ask
+                .sop_uid
+                .as_deref()
+                .and_then(|u| held_by_tree.get(u))
+            {
+                let _ = ask.reply.send(Answer::InTree {
+                    out_path: out_path.clone(),
+                    out_size: *out_size,
+                });
+                continue;
+            }
+            rest.push(ask);
+        }
         let now = now_iso();
         let mut by_make: BTreeMap<u8, Vec<Ask>> = BTreeMap::new();
-        for ask in batch {
+        for ask in rest {
             let key = match ask.make {
                 Make::Nothing => 0,
                 Make::Subject => 1,
@@ -1210,6 +1354,9 @@ impl<'a> Recorder<'a> {
             Item::Held { shape, .. } => {
                 *self.held_by_shape.entry(shape.clone()).or_insert(0) += 1;
             }
+            Item::InTree { .. } => {
+                self.in_tree += 1;
+            }
             Item::StillHeld { shape, .. } => {
                 *self
                     .held_by_shape
@@ -1286,6 +1433,36 @@ impl<'a> Recorder<'a> {
                         Param::Int(batch_id),
                         Param::from(now.as_str()),
                         Param::from(now.as_str()),
+                        Param::Null,
+                        Param::Int(0),
+                    ]),
+                    // the tree's own file stands for the original: the
+                    // record points at it, so the next run checks it as it
+                    // checks an output of its own
+                    Item::InTree {
+                        rel,
+                        dir,
+                        size,
+                        mtime,
+                        out_path,
+                        out_size,
+                    } => written.push(vec![
+                        Param::Int(place_id),
+                        Param::from(rel.as_str()),
+                        Param::from(dir.as_str()),
+                        Param::Int(*size as i64),
+                        Param::Int(*mtime),
+                        Param::from(state::UNCHANGED),
+                        Param::Null,
+                        Param::Null,
+                        Param::Null,
+                        Param::Null,
+                        Param::from(out_path.as_str()),
+                        Param::Int(*out_size as i64),
+                        Param::Null,
+                        Param::Int(batch_id),
+                        Param::from(now.as_str()),
+                        Param::Null,
                         Param::Null,
                         Param::Int(0),
                     ]),
@@ -1532,6 +1709,7 @@ impl<'a> Recorder<'a> {
             private_removed: tally.private_removed,
             refused_by: tally.refused_by,
             held_by_shape: self.held_by_shape.clone(),
+            in_tree: self.in_tree,
             walk_errors: self.walk_errors,
             bytes,
             seconds: elapsed,

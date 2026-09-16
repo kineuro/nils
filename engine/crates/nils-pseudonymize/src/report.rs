@@ -55,6 +55,11 @@ pub struct Report {
     /// The shape of a held identifier to the files held under it, this
     /// run's and the ones still held from before.
     pub held_by_shape: BTreeMap<String, u64>,
+    /// Originals left as they are because the tree held a file of the
+    /// same SOP instance already, read by a digest (a v0 tree holds every
+    /// original it was made from): counted among the unchanged.
+    #[serde(default)]
+    pub in_tree: u64,
     pub walk_errors: u64,
     pub bytes: u64,
     pub seconds: f64,
@@ -136,6 +141,13 @@ impl fmt::Display for Report {
                 .map(|(s, n)| format!("{s} {}", thousands(*n)))
                 .collect();
             writeln!(f, "  held by shape    {}", by.join("   "))?;
+        }
+        if self.in_tree > 0 {
+            writeln!(
+                f,
+                "  in the tree      {} original(s) the tree held already, left as they are",
+                thousands(self.in_tree)
+            )?;
         }
         writeln!(
             f,

@@ -46,6 +46,9 @@ pub struct Prepared {
     pub framed: Framed,
     pub ident: Ident,
     pub facts: Facts,
+    /// The file's SOPInstanceUID, which the pseudonymised copy keeps: a
+    /// tree that holds it already holds this file (lab 26, defect 7).
+    pub sop_uid: String,
 }
 
 fn text(dataset: &InMemDicomObject, tag: Tag) -> Option<String> {
@@ -79,6 +82,7 @@ pub fn prepare(path: &Path, rel: &str, rule: &Rule) -> Result<Prepared, Refusal>
         }
     }
     let study_uid = text(dataset, tags::STUDY_INSTANCE_UID).unwrap_or_default();
+    let sop_uid = text(dataset, tags::SOP_INSTANCE_UID).unwrap_or_default();
     let charset = nils_dicom::charset_of(dataset);
     let identity = nils_dicom::identity_values(dataset, rule.fields(), &charset);
     let ident = rule.trace(&identity.values, &study_uid, rel).ident;
@@ -92,6 +96,7 @@ pub fn prepare(path: &Path, rel: &str, rule: &Rule) -> Result<Prepared, Refusal>
         framed,
         ident,
         facts,
+        sop_uid,
     })
 }
 

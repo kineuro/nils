@@ -55,11 +55,16 @@ pub(crate) fn parse_then(doc: &Value) -> Result<Vec<Vec<String>>, String> {
 /// first; any other has no first step and starts with the digest. The
 /// digest is named as the pseudonymise step is, so the two batches are one
 /// thread (record 26 §14); the name is the dataset's and today's date
-/// unless given.
+/// unless given. With `digest_first`, a digest of the tree goes before
+/// the pseudonymise step: the tree holds files no digest has read, as a
+/// v0 folder does on its first bring-in, and the pseudonymiser leaves an
+/// original the tree holds already as it is only once the registry knows
+/// the tree's files (lab 26, defect 7).
 pub(crate) fn bring_in(
     place: &Place,
     name: Option<&str>,
     pack: Option<&str>,
+    digest_first: bool,
 ) -> (Vec<String>, Vec<Vec<String>>) {
     let at = format!("@{}", place.name);
     let name = name
@@ -73,6 +78,9 @@ pub(crate) fn bring_in(
     let identified = place.dataset["arrives"].as_str() == Some("identified");
     let mut steps = Vec::new();
     if identified {
+        if digest_first {
+            steps.push(named("digest"));
+        }
         steps.push(named("pseudonymize"));
     }
     steps.push(named("digest"));
@@ -80,6 +88,44 @@ pub(crate) fn bring_in(
     steps.push(classify);
     let first = steps.remove(0);
     (first, steps)
+}
+
+/// How many files of the dataset's pseudonymised tree no digest has read,
+/// when there are any: the tree's files, counted as a probe counts them,
+/// against the registry's rows for the tree. None for a dataset that is
+/// not pseudonymised, or whose tree the registry has read whole; a count
+/// that stopped short says nothing unless it already passed the rows.
+pub(crate) fn unread_in_tree(store: &mut Store, place: &Place) -> Option<u64> {
+    if place.dataset["arrives"].as_str() != Some("identified") {
+        return None;
+    }
+    let anon = place.tree_path("anon")?;
+    let counted = crate::dataset::count(&anon);
+    let files = counted["files"].as_u64().unwrap_or(0);
+    if files == 0 {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(&anon).ok()?;
+    let sql = format!(
+        "SELECT COUNT(*) FROM {} f JOIN {} s ON s.id = f.source_id \
+         WHERE s.root_canonical = {} AND f.status <> 'gone'",
+        store.qualified("source_file"),
+        store.qualified("source"),
+        store.dialect().param(1, nils_registry::schema::Type::Text)
+    );
+    let rows = store
+        .query_opt(
+            &sql,
+            &[nils_registry::store::Param::from(
+                canonical.display().to_string(),
+            )],
+        )
+        .ok()
+        .flatten()
+        .and_then(|r| r.int(0).ok())
+        .unwrap_or(0)
+        .max(0) as u64;
+    (files > rows).then_some(files - rows)
 }
 
 /// The arguments of `bring-in`, read from its command line: the dataset,
@@ -229,19 +275,29 @@ mod tests {
 
     #[test]
     fn bring_in_is_the_thread_of_a_dataset() {
-        let (first, then) = bring_in(&place("identified"), Some("batch-1"), Some("mri"));
+        let (first, then) = bring_in(&place("identified"), Some("batch-1"), Some("mri"), false);
         assert_eq!(first, ["pseudonymize", "@scans", "--name", "batch-1"]);
         assert_eq!(then.len(), 3);
         assert_eq!(then[0], ["digest", "@scans", "--name", "batch-1"]);
         assert_eq!(then[1], ["fingerprint"]);
         assert_eq!(then[2], ["classify", "--pack", "mri"]);
-        let (first, then) = bring_in(&place("deidentified"), None, None);
+        let (first, then) = bring_in(&place("deidentified"), None, None, false);
         assert_eq!(first[0], "digest");
         assert!(first[3].starts_with("scans-20"), "{first:?}");
         assert_eq!(then.len(), 2);
         assert_eq!(then[1], ["classify"]);
-        let (first, _) = bring_in(&place("coded"), None, None);
+        let (first, _) = bring_in(&place("coded"), None, None, false);
         assert_eq!(first[0], "digest");
+        // a tree with files no digest has read: the digest goes first
+        let (first, then) = bring_in(&place("identified"), Some("v0"), None, true);
+        assert_eq!(first, ["digest", "@scans", "--name", "v0"]);
+        assert_eq!(then[0], ["pseudonymize", "@scans", "--name", "v0"]);
+        assert_eq!(then[1], ["digest", "@scans", "--name", "v0"]);
+        assert_eq!(then.len(), 4);
+        // never for a dataset with no pseudonymise step
+        let (first, then) = bring_in(&place("deidentified"), None, None, true);
+        assert_eq!(first[0], "digest");
+        assert_eq!(then.len(), 2);
     }
 
     #[test]
