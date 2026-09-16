@@ -767,6 +767,123 @@ fn a_map_naming_a_held_value_under_another_type_releases_it_for_the_held_run() {
     );
 }
 
+/// Lab 26d, finding 2, and the cure a refused purge names. A run records
+/// what the original hashed to beside what the copy hashed to, since a
+/// purge proves by content what it destroys. Two files cannot be proved: one
+/// whose row was written before that digest was recorded, which is every row
+/// of an install from before, and one changed in place under a modification
+/// time put back to the recorded value, which a size and a time cannot see.
+/// The run the refusal names is the one that mends both, so it has to be a
+/// run that notices both.
+#[test]
+fn a_run_records_what_the_original_hashed_to_and_writes_again_what_it_cannot_prove() {
+    use blake2::Digest as _;
+    let lab = lab();
+    let dir = dataset();
+    let originals = dir.path().join("derivatives/dcm-original");
+    let anon = dir.path().join("derivatives/dcm-anon");
+    let mut registry = lab.home.open().unwrap();
+    import_map(&mut registry);
+    let place = declare(&mut registry, dir.path(), json!({}));
+    let s = settings(&place);
+    let report = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(files_of(&report), (16, 12, 0, 3, 1), "{report}");
+
+    // every copy carries the digest of the original it was made from, which
+    // is that file's own bytes and never the copy's
+    let written = rows(
+        &mut registry,
+        "SELECT path, original_digest, digest FROM pseudonym_file WHERE state = 'written' ORDER BY path",
+    );
+    assert_eq!(written.len(), 12);
+    for r in &written {
+        let rel = r.text(0).unwrap().to_string();
+        let recorded = r.opt_text(1).unwrap().expect("the original's digest");
+        let source = std::fs::read(originals.join(&rel)).unwrap();
+        assert_eq!(
+            recorded,
+            hex::encode(blake2::Blake2s256::digest(&source)),
+            "{rel}"
+        );
+        assert_ne!(recorded, r.text(2).unwrap(), "the copy is another file");
+    }
+    // the held and the refused rows carry none: no copy was made of them,
+    // and a purge is refused for as long as either is there
+    assert_eq!(
+        one(
+            &mut registry,
+            "SELECT COUNT(*) FROM pseudonym_file WHERE original_digest IS NULL"
+        ),
+        4,
+        "the three held and the one the reader refused"
+    );
+
+    // the first cure: rows from before the digest was recorded are read
+    // again, and this run records what their originals hash to
+    registry
+        .store()
+        .execute("UPDATE pseudonym_file SET original_digest = NULL", &[])
+        .unwrap();
+    let again = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(files_of(&again), (16, 12, 0, 3, 1), "{again}");
+    assert_eq!(
+        one(
+            &mut registry,
+            "SELECT COUNT(*) FROM pseudonym_file WHERE state = 'written' AND original_digest IS NOT NULL"
+        ),
+        12,
+        "the run a refused purge names is the run that records them"
+    );
+
+    // the second cure: an original changed in place, to other bytes of
+    // exactly its length, with its modification time put back to the one
+    // the row recorded. The size and the time say nothing happened
+    let rel = "p0/s1/IM_0001";
+    let path = originals.join(rel);
+    let row = |registry: &mut Registry| -> (String, String) {
+        let r = &rows(
+            registry,
+            &format!("SELECT original_digest, out_path FROM pseudonym_file WHERE path = '{rel}'"),
+        )[0];
+        (
+            r.opt_text(0).unwrap().unwrap_or_default().to_string(),
+            r.text(1).unwrap().to_string(),
+        )
+    };
+    let (before, out_path) = row(&mut registry);
+    let was = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let n = bytes.len();
+    for b in &mut bytes[n - 64..] {
+        *b ^= 0xFF;
+    }
+    std::fs::write(&path, &bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(was))
+        .unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, n);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), was);
+
+    let third = pseudonymize(&s, &mut registry).unwrap();
+    assert_eq!(
+        files_of(&third),
+        (16, 1, 11, 3, 1),
+        "the run notices by content what the two numbers hide: {third}"
+    );
+    let (after, _) = row(&mut registry);
+    assert_ne!(after, before);
+    assert_eq!(after, hex::encode(blake2::Blake2s256::digest(&bytes)));
+    assert!(
+        std::fs::read(anon.join(&out_path))
+            .unwrap()
+            .ends_with(&bytes[n - 64..]),
+        "the copy holds the bytes the original holds now"
+    );
+}
+
 /// v0's copy of an original: the same UIDs, the code in `PatientID`, no
 /// name and no birth date, as `dcm-raw` holds it.
 fn v0_copy(code: &str, patient: &str, study: u32, series: u32, instance: u32) -> Vec<u8> {

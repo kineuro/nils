@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 43;
+pub const SCHEMA_VERSION: i64 = 44;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +226,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 43,
         apply: a_release_says_why_its_sessions_were_numbered,
     },
+    Migration {
+        version: 44,
+        apply: an_original_is_proved_by_its_own_digest,
+    },
 ];
 
 /// Record 26 §3, §4 and §14: a batch says which step it is, `digest` or
@@ -356,6 +360,20 @@ fn a_release_says_why_its_sessions_were_numbered(
         return Ok(());
     }
     add_columns(store, "release", &["session_naming"])
+}
+
+/// Lab 26d, finding 2: the pseudonymiser records the digest of the original
+/// it read beside the digest of the copy it wrote, so that what a purge
+/// destroys is proved by its content and not by a size and a modification
+/// time anything may set. A row written before this has none, and no reading
+/// of the file can supply it after the fact: it stays null until a run of the
+/// pseudonymiser reads that original again, and until then a purge of the
+/// dataset is refused in words naming that run.
+fn an_original_is_proved_by_its_own_digest(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "pseudonym_file", &["original_digest"])
 }
 
 /// Wave 4b §11.3 and §11.4: the case folded companions of the fingerprint's

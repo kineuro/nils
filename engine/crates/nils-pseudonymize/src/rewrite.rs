@@ -8,7 +8,7 @@
 //! step at the copy's speed (the spike of record 26).
 
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
 
 use blake2::{Blake2s256, Digest};
@@ -129,6 +129,12 @@ impl<'a> Scrub<'a> {
 pub struct Outcome {
     pub out_size: u64,
     pub digest: String,
+    /// The digest of the original this copy was made from, hashed from its
+    /// first byte to its last in the pass that copied the pixels (lab 26d,
+    /// finding 2). The copy is proved by content and the original must be
+    /// too, since a purge destroys the original and nothing else holds those
+    /// bytes. Empty on a dry run, which writes no row.
+    pub source_digest: String,
     pub applied: Applied,
 }
 
@@ -202,11 +208,12 @@ pub fn write(
         return Ok(Outcome {
             out_size: 0,
             digest: String::new(),
+            source_digest: String::new(),
             applied,
         });
     }
     let part = target.with_extension("dcm.part");
-    let written = (|| -> Result<(u64, String), String> {
+    let written = (|| -> Result<(u64, String, String), String> {
         let file = File::create(&part).map_err(|e| format!("unwritable: {e}"))?;
         let mut w = Hashing {
             inner: BufWriter::with_capacity(WRITE_BUF, file),
@@ -222,28 +229,40 @@ pub fn write(
         object
             .write_dataset(&mut w)
             .map_err(|e| format!("unwritable: {}", first_line(&e.to_string())))?;
-        if pixel_end > pixel_at {
-            let mut src = File::open(source).map_err(|e| format!("unreadable: {e}"))?;
-            src.seek(SeekFrom::Start(pixel_at))
-                .map_err(|e| format!("unreadable: {e}"))?;
-            let mut left = pixel_end - pixel_at;
-            while left > 0 {
-                let want = (buf.len() as u64).min(left) as usize;
-                let n = src
-                    .read(&mut buf[..want])
-                    .map_err(|e| format!("unreadable: {e}"))?;
-                if n == 0 {
-                    break;
-                }
-                w.write_all(&buf[..n])
-                    .map_err(|e| format!("unwritable: {e}"))?;
-                left -= n as u64;
+        // Lab 26d, finding 2: the source is read from its first byte to its
+        // last and hashed as it goes, so that the run records what the
+        // original was as well as what the copy is. The pixel bytes are
+        // written out of that same pass, so the file is read once and not
+        // twice: the header the parser has already seen costs a page or two
+        // more, and whatever a writer appended after the pixels is hashed
+        // and, as before, not copied.
+        let mut src = File::open(source).map_err(|e| format!("unreadable: {e}"))?;
+        let mut source_hasher = Blake2s256::new();
+        let mut at = 0u64;
+        loop {
+            let n = src.read(buf).map_err(|e| format!("unreadable: {e}"))?;
+            if n == 0 {
+                break;
             }
+            source_hasher.update(&buf[..n]);
+            let end = at + n as u64;
+            let from = pixel_at.max(at);
+            let to = pixel_end.min(end);
+            if to > from {
+                let (lo, hi) = ((from - at) as usize, (to - at) as usize);
+                w.write_all(&buf[lo..hi])
+                    .map_err(|e| format!("unwritable: {e}"))?;
+            }
+            at = end;
         }
         w.flush().map_err(|e| format!("unwritable: {e}"))?;
-        Ok((w.bytes, hex::encode(w.hasher.finalize())))
+        Ok((
+            w.bytes,
+            hex::encode(w.hasher.finalize()),
+            hex::encode(source_hasher.finalize()),
+        ))
     })();
-    let (out_size, digest) = match written {
+    let (out_size, digest, source_digest) = match written {
         Ok(w) => w,
         Err(why) => {
             let _ = std::fs::remove_file(&part);
@@ -257,6 +276,7 @@ pub fn write(
     Ok(Outcome {
         out_size,
         digest,
+        source_digest,
         applied,
     })
 }

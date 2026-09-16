@@ -5,11 +5,18 @@
 //! asks once per directory what an earlier run recorded there in
 //! `pseudonym_file` and decides each file by its size and modification
 //! time. A file recorded as written whose source is unchanged is checked
-//! for its output, which must be there at the size and the digest that
-//! were recorded, and is otherwise written again as a changed file is
-//! (lab 26c, finding 3): an original whose copy no longer verifies can
-//! only be mended by writing that copy again, and a purge refuses until it
-//! is. A held file is read again only
+//! on both sides, and written again where either fails: the copy must be
+//! there at the size and the digest that were recorded (lab 26c, finding
+//! 3), and the original must still hash to the digest the run that copied
+//! it recorded (lab 26d, finding 2). An original whose copy no longer
+//! verifies can only be mended by writing that copy again, and one whose
+//! bytes moved under a modification time that did not is invisible to the
+//! size and the time: since a purge proves each original by its content,
+//! and refuses what it cannot prove, the run that proves it again is the
+//! cure a refused purge names, and it has to be a run that notices. A row
+//! from before the original's digest was recorded has nothing to check
+//! against, so its file is read and written again once. A held file is
+//! read again only
 //! once a map released it or a person asked for it to be coded anyway; a
 //! refused file stays refused until it changes; a changed file is read
 //! again with its record beside it, so its old output can be let go.
@@ -55,6 +62,10 @@ pub struct Recorded {
     /// The digest of the copy as it was written, which the output must
     /// still hash to for the record to stand.
     pub digest: Option<String>,
+    /// The digest of the original as the run that copied it read it, which
+    /// the file must still hash to for the record to stand (lab 26d).
+    /// None on a row written before it was recorded.
+    pub original_digest: Option<String>,
     pub shape: Option<String>,
     /// A map released the held file.
     pub released: bool,
@@ -94,6 +105,8 @@ pub enum Decision {
         out_path: String,
         out_size: i64,
         digest: Option<String>,
+        /// What the original must still hash to.
+        original_digest: String,
     },
     /// Held and not released: it stays held, its row touched.
     StillHeld { id: i64, shape: Option<String> },
@@ -117,12 +130,29 @@ pub fn decide(recorded: Option<&Recorded>, size: u64, mtime: i64) -> Decision {
         }));
     }
     match (r.state, &r.out_path, r.out_size) {
-        (state::WRITTEN | state::UNCHANGED, Some(out_path), Some(out_size)) => Decision::Check {
-            id: r.id,
-            out_path: out_path.clone(),
-            out_size,
-            digest: r.digest.clone(),
-        },
+        // lab 26d, finding 2: a row that says what the original hashed to
+        // is checked on both sides, the copy and the original; one that
+        // says nothing about the original cannot be checked at all, and the
+        // file is read and written again so that this run records it. That
+        // run is what a purge refused for want of the digest asks for.
+        (state::WRITTEN | state::UNCHANGED, Some(out_path), Some(out_size)) => {
+            match &r.original_digest {
+                Some(original_digest) => Decision::Check {
+                    id: r.id,
+                    out_path: out_path.clone(),
+                    out_size,
+                    digest: r.digest.clone(),
+                    original_digest: original_digest.clone(),
+                },
+                None => Decision::Read(Some(Prior {
+                    id: r.id,
+                    out_path: Some(out_path.clone()),
+                    changed: false,
+                    code_anyway: r.code_anyway,
+                    lookup: None,
+                })),
+            }
+        }
         (state::HELD, _, _) if r.released || r.code_anyway => Decision::Read(Some(Prior {
             id: r.id,
             out_path: None,
@@ -168,7 +198,7 @@ impl Records {
         let empty = store.query_opt(&probe, &[Param::Int(place_id)])?.is_none();
         let released = d.text_of(t.column("released_at").expect("released_at"));
         let sql = format!(
-            "SELECT path, size, mtime, state, out_path, out_size, shape, {released} IS NOT NULL, code_anyway, id, lookup, digest \
+            "SELECT path, size, mtime, state, out_path, out_size, shape, {released} IS NOT NULL, code_anyway, id, lookup, digest, original_digest \
              FROM {qualified} WHERE place_id = {} AND dir = {}",
             d.param(1, Type::Int),
             d.param(2, Type::Text)
@@ -212,6 +242,7 @@ impl Records {
                         out_path: r.opt_text(4)?.map(str::to_string),
                         out_size: r.opt_int(5)?,
                         digest: r.opt_text(11)?.map(str::to_string),
+                        original_digest: r.opt_text(12)?.map(str::to_string),
                         shape: r.opt_text(6)?.map(str::to_string),
                         released: flag(7),
                         code_anyway: flag(8),
@@ -235,8 +266,9 @@ pub enum Task {
         mtime: i64,
         prior: Option<Prior>,
     },
-    /// Look for the output of an unchanged source, and read it back to see
-    /// that it is still what was written.
+    /// Look for the output of a source whose size and modification time
+    /// stand, and read both files back to see that each is still what was
+    /// written and read.
     Check {
         path: PathBuf,
         rel: String,
@@ -246,6 +278,7 @@ pub enum Task {
         out_path: String,
         out_size: i64,
         digest: Option<String>,
+        original_digest: String,
     },
 }
 
@@ -289,6 +322,7 @@ pub fn run(
                         out_path,
                         out_size,
                         digest,
+                        original_digest,
                     } => Task::Check {
                         path,
                         rel,
@@ -298,6 +332,7 @@ pub fn run(
                         out_path,
                         out_size,
                         digest,
+                        original_digest,
                     },
                     Decision::StillHeld { id, shape } => {
                         progress.file(&progress.held, size);
@@ -348,6 +383,7 @@ mod tests {
             out_path: Some("c/d/001/00001.dcm".into()),
             out_size: Some(9),
             digest: Some("d0d0".into()),
+            original_digest: Some("0f0f".into()),
             shape: Some("999".into()),
             released: false,
             code_anyway: false,
@@ -365,7 +401,8 @@ mod tests {
                 id: 1,
                 out_path: "c/d/001/00001.dcm".into(),
                 out_size: 9,
-                digest: Some("d0d0".into())
+                digest: Some("d0d0".into()),
+                original_digest: "0f0f".into()
             }
         );
         assert_eq!(
@@ -445,6 +482,23 @@ mod tests {
             decide(Some(&lost), 10, 5),
             Decision::Read(Some(_))
         ));
+        // lab 26d, finding 2: a row from before the original's digest was
+        // recorded is read again, keeping its output, so that this run
+        // records what the original hashes to; nothing else can supply it
+        let unproved = Recorded {
+            original_digest: None,
+            ..rec(state::WRITTEN)
+        };
+        assert_eq!(
+            decide(Some(&unproved), 10, 5),
+            Decision::Read(Some(Prior {
+                id: 1,
+                out_path: Some("c/d/001/00001.dcm".into()),
+                changed: false,
+                code_anyway: false,
+                lookup: None
+            }))
+        );
     }
 
     #[test]

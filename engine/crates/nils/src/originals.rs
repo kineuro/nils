@@ -26,6 +26,28 @@
 //! exists nowhere else. A modification time that moved innocently, after a
 //! restore or a copy between disks, is refused too, and that is the price.
 //!
+//! **A purge proves each original by its content, in one read of the file
+//! taken at the moment it removes it** (lab 26d). Two things were wrong
+//! with judging it any other way. The walk lists a directory and then
+//! reaches its files one by one, so the size and the modification time it
+//! captured may be many files old by the time a file's turn comes, and an
+//! rsync, a re-export or a corrected study copied over the old one while
+//! the purge runs was destroyed on that stale reading. And the copy was
+//! proved honestly, by a digest hashed on the spot, while the original was
+//! proved by two numbers anything may set, so an original changed in place
+//! whose modification time was then put back passed as verified. So the
+//! pseudonymiser records the digest of the original it read beside the
+//! digest of the copy it wrote, and a purge, immediately before it removes
+//! a file, opens that file, measures it, hashes every byte of it and judges
+//! *that*: one read serves both. A row with no such digest, written before
+//! this, cannot be proved at all, and the refusal says so and names the run
+//! that mends it. A purge therefore reads every original once, whole,
+//! because it proves what it destroys, and that is the point of it.
+//!
+//! The survey and the door stay cheap, on the rows and on each original's
+//! size and modification time, and say in [`FORECAST`] that they are a
+//! forecast, since what the purge proves it proves file by file as it goes.
+//!
 //! The counts a person reads keep the problems apart, because their cures
 //! differ: a file whose **copy** is missing or is no longer what was
 //! recorded, a file whose **original moved on** since it was copied, and a
@@ -73,6 +95,12 @@ pub(crate) const VAULT_UNDER: &str = "originals";
 
 /// Files between heartbeats, which is also how often a cancel is seen.
 const BEAT_EVERY: u64 = 128;
+
+/// What the survey and the door are, said in the answer itself (lab 26d).
+/// A person who reads `ready` must not then meet a refusal with nothing to
+/// explain it: the counts are cheap and the proof is not, and this sentence
+/// is the difference between the two, wherever the survey is answered.
+pub(crate) const FORECAST: &str = "these counts are a forecast, read from the rows and from each original's size and modification time; a purge reads every original again as it reaches it and proves it by its content, so a file that changes in between is left as it is and the job names it";
 
 /// What a copy and a digest read through.
 const BUF: usize = 256 * 1024;
@@ -197,6 +225,10 @@ pub(crate) struct Survey {
     /// The original moved on: its size or its modification time is not
     /// what the row recorded, so the copy was made from other bytes.
     pub(crate) changed: u64,
+    /// The row says nothing about what the original hashed to when it was
+    /// copied (lab 26d), so nothing proves this file is that one and a
+    /// purge will not destroy it on a row's word alone.
+    pub(crate) unproved: u64,
     /// The reader refused the original, so it has no copy at all.
     pub(crate) no_copy: u64,
     pub(crate) held: u64,
@@ -217,21 +249,24 @@ impl Survey {
             "unverified": self.unverified,
             "copy_unverified": self.copy_unverified,
             "changed": self.changed,
+            "unproved": self.unproved,
             "no_copy": self.no_copy,
             "held": self.held,
             "ready": self.ready(),
             "why": self.why,
+            "forecast": FORECAST,
         })
     }
 }
 
-/// What the act would do, without doing it. Every original is checked
-/// exactly as a purge checks it: the copy is there, at the size that was
-/// recorded, its digest is what was recorded, hashed again now, and the
-/// original is still the file that copy was made from, at the size and the
-/// modification time the row recorded. The check therefore costs what a
-/// purge costs, which is the point: nothing is destroyed on the strength
-/// of a row alone.
+/// What the act would do, without doing it, as a forecast ([`FORECAST`]).
+/// Every copy is read and hashed, which is what says a copy still stands,
+/// and every original is read as the walk reads it, by its size and its
+/// modification time, which is what says cheaply that it has not moved on.
+/// What this cannot say is whether an original whose numbers stand is still
+/// the file that was copied: that is the purge's own reading, file by file,
+/// of every byte (lab 26d). So `ready` means a purge may begin, not that
+/// every file will prove itself when it is reached, and the answer says so.
 pub(crate) fn survey(registry: &mut Registry, place: &Place) -> Result<Survey, StoreError> {
     let mut survey = Survey {
         held: held_files(registry, place)?,
@@ -265,6 +300,10 @@ pub(crate) fn survey(registry: &mut Registry, place: &Place) -> Result<Survey, S
                 Standing::Changed => {
                     survey.unverified += 1;
                     survey.changed += 1;
+                }
+                Standing::Unproved => {
+                    survey.unverified += 1;
+                    survey.unproved += 1;
                 }
                 Standing::NoCopy => {
                     survey.unverified += 1;
@@ -363,6 +402,9 @@ fn purge_refusal(place: &Place, survey: &Survey) -> Option<String> {
     if survey.changed > 0 {
         why.push(changed_words(place, survey.changed));
     }
+    if survey.unproved > 0 {
+        why.push(unproved_words(place, survey.unproved));
+    }
     if survey.copy_unverified > 0 {
         why.push(copy_words(place, survey.copy_unverified));
     }
@@ -404,6 +446,25 @@ fn changed_words(place: &Place, n: u64) -> String {
         "{} of the dataset {} changed after being copied, at the size or the modification time the pseudonymiser recorded, so the pseudonymised tree holds the older bytes and a purge would destroy what is newer; a purge is refused. Pseudonymise the dataset again with nils pseudonymize @{}, which writes a changed original again, then look once more.",
         many(n, "file"),
         place.name,
+        place.name
+    )
+}
+
+/// The words a purge is refused with when the row says nothing about what
+/// the original hashed to (lab 26d, finding 2): a row the pseudonymiser
+/// wrote before it recorded that digest. Such a file cannot be proved by
+/// anything now, and a purge destroys nothing it cannot prove; the run the
+/// refusal names reads the original again and records what it is, after
+/// which the file can be proved and the purge may run.
+fn unproved_words(place: &Place, n: u64) -> String {
+    format!(
+        "{} of the dataset {} {} copied before the pseudonymiser recorded what the original hashed to, so nothing proves {} still the {} that {} copied and a purge is refused: a purge proves every file by its content before it destroys it. Pseudonymise the dataset again with nils pseudonymize @{}, which reads each original and records its digest, then look once more.",
+        many(n, "file"),
+        place.name,
+        if n == 1 { "was" } else { "were" },
+        if n == 1 { "it is" } else { "they are" },
+        if n == 1 { "file" } else { "files" },
+        if n == 1 { "was" } else { "were" },
         place.name
     )
 }
@@ -504,6 +565,11 @@ struct Recorded {
     out_path: Option<String>,
     out_size: Option<i64>,
     digest: Option<String>,
+    /// What the original hashed to when the run that wrote the copy read
+    /// it (lab 26d): what a purge proves the file against before it
+    /// removes it. None on a row written before it was recorded, which is
+    /// a file no purge may destroy until a run records it.
+    original_digest: Option<String>,
 }
 
 /// What the pseudonymiser recorded for the files of one directory of the
@@ -516,7 +582,7 @@ fn recorded_in(
 ) -> Result<HashMap<String, Recorded>, StoreError> {
     let d = store.dialect();
     let sql = format!(
-        "SELECT path, state, size, mtime, out_path, out_size, digest FROM {} WHERE place_id = {} AND dir = {}",
+        "SELECT path, state, size, mtime, out_path, out_size, digest, original_digest FROM {} WHERE place_id = {} AND dir = {}",
         store.qualified("pseudonym_file"),
         d.param(1, Type::Int),
         d.param(2, Type::Text)
@@ -533,6 +599,7 @@ fn recorded_in(
                 out_path: r.opt_text(4)?.map(str::to_string),
                 out_size: r.opt_int(5)?,
                 digest: r.opt_text(6)?.map(str::to_string),
+                original_digest: r.opt_text(7)?.map(str::to_string),
             },
         );
     }
@@ -552,6 +619,9 @@ enum Standing {
     NoCopy,
     /// It moved on since it was copied: the copy is of other bytes.
     Changed,
+    /// Nothing says what the original hashed to when it was copied, so it
+    /// cannot be proved to be that file (lab 26d).
+    Unproved,
     /// The copy is missing, or is no longer what was recorded.
     CopyUnverified,
 }
@@ -565,16 +635,21 @@ impl Standing {
                 "was refused by the reader and has no copy in the pseudonymised tree"
             }
             Standing::Changed => "changed after its copy was written",
+            Standing::Unproved => {
+                "was copied before the pseudonymiser recorded what the original hashed to, so nothing proves it is that file"
+            }
             Standing::CopyUnverified => "has no verified copy in the pseudonymised tree",
         }
     }
 }
 
-/// Where one original stands: the row says a copy was written; the
-/// original is still that file, at the size and the modification time the
-/// row recorded; the copy is there at the recorded size; and its digest
-/// now is the digest that was recorded. A row alone proves nothing, which
-/// is why both files are read.
+/// Where one original stands in the forecast: the row says a copy was
+/// written; the original has not moved on, at the size and the modification
+/// time the row recorded; the row says what the original hashed to, which a
+/// purge will prove it against; the copy is there at the recorded size; and
+/// its digest now is the digest that was recorded. A row alone proves
+/// nothing, which is why the copy is read here and the original is read by
+/// the purge (lab 26d).
 fn standing(anon: Option<&Path>, recorded: Option<&Recorded>, size: u64, mtime: i64) -> Standing {
     // no tree to verify against, or no row at all: never copied
     let (Some(anon), Some(r)) = (anon, recorded) else {
@@ -592,10 +667,88 @@ fn standing(anon: Option<&Path>, recorded: Option<&Recorded>, size: u64, mtime: 
     if r.size != size as i64 || r.mtime != mtime {
         return Standing::Changed;
     }
+    // lab 26d: a row from before the original's digest was recorded is
+    // counted here rather than found at the last moment by the purge, so
+    // that a person is told what to do about it before they ask for one
+    if r.original_digest.is_none() {
+        return Standing::Unproved;
+    }
     if copy_stands(anon, r) {
         Standing::Verified
     } else {
         Standing::CopyUnverified
+    }
+}
+
+/// One original read again, whole, now: the size and the modification time
+/// the file system answers for the very handle that is hashed, and the
+/// digest of every byte of it. This is the one read a purge takes of a file
+/// before it removes it, and it serves both halves of the judgment (lab
+/// 26d): what the file is now, and whether it is what was copied.
+///
+/// The file is measured before the hash and again after it, because a write
+/// landing while it is being read would otherwise be hashed into a file
+/// that never existed on disk. Where the two readings differ the file is
+/// moving under the purge and the purge leaves it, saying so.
+fn read_now(path: &Path) -> Result<(u64, i64, String), String> {
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("could not be read again: {e}"))?;
+    let before = file
+        .metadata()
+        .map_err(|e| format!("could not be read again: {e}"))?;
+    let mut hasher = Blake2s256::new();
+    let mut buf = vec![0u8; BUF];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(e) => return Err(format!("could not be read again: {e}")),
+        }
+    }
+    let after = file
+        .metadata()
+        .map_err(|e| format!("could not be read again: {e}"))?;
+    let (was, is) = (
+        nils_digest::walk::mtime_ns_of(&before),
+        nils_digest::walk::mtime_ns_of(&after),
+    );
+    if before.len() != after.len() || was != is {
+        return Err("was written to while the purge was reading it".to_string());
+    }
+    Ok((after.len(), is, hex::encode(hasher.finalize())))
+}
+
+/// Where one original stands when it is read again at the moment it would
+/// be removed (lab 26d): judged on what the file is then, never on what the
+/// walk's listing said, since a directory is listed once and its files are
+/// reached one by one. The size and the modification time are asked first,
+/// because they name the commoner case in words a person can act on, but
+/// what proves the file is the digest of its content against the digest the
+/// run that copied it recorded.
+fn standing_now(
+    anon: &Path,
+    recorded: Option<&Recorded>,
+    size: u64,
+    mtime: i64,
+    digest: &str,
+) -> Standing {
+    let Some(r) = recorded else {
+        return Standing::CopyUnverified;
+    };
+    if r.state == "refused" {
+        return Standing::NoCopy;
+    }
+    if !matches!(r.state.as_str(), "written" | "unchanged") {
+        return Standing::CopyUnverified;
+    }
+    if r.size != size as i64 || r.mtime != mtime {
+        return Standing::Changed;
+    }
+    match r.original_digest.as_deref() {
+        None => Standing::Unproved,
+        Some(recorded) if recorded != digest => Standing::Changed,
+        _ if copy_stands(anon, r) => Standing::Verified,
+        _ => Standing::CopyUnverified,
     }
 }
 
@@ -642,9 +795,15 @@ enum Flow {
 
 /// Every directory under `root` with the files in it: the path, the path
 /// relative to `root` as `pseudonym_file` records it, the size and the
-/// modification time, which are what a row says the original was. Links
+/// modification time as they were **when the directory was listed**. Links
 /// and special files are left out, as the pseudonymiser leaves them out.
 /// One directory is held at a time, never the tree.
+///
+/// Those two numbers are a listing, not a judgment (lab 26d, finding 1):
+/// by the time a file's turn comes they may be many files old, and a purge
+/// reads the file again rather than believe them. The survey counts by them
+/// and says it is a forecast; a vault takes a file's size from them for its
+/// tally, which no file is destroyed on.
 fn each_directory(root: &Path, mut f: impl FnMut(&str, &[(PathBuf, String, u64, i64)]) -> Flow) {
     let mut queue = vec![root.to_path_buf()];
     while let Some(dir) = queue.pop() {
@@ -872,12 +1031,13 @@ pub(crate) fn check(
                 place.name
             )));
         }
-        // lab 26c: the whole verification here as well, so that a person
-        // who asks for a purge meets the refusal in words at the door, in
-        // the sentence GET answered with, rather than as a job that failed.
-        // It costs the walk and the hashing, which is what a purge costs in
-        // any case, and it is what stands between a changed original and
-        // its deletion.
+        // lab 26c: the forecast here as well, so that a person who asks for
+        // a purge meets the refusal in words at the door, in the sentence
+        // GET answered with, rather than as a job that failed. What it can
+        // see it refuses here: a file waiting for a map, one the reader
+        // refused, one whose copy no longer stands, one whose numbers moved
+        // and one no row can prove. What only the file itself can say, the
+        // purge asks of each file as it reaches it (lab 26d).
         let surveyed = survey(registry, place).map_err(store_failed)?;
         if let Some(why) = surveyed.why {
             return Err(conflict(why));
@@ -984,6 +1144,10 @@ pub(crate) fn as_text(place: &Place, survey: &Survey) -> String {
         thousands(survey.changed)
     ));
     out.push_str(&format!(
+        "  unproved         {} copied before the original's own digest was recorded\n",
+        thousands(survey.unproved)
+    ));
+    out.push_str(&format!(
         "  no copy          {} the reader refused, which are never copied\n",
         thousands(survey.no_copy)
     ));
@@ -995,6 +1159,9 @@ pub(crate) fn as_text(place: &Place, survey: &Survey) -> String {
         None => out.push_str("  purge            may run\n"),
         Some(why) => out.push_str(&format!("  purge            is refused: {why}\n")),
     }
+    // lab 26d: a person told `may run` is told in the same breath what this
+    // reading is and what the purge will do that it has not done
+    out.push_str(&format!("\n{FORECAST}\n"));
     out
 }
 
@@ -1104,7 +1271,7 @@ pub(crate) fn run(
                 tally.first.as_deref().unwrap_or("of an error")
             ),
             Act::Purge => format!(
-                "{} under the originals of the dataset {} did not verify when the purge reached {} and {}, the first because {}; nothing was removed that did not verify at that moment. Pseudonymise the dataset again with nils pseudonymize @{}, then look once more.",
+                "{} under the originals of the dataset {} could not be proved when the purge read {} again and {}, the first because {}; a purge reads every original as it reaches it and removes nothing that does not prove itself at that moment. Pseudonymise the dataset again with nils pseudonymize @{}, then look once more.",
                 many(tally.left, "file"),
                 place.name,
                 them(tally.left),
@@ -1252,9 +1419,41 @@ fn vault(
     Ok(tally)
 }
 
-/// The purge: the originals deleted, each checked once more against the
-/// row that says where its copy is, so that a file which appeared under
-/// the originals while the run went on is left rather than destroyed.
+/// The seam the tests write through (lab 26d, finding 1): called for each
+/// file a purge is about to judge, after that file's directory has been
+/// listed and its rows read, and before the file is read again. That is the
+/// window an rsync, a re-export or a corrected study writes in, and it is a
+/// property of one file, not of a corpus: a test with two files stands in
+/// it exactly, where the lab needed 19,200 files and two runs to catch the
+/// same thing by weight of numbers. It is compiled into the test build
+/// alone, so a real run pays nothing for it.
+#[cfg(test)]
+type UnderTheWalk = Option<Box<dyn FnMut(&Path) + Send>>;
+
+#[cfg(test)]
+static UNDER_THE_WALK: std::sync::Mutex<UnderTheWalk> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn under_the_walk(path: &Path) {
+    let mut seam = UNDER_THE_WALK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(write) = seam.as_mut() {
+        write(path);
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn under_the_walk(_path: &Path) {}
+
+/// The purge: the originals deleted, each proved once more immediately
+/// before it goes, by a reading of the file itself and not of the listing
+/// (lab 26d, finding 1) and by the digest of its content and not by two
+/// numbers anything may set (finding 2). One read of the original serves
+/// both, and the copy is hashed beside it, so a file that appeared or
+/// changed under the originals while the run went on is left rather than
+/// destroyed, and the job names the first that was.
 fn purge(
     registry: &mut Registry,
     place: &Place,
@@ -1280,33 +1479,46 @@ fn purge(
                 return Flow::Stop;
             }
         };
-        for (path, rel, size, mtime) in files {
+        for (path, rel, _, _) in files {
             if cancel.stop() {
                 tally.cancelled = true;
                 return Flow::Stop;
             }
-            // lab 26c: the whole check again, on this file, now. The survey
-            // hashed every copy a moment ago, but a file that changed since
-            // then must not be removed on the strength of that reading, and
-            // a file that appeared under the originals while the run went on
-            // has no copy at all.
-            match standing(Some(&anon), rows.get(rel.as_str()), *size, *mtime) {
-                Standing::Verified => match std::fs::remove_file(path) {
-                    Ok(()) => {
-                        tally.files += 1;
-                        tally.bytes += size;
-                        tally.verified += 1;
+            under_the_walk(path);
+            // lab 26c and lab 26d: the whole judgment again, on this file,
+            // now. The survey hashed every copy a moment ago and the walk
+            // listed this directory some files ago; neither says what the
+            // file is at the moment it would be destroyed. So the original
+            // is read here, once, for its size, its modification time and
+            // the digest of every byte of it, and judged on that reading
+            // against the row. A file that appeared under the originals
+            // while the run went on has no row and no copy at all.
+            match read_now(path) {
+                Ok((size, mtime, digest)) => {
+                    match standing_now(&anon, rows.get(rel.as_str()), size, mtime, &digest) {
+                        Standing::Verified => match std::fs::remove_file(path) {
+                            Ok(()) => {
+                                tally.files += 1;
+                                tally.bytes += size;
+                                tally.verified += 1;
+                            }
+                            Err(e) => {
+                                tally.left += 1;
+                                tally.first.get_or_insert(format!(
+                                    "{} could not be removed: {e}",
+                                    path.display()
+                                ));
+                            }
+                        },
+                        left => {
+                            tally.left += 1;
+                            tally.first.get_or_insert(format!("{rel} {}", left.why()));
+                        }
                     }
-                    Err(e) => {
-                        tally.left += 1;
-                        tally
-                            .first
-                            .get_or_insert(format!("{} could not be removed: {e}", path.display()));
-                    }
-                },
-                left => {
+                }
+                Err(why) => {
                     tally.left += 1;
-                    tally.first.get_or_insert(format!("{rel} {}", left.why()));
+                    tally.first.get_or_insert(format!("{rel} {why}"));
                 }
             }
             since += 1;
@@ -1383,14 +1595,15 @@ mod tests {
         mtime: i64,
         out: &str,
         digest: &str,
+        original_digest: Option<&str>,
         state: &str,
     ) {
         let dir = rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
         registry
             .store()
             .execute(
-                "INSERT INTO pseudonym_file (place_id, path, dir, size, mtime, state, out_path, out_size, digest, first_seen, code_anyway) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '2026-09-16T00:00:00Z', 0)",
+                "INSERT INTO pseudonym_file (place_id, path, dir, size, mtime, state, out_path, out_size, digest, original_digest, first_seen, code_anyway) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '2026-09-16T00:00:00Z', 0)",
                 &[
                     Param::Int(place_id),
                     Param::from(rel),
@@ -1401,6 +1614,10 @@ mod tests {
                     Param::from(out),
                     Param::Int(size as i64),
                     Param::from(digest),
+                    match original_digest {
+                        Some(d) => Param::from(d),
+                        None => Param::Null,
+                    },
                 ],
             )
             .unwrap();
@@ -1452,6 +1669,10 @@ mod tests {
             let out = format!("x/001/{:05}.dcm", i + 1);
             let copy = dir.file(&format!("{name}/derivatives/dcm-anon/{out}"), bytes);
             let digest = digest_of(&copy).unwrap();
+            // the copy holds the original's own bytes here, and the two
+            // digests are recorded apart all the same: one proves the copy
+            // and the other proves the original (lab 26d)
+            let original_digest = digest_of(&original).unwrap();
             record(
                 registry,
                 id,
@@ -1460,10 +1681,54 @@ mod tests {
                 mtime_of(&original),
                 &out,
                 &digest,
+                Some(&original_digest),
                 "written",
             );
         }
         place::show(registry.store(), id).unwrap().unwrap()
+    }
+
+    /// The seam set for one test and cleared when it ends, so that a panic
+    /// never leaves one standing for another test of this binary.
+    struct Seam;
+
+    impl Drop for Seam {
+        fn drop(&mut self) {
+            *UNDER_THE_WALK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+
+    /// Write `bytes` into `target` the first time a purge reaches a file
+    /// under `root`: the moment that file's directory has been listed and
+    /// nothing under it has been read again yet. That is where an rsync
+    /// refreshing files in place lands, and the walk's reading of the size
+    /// and the modification time is stale from then on.
+    fn write_under_the_walk(root: PathBuf, target: PathBuf, bytes: &'static [u8]) -> Seam {
+        let mut written = false;
+        *UNDER_THE_WALK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move |reached| {
+            if written || !reached.starts_with(&root) {
+                return;
+            }
+            written = true;
+            std::fs::write(&target, bytes).expect("write under the walk");
+        }));
+        Seam
+    }
+
+    /// One file's modification time put back to what it was, as a tool that
+    /// restores content and timestamps out of step leaves it.
+    fn put_back(path: &Path, mtime: i64) {
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(mtime as u64);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(when))
+            .unwrap();
     }
 
     /// A backup place to vault into, on the same filesystem as the dataset.
@@ -2020,6 +2285,225 @@ mod tests {
             !originals.join("a/2.dcm").exists(),
             "the one that verified went"
         );
+    }
+
+    /// Lab 26d, finding 1, as a property of one file rather than by weight
+    /// of numbers. The walk reads a file's size and modification time when
+    /// it lists that file's directory, and the purge judged the file
+    /// against those numbers when its turn came, which might be many files
+    /// later: an rsync refreshing files in place, a re-export or a
+    /// corrected study copied over the old one was destroyed that way, one
+    /// file in the lab's first run and five in its second. Here the bytes
+    /// are replaced through the seam, in exactly that window and every run:
+    /// the file written under the walk is left, holding what was written
+    /// into it, the other is removed, and the job says which and why.
+    #[test]
+    fn a_file_written_under_the_walk_is_read_again_and_left() {
+        // eighteen bytes, as the file it replaces, and a modification time
+        // that moves with them: what the walk listed is stale either way,
+        // and only reading the file again can tell
+        const UNDER: &[u8] = b"WRITTEN UNDER WALK";
+        let dir = TempDir::new("originals-under-the-walk");
+        let mut registry = lab(&dir);
+        let ds = dataset(&mut registry, &dir, "north");
+        let originals = ds.tree_path("originals").unwrap();
+        let written_under = originals.join("a/1.dcm");
+        assert_eq!(ORIGINALS[0].1.len(), UNDER.len(), "the same length");
+        assert!(
+            survey(&mut registry, &ds).unwrap().ready(),
+            "every original is verified when the purge is asked for"
+        );
+
+        let _seam = write_under_the_walk(originals.clone(), written_under.clone(), UNDER);
+        let refused = run(
+            &mut registry,
+            &ds,
+            Act::Purge,
+            None,
+            "the originals are no longer needed and the tree stands",
+            WHO,
+            &Cancel::new(),
+        )
+        .unwrap_err();
+
+        // the file written under the walk is still there, holding the bytes
+        // that were written into it, which exist nowhere else
+        assert!(
+            written_under.is_file(),
+            "a/1.dcm was destroyed on a stale reading"
+        );
+        assert_eq!(std::fs::read(&written_under).unwrap(), UNDER);
+        assert!(
+            !originals.join("a/2.dcm").exists(),
+            "the one that proved itself went"
+        );
+
+        // and the job says so, naming the file and the cure
+        assert_eq!(refused.status, 409);
+        assert!(
+            refused.message.starts_with(
+                "1 file under the originals of the dataset north could not be proved when the purge read it again and was left as it is, the first because a/1.dcm changed after its copy was written"
+            ),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("nils pseudonymize @north"),
+            "{}",
+            refused.message
+        );
+        let job = the_job(&mut registry);
+        assert_eq!(job.state, State::Failed);
+        assert_eq!(job.error.as_deref(), Some(refused.message.as_str()));
+        let result = job.result.clone().expect("the job says what it did");
+        assert_eq!(
+            (result["files"].as_u64(), result["verified"].as_u64()),
+            (Some(1), Some(1)),
+            "{result}"
+        );
+        // the dataset keeps the state it had until an act runs to the end
+        let after = place::show(registry.store(), ds.id).unwrap().unwrap();
+        assert_eq!(after.dataset["originals_kept"], "kept");
+    }
+
+    /// Lab 26d, finding 2: an original changed in place and its
+    /// modification time then put back to the one the row recorded. The
+    /// copy was proved honestly, by a digest hashed on the spot, and the
+    /// original by two numbers anything may set, so the file passed as
+    /// verified and the purge destroyed bytes that existed nowhere else.
+    /// The purge now proves the original by its own digest, read from the
+    /// file as it reaches it. The survey is cheap and cannot see this, so
+    /// it says in the same breath what it is and what the purge will do.
+    #[test]
+    fn an_original_changed_under_a_restored_modification_time_is_refused_by_its_digest() {
+        const FORGED: &[u8] = b"THE FIRST ORIGINAL";
+        let dir = TempDir::new("originals-forged");
+        let mut registry = lab(&dir);
+        let ds = dataset(&mut registry, &dir, "north");
+        let originals = ds.tree_path("originals").unwrap();
+        let forged = originals.join("a/1.dcm");
+        let was = mtime_of(&forged);
+
+        change_in_place(&forged, FORGED);
+        put_back(&forged, was);
+        assert_eq!(mtime_of(&forged), was, "the row's own modification time");
+        assert_eq!(std::fs::read(&forged).unwrap(), FORGED);
+
+        // the forecast cannot see the bytes, and says as much
+        let surveyed = survey(&mut registry, &ds).unwrap();
+        assert!(surveyed.ready(), "{:?}", surveyed.why);
+        assert_eq!(surveyed.as_json()["forecast"], FORECAST);
+        assert!(as_text(&ds, &surveyed).contains(FORECAST));
+
+        // the purge reads the file, cannot prove it, and leaves it
+        let refused = run(
+            &mut registry,
+            &ds,
+            Act::Purge,
+            None,
+            "the originals are no longer needed and the tree stands",
+            WHO,
+            &Cancel::new(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.status, 409);
+        assert!(
+            refused
+                .message
+                .contains("a/1.dcm changed after its copy was written"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("nils pseudonymize @north"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(
+            std::fs::read(&forged).unwrap(),
+            FORGED,
+            "the bytes that exist nowhere else are still here"
+        );
+        assert!(
+            !originals.join("a/2.dcm").exists(),
+            "the one that proved itself went"
+        );
+        let after = place::show(registry.store(), ds.id).unwrap().unwrap();
+        assert_eq!(after.dataset["originals_kept"], "kept");
+        assert_eq!(the_job(&mut registry).state, State::Failed);
+    }
+
+    /// Lab 26d, finding 2, for the rows written before it: a row that says
+    /// nothing about what the original hashed to cannot be proved by
+    /// anything now. The survey counts those apart, the door refuses in
+    /// words naming the run that records the digest, and nothing is
+    /// removed. The run itself is proved beside the pseudonymiser, whose
+    /// resume reads such a file again.
+    #[test]
+    fn a_row_without_the_original_s_digest_is_refused_with_the_run_that_records_it() {
+        let dir = TempDir::new("originals-unproved");
+        let mut registry = lab(&dir);
+        let ds = dataset(&mut registry, &dir, "north");
+        let originals = ds.tree_path("originals").unwrap();
+        registry
+            .store()
+            .execute(
+                "UPDATE pseudonym_file SET original_digest = NULL WHERE path = 'a/1.dcm'",
+                &[],
+            )
+            .unwrap();
+
+        let surveyed = survey(&mut registry, &ds).unwrap();
+        assert_eq!(
+            (
+                surveyed.verified,
+                surveyed.unverified,
+                surveyed.unproved,
+                surveyed.changed,
+                surveyed.copy_unverified
+            ),
+            (1, 1, 1, 0, 0),
+            "a row with no digest of its own is neither changed nor a broken copy"
+        );
+        assert_eq!(surveyed.as_json()["unproved"], 1);
+        assert!(
+            as_text(&ds, &surveyed).contains(
+                "unproved         1 copied before the original's own digest was recorded"
+            ),
+            "{}",
+            as_text(&ds, &surveyed)
+        );
+        let why = surveyed.why.clone().unwrap();
+        assert!(
+            why.starts_with(
+                "1 file of the dataset north was copied before the pseudonymiser recorded what the original hashed to"
+            ),
+            "{why}"
+        );
+        assert!(why.contains("proves every file by its content"), "{why}");
+        assert!(
+            why.contains("Pseudonymise the dataset again with nils pseudonymize @north, which reads each original and records its digest, then look once more."),
+            "{why}"
+        );
+
+        let refused = run(
+            &mut registry,
+            &ds,
+            Act::Purge,
+            None,
+            "the originals are no longer needed",
+            WHO,
+            &Cancel::new(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.status, 409);
+        assert_eq!(refused.message, why);
+        assert!(originals.join("a/1.dcm").is_file());
+        assert!(
+            originals.join("a/2.dcm").is_file(),
+            "a refusal at the door removes nothing at all"
+        );
+        assert!(job::list(registry.store(), true, 10).unwrap().is_empty());
     }
 
     #[test]

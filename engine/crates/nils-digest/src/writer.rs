@@ -704,6 +704,11 @@ impl<'a> Writer<'a> {
     /// one, so that the map, the held doors and the counts read one table
     /// whichever verb held the file. A file this batch filed is no longer
     /// held, and its row goes.
+    ///
+    /// A held row carries no digest of the original (lab 26d, finding 2):
+    /// the file has no copy anywhere, a purge of the dataset is refused for
+    /// as long as one waits for a map, and what is never destroyed needs no
+    /// proof. A row that stands for a copy carries one.
     fn record_held(
         &mut self,
         place_id: i64,

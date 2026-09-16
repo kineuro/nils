@@ -363,6 +363,8 @@ pub enum Item {
         out_path: String,
         out_size: u64,
         digest: String,
+        /// What the original hashed to as this run read it (lab 26d).
+        original_digest: String,
         subject: i64,
         created: bool,
         provisional: bool,
@@ -376,6 +378,10 @@ pub enum Item {
         mtime: i64,
         out_path: String,
         out_size: u64,
+        /// What the original hashed to as this run read it, none where it
+        /// could not be read (lab 26d): a row is written for a file that
+        /// was read, so the file it stands for is proved by content too.
+        original_digest: Option<String>,
     },
     Held {
         rel: String,
@@ -735,6 +741,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                 out_path,
                 out_size,
                 digest,
+                original_digest,
             } => {
                 let out = ctx.settings.anon.join(&out_path);
                 // lab 26c, finding 3: the copy must still be what was
@@ -743,7 +750,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                 // treated as a changed file and written again, which is
                 // what makes "pseudonymise the dataset again" true advice
                 // for a person whose purge was refused.
-                let stands = match std::fs::metadata(&out) {
+                let copy_stands = match std::fs::metadata(&out) {
                     Ok(m) if m.len() as i64 == out_size => match &digest {
                         Some(recorded) => {
                             digest_of(&out, &mut buf).is_some_and(|now| &now == recorded)
@@ -752,6 +759,16 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                     },
                     _ => false,
                 };
+                // lab 26d, finding 2: and the original must still be the
+                // file that copy was made from, which its content says and
+                // its size and modification time do not, since anything may
+                // set those. A purge proves each original by this digest
+                // before it destroys it, so a file whose bytes moved under
+                // a modification time that did not is written again here:
+                // that is what makes "pseudonymise the dataset again" true
+                // advice for a person whose purge was refused for it.
+                let stands = copy_stands
+                    && digest_of(&path, &mut buf).is_some_and(|now| now == original_digest);
                 match stands {
                     true => {
                         progress.file(&progress.unchanged, size);
@@ -838,6 +855,11 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                 break;
             }
             Answer::InTree { out_path, out_size } => {
+                // lab 26d: nothing is written for this file, but a row is,
+                // and a row for a file that was read says what the file
+                // hashed to, so that what stands for the original is proved
+                // by its content like any other
+                let original_digest = digest_of(&path, &mut buf);
                 progress.file(&progress.unchanged, size);
                 if items
                     .send(Item::InTree {
@@ -847,6 +869,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                         mtime,
                         out_path,
                         out_size,
+                        original_digest,
                     })
                     .is_err()
                 {
@@ -929,6 +952,7 @@ fn worker(ctx: &Ctx<'_>, rx: &Receiver<Task>, asks: &Sender<Ask>, items: &Sender
                         out_path: out_rel,
                         out_size: outcome.out_size,
                         digest: outcome.digest,
+                        original_digest: outcome.source_digest,
                         subject,
                         created,
                         provisional,
@@ -1445,6 +1469,7 @@ impl<'a> Recorder<'a> {
                         out_path,
                         out_size,
                         digest,
+                        original_digest,
                         ..
                     } => written.push(vec![
                         Param::Int(place_id),
@@ -1460,6 +1485,7 @@ impl<'a> Recorder<'a> {
                         Param::from(out_path.as_str()),
                         Param::Int(*out_size as i64),
                         Param::from(digest.as_str()),
+                        Param::from(original_digest.as_str()),
                         Param::Int(batch_id),
                         Param::from(now.as_str()),
                         Param::from(now.as_str()),
@@ -1476,6 +1502,7 @@ impl<'a> Recorder<'a> {
                         mtime,
                         out_path,
                         out_size,
+                        original_digest,
                     } => written.push(vec![
                         Param::Int(place_id),
                         Param::from(rel.as_str()),
@@ -1490,6 +1517,10 @@ impl<'a> Recorder<'a> {
                         Param::from(out_path.as_str()),
                         Param::Int(*out_size as i64),
                         Param::Null,
+                        match original_digest {
+                            Some(d) => Param::from(d.as_str()),
+                            None => Param::Null,
+                        },
                         Param::Int(batch_id),
                         Param::from(now.as_str()),
                         Param::Null,
@@ -1563,6 +1594,7 @@ impl<'a> Recorder<'a> {
                                 "out_path",
                                 "out_size",
                                 "digest",
+                                "original_digest",
                                 "batch_id",
                                 "first_seen",
                                 "written_at",
@@ -1584,6 +1616,7 @@ impl<'a> Recorder<'a> {
                                 "out_path",
                                 "out_size",
                                 "digest",
+                                "original_digest",
                                 "batch_id",
                                 "written_at",
                                 "released_at",

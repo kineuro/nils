@@ -882,6 +882,15 @@ fn build_registry() -> Vec<Table> {
                 col("out_path", Type::Text),
                 col("out_size", Type::Int),
                 col("digest", Type::Text),
+                // The digest of the original itself, hashed while the run
+                // read it (lab 26d, finding 2). The copy is proved by
+                // content and the original was proved by two numbers
+                // anything may set, so a file changed in place under its own
+                // modification time passed as verified and a purge destroyed
+                // it. A purge proves each original by this digest, read from
+                // the file at the moment it removes it; a row without one
+                // cannot be proved and is refused.
+                col("original_digest", Type::Text),
                 // The pseudonymise batch that last touched the row.
                 col("batch_id", Type::Int),
                 req("first_seen", Type::Timestamp),
