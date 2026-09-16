@@ -546,7 +546,7 @@ fn a_release_spanning_two_datasets_leaves_each_under_its_own_policy() {
 }
 
 #[test]
-fn the_two_halves_of_4_3_hold_one_by_refusal_and_one_by_numbering() {
+fn the_two_halves_of_4_3_are_refused_rather_than_warned_about() {
     let source = tree();
     let home_dir = TempDir::new("release-home");
     let out = TempDir::new("release-out");
@@ -567,24 +567,55 @@ fn the_two_halves_of_4_3_hold_one_by_refusal_and_one_by_numbering() {
         .to_string();
     assert!(e.contains("decorative"), "{e}");
 
-    // And a shift with a date-named session: the tree carries what the files
-    // no longer do.
+    // And a shift with a date-named session, both halves asked for by the
+    // run's own flags: the tree would carry the date the files no longer do,
+    // and a warning on a run that produced a tree is read after the tree
+    // exists. The refusal names the case that is resolved instead, a dataset
+    // declaring the policy of its own.
     let shifted = Policy {
         dates: dates::Policy::Shift,
         ..Policy::default()
     };
-    // Nothing was written.
-    assert!(files_under(out.path()).is_empty());
-
-    // And a shift with a date-named session: the labels give way rather than
-    // the release, since the dates are the dataset's and the labels are the
-    // tree's (record 26 section 13). The sessions are numbered in date
-    // order, the report says why, and the row records the scheme that named
-    // them.
     let by_date = SessionScheme::default();
-    let report = run::run(&mut reg, &settings(out.path(), &shifted, &by_date)).unwrap();
+    let e = run::run(&mut reg, &settings(out.path(), &shifted, &by_date))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("labels by the date"), "{e}");
+    assert!(e.contains("numbered in date order"), "{e}");
+
+    // Neither wrote anything.
+    assert!(files_under(out.path()).is_empty());
+}
+
+#[test]
+fn a_dataset_that_declares_moved_dates_numbers_its_sessions_rather_than_refusing() {
+    // §4.3 with record 26 section 13: nobody gave --dates or --uids, so the
+    // shift is the dataset's own standing rule rather than an instruction of
+    // this run's. A declared policy that could never be released would be a
+    // declaration nobody could use, and an ordinal label leaks no date, which
+    // is what §4.3 protects: here the labels give way rather than the release.
+    let source = tree();
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    dataset(
+        &mut reg,
+        "ds-shifted",
+        source.path(),
+        serde_json::json!({"dates": "shift", "uids": "remap"}),
+    );
+
+    let by_date = SessionScheme::default();
+    let defaults = Policy::default();
+    let declared = run::Settings {
+        policy_from: nils_release::policy::Source::Datasets,
+        ..settings(out.path(), &defaults, &by_date)
+    };
+    let report = run::run(&mut reg, &declared).unwrap();
     assert_eq!(report.files, 2, "{report:?}");
+    // the report says why, and names whose declaration it was
     let why = report.session_naming.clone().unwrap_or_default();
+    assert!(why.contains("ds-shifted"), "{why}");
     assert!(why.contains("numbered in date order"), "{why}");
     let written = files_under(out.path());
     assert!(!written.is_empty());
@@ -596,6 +627,7 @@ fn the_two_halves_of_4_3_hold_one_by_refusal_and_one_by_numbering() {
         );
         assert!(text.contains("ses-01") || text.contains("ses-02"), "{text}");
     }
+    // and the row records the scheme that named them, not the one asked for
     let store = reg.store();
     let sql = format!(
         "SELECT session_scheme FROM {} ORDER BY id DESC",

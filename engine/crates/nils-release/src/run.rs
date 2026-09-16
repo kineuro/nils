@@ -447,23 +447,54 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // dataset's, every one checked by name before anything is read.
     let policies = Policies::resolve(registry.store(), settings)?;
     // And the other half of §4.3: a session label that is a date under a
-    // policy that moves dates would put the true date back in the path. The
-    // dates are each dataset's own (record 26 §13) and the labels are the
-    // tree's, so the tree gives way rather than the release: the sessions
-    // are numbered in date order, the row records the scheme that named
-    // them, and the report says why it is not the scheme that was asked for.
+    // policy that moves dates would put the true date back in the path. What
+    // happens then turns on where the policy came from (record 26 §13).
+    //
+    // From the run's own flags, it is refused and no tree is written, which
+    // is §4.3 as it stands: a warning on a run that produced a tree is read
+    // after the tree exists, and by then the dataset has left. The caller
+    // named both halves of the contradiction, and quietly altering either is
+    // not the engine's to do.
+    //
+    // From the datasets' own declarations, with neither flag given, the tree
+    // gives way rather than the release: the sessions are numbered in date
+    // order, the row records the scheme that named them, and the report says
+    // why. Here the registry is resolving a standing rule rather than
+    // altering anybody's instruction; a declared policy that could never be
+    // released would be a declaration nobody could use; and the policy is
+    // not made decorative by it, since an ordinal label leaks no date, which
+    // is what §4.3 protects.
     let mut scheme = settings.scheme.clone();
     let mut session_naming = None;
-    if let Some(moving) = policies.all.iter().find(|p| p.dates.moves_dates())
+    if let Some(i) = policies.all.iter().position(|p| p.dates.moves_dates())
         && scheme.naming == session::Naming::Date
     {
-        scheme.naming = session::Naming::Ordinal;
-        session_naming = Some(format!(
-            "dates {} and a session scheme that labels by the date would put the date back in \
-             the tree the files no longer carry (§4.3), so the sessions are numbered in date \
-             order instead. Name a months or ordinal scheme to choose the labels yourself.",
-            moving.dates.name()
-        ));
+        let moving = policies.all[i].dates.name();
+        match policies.from {
+            crate::policy::Source::Flags => {
+                return Err(Error::Refused(format!(
+                    "dates {moving} and a session scheme that labels by the date is not a \
+                     policy: the tree would carry the date the files no longer do (§4.3). Use a \
+                     months or ordinal scheme, or keep the dates. A dataset that declares dates \
+                     {moving} of its own is resolved rather than refused, on a run that gives \
+                     neither --dates nor --uids: its sessions are numbered in date order."
+                )));
+            }
+            crate::policy::Source::Datasets => {
+                let declared = match policies.datasets.get(i).and_then(|d| d.as_deref()) {
+                    Some(name) => format!("dataset {name} declares dates {moving}"),
+                    None => format!("dates {moving}"),
+                };
+                scheme.naming = session::Naming::Ordinal;
+                session_naming = Some(format!(
+                    "{declared}, and a session scheme that labels by the date would put the date \
+                     back in the tree the files no longer carry (§4.3), so the sessions are \
+                     numbered in date order instead. Asked for by --dates on the run, this is \
+                     refused rather than numbered; name a months or ordinal scheme to choose the \
+                     labels yourself."
+                ));
+            }
+        }
     }
     let scheme = &scheme;
 
