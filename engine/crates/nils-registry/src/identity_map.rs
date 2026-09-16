@@ -691,8 +691,65 @@ pub fn import(
         return Ok(report);
     }
 
-    // apply: the types, the registry, the merges, the linkage store (§9.3)
-    for name in &types_to_make {
+    // apply: the types, the subjects, the merges, the identities and the
+    // held files, in one transaction on each store, both written before
+    // either commits and both rolled back when anything fails, so a map
+    // whose merge fails leaves nothing behind (§9.3; lab 26, defect 1b)
+    registry.begin()?;
+    if let Err(e) = linkage.begin() {
+        let _ = registry.rollback();
+        return Err(e);
+    }
+    let applied = apply(
+        registry,
+        linkage,
+        keys,
+        map,
+        &report,
+        &types_to_make,
+        &mut type_ids,
+        &by_code,
+        &subjects,
+        &codes_ok,
+        &digests,
+        to_file,
+        &named_lookups,
+    );
+    match applied {
+        Ok(released) => {
+            registry.commit()?;
+            linkage.commit()?;
+            report.held_released = released;
+            Ok(report)
+        }
+        Err(e) => {
+            let _ = registry.rollback();
+            let _ = linkage.rollback();
+            Err(e)
+        }
+    }
+}
+
+/// The writes of an import, inside the transactions [`import`] holds:
+/// the types made, the subjects created, the merges, the identities filed,
+/// and the held files released. Answers how many held files were released.
+#[allow(clippy::too_many_arguments)]
+fn apply(
+    registry: &mut Store,
+    linkage: &mut Store,
+    keys: &Subkeys,
+    map: &Map<'_>,
+    report: &Report,
+    types_to_make: &[String],
+    type_ids: &mut HashMap<String, Option<i64>>,
+    by_code: &HashMap<String, Subject>,
+    subjects: &HashMap<i64, Subject>,
+    codes_ok: &BTreeSet<String>,
+    digests: &HashMap<String, Vec<u8>>,
+    to_file: Vec<(String, Ident)>,
+    named_lookups: &[Vec<u8>],
+) -> Result<u64, Error> {
+    for name in types_to_make {
         let t = linkage::add_id_type(linkage, name, None)?;
         type_ids.insert(name.clone(), Some(t.id));
     }
@@ -713,19 +770,10 @@ pub fn import(
                 ]
             })
             .collect();
-        registry.begin()?;
         let inserted = registry.insert(
             &Insert::new(t, &["code", "code_digest", "created_at"]).returning(&["id", "code"]),
             &values,
-        );
-        let inserted = match inserted {
-            Ok(rows) => rows,
-            Err(e) => {
-                let _ = registry.rollback();
-                return Err(e);
-            }
-        };
-        registry.commit()?;
+        )?;
         for row in &inserted {
             ids.insert(row.text(1)?.to_string(), row.int(0)?);
         }
@@ -742,7 +790,7 @@ pub fn import(
             "the identifier map files an identifier of {} under the canonical identifier of {}",
             m.alias, m.canonical
         );
-        merge::merge(
+        merge::merge_in(
             registry,
             linkage,
             keys,
@@ -775,16 +823,8 @@ pub fn import(
             first_batch_id: None,
         });
     }
-    linkage.begin()?;
-    match linkage::insert_identities(linkage, &rows) {
-        Ok(_) => linkage.commit()?,
-        Err(e) => {
-            let _ = linkage.rollback();
-            return Err(e);
-        }
-    }
-    report.held_released = release_held(registry, &named_lookups)?;
-    Ok(report)
+    linkage::insert_identities(linkage, &rows)?;
+    release_held(registry, named_lookups)
 }
 
 /// The table the pseudonymiser records every file in (record 26 §4),
@@ -1477,6 +1517,159 @@ mod tests {
                     into: "xg5pf9g20xwm".into()
                 }
             }]
+        );
+    }
+
+    /// Lab 26, defects 1 and 1b: the pseudonymiser coded a woman's two
+    /// numbers as two subjects and the digest joined both to the dataset's
+    /// cohort at one time; the map that names the second number under the
+    /// first merges them, and the shared interval does not break the
+    /// membership key. A map whose apply fails leaves no subject behind.
+    #[test]
+    fn a_map_merges_two_subjects_one_digest_joined_and_a_failed_apply_leaves_nothing() {
+        let (mut registry, mut linkage, keys) = stores();
+        linkage::add_id_type(&mut linkage, "personnummer", None).unwrap();
+        // the two subjects as the pseudonymiser would have coded them
+        let first = pseudonym::code(Scheme::Blake2b32, KEY, "199001011234", 12).code;
+        let second = pseudonym::code(Scheme::Blake2b32, KEY, "199001019876", 12).code;
+        let cols = columns(&[("nummer", "canonical:personnummer")]);
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &rows(&[&["199001011234"], &["199001019876"]]),
+            false,
+            false,
+        );
+        assert!(r.written(), "{r}");
+        assert_eq!(codes(&mut registry), {
+            let mut both = vec![first.clone(), second.clone()];
+            both.sort();
+            both
+        });
+        registry
+            .execute(
+                "INSERT INTO cohort (id, name, owner, created_at) VALUES (1, 'north', 'o', 't')",
+                &[],
+            )
+            .unwrap();
+        registry
+            .execute(
+                "INSERT INTO cohort_member (cohort_id, subject_id, joined_at, source, batch_id) \
+                 SELECT 1, id, '2026-09-16T10:00:00Z', 'digest', 3 FROM subject",
+                &[],
+            )
+            .unwrap();
+        // the second map: her second number is an identifier of the person
+        // whose canonical number is the first
+        let cols = columns(&[
+            ("other", "identifier:personnummer"),
+            ("nummer", "canonical:personnummer"),
+        ]);
+        let data = rows(&[&["199001019876", "199001011234"]]);
+        let dry = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            true,
+            false,
+        );
+        assert_eq!(
+            dry.merges,
+            vec![Merge {
+                alias: second.clone(),
+                canonical: first.clone()
+            }]
+        );
+        let r = run(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            &cols,
+            &data,
+            false,
+            false,
+        );
+        assert!(r.written(), "{r}");
+        assert_eq!(codes(&mut registry), [first.clone()]);
+        // one open membership, the canonical's; the alias's, the same
+        // interval, is gone
+        let members = registry
+            .query(
+                "SELECT subject_id, left_at IS NULL FROM cohort_member ORDER BY id",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(members.len(), 1, "{members:?}");
+        let canonical_id = registry
+            .query("SELECT id FROM subject WHERE merged_into IS NULL", &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(members[0].int(0).unwrap(), canonical_id);
+        assert_eq!(members[0].int(1).unwrap(), 1);
+        let shown = linkage::reveal(&mut linkage, &keys, canonical_id, "tester", None).unwrap();
+        let mut values: Vec<(String, String)> =
+            shown.into_iter().map(|r| (r.id_type, r.value)).collect();
+        values.sort();
+        assert_eq!(
+            values,
+            [
+                ("personnummer".to_string(), "199001011234".to_string()),
+                ("personnummer".to_string(), "199001019876".to_string()),
+                ("subject-code".to_string(), second.clone()),
+            ]
+        );
+
+        // a map whose apply fails: two new people and a merge, with the
+        // linkage store refusing to file; no subject is created and the
+        // merge does not happen
+        let third = pseudonym::code(Scheme::Blake2b32, KEY, "198001011111", 12).code;
+        let cols = columns(&[
+            ("other", "identifier:personnummer"),
+            ("nummer", "canonical:personnummer"),
+        ]);
+        let data = rows(&[&["", "198001011111"], &["199001011234", "198001011111"]]);
+        linkage
+            .execute(
+                "CREATE TRIGGER refuse BEFORE INSERT ON identity BEGIN SELECT RAISE(ABORT, 'the store refused'); END",
+                &[],
+            )
+            .unwrap();
+        let err = import(
+            &mut registry,
+            &mut linkage,
+            &keys,
+            Some(&derive()),
+            &Map {
+                columns: &cols,
+                rows: &data,
+                dry_run: false,
+                make_types: false,
+                place_id: None,
+                actor: "tester@lab",
+                job_id: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("refused"), "{err}");
+        assert_eq!(codes(&mut registry), [first.clone()], "no subject behind");
+        assert!(!codes(&mut registry).contains(&third));
+        assert_eq!(
+            count(
+                &mut registry,
+                "SELECT COUNT(*) FROM subject WHERE merged_into IS NOT NULL"
+            ),
+            1,
+            "the earlier merge only"
+        );
+        assert_eq!(
+            count(&mut registry, "SELECT COUNT(*) FROM audit"),
+            1,
+            "the earlier merge's row only"
         );
     }
 

@@ -4005,9 +4005,11 @@ fn merged_line(m: &nils_registry::merge::Merged) -> String {
         } else {
             moved.join(", ")
         },
-        match m.memberships_closed {
-            0 => String::new(),
-            n => format!("; {n} duplicate membership(s) closed"),
+        match (m.memberships_closed, m.memberships_dropped) {
+            (0, 0) => String::new(),
+            (n, 0) => format!("; {n} duplicate membership(s) closed"),
+            (0, n) => format!("; {n} shared membership(s) dropped"),
+            (c, d) => format!("; {c} duplicate membership(s) closed, {d} shared dropped"),
         },
         match m.provisional_closed {
             0 => String::new(),
