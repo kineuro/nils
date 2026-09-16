@@ -71,6 +71,10 @@ const SLICE_MIN: Duration = Duration::from_millis(250);
 const MARGIN: Duration = Duration::from_secs(2);
 
 const NAMED: &str = "at: a folder of an ingest location, as @root/relative";
+/// What a look takes, which is either of those (record 26): the desk looks
+/// at a folder before a dataset is declared on it, and such a folder is
+/// under no location yet.
+const GIVEN: &str = "at: a folder of an ingest location, as @root/relative, or path: the absolute path of a folder on this host";
 const OUTSIDE: &str = "at: the path steps outside its location";
 
 /// A folder of an ingest root, named as `@root/relative`.
@@ -787,8 +791,27 @@ fn what(sampled: &Sampled, until: Instant) -> Map<String, Value> {
 /// What a look is asked.
 struct LookAsked {
     at: At,
+    /// Record 26: the absolute path the call named, for a folder under no
+    /// ingest location. The look is the same one, bounded the same way, on
+    /// a root made of that folder; the answer names no location.
+    given: Option<PathBuf>,
     names: Option<Vec<String>>,
     budget: Duration,
+}
+
+impl LookAsked {
+    /// How the answer names the folder: the location and the part under it,
+    /// or nothing where the call gave a path of its own.
+    fn named(&self) -> (Value, Value, Value) {
+        match self.given {
+            Some(_) => (Value::Null, Value::Null, Value::Null),
+            None => (
+                json!(self.at.text()),
+                json!(self.at.root),
+                json!(self.at.rel),
+            ),
+        }
+    }
 }
 
 /// What a look knows as the disk answers, for an answer past the wait.
@@ -804,10 +827,11 @@ struct LookKnown {
 fn looking(root: &Root, asked: &LookAsked, known: &Mutex<LookKnown>) -> Result<Value, Reply> {
     let begun = Instant::now();
     let (path, spot) = resolve(root, &asked.at)?;
+    let (at, in_root, rel) = asked.named();
     let mut doc = json!({
-        "at": asked.at.text(),
-        "root": asked.at.root,
-        "rel": asked.at.rel,
+        "at": at,
+        "root": in_root,
+        "rel": rel,
         "path": path.display().to_string(),
         "exists": true,
         "directory": true,
@@ -902,11 +926,12 @@ fn look_late(known: &Mutex<LookKnown>, asked: &LookAsked, root: &Root) -> Value 
         doc["folders"] = json!(folders);
         Some(doc)
     });
+    let (at, in_root, rel) = asked.named();
     let mut doc = doc.unwrap_or_else(|| {
         json!({
-            "at": asked.at.text(),
-            "root": asked.at.root,
-            "rel": asked.at.rel,
+            "at": at,
+            "root": in_root,
+            "rel": rel,
             "path": asked.at.under(root).display().to_string(),
             "exists": null,
             "directory": null,
@@ -928,11 +953,31 @@ pub(crate) fn look_door(
     store: &mut Store,
     doc: &Value,
 ) -> Result<Reply, Reply> {
-    let at = match doc["at"].as_str() {
-        Some(text) => At::parse(text).map_err(|m| Reply::error(400, m))?,
-        None => return Err(Reply::error(400, NAMED)),
+    // A folder of a location, or, for a folder no dataset is declared on
+    // yet, the path itself: the desk asks what a folder holds before it
+    // declares a dataset on it, and such a folder is under no location
+    // (record 26). The path is read under `data:work`, as the door is, and
+    // the look is bounded exactly as a location's is.
+    let (at, root, given) = match (doc["at"].as_str(), doc["path"].as_str()) {
+        (Some(text), _) => {
+            let at = At::parse(text).map_err(|m| Reply::error(400, m))?;
+            let root = root_of(&dataset::roots(store, roots), &at)?;
+            (at, root, None)
+        }
+        (None, Some(text)) => {
+            let path = PathBuf::from(text.trim());
+            if !path.is_absolute() || path.components().any(|c| c.as_os_str() == "..") {
+                return Err(Reply::error(400, GIVEN));
+            }
+            let at = At {
+                root: String::new(),
+                rel: String::new(),
+            };
+            let root = Root::plain("", &path);
+            (at, root, Some(path))
+        }
+        (None, None) => return Err(Reply::error(400, GIVEN)),
     };
-    let root = root_of(&dataset::roots(store, roots), &at)?;
     let names = match &doc["names"] {
         Value::Null => None,
         Value::Array(list) => {
@@ -967,6 +1012,7 @@ pub(crate) fn look_door(
     };
     let asked = Arc::new(LookAsked {
         at,
+        given,
         names,
         budget: Duration::from_millis(budget),
     });

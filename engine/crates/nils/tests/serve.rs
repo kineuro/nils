@@ -2580,7 +2580,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
         &dicom("1.2.3.D", "1.2.3.D.1.1"),
     );
     plain.file("sub-1/a.dcm", &dicom("1.2.3.E", "1.2.3.E.1.1"));
-    const LIMIT: usize = 40;
+    const LIMIT: usize = 42;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -2619,6 +2619,37 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     let (_, look) = ask("POST", "/api/ingest/look", Some(r#"{"at": "@ds"}"#), ops);
     assert_eq!(look["layout"]["v0"], serde_json::Value::Null, "{look}");
     assert_eq!(look["layout"]["loose"], 2, "{look}");
+    // record 26: a folder under no location, by its absolute path, which is
+    // how the desk looks at what it is about to declare; the same look,
+    // bounded the same way, and the answer names no location
+    let (status, look) = ask(
+        "POST",
+        "/api/ingest/look",
+        Some(&serde_json::json!({"path": plain.path().display().to_string()}).to_string()),
+        ops,
+    );
+    assert_eq!(status, 200, "{look}");
+    assert_eq!(look["at"], serde_json::Value::Null, "{look}");
+    assert_eq!(look["root"], serde_json::Value::Null, "{look}");
+    assert_eq!(look["layout"]["v0"], serde_json::Value::Null, "{look}");
+    assert_eq!(look["layout"]["loose"], 1, "{look}");
+    assert_eq!(look["folders"][0]["name"], "sub-1", "{look}");
+    assert_eq!(look["folders"][0]["dicom"], 1, "{look}");
+    // a path that is not absolute is refused in words
+    let (status, refused) = ask(
+        "POST",
+        "/api/ingest/look",
+        Some(r#"{"path": "sub-1"}"#),
+        ops,
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("absolute path"),
+        "{refused}"
+    );
 
     // the dataset fields need data:work beside places:work, and a source place
     let body = |name: &str, role: &str, path: &std::path::Path, more: serde_json::Value| {
