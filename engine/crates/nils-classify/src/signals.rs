@@ -9,6 +9,14 @@
 //! image type string, the echo time, the slice count and the reconstruction
 //! variant, not the six axes.
 //!
+//! Record 26, decision 12: the same signals by value, so that a person
+//! tuning one value's words sees what reaches it. Per axis and value: how
+//! many stacks were decided to it and by which kind of clause (a flag, a
+//! word, a window), how many a person is still asked about, the words that
+//! were shadowed on the way to it, and the words that carried decisions a
+//! person overrode. Beside them the origins of the scope (manufacturers,
+//! models, stations, with counts), which is what an overlay is keyed on.
+//!
 //! Everything here is an aggregate over rows the caller may read as a
 //! reviewer; no row leaves, and the fingerprint fields shown are acquisition
 //! parameters, never identifiers.
@@ -25,6 +33,18 @@ pub const FIELDS: &[&str] = &["image_type", "echo_time", "n_instances", "sequenc
 
 /// The most terms or values listed per axis or field.
 const TOP: usize = 12;
+
+/// The most values reported per axis: a pack's vocabulary is far smaller,
+/// and a bound is a bound.
+const VALUES_MAX: usize = 200;
+
+/// The origin kinds, as the fingerprint stores them and an overlay keys on
+/// them.
+const ORIGINS: &[(&str, &str)] = &[
+    ("manufacturer", "manufacturer"),
+    ("manufacturer_model_name", "model"),
+    ("station_name", "station"),
+];
 
 fn count_rows(
     store: &mut Store,
@@ -194,9 +214,14 @@ pub fn signals(store: &mut Store, scope: &Scope) -> Result<Value, Error> {
         }
     }
 
+    let by_value = by_value(store, &stacks, &scope_params, &shadowed)?;
+    let origins = origins(store, &stacks, &scope_params)?;
+
     Ok(json!({
         "scope": scope.text(),
         "axes": axes,
+        "by_value": by_value,
+        "origins": origins,
         "open_review": open_by_kind,
         "diagnostics": diagnostics,
         "diagnostic_samples": samples,
@@ -204,4 +229,195 @@ pub fn signals(store: &mut Store, scope: &Scope) -> Result<Value, Error> {
         "unused_overlay_terms": unused,
         "fields": fields,
     }))
+}
+
+/// One axis value's signals.
+#[derive(Default)]
+struct ValueSignals {
+    decided: i64,
+    by_flag: i64,
+    by_word: i64,
+    by_physics: i64,
+    unsure: i64,
+    shadowed: Vec<String>,
+    overrode_with: Vec<(String, i64)>,
+}
+
+/// The signals by axis and value (record 26, decision 12), over the rows in
+/// scope. `decided` counts the rows that store the value, whoever decided
+/// it; `by_flag`, `by_word` and `by_physics` the rows the rules decided by
+/// that kind of clause; `unsure` the stacks a person is still asked about
+/// on that axis; `shadowed` the words that matched on the way to it and
+/// were never cited, from the batch samples; `overrode_with` the words the
+/// rule cited on stacks a person then decided otherwise.
+fn by_value(
+    store: &mut Store,
+    stacks: &str,
+    params: &[Param],
+    shadowed: &[String],
+) -> Result<BTreeMap<String, BTreeMap<String, Value>>, Error> {
+    let mut out: BTreeMap<String, BTreeMap<String, ValueSignals>> = BTreeMap::new();
+    // A slot for a value, bounded per axis; None when the axis is full.
+    fn slot<'a>(
+        out: &'a mut BTreeMap<String, BTreeMap<String, ValueSignals>>,
+        axis: &str,
+        value: &str,
+    ) -> Option<&'a mut ValueSignals> {
+        if value.is_empty() {
+            return None;
+        }
+        let values = out.entry(axis.to_string()).or_default();
+        if !values.contains_key(value) && values.len() >= VALUES_MAX {
+            return None;
+        }
+        Some(values.entry(value.to_string()).or_default())
+    }
+
+    // How many rows store each value, and by which kind of clause.
+    let sql = format!(
+        "SELECT axis, value, tier, COUNT(*) FROM {} WHERE stack_id IN {stacks} AND value IS NOT NULL GROUP BY axis, value, tier ORDER BY axis, value, tier",
+        store.qualified("classification_axis")
+    );
+    for r in store.query(&sql, params)? {
+        let axis = r.text(0)?.to_string();
+        let value = r.opt_text(1)?.unwrap_or("").to_string();
+        let tier = r.text(2)?.to_string();
+        let n = r.int(3)?;
+        let Some(v) = slot(&mut out, &axis, &value) else {
+            continue;
+        };
+        v.decided += n;
+        match tier.as_str() {
+            "exclusive" | "alternative" | "combination" => v.by_flag += n,
+            "keywords" => v.by_word += n,
+            "physics" => v.by_physics += n,
+            _ => {}
+        }
+    }
+
+    // The stacks a person is still asked about, on that axis, by the value
+    // they were decided to: the open review items whose kind names the
+    // axis before the colon.
+    let sql = format!(
+        "SELECT ca.axis, ca.value, COUNT(DISTINCT ca.stack_id) FROM {} AS ca JOIN {} AS m ON m.stack_id = ca.stack_id JOIN {} AS i ON i.id = m.item_id WHERE i.status = 'open' AND SUBSTR(i.kind, 1, LENGTH(ca.axis) + 1) = ca.axis || ':' AND ca.value IS NOT NULL AND ca.stack_id IN {stacks} GROUP BY ca.axis, ca.value",
+        store.qualified("classification_axis"),
+        store.qualified("review_member"),
+        store.qualified("review_item")
+    );
+    for (axis, value, n) in count_rows(store, &sql, params)? {
+        if let Some(v) = slot(&mut out, &axis, &value) {
+            v.unsure = n;
+        }
+    }
+
+    // The words the rule cited on stacks a person then decided otherwise,
+    // by the value the rule had decided.
+    let sql = format!(
+        "SELECT e.axis, e.value, e.matched, COUNT(*) FROM {} AS d JOIN {} AS e ON CAST(e.stack_id AS TEXT) = d.ref AND e.axis = d.axis WHERE d.scope = 'stack' AND d.withdrawn_at IS NULL AND e.source = 'text' AND (d.value IS NULL OR d.value <> e.value) AND e.stack_id IN {stacks} GROUP BY e.axis, e.value, e.matched ORDER BY COUNT(*) DESC, e.axis, e.value, e.matched LIMIT 400",
+        store.qualified("decision"),
+        store.qualified("classification_evidence")
+    );
+    for r in store.query(&sql, params)? {
+        let axis = r.text(0)?.to_string();
+        let value = r.text(1)?.to_string();
+        let word = r.opt_text(2)?.unwrap_or("").to_string();
+        let n = r.int(3)?;
+        if let Some(v) = slot(&mut out, &axis, &value)
+            && v.overrode_with.len() < TOP
+        {
+            v.overrode_with.push((word, n));
+        }
+    }
+
+    // A shadowed word belongs to the value its rule sets. An axis's own
+    // rule is named after the value; a longhand rule is mapped through the
+    // evidence rows in scope that cite it, which is what the batch has.
+    let sql = format!(
+        "SELECT rule_set, rule, axis, value FROM {} WHERE stack_id IN {stacks} AND source = 'text' GROUP BY rule_set, rule, axis, value LIMIT 2000",
+        store.qualified("classification_evidence")
+    );
+    let mut rule_values: BTreeMap<(String, String), Vec<(String, String)>> = BTreeMap::new();
+    for r in store.query(&sql, params)? {
+        rule_values
+            .entry((r.text(0)?.to_string(), r.text(1)?.to_string()))
+            .or_default()
+            .push((r.text(2)?.to_string(), r.text(3)?.to_string()));
+    }
+    for line in shadowed {
+        // "{axis}: {word} in {set}/{rule} behind {by_rule} [{by_matched}] ({n})"
+        let Some((left, _)) = line.rsplit_once(" behind ") else {
+            continue;
+        };
+        let Some((named, at)) = left.rsplit_once(" in ") else {
+            continue;
+        };
+        let Some((axis, word)) = named.split_once(": ") else {
+            continue;
+        };
+        let Some((set, rule)) = at.split_once('/') else {
+            continue;
+        };
+        let targets: Vec<(String, String)> = if set == axis {
+            vec![(axis.to_string(), rule.to_string())]
+        } else {
+            rule_values
+                .get(&(set.to_string(), rule.to_string()))
+                .cloned()
+                .unwrap_or_default()
+        };
+        for (a, value) in targets {
+            if let Some(v) = slot(&mut out, &a, &value)
+                && v.shadowed.len() < TOP
+                && !v.shadowed.iter().any(|w| w == word)
+            {
+                v.shadowed.push(word.to_string());
+            }
+        }
+    }
+
+    Ok(out
+        .into_iter()
+        .map(|(axis, values)| {
+            let values = values
+                .into_iter()
+                .map(|(value, v)| {
+                    let overrode: Vec<Value> = v
+                        .overrode_with
+                        .iter()
+                        .map(|(w, n)| json!({"word": w, "count": n}))
+                        .collect();
+                    (
+                        value,
+                        json!({
+                            "decided": v.decided,
+                            "by_flag": v.by_flag,
+                            "by_word": v.by_word,
+                            "by_physics": v.by_physics,
+                            "unsure": v.unsure,
+                            "shadowed": v.shadowed,
+                            "overrode_with": overrode,
+                        }),
+                    )
+                })
+                .collect();
+            (axis, values)
+        })
+        .collect())
+}
+
+/// The origins of the stacks in scope, for the scope chips: each
+/// manufacturer, model and station with how many stacks carry it, the
+/// most common first and at most `TOP` of each kind.
+fn origins(store: &mut Store, stacks: &str, params: &[Param]) -> Result<Vec<Value>, Error> {
+    let mut out = Vec::new();
+    for (column, kind) in ORIGINS {
+        let sql = format!(
+            "SELECT {column}, '', COUNT(*) FROM {} WHERE stack_id IN {stacks} AND {column} IS NOT NULL AND {column} <> '' GROUP BY {column} ORDER BY COUNT(*) DESC, 1 LIMIT {TOP}",
+            store.qualified("stack_fingerprint")
+        );
+        for (name, _, n) in count_rows(store, &sql, params)? {
+            out.push(json!({"name": name, "kind": kind, "stacks": n}));
+        }
+    }
+    Ok(out)
 }

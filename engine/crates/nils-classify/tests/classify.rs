@@ -860,7 +860,8 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
 }
 
 /// Wave 4c §6.6: what the evaluator noticed is counted per batch, and a
-/// site term that matched nothing is named.
+/// site term that matched nothing is named, whether it was added to a
+/// bucket or to an axis value's list (pack contract 5).
 #[test]
 fn the_diagnostics_are_counted_per_batch_and_an_unused_overlay_term_is_named() {
     let overlay = nils_pack::Overlay::parse(
@@ -872,15 +873,20 @@ pack: mri
 scope: {manufacturer: SYNTHETIC}
 buckets:
   localizer_words: {add: [zzznever]}
+lists:
+  technique.TSE: {add: [zzzturbo]}
 cases:
   - name: the site's own localizer word
     stack: {text_sequence_name: 'zzznever_3d'}
     flags: {is_localizer: true}
+  - name: the site's own turbo word
+    stack: {text_series_description: 'zzzturbo'}
+    axes: {technique: TSE}
 ",
     )
     .expect("the overlay parses");
     let pack = nils_pack::load(&packs(), Some(&overlay)).expect("the MRI pack loads amended");
-    assert_eq!(pack.overlay_terms, vec!["zzznever"]);
+    assert_eq!(pack.overlay_terms, vec!["zzznever", "zzzturbo"]);
     for lab in labs() {
         let name = lab.name;
         let dir = tree();
@@ -896,7 +902,7 @@ cases:
             assert_eq!(report.written, 1, "{name}");
             assert_eq!(
                 report.diagnostics.get("overlay_unused"),
-                Some(&1),
+                Some(&2),
                 "{name} round {round}: {:?}",
                 report.diagnostics
             );
@@ -915,8 +921,12 @@ cases:
             })
             .collect();
             assert_eq!(rows_now.len(), 1, "{name} round {round}: {rows_now:?}");
-            assert_eq!(rows_now[0].1, 1, "{name}");
+            assert_eq!(rows_now[0].1, 2, "{name}");
             assert!(rows_now[0].2.contains("zzznever"), "{name}: {rows_now:?}");
+            assert!(
+                rows_now[0].2.contains("zzzturbo"),
+                "a list's term is counted like a bucket's: {name}: {rows_now:?}"
+            );
             // every diagnostic row of the classifier's kinds is scoped to the batch
             let scopes = one(
                 &mut reg,
@@ -928,22 +938,57 @@ cases:
         let scope = nils_classify::scope::Scope::parse("batch:1").unwrap();
         let signals = nils_classify::signals::signals(reg.store(), &scope).unwrap();
         assert_eq!(
-            signals["diagnostics"]["overlay_unused"], 1,
+            signals["diagnostics"]["overlay_unused"], 2,
             "{name}: {signals}"
         );
         assert_eq!(
             signals["unused_overlay_terms"],
-            serde_json::json!(["zzznever"]),
+            serde_json::json!(["zzznever", "zzzturbo"]),
             "{name}: {signals}"
         );
         assert!(
             signals["axes"]["technique"]["tiers"].is_object(),
             "{name}: {signals}"
         );
+        // record 26: the same signals by value, and the origins of the scope
+        let technique = signals["by_value"]["technique"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{name}: {signals}"));
+        assert_eq!(
+            technique.len(),
+            1,
+            "one stack, one value: {name}: {signals}"
+        );
+        let (_, value) = technique.iter().next().unwrap();
+        assert_eq!(value["decided"], 1, "{name}: {signals}");
+        assert_eq!(
+            value["by_flag"].as_i64().unwrap()
+                + value["by_word"].as_i64().unwrap()
+                + value["by_physics"].as_i64().unwrap(),
+            1,
+            "decided by one kind of clause: {name}: {signals}"
+        );
+        assert_eq!(value["unsure"], 0, "{name}: {signals}");
+        assert!(value["shadowed"].is_array(), "{name}: {signals}");
+        assert_eq!(
+            value["overrode_with"],
+            serde_json::json!([]),
+            "{name}: {signals}"
+        );
+        assert!(
+            signals["origins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["name"] == "SYNTHETIC"
+                    && o["kind"] == "manufacturer"
+                    && o["stacks"] == 1),
+            "{name}: {signals}"
+        );
         let origin = nils_classify::scope::Scope::parse("origin:SYNTHETIC").unwrap();
         let by_origin = nils_classify::signals::signals(reg.store(), &origin).unwrap();
         assert_eq!(
-            by_origin["diagnostics"]["overlay_unused"], 1,
+            by_origin["diagnostics"]["overlay_unused"], 2,
             "{name}: {by_origin}"
         );
         assert!(nils_classify::scope::Scope::parse("nonsense").is_err());
