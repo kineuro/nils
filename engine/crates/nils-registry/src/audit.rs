@@ -46,6 +46,13 @@ pub enum Action {
     CohortMemberAdd,
     CohortMemberRemove,
     CohortPromote,
+    /// Record 26 §8 and §9: a digest of a dataset fed its cohort; a cohort
+    /// was renamed, its owner or description set, retired, or brought back.
+    CohortJoin,
+    CohortRename,
+    CohortSet,
+    CohortRetire,
+    CohortRestore,
     SelectionSave,
     /// Wave 5 §12.8: a handle stopped reproducing under a change the
     /// dependency door named.
@@ -87,6 +94,11 @@ impl Action {
             Action::CohortMemberAdd => "cohort.member.add",
             Action::CohortMemberRemove => "cohort.member.remove",
             Action::CohortPromote => "cohort.promote",
+            Action::CohortJoin => "cohort.join",
+            Action::CohortRename => "cohort.rename",
+            Action::CohortSet => "cohort.set",
+            Action::CohortRetire => "cohort.retire",
+            Action::CohortRestore => "cohort.restore",
             Action::SelectionSave => "selection.save",
             Action::HandleInvalidate => "handle.invalidate",
             Action::InstanceOpen => "instance.open",

@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 40;
+pub const SCHEMA_VERSION: i64 = 41;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +214,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 40,
         apply: a_batch_has_a_kind_and_a_subject_may_be_provisional,
     },
+    Migration {
+        version: 41,
+        apply: a_cohort_is_fed_retired_and_released_under_its_policy,
+    },
 ];
 
 /// Record 26 §3, §4 and §14: a batch says which step it is, `digest` or
@@ -242,6 +246,21 @@ fn a_batch_has_a_kind_and_a_subject_may_be_provisional(
         )?;
     }
     Ok(())
+}
+
+/// Record 26 §8, §9 and §13: a membership interval names the batch of the
+/// digest that opened it, a cohort may be retired, and a release records the
+/// leaving policy of each dataset it spanned.
+fn a_cohort_is_fed_retired_and_released_under_its_policy(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "cohort", &["retired_at"])?;
+    add_columns(store, "cohort_member", &["batch_id"])?;
+    add_columns(store, "release", &["policies"])
 }
 
 /// Record 26 §1: a source place is a dataset, with what arrives, its two

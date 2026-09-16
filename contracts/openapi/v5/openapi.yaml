@@ -20,9 +20,17 @@
 # first; the verbs `pseudonymize @dataset` and `bring-in @dataset`; a job
 # answers `then` and `chain {before, after}`; a batch answers its five
 # stages and the timeline serves the kind `batch`; the sources door fills
-# each digest's pseudonymise step in and the machine's rates. The slices
-# after edit this document in place: the map in any shape, the held doors,
-# the merge, the cohort doors, the explain door and the packs' word lists.
+# each digest's pseudonymise step in and the machine's rates.
+# The cohort slice (record 26 sections 8 to 11 and 13): a digest of a dataset
+# feeds its cohort; the cohort doors under /api/cohorts list, show, make,
+# rename, retire and change members by hand, data:see to read and data:work
+# to write; a promotion takes a handle at any grain and is data:work; the
+# review queue, its summary and the quarantine take a cohort; the explain
+# door answers what nils explain prints; a release reads each dataset's
+# leaving policy when the flags are not given, takes datasets as a
+# selection, and its row records the policies applied.
+# The slices after edit this document in place: the map in any shape, the
+# held doors, the merge, and the packs' word lists.
 # Version 4 was version 3 with grants and detail in place of the role ladder
 # (suite contract version 2). A caller holds a set of grants, each naming a
 # page and how far the caller goes there (see, or work, which includes see;
@@ -76,13 +84,13 @@ paths:
   /api/capabilities:
     get:
       summary: What this engine is and speaks (C26)
-      description: The engine version, the contract versions (openapi, review-item, pack), the loaded packs with their versions, the registry id, epoch, schema version and `synthetic` (the builder's name when `nils synth` made the registry, absent on real data; a desk shows a banner on it), the auth mode, the caller's principal, grants (sorted), detail, roles (for one release, the ladder steps up to the detail, never admin), display name, mail, ceiling and actor, the node, the list of doors, and since version 3 `assist` (the assistant's URL when one is installed), `event_streams` (the cap), `idempotency` (the header, the doors, the hours), `policy` (one row per door, Wave 4c section 6.5, each naming the grant it needs as a grant or an array meaning any of, with `also` for a second grant, `detail` for the lowest detail and, since version 5, `dataset` on POST /api/places and PUT /api/places/{id} for the grant their dataset fields need beside the door's own), since Wave 5 section 10.4 `supervisor` (the URL of the supervisor on this host when `nils serve --supervisor` names one, null otherwise), and since version 5 `places.dataset` (record 26: `grant`, the `fields` a declaration takes, the three `arrives` and the two `trees` by name).
+      description: "The engine version, the contract versions (openapi, review-item, pack), the loaded packs with their versions, the registry id, epoch, schema version and `synthetic` (the builder's name when `nils synth` made the registry, absent on real data; a desk shows a banner on it), the auth mode, the caller's principal, grants (sorted), detail, roles (for one release, the ladder steps up to the detail, never admin), display name, mail, ceiling and actor, the node, the list of doors, and since version 3 `assist` (the assistant's URL when one is installed), `event_streams` (the cap), `idempotency` (the header, the doors, the hours), `policy` (one row per door, Wave 4c section 6.5, each naming the grant it needs as a grant or an array meaning any of, with `also` for a second grant, `detail` for the lowest detail and, since version 5, `dataset` on POST /api/places and PUT /api/places/{id} for the grant their dataset fields need beside the door's own), since Wave 5 section 10.4 `supervisor` (the URL of the supervisor on this host when `nils serve --supervisor` names one, null otherwise), and since version 5 `places.dataset` (record 26: `grant`, the `fields` a declaration takes, the three `arrives` and the two `trees` by name)."
       responses:
         "200": {description: The capabilities}
   /api/summary:
     get:
       summary: What the registry holds, as counts (Wave 5 section 12.1)
-      description: Subjects, sessions and stacks, each a total and by cohort; subjects and stacks by pack version; the cohorts; the epoch; `synthetic`, the builder's name when `nils synth` made the registry; and with `since`, what arrived after that date. Never a row of a person.
+      description: Subjects, sessions and stacks, each a total and by cohort; subjects and stacks by pack version; the cohorts; the epoch; `synthetic`, the builder's name when `nils synth` made the registry; and with `since`, what arrived after that date. Never a row of a person. Since version 5 a retired cohort (record 26 section 9) leaves the counts and the lists here, its members kept.
       parameters:
         - {name: since, in: query, schema: {type: string}, description: "An ISO date or instant; the `since` block counts subjects, sessions, stacks, handles and releases created after it"}
       responses:
@@ -118,7 +126,7 @@ paths:
         "200": {description: "{count, jobs}"}
     post:
       summary: Queue a command line for a worker, and the chain after it (nils jobs enqueue, nils bring-in)
-      description: "The one way anything heavy runs through the door. The verb is one the door queues, such as digest, classify, release or backup; the caller's principal is carried to the verb. A tree is named as `@name` or `@name/relative`, a registered ingest location and never a path; since version 5 `@name` is the pseudonymised tree of the dataset declared on the location (the folder itself where none is), and `@name/originals` its originals, which a digest is refused (409) since the registry never points at an identified file. A backup goes to the directory --backup-dir names and takes --keep N and --rehearse; verify NAME checks one archive there and takes --rehearse. The door needs one of the verbs' grants, and each verb its own: digest and linkage import data:work (linkage with detail sensitive); pseudonymize data:work with detail sensitive, since it reads the identifiers it replaces; release, handover and ask promote release:work; ask run query:work; fingerprint, classify, pick, session and pyramid pipelines:work; backup and verify database:work. Another ask verb is refused. The job records the caller's detail, actor and grants, and a job that records no detail runs as plain. Record 26: `pseudonymize @dataset [--name N] [--workers N] [--held] [--dry-run]` rewrites an identified dataset's originals into its pseudonymised tree and takes the dataset as `@name` alone; a dataset that arrives de-identified or coded is refused by the verb, since its tree is read in place. `then` is the chain: command lines, each a list of words (or one string), queued one after another by the worker when the job before ends done, under the principal, grants and detail recorded on this job; each is a verb the door queues (never bring-in), located now, its grant checked when its turn comes, and a step the recorded grants do not reach ends the chain with `result.chain_stopped {step, why}` on the job before it. `bring-in @dataset [--name N] [--pack P]` is sugar: it queues `pseudonymize @dataset --name N` with `then` digest, fingerprint and classify for an identified dataset, or `digest @dataset --name N` with the rest for any other; the digest shares the pseudonymise step's name, so the two batches are one thread; the name is the dataset's and today's date unless given."
+      description: "The one way anything heavy runs through the door. The verb is one the door queues, such as digest, classify, release or backup; the caller's principal is carried to the verb. A tree is named as `@name` or `@name/relative`, a registered ingest location and never a path; since version 5 `@name` is the pseudonymised tree of the dataset declared on the location (the folder itself where none is), and `@name/originals` its originals, which a digest is refused (409) since the registry never points at an identified file. A backup goes to the directory --backup-dir names and takes --keep N and --rehearse; verify NAME checks one archive there and takes --rehearse. The door needs one of the verbs' grants, and each verb its own: digest, linkage import and ask promote data:work (linkage with detail sensitive; a promotion is a cohort act since version 5, record 26 section 9); pseudonymize data:work with detail sensitive, since it reads the identifiers it replaces; release and handover release:work; ask run query:work; fingerprint, classify, pick, session and pyramid pipelines:work; backup and verify database:work. Another ask verb is refused. The job records the caller's detail, actor and grants, and a job that records no detail runs as plain. A digest of a dataset that feeds a cohort (record 26 section 8) opens a membership interval for every subject it creates, and for one it meets whose membership is not open, with source digest and the batch, makes the cohort on first use, and its report carries `joined {cohort, subjects, met, created}` or the refusal. Record 26: `pseudonymize @dataset [--name N] [--workers N] [--held] [--dry-run]` rewrites an identified dataset's originals into its pseudonymised tree and takes the dataset as `@name` alone; a dataset that arrives de-identified or coded is refused by the verb, since its tree is read in place. `then` is the chain: command lines, each a list of words (or one string), queued one after another by the worker when the job before ends done, under the principal, grants and detail recorded on this job; each is a verb the door queues (never bring-in), located now, its grant checked when its turn comes, and a step the recorded grants do not reach ends the chain with `result.chain_stopped {step, why}` on the job before it. `bring-in @dataset [--name N] [--pack P]` is sugar: it queues `pseudonymize @dataset --name N` with `then` digest, fingerprint and classify for an identified dataset, or `digest @dataset --name N` with the rest for any other; the digest shares the pseudonymise step's name, so the two batches are one thread; the name is the dataset's and today's date unless given."
       requestBody:
         content:
           application/json:
@@ -153,11 +161,13 @@ paths:
   /api/releases:
     get:
       summary: The releases the registry holds, newest first (nils release --history)
+      description: "Since version 5 each release carries `policy` ({dates, uids, uid_root, from}, `from` being flags when --dates or --uids was given and datasets otherwise) and `policies` ([{dataset, dates, uids, from}], record 26 section 13: what each dataset's files left under, `dataset` null for files under no dataset, `from` being dataset, flags or defaults); null on a release from before."
       parameters: [{name: limit, in: query, schema: {type: integer, default: 50}}]
       responses:
-        "200": {description: "{count, releases}"}
+        "200": {description: "{count, releases[{id, name, version, root, started_at, files, subjects, unchanged, moved, rewritten, added, removed, layout, actor, withdrawn_at, withdrawn_by, withdrawn_why, policy, policies}]}"}
     post:
       summary: Release a dataset, as a queued job (nils release)
+      description: "Record 26 section 13: when neither `dates` nor `uids` is given, the policy of each file comes from the dataset holding it, the `handling.on_release` of the source place whose pseudonymised tree holds the file's source root, and a file under no dataset leaves under the run's defaults (dates kept, UIDs remapped); a release spanning datasets applies each dataset's to its own files, refuses the shift-with-preserved-UIDs combination under the dataset's name, and the tree's one clinical export leaves under the strictest policy in play. Given, `dates` or `uids` override every dataset's for the run, and the row says so. `datasets` names source places whose pseudonymised trees hold the files released, a selection beside the others."
       requestBody:
         content:
           application/json:
@@ -168,13 +178,15 @@ paths:
                 name: {type: string}
                 out: {type: string, description: The directory to write, on the engine's host}
                 layout: {type: string, enum: [descriptive, bids]}
-                dates: {type: string, enum: [keep, shift, year]}
+                dates: {type: string, enum: [keep, shift, year], description: "The run's date policy for every file; absent with uids absent, each dataset's applies"}
+                uids: {type: string, enum: [remap, preserve], description: "The run's UID policy for every file; absent with dates absent, each dataset's applies"}
                 on_unknown: {type: string}
                 pack: {type: string}
                 scheme_name: {type: string}
                 subjects: {type: array, items: {type: string}, description: Codes or identifiers (Wave 4a section 8)}
                 sessions: {type: array, items: {type: string}}
                 cohorts: {type: array, items: {type: string}}
+                datasets: {type: array, items: {type: string}, description: "Source places by name, whose pseudonymised trees hold the files released (record 26 section 13)"}
                 axes: {type: array, items: {type: string}, description: axis=value}
                 stacks: {type: array, items: {type: integer}}
                 observations: {type: array, items: {type: string}}
@@ -220,12 +232,24 @@ paths:
   /api/review:
     get:
       summary: The review items, newest first (nils review list)
+      description: "Since version 5 `cohort` keeps the items whose subject, through the item's stack, its series, its subject or, for a grouped item, its member stacks, holds an open membership in that cohort (record 26 section 10); a subject in two cohorts shows in both and is decided once. An item about a batch is about no subject and is left out."
       parameters:
         - {name: status, in: query, schema: {type: string}}
         - {name: kind, in: query, schema: {type: string}}
+        - {name: cohort, in: query, schema: {type: string}, description: A cohort's name}
         - {name: limit, in: query, schema: {type: integer, default: 50}}
       responses:
         "200": {description: "{count, items}; each item is contracts/review-item v2"}
+        "404": {description: No cohort so named}
+  /api/review/summary:
+    get:
+      summary: The open review items by kind and by cohort (record 26 section 10; review:see)
+      description: "`by_kind` counts the open items by kind, of the cohort named when one is; `cohorts` is every cohort in force with its open items, a subject in two cohorts counted in each; `none` is the open items whose subject is in no cohort, those about no subject among them."
+      parameters:
+        - {name: cohort, in: query, schema: {type: string}, description: Narrow by_kind to this cohort's items}
+      responses:
+        "200": {description: "{by_kind: {kind: count}, cohorts: [{name, open}], none}"}
+        "404": {description: No cohort so named}
   /api/review/{id}:
     get:
       summary: One review item with its members (nils review show)
@@ -470,7 +494,8 @@ paths:
         "404": {description: No such page, or the rows were dropped by retention}
   /api/ask/handles/{id}/promote:
     post:
-      summary: Promote a subject handle into a cohort, as a job (release:work; Wave 4b section 8.3)
+      summary: Promote a handle into a cohort, as a job (data:work since version 5; Wave 4b section 8.3, record 26 section 9)
+      description: "A complete handle at subject, session or stack grain: the distinct subjects of its rows join, each interval recording the handle, its epoch, scheme digest, ask hash and selection version, and since version 5 the grain and the row count beside the parameters as bound. A cohort named that is a selection's name, or is retired, is refused by the job."
       requestBody: {content: {application/json: {schema: {type: object, required: [cohort], properties: {cohort: {type: string}, create: {type: boolean}, reason: {type: string}}}}}}
       responses:
         "202": {description: "{job, state}"}
@@ -550,11 +575,64 @@ paths:
   /api/quarantine:
     get:
       summary: The quarantined files by batch and class (Wave 4c section 6.5)
+      description: "Since version 5 `cohort` narrows to the batches that fed the cohort (record 26 section 10): the batches its digest intervals name and every batch of a source whose dataset feeds it, since a quarantined file is about no subject."
       parameters:
         - {name: batch, in: query, schema: {type: integer}}
         - {name: class, in: query, schema: {type: string}}
+        - {name: cohort, in: query, schema: {type: string}, description: A cohort's name}
       responses:
         "200": {description: "{count, files}"}
+        "404": {description: No cohort so named}
+  /api/cohorts:
+    get:
+      summary: Every cohort with its counts and its provenance (record 26 section 9; data:see)
+      description: "A cohort is a membership fact and nothing else. Each carries its open members counted as subjects, their sessions under the default window and their stacks; `feeds`, the source places whose dataset feeds it; `from`, what opened its first interval ({kind: source, detail: {dataset, batch}}, {kind: promotion, detail: {handle, actor}}, {kind: manual, detail: {actor}} or {kind: import, detail: {actor}}); `waiting`, the open review items about its members; `releases`, the releases whose selection names it; `last_joined`; and `retired_at`, set on a retired cohort, which keeps its members and its history and leaves the summary and the ask's lists. Never a row of a person."
+      responses:
+        "200": {description: "[{id, name, owner, description, subjects, sessions, stacks, feeds: [place names], from: {kind, detail}, waiting, releases, created_at, last_joined, retired_at}]"}
+    post:
+      summary: Make a cohort (record 26 section 9; data:work)
+      description: "One word, without @, / or spaces; the owner is the caller unless said. Refused with 409 when a cohort or a selection is named so, as a promotion refuses it. Audited as cohort.create; the epoch moves."
+      requestBody: {content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}, owner: {type: string}, description: {type: string}}}}}}
+      responses:
+        "201": {description: "The cohort, as GET /api/cohorts/{name} answers it"}
+        "400": {description: No name, or not a name}
+        "409": {description: The name is a cohort's or a selection's}
+  /api/cohorts/{name}:
+    get:
+      summary: One cohort in full (record 26 section 9; data:see)
+      description: "The list's fields, plus `joins`, the joins and the removals grouped by what did them, newest first, a digest's by batch, a promotion's by handle, a hand's by act, each with when, what (digest, promotion, manual, import or remove), how many subjects, by whom, the batch, handle or actor, the reason and, for a join, whether every one of its subjects has left; `sources_holding`, the source places holding the members' files by each member's first batch, `place` null for members from none; and `releases`, each with its name, version, layout, subjects and whether it was handed over."
+      parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: "The list's fields and joins: [{when, what, subjects, by, batch | handle | actor, reason, left}], sources_holding: [{place, subjects}], releases: [{id, name, version, layout, subjects, handed_over}]"}
+        "404": {description: No cohort so named}
+    put:
+      summary: Rename, re-own, describe, retire or bring back a cohort (record 26 section 9; data:work)
+      description: "A field not given keeps what it holds; `description` null clears it. A rename keeps the id, and the releases and the selections that recorded the old name keep it. `retired` true sets `retired_at`, and the cohort leaves the summary and the ask's lists, its members and its history kept; false brings it back. Audited as cohort.rename, cohort.set, cohort.retire or cohort.restore, one row per act; the epoch moves."
+      parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, owner: {type: string}, description: {type: string, nullable: true}, retired: {type: boolean}}}}}}
+      responses:
+        "200": {description: The cohort, as GET answers it}
+        "400": {description: A field that is not what it should be}
+        "404": {description: No cohort so named}
+        "409": {description: The new name is a cohort's or a selection's}
+  /api/cohorts/{name}/members:
+    post:
+      summary: Add and remove members by code, with a reason (record 26 section 9; data:work)
+      description: "Adding opens an interval with source manual, the actor and the reason for every code not a member already; removing closes the open interval with left_at, left_by and the reason. A code the registry does not hold is refused with 400 and the codes named under `unknown`, before anything is written. Audited as cohort.member.add and cohort.member.remove with the counts; the epoch moves."
+      parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {add: {type: array, items: {type: string}}, remove: {type: array, items: {type: string}}, why: {type: string}}}}}}
+      responses:
+        "200": {description: "{cohort, added, already, removed, not_members, epoch}"}
+        "400": {description: "Nothing to add or remove, or a code the registry does not hold: {error, unknown: [codes]}"}
+        "404": {description: No cohort so named}
+  /api/explain/{stack}:
+    get:
+      summary: Why one stack was judged so, as nils explain prints it (record 26 section 11; review:see)
+      description: "The classification of the stack: the pack and its version, the overlay it was judged under, the review items it raised, and every axis row with its value, the pack's label for the value (null when the pack is not served here), its confidence and tier, the evidence rows that carried it (the rule set, the rule, the source it read, what matched, the value the row voted for, its tier and confidence, the pass and reference for a pass's row) and, where a person, an agent or a model decided it, `decision` {kind, actor, why, version}, null otherwise. One reading for the command line and the door, so the two cannot disagree."
+      parameters: [{name: stack, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: "{stack, pack, version, contract, overlay, review_items, axes: [{axis, value, label, confidence, tier, evidence: [{rule_set, rule, source, matched, value, tier, confidence, pass, reference}], decision: {kind, actor, why, version} | null}]}"}
+        "404": {description: The stack has not been classified}
   /api/classify/signals:
     get:
       summary: The classifier's own signals over a scope (Wave 4c section 6.6; review:see)

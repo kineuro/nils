@@ -397,6 +397,23 @@ pub struct Written {
     pub stacks_created: u64,
 }
 
+/// Record 26 §8: what feeding the dataset's cohort did. Every subject the
+/// batch created joined, and so did one it met whose membership was not
+/// open; `refused` says why nothing was written when the name could not be
+/// a cohort's.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Joined {
+    pub cohort: String,
+    /// Intervals opened.
+    pub subjects: u64,
+    /// Subjects the batch created or met, members already or not.
+    pub met: u64,
+    /// The cohort was made on this first use.
+    pub created: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
+}
+
 /// The report: the JSON of `--json`, the text otherwise.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
@@ -430,6 +447,10 @@ pub struct Report {
     pub diagnostics: Vec<DiagnosticCount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub written: Option<Written>,
+    /// Record 26 §8: the cohort the dataset feeds, and what joined it;
+    /// absent when the tree is no dataset's or the dataset feeds none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joined: Option<Joined>,
     /// How the run ended when it was asked to stop (§10): absent when it ran
     /// to the end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -499,6 +520,7 @@ impl Report {
                 })
                 .collect(),
             written: None,
+            joined: None,
             cancelled: None,
         }
     }
@@ -650,6 +672,19 @@ impl fmt::Display for Report {
                 thousands(w.subjects_matched),
                 thousands(w.identities_attached),
             )?;
+        }
+        if let Some(j) = &self.joined {
+            match &j.refused {
+                Some(why) => writeln!(f, "  cohort {}   not fed: {why}", j.cohort)?,
+                None => writeln!(
+                    f,
+                    "  cohort {}   joined {} of {} subject(s){}",
+                    j.cohort,
+                    thousands(j.subjects),
+                    thousands(j.met),
+                    if j.created { "   made now" } else { "" },
+                )?,
+            }
         }
 
         writeln!(f, "quarantine")?;

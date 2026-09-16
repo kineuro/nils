@@ -98,6 +98,7 @@ fn released(home_dir: &TempDir, source: &TempDir, out: &Path) -> (Home, Registry
         name: "a cohort",
         root: out,
         policy: &policy,
+        policy_from: nils_release::policy::Source::Flags,
         categories: categories::Category::every(),
         selection: Selection::default(),
         scheme: &scheme,

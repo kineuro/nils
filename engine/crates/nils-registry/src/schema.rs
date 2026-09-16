@@ -450,6 +450,9 @@ fn build_registry() -> Vec<Table> {
                 req("owner", Type::Text),
                 col("description", Type::Text),
                 req("created_at", Type::Timestamp),
+                // Record 26 §9: a retired cohort keeps its members and its
+                // history and leaves the lists the ask and the summary read.
+                col("retired_at", Type::Timestamp),
             ],
         )
         .unique(&["name"]),
@@ -468,9 +471,11 @@ fn build_registry() -> Vec<Table> {
                 col("left_at", Type::Timestamp),
                 col("notes", Type::Text),
                 col("actor", Type::Text),
-                // `import`, `promotion`, `manual`
+                // `import`, `promotion`, `manual`, and since record 26 §8
+                // `digest`: the batch of the dataset that fed the cohort.
                 col("source", Type::Text),
                 col("handle_id", Type::Int),
+                col("batch_id", Type::Int),
                 col("epoch", Type::Int),
                 col("scheme_digest", Type::Text),
                 col("params", Type::Json),
@@ -1118,6 +1123,10 @@ fn build_registry() -> Vec<Table> {
                 req("added", Type::Int),
                 req("removed", Type::Int),
                 col("error", Type::Text),
+                // Record 26 §13: the leaving policy of each dataset the
+                // release spanned, `[{dataset, dates, uids, from}]`, beside
+                // the run's own `policy`.
+                col("policies", Type::Json),
             ],
         )
         .index(&["name"]),

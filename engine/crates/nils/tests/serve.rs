@@ -1563,11 +1563,13 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
             serde_json::from_str(&text).unwrap()
         })
         .collect();
+    // record 26 section 11: the evidence sits under each axis
     let cites = |doc: &serde_json::Value| {
-        doc["evidence"]
+        doc["axes"]
             .as_array()
             .unwrap()
             .iter()
+            .flat_map(|a| a["evidence"].as_array().into_iter().flatten())
             .any(|e| e["matched"] == "zzgado")
     };
     let moved = explained
@@ -3467,11 +3469,12 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
         ),
         ("pipelines-work", r#"["backup"]"#, 403, "database:work"),
         ("database-work", r#"["backup"]"#, 409, "no backup directory"),
+        // record 26 section 9: a promotion is a cohort act, Data work
         (
             "query-work",
             r#"["ask", "promote", "--handle", "1", "--cohort", "c"]"#,
             403,
-            "release:work",
+            "data:work",
         ),
         (
             "query-work",

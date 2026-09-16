@@ -1259,7 +1259,7 @@ impl Catalog {
             &format!(
                 "SELECT c.id, c.name, c.owner, \
                  (SELECT COUNT(*) FROM {} m WHERE m.cohort_id = c.id AND m.left_at IS NULL) \
-                 FROM {} c ORDER BY c.name",
+                 FROM {} c WHERE c.retired_at IS NULL ORDER BY c.name",
                 store.qualified("cohort_member"),
                 store.qualified("cohort")
             ),

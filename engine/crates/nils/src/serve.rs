@@ -1348,11 +1348,127 @@ fn routed(
         }
         ["api", "quarantine"] if get => {
             let batch = query.get("batch").and_then(|b| b.parse::<i64>().ok());
+            // record 26 §10: a quarantined file is about no subject, so a
+            // cohort narrows to the batches that fed it
+            let batches = match query.get("cohort") {
+                Some(name) => Some(
+                    nils_registry::cohort::batches_feeding(registry.store(), name)?
+                        .ok_or_else(|| Reply::error(404, format!("no cohort named {name}")))?,
+                ),
+                None => None,
+            };
             Ok(Reply::ok(crate::quarantine_doc(
                 registry,
                 batch,
                 query.get("class").map(String::as_str),
+                batches.as_deref(),
             )?))
+        }
+        // record 26 §9: the cohort doors, Data work
+        ["api", "cohorts"] if get => Ok(Reply::ok(serde_json::Value::Array(
+            nils_registry::cohort::list(registry.store())?,
+        ))),
+        ["api", "cohorts", name] if get => {
+            match nils_registry::cohort::show(registry.store(), name)? {
+                Some(doc) => Ok(Reply::ok(doc)),
+                None => Err(Reply::error(404, format!("no cohort named {name}"))),
+            }
+        }
+        ["api", "cohorts"] if post => {
+            let doc = json_body(body)?;
+            let name = doc["name"]
+                .as_str()
+                .ok_or_else(|| Reply::error(400, "name is required"))?;
+            let owner = doc["owner"].as_str().unwrap_or(principal);
+            let made = nils_registry::cohort::create(
+                registry,
+                name,
+                owner,
+                doc["description"].as_str(),
+                principal,
+            )
+            .map_err(cohort_err)?;
+            let shown = nils_registry::cohort::show(registry.store(), &made.name)?
+                .unwrap_or_else(|| serde_json::json!({"name": made.name}));
+            Ok(Reply::created(shown))
+        }
+        ["api", "cohorts", name] if put => {
+            let doc = json_body(body)?;
+            for key in ["name", "owner", "description"] {
+                if !(doc[key].is_null() || doc[key].is_string()) {
+                    return Err(Reply::error(400, format!("{key} is a string")));
+                }
+            }
+            if !(doc["retired"].is_null() || doc["retired"].is_boolean()) {
+                return Err(Reply::error(400, "retired is true or false"));
+            }
+            let change = nils_registry::cohort::Change {
+                name: doc["name"].as_str(),
+                owner: doc["owner"].as_str(),
+                description: doc.get("description").map(|d| d.as_str()),
+                retired: doc["retired"].as_bool(),
+            };
+            let set = nils_registry::cohort::set(registry, name, &change, principal)
+                .map_err(cohort_err)?;
+            let shown = nils_registry::cohort::show(registry.store(), &set.name)?
+                .unwrap_or_else(|| serde_json::json!({"name": set.name}));
+            Ok(Reply::ok(shown))
+        }
+        ["api", "cohorts", name, "members"] if post => {
+            let doc = json_body(body)?;
+            let codes = |key: &str| -> Result<Vec<String>, Reply> {
+                match doc.get(key) {
+                    None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+                    Some(serde_json::Value::Array(a)) => a
+                        .iter()
+                        .map(|v| {
+                            v.as_str()
+                                .map(str::to_string)
+                                .ok_or_else(|| Reply::error(400, format!("{key}: a list of codes")))
+                        })
+                        .collect(),
+                    Some(_) => Err(Reply::error(400, format!("{key}: a list of codes"))),
+                }
+            };
+            let add = codes("add")?;
+            let remove = codes("remove")?;
+            if add.is_empty() && remove.is_empty() {
+                return Err(Reply::error(
+                    400,
+                    "add or remove: the codes to add or remove",
+                ));
+            }
+            let done = nils_registry::cohort::members(
+                registry,
+                name,
+                &add,
+                &remove,
+                doc["why"].as_str(),
+                principal,
+            )
+            .map_err(cohort_err)?;
+            registry
+                .refresh_meta()
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            Ok(Reply::ok(serde_json::json!({
+                "cohort": name,
+                "added": done.added,
+                "already": done.already,
+                "removed": done.removed,
+                "not_members": done.not_members,
+                "epoch": registry.meta().epoch,
+            })))
+        }
+        // record 26 §11: why one stack was judged so, as `nils explain` says it
+        ["api", "explain", _] if get => {
+            let stack = id_at(2)?;
+            match crate::explain::document(registry.store(), stack, doors.pack_dir.as_deref())? {
+                Some(doc) => Ok(Reply::ok(doc)),
+                None => Err(Reply::error(
+                    404,
+                    format!("stack {stack} has not been classified"),
+                )),
+            }
         }
         // Wave 4c §6.6: the knob engine.
         ["api", "classify", "signals"] if get => {
@@ -2213,6 +2329,7 @@ fn routed(
             for (flag, key) in [
                 ("--layout", "layout"),
                 ("--dates", "dates"),
+                ("--uids", "uids"),
                 ("--on-unknown", "on_unknown"),
                 ("--pack", "pack"),
                 ("--scheme-name", "scheme_name"),
@@ -2228,6 +2345,8 @@ fn routed(
                 ("--subject", "subjects"),
                 ("--session", "sessions"),
                 ("--cohort", "cohorts"),
+                // record 26 §13: a dataset as a selection
+                ("--dataset", "datasets"),
                 ("--axis", "axes"),
                 ("--observation", "observations"),
             ] {
@@ -2343,15 +2462,54 @@ fn routed(
             Ok(Reply::ok(out))
         }
         ["api", "review"] if get => {
-            let rows = review_list(
+            let status = query.get("status").map(String::as_str);
+            // record 26 §10: a cohort keeps the items whose subject, through
+            // the item's stack, series or subject, holds an open membership
+            let keep = match query.get("cohort") {
+                Some(name) => {
+                    let members =
+                        nils_registry::cohort::open_members_of(registry.store(), name)?
+                            .ok_or_else(|| Reply::error(404, format!("no cohort named {name}")))?;
+                    let about = nils_registry::cohort::items_about(registry.store(), status)?;
+                    Some(
+                        about
+                            .iter()
+                            .filter(|it| it.subjects.iter().any(|s| members.contains(s)))
+                            .map(|it| it.id)
+                            .collect::<std::collections::HashSet<i64>>(),
+                    )
+                }
+                None => None,
+            };
+            let mut rows = review_list(
                 registry.store(),
-                query.get("status").map(String::as_str),
+                status,
                 query.get("kind").map(String::as_str),
-                limit,
+                if keep.is_some() {
+                    i64::MAX as usize
+                } else {
+                    limit
+                },
             )?;
+            if let Some(keep) = keep {
+                rows.retain(|r| r["id"].as_i64().is_some_and(|id| keep.contains(&id)));
+                rows.truncate(limit.max(1));
+            }
             Ok(Reply::ok(
                 serde_json::json!({ "count": rows.len(), "items": rows }),
             ))
+        }
+        ["api", "review", "summary"] if get => {
+            let cohort = query.get("cohort").map(String::as_str);
+            if let Some(name) = cohort
+                && nils_registry::cohort::by_name(registry.store(), name)?.is_none()
+            {
+                return Err(Reply::error(404, format!("no cohort named {name}")));
+            }
+            Ok(Reply::ok(nils_registry::cohort::review_summary(
+                registry.store(),
+                cohort,
+            )?))
         }
         ["api", "review", _] if get => {
             let id = id_at(2)?;
@@ -2573,9 +2731,18 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("POST", ["api", "ingest", "folders" | "look" | "probe"]) => {
             (Need::One("data:work"), Plain)
         }
-        // the Review page, and the knob engine of Wave 4c §6.6
+        // record 26 §9: the cohorts are Data work, a promotion among them
+        ("GET", ["api", "cohorts"]) | ("GET", ["api", "cohorts", _]) => {
+            (Need::One("data:see"), Plain)
+        }
+        ("POST", ["api", "cohorts"])
+        | ("PUT", ["api", "cohorts", _])
+        | ("POST", ["api", "cohorts", _, "members"])
+        | ("POST", ["api", "ask", "handles", _, "promote"]) => (Need::One("data:work"), Plain),
+        // the Review page, and the knob engine of Wave 4c §6.6; record 26
+        // §11: why a stack was judged so is a review reading
         ("GET", ["api", "review" | "overlays" | "quarantine"])
-        | ("GET", ["api", "review" | "overlays", _])
+        | ("GET", ["api", "review" | "overlays" | "explain", _])
         | ("GET", ["api", "classify", "signals"]) => (Need::One("review:see"), Plain),
         ("POST", ["api", "review", _, "apply" | "accept"])
         | ("POST", ["api", "decisions", _, "commit" | "withdraw"])
@@ -2589,8 +2756,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("GET", ["api", "releases"]) | ("POST", ["api", "select"]) => {
             (Need::One("release:see"), Plain)
         }
-        ("POST", ["api", "releases" | "handovers"])
-        | ("POST", ["api", "ask", "handles", _, "promote"]) => (Need::One("release:work"), Plain),
+        ("POST", ["api", "releases" | "handovers"]) => (Need::One("release:work"), Plain),
         // the Pipelines page; a queued verb needs its own grant and a cancel
         // the grant of the job's verb, both checked at the door itself
         ("GET", ["api", "jobs"]) | ("GET", ["api", "jobs", _]) => {
@@ -2626,7 +2792,9 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
         ("bring-in", _) => ("data:work", Detail::Plain),
         // a linkage import reads the identifiers it links
         ("linkage", _) => ("data:work", Detail::Sensitive),
-        ("release" | "handover", _) | ("ask", Some("promote")) => ("release:work", Detail::Plain),
+        ("release" | "handover", _) => ("release:work", Detail::Plain),
+        // record 26 §9: a promotion is a cohort act, which is Data work
+        ("ask", Some("promote")) => ("data:work", Detail::Plain),
         ("ask", Some("run")) => ("query:work", Detail::Plain),
         ("fingerprint" | "classify" | "pick" | "session" | "pyramid", _) => {
             ("pipelines:work", Detail::Plain)
@@ -2648,7 +2816,7 @@ fn cancel_needs(job: &nils_registry::job::Job) -> &'static str {
         | "clinical-import" => "data:work",
         "release" | "handover" => "release:work",
         "backup" | "verify" => "database:work",
-        "ask" if job.args["cohort"].is_string() => "release:work",
+        "ask" if job.args["cohort"].is_string() => "data:work",
         "ask" => "query:work",
         _ => "pipelines:work",
     }
@@ -2764,6 +2932,23 @@ pub(crate) fn job_err(e: nils_registry::job::Error) -> Reply {
     }
 }
 
+/// A cohort refusal: a name that is taken is 409, a code the registry does
+/// not hold is 400 with the codes beside the text, and no cohort is 404.
+fn cohort_err(e: nils_registry::cohort::Error) -> Reply {
+    use nils_registry::cohort::Error;
+    match &e {
+        Error::NotFound(n) => Reply::error(404, format!("no cohort named {n}")),
+        Error::Taken(_) => Reply::error(409, e.to_string()),
+        Error::Unknown(codes) => {
+            let mut r = Reply::error(400, e.to_string());
+            r.body["unknown"] = serde_json::json!(codes);
+            r
+        }
+        Error::Message(m) => Reply::error(400, m.clone()),
+        Error::Store(e) => Reply::error(500, e.to_string()),
+    }
+}
+
 /// A review refusal quotes what it refuses: a reference, a header value, a
 /// name, the person who decided; every one is gated.
 fn review_err(e: nils_registry::review::Error) -> Reply {
@@ -2817,6 +3002,13 @@ fn capabilities(
         "GET /api/batches",
         "GET /api/batches/{id}",
         "GET /api/quarantine",
+        "GET /api/cohorts",
+        "GET /api/cohorts/{name}",
+        "POST /api/cohorts",
+        "PUT /api/cohorts/{name}",
+        "POST /api/cohorts/{name}/members",
+        "GET /api/review/summary",
+        "GET /api/explain/{stack}",
         "GET /api/classify/signals",
         "POST /api/classify/try",
         "GET /api/overlays",
@@ -3389,6 +3581,69 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "every file",
             "Listing quarantine",
             "Listed quarantine",
+        ),
+        row(
+            "GET /api/cohorts",
+            false,
+            false,
+            "bounded",
+            "every cohort",
+            "Listing cohorts",
+            "Listed cohorts",
+        ),
+        row(
+            "GET /api/cohorts/{name}",
+            false,
+            false,
+            "bounded",
+            "one cohort",
+            "Reading a cohort",
+            "Read a cohort",
+        ),
+        row(
+            "POST /api/cohorts",
+            true,
+            false,
+            "free",
+            "one cohort",
+            "Making a cohort",
+            "Made a cohort",
+        ),
+        row(
+            "PUT /api/cohorts/{name}",
+            true,
+            false,
+            "free",
+            "one cohort",
+            "Changing a cohort",
+            "Changed a cohort",
+        ),
+        row(
+            "POST /api/cohorts/{name}/members",
+            true,
+            false,
+            "bounded",
+            "the counts",
+            "Changing a cohort's members",
+            "Changed a cohort's members",
+        ),
+        row(
+            "GET /api/review/summary",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading the review summary",
+            "Read the review summary",
+        ),
+        row(
+            "GET /api/explain/{stack}",
+            false,
+            false,
+            "free",
+            "one document",
+            "Reading why a stack was judged so",
+            "Read why a stack was judged so",
         ),
         row(
             "GET /api/classify/signals",

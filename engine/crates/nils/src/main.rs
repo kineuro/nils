@@ -33,6 +33,7 @@ mod chain;
 mod dataset;
 mod depends;
 mod door_client;
+mod explain;
 mod folders;
 mod gate;
 mod grants;
@@ -104,6 +105,10 @@ enum Command {
     Explain {
         /// The stack's id
         stack: i64,
+        /// Where the packs are, for the labels of the values; $NILS_PACK_DIR,
+        /// else `packs/` in the registry home
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -263,13 +268,15 @@ struct ReleaseArgs {
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
     /// What happens to every date: as they are, moved by one offset per
-    /// subject, or the year only
-    #[arg(long, default_value = "keep", value_name = "keep|shift|year")]
-    dates: String,
+    /// subject, or the year only. Without --dates and --uids each dataset's
+    /// own leaving policy applies to its files (record 26 section 13); given,
+    /// the run's applies to every file
+    #[arg(long, value_name = "keep|shift|year")]
+    dates: Option<String>,
     /// What happens to UIDs. Remapping is keyed and deterministic, so two
     /// releases of overlapping selections agree
-    #[arg(long, default_value = "remap", value_name = "remap|preserve")]
-    uids: String,
+    #[arg(long, value_name = "remap|preserve")]
+    uids: Option<String>,
     /// The arc new UIDs hang from. The default is DICOM's UUID arc, which is
     /// legal and needs no registration
     #[arg(long, value_name = "OID")]
@@ -294,6 +301,10 @@ struct ReleaseArgs {
     /// Every current member of this cohort, by name (Wave 4a section 8)
     #[arg(long, value_name = "NAME")]
     cohort: Vec<String>,
+    /// Only the files under this dataset's pseudonymised tree, by the source
+    /// place's name (record 26 section 13)
+    #[arg(long, value_name = "NAME")]
+    dataset: Vec<String>,
     /// Only stacks holding this value on this pack axis, as `<axis>=<value>`;
     /// several values of one axis are alternatives, several axes all hold
     #[arg(long, value_name = "AXIS=VALUE")]
@@ -887,8 +898,98 @@ enum ClinicalCommand {
 
 #[derive(Debug, Subcommand)]
 enum CohortCommand {
-    /// Every cohort, with its owner and its current member count
+    /// Every cohort with its counts and where it came from, retired ones
+    /// marked (record 26 section 9)
     List {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// One cohort in full: its joins, the sources holding its members and
+    /// the releases naming it
+    Show {
+        /// The cohort's name
+        name: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make a cohort; refused when a cohort or a selection is named so
+    Make {
+        /// One word, without @, / or spaces
+        name: String,
+        /// Whose it is; you, unless said
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rename a cohort: the id stays, and what recorded the old name keeps it
+    Rename {
+        /// The cohort's name
+        name: String,
+        /// The new name
+        #[arg(long)]
+        to: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set a cohort's owner or description
+    Set {
+        /// The cohort's name
+        name: String,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long, conflicts_with = "no_description")]
+        description: Option<String>,
+        /// Clear the description
+        #[arg(long)]
+        no_description: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retire a cohort, or bring it back with --back: the members and the
+    /// history are kept, and a retired cohort leaves the lists
+    Retire {
+        /// The cohort's name
+        name: String,
+        /// Bring a retired cohort back
+        #[arg(long)]
+        back: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add members by code, with a reason; a code the registry does not
+    /// hold is refused before anything is written
+    Add {
+        /// The cohort's name
+        name: String,
+        /// The subjects, by code
+        #[arg(required = true)]
+        codes: Vec<String>,
+        /// Why, on the intervals and the audit row
+        #[arg(long)]
+        why: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove members by code, with a reason; the interval closes and stays
+    Remove {
+        /// The cohort's name
+        name: String,
+        /// The subjects, by code
+        #[arg(required = true)]
+        codes: Vec<String>,
+        /// Why, on the intervals and the audit row
+        #[arg(long)]
+        why: Option<String>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -1507,7 +1608,11 @@ fn main() -> ExitCode {
         Command::BringIn(args) => bring_in(&home, args),
         Command::Fingerprint(args) => fingerprint(&home, args),
         Command::Classify(args) => classify(&home, args),
-        Command::Explain { stack, json } => explain(&home, stack, json),
+        Command::Explain {
+            stack,
+            pack_dir,
+            json,
+        } => explain(&home, stack, pack_dir, json),
         Command::Pack { command } => pack_command(&home, command),
         Command::Status(args) => status(&home, args),
         Command::Backup(args) => backup_command(&home, args),
@@ -1800,146 +1905,33 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
 }
 
 /// `nils explain` (Wave 2 §12): small, and load-bearing. It is the answer to
-/// "why is this a T2w", which v0 cannot give at all.
-fn explain(home: &Home, stack: i64, json: bool) -> Result<(), Exit> {
+/// "why is this a T2w", which v0 cannot give at all. Record 26 §11: the
+/// door `GET /api/explain/{stack}` answers the same document.
+fn explain(
+    home: &Home,
+    stack: i64,
+    pack_dir_given: Option<PathBuf>,
+    json: bool,
+) -> Result<(), Exit> {
     let mut registry = open(home)?;
-    let store = registry.store();
-    let meta = store
-        .query(
-            &format!(
-                "SELECT pack, pack_version, contract, overlay, review_items FROM {} WHERE stack_id = {}",
-                store.qualified("classification"),
-                store.dialect().param(1, nils_registry::schema::Type::Int)
-            ),
-            &[nils_registry::store::Param::Int(stack)],
-        )
-        .map_err(|e| fail(e.to_string()))?;
-    let Some(m) = meta.first() else {
-        return Err(fail(format!("stack {stack} has not been classified")));
+    // the pack, for the labels of the values; best effort, since the
+    // explanation stands without it
+    let dir = match pack_dir_given {
+        Some(d) => Some(d),
+        None => pack_dir(home, None).ok(),
     };
-    let pack = format!(
-        "{}@{}",
-        m.text(0).map_err(|e| fail(e.to_string()))?,
-        m.text(1).map_err(|e| fail(e.to_string()))?
-    );
-    let overlay = m
-        .opt_text(3)
+    let doc = explain::document(registry.store(), stack, dir.as_deref())
         .map_err(|e| fail(e.to_string()))?
-        .map(str::to_string);
-    let review_items = m.int(4).map_err(|e| fail(e.to_string()))?;
-
-    let axes = store
-        .query(
-            &format!(
-                "SELECT axis, value, confidence, tier FROM {} WHERE stack_id = {} ORDER BY axis",
-                store.qualified("classification_axis"),
-                store.dialect().param(1, nils_registry::schema::Type::Int)
-            ),
-            &[nils_registry::store::Param::Int(stack)],
-        )
-        .map_err(|e| fail(e.to_string()))?;
-    let ev = store
-        .query(
-            &format!(
-                "SELECT axis, value, tier, confidence, rule_set, rule, source, matched, \
-                        author, author_kind FROM {} \
-                 WHERE stack_id = {} ORDER BY axis, id",
-                store.qualified("classification_evidence"),
-                store.dialect().param(1, nils_registry::schema::Type::Int)
-            ),
-            &[nils_registry::store::Param::Int(stack)],
-        )
-        .map_err(|e| fail(e.to_string()))?;
-
+        .ok_or_else(|| fail(format!("stack {stack} has not been classified")))?;
     if json {
-        let axes_json: Vec<serde_json::Value> = axes
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "axis": r.text(0).unwrap_or_default(),
-                    "value": r.opt_text(1).ok().flatten(),
-                    "confidence": r.double(2).unwrap_or(0.0),
-                    "tier": r.text(3).unwrap_or_default(),
-                })
-            })
-            .collect();
-        let ev_json: Vec<serde_json::Value> = ev
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "axis": r.text(0).unwrap_or_default(),
-                    "value": r.text(1).unwrap_or_default(),
-                    "tier": r.text(2).unwrap_or_default(),
-                    "confidence": r.double(3).unwrap_or(0.0),
-                    "rule_set": r.text(4).unwrap_or_default(),
-                    "rule": r.text(5).unwrap_or_default(),
-                    "source": r.text(6).unwrap_or_default(),
-                    "matched": r.opt_text(7).ok().flatten(),
-                    "author": r.opt_text(8).ok().flatten(),
-                    "author_kind": r.opt_text(9).ok().flatten(),
-                })
-            })
-            .collect();
-        let v = serde_json::json!({
-            "stack": stack, "pack": pack, "overlay": overlay,
-            "review_items": review_items, "axes": axes_json, "evidence": ev_json,
-        });
         println!(
             "{}",
-            serde_json::to_string_pretty(&v)
+            serde_json::to_string_pretty(&doc)
                 .map_err(|e| fail(format!("will not serialize: {e}")))?
         );
         return Ok(());
     }
-
-    println!("stack {stack}, judged by {pack}");
-    if let Some(o) = &overlay {
-        println!("  under overlay {o}");
-    }
-    for r in &axes {
-        let axis = r.text(0).unwrap_or_default();
-        let value = r.opt_text(1).ok().flatten().unwrap_or("");
-        println!(
-            "  {axis:16} {:20} {:.2}  {}",
-            if value.is_empty() { "(nothing)" } else { value },
-            r.double(2).unwrap_or(0.0),
-            r.text(3).unwrap_or_default()
-        );
-        for e in ev.iter().filter(|e| e.text(0).unwrap_or_default() == axis) {
-            // §10.1. A value somebody decided says who, and with what
-            // standing, in the same place a rule's answer says which rule.
-            // Whether a model produced it has to be readable here, or it
-            // reads exactly like a rule's answer, which is v0's 4,692 body
-            // parts.
-            match e.opt_text(9).ok().flatten() {
-                Some(kind) => println!(
-                    "      a {kind}, {}, decided {} for the {}{}",
-                    e.opt_text(8).ok().flatten().unwrap_or("unnamed"),
-                    e.text(1).unwrap_or_default(),
-                    e.text(5).unwrap_or_default(),
-                    match e.opt_text(7).ok().flatten() {
-                        Some(v) => format!(" (version {v})"),
-                        None => String::new(),
-                    }
-                ),
-                None => println!(
-                    "{}",
-                    format!(
-                        "      {} said {} by {}, from {} {}",
-                        e.text(4).unwrap_or_default(),
-                        e.text(1).unwrap_or_default(),
-                        e.text(2).unwrap_or_default(),
-                        e.text(6).unwrap_or_default(),
-                        e.opt_text(7).ok().flatten().unwrap_or("")
-                    )
-                    .trim_end()
-                ),
-            }
-        }
-    }
-    if review_items > 0 {
-        println!("  {review_items} review item(s) were raised for this stack");
-    }
+    print!("{}", explain::text(&doc));
     Ok(())
 }
 
@@ -3957,7 +3949,7 @@ fn confirm(prompt: &str) -> Result<bool, Exit> {
 fn quarantine_command(home: &Home, command: QuarantineCommand) -> Result<(), Exit> {
     let QuarantineCommand::List { batch, class, json } = command;
     let mut registry = open(home)?;
-    let doc = quarantine_doc(&mut registry, batch, class.as_deref())?;
+    let doc = quarantine_doc(&mut registry, batch, class.as_deref(), None)?;
     let files: Vec<serde_json::Value> = doc["files"].as_array().cloned().unwrap_or_default();
     if json {
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
@@ -4632,8 +4624,8 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "counts": { "cohorts": cohorts, "members": members, "diseases": diseases, "observation_types": kinds, "events": events, "subjects_with_birth_date": with_birth_date },
             "kept": "for ever; a correction supersedes the old row and the old row stays (section 13.2)",
             "commands": {
-                "read": ["nils clinical vocabulary list", "nils custody"],
-                "change": ["nils clinical vocabulary load"],
+                "read": ["nils clinical vocabulary list", "nils clinical cohort list", "nils clinical cohort show <name>", "nils custody"],
+                "change": ["nils clinical vocabulary load", "nils clinical cohort make|rename|set|retire|add|remove", "nils ask promote", "a digest of a dataset that feeds a cohort"],
                 "export": ["nils release"],
                 "delete": delete_db(REGISTRY_DB, &registry_schema),
             },
@@ -6256,55 +6248,255 @@ fn size_text(bytes: i64) -> String {
     }
 }
 
-/// `nils clinical cohort list`.
+/// `nils clinical cohort list`: what `GET /api/cohorts` answers.
 fn cohort_list(home: &Home, json: bool) -> Result<(), Exit> {
     let mut registry = open(home)?;
-    let store = registry.store();
-    let sql = format!(
-        "SELECT c.id, c.name, c.owner, c.description, \
-                (SELECT COUNT(*) FROM {} m WHERE m.cohort_id = c.id AND m.left_at IS NULL) \
-         FROM {} c ORDER BY c.name",
-        store.qualified("cohort_member"),
-        store.qualified("cohort")
-    );
-    let mut rows = Vec::new();
-    for r in store.query(&sql, &[]).map_err(|e| fail(e.to_string()))? {
-        rows.push((
-            r.int(0).map_err(|e| fail(e.to_string()))?,
-            r.text(1).map_err(|e| fail(e.to_string()))?.to_string(),
-            r.text(2).map_err(|e| fail(e.to_string()))?.to_string(),
-            r.opt_text(3)
-                .map_err(|e| fail(e.to_string()))?
-                .map(str::to_string),
-            r.int(4).map_err(|e| fail(e.to_string()))?,
-        ));
-    }
+    let rows = nils_registry::cohort::list(registry.store()).map_err(|e| fail(e.to_string()))?;
     if json {
-        let doc: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|(id, name, owner, description, members)| {
-                serde_json::json!({
-                    "id": id, "name": name, "owner": owner,
-                    "description": description, "members": members,
-                })
-            })
-            .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&doc).map_err(|e| fail(e.to_string()))?
+            serde_json::to_string_pretty(&rows).map_err(|e| fail(e.to_string()))?
         );
         return Ok(());
     }
     if rows.is_empty() {
-        println!("no cohorts; `nils clinical import` with a cohort mapping makes one");
+        println!(
+            "no cohorts; `nils clinical cohort make`, a dataset that feeds one, `nils ask promote` or `nils clinical import` with a cohort mapping makes one"
+        );
         return Ok(());
     }
-    for (_, name, owner, description, members) in &rows {
+    for c in &rows {
         println!(
-            "  {name:<24} {members:>6} member(s)   {owner}   {}",
-            description.as_deref().unwrap_or("")
+            "  {:<24} {:>6} subject(s)   {:>6} stack(s)   {}   {}{}",
+            c["name"].as_str().unwrap_or_default(),
+            c["subjects"].as_i64().unwrap_or(0),
+            c["stacks"].as_i64().unwrap_or(0),
+            c["owner"].as_str().unwrap_or_default(),
+            c["description"].as_str().unwrap_or(""),
+            if c["retired_at"].is_string() {
+                "   (retired)"
+            } else {
+                ""
+            }
         );
     }
+    Ok(())
+}
+
+/// One cohort as the door shows it, printed or as JSON.
+fn cohort_print(doc: &serde_json::Value, json: bool) -> Result<(), Exit> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(doc).map_err(|e| fail(e.to_string()))?
+        );
+        return Ok(());
+    }
+    println!(
+        "cohort {}   owner {}   subjects {}   sessions {}   stacks {}{}",
+        doc["name"].as_str().unwrap_or_default(),
+        doc["owner"].as_str().unwrap_or_default(),
+        doc["subjects"].as_i64().unwrap_or(0),
+        doc["sessions"].as_i64().unwrap_or(0),
+        doc["stacks"].as_i64().unwrap_or(0),
+        match doc["retired_at"].as_str() {
+            Some(at) => format!("   retired {at}"),
+            None => String::new(),
+        }
+    );
+    if let Some(d) = doc["description"].as_str() {
+        println!("  {d}");
+    }
+    println!(
+        "  from {}   fed by {}   waiting {}   releases {}",
+        doc["from"]["kind"].as_str().unwrap_or("manual"),
+        match doc["feeds"].as_array() {
+            Some(f) if !f.is_empty() => f
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            _ => "no dataset".to_string(),
+        },
+        doc["waiting"].as_i64().unwrap_or(0),
+        match &doc["releases"] {
+            serde_json::Value::Array(a) => a.len() as i64,
+            other => other.as_i64().unwrap_or(0),
+        }
+    );
+    for j in doc["joins"].as_array().into_iter().flatten() {
+        println!(
+            "  {}   {:<10} {:>6} subject(s)   {}{}",
+            j["when"].as_str().unwrap_or_default(),
+            j["what"].as_str().unwrap_or_default(),
+            j["subjects"].as_i64().unwrap_or(0),
+            j["by"].as_str().unwrap_or(""),
+            match (
+                j["batch"].as_i64(),
+                j["handle"].as_i64(),
+                j["reason"].as_str()
+            ) {
+                (Some(b), _, _) => format!("   batch {b}"),
+                (_, Some(h), _) => format!("   handle {h}"),
+                (_, _, Some(r)) => format!("   {r}"),
+                _ => String::new(),
+            }
+        );
+    }
+    Ok(())
+}
+
+/// The cohort verbs beside `list` (record 26 section 9), each what its
+/// door does, under your name.
+fn cohort_command(home: &Home, command: CohortCommand) -> Result<(), Exit> {
+    use nils_registry::cohort;
+    let who = actor();
+    let mut registry = open(home)?;
+    let err = |e: cohort::Error| match e {
+        cohort::Error::Store(e) => fail(e.to_string()),
+        other => usage(other.to_string()),
+    };
+    match command {
+        CohortCommand::List { json } => cohort_list(home, json),
+        CohortCommand::Show { name, json } => {
+            let doc = cohort::show(registry.store(), &name)
+                .map_err(|e| fail(e.to_string()))?
+                .ok_or_else(|| usage(format!("no cohort named {name}")))?;
+            cohort_print(&doc, json)
+        }
+        CohortCommand::Make {
+            name,
+            owner,
+            description,
+            json,
+        } => {
+            let made = cohort::create(
+                &mut registry,
+                &name,
+                owner.as_deref().unwrap_or(&who),
+                description.as_deref(),
+                &who,
+            )
+            .map_err(err)?;
+            let doc = cohort::show(registry.store(), &made.name)
+                .map_err(|e| fail(e.to_string()))?
+                .unwrap_or_default();
+            cohort_print(&doc, json)
+        }
+        CohortCommand::Rename { name, to, json } => {
+            let change = cohort::Change {
+                name: Some(&to),
+                ..cohort::Change::default()
+            };
+            let set = cohort::set(&mut registry, &name, &change, &who).map_err(err)?;
+            let doc = cohort::show(registry.store(), &set.name)
+                .map_err(|e| fail(e.to_string()))?
+                .unwrap_or_default();
+            cohort_print(&doc, json)
+        }
+        CohortCommand::Set {
+            name,
+            owner,
+            description,
+            no_description,
+            json,
+        } => {
+            let change = cohort::Change {
+                owner: owner.as_deref(),
+                description: if no_description {
+                    Some(None)
+                } else {
+                    description.as_deref().map(Some)
+                },
+                ..cohort::Change::default()
+            };
+            let set = cohort::set(&mut registry, &name, &change, &who).map_err(err)?;
+            let doc = cohort::show(registry.store(), &set.name)
+                .map_err(|e| fail(e.to_string()))?
+                .unwrap_or_default();
+            cohort_print(&doc, json)
+        }
+        CohortCommand::Retire { name, back, json } => {
+            let change = cohort::Change {
+                retired: Some(!back),
+                ..cohort::Change::default()
+            };
+            let set = cohort::set(&mut registry, &name, &change, &who).map_err(err)?;
+            let doc = cohort::show(registry.store(), &set.name)
+                .map_err(|e| fail(e.to_string()))?
+                .unwrap_or_default();
+            cohort_print(&doc, json)
+        }
+        CohortCommand::Add {
+            name,
+            codes,
+            why,
+            json,
+        } => cohort_members(
+            &mut registry,
+            &name,
+            &codes,
+            &[],
+            why.as_deref(),
+            &who,
+            json,
+        ),
+        CohortCommand::Remove {
+            name,
+            codes,
+            why,
+            json,
+        } => cohort_members(
+            &mut registry,
+            &name,
+            &[],
+            &codes,
+            why.as_deref(),
+            &who,
+            json,
+        ),
+    }
+}
+
+/// `nils clinical cohort add|remove`: what `POST /api/cohorts/{name}/members`
+/// does, the counts printed.
+fn cohort_members(
+    registry: &mut Registry,
+    name: &str,
+    add: &[String],
+    remove: &[String],
+    why: Option<&str>,
+    who: &str,
+    json: bool,
+) -> Result<(), Exit> {
+    use nils_registry::cohort;
+    let done = cohort::members(registry, name, add, remove, why, who).map_err(|e| match e {
+        cohort::Error::Store(e) => fail(e.to_string()),
+        other => usage(other.to_string()),
+    })?;
+    registry.refresh_meta().map_err(|e| fail(e.to_string()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "cohort": name,
+                "added": done.added,
+                "already": done.already,
+                "removed": done.removed,
+                "not_members": done.not_members,
+                "epoch": registry.meta().epoch,
+            })
+        );
+        return Ok(());
+    }
+    println!(
+        "cohort {name}   added {}   already {}   removed {}   not members {}   epoch {}",
+        done.added,
+        done.already,
+        done.removed,
+        done.not_members,
+        registry.meta().epoch
+    );
     Ok(())
 }
 
@@ -6704,7 +6896,7 @@ fn yaml_text(s: &str) -> String {
 fn clinical_command(home: &Home, command: ClinicalCommand) -> Result<(), Exit> {
     match command {
         ClinicalCommand::Import(args) => clinical_import(home, args),
-        ClinicalCommand::Cohort(CohortCommand::List { json }) => cohort_list(home, json),
+        ClinicalCommand::Cohort(command) => cohort_command(home, command),
         ClinicalCommand::Vocabulary(VocabularyCommand::Load {
             file,
             pack_dir: dir,
@@ -7204,14 +7396,22 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         return release_withdraw(home, name, version, args.why.as_deref().unwrap_or(""));
     }
     let out = args.out.clone().expect("--out, or --history");
-    let dates_policy = dates::Policy::parse(&args.dates).ok_or_else(|| {
-        usage(format!(
-            "--dates is keep, shift or year, not {}",
-            args.dates
-        ))
-    })?;
-    let uids = policy::Uids::parse(&args.uids)
-        .ok_or_else(|| usage(format!("--uids is remap or preserve, not {}", args.uids)))?;
+    // record 26 section 13: without the flags each dataset's leaving policy
+    // applies to its own files, and the run's defaults elsewhere
+    let policy_from = match (&args.dates, &args.uids) {
+        (None, None) => policy::Source::Datasets,
+        _ => policy::Source::Flags,
+    };
+    let dates_policy = match &args.dates {
+        Some(text) => dates::Policy::parse(text)
+            .ok_or_else(|| usage(format!("--dates is keep, shift or year, not {text}")))?,
+        None => dates::Policy::default(),
+    };
+    let uids = match &args.uids {
+        Some(text) => policy::Uids::parse(text)
+            .ok_or_else(|| usage(format!("--uids is remap or preserve, not {text}")))?,
+        None => policy::Uids::default(),
+    };
     let root = match &args.uid_root {
         Some(text) => uid::Root::new(text).map_err(|e| usage(e.to_string()))?,
         None => uid::Root::default(),
@@ -7301,6 +7501,17 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     let mut registry = open(home)?;
     // Wave 5 section 10.2: a release writes only to an export place.
     require_place(&mut registry, nils_registry::place::Role::Export, &out)?;
+    // record 26 section 13: a dataset named is a source place in force
+    for name in &args.dataset {
+        let found = nils_registry::place::by_name(registry.store(), name)
+            .map_err(|e| fail(e.to_string()))?
+            .filter(|p| p.role == nils_registry::place::Role::Source && p.retired_at.is_none());
+        if found.is_none() {
+            return Err(usage(format!(
+                "--dataset {name}: no source place in force is named so; `nils place list` shows them"
+            )));
+        }
+    }
     // Wave 4a section 8: every item resolved up front, and a refusal that
     // names what did not, rather than a smaller release.
     let chosen = resolve_or_refuse(&mut registry, &items, Some(&pack))?.selection;
@@ -7323,6 +7534,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         name: &name,
         root: &out,
         policy: &policy,
+        policy_from,
         categories,
         selection: run::Selection {
             subjects: chosen.subjects,
@@ -7334,6 +7546,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             modality: args.modality.clone(),
             axes: chosen.axes,
             cohorts: chosen.cohorts,
+            datasets: args.dataset.clone(),
         },
         scheme: &scheme,
         // §8.4: dropped by default, and back only by name. The pack declares
@@ -7369,6 +7582,16 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         report.name, report.version, report.layout, report.policy
     );
     println!("  into             {}", report.root);
+    // record 26 section 13: what each dataset's files left under
+    for p in &report.policies {
+        println!(
+            "  dataset          {:<24} dates {}   uids {}   from {}",
+            p["dataset"].as_str().unwrap_or("(none)"),
+            p["dates"].as_str().unwrap_or_default(),
+            p["uids"].as_str().unwrap_or_default(),
+            p["from"].as_str().unwrap_or_default()
+        );
+    }
     if let Some(c) = &report.converter {
         println!("  converted by     {c}");
     }
@@ -7538,13 +7761,20 @@ fn releases_doc(registry: &mut Registry, limit: usize) -> Result<serde_json::Val
     let store = registry.store();
     let started = text_of(store, "release", "started_at");
     let withdrawn = text_of(store, "release", "withdrawn_at");
+    let policy = text_of(store, "release", "policy");
+    let policies = text_of(store, "release", "policies");
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
-         added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why FROM {} \
+         added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
+         {policies} FROM {} \
          ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
     );
+    let json = |s: Option<&str>| {
+        s.and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+            .unwrap_or(serde_json::Value::Null)
+    };
     let rows: Vec<serde_json::Value> = store
         .query(&sql, &[])?
         .iter()
@@ -7567,6 +7797,10 @@ fn releases_doc(registry: &mut Registry, limit: usize) -> Result<serde_json::Val
                 "withdrawn_at": r.opt_text(14)?,
                 "withdrawn_by": r.opt_text(15)?,
                 "withdrawn_why": r.opt_text(16)?,
+                // record 26 section 13: the run's policy, where it came
+                // from, and what each dataset's files left under
+                "policy": json(r.opt_text(17)?),
+                "policies": json(r.opt_text(18)?),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
@@ -7906,6 +8140,7 @@ pub(crate) fn quarantine_doc(
     registry: &mut Registry,
     batch: Option<i64>,
     class: Option<&str>,
+    batches: Option<&[i64]>,
 ) -> Result<serde_json::Value, Exit> {
     let store = registry.store();
     let d = store.dialect();
@@ -7928,6 +8163,22 @@ pub(crate) fn quarantine_doc(
         sql.push_str(&format!(
             " AND f.reason = {}",
             d.param(params.len(), Type::Text)
+        ));
+    }
+    // record 26 §10: the batches that fed a cohort; none reaches nothing
+    if let Some(ids) = batches {
+        let list = ids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(
+            " AND f.batch_id IN ({})",
+            if list.is_empty() {
+                "-1".to_string()
+            } else {
+                list
+            }
         ));
     }
     sql.push_str(" ORDER BY f.batch_id, f.path");

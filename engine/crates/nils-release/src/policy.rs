@@ -48,6 +48,49 @@ pub struct Policy {
     pub root: uid::Root,
 }
 
+/// Where a run's policy comes from (record 26 §13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Source {
+    /// `--dates` or `--uids` was given: the run's policy applies to every
+    /// file, whatever its dataset says, and the row says so.
+    Flags,
+    /// Neither was given: each dataset's `on_release` applies to its own
+    /// files, and the run's defaults to a file under no dataset.
+    #[default]
+    Datasets,
+}
+
+impl Source {
+    pub fn name(self) -> &'static str {
+        match self {
+            Source::Flags => "flags",
+            Source::Datasets => "datasets",
+        }
+    }
+}
+
+impl Policy {
+    /// A dataset's leaving policy as its place declares it,
+    /// `handling.on_release`, under the run's UID root; the defaults where
+    /// nothing is declared. Read as written, so a combination the run
+    /// refuses is refused by `check` under the dataset's name rather than
+    /// quietly replaced.
+    pub fn of_handling(handling: &serde_json::Value, root: &uid::Root) -> Policy {
+        let release = &handling["on_release"];
+        Policy {
+            dates: release["dates"]
+                .as_str()
+                .and_then(dates::Policy::parse)
+                .unwrap_or_default(),
+            uids: release["uids"]
+                .as_str()
+                .and_then(Uids::parse)
+                .unwrap_or_default(),
+            root: root.clone(),
+        }
+    }
+}
+
 /// A combination the engine will not write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refused(pub String);
@@ -103,6 +146,18 @@ impl Policy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dataset_declares_its_leaving_policy_and_the_defaults_stand_in() {
+        let declared = serde_json::json!({"on_release": {"dates": "shift", "uids": "remap"}});
+        let p = Policy::of_handling(&declared, &uid::Root::default());
+        assert_eq!(p.dates, dates::Policy::Shift);
+        assert_eq!(p.uids, Uids::Remap);
+        let nothing = Policy::of_handling(&serde_json::Value::Null, &uid::Root::default());
+        assert_eq!(nothing, Policy::default());
+        assert_eq!(Source::default(), Source::Datasets);
+        assert_eq!(Source::Flags.name(), "flags");
+    }
 
     #[test]
     fn keeping_dates_and_preserving_uids_is_a_policy() {

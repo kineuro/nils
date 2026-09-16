@@ -298,7 +298,8 @@ pub(crate) struct AskRunArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct AskPromoteArgs {
-    /// The handle, a complete subject grain one
+    /// The handle, a complete one at subject, session or stack grain; the
+    /// distinct subjects of its rows join
     #[arg(long, value_name = "ID")]
     handle: i64,
     /// The cohort's name
@@ -1404,8 +1405,10 @@ fn ask_promote(home: &Home, args: AskPromoteArgs) -> Result<(), Exit> {
                 println!("{}", serde_json::to_string_pretty(&p).unwrap_or_default());
             } else {
                 println!(
-                    "nils ask promote   cohort {}   added {}   already {}   epoch {}{}",
+                    "nils ask promote   cohort {}   {} grain, {} rows   added {}   already {}   epoch {}{}",
                     p.cohort,
+                    p.grain,
+                    p.rows,
                     p.added,
                     p.already,
                     p.epoch,

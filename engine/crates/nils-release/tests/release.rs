@@ -135,6 +135,7 @@ fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) ->
         name: "test",
         root: out,
         policy,
+        policy_from: nils_release::policy::Source::Flags,
         categories: categories::Category::every(),
         selection: Selection::default(),
         scheme,
@@ -308,6 +309,240 @@ fn a_shift_moves_the_dates_and_keeps_the_interval() {
         )
         .unwrap();
     assert_eq!(rows.len(), 1);
+}
+
+/// One study of one person, under its own UIDs, for a second dataset.
+fn tree_of(prefix: &str, patient: &str, day: &str) -> TempDir {
+    let dir = TempDir::new("release-dataset");
+    let study = format!("{prefix}.1");
+    let series = format!("{prefix}.1.1");
+    let sop = format!("{prefix}.1.1.1");
+    let mut e = synth::minimal_mr(&study, &series, &sop);
+    e.extend([
+        synth::text(tags::PATIENT_ID, VR::LO, patient),
+        synth::text(tags::PATIENT_NAME, VR::PN, "PERSSON^BO"),
+        synth::text(tags::PATIENT_BIRTH_DATE, VR::DA, "19750301"),
+        synth::text(tags::STUDY_DATE, VR::DA, day),
+        synth::text(tags::STUDY_TIME, VR::TM, "101010"),
+        synth::text(tags::SERIES_DESCRIPTION, VR::LO, "sag T1 mprage"),
+        synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "3D"),
+        synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+        synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+    ]);
+    dir.file("s/1", &synth::part10(&MetaFields::mr(&sop), &e, true));
+    dir
+}
+
+/// A source place on a folder, with the leaving policy it declares
+/// (record 26 section 13): the folder itself is its pseudonymised tree.
+fn dataset(reg: &mut Registry, name: &str, path: &Path, on_release: serde_json::Value) -> i64 {
+    nils_registry::place::add(
+        reg.store(),
+        &nils_registry::place::New {
+            name,
+            role: nils_registry::place::Role::Source,
+            path: path.to_str().unwrap(),
+            guarantees: serde_json::json!({}),
+            probed: serde_json::json!({}),
+            handling: serde_json::json!({"on_release": on_release}),
+            dataset: serde_json::Value::Null,
+        },
+    )
+    .unwrap()
+}
+
+/// The study date and the SOP instance UID of each file written, by path.
+fn written_dates_and_uids(root: &Path) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for path in files_under(root) {
+        let object = dicom_object::open_file(&path).unwrap();
+        let text = |tag| {
+            object
+                .element(tag)
+                .unwrap()
+                .value()
+                .to_str()
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        out.push((
+            path.strip_prefix(root).unwrap().display().to_string(),
+            text(tags::STUDY_DATE),
+            text(tags::SOP_INSTANCE_UID),
+        ));
+    }
+    out
+}
+
+#[test]
+fn a_release_spanning_two_datasets_leaves_each_under_its_own_policy() {
+    // Record 26 section 13: without --dates and --uids the policy of each
+    // file comes from the dataset holding it; the row records them all.
+    let a = tree_of("A", "19750301-1111", "20220115");
+    let b = tree_of("B", "19750301-2222", "20220115");
+    let home_dir = TempDir::new("release-home");
+    let (_home, mut reg) = registry(&home_dir, &a);
+    let mut s = nils_digest::Settings::new(b.path());
+    s.name = "b".into();
+    digest(&s, &mut reg).unwrap();
+    dataset(
+        &mut reg,
+        "ds-shifted",
+        a.path(),
+        serde_json::json!({"dates": "shift", "uids": "remap"}),
+    );
+    dataset(
+        &mut reg,
+        "ds-kept",
+        b.path(),
+        serde_json::json!({"dates": "keep", "uids": "preserve"}),
+    );
+    let ordinal = SessionScheme {
+        naming: Naming::Ordinal,
+        ..SessionScheme::default()
+    };
+    let policy = Policy::default();
+    let out = TempDir::new("release-out");
+    let by_dataset = run::Settings {
+        policy_from: nils_release::policy::Source::Datasets,
+        ..settings(out.path(), &policy, &ordinal)
+    };
+    let report = run::run(&mut reg, &by_dataset).unwrap();
+    assert_eq!(report.files, 2, "{report:?}");
+    // the row says what each dataset's files left under, and where from
+    let mut rows: Vec<(String, String, String, String)> = report
+        .policies
+        .iter()
+        .map(|p| {
+            (
+                p["dataset"].as_str().unwrap_or("").to_string(),
+                p["dates"].as_str().unwrap().to_string(),
+                p["uids"].as_str().unwrap().to_string(),
+                p["from"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "ds-kept".into(),
+                "keep".into(),
+                "preserve".into(),
+                "dataset".into()
+            ),
+            (
+                "ds-shifted".into(),
+                "shift".into(),
+                "remap".into(),
+                "dataset".into()
+            ),
+        ]
+    );
+    assert!(
+        report.policy.contains("ds-shifted: dates shift"),
+        "{}",
+        report.policy
+    );
+    // and each file left under its own: the kept dataset's file keeps its
+    // date and its UID, the shifted dataset's has neither
+    let files = written_dates_and_uids(out.path());
+    assert_eq!(files.len(), 2, "{files:?}");
+    let kept = files.iter().find(|(_, _, uid)| uid == "B.1.1.1");
+    assert!(
+        kept.is_some(),
+        "the preserved UID names the file: {files:?}"
+    );
+    assert_eq!(kept.unwrap().1, "20220115");
+    let shifted = files.iter().find(|(_, _, uid)| uid != "B.1.1.1").unwrap();
+    assert_ne!(shifted.1, "20220115", "{files:?}");
+    assert_ne!(shifted.2, "A.1.1.1", "{files:?}");
+    let store = reg.store();
+    let sql = format!(
+        "SELECT policies, policy FROM {} ORDER BY id DESC",
+        store.qualified("release")
+    );
+    let stored = store.query(&sql, &[]).unwrap();
+    let policies: serde_json::Value = serde_json::from_str(stored[0].text(0).unwrap()).unwrap();
+    assert_eq!(policies.as_array().unwrap().len(), 2, "{policies}");
+    let own: serde_json::Value = serde_json::from_str(stored[0].text(1).unwrap()).unwrap();
+    assert_eq!(own["from"], "datasets", "{own}");
+
+    // the flags given override every dataset's, and the row says so
+    let flagged_out = TempDir::new("release-out-flags");
+    let flagged = run::Settings {
+        name: "flagged",
+        policy_from: nils_release::policy::Source::Flags,
+        ..settings(flagged_out.path(), &policy, &ordinal)
+    };
+    let report = run::run(&mut reg, &flagged).unwrap();
+    assert!(
+        report
+            .policies
+            .iter()
+            .all(|p| p["from"] == "flags" && p["dates"] == "keep" && p["uids"] == "remap"),
+        "{:?}",
+        report.policies
+    );
+    let files = written_dates_and_uids(flagged_out.path());
+    assert!(
+        files.iter().all(|(_, day, _)| day == "20220115"),
+        "{files:?}"
+    );
+    assert!(
+        files.iter().all(|(_, _, uid)| uid != "B.1.1.1"),
+        "{files:?}"
+    );
+
+    // a dataset as the selection releases its files and no other's
+    let one_out = TempDir::new("release-out-one");
+    let one = run::Settings {
+        name: "one",
+        policy_from: nils_release::policy::Source::Datasets,
+        selection: Selection {
+            datasets: vec!["ds-kept".to_string()],
+            ..Selection::default()
+        },
+        ..settings(one_out.path(), &policy, &ordinal)
+    };
+    let report = run::run(&mut reg, &one).unwrap();
+    assert_eq!(report.files, 1, "{report:?}");
+    assert_eq!(report.policies.len(), 1, "{:?}", report.policies);
+    assert_eq!(report.policies[0]["dataset"], "ds-kept");
+
+    // a dataset whose declared policy would shift dates and preserve UIDs is
+    // refused by name, as the run's own is; the declaration door refuses
+    // it too, so it is written past the door here
+    let t = nils_registry::schema::table("place");
+    let store = reg.store();
+    let sql = format!(
+        "UPDATE {} SET handling = {} WHERE name = 'ds-kept'",
+        store.qualified("place"),
+        store.dialect().param(1, t.column("handling").unwrap().ty)
+    );
+    store
+        .execute(
+            &sql,
+            &[nils_registry::Param::from(
+                serde_json::json!({"on_release": {"dates": "shift", "uids": "preserve"}})
+                    .to_string(),
+            )],
+        )
+        .unwrap();
+    let refused_out = TempDir::new("release-out-refused");
+    let refused = run::Settings {
+        name: "refused",
+        policy_from: nils_release::policy::Source::Datasets,
+        ..settings(refused_out.path(), &policy, &ordinal)
+    };
+    let e = run::run(&mut reg, &refused).unwrap_err().to_string();
+    assert!(
+        e.contains("dataset ds-kept") && e.contains("decorative"),
+        "{e}"
+    );
+    assert!(files_under(refused_out.path()).is_empty());
 }
 
 #[test]
