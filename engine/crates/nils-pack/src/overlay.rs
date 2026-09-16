@@ -9,14 +9,23 @@
 //! **original spelling is kept**, and the order is the order they were
 //! written, because v0's contrast vocabulary contains `" -k"` and `" -gd"`
 //! whose leading space is load-bearing.
+//!
+//! Pack contract 5 (record 26, decision 12): an overlay amends the named
+//! `buckets` as before, and beside them every axis value's word list, named
+//! `lists.<axis>.<value>`. Words are all it amends. The flags, the physics,
+//! the review thresholds and the order the values are tried in stay the
+//! pack's, and an overlay that reaches for any of them is refused with why.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use serde_json::Value;
+
 use crate::error::{Error, R};
+use crate::rules::Axis;
 use crate::yaml::{self, File};
 
-/// What an overlay does to one bucket.
+/// What an overlay does to one bucket or one list.
 #[derive(Debug, Default, Clone)]
 pub struct Edit {
     pub add: Vec<String>,
@@ -33,12 +42,56 @@ pub struct Overlay {
     /// batch. Provenance, never a selection.
     pub scope: BTreeMap<String, String>,
     pub buckets: BTreeMap<String, Edit>,
+    /// The axis values' word lists it amends, keyed `axis.value` as written
+    /// (the value's identity or its label).
+    pub lists: BTreeMap<String, Edit>,
     /// What the site says its amendment does. An overlay carries its own
     /// cases for the same reason a pack does: it changes verdicts, and the
     /// pack author's cases are the author's claim about the pack, not a
     /// constraint on the site.
     pub cases: Vec<(std::path::PathBuf, crate::corpus::Case)>,
 }
+
+/// What an overlay says, and nothing else.
+const SAYS: &[&str] = &[
+    "overlay", "version", "pack", "scope", "buckets", "lists", "cases",
+];
+
+/// The keys of a pack, an axis or a value an overlay may not carry, at the
+/// top or inside an edit: naming one of these is reaching for what stays
+/// the pack's.
+const STAYS: &[&str] = &[
+    "flags",
+    "physics",
+    "thresholds",
+    "review",
+    "order",
+    "tiers",
+    "parsers",
+    "normalize",
+    "axes",
+    "rules",
+    "passes",
+    "picks",
+    "private",
+    "dictionary",
+    "bids",
+    "levels",
+    "mcp",
+    "fields",
+    "detection",
+    "exclusive",
+    "combination",
+    "alternative_flags",
+    "confidence",
+    "requires",
+    "default",
+    "values",
+    "search",
+];
+
+const STAYS_WHY: &str = "an overlay amends words, the buckets by name and the lists by axis.value, and nothing else; \
+     the flags, the physics, the thresholds and the order the values are tried in stay the pack's";
 
 impl Overlay {
     pub fn load(path: &Path) -> R<Overlay> {
@@ -51,17 +104,46 @@ impl Overlay {
         Overlay::of(File::from_text(name, text)?)
     }
 
-    /// The terms the overlay adds, over every bucket: what `overlay_unused`
-    /// counts against the citations of a batch (Wave 4c §6.6).
+    /// The terms the overlay adds, over every bucket and every list: what
+    /// `overlay_unused` counts against the citations of a batch (Wave 4c
+    /// §6.6).
     pub fn added_terms(&self) -> Vec<String> {
         self.buckets
             .values()
+            .chain(self.lists.values())
             .flat_map(|e| e.add.iter().cloned())
             .collect()
     }
 
+    /// The edit this overlay makes to one axis value's list, named by the
+    /// value's identity or its label.
+    pub fn list_edit(&self, axis: &str, id: &str, label: &str) -> Option<&Edit> {
+        self.lists
+            .get(&format!("{axis}.{id}"))
+            .or_else(|| self.lists.get(&format!("{axis}.{label}")))
+    }
+
     fn of(f: File) -> R<Overlay> {
         let m = f.blame(yaml::obj(&f.value, "overlay"))?;
+
+        // Reaching for anything but words is refused before anything else
+        // is read: the refusal names the key and says what stays whose.
+        for key in m.keys() {
+            if STAYS.contains(&key.as_str()) {
+                return Err(Error::at(key, STAYS_WHY).in_file(&f.path, Some(&f.source)));
+            }
+            if !SAYS.contains(&key.as_str()) {
+                return Err(Error::at(
+                    key,
+                    format!(
+                        "is not something an overlay says; it says {}",
+                        SAYS.join(", ")
+                    ),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+        }
+
         let name = f.blame(yaml::text(yaml::get(m, "overlay", "overlay")?, "overlay"))?;
         let version = f.blame(yaml::text(yaml::get(m, "version", "overlay")?, "version"))?;
         let pack = f.blame(yaml::text(yaml::get(m, "pack", "overlay")?, "pack"))?;
@@ -91,21 +173,34 @@ impl Overlay {
         }
 
         let mut buckets = BTreeMap::new();
-        for (name, edit) in f.blame(yaml::obj(yaml::get(m, "buckets", "overlay")?, "buckets"))? {
-            let at = format!("buckets.{name}");
-            let e = f.blame(yaml::obj(edit, &at))?;
-            let mut out = Edit::default();
-            if let Some(a) = e.get("add") {
-                out.add = f.blame(yaml::texts(a, &format!("{at}.add")))?;
+        if let Some(b) = m.get("buckets") {
+            for (name, edit) in f.blame(yaml::obj(b, "buckets"))? {
+                buckets.insert(name.clone(), edit_of(&f, &format!("buckets.{name}"), edit)?);
             }
-            if let Some(r) = e.get("remove") {
-                out.remove = f.blame(yaml::texts(r, &format!("{at}.remove")))?;
-            }
-            if out.add.is_empty() && out.remove.is_empty() {
-                return Err(Error::at(&at, "adds nothing and removes nothing")
+        }
+        let mut lists = BTreeMap::new();
+        if let Some(l) = m.get("lists") {
+            for (name, edit) in f.blame(yaml::obj(l, "lists"))? {
+                let at = format!("lists.{name}");
+                if !name
+                    .split_once('.')
+                    .is_some_and(|(axis, value)| !axis.is_empty() && !value.is_empty())
+                {
+                    return Err(Error::at(
+                        &at,
+                        "a list is named axis.value: the axis, a dot, and one of its values",
+                    )
                     .in_file(&f.path, Some(&f.source)));
+                }
+                lists.insert(name.clone(), edit_of(&f, &at, edit)?);
             }
-            buckets.insert(name.clone(), out);
+        }
+        if buckets.is_empty() && lists.is_empty() {
+            return Err(Error::at(
+                "buckets",
+                "amends no bucket and no list, so it changes nothing; name a bucket or a list as axis.value",
+            )
+            .in_file(&f.path, Some(&f.source)));
         }
 
         let cases = match m.get("cases") {
@@ -125,6 +220,7 @@ impl Overlay {
             pack,
             scope,
             buckets,
+            lists,
             cases,
         })
     }
@@ -156,6 +252,73 @@ impl Overlay {
         }
         Ok(())
     }
+
+    /// Refuse a list naming an axis or a value the pack does not have, or a
+    /// value no word of the pack's reaches. Amending the words of a value
+    /// nothing tries would make the axis try it, and the order the values
+    /// are tried in stays the pack's. `lists` is `axis.value`, by identity,
+    /// of every value that takes a list ([`crate::rules::amendable`]).
+    pub fn check_lists(&self, axes: &[Axis], lists: &[String]) -> R<()> {
+        for name in self.lists.keys() {
+            let at = format!("lists.{name}");
+            let (axis, value) = name.split_once('.').unwrap_or((name, ""));
+            let Some(a) = axes.iter().find(|a| a.name == axis) else {
+                let names: Vec<&str> = axes.iter().map(|a| a.name.as_str()).collect();
+                return Err(Error::at(
+                    at,
+                    format!(
+                        "the pack has no axis named {axis}; it decides {}",
+                        names.join(", ")
+                    ),
+                ));
+            };
+            let Some(v) = a.values.iter().find(|v| v.id == value || v.label == value) else {
+                return Err(Error::at(at, format!("{axis} has no value named {value}")));
+            };
+            if !lists.iter().any(|l| *l == format!("{axis}.{}", v.id)) {
+                return Err(Error::at(
+                    at,
+                    format!(
+                        "no word of the pack's reaches {value} on {axis}: a route sets it or it is the default, \
+                         and the order the values are tried in stays the pack's"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One edit: what it adds and what it removes, and nothing else.
+fn edit_of(f: &File, at: &str, v: &Value) -> R<Edit> {
+    let e = f.blame(yaml::obj(v, at))?;
+    for key in e.keys() {
+        if STAYS.contains(&key.as_str()) {
+            return Err(
+                Error::at(format!("{at}.{key}"), STAYS_WHY).in_file(&f.path, Some(&f.source))
+            );
+        }
+        if key != "add" && key != "remove" {
+            return Err(Error::at(
+                format!("{at}.{key}"),
+                "an edit adds words and removes words, and says nothing else",
+            )
+            .in_file(&f.path, Some(&f.source)));
+        }
+    }
+    let mut out = Edit::default();
+    if let Some(a) = e.get("add") {
+        out.add = f.blame(yaml::texts(a, &format!("{at}.add")))?;
+    }
+    if let Some(r) = e.get("remove") {
+        out.remove = f.blame(yaml::texts(r, &format!("{at}.remove")))?;
+    }
+    if out.add.is_empty() && out.remove.is_empty() {
+        return Err(
+            Error::at(at, "adds nothing and removes nothing").in_file(&f.path, Some(&f.source))
+        );
+    }
+    Ok(out)
 }
 
 /// What an overlay may be keyed on: an origin, never a selection (C2).
@@ -255,5 +418,107 @@ mod tests {
             },
         );
         assert_eq!(out, s(&["gd"]));
+    }
+
+    #[test]
+    fn a_list_is_read_beside_the_buckets_and_its_terms_are_counted() {
+        let o = Overlay::parse(
+            "overlay",
+            "\
+overlay: site
+version: 1.0.0
+pack: t
+scope: {station: MR1}
+buckets:
+  agents: {add: [clariscan]}
+lists:
+  technique.TSE: {add: [zzturbo], remove: [turbo]}
+cases:
+  - name: c
+    stack: {text_series_description: zzturbo}
+    axes: {technique: TSE}
+",
+        )
+        .unwrap();
+        assert_eq!(o.added_terms(), s(&["clariscan", "zzturbo"]));
+        assert_eq!(o.lists["technique.TSE"].remove, s(&["turbo"]));
+        assert!(o.list_edit("technique", "TSE", "TSE").is_some());
+        assert!(o.list_edit("technique", "SE", "SE").is_none());
+    }
+
+    #[test]
+    fn a_list_alone_is_an_overlay_and_neither_is_not() {
+        let o = Overlay::parse(
+            "overlay",
+            "overlay: s\nversion: 1.0.0\npack: t\nscope: {model: X}\nlists:\n  kind.a: {add: [x]}\ncases:\n  - {name: c, stack: {text_series_description: x}, axes: {kind: a}}\n",
+        )
+        .unwrap();
+        assert!(o.buckets.is_empty());
+        let e = Overlay::parse(
+            "overlay",
+            "overlay: s\nversion: 1.0.0\npack: t\nscope: {model: X}\ncases:\n  - {name: c, stack: {text_series_description: x}, axes: {kind: a}}\n",
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(e.contains("changes nothing"), "{e}");
+    }
+
+    #[test]
+    fn a_list_not_named_axis_dot_value_is_refused() {
+        let e = Overlay::parse(
+            "overlay",
+            "overlay: s\nversion: 1.0.0\npack: t\nscope: {model: X}\nlists:\n  kind: {add: [x]}\ncases:\n  - {name: c, stack: {text_series_description: x}, axes: {kind: a}}\n",
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(e.contains("lists.kind"), "{e}");
+        assert!(e.contains("named axis.value"), "{e}");
+    }
+
+    #[test]
+    fn reaching_for_a_flag_the_order_or_a_window_is_refused_with_why() {
+        for (body, at) in [
+            ("flags:\n  is_x: true\n", "flags"),
+            ("order: [a, b]\n", "order"),
+            ("physics:\n  - {value: a, when: {tr: 1}}\n", "physics"),
+            ("review:\n  low_confidence: 0.1\n", "review"),
+            (
+                "lists:\n  kind.a: {exclusive: is_x}\n",
+                "lists.kind.a.exclusive",
+            ),
+            (
+                "lists:\n  kind.a: {add: [x], confidence: 0.5}\n",
+                "lists.kind.a.confidence",
+            ),
+            (
+                "buckets:\n  agents: {add: [x], order: [x]}\n",
+                "buckets.agents.order",
+            ),
+        ] {
+            let text = format!(
+                "overlay: s\nversion: 1.0.0\npack: t\nscope: {{model: X}}\n{body}cases:\n  - {{name: c, stack: {{text_series_description: x}}, axes: {{kind: a}}}}\n"
+            );
+            let e = Overlay::parse("overlay", &text).err().unwrap().to_string();
+            assert!(e.contains(at), "{at}: {e}");
+            assert!(e.contains("stay the pack's"), "{at}: {e}");
+        }
+        let e = Overlay::parse(
+            "overlay",
+            "overlay: s\nversion: 1.0.0\npack: t\nscope: {model: X}\nlists:\n  kind.a: {add: [x], note: y}\ncases:\n  - {name: c, stack: {text_series_description: x}, axes: {kind: a}}\n",
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(e.contains("says nothing else"), "{e}");
+        let e = Overlay::parse(
+            "overlay",
+            "overlay: s\nversion: 1.0.0\npack: t\nscope: {model: X}\nnote: y\nlists:\n  kind.a: {add: [x]}\ncases:\n  - {name: c, stack: {text_series_description: x}, axes: {kind: a}}\n",
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(e.contains("not something an overlay says"), "{e}");
     }
 }
