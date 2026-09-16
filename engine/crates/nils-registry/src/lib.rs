@@ -18,6 +18,7 @@ use std::str::FromStr;
 pub mod actor;
 pub mod audit;
 pub mod clinical;
+pub mod cohort;
 pub mod day;
 pub mod dialect;
 pub mod home;

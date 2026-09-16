@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 39;
+pub const SCHEMA_VERSION: i64 = 41;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,7 +210,37 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 39,
         apply: a_source_place_is_a_dataset,
     },
+    Migration {
+        version: 40,
+        apply: reserved_for_the_pseudonymise_slice,
+    },
+    Migration {
+        version: 41,
+        apply: a_cohort_is_fed_retired_and_released_under_its_policy,
+    },
 ];
+
+/// Record 26 E2, the pseudonymise slice, numbers its migration 40 and merges
+/// before the cohort slice; this row keeps the numbering whole until then
+/// and is replaced by E2's at the merge.
+fn reserved_for_the_pseudonymise_slice(_store: &mut Store, _kind: Kind) -> Result<(), Error> {
+    Ok(())
+}
+
+/// Record 26 §8, §9 and §13: a membership interval names the batch of the
+/// digest that opened it, a cohort may be retired, and a release records the
+/// leaving policy of each dataset it spanned.
+fn a_cohort_is_fed_retired_and_released_under_its_policy(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "cohort", &["retired_at"])?;
+    add_columns(store, "cohort_member", &["batch_id"])?;
+    add_columns(store, "release", &["policies"])
+}
 
 /// Record 26 §1: a source place is a dataset, with what arrives, its two
 /// trees, its identity rule, what an unmapped identifier does, the cohort it
