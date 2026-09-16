@@ -1598,6 +1598,11 @@ fn routed(
                 .map_err(|(code, m)| Reply::error(code, m))?;
             Ok(Reply::ok(crate::schedule::calendar(registry)))
         }
+        // Record 28: the pseudonymiser's own tag policy, the constants of
+        // this binary and nothing of the registry, so any grant opens it.
+        ["api", "pseudonymize", "tags"] if get => {
+            Ok(Reply::ok(nils_pseudonymize::policy::document()))
+        }
         ["api", "sources"] if get => {
             // the Data page: each source place, its dataset, its digests and
             // totals; `?probe=1` counts the trees again first, since a page
@@ -3176,6 +3181,7 @@ fn capabilities(
         "POST /api/ingest/folders",
         "POST /api/ingest/look",
         "GET /api/sources",
+        "GET /api/pseudonymize/tags",
         "GET /api/places",
         "POST /api/places",
         "PUT /api/places/{id}",
@@ -4373,6 +4379,17 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one id",
             "Rebuilding sessions",
             "Rebuilt sessions",
+        ),
+        // record 28: the constants of the binary, which say nothing of the
+        // registry and cost nothing to read
+        row(
+            "GET /api/pseudonymize/tags",
+            false,
+            false,
+            "free",
+            "one document",
+            "Reading what the pseudonymiser removes",
+            "Read what the pseudonymiser removes",
         ),
     ]
 }
