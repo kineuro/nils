@@ -1159,7 +1159,8 @@ fn handle(
     if path == "/api/events" && method == Method::Get {
         // Display plumbing: the open jobs, every second, until the client
         // goes away. Never the execution context.
-        events(doors, registry, request);
+        let all = query.get("all").is_some_and(|a| a == "1" || a == "true");
+        events(doors, registry, request, all);
         return;
     }
     let caller = doors.auth.caller(&request);
@@ -2178,7 +2179,13 @@ fn routed(
         }
         ["api", "jobs"] if get => {
             let all = query.get("all").is_some_and(|a| a == "1" || a == "true");
-            let jobs = nils_registry::job::list(registry.store(), all, limit).map_err(job_err)?;
+            // the queue's worker is a row of its own kind, and not a job a
+            // person queued or would cancel: listed with ?all only
+            let jobs: Vec<_> = nils_registry::job::list(registry.store(), all, limit)
+                .map_err(job_err)?
+                .into_iter()
+                .filter(|j| all || j.kind != "worker")
+                .collect();
             Ok(Reply::ok(serde_json::json!({
                 "count": jobs.len(),
                 "jobs": jobs.iter().map(nils_registry::job::Job::as_json).collect::<Vec<_>>(),
@@ -2835,7 +2842,7 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
 /// queued names its command line; one the command line claimed names its
 /// verb as its kind, and a kind no door queues is a pipeline's.
 fn cancel_needs(job: &nils_registry::job::Job) -> &'static str {
-    if let Some((grant, _)) = job.argv().as_deref().and_then(verb_needs) {
+    if let Some((grant, _)) = job.queued().as_deref().and_then(verb_needs) {
         return grant;
     }
     match job.kind.as_str() {
@@ -3165,8 +3172,9 @@ fn review_list(
 }
 
 /// `GET /api/events`: server-sent events with the open jobs, every second,
-/// until the client goes away. Display plumbing only.
-fn events(doors: &Doors, registry: &mut Registry, request: Request) {
+/// until the client goes away. Display plumbing only. The queue's worker is
+/// left out unless `?all` asks for it, as `GET /api/jobs` leaves it out.
+fn events(doors: &Doors, registry: &mut Registry, request: Request, all: bool) {
     let caller = match doors.auth.caller(&request) {
         Ok(c) => c,
         Err(reply) => {
@@ -3207,7 +3215,11 @@ fn events(doors: &Doors, registry: &mut Registry, request: Request) {
     let _ = writer.write_all(b"event: hello\ndata: {}\n\n");
     let once = std::env::var("NILS_EVENTS_ONCE").is_ok();
     loop {
-        let jobs = nils_registry::job::list(registry.store(), false, 50).unwrap_or_default();
+        let jobs: Vec<_> = nils_registry::job::list(registry.store(), false, 50)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|j| all || j.kind != "worker")
+            .collect();
         let data = serde_json::json!({
             "epoch": registry.meta().epoch,
             "jobs": jobs.iter().map(nils_registry::job::Job::as_json).collect::<Vec<_>>(),

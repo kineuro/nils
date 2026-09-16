@@ -4261,6 +4261,36 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     );
     assert!(sources["rates"]["digest"].as_f64().is_some(), "{sources}");
 
+    // the jobs read as queued (lab 26, defect 19): the command line the
+    // door located, what ran beside it, and the queue's worker left out
+    // of the list unless asked for
+    let (_, shown) = ask("GET", &format!("/api/jobs/{first}"), None, ops);
+    assert_eq!(shown["args"]["queued"][0], "pseudonymize", "{shown}");
+    assert_eq!(shown["args"]["queued"][2], "--name", "{shown}");
+    assert!(
+        shown["args"]["argv"][0].as_str().unwrap().ends_with("nils"),
+        "what ran: {shown}"
+    );
+    assert_eq!(job["args"]["queued"][0], "classify", "{job}");
+    let (_, open) = ask("GET", "/api/jobs", None, ops);
+    assert!(
+        !open["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["kind"] == "worker"),
+        "{open}"
+    );
+    let (_, every) = ask("GET", "/api/jobs?all=1", None, ops);
+    assert!(
+        every["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["kind"] == "worker"),
+        "{every}"
+    );
+
     // a dry run at the door answers its report as the job's result (lab
     // 26, defect 17)
     let (status, queued) = ask(

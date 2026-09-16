@@ -6382,11 +6382,8 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             if let Some(p) = &j.progress {
                 println!("  progress    {p}");
             }
-            if let Some(argv) = j.argv() {
-                println!(
-                    "  command     nils {}",
-                    argv.iter().skip(1).cloned().collect::<Vec<_>>().join(" ")
-                );
+            if let Some(words) = j.queued() {
+                println!("  command     nils {}", words.join(" "));
             }
             Ok(())
         }

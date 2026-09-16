@@ -168,6 +168,27 @@ fn stamp(store: &Store, column: &str) -> String {
 /// and the id a door answered 202 with is the id whose progress is read.
 pub const ADOPT_VAR: &str = "NILS_JOB_ID";
 
+/// A process's command line as the words after `nils` and its registry:
+/// what a queued command line looks like, so that a job claimed at the
+/// keyboard and one queued at a door read alike under `queued`.
+pub fn words_of(own: &[String]) -> Vec<String> {
+    let mut words: Vec<String> = own.to_vec();
+    if words
+        .first()
+        .is_some_and(|b| b == "nils" || b.ends_with("/nils") || b.ends_with("\\nils.exe"))
+    {
+        words.remove(0);
+    }
+    if words.first().is_some_and(|w| w == "--registry") && words.len() >= 2 {
+        words.drain(..2);
+    } else if let Some(first) = words.first()
+        && first.starts_with("--registry=")
+    {
+        words.remove(0);
+    }
+    words
+}
+
 /// Take the kind, failing what is stale and refusing what is fresh, and
 /// record this run as a running job. Returns the job's id.
 pub fn claim(store: &mut Store, claim: &Claim<'_>) -> Result<i64, Error> {
@@ -232,17 +253,27 @@ pub fn claim(store: &mut Store, claim: &Claim<'_>) -> Result<i64, Error> {
     if !args.is_object() {
         args = serde_json::json!({});
     }
-    args["argv"] = std::env::args().collect::<Vec<String>>().into();
+    // The process's own command line, binary and registry included, under
+    // `argv`: what ran, and what a resume runs. The command line as words
+    // after `nils` and its registry under `queued`: as the door queued it,
+    // or as the keyboard claimed it, which is what a card reads and what a
+    // cancel's grant is found by (lab 26, defect 19).
+    let own: Vec<String> = std::env::args().collect();
+    args["argv"] = own.clone().into();
     if let Some(id) = adopted {
         // Wave 4c §6.1: what the queue recorded beside the command line
-        // (the principal, the roles, the projection flag) survives the
-        // adoption; the verb's own args are laid over it.
+        // (the principal, the roles, the projection flag, the command line
+        // as queued) survives the adoption; the verb's own args are laid
+        // over it.
         if let Some(queued) = show(store, id)?.and_then(|j| j.args.as_object().cloned()) {
             for (k, v) in queued {
                 if args.get(&k).is_none() {
                     args[k] = v;
                 }
             }
+        }
+        if !args["queued"].is_array() {
+            args["queued"] = words_of(&own).into();
         }
         // The row a worker took for this verb: it becomes this run.
         let n = store.update_by_id(
@@ -263,6 +294,7 @@ pub fn claim(store: &mut Store, claim: &Claim<'_>) -> Result<i64, Error> {
             return Ok(id);
         }
     }
+    args["queued"] = words_of(&own).into();
     let rows = store.insert(
         &Insert::new(
             job_t,
@@ -422,13 +454,30 @@ impl Job {
         self.args["principal"].as_str()
     }
 
-    /// The command line the job was started with, if the claim recorded it.
+    /// The command line the job was started with, if the row recorded one:
+    /// the words as queued until a worker's verb adopts the row, then the
+    /// process's own line, binary and registry included, which a resume runs.
     pub fn argv(&self) -> Option<Vec<String>> {
         self.args["argv"].as_array().map(|a| {
             a.iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect()
         })
+    }
+
+    /// The command line as words after `nils` and its registry, as a door
+    /// queued it or the keyboard claimed it, whoever ran it: what a card
+    /// reads. A row from before this was recorded answers its `argv` with
+    /// the binary and the registry taken off.
+    pub fn queued(&self) -> Option<Vec<String>> {
+        let words = |v: &serde_json::Value| {
+            v.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<String>>()
+            })
+        };
+        words(&self.args["queued"]).or_else(|| words(&self.args["argv"]).map(|a| words_of(&a)))
     }
 
     /// Record 26 §7: the command lines queued when this job ends done, the
@@ -598,8 +647,10 @@ pub fn enqueue_with(
         ));
     };
     let now = now_iso();
-    // Wave 4a §9.2: who asked, carried to the verb the worker runs.
-    let mut args = serde_json::json!({ "argv": argv, "principal": principal });
+    // Wave 4a §9.2: who asked, carried to the verb the worker runs; the
+    // command line as queued stays under `queued` once the verb has run
+    // and written its own line over `argv`.
+    let mut args = serde_json::json!({ "argv": argv, "queued": argv, "principal": principal });
     if let Some(more) = extra.as_object() {
         for (k, v) in more {
             args[k] = v.clone();

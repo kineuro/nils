@@ -3082,9 +3082,20 @@ fn nils_jobs_lists_shows_cancels_queues_works_and_resumes() {
     assert_eq!(doc[0]["kind"], "digest", "{doc}");
     assert_eq!(doc[0]["state"], "done", "{doc}");
     let shown = run(&["jobs", "show", &digest_id.to_string()]);
-    assert!(shown.contains("command     nils --registry"), "{shown}");
-    assert!(shown.contains("digest --name a"), "{shown}");
+    // the command line as words after nils and its registry under queued
+    // (lab 26, defect 19); what ran, binary and registry included, is argv
+    assert!(shown.contains("command     nils digest --name a"), "{shown}");
+    assert!(!shown.contains("--registry"), "{shown}");
     assert!(shown.contains("progress"), "{shown}");
+    assert_eq!(doc[0]["args"]["queued"][0], "digest", "{doc}");
+    assert!(
+        doc[0]["args"]["argv"][0]
+            .as_str()
+            .unwrap()
+            .ends_with("nils"),
+        "{doc}"
+    );
+    assert_eq!(doc[0]["args"]["argv"][1], "--registry", "{doc}");
 
     // Queued, listed as queued, cancelled, gone from the queue.
     let queued = run(&[
@@ -3156,7 +3167,18 @@ fn nils_jobs_lists_shows_cancels_queues_works_and_resumes() {
         .iter()
         .find(|j| j["kind"] == "fingerprint" && j["state"] == "done")
         .unwrap();
-    assert!(adopted["args"]["argv"].is_array(), "{adopted}");
+    assert_eq!(
+        adopted["args"]["queued"],
+        serde_json::json!(["fingerprint", "--name", "queued-run"]),
+        "the command line as queued: {adopted}"
+    );
+    assert!(
+        adopted["args"]["argv"][0]
+            .as_str()
+            .unwrap()
+            .ends_with("nils"),
+        "what ran: {adopted}"
+    );
     assert!(adopted["heartbeat_at"].is_string(), "{adopted}");
     // A queued command that fails ends failed with the reason the verb
     // printed, as a job run from the command line records it (lab 26,

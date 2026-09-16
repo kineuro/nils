@@ -133,8 +133,9 @@ paths:
   /api/jobs:
     get:
       summary: The jobs not over, newest first (nils jobs list)
+      description: "Each job's `args.queued` is its command line as queued at a door, or as claimed at the keyboard: the words after `nils` and its registry, whoever ran it, which is what a card reads and a cancel's grant is found by; a chain's steps carry theirs when the step before queues them. `args.argv` is what ran: the words as queued until a worker's verb adopts the row, then the process's own line, binary and registry included. The queue's worker is a row of kind `worker` and no job a person queued or would cancel: it is listed with `all` only."
       parameters:
-        - {name: all, in: query, schema: {type: boolean}, description: The finished ones too}
+        - {name: all, in: query, schema: {type: boolean}, description: The finished ones too, and the queue's worker}
         - {name: limit, in: query, schema: {type: integer, default: 50}}
       responses:
         "200": {description: "{count, jobs}"}
@@ -344,6 +345,8 @@ paths:
   /api/events:
     get:
       summary: Server-sent events with the open jobs and the epoch, every second, for display
+      parameters:
+        - {name: all, in: query, schema: {type: boolean}, description: The queue's worker too, which the stream leaves out otherwise as GET /api/jobs leaves it out}
       responses:
         "200": {description: "text/event-stream: an event hello, then jobs events, each open job as GET /api/jobs/{id} answers it, its `then` and `chain` included"}
   /api/ask/schema:
