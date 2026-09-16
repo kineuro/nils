@@ -41,8 +41,12 @@ pub fn synthetic(store: &mut Store) -> Result<Option<String>, StoreError> {
 /// The summary document.
 pub fn document(registry: &mut Registry, since: Option<&str>) -> Result<Value, StoreError> {
     let epoch = registry.meta().epoch;
-    let window = Scheme::default().window_days;
     let store = registry.store();
+    // record 26: the window the session cache was built under, which is
+    // what every count of sessions here is of; the scheme's own where
+    // nobody has built it yet
+    let window = nils_registry::cohort::built_window(store)?
+        .unwrap_or_else(|| Scheme::default().window_days);
     let d = store.dialect();
     let q = |t: &str| store.qualified(t);
     let (subject, session, stack, series, study, member, cohort, class, handle, release, batch) = (

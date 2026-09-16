@@ -233,6 +233,9 @@ fn a_digest_of_a_dataset_feeds_its_cohort_and_review_reads_by_cohort() {
     assert_eq!(fed["name"], "fed", "{fed}");
     assert_eq!(fed["subjects"], 1, "{fed}");
     assert_eq!(fed["stacks"], 2, "{fed}");
+    // record 26 §9: the sessions of the members, out of the cache a person
+    // built; the two studies are two sessions under the default window
+    assert_eq!(fed["sessions"], 2, "{fed}");
     assert_eq!(fed["feeds"], serde_json::json!(["ds"]), "{fed}");
     assert_eq!(fed["from"]["kind"], "source", "{fed}");
     assert_eq!(fed["from"]["detail"]["dataset"], "ds", "{fed}");
@@ -321,6 +324,20 @@ fn a_digest_of_a_dataset_feeds_its_cohort_and_review_reads_by_cohort() {
     assert_eq!(report["joined"]["subjects"], 0, "{report}");
     assert_eq!(report["joined"]["met"], 1, "{report}");
     assert_eq!(report["joined"]["created"], false, "{report}");
+
+    // record 26 §9: with the cache emptied, a cohort answers no number of
+    // sessions rather than none of them, since building it is a person's act
+    {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .execute("DELETE FROM session_cache_study", &[])
+            .unwrap();
+        store.execute("DELETE FROM session_cache", &[]).unwrap();
+    }
+    let listed: serde_json::Value =
+        serde_json::from_str(&ok(&home, &["clinical", "cohort", "list", "--json"])).unwrap();
+    assert!(listed[0]["sessions"].is_null(), "{listed}");
 }
 
 #[test]

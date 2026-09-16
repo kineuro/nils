@@ -17,7 +17,6 @@ use crate::audit::{self, Action, Entry};
 use crate::home::Registry;
 use crate::place::{self, Role};
 use crate::schema::{Type, table};
-use crate::session::Scheme;
 use crate::store::{Error as StoreError, Insert, Param, Store};
 use crate::time::now_iso;
 
@@ -1213,9 +1212,25 @@ fn joins_of(intervals: &[Interval]) -> Vec<Value> {
         .collect()
 }
 
-/// The counts of a cohort's open members: subjects, sessions under the
-/// default window, stacks.
-fn counts_of(store: &mut Store, cohort_id: i64) -> Result<(i64, i64, i64), StoreError> {
+/// The window the session cache was built under, which is the window every
+/// count of sessions is of: none where the cache holds nothing, since
+/// building it is a person's act and a cohort whose sessions nobody has
+/// derived has no answer rather than none of them.
+pub fn built_window(store: &mut Store) -> Result<Option<i64>, StoreError> {
+    let sql = format!(
+        "SELECT window_days FROM {} GROUP BY window_days ORDER BY COUNT(*) DESC, window_days ASC",
+        store.qualified("session_cache")
+    );
+    match store.query(&sql, &[])?.first() {
+        Some(r) => Ok(Some(r.int(0)?)),
+        None => Ok(None),
+    }
+}
+
+/// The counts of a cohort's open members: subjects, the sessions the cache
+/// holds for them under the window it was built with, stacks. The sessions
+/// are none where the cache is empty.
+fn counts_of(store: &mut Store, cohort_id: i64) -> Result<(i64, Option<i64>, i64), StoreError> {
     let d = store.dialect();
     let member = store.qualified("cohort_member");
     let current = format!(
@@ -1227,19 +1242,24 @@ fn counts_of(store: &mut Store, cohort_id: i64) -> Result<(i64, i64, i64), Store
         &[Param::Int(cohort_id)],
     )?[0]
         .int(0)?;
-    let sessions = store.query(
-        &format!(
-            "SELECT COUNT(DISTINCT sc.id) FROM {} sc WHERE sc.window_days = {} \
-                 AND sc.subject_id IN (SELECT m.subject_id FROM {current})",
-            store.qualified("session_cache"),
-            d.param(2, Type::Int),
+    // the window is written into the text rather than bound: a placeholder
+    // on SQLite is positional, so a second parameter before the first in
+    // the text takes the first one's value, which asked every cohort for
+    // the sessions of the cohort whose id is the window
+    let sessions = match built_window(store)? {
+        None => None,
+        Some(window) => Some(
+            store.query(
+                &format!(
+                    "SELECT COUNT(DISTINCT sc.id) FROM {} sc WHERE sc.window_days = {window} \
+                     AND sc.subject_id IN (SELECT m.subject_id FROM {current})",
+                    store.qualified("session_cache"),
+                ),
+                &[Param::Int(cohort_id)],
+            )?[0]
+                .int(0)?,
         ),
-        &[
-            Param::Int(cohort_id),
-            Param::Int(Scheme::default().window_days),
-        ],
-    )?[0]
-        .int(0)?;
+    };
     let stacks = store.query(
         &format!(
             "SELECT COUNT(DISTINCT st.id) FROM {} st JOIN {} se ON se.id = st.series_id \

@@ -53,8 +53,11 @@ fn held(store: &mut Store, place_id: i64) -> Result<Value, StoreError> {
 /// The sources document: each active source place with its digests, the
 /// newest `recent` of them in full, and its totals.
 pub fn document(registry: &mut Registry, recent: usize) -> Result<Value, StoreError> {
-    let window = Scheme::default().window_days;
     let store = registry.store();
+    // record 26: the sessions counted are the ones the cache holds, under
+    // the window it was built with; the scheme's own where it is empty
+    let window = nils_registry::cohort::built_window(store)?
+        .unwrap_or_else(|| Scheme::default().window_days);
     let places: Vec<Place> = place::list(store)?
         .into_iter()
         .filter(|p| p.role == Role::Source && p.retired_at.is_none())
