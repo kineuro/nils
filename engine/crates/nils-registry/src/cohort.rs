@@ -124,7 +124,7 @@ pub fn all(store: &mut Store) -> Result<Vec<Cohort>, StoreError> {
 
 /// Whether a selection is named so (Wave 4b §8.2): the two namespaces are
 /// one, since `@name` selects either.
-fn selection_named(store: &mut Store, name: &str) -> Result<bool, StoreError> {
+pub fn selection_named(store: &mut Store, name: &str) -> Result<bool, StoreError> {
     let d = store.dialect();
     let sql = format!(
         "SELECT 1 FROM {} WHERE name = {}",
@@ -281,8 +281,9 @@ pub fn join(
     Ok(added)
 }
 
-/// Insert the cohort row, inside the caller's transaction.
-fn insert_cohort(
+/// Insert the cohort row, inside the caller's transaction; the caller has
+/// checked the name is free and audits the making.
+pub fn insert(
     store: &mut Store,
     name: &str,
     owner: &str,
@@ -326,7 +327,7 @@ pub fn create(
         return Err(Error::Taken(name.to_string()));
     }
     store.begin()?;
-    let id = match insert_cohort(store, name, owner, description) {
+    let id = match insert(store, name, owner, description) {
         Ok(id) => id,
         Err(e) => return rolled_back(registry, e),
     };
@@ -660,7 +661,7 @@ pub fn feed(
     let description = format!("fed by the dataset {dataset}");
     let (cohort_id, created) = match &existing {
         Some(c) => (c.id, false),
-        None => match insert_cohort(store, name, actor, Some(&description)) {
+        None => match insert(store, name, actor, Some(&description)) {
             Ok(id) => (id, true),
             Err(e) => return rolled_back(registry, e),
         },

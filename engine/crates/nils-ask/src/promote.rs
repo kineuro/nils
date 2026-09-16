@@ -1,21 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Promotion (§8.3): from ask to fact, one way. A complete, never
-//! truncated, subject grain handle opens membership intervals recording
-//! the handle id, its epoch, scheme digest and parameters as bound, the
-//! ask hash and the selection version, and writes the cohort id onto the
-//! selection. Re-promotion appends and never edits; the tool reports when
-//! a promoted cohort's source ask has moved.
+//! truncated handle opens membership intervals recording the handle id,
+//! its epoch, scheme digest and parameters as bound, the ask hash and the
+//! selection version, and writes the cohort id onto the selection.
+//! Re-promotion appends and never edits; the tool reports when a promoted
+//! cohort's source ask has moved. Record 26 §9: a handle at session or
+//! stack grain promotes too, filing the distinct subjects of its rows, the
+//! grain and the row count recorded on the intervals.
 
 use std::collections::BTreeSet;
 use std::fmt;
 
+use nils_registry::Param;
 use nils_registry::audit::{self, Action, Entry};
+use nils_registry::cohort::{self, Opened};
 use nils_registry::home::Registry;
 use nils_registry::schema::{Type, table};
-use nils_registry::store::{Error as StoreError, Store};
-use nils_registry::time::now_iso;
-use nils_registry::{Insert, Param};
+use nils_registry::store::Error as StoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -27,6 +29,8 @@ pub enum PromoteError {
     Store(StoreError),
     Handle(HandleError),
     NoSuchCohort(String),
+    /// The name is a selection's (Wave 4b §8.2), or the cohort is retired.
+    Refused(String),
     Message(String),
 }
 
@@ -38,6 +42,7 @@ impl fmt::Display for PromoteError {
             PromoteError::NoSuchCohort(n) => {
                 write!(f, "no cohort named {n}; pass create to open one")
             }
+            PromoteError::Refused(m) => f.write_str(m),
             PromoteError::Message(m) => f.write_str(m),
         }
     }
@@ -64,6 +69,12 @@ pub struct Promoted {
     pub cohort_id: i64,
     pub cohort: String,
     pub created: bool,
+    /// The handle's grain; the subjects of its rows are what joined.
+    #[serde(default)]
+    pub grain: String,
+    /// The handle's rows, of which `added + already` distinct subjects.
+    #[serde(default)]
+    pub rows: i64,
     /// Intervals opened.
     pub added: usize,
     /// Subjects already members with an open interval.
@@ -92,21 +103,10 @@ struct Applied {
     selection: Option<Matched>,
 }
 
-fn cohort_by_name(store: &mut Store, name: &str) -> Result<Option<i64>, StoreError> {
-    let d = store.dialect();
-    let sql = format!(
-        "SELECT id FROM {} WHERE name = {}",
-        store.qualified("cohort"),
-        d.param(1, Type::Text)
-    );
-    store
-        .query_opt(&sql, &[Param::from(name)])?
-        .map(|r| r.int(0))
-        .transpose()
-}
-
 /// Promote a handle's subjects into a cohort, opening one so named when
-/// asked. A judgement changing act: the epoch advances.
+/// asked. A judgement changing act: the epoch advances. A subject grain
+/// handle's keys are its subjects; a session or stack grain handle's rows
+/// each name their subject, and the distinct subjects join (record 26 §9).
 pub fn promote(
     registry: &mut Registry,
     handle_id: i64,
@@ -119,7 +119,7 @@ pub fn promote(
     if h.withdrawn_at.is_some() {
         return Err(HandleError::Withdrawn(handle_id).into());
     }
-    if h.grain != Grain::Subject {
+    if !matches!(h.grain, Grain::Subject | Grain::Session | Grain::Stack) {
         return Err(HandleError::Grain {
             id: handle_id,
             grain: h.grain,
@@ -132,48 +132,40 @@ pub fn promote(
     if !h.has_rows() {
         return Err(HandleError::Expired(handle_id).into());
     }
+    // a subject handle's keys are its subjects; a session's or a stack's
+    // rows each name their subject
     let subjects: Vec<i64> = handle::keys(registry.store(), handle_id)?
         .into_iter()
-        .map(|(k, s)| s.unwrap_or(k))
+        .filter_map(|(k, s)| match h.grain {
+            Grain::Subject => Some(s.unwrap_or(k)),
+            _ => s,
+        })
         .collect::<BTreeSet<i64>>()
         .into_iter()
         .collect();
     let ask_hash = h.ask_hash();
-    let now = now_iso();
     let store = registry.store();
+    let existing = cohort::by_name(store, cohort)?;
+    if let Some(c) = &existing
+        && c.retired_at.is_some()
+    {
+        return Err(PromoteError::Refused(format!(
+            "cohort {cohort} is retired; bring it back before promoting into it"
+        )));
+    }
+    if existing.is_none() && create && cohort::selection_named(store, cohort)? {
+        return Err(PromoteError::Refused(format!(
+            "{cohort} is a selection's name; a cohort cannot be named so (Wave 4b section 8.2)"
+        )));
+    }
     store.begin()?;
     let result = (|| -> Result<Applied, PromoteError> {
-        let (cohort_id, created) = match cohort_by_name(store, cohort)? {
-            Some(id) => (id, false),
-            None if create => {
-                let rows = store.insert(
-                    &Insert::new(table("cohort"), &["name", "owner", "created_at"])
-                        .returning(&["id"]),
-                    &[vec![
-                        Param::from(cohort),
-                        Param::from(actor),
-                        Param::from(now.as_str()),
-                    ]],
-                )?;
-                let id = rows
-                    .first()
-                    .ok_or_else(|| PromoteError::Message("the cohort was not written back".into()))?
-                    .int(0)?;
-                (id, true)
-            }
+        let (cohort_id, created) = match &existing {
+            Some(c) => (c.id, false),
+            None if create => (cohort::insert(store, cohort, actor, None)?, true),
             None => return Err(PromoteError::NoSuchCohort(cohort.to_string())),
         };
         let d = store.dialect();
-        let sql = format!(
-            "SELECT subject_id FROM {} WHERE cohort_id = {} AND left_at IS NULL",
-            store.qualified("cohort_member"),
-            d.param(1, Type::Int)
-        );
-        let open: BTreeSet<i64> = store
-            .query(&sql, &[Param::Int(cohort_id)])?
-            .iter()
-            .map(|r| r.int(0))
-            .collect::<Result<_, _>>()?;
         // the selection whose version holds this ask, if any
         let selection = match &ask_hash {
             Some(hash) => {
@@ -198,52 +190,30 @@ pub fn promote(
             }
             None => None,
         };
-        let params_json = h.params.to_string();
-        let rows: Vec<Vec<Param>> = subjects
-            .iter()
-            .filter(|s| !open.contains(s))
-            .map(|s| {
-                vec![
-                    Param::Int(cohort_id),
-                    Param::Int(*s),
-                    Param::from(now.as_str()),
-                    Param::from(actor),
-                    Param::from("promotion"),
-                    Param::Int(handle_id),
-                    Param::Int(h.epoch),
-                    h.scheme_digest.as_deref().map_or(Param::Null, Param::from),
-                    Param::from(params_json.as_str()),
-                    ask_hash.as_deref().map_or(Param::Null, Param::from),
-                    selection
-                        .as_ref()
-                        .map_or(Param::Null, |m| Param::Int(m.version as i64)),
-                    reason.map_or(Param::Null, Param::from),
-                ]
-            })
-            .collect();
-        let added = rows.len();
-        for chunk in rows.chunks(500) {
-            store.insert(
-                &Insert::new(
-                    table("cohort_member"),
-                    &[
-                        "cohort_id",
-                        "subject_id",
-                        "joined_at",
-                        "actor",
-                        "source",
-                        "handle_id",
-                        "epoch",
-                        "scheme_digest",
-                        "params",
-                        "ask_hash",
-                        "selection_version",
-                        "reason",
-                    ],
-                ),
-                chunk,
-            )?;
-        }
+        // record 26 §9: the grain and the row count beside the parameters
+        // as bound, so an interval says what kind of answer opened it
+        let params = json!({
+            "grain": h.grain.name(),
+            "rows": h.row_count,
+            "ask": h.params,
+        });
+        let added = cohort::join(
+            store,
+            cohort_id,
+            &subjects,
+            actor,
+            &Opened {
+                source: "promotion",
+                handle_id: Some(handle_id),
+                epoch: Some(h.epoch),
+                scheme_digest: h.scheme_digest.as_deref(),
+                params: Some(params),
+                ask_hash: ask_hash.as_deref(),
+                selection_version: selection.as_ref().map(|m| m.version as i64),
+                reason,
+                ..Opened::default()
+            },
+        )?;
         if let Some(m) = &selection {
             store.update_by_id(
                 table("selection"),
@@ -300,6 +270,8 @@ pub fn promote(
             job_id: None,
             details: Some(json!({
                 "reason": reason,
+                "grain": h.grain.name(),
+                "rows": h.row_count,
                 "ask_hash": ask_hash,
                 "selection": selection.as_ref().map(|m| json!({"name": m.name, "version": m.version})),
             })),
@@ -318,6 +290,8 @@ pub fn promote(
         cohort_id,
         cohort: cohort.to_string(),
         created,
+        grain: h.grain.name().to_string(),
+        rows: h.row_count,
         added,
         already,
         ask_hash,

@@ -473,7 +473,7 @@ fn a_capped_run_is_truncated_and_a_token_with_no_grant_is_refused() {
     assert!(ran["content_hash"].is_null(), "{ran}");
     assert_eq!(ran["row_count"], 3);
     // the promotion of a truncated handle is refused before it is queued? No: the
-    // job refuses it; the door needs release:work
+    // job refuses it; the door needs data:work (record 26 section 9)
     let handle = ran["handle"].as_i64().unwrap();
     let (status, doc) = server.request(
         "POST",
@@ -482,7 +482,7 @@ fn a_capped_run_is_truncated_and_a_token_with_no_grant_is_refused() {
         reader,
     );
     assert_eq!(status, 403, "{doc}");
-    assert!(doc["error"].as_str().unwrap().contains("release:work"));
+    assert!(doc["error"].as_str().unwrap().contains("data:work"));
     // a token with no grant is refused at every door, and says so
     let (status, doc) = server.request(
         "GET",
