@@ -830,12 +830,13 @@ pub fn release_held(registry: &mut Store, lookups: &[Vec<u8>]) -> Result<u64, Er
     let now = now_iso();
     let mut n = 0u64;
     for chunk in lookups.chunks(crate::store::SQLITE_KEY_CHUNK) {
-        // the stamp as text, so the column's own type takes it on either
-        // backend
+        // the stamp is written as text; the timestamp placeholder casts it
+        // on Postgres, where a bare placeholder would take the column's
+        // type and refuse the text
         let sql = format!(
             "UPDATE {} SET released_at = {} {}",
             registry.qualified(HELD_TABLE),
-            registry.dialect().param(1, Type::Text),
+            registry.dialect().param(1, Type::Timestamp),
             held_where(registry, 2, chunk.len())
         );
         let mut params: Vec<Param> = vec![Param::from(now.as_str())];
