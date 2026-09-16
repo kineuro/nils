@@ -586,6 +586,23 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         &["kept", "vaulted", "purged"],
         "kept",
     )?;
+    // The place a vault put the originals in, by name: null until one has,
+    // and on a dataset whose originals were purged. [`set_originals`]
+    // writes it when the job succeeds; a declaration that does not name it
+    // keeps what is in force. The path it went to and when are the audit
+    // row's and the job's result; a page wants the place.
+    let originals_vault = match doc.get("originals_vault") {
+        Some(Value::Null) => Value::Null,
+        Some(Value::String(s)) => Value::String(s.clone()),
+        Some(other) => {
+            return Err(format!(
+                "originals_vault is the name of the place a vault put the originals in, or null, not {other}"
+            ));
+        }
+        None => current
+            .map(|c| c["originals_vault"].clone())
+            .unwrap_or(Value::Null),
+    };
     Ok(json!({
         "arrives": arrives,
         "trees": {"originals": originals, "anon": anon},
@@ -594,6 +611,7 @@ pub fn dataset_of(doc: &Value, current: Option<&Value>) -> Result<Value, String>
         "cohort": cohort,
         "tags": tags,
         "originals_kept": originals_kept,
+        "originals_vault": originals_vault,
     }))
 }
 
@@ -686,6 +704,33 @@ pub fn set_dataset(store: &mut Store, id: i64, dataset: &Value) -> Result<Place,
         )));
     }
     let checked = dataset_of(dataset, None).map_err(Error::Message)?;
+    set_json(store, id, "dataset", &checked)
+}
+
+/// Record 26 §1: what became of a dataset's originals, written by the act
+/// that did it and by nothing else. `kept` is what every dataset carries
+/// until a vault or a purge job succeeds; a vault records where it put
+/// them, a purge records nothing. The rest of the dataset is kept as it
+/// stands.
+pub fn set_originals(
+    store: &mut Store,
+    id: i64,
+    kept: &str,
+    vault: Option<&str>,
+) -> Result<Place, Error> {
+    let current = show(store, id)?.ok_or_else(|| Error::Message(format!("no place {id}")))?;
+    if current.role != Role::Source {
+        return Err(Error::Message(format!(
+            "a dataset is a source place; {} is a {} place",
+            current.name,
+            current.role.name()
+        )));
+    }
+    let asked = json!({
+        "originals_kept": kept,
+        "originals_vault": vault,
+    });
+    let checked = dataset_of(&asked, Some(&current.dataset)).map_err(Error::Message)?;
     set_json(store, id, "dataset", &checked)
 }
 
@@ -848,6 +893,7 @@ mod tests {
                 "cohort": null,
                 "tags": {"keep_demographics": true, "remove": [], "keep": []},
                 "originals_kept": "kept",
+                "originals_vault": null,
             })
         );
         assert_eq!(dataset_of(&json!({}), None).unwrap(), default_dataset(None));
@@ -902,6 +948,10 @@ mod tests {
                 "true or false",
             ),
             (json!({"originals_kept": "lost"}), "kept, vaulted, purged"),
+            (
+                json!({"originals_vault": {"place": "archive"}}),
+                "originals_vault is the name",
+            ),
         ] {
             let why = dataset_of(&doc, None).unwrap_err();
             assert!(why.contains(what), "{doc}: {why}");
@@ -927,6 +977,16 @@ mod tests {
         let after = dataset_of(&json!({"tags": {"keep": ["0008,0080"]}}), Some(&before)).unwrap();
         assert_eq!(after["tags"]["remove"], json!(["0010,1010"]));
         assert_eq!(after["tags"]["keep"], json!(["0008,0080"]));
+        // what a vault recorded of the originals survives a change that
+        // does not name it
+        let vaulted = dataset_of(
+            &json!({"originals_kept": "vaulted", "originals_vault": "archive"}),
+            Some(&before),
+        )
+        .unwrap();
+        let after = dataset_of(&json!({"cohort": "ms2"}), Some(&vaulted)).unwrap();
+        assert_eq!(after["originals_kept"], "vaulted");
+        assert_eq!(after["originals_vault"], "archive");
         // the trees are kept until the engine sets them again
         let after = dataset_of(
             &json!({"arrives": "deidentified"}),

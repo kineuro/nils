@@ -40,6 +40,7 @@ mod grants;
 mod linkage_doors;
 mod login;
 mod mcp;
+mod originals;
 mod places;
 mod profile;
 mod pyramid;
@@ -750,6 +751,27 @@ enum PlaceCommand {
         fast: Option<bool>,
         #[command(flatten)]
         dataset: DatasetFlags,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What becomes of a dataset's originals (record 26): vault them into a
+    /// backup place, or purge them. What the act would do is printed
+    /// first; with neither flag that is all it does
+    Originals {
+        /// The dataset, by the name of its source place
+        name: String,
+        /// Move the originals into another place, which keeps them
+        #[arg(long)]
+        vault: bool,
+        /// Delete the originals, which keeps nothing
+        #[arg(long, conflicts_with = "vault")]
+        purge: bool,
+        /// The backup place a vault moves them to
+        #[arg(long, value_name = "PLACE")]
+        into: Option<String>,
+        /// Why, in a sentence, which the audit row keeps
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -2377,6 +2399,75 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     println!("  {line}");
                 }
                 show_layout(&layout);
+            }
+            Ok(())
+        }
+        PlaceCommand::Originals {
+            name,
+            vault,
+            purge,
+            into,
+            why,
+            json,
+        } => {
+            use crate::originals::Act;
+            let name = name.trim_start_matches('@').to_string();
+            let dataset =
+                match place::by_name(registry.store(), &name).map_err(|e| fail(e.to_string()))? {
+                    Some(p) if p.role == Role::Source && p.retired_at.is_none() => p,
+                    _ => {
+                        return Err(usage(format!(
+                            "{name} is not a dataset; nils place list shows the source places"
+                        )));
+                    }
+                };
+            // what the door answers, worked out before anything is acted on
+            let surveyed =
+                originals::survey(&mut registry, &dataset).map_err(|e| fail(e.to_string()))?;
+            let asked = match (vault, purge) {
+                (true, _) => Some(Act::Vault),
+                (_, true) => Some(Act::Purge),
+                _ => None,
+            };
+            let Some(act) = asked else {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&surveyed.as_json()).unwrap_or_default()
+                    );
+                } else {
+                    print!("{}", originals::as_text(&dataset, &surveyed));
+                }
+                return Ok(());
+            };
+            if !json {
+                print!("{}", originals::as_text(&dataset, &surveyed));
+            }
+            let cancel = stop_on_signal()?;
+            let done = originals::run(
+                &mut registry,
+                &dataset,
+                act,
+                into.as_deref(),
+                why.as_deref().unwrap_or_default(),
+                &actor(),
+                &cancel,
+            )
+            .map_err(|r| Exit {
+                code: if r.status == 400 { USAGE } else { FAILED },
+                message: r.message,
+            })?;
+            if json {
+                let doc = serde_json::json!({"survey": surveyed.as_json(), "done": done.as_json()});
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+            } else {
+                print!("{}", originals::done_text(&dataset, &done));
+            }
+            if done.cancelled {
+                return Err(Exit {
+                    code: STOPPED,
+                    message: "stopped: what was done stays done; run it again to go on".into(),
+                });
             }
             Ok(())
         }

@@ -108,6 +108,7 @@ fn source(
         "cohort",
         "tags",
         "originals_kept",
+        "originals_vault",
     ] {
         doc[key] = doc["dataset"][key].clone();
     }

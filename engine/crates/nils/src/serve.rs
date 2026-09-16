@@ -1675,6 +1675,69 @@ fn routed(
                 "bindings": crate::places::bindings_doc(),
             })))
         }
+        ["api", "places", _, "originals"] if get => {
+            // record 26 §1: what a vault or a purge would do, without doing
+            // it. Every original is checked against the pseudonymised tree
+            // exactly as a purge checks it, so this answer costs what a
+            // purge costs and is never read off the rows alone.
+            let id = id_at(2)?;
+            let dataset = crate::originals::dataset_at(registry.store(), id)
+                .map_err(|r| Reply::error(r.status, r.message))?;
+            let surveyed = crate::originals::survey(registry, &dataset)
+                .map_err(|e| Reply::error(500, e.to_string()))?;
+            Ok(Reply::ok(surveyed.as_json()))
+        }
+        ["api", "places", _, "originals"] if post => {
+            // record 26 §1: the act itself, as an `originals` job. What can
+            // be known without reading every file is refused here in words;
+            // the job asks again when it runs and refuses in the same words.
+            let id = id_at(2)?;
+            let dataset = crate::originals::dataset_at(registry.store(), id)
+                .map_err(|r| Reply::error(r.status, r.message))?;
+            let doc = json_body(body)?;
+            let asked = doc["do"].as_str().unwrap_or_default();
+            let act = crate::originals::Act::parse(asked)
+                .ok_or_else(|| Reply::error(400, format!("do is vault or purge, not {asked:?}")))?;
+            let why = doc["why"]
+                .as_str()
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .ok_or_else(|| {
+                    Reply::error(400, "why: a sentence saying why, which the audit row keeps")
+                })?;
+            let into = doc["into"]
+                .as_str()
+                .map(str::trim)
+                .filter(|i| !i.is_empty());
+            crate::originals::check(registry, &dataset, act, into)
+                .map_err(|r| Reply::error(r.status, r.message))?;
+            let mut command = vec![
+                "place".to_string(),
+                "originals".to_string(),
+                dataset.name.clone(),
+                format!("--{}", act.name()),
+            ];
+            if let Some(into) = into {
+                command.extend(["--into".to_string(), into.to_string()]);
+            }
+            command.extend(["--why".to_string(), why.to_string()]);
+            let job = nils_registry::job::enqueue_with(
+                registry.store(),
+                &command,
+                Some(&dataset.name),
+                Some(principal),
+                queued_by(caller),
+            )
+            .map_err(job_err)?;
+            Ok(Reply::accepted(serde_json::json!({
+                "job": job,
+                "state": "queued",
+                "do": act.name(),
+                "place": dataset.name,
+                "into": into,
+                "command": command,
+            })))
+        }
         ["api", "places"] if post => {
             use nils_registry::place::{self, Role as PlaceRole};
             let doc = json_body(body)?;
@@ -2239,6 +2302,14 @@ fn routed(
                     "linkage import and linkage merge are the linkage verbs the door queues",
                 ));
             }
+            // Record 26 §1: of the place verbs only the acts on a dataset's
+            // originals are jobs; the rest declare a place and are not.
+            if command[0] == "place" && command.get(1).map(String::as_str) != Some("originals") {
+                return Err(Reply::error(
+                    400,
+                    "place originals is the place verb the door queues",
+                ));
+            }
             // Record 26 §7: the chain, `then: [command, ...]`, each a
             // command line queued when the one before ends done; and
             // `bring-in @dataset`, which stands for the thread of a
@@ -2711,6 +2782,9 @@ const QUEUEABLE: &[&str] = &[
     // whole thread of one as a chain.
     "pseudonymize",
     "bring-in",
+    // Record 26 §1: `place originals`, the acts on a dataset's originals;
+    // no other place verb is a job.
+    "place",
     "fingerprint",
     "classify",
     "pick",
@@ -2783,6 +2857,11 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("GET", ["api", "sources" | "packs" | "batches"])
         | ("GET", ["api", "packs" | "batches", _]) => (Need::One("data:see"), Plain),
         ("GET", ["api", "places"]) => (Need::AnyOf(&["data:see", "places:see"]), Plain),
+        // record 26 §1: what becomes of a dataset's originals. What an act
+        // would do is Data reading; the acts themselves move and delete
+        // identified files, so they are Data work at detail sensitive.
+        ("GET", ["api", "places", _, "originals"]) => (Need::One("data:see"), Plain),
+        ("POST", ["api", "places", _, "originals"]) => (Need::One("data:work"), Detail::Sensitive),
         ("POST", ["api", "ingest", "folders" | "look" | "probe"]) => {
             (Need::One("data:work"), Plain)
         }
@@ -2855,6 +2934,9 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
         // what a cancel of it needs
         ("pseudonymize", _) => ("data:work", Detail::Sensitive),
         ("bring-in", _) => ("data:work", Detail::Plain),
+        // record 26 §1: vaulting or purging a dataset's originals moves and
+        // deletes the identified files themselves
+        ("place", Some("originals")) => ("data:work", Detail::Sensitive),
         // a linkage import reads the identifiers it links
         ("linkage", _) => ("data:work", Detail::Sensitive),
         ("release" | "handover", _) => ("release:work", Detail::Plain),
@@ -2878,7 +2960,7 @@ fn cancel_needs(job: &nils_registry::job::Job) -> &'static str {
     }
     match job.kind.as_str() {
         "digest" | "ingest" | "pseudonymize" | "bring-in" | "linkage" | "linkage-purge"
-        | "clinical-import" => "data:work",
+        | "clinical-import" | "originals" | "place" => "data:work",
         "release" | "handover" => "release:work",
         "backup" | "verify" => "database:work",
         "ask" if job.args["cohort"].is_string() => "data:work",
@@ -3087,6 +3169,8 @@ fn capabilities(
         "GET /api/places",
         "POST /api/places",
         "PUT /api/places/{id}",
+        "GET /api/places/{id}/originals",
+        "POST /api/places/{id}/originals",
         "GET /api/backups",
         "PUT /api/backups/schedule",
         "GET /api/settings",
@@ -3348,9 +3432,15 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
     // originals, `@name/originals`, are the pseudonymiser's alone
     let roots = crate::dataset::roots(store, &doors.ingest_roots);
     let digests = verb == "digest";
-    // record 26 §3: the pseudonymiser reads a dataset by its name, both
-    // trees at once, so `@name` stays a name for it
-    let by_name = verb == "pseudonymize";
+    // record 26 §3 and §1: the pseudonymiser reads a dataset by its name,
+    // both trees at once, and an act on a dataset's originals names it the
+    // same way, so `@name` stays a name for them
+    let by_name = verb == "pseudonymize"
+        || (verb == "place" && command.get(1).is_some_and(|c| c == "originals"));
+    let named = match command.get(1) {
+        Some(second) if verb == "place" => format!("{verb} {second}"),
+        _ => verb.to_string(),
+    };
     let mut out = Vec::with_capacity(command.len());
     for arg in command {
         if let Some(rest) = arg.strip_prefix('@') {
@@ -3368,7 +3458,7 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
                 if root.place.is_none() || !rel.is_empty() {
                     return Err(Reply::error(
                         400,
-                        format!("pseudonymize takes a dataset as @name; @{name} is not one"),
+                        format!("{named} takes a dataset as @name; @{name} is not one"),
                     ));
                 }
                 out.push(arg);
@@ -3805,6 +3895,24 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one place",
             "Changing a place",
             "Changed a place",
+        ),
+        row(
+            "GET /api/places/{id}/originals",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading what an act on the originals would do",
+            "Read what an act on the originals would do",
+        ),
+        row(
+            "POST /api/places/{id}/originals",
+            true,
+            false,
+            "job",
+            "one job",
+            "Acting on a dataset's originals",
+            "Acted on a dataset's originals",
         ),
         row(
             "GET /api/linkage/types",

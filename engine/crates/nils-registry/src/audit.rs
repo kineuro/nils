@@ -72,6 +72,12 @@ pub enum Action {
     /// Record 26 §6: an alias subject merged into a canonical one, which
     /// moves every row of the alias and so the epoch.
     SubjectMerge,
+    /// Record 26 §1: a dataset's originals moved into another place, and a
+    /// dataset's originals deleted. What the row holds is the shape of the
+    /// act: the dataset, where they went, how many files and bytes, and
+    /// the reason the person gave.
+    OriginalsVault,
+    OriginalsPurge,
 }
 
 impl Action {
@@ -111,6 +117,8 @@ impl Action {
             Action::SettingsSet => "settings.set",
             Action::BackupSchedule => "backup.schedule",
             Action::SubjectMerge => "subject.merge",
+            Action::OriginalsVault => "originals.vault",
+            Action::OriginalsPurge => "originals.purge",
         }
     }
 

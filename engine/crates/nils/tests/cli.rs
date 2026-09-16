@@ -4266,6 +4266,119 @@ fn a_backup_with_no_directory_goes_to_the_place_the_registry_names() {
     assert!(vault.path().join(archive).exists(), "{manifest}");
 }
 
+/// Record 26 section 1 at the keyboard: `nils place originals` says what an
+/// act would do before it acts, refuses a purge in words and writes
+/// nothing, and vaults the originals into a backup place, which the dataset
+/// then records and the audit log keeps.
+#[test]
+fn a_dataset_s_originals_are_surveyed_then_vaulted_at_the_keyboard() {
+    let home = home();
+    let dir = TempDir::new("cli-originals");
+    dir.file("sub-1/IM_0001", &identified("P1", 1, 1));
+    let vault = TempDir::new("cli-originals-vault");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let original = dir.path().join("derivatives/dcm-original/sub-1/IM_0001");
+
+    let added = nils()
+        .args(registry)
+        .args(["place", "add", "ds"])
+        .arg(dir.path())
+        .args(["--role", "source", "--arrives", "identified"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr(&added));
+    let added = nils()
+        .args(registry)
+        .args(["place", "add", "vault"])
+        .arg(vault.path())
+        .args(["--role", "backup"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    // with neither flag, what the door answers and nothing done
+    let said = nils()
+        .args(registry)
+        .args(["place", "originals", "ds"])
+        .output()
+        .unwrap();
+    assert!(said.status.success(), "{}", stderr(&said));
+    let text = stdout(&said);
+    assert!(text.contains("originals of ds   kept"), "{text}");
+    assert!(text.contains("files            1"), "{text}");
+    assert!(text.contains("verified         0 of 1"), "{text}");
+    assert!(text.contains("purge            is refused:"), "{text}");
+    assert!(original.is_file());
+
+    // a purge is refused in the same words, and writes nothing
+    let refused = nils()
+        .args(registry)
+        .args([
+            "place",
+            "originals",
+            "ds",
+            "--purge",
+            "--why",
+            "the study is over",
+        ])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("not verified in its pseudonymised tree"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(original.is_file(), "a refused purge deletes nothing");
+
+    // a vault moves them into the backup place
+    let vaulted = nils()
+        .args(registry)
+        .args([
+            "place",
+            "originals",
+            "ds",
+            "--vault",
+            "--into",
+            "vault",
+            "--why",
+            "the originals leave the working disk",
+        ])
+        .output()
+        .unwrap();
+    assert!(vaulted.status.success(), "{}", stderr(&vaulted));
+    let text = stdout(&vaulted);
+    assert!(text.contains("vaulted 1 file of the dataset ds"), "{text}");
+    assert!(!original.exists());
+    assert!(vault.path().join("originals/ds/sub-1/IM_0001").is_file());
+
+    // and the dataset says what became of them, and where they went
+    let listed = nils()
+        .args(registry)
+        .args(["place", "list", "--json"])
+        .output()
+        .unwrap();
+    let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let ds = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "ds")
+        .unwrap();
+    assert_eq!(ds["dataset"]["originals_kept"], "vaulted", "{ds}");
+    assert_eq!(ds["dataset"]["originals_vault"], "vault", "{ds}");
+
+    let audited = nils()
+        .args(registry)
+        .args(["audit", "list", "--action", "originals.vault", "--json"])
+        .output()
+        .unwrap();
+    assert!(audited.status.success(), "{}", stderr(&audited));
+    let rows: serde_json::Value = serde_json::from_slice(&audited.stdout).unwrap();
+    assert_eq!(rows[0]["details"]["files"], 1, "{rows}");
+    assert_eq!(rows[0]["scope"]["into"], "vault", "{rows}");
+}
+
 /// An identified file for the pseudonymiser's tests: a patient with a
 /// name and a number, a study, a series, a slice, and pixels.
 fn identified(patient: &str, series: u32, instance: u32) -> Vec<u8> {

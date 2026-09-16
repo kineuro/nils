@@ -619,6 +619,21 @@ pub fn show(store: &mut Store, job_id: i64) -> Result<Option<Job>, Error> {
         .transpose()
 }
 
+/// The kind a queued command line is: the verb, and the act where the verb
+/// has one. Record 26 §1: `place originals` is an `originals` job, which is
+/// the kind it claims when it runs, so a queued row and a running one read
+/// alike.
+pub fn kind_of(argv: &[String]) -> &str {
+    match (
+        argv.first().map(String::as_str),
+        argv.get(1).map(String::as_str),
+    ) {
+        (Some("place"), Some("originals")) => "originals",
+        (Some(verb), _) => verb,
+        (None, _) => "",
+    }
+}
+
 /// Put a command line on the queue, to be run by a worker in its turn. The
 /// kind is the verb, so that `nils jobs list` reads the same for a queued
 /// digest and a running one.
@@ -641,11 +656,11 @@ pub fn enqueue_with(
     principal: Option<&str>,
     extra: serde_json::Value,
 ) -> Result<i64, Error> {
-    let Some(verb) = argv.first() else {
+    if argv.is_empty() {
         return Err(Error::Message(
             "nothing to queue: the command line is empty".into(),
         ));
-    };
+    }
     let now = now_iso();
     // Wave 4a §9.2: who asked, carried to the verb the worker runs; the
     // command line as queued stays under `queued` once the verb has run
@@ -663,7 +678,7 @@ pub fn enqueue_with(
         )
         .returning(&["id"]),
         &[vec![
-            Param::from(verb.as_str()),
+            Param::from(kind_of(argv)),
             name.map_or(Param::Null, Param::from),
             Param::from(args.to_string()),
             Param::from("queued"),
