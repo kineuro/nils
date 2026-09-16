@@ -29,6 +29,24 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - A source place declared with nothing said about it arrives de-identified, where its handling read as identified; `handling.arrives` mirrors the dataset's `arrives` and takes `coded` too.
 - `nils setup` names every graphics card the machine has and the memory of them all, as in `2 × NVIDIA RTX PRO 6000, 191 GB`, where it named only the first card nvidia-smi listed. The supervisor's install report carries `machine.cards`, each card with its name and memory, beside `machine.card`, which is the card with the most memory and what the advice reads.
 
+### Fixed
+
+- A merge keeps a cohort membership whole, so `nils linkage merge`, `POST /api/linkage/merge` and an import whose row merges two subjects no longer end on a unique constraint over `cohort_member` when alias and canonical joined one cohort in one digest, which is the common case. An identifier map applies as one transaction on each store, so a map that is refused halfway leaves no subject behind it.
+- An identifier map releases a held file whatever type it names the value under, and its report says how many files each identifier released. A map that named a held value under another type released nothing and said nothing about it.
+- A job that fails under the worker records what the verb printed, not its exit status alone, so a card on Pipelines says why it stopped.
+- A pseudonymise dry run queued at the door records its report as the job's result, where the report existed only on the command line's own output.
+- `POST /api/ask/run` with `keep` and a name a kept handle holds already is refused in words, where it ended on a unique constraint.
+- A job keeps the command line it was queued with under `args.queued`, `argv` says what ran, and the queue's worker is no job the doors list.
+- The pseudonymiser leaves an original the pseudonymised tree holds already as it is, so a v0 cohort folder's files are not written a second time beside v0's own, and `bring-in` on such a dataset digests the tree it has before it pseudonymises anything.
+- A pseudonymised tree's codes are read verbatim whatever their length, so a v0 cohort folder's sixteen hex characters are read as the codes they are: with v0's map filed, a person keeps the code they had and is one subject and not two. A value no subject holds stands as its own code where it has the shape this registry makes, and is otherwise an identifier a code is derived from.
+- A release whose dates move numbers its sessions in date order instead of refusing to run, since the dates are each dataset's own and the labels are the tree's; the release row records the scheme that named them and the report says why it is not the scheme that was asked for. A months or ordinal scheme named by the caller stands as it is, and dates that move with UIDs preserved is still refused.
+- A digest of a dataset read in place reads what it says of an identifier the linkage store does not know. Where the dataset says `hold`, the file is not filed: its `source_file` row is quarantined under `identity.unmapped` with the shape of the identifier, no subject is made for it, and one review item per dataset and shape says how many, opened and closed as the pseudonymiser's are; a held file is read again by the next digest, so a map filed since releases it. Where it says `code`, the subject is made and marked provisional, as the pseudonymiser marks it.
+- `POST /api/ingest/look` takes `path`, the absolute path of a folder under no ingest location, which is how the desk looks at a folder before a dataset is declared on it; the look is the same one and bounded the same way, and the answer names no location.
+- A dataset's subjects are the subjects whose files its tree holds, whoever made them, on `GET /api/sources` and on a batch's digested stage. They were the subjects a digest created, so a dataset whose subjects an identifier map made read as none.
+- `GET /api/sources` takes each rate from the last run of that step that read or wrote at least a hundred files, else the largest run there was, and says how many files it was measured over: `rates` carries `{files_per_s, files}` per step. A resume run of ten files reported eighty thousand files a second.
+- Each recent digest on `GET /api/sources` names the jobs of its thread by stage under `chain`, where it carried none.
+- A cohort counts the sessions of its members out of the session cache as it stands, and answers none where nobody has built it; every cohort answered zero. `GET /api/summary` and `GET /api/sources` say the window the cache was built under.
+
 ## [1.0.0-alpha.28] - 2026-09-15
 
 ### Changed
