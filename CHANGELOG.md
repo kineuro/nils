@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.30] - 2026-09-16
+
+No change of its own. Released beside the desk's 1.0.0-alpha.30 so the two stay in step: a container install names both images with the engine's version. The change of this release is the desk's, record 27, where the pages say a value first and keep their explanations behind a disclosure, a dataset is added by browsing the engine's own folders, the tags the pseudonymiser removes are shown and chosen among, a map states its columns and rehearses before filing, and Rules walks every axis.
+
 ## [1.0.0-alpha.29] - 2026-09-16
 
 ### Added
