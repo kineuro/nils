@@ -23150,7 +23150,7 @@ mod tests {
     /// directory at all. Ten are read.
     fn a_sites_places() -> Vec<String> {
         [
-            "archives=/data/nils-archives/registry,role=backup,snapshots,protected",
+            "archives=/data/archives/registry,role=backup,snapshots,protected",
             "registry=/srv/nils/registry,role=registry,backup=archives,snapshots,protected,fast",
             "source=/data/source,role=source,snapshots,protected",
             "archive=/data/archive,role=backup,protected,read",
@@ -23268,7 +23268,7 @@ mod tests {
         )
         .join(" ");
         assert!(
-            argv.contains("--backup-dir /data/nils-archives/registry"),
+            argv.contains("--backup-dir /data/archives/registry"),
             "the archives go to the backup place the registry names: {argv}"
         );
         assert!(argv.contains("--pack-dir /srv/nils/engine/packs"), "{argv}");
@@ -23288,7 +23288,7 @@ mod tests {
         };
         assert_eq!(
             backups_dir(Some(&site), dir),
-            PathBuf::from("/data/nils-archives/registry")
+            PathBuf::from("/data/archives/registry")
         );
         let named = Site {
             backup_dir: Some("/data/elsewhere".to_string()),
@@ -23341,7 +23341,7 @@ mod tests {
     fn places_that_do_not_hold_this_installs_registry_or_its_archives_are_refused() {
         let places = places_given(&a_sites_places()).unwrap();
         let registry = Path::new("/srv/nils/registry");
-        let backups = Path::new("/data/nils-archives/registry");
+        let backups = Path::new("/data/archives/registry");
         assert_eq!(places_refusal(&places, registry, backups), None);
         let moved = places_refusal(&places, Path::new("/opt/nils/registry"), backups).unwrap();
         assert!(moved.contains("or install with --dir /srv/nils"), "{moved}");
@@ -23397,10 +23397,7 @@ mod tests {
             "an update and a repair declare the same places, and no more"
         );
         assert_eq!(plan.read_from().len(), 10);
-        assert_eq!(
-            plan.backups(),
-            PathBuf::from("/data/nils-archives/registry")
-        );
+        assert_eq!(plan.backups(), PathBuf::from("/data/archives/registry"));
         assert_eq!(
             plan.pack_dir(),
             Some(PathBuf::from("/srv/nils/engine/packs"))
@@ -23428,10 +23425,7 @@ mod tests {
             "a working and an export directory under the install directory are not this site's, \
              and archives at a backup place it declared are on its own filesystem"
         );
-        assert_eq!(
-            plan.backups(),
-            PathBuf::from("/data/nils-archives/registry")
-        );
+        assert_eq!(plan.backups(), PathBuf::from("/data/archives/registry"));
         let inside = a_site(Site {
             places: places_given(&[
                 "archives=/srv/nils/archives,role=backup".to_string(),

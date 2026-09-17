@@ -437,7 +437,7 @@ workers = 64
 [[site.places]]
 name = "archives"
 role = "backup"
-path = "/data/nils-archives/registry"
+path = "/data/archives/registry"
 snapshots = true
 protected = true
 
