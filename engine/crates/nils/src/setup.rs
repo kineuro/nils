@@ -3770,13 +3770,21 @@ fn backups_dir(site: Option<&Site>, dir: &Path) -> PathBuf {
 /// folder and the archives, and for an install that declared no places the
 /// work in flight and what is exported, which are that install's own. A
 /// site that declared its places keeps the rest at paths of its own, made
-/// as they are declared.
+/// as they are declared, and that includes archives kept at a place the site
+/// declared: they sit on the site's own filesystem, which the account running
+/// setup may not even see into, as with a share that grants the engine's
+/// account alone, and setup made them as root before anything else and
+/// stopped there with permission denied.
 fn own_dirs(plan: &Plan) -> Vec<PathBuf> {
-    let mut out = vec![
-        plan.dir.join("registry"),
-        plan.dir.join("desk"),
-        plan.backups(),
-    ];
+    let mut out = vec![plan.dir.join("registry"), plan.dir.join("desk")];
+    let backups = plan.backups();
+    if !plan
+        .declared()
+        .iter()
+        .any(|place| backups.starts_with(&place.path))
+    {
+        out.push(backups);
+    }
     if plan.declared().is_empty() {
         out.push(plan.dir.join("working"));
         out.push(plan.dir.join("export"));
@@ -16555,9 +16563,13 @@ mod tests {
             vec![
                 PathBuf::from("/srv/nils/registry"),
                 PathBuf::from("/srv/nils/desk"),
-                PathBuf::from("/data/nils-archives/registry"),
             ],
-            "a working and an export directory under the install directory are not this site's"
+            "a working and an export directory under the install directory are not this site's, \
+             and archives at a backup place it declared are on its own filesystem"
+        );
+        assert_eq!(
+            plan.backups(),
+            PathBuf::from("/data/nils-archives/registry")
         );
         plan.system = Some(SystemUnits::default());
         let files = files_of(&plan);
