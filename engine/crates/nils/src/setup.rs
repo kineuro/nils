@@ -9450,6 +9450,85 @@ fn source_folder(into: &Path) -> SourceFolder {
     }
 }
 
+/// What a part's folder is, as the steps that take its source find it, with
+/// an adoption that stopped partway taken back first: where the folder's own
+/// `.git` holds no commit and the folder holds a copy beside it, that `.git`
+/// is removed and the folder is a copy to adopt again, with the line that
+/// says so. Git refuses a plain checkout over the copy's files, so taking it
+/// for a checkout would stop every run after. A `.git` with a commit stays a
+/// checkout, and so does one git does not take for this folder's repository.
+fn source_folder_resumed(
+    hands: &SourceHands,
+    into: &Path,
+    base: &Path,
+) -> (SourceFolder, Option<String>) {
+    let folder = source_folder(into);
+    if folder != SourceFolder::Checkout {
+        return (folder, None);
+    }
+    // Asked as whoever takes the source steps, since git refuses anyone else
+    // a repository that is another account's; a question git does not answer
+    // leaves the folder a checkout, as it always was.
+    let read = |words: &[&str]| {
+        let out = source_step(hands, "git", &owned_words(words), into, base)
+            .command()
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let git = into.join(".git");
+    let own = [
+        std::fs::canonicalize(&git).unwrap_or_else(|_| git.clone()),
+        git.clone(),
+    ];
+    let git_dir = read(&["rev-parse", "--absolute-git-dir"]);
+    let committed = || read(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).is_some();
+    let holds_more = || {
+        std::fs::read_dir(into)
+            .is_ok_and(|entries| entries.flatten().any(|entry| entry.file_name() != ".git"))
+    };
+    if !adoption_unfinished(git_dir.as_deref(), &own, committed, holds_more) {
+        return (folder, None);
+    }
+    if let Err(e) = std::fs::remove_dir_all(&git) {
+        return (
+            folder,
+            Some(format!(
+                "{} holds no commit, left by an adoption that stopped partway, and could not be \
+                 removed: {e}",
+                git.display()
+            )),
+        );
+    }
+    (
+        SourceFolder::Copy,
+        Some(format!(
+            "{} held a .git with no commit, left by an adoption that stopped partway; that .git \
+             is removed and the folder adopted again",
+            into.display()
+        )),
+    )
+}
+
+/// Whether a folder's `.git` is what an adoption that stopped partway
+/// leaves: the repository git finds is that `.git` itself, not one in a
+/// folder above, its HEAD names no commit, and the folder holds more than
+/// the `.git`. Asked in that order, so that git is not asked of a commit in
+/// a repository that is not the folder's.
+fn adoption_unfinished(
+    git_dir: Option<&str>,
+    own: &[PathBuf],
+    committed: impl FnOnce() -> bool,
+    holds_more: impl FnOnce() -> bool,
+) -> bool {
+    git_dir.is_some_and(|dir| own.iter().any(|own| own == Path::new(dir)))
+        && !committed()
+        && holds_more()
+}
+
 /// Who takes a Node part's source steps: git, `npm ci` and the build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SourceHands {
@@ -10204,7 +10283,10 @@ fn install_node_parts(
         };
         let into = plan.dir.join(name);
         // a checkout is brought to the release, whatever it followed before
-        let folder = source_folder(&into);
+        let (folder, resumed) = source_folder_resumed(&hands, &into, &plan.dir);
+        if let Some(line) = resumed {
+            console.say(&line);
+        }
         ready_for_sources(&hands, &plan.dir, &into, true).map_err(fail)?;
         if folder == SourceFolder::Copy {
             adopt_folder(
@@ -13934,7 +14016,10 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                 // repository in the folders above and would fetch there, so
                 // a copy is adopted as setup adopts it, and a folder with
                 // nothing in it is left for setup to take again.
-                let folder = source_folder(&dir);
+                let (folder, resumed) = source_folder_resumed(&hands, &dir, &base);
+                if let Some(line) = resumed {
+                    println!("{name}: {line}");
+                }
                 if folder == SourceFolder::Empty {
                     println!(
                         "{name}: {} holds no copy of its source; nils setup and then repair takes \
@@ -19716,13 +19801,12 @@ mod tests {
         out
     }
 
+    /// A part's repository in a test's folder, as a `file://` address: a
+    /// release that tracks only source, `v1.0.0-alpha.1`, whose commit is
+    /// answered too, and a later one that tracks a file a part's folder keeps
+    /// as data, `v1.0.0-alpha.2`.
     #[cfg(unix)]
-    #[test]
-    fn a_built_copy_is_adopted_in_place_with_its_data_kept_byte_for_byte_and_a_release_that_tracks_its_data_is_refused()
-     {
-        let root = scratch("adopt-copy");
-        // The part's repository, with a release that tracks only source and
-        // a later one that tracks a file the folder keeps as data.
+    fn released_repository(root: &Path) -> (String, String) {
         let source = root.join("source");
         std::fs::create_dir_all(source.join("src")).unwrap();
         test_git(&source, &["init", "--quiet"]);
@@ -19738,27 +19822,39 @@ mod tests {
         test_git(&source, &["commit", "--quiet", "-m", "data"]);
         test_git(&source, &["tag", "v1.0.0-alpha.2"]);
         test_git(
-            &root,
+            root,
             &["clone", "--quiet", "--bare", "source", "remote.git"],
         );
-        let repo = format!("file://{}", root.join("remote.git").display());
+        (
+            format!("file://{}", root.join("remote.git").display()),
+            released,
+        )
+    }
 
-        // A copy laid down by another way of deploying: its build, a
-        // package.json unlike the release's, and its data.
-        let lay_copy = |into: &Path| {
-            std::fs::create_dir_all(into.join("dist")).unwrap();
-            std::fs::create_dir_all(into.join("node_modules").join("left")).unwrap();
-            std::fs::create_dir_all(into.join("state")).unwrap();
-            std::fs::write(into.join("package.json"), "{\"name\": \"built\"}\n").unwrap();
-            std::fs::write(into.join("dist").join("main.js"), "built();\n").unwrap();
-            std::fs::write(
-                into.join("node_modules").join("left").join("index.js"),
-                "left();\n",
-            )
-            .unwrap();
-            std::fs::write(into.join("state").join("x"), [0u8, 1, 2, 255]).unwrap();
-            std::fs::write(into.join("kvasir.json"), "{\"auth\": \"kept\"}\n").unwrap();
-        };
+    /// A copy laid down by another way of deploying: its build, a
+    /// package.json unlike the release's, and its data.
+    #[cfg(unix)]
+    fn lay_copy(into: &Path) {
+        std::fs::create_dir_all(into.join("dist")).unwrap();
+        std::fs::create_dir_all(into.join("node_modules").join("left")).unwrap();
+        std::fs::create_dir_all(into.join("state")).unwrap();
+        std::fs::write(into.join("package.json"), "{\"name\": \"built\"}\n").unwrap();
+        std::fs::write(into.join("dist").join("main.js"), "built();\n").unwrap();
+        std::fs::write(
+            into.join("node_modules").join("left").join("index.js"),
+            "left();\n",
+        )
+        .unwrap();
+        std::fs::write(into.join("state").join("x"), [0u8, 1, 2, 255]).unwrap();
+        std::fs::write(into.join("kvasir.json"), "{\"auth\": \"kept\"}\n").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_built_copy_is_adopted_in_place_with_its_data_kept_byte_for_byte_and_a_release_that_tracks_its_data_is_refused()
+     {
+        let root = scratch("adopt-copy");
+        let (repo, released) = released_repository(&root);
         let console = Console::new(true);
         let hands = SourceHands::Own;
 
@@ -19842,6 +19938,83 @@ mod tests {
         );
         assert_eq!(bytes_under(&refused), before, "and the folder as it was");
         assert_eq!(source_folder(&refused), SourceFolder::Copy);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_whose_adoption_stopped_before_its_checkout_is_adopted_again_on_the_next_run() {
+        let root = scratch("adopt-resumed");
+        let (repo, released) = released_repository(&root);
+        let console = Console::new(true);
+        let hands = SourceHands::Own;
+
+        // What a run killed between the repository being made and the
+        // checkout leaves: the copy, and a .git with no commit.
+        let into = root.join("kvasir");
+        lay_copy(&into);
+        let state = bytes_under(&into.join("state"));
+        test_git(&into, &["init", "--quiet"]);
+        assert_eq!(source_folder(&into), SourceFolder::Checkout, "by its .git");
+
+        let (folder, said) = source_folder_resumed(&hands, &into, &root);
+        assert_eq!(folder, SourceFolder::Copy);
+        assert_eq!(
+            said.as_deref(),
+            Some(
+                format!(
+                    "{} held a .git with no commit, left by an adoption that stopped partway; \
+                     that .git is removed and the folder adopted again",
+                    into.display()
+                )
+                .as_str()
+            )
+        );
+        assert!(!into.join(".git").exists(), "that .git alone is removed");
+        adopt_folder(
+            &console,
+            &hands,
+            "Kvasir",
+            &repo,
+            "v1.0.0-alpha.1",
+            &into,
+            &root,
+            "nils setup",
+        )
+        .unwrap_or_else(|e| panic!("the copy is adopted: {}", e.message));
+        assert_eq!(
+            source_head(&hands, &into, &root).map(|head| head.trim().to_string()),
+            Some(released)
+        );
+        assert_eq!(
+            bytes_under(&into.join("state")),
+            state,
+            "state/ byte for byte"
+        );
+        assert!(!state.is_empty());
+        assert_eq!(
+            source_folder_resumed(&hands, &into, &root),
+            (SourceFolder::Checkout, None),
+            "a .git with a commit stays a checkout"
+        );
+
+        // A repository with no commit and nothing beside it is a clone that
+        // stopped, which a checkout's steps finish.
+        let bare = root.join("assistant");
+        std::fs::create_dir_all(&bare).unwrap();
+        test_git(&bare, &["init", "--quiet"]);
+        assert_eq!(
+            source_folder_resumed(&hands, &bare, &root),
+            (SourceFolder::Checkout, None)
+        );
+        assert!(bare.join(".git").is_dir());
+
+        // Where git finds a repository in a folder above, the .git is not
+        // this folder's, and is left for git to say what it is.
+        let own = [into.join(".git")];
+        let above = root.join(".git").display().to_string();
+        assert!(!adoption_unfinished(Some(&above), &own, || false, || true));
+        assert!(!adoption_unfinished(None, &own, || false, || true));
         let _ = std::fs::remove_dir_all(&root);
     }
 
