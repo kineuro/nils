@@ -5770,7 +5770,7 @@ fn questions(
     // in it
     if mode == Mode::Local
         && parts.contains(&Part::Desk)
-        && !desk_has_people(&dir)
+        && !desk_has_people(&dir.join("desk"), runtime.container())
         && console.interactive()
         && console.ask_yes_no("Add the first person now, who may do everything?", true)?
     {
@@ -7290,7 +7290,7 @@ fn place(
             secret: Some(secret),
         }) = &answers.provider
         {
-            write_secret(&plan.desk_dir().join("client-secret"), secret)?;
+            write_secret(&desk_secret_file(plan), secret)?;
         }
         if let Err(e) = write_supervisor(plan) {
             console.warn(&format!("the supervisor was not set up: {}", e.message));
@@ -7323,7 +7323,7 @@ fn place(
                 desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
             console.say(&format!(
                 "  nils-desk register --authentik https://auth.example.org --token ./api-token \\\n      --origin {origin} --allow <group> --bind reader=<group> --secret-file {}",
-                plan.desk_dir().join("client-secret").display()
+                desk_secret_file(plan).display()
             ));
         }
     }
@@ -8425,19 +8425,42 @@ fn pack_destination(plan: &Plan, me: &Path) -> PathBuf {
 }
 
 /// The desk's configuration once a plan is set: written whole where there is
-/// none or where the file no longer reads as TOML, and otherwise the file on
-/// disk with what setup writes set in it, keeping what a person set by hand.
+/// none, written whole on the store it still names where the file no longer
+/// reads as TOML, and otherwise the file on disk with what setup writes set in
+/// it, keeping what a person set by hand. A configuration that would take the
+/// desk from a store that keeps people to one that keeps nobody is not written.
 fn write_desk_config(plan: &Plan) -> Result<(), Exit> {
     let path = plan.desk_config();
+    let existing = std::fs::read_to_string(&path).ok();
     let written = desk_config_text(plan);
-    let text = match std::fs::read_to_string(&path) {
-        Err(_) => written,
-        Ok(existing) => match desk_config_merged(&existing, &written) {
-            Ok(Some(merged)) => merged,
-            Ok(None) => return Ok(()),
-            Err(()) => written,
-        },
+    let text = match existing
+        .as_deref()
+        .map(|text| desk_config_merged(text, &written))
+    {
+        None => written,
+        Some(Ok(Some(merged))) => merged,
+        Some(Ok(None)) => return Ok(()),
+        // A file that no longer reads may still say where the people are, and
+        // the configuration written in its place keeps the desk there.
+        Some(Err(())) => existing
+            .as_deref()
+            .and_then(desk_store_line)
+            .and_then(|store| {
+                let named = format!("store = {}\n", toml::Value::String(store));
+                desk_config_merged(&named, &written).ok().flatten()
+            })
+            .unwrap_or(written),
     };
+    // The desk starts on whatever store it is named, making an empty one
+    // where there is none, and says nothing: a rerun once left a desk with no
+    // one in it while its people sat in the store it had been named before.
+    let (desk, container) = (plan.desk_dir(), plan.runtime.container());
+    if let Some(refused) = desk_store_left(
+        desk_store(&desk, container, existing.as_deref()).as_deref(),
+        desk_store(&desk, container, Some(&text)).as_deref(),
+    ) {
+        return Err(fail(refused));
+    }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
     }
@@ -8466,11 +8489,13 @@ const DESK_MANAGED: [&str; 11] = [
 /// keys in it stay, and Kvasir's and the assistant's tables removed
 /// with them. A `[local]` or an `[oidc]` table stays for a desk that goes
 /// back, and every key setup does not write is kept, though not the file's
-/// comments. `Ok(None)` when nothing setup writes has changed; an error when
+/// comments. The paths `desk_paths_kept` names are kept as the file sets
+/// them. `Ok(None)` when nothing setup writes has changed; an error when
 /// either text does not read as TOML.
 fn desk_config_merged(existing: &str, written: &str) -> Result<Option<String>, ()> {
     let mut have: toml::Table = toml::from_str(existing).map_err(|_| ())?;
-    let want: toml::Table = toml::from_str(written).map_err(|_| ())?;
+    let mut want: toml::Table = toml::from_str(written).map_err(|_| ())?;
+    desk_paths_kept(&have, &mut want);
     let mut changed = false;
     for key in DESK_MANAGED {
         match (have.get(key).cloned(), want.get(key)) {
@@ -8506,23 +8531,162 @@ fn desk_config_merged(existing: &str, written: &str) -> Result<Option<String>, (
     )))
 }
 
-/// Whether the desk under a directory keeps anyone who signs in with a
-/// password, read from its store without changing it. A store that is not
-/// there, or does not read, keeps nobody.
-fn desk_has_people(dir: &Path) -> bool {
-    let store = dir.join("desk").join("nils-desk.sqlite");
-    if !store.exists() {
-        return false;
+/// The desk's store where its configuration names none: beside the
+/// configuration, where the desk makes it.
+const DESK_STORE: &str = "nils-desk.sqlite";
+
+/// What setup writes in the desk's configuration only where the file sets
+/// nothing: the store, where the people are; `[local] key`, which signs every
+/// token the desk has minted; and `[oidc] client_secret_file`, which holds
+/// the provider's secret. A value the file sets is kept whatever it is, the
+/// default among them. Setup cannot tell a path it wrote from one a person
+/// wrote, since the file keeps no record of either, and whoever wrote it, the
+/// desk has been reading from there: replacing any of them points the desk at
+/// another file, and for the store that is a desk with nobody in it. A key the
+/// file names nowhere stays unnamed, since the desk keeps that one beside its
+/// store and naming setup's would move it.
+fn desk_paths_kept(have: &toml::Table, want: &mut toml::Table) {
+    if let Some(store) = have.get("store") {
+        want.insert("store".to_string(), store.clone());
+    }
+    if let Some(toml::Value::Table(local)) = want.get_mut("local") {
+        match have.get("local").and_then(|mine| mine.get("key")) {
+            Some(key) => local.insert("key".to_string(), key.clone()),
+            None => local.remove("key"),
+        };
+    }
+    if let (Some(file), Some(toml::Value::Table(oidc))) = (
+        have.get("oidc")
+            .and_then(|mine| mine.get("client_secret_file")),
+        want.get_mut("oidc"),
+    ) {
+        oidc.insert("client_secret_file".to_string(), file.clone());
+    }
+}
+
+/// Where this machine finds a file the desk's configuration names, taken as
+/// the desk takes it (nils-desk's `Config::beside`): a relative path beside
+/// the configuration, an absolute one as it stands. A desk in a container
+/// reads its folder at IN_DESK, so a path under that is the same file in the
+/// folder here, and a path outside it is not on this machine at all.
+fn desk_file(desk_dir: &Path, container: bool, named: &str) -> Option<PathBuf> {
+    let named = Path::new(named);
+    if named.is_relative() {
+        Some(desk_dir.join(named))
+    } else if container {
+        named
+            .strip_prefix(IN_DESK)
+            .ok()
+            .map(|rest| desk_dir.join(rest))
+    } else {
+        Some(named.to_path_buf())
+    }
+}
+
+/// The store a desk's configuration names, where this machine finds it: the
+/// one beside the configuration where there is none or it names none. A file
+/// that no longer reads as TOML is read for its store line by line.
+fn desk_store(desk_dir: &Path, container: bool, config: Option<&str>) -> Option<PathBuf> {
+    let named = config
+        .and_then(|text| match toml::from_str::<toml::Table>(text) {
+            Ok(table) => table.get("store")?.as_str().map(str::to_string),
+            Err(_) => desk_store_line(text),
+        })
+        .unwrap_or_else(|| DESK_STORE.to_string());
+    desk_file(desk_dir, container, &named)
+}
+
+/// The store a desk's configuration sets on a line of its own before its
+/// first table, which is found even where something else in the file stops
+/// it reading as TOML.
+fn desk_store_line(text: &str) -> Option<String> {
+    text.lines()
+        .take_while(|line| !line.trim_start().starts_with('['))
+        .filter_map(|line| toml::from_str::<toml::Table>(line).ok())
+        .find_map(|table| table.get("store")?.as_str().map(str::to_string))
+}
+
+/// How many rows the named tables of a desk's store hold together, read
+/// without changing the store. A store that is not there counts none, and so
+/// does a table an older desk had not made yet.
+fn desk_rows(store: &Path, tables: &[&str]) -> i64 {
+    if !store.is_file() {
+        return 0;
     }
     let Ok(conn) =
-        rusqlite::Connection::open_with_flags(&store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        rusqlite::Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
     else {
-        return false;
+        return 0;
     };
-    conn.query_row("SELECT EXISTS(SELECT 1 FROM user)", [], |r| {
-        r.get::<_, i64>(0)
-    })
-    .is_ok_and(|n| n != 0)
+    tables
+        .iter()
+        .map(|table| {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap_or(0)
+        })
+        .sum()
+}
+
+/// Whether the desk in a folder keeps anyone who signs in with a password,
+/// read from the store its configuration names, as the desk's own
+/// `has_users` reads it: the people in its `user` table.
+fn desk_has_people(desk_dir: &Path, container: bool) -> bool {
+    let config = std::fs::read_to_string(desk_dir.join("nils-desk.toml")).ok();
+    desk_store(desk_dir, container, config.as_deref())
+        .is_some_and(|store| desk_rows(&store, &["user"]) > 0)
+}
+
+/// Whether a desk's store keeps anything a person made: someone who signs in
+/// with a password, someone who has signed in at all, a membership of a group
+/// or grants of a person's own. The groups are not counted, since the desk
+/// makes a new store with four.
+fn desk_store_keeps_people(store: &Path) -> bool {
+    desk_rows(store, &["user", "person", "member", "own"]) > 0
+}
+
+/// Why a desk's configuration may not be written, where it would take the
+/// desk from a store that keeps people to one that keeps nobody, or to one
+/// this machine cannot see. Setup keeps the store a configuration names, so
+/// nothing it writes moves one; a change that ever does has to carry the file
+/// across first and say so, and this is what stops it where it does not.
+fn desk_store_left(before: Option<&Path>, after: Option<&Path>) -> Option<String> {
+    let before = before?;
+    if after == Some(before)
+        || after.is_some_and(desk_store_keeps_people)
+        || !desk_store_keeps_people(before)
+    {
+        return None;
+    }
+    let after = after.map_or_else(
+        || "a store this machine cannot see".to_string(),
+        |store| format!("{}, which keeps nobody", store.display()),
+    );
+    Some(format!(
+        "the desk's configuration was left as it was: it would have named {after}, while the \
+         desk's people are in {}",
+        before.display()
+    ))
+}
+
+/// The file the desk reads its provider's secret from, where this machine
+/// finds it: the one its configuration names, which setup keeps, or setup's
+/// own beside the configuration. A secret setup is given goes where the desk
+/// will read it, not beside a name the desk no longer looks at.
+fn desk_secret_file(plan: &Plan) -> PathBuf {
+    std::fs::read_to_string(plan.desk_config())
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+        .and_then(|table| {
+            table
+                .get("oidc")?
+                .get("client_secret_file")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .and_then(|named| desk_file(&plan.desk_dir(), plan.runtime.container(), &named))
+        .unwrap_or_else(|| plan.desk_dir().join("client-secret"))
 }
 
 /// The desk's configuration as setup writes it for a plan: the mode chosen,
@@ -8547,7 +8711,7 @@ fn desk_config_text(plan: &Plan) -> String {
             .join(", ")
     );
     let _ = writeln!(text, "mode = \"{}\"", plan.mode.name());
-    let _ = writeln!(text, "store = \"nils-desk.sqlite\"");
+    let _ = writeln!(text, "store = \"{DESK_STORE}\"");
     if plan.mode == Mode::Local {
         let _ = writeln!(text, "\n[local]");
         let _ = writeln!(text, "key = \"nils-desk.key\"");
@@ -8896,8 +9060,8 @@ fn jwks_of(discovery: &serde_json::Value) -> Option<String> {
 /// The desk registered at an Authentik by the desk's own register command:
 /// the application, its provider and signing key, and the groups bound to
 /// the entitlements, each made where it is not there yet. The client's
-/// secret goes beside the desk's configuration; the API token is kept only
-/// while the command runs.
+/// secret goes to the file the desk's configuration names, beside it unless
+/// a person named another; the API token is kept only while the command runs.
 fn register_desk(
     plan: &Plan,
     state: &State,
@@ -8931,6 +9095,12 @@ fn register_desk(
     } else {
         dir.clone()
     };
+    // the secret goes where the desk's configuration has the desk read it,
+    // which in a container is under the folder setup gives the desk
+    let secret = desk_secret_file(plan);
+    let secret = secret
+        .strip_prefix(&dir)
+        .map_or_else(|_| secret.clone(), |rest| at.join(rest));
     let mut argv: Vec<String> = vec![
         "register".into(),
         "--authentik".into(),
@@ -8940,7 +9110,7 @@ fn register_desk(
         "--origin".into(),
         origin,
         "--secret-file".into(),
-        at.join("client-secret").display().to_string(),
+        secret.display().to_string(),
     ];
     for group in [users, admins] {
         argv.push("--allow".into());
@@ -13005,7 +13175,8 @@ pub(crate) fn launchd_plists(plan: &Plan, state: &State) -> Vec<(String, String)
 /// yet: the command that adds the first, since without one the desk opens on
 /// a login nobody can pass.
 fn nobody_yet(plan: &Plan) -> Option<String> {
-    (plan.mode == Mode::Local && plan.has(Part::Desk) && !desk_has_people(&plan.dir)).then(|| {
+    let keeps_its_own = plan.mode == Mode::Local && plan.has(Part::Desk);
+    (keeps_its_own && !desk_has_people(&plan.desk_dir(), plan.runtime.container())).then(|| {
         format!(
             "add the first person, who may do everything: nils-desk user add <name> --admin --config {}",
             plan.desk_config().display()
@@ -20010,13 +20181,320 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A desk's store made as the desk makes it (nils-desk's `store.rs`):
+    /// its four groups, and the people and memberships given.
+    fn desk_store_holding(store: &Path, people: &[&str], memberships: &[(&str, &str)]) {
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(store).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE person (subject TEXT PRIMARY KEY, display TEXT NOT NULL, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL);
+             CREATE TABLE user (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, display TEXT NOT NULL, entitlements TEXT NOT NULL DEFAULT '[]', admin INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+             CREATE TABLE grp (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, grants TEXT NOT NULL DEFAULT '[]', detail TEXT NOT NULL DEFAULT 'plain', follows TEXT NOT NULL DEFAULT '[]', made_at TEXT NOT NULL);
+             CREATE TABLE member (subject TEXT NOT NULL, grp INTEGER NOT NULL, PRIMARY KEY (subject, grp));
+             CREATE TABLE own (subject TEXT PRIMARY KEY, grants TEXT NOT NULL DEFAULT '[]', detail TEXT);
+             INSERT INTO grp (name, made_at) VALUES ('Readers', 'now'), ('Reviewers', 'now'), ('Operators', 'now'), ('Admins', 'now');",
+        )
+        .unwrap();
+        for name in people {
+            conn.execute(
+                "INSERT INTO user VALUES (?1, 'x', ?1, '[]', 0, '2026-09-17T00:00:00Z')",
+                [name],
+            )
+            .unwrap();
+        }
+        for (name, group) in memberships {
+            conn.execute(
+                "INSERT INTO member (subject, grp) SELECT ?1, id FROM grp WHERE name = ?2",
+                [name, group],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn setup_keeps_the_store_the_signing_key_and_the_secret_file_a_desk_was_given_by_hand() {
+        let mut p = plan(Runtime::Machine);
+        p.mode = Mode::Local;
+        let written = desk_config_text(&p);
+        assert!(
+            written.contains("store = \"nils-desk.sqlite\""),
+            "{written}"
+        );
+        assert!(written.contains("key = \"nils-desk.key\""), "{written}");
+
+        // the store and the key where an earlier deployment put them
+        let hand = written
+            .replace(
+                "store = \"nils-desk.sqlite\"",
+                "store = \"/srv/nils/desk/state/nils-desk.sqlite\"",
+            )
+            .replace(
+                "key = \"nils-desk.key\"",
+                "key = \"/srv/nils/desk/state/nils-desk.key\"",
+            );
+        assert_eq!(
+            desk_config_merged(&hand, &written),
+            Ok(None),
+            "a rerun with nothing else changed keeps the file as it is"
+        );
+        p.reach = Reach::Network("lab.example.org".to_string());
+        let merged = desk_config_merged(&hand, &desk_config_text(&p))
+            .unwrap()
+            .expect("the reach changed");
+        let table: toml::Table = toml::from_str(&merged).unwrap();
+        assert_eq!(table["bind"].as_str(), Some("0.0.0.0:7200"), "{merged}");
+        assert_eq!(
+            table["store"].as_str(),
+            Some("/srv/nils/desk/state/nils-desk.sqlite"),
+            "the desk stays on the store its people are in: {merged}"
+        );
+        assert_eq!(
+            table["local"]["key"].as_str(),
+            Some("/srv/nils/desk/state/nils-desk.key"),
+            "the desk keeps the key its tokens were signed with: {merged}"
+        );
+
+        // A desk that signed people in at a provider, its key named nowhere and
+        // so kept beside its store, keeps that key when it moves to its own
+        // people: naming setup's would have made it a new one.
+        let mut o = plan(Runtime::Machine);
+        o.mode = Mode::Oidc;
+        o.oidc = Some(OidcPlan {
+            issuer: "https://auth.example.org/application/o/nils/".into(),
+            client_id: "abc123".into(),
+            jwks: "https://auth.example.org/application/o/nils/jwks/".into(),
+            roles_claim: "roles".into(),
+            scopes: None,
+        });
+        let provider = desk_config_text(&o)
+            .replace(
+                "store = \"nils-desk.sqlite\"",
+                "store = \"/srv/nils/desk/state/nils-desk.sqlite\"",
+            )
+            .replace(
+                "client_secret_file = \"client-secret\"",
+                "client_secret_file = \"/srv/nils/secrets/desk-client\"",
+            );
+        assert_eq!(
+            desk_config_merged(&provider, &desk_config_text(&o)),
+            Ok(None)
+        );
+        o.reach = Reach::Network("lab.example.org".to_string());
+        let merged = desk_config_merged(&provider, &desk_config_text(&o))
+            .unwrap()
+            .expect("the reach changed");
+        let table: toml::Table = toml::from_str(&merged).unwrap();
+        assert_eq!(
+            table["oidc"]["client_secret_file"].as_str(),
+            Some("/srv/nils/secrets/desk-client"),
+            "the desk reads its secret where it always did: {merged}"
+        );
+        assert_eq!(
+            table["store"].as_str(),
+            Some("/srv/nils/desk/state/nils-desk.sqlite"),
+            "{merged}"
+        );
+        o.mode = Mode::Local;
+        let local = desk_config_merged(&merged, &desk_config_text(&o))
+            .unwrap()
+            .expect("the mode changed");
+        let table: toml::Table = toml::from_str(&local).unwrap();
+        assert_eq!(table["local"]["audience"].as_str(), Some("nils"), "{local}");
+        assert_eq!(
+            table["local"].get("key"),
+            None,
+            "the key stays beside the store, where the desk keeps one named nowhere: {local}"
+        );
+        assert_eq!(
+            table["oidc"]["client_secret_file"].as_str(),
+            Some("/srv/nils/secrets/desk-client"),
+            "an [oidc] table stays for a desk that goes back: {local}"
+        );
+        assert_eq!(desk_config_merged(&local, &desk_config_text(&o)), Ok(None));
+
+        // a file that names none of them is given setup's, which are the desk's own defaults
+        let bare =
+            "origin = \"http://127.0.0.1:7200\"\n\n[engine]\nurl = \"http://127.0.0.1:8437\"\n";
+        let merged = desk_config_merged(bare, &desk_config_text(&p))
+            .unwrap()
+            .expect("setup's keys are set");
+        let table: toml::Table = toml::from_str(&merged).unwrap();
+        assert_eq!(table["store"].as_str(), Some(DESK_STORE), "{merged}");
+    }
+
+    #[test]
+    fn the_people_check_reads_the_store_the_desks_configuration_names() {
+        let dir = scratch("desk-people-named");
+        let desk = dir.join("desk");
+        let store = desk.join("state").join("nils-desk.sqlite");
+        desk_store_holding(&store, &["reader", "other"], &[("reader", "Readers")]);
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Local;
+        let config = |text: String| std::fs::write(desk.join("nils-desk.toml"), text).unwrap();
+
+        // with no configuration the desk's store is the one beside it, which is not there
+        assert!(!desk_has_people(&desk, false));
+        assert!(nobody_yet(&p).is_some());
+
+        config(format!(
+            "origin = \"http://127.0.0.1:7200\"\nstore = \"{}\"\n",
+            store.display().to_string().replace('\\', "\\\\")
+        ));
+        assert!(
+            desk_has_people(&desk, false),
+            "an absolute store is read where it is"
+        );
+        assert!(
+            nobody_yet(&p).is_none(),
+            "the end of setup does not ask for a first person"
+        );
+
+        config("origin = \"http://127.0.0.1:7200\"\nstore = \"state/nils-desk.sqlite\"\n".into());
+        assert!(
+            desk_has_people(&desk, false),
+            "a relative store is beside the configuration"
+        );
+
+        // a desk in a container reads its folder at IN_DESK
+        config(format!(
+            "origin = \"http://127.0.0.1:7200\"\nstore = \"{IN_DESK}/state/nils-desk.sqlite\"\n"
+        ));
+        assert!(desk_has_people(&desk, true));
+        assert_eq!(
+            desk_file(&desk, true, "/elsewhere/nils-desk.sqlite"),
+            None,
+            "a path outside the folder is not on this machine"
+        );
+
+        // counted as the desk counts people who sign in with a password
+        let empty = desk.join("nils-desk.sqlite");
+        desk_store_holding(&empty, &[], &[]);
+        config("origin = \"http://127.0.0.1:7200\"\n".into());
+        assert!(
+            !desk_has_people(&desk, false),
+            "four groups and nobody in them"
+        );
+        assert!(!desk_store_keeps_people(&empty));
+        assert!(desk_store_keeps_people(&store));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setup_never_points_a_desk_at_an_empty_store_while_its_people_are_in_another() {
+        let dir = scratch("desk-store-left");
+        let desk = dir.join("desk");
+        let people = desk.join("state").join("nils-desk.sqlite");
+        let empty = desk.join("nils-desk.sqlite");
+        desk_store_holding(&people, &["reader", "other"], &[("reader", "Readers")]);
+        desk_store_holding(&empty, &[], &[]);
+
+        let refused = desk_store_left(Some(&people), Some(&empty))
+            .expect("a desk taken from its people to an empty store is refused");
+        assert!(
+            refused.contains(&people.display().to_string())
+                && refused.contains(&empty.display().to_string()),
+            "{refused}"
+        );
+        assert!(
+            desk_store_left(Some(&people), None).is_some(),
+            "nor to one not here"
+        );
+        assert_eq!(desk_store_left(Some(&people), Some(&people)), None);
+        assert_eq!(
+            desk_store_left(Some(&empty), Some(&people)),
+            None,
+            "a store carried across first is where the people are"
+        );
+        assert_eq!(desk_store_left(None, Some(&empty)), None);
+
+        // Every way setup writes the configuration leaves a desk with people on
+        // their store: a rerun, a changed reach, a changed mode.
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Local;
+        let named = people.display().to_string().replace('\\', "\\\\");
+        let hand = desk_config_text(&p).replace(
+            "store = \"nils-desk.sqlite\"",
+            &format!("store = \"{named}\""),
+        );
+        std::fs::write(p.desk_config(), &hand).unwrap();
+        for change in 0..3 {
+            match change {
+                1 => p.reach = Reach::Network("lab.example.org".to_string()),
+                2 => p.mode = Mode::Off,
+                _ => {}
+            }
+            assert!(write_desk_config(&p).is_ok());
+            let on_disk = std::fs::read_to_string(p.desk_config()).unwrap();
+            assert_eq!(
+                desk_store(&desk, false, Some(&on_disk)),
+                Some(people.clone()),
+                "the desk was pointed away from its people: {on_disk}"
+            );
+            assert_eq!(desk_config_fate(&p), DeskConfigFate::Kept);
+        }
+        p.mode = Mode::Local;
+        assert!(write_desk_config(&p).is_ok());
+        assert!(desk_has_people(&desk, false));
+        assert!(nobody_yet(&p).is_none());
+
+        // a file broken below its store line is written again on the same store
+        std::fs::write(
+            p.desk_config(),
+            format!("mode = \"local\"\nstore = \"{named}\"\n\n[local\nkey = \n"),
+        )
+        .unwrap();
+        assert_eq!(desk_config_fate(&p), DeskConfigFate::Replaced);
+        assert!(
+            desk_has_people(&desk, false),
+            "the people check finds it too"
+        );
+        assert!(write_desk_config(&p).is_ok());
+        let on_disk = std::fs::read_to_string(p.desk_config()).unwrap();
+        assert_eq!(
+            desk_store(&desk, false, Some(&on_disk)),
+            Some(people.clone()),
+            "{on_disk}"
+        );
+        assert!(on_disk.contains("audience = \"nils\""), "{on_disk}");
+
+        // a secret setup is given goes where the desk reads it
+        p.mode = Mode::Oidc;
+        p.oidc = Some(OidcPlan {
+            issuer: "https://auth.example.org/application/o/nils/".into(),
+            client_id: "abc123".into(),
+            jwks: "https://auth.example.org/application/o/nils/jwks/".into(),
+            roles_claim: "roles".into(),
+            scopes: None,
+        });
+        assert!(write_desk_config(&p).is_ok());
+        assert_eq!(desk_secret_file(&p), desk.join("client-secret"));
+        let secret = dir.join("secrets").join("desk-client");
+        let on_disk = std::fs::read_to_string(p.desk_config()).unwrap().replace(
+            "client_secret_file = \"client-secret\"",
+            &format!(
+                "client_secret_file = \"{}\"",
+                secret.display().to_string().replace('\\', "\\\\")
+            ),
+        );
+        std::fs::write(p.desk_config(), on_disk).unwrap();
+        assert_eq!(desk_secret_file(&p), secret);
+        assert!(write_desk_config(&p).is_ok());
+        assert_eq!(desk_secret_file(&p), secret, "a rerun keeps it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_desk_keeps_people_only_once_one_is_added() {
         let dir = scratch("desk-people");
         let mut p = plan(Runtime::Machine);
         p.dir = dir.clone();
         p.mode = Mode::Local;
-        assert!(!desk_has_people(&dir), "no store, nobody");
+        assert!(
+            !desk_has_people(&dir.join("desk"), false),
+            "no store, nobody"
+        );
         std::fs::create_dir_all(dir.join("desk")).unwrap();
         let conn = rusqlite::Connection::open(dir.join("desk").join("nils-desk.sqlite")).unwrap();
         conn.execute_batch(
@@ -20024,7 +20502,7 @@ mod tests {
         )
         .unwrap();
         // the store a desk that ran with nobody signing in has: there, and empty
-        assert!(!desk_has_people(&dir));
+        assert!(!desk_has_people(&dir.join("desk"), false));
         assert!(
             nobody_yet(&p).is_some_and(|line| line.contains("nils-desk user add <name> --admin")),
             "the end of setup says how to add the first"
@@ -20034,7 +20512,7 @@ mod tests {
             [],
         )
         .unwrap();
-        assert!(desk_has_people(&dir));
+        assert!(desk_has_people(&dir.join("desk"), false));
         assert!(nobody_yet(&p).is_none());
         p.mode = Mode::Off;
         drop(conn);
