@@ -5962,7 +5962,7 @@ fn questions(
         console.row("model", &said);
     }
     // what this machine lacks for the plan, found before anything is placed
-    let missing = missing_for(&plan);
+    let missing = missing_for(&plan, args.print);
     for need in &missing {
         console.row("missing", need);
     }
@@ -8877,11 +8877,19 @@ fn desk_config_fate(plan: &Plan) -> DeskConfigFate {
 
 /// What this machine lacks for a plan, found before anything is placed, so
 /// an install never stops halfway for a tool it could have named at the start.
-fn missing_for(plan: &Plan) -> Vec<String> {
+/// A print changes nothing, so it is not refused for what only a run for real
+/// takes.
+fn missing_for(plan: &Plan, print: bool) -> Vec<String> {
     let mut out = Vec::new();
     if plan.runtime.container() && !have(plan.runtime.name()) {
         out.push(format!("{}, which runs the parts", plan.runtime.name()));
     }
+    out.extend(runuser_missing(
+        plan.system.as_ref(),
+        print,
+        am_root,
+        runuser_here,
+    ));
     // The privilege the supervisor restarts the services with is written
     // with visudo and called through sudo; without them the supervisor could
     // restart nothing, and the install would say so only afterwards.
@@ -8908,6 +8916,31 @@ fn missing_for(plan: &Plan) -> Vec<String> {
         }
     }
     out
+}
+
+/// runuser, where a run needs it and this machine has none: root setting up
+/// the services of this machine, with the engine running as an account of its
+/// own. Every step on the registry is taken as that account through runuser,
+/// and unlike Kvasir's and the assistant's source steps, which root takes
+/// itself where it cannot act as their account, they have nothing to fall
+/// back on, so the install would stop at the registry with the engine already
+/// placed. A print changes nothing, and a run that is not root takes no step
+/// as another account, so neither asks the machine. Whether this process is
+/// root and whether runuser is here are given, so that every answer can be
+/// had on any machine.
+fn runuser_missing(
+    system: Option<&SystemUnits>,
+    print: bool,
+    root: impl FnOnce() -> bool,
+    runuser: impl FnOnce() -> bool,
+) -> Option<String> {
+    if print || system.is_none() {
+        return None;
+    }
+    registry_account(system, root())?;
+    (!runuser()).then(|| {
+        "runuser, which setup takes the registry's steps as the engine's account with".to_string()
+    })
 }
 
 /// The major version of the Node on the path; 0 where there is none.
@@ -16756,6 +16789,79 @@ mod tests {
         .unwrap();
         assert_eq!(renamed.account("engine"), "nils-engine");
         assert_eq!(renamed.capabilities, ["CAP_DAC_OVERRIDE"]);
+    }
+
+    #[test]
+    fn runuser_is_missing_at_the_question_where_root_takes_the_registry_as_the_engines_account() {
+        let row = "runuser, which setup takes the registry's steps as the engine's account with";
+        let machine = SystemUnits::default();
+        assert_eq!(
+            runuser_missing(Some(&machine), false, || true, || false).as_deref(),
+            Some(row),
+            "root setting up the services of this machine takes the registry as the engine's account"
+        );
+        assert_eq!(
+            runuser_missing(Some(&machine), false, || true, || true),
+            None,
+            "a machine with runuser lacks nothing"
+        );
+        let asked = |_: &str| -> bool { panic!("a run that needs no runuser asks nothing") };
+        assert_eq!(
+            runuser_missing(Some(&machine), true, || asked("root"), || asked("runuser")),
+            None,
+            "a print changes nothing, so it is not refused for runuser"
+        );
+        assert_eq!(
+            runuser_missing(None, false, || asked("root"), || asked("runuser")),
+            None,
+            "an install of an account's own takes its steps as itself"
+        );
+        assert_eq!(
+            runuser_missing(Some(&machine), false, || false, || asked("runuser")),
+            None,
+            "a run that is not root takes no step as another account"
+        );
+        let engine_as = |engine: &str| SystemUnits {
+            accounts: BTreeMap::from([
+                ("engine".to_string(), engine.to_string()),
+                ("desk".to_string(), "nils-desk".to_string()),
+                ("assistant".to_string(), "nils-desk".to_string()),
+            ]),
+            ..SystemUnits::default()
+        };
+        assert_eq!(
+            runuser_missing(Some(&engine_as("nils")), false, || true, || false).as_deref(),
+            Some(row)
+        );
+        assert_eq!(
+            runuser_missing(
+                Some(&engine_as("root")),
+                false,
+                || true,
+                || asked("runuser")
+            ),
+            None,
+            "an engine that runs as root takes the registry's steps in this process, and root \
+             takes the source steps itself where it cannot act as their account"
+        );
+
+        // and the plan's own list says it only for a run for real
+        let mut plan = plan(Runtime::Machine);
+        plan.system = Some(machine);
+        assert!(
+            !missing_for(&plan, true)
+                .iter()
+                .any(|need| need.starts_with("runuser")),
+            "--print is never refused for runuser"
+        );
+        if !am_root() {
+            assert!(
+                !missing_for(&plan, false)
+                    .iter()
+                    .any(|need| need.starts_with("runuser")),
+                "a run that is not root is not asked for runuser"
+            );
+        }
     }
 
     #[test]

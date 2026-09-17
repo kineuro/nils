@@ -210,7 +210,9 @@ asked by the account that will use it. A registry that does not answer that
 account is said, and never quietly replaced by the places in the setup record,
 which hold none added at the desk since: an install, an update, a repair and a
 reapply stop on it before they change anything, `--print` says it, and the
-restart after `nils update --all` says it and how to mend it.
+restart after `nils update --all` says it and how to mend it. A machine
+without `runuser` is named among what the plan lacks, before anything is
+placed.
 
 Kvasir's and the assistant's source is taken the same way, as the account
 those two run as. Git, `npm ci` and the build run under `runuser` in the part's
