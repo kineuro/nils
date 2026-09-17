@@ -56,12 +56,25 @@ file.
 | An identity provider | `--auth oidc` | `mode = "oidc"` |
 
 `--mode off|local|oidc`. With the desk installed, the wizard then asks who
-may open it: only this machine, or this network. Choosing the network while
-nobody signs in says plainly that anyone on that network who finds the port
-gets the whole registry, and offers to keep the people in the desk instead.
-The desk's `bind`, `origin` and `also_origins` follow the answer. Where a
-default port is taken, the wizard says which and moves that part to the next
-free one; where they are free it asks nothing.
+may open it: only this machine, this network, or a proxy of yours, which is
+how a site puts the desk behind a name of its own with a certificate.
+Choosing the network or a proxy while nobody signs in says plainly that
+anyone who reaches it gets the whole registry, and offers to keep the people
+in the desk instead. The desk's `bind`, `origin` and `also_origins` follow
+the answer. Where a default port is taken, the wizard says which and moves
+that part to the next free one; where they are free it asks nothing.
+
+Behind a proxy the address a browser opens and the address the desk binds
+are two answers and not one. `--origin https://nils.example.org` gives the
+first: it is what the desk compares a write against, what it signs the
+tokens the other parts trust with, and what a person is sent back to after
+signing in at a provider, so the engine's trust in the desk follows it too.
+The desk still binds this machine's loopback, for a proxy running here, and
+with `--reach network` beside it every address, for a proxy on another
+machine; either way the loopback stays among the addresses it also answers
+at, so a browser on the machine keeps working. An address that is not a
+scheme and a host is refused before anything is written, in words naming
+what is wrong with it.
 
 Where the desk keeps the people, the wizard offers to add the first person,
 who may do everything. It holds the name and the password to the desk's own
@@ -118,7 +131,15 @@ subscription is each person's own, and each signs in to theirs from the desk.
 
 **7. Keeping it running.** Systemd user units on Linux, podman quadlets for a
 podman run, a compose file for a docker one, launchd agents on macOS. Where
-there is no service manager the commands are printed instead. llama.cpp runs
+there is no service manager the commands are printed instead. The units of a
+machine or a podman install are the account's own, so systemd must have a
+session of that account to take them: on a machine nobody is logged in to
+there is none, and the wizard says so at this step and prints the commands
+instead of writing units nothing would start. `--service` there is refused
+before anything is written, with the account named, so that the fix, signing
+in as it or `loginctl enable-linger <account>`, is made before the install
+rather than after it. The account is lingered before the units are handed
+over, which is what gives such an account a user manager at all. llama.cpp runs
 on this machine whichever runtime the parts use: a systemd user unit of its
 own, `nils-llama.service`, started before Kvasir, or a launchd agent on macOS.
 `--service` / `--no-service`.
@@ -204,7 +225,8 @@ Podman is kept running by quadlets in `~/.config/containers/systemd/`
 `~/.config/nils/setup.toml` (or `$XDG_CONFIG_HOME/nils/setup.toml`) records
 the base directory, the parts with their versions and how each runs, the
 mode, the runtime, the service manager, the ports, the reachability, the
-backend and the places declared:
+address a browser opens the desk at where a proxy answers for it (`origin`,
+written only for such an install), the backend and the places declared:
 
 ```toml
 dir = "/home/you/nils"
@@ -276,6 +298,7 @@ key cannot be recovered. `--keep-data` and `--purge` answer it.
 | `--runtime machine\|podman\|docker` | Where the parts run |
 | `--mode off\|local\|oidc` | Who may sign in |
 | `--reach loopback\|network` | Who may open the desk |
+| `--origin URL` | The address a browser opens the desk at, where a proxy of yours answers for it |
 | `--backend sqlite\|postgres`, `--dsn`, `--schema` | Where the registry is kept |
 | `--source PATH` | A directory of DICOM the engine may read |
 | `--key-file FILE` | The registry key's passphrase, instead of a prompt |

@@ -712,6 +712,151 @@ fn docker_is_a_network_and_a_compose_file_and_owns_no_mounts() {
     );
 }
 
+/// An address given on the command line is what the desk answers at, is
+/// written down, and is still there after an update, which is made from the
+/// record alone.
+#[test]
+fn an_origin_given_is_recorded_and_survives_an_update() {
+    let releases = Releases::new("99.0.0");
+    let nils = Installed::new("nils-setup-origin");
+    let config = TempDir::new("nils-setup-origin-config");
+    let base = TempDir::new("nils-setup-origin-base");
+    let dir = base.path().join("nils");
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "desk",
+            "--mode",
+            "local",
+            "--origin",
+            "https://nils.example.org",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--channel",
+            &releases.url(),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    let desk = dir.join("desk").join("nils-desk.toml");
+    let text = std::fs::read_to_string(&desk).expect("the desk's configuration");
+    assert!(
+        text.contains("origin = \"https://nils.example.org\""),
+        "{text}"
+    );
+    // the desk binds where only a proxy here reaches it, on the port it was
+    // given, which moves where this machine holds the default already
+    let port = text
+        .lines()
+        .find_map(|line| line.strip_prefix("bind = \"127.0.0.1:"))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("it did not bind the loopback: {text}"));
+    assert!(
+        text.contains(&format!("also_origins = [\"http://127.0.0.1:{port}\"")),
+        "a browser on the machine still opens it: {text}"
+    );
+    let state = state_of(config.path());
+    assert!(
+        state.contains("origin = \"https://nils.example.org\""),
+        "{state}"
+    );
+
+    // the update writes the desk's configuration again from the record
+    let again = setup(
+        &nils.path(),
+        config.path(),
+        &["--update", "--yes", "--channel", &releases.url()],
+    );
+    assert!(again.ok, "{}", again.stderr);
+    again.says("https://nils.example.org");
+    let after = std::fs::read_to_string(&desk).expect("the desk's configuration");
+    assert!(
+        after.contains("origin = \"https://nils.example.org\""),
+        "the update stamped an address of its own over it:\n{after}"
+    );
+}
+
+/// An address a browser could not open is refused before anything is written.
+#[test]
+fn an_origin_that_is_not_an_address_is_refused_and_nothing_is_written() {
+    let nils = Installed::new("nils-setup-origin-bad");
+    let config = TempDir::new("nils-setup-origin-bad-config");
+    let base = TempDir::new("nils-setup-origin-bad-base");
+    let dir = base.path().join("nils");
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "desk",
+            "--origin",
+            "nils.example.org",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+        ],
+    );
+    assert!(!o.ok, "a bare host was taken as an address:\n{}", o.stdout);
+    assert!(
+        o.stderr
+            .contains("has no scheme: write https://nils.example.org"),
+        "{}",
+        o.stderr
+    );
+    assert!(!dir.exists(), "{} was made", dir.display());
+    assert!(
+        !config.path().join("nils").join("setup.toml").exists(),
+        "the record was written"
+    );
+}
+
+/// With no session of this account there is nothing to keep the parts
+/// running, and an install told to write services says so at the question,
+/// before a file is written.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_install_that_cannot_keep_services_says_so_before_it_writes_anything() {
+    let nils = Installed::new("nils-setup-nosession");
+    let config = TempDir::new("nils-setup-nosession-config");
+    let base = TempDir::new("nils-setup-nosession-base");
+    let dir = base.path().join("nils");
+    let out = output(
+        Command::new(nils.path())
+            .arg("setup")
+            .args([
+                "--yes",
+                "--parts",
+                "engine",
+                "--service",
+                "--dir",
+                dir.to_str().unwrap(),
+            ])
+            .env("NILS_NO_TTY", "1")
+            .env("NO_COLOR", "1")
+            .env("XDG_CONFIG_HOME", config.path())
+            // what a machine nobody is logged in to has: systemctl, and no
+            // user manager for it to talk to
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env_remove("NILS_RELEASES")
+            .env_remove("NILS_DESK_RELEASES"),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "it went on and installed:\n{stdout}");
+    assert!(stderr.contains("no systemd session"), "{stderr}");
+    assert!(stderr.contains("loginctl enable-linger"), "{stderr}");
+    assert!(!dir.exists(), "{} was made", dir.display());
+    assert!(
+        !config.path().join("systemd").exists(),
+        "units were written for a manager that would not take them"
+    );
+}
+
 #[test]
 fn the_network_and_no_login_are_not_offered_together() {
     let nils = Installed::new("nils-setup-reach");
