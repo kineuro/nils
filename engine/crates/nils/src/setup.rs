@@ -3778,10 +3778,11 @@ fn backups_dir(site: Option<&Site>, dir: &Path) -> PathBuf {
 fn own_dirs(plan: &Plan) -> Vec<PathBuf> {
     let mut out = vec![plan.dir.join("registry"), plan.dir.join("desk")];
     let backups = plan.backups();
-    if !plan
-        .declared()
-        .iter()
-        .any(|place| backups.starts_with(&place.path))
+    if backups.starts_with(&plan.dir)
+        || !plan
+            .declared()
+            .iter()
+            .any(|place| backups.starts_with(&place.path))
     {
         out.push(backups);
     }
@@ -16570,6 +16571,19 @@ mod tests {
         assert_eq!(
             plan.backups(),
             PathBuf::from("/data/nils-archives/registry")
+        );
+        let inside = a_site(Site {
+            places: places_given(&[
+                "archives=/srv/nils/archives,role=backup".to_string(),
+                "registry=/srv/nils/registry,role=registry,backup=archives".to_string(),
+            ])
+            .unwrap(),
+            ..Site::default()
+        });
+        assert!(
+            own_dirs(&inside).contains(&PathBuf::from("/srv/nils/archives")),
+            "archives under the install's own directory are still made by it: {:?}",
+            own_dirs(&inside)
         );
         plan.system = Some(SystemUnits::default());
         let files = files_of(&plan);
