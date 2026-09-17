@@ -3637,6 +3637,13 @@ pub(crate) struct Plan {
     /// settings beside it: `None` where the install has the five places of
     /// a laptop and the engine's own defaults.
     pub(crate) site: Option<Site>,
+    /// The paths a unit would keep a part's account out of that are closed
+    /// to that account already, each with the account: root cannot look at
+    /// them, so the line that would hide one is left out. Found when the plan
+    /// is made, by [`masks_here`], and never while a unit is written, so that
+    /// writing a unit stays a matter of text. Empty for every install whose
+    /// services are an account's own.
+    pub(crate) closed: Vec<(String, PathBuf)>,
 }
 
 /// The provider the desk signs people in at, as the desk, the engine and
@@ -3902,6 +3909,9 @@ fn plan_and_sources(state: &State, channel: Option<&str>) -> (Plan, Option<(Stri
         system: state.system.clone(),
         helper: state.helper.clone(),
         site: state.site.clone(),
+        // not recorded: a path can come within an account's reach, or out of
+        // root's, after the install, so every run that writes units looks
+        closed: Vec::new(),
     };
     (plan, read)
 }
@@ -5906,7 +5916,7 @@ fn questions(
             read.or_record(recorded_places)
         }
     };
-    let plan = Plan {
+    let mut plan = Plan {
         dir,
         parts,
         mode,
@@ -5927,7 +5937,21 @@ fn questions(
         system,
         helper,
         site,
+        closed: Vec::new(),
     };
+    // Every path a unit would keep a part out of is looked at here, as root,
+    // the way systemd looks at it before the part starts, now that the
+    // places and the accounts are settled. A path the part's account could
+    // reach but no unit can hide is refused with nothing written, as the
+    // services of this machine are; `--print` says it and goes on.
+    let masks = console.probe("the paths the services hide", || masks_here(&plan));
+    if let Some(refused) = in_reach_refusal(&masks) {
+        if !args.print {
+            return Err(usage(refused).into());
+        }
+        console.note(&refused);
+    }
+    plan.closed = masks.closed;
 
     // 8. the summary, then the work
     console.step(8);
@@ -6018,6 +6042,9 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
         Reading::Update
     };
     sources_said_or_stop(reading, read.as_ref(), console)?;
+    if let Some(refused) = recorded_masks_refusal(&mut plan) {
+        return Err(fail(format!("nothing was changed: {refused}")));
+    }
     if let Ok(newest) = update::newest_version(&update::engine_base(args.channel.as_deref())) {
         plan.version = newest;
     }
@@ -6104,7 +6131,7 @@ fn sources_said_or_stop(
 /// The menu's last offer: the configuration and the units written again from
 /// what the state records, for an install whose files were lost or edited.
 fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
-    let (plan, read) = plan_and_sources(state, args.channel.as_deref());
+    let (mut plan, read) = plan_and_sources(state, args.channel.as_deref());
     if let Some(refused) = recorded_system_refusal(&plan) {
         return Err(fail(format!("nothing was changed: {refused}")));
     }
@@ -6114,6 +6141,9 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         Reading::Repair
     };
     sources_said_or_stop(reading, read.as_ref(), console)?;
+    if let Some(refused) = recorded_masks_refusal(&mut plan) {
+        return Err(fail(format!("nothing was changed: {refused}")));
+    }
     println!();
     println!("{}", console.bold("Repairing"));
     print!("{}", plan_text(&plan, console));
@@ -6428,6 +6458,9 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
         ));
         if !system.capabilities.is_empty() {
             rows.push(("engine keeps", system.capabilities.join(", ")));
+        }
+        for sentence in closed_words(&plan.closed) {
+            rows.push(("closed", sentence));
         }
     }
     if let Some(helper) = &plan.helper {
@@ -11936,6 +11969,19 @@ fn service_of_machine(plan: &Plan, part: &str) -> String {
         out.push_str("ProtectHome=yes\n");
     }
     for path in engine_data(plan) {
+        // Systemd looks at a path it hides as root before the part starts,
+        // and a path root cannot look at stops the part. One the account is
+        // closed out of already needs no hiding, so its line is left out,
+        // and the unit says why for whoever reads it.
+        if plan.closed.iter().any(|(a, p)| a == account && *p == path) {
+            let _ = writeln!(
+                out,
+                "# InaccessiblePaths=-{} is left out: root cannot look at it, and {account} \
+                 cannot reach it",
+                path.display()
+            );
+            continue;
+        }
         let _ = writeln!(out, "InaccessiblePaths=-{}", path.display());
     }
     out
@@ -11957,6 +12003,235 @@ fn engine_data(plan: &Plan) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+// ------------------------------------------ the paths a unit hides, looked at
+
+/// What root finds at a path a unit would hide. Systemd looks at every such
+/// path as root before the part starts, and one it is refused at stops the
+/// part with `226/NAMESPACE`: the `-` before the path forgives only a path
+/// that is missing. A share that squashes root refuses root in this way,
+/// while the engine's account reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RootLook {
+    /// Root can look at it, or it is missing, or it failed some other way
+    /// that systemd is left to meet as it always was: the line stays.
+    Seen,
+    /// Root is refused. The folder is the nearest above the path that root
+    /// can look at, which is the one root may not search, and so the one a
+    /// fix is given for.
+    Refused { folder: PathBuf },
+}
+
+/// A path root cannot look at, which a service running as the account could
+/// reach were its line left out, and which no unit can hide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InReach {
+    account: String,
+    path: PathBuf,
+    /// The folder root may not search.
+    folder: PathBuf,
+    /// Whether the account was seen to reach it. A line is left out only
+    /// where the account is known to be closed out already, so one that
+    /// could not be asked is refused as one that reaches it.
+    seen: bool,
+}
+
+/// What became of the lines that hide the engine's data from the parts that
+/// run as other accounts, once each path was looked at.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Masks {
+    /// Each path root cannot look at that the account cannot reach either,
+    /// with the account: its line is left out.
+    closed: Vec<(String, PathBuf)>,
+    /// Each path root cannot look at that the account can reach.
+    in_reach: Vec<InReach>,
+}
+
+/// Every path a unit would hide, with the account whose services it is hidden
+/// from: the engine's data, for each part that runs as an account other than
+/// the engine's, each account once. Empty where no unit is written or none
+/// hides anything, which is every install whose services are an account's
+/// own.
+fn masked(plan: &Plan) -> Vec<(String, PathBuf)> {
+    let Some(system) = &plan.system else {
+        return Vec::new();
+    };
+    if !plan.service {
+        return Vec::new();
+    }
+    // the same parts, and the same test, as the units that carry the lines
+    let engine = system.account("engine");
+    let mut accounts: Vec<&str> = Vec::new();
+    for part in [Part::Desk, Part::Assistant] {
+        let account = system.account(part.name());
+        if plan.has(part) && account != engine && !accounts.contains(&account) {
+            accounts.push(account);
+        }
+    }
+    let data = engine_data(plan);
+    accounts
+        .into_iter()
+        .flat_map(|account| {
+            data.iter()
+                .map(move |path| (account.to_string(), path.clone()))
+        })
+        .collect()
+}
+
+/// What becomes of each line, with what root finds and whether an account
+/// reaches a path given, so that every answer can be had on any machine.
+/// The account is asked only where root is refused.
+fn masks_when(
+    plan: &Plan,
+    root: impl Fn(&Path) -> RootLook,
+    reaches: impl Fn(&str, &Path) -> Option<bool>,
+) -> Masks {
+    let mut out = Masks::default();
+    for (account, path) in masked(plan) {
+        let RootLook::Refused { folder } = root(&path) else {
+            continue;
+        };
+        match reaches(&account, &path) {
+            Some(false) => out.closed.push((account, path)),
+            seen => out.in_reach.push(InReach {
+                account,
+                path,
+                folder,
+                seen: seen.is_some(),
+            }),
+        }
+    }
+    out
+}
+
+/// The same, looked at on this machine. Only root's look is the one systemd
+/// takes, so a run that is not root, as `--print` may be, finds nothing and
+/// every line stays as it was.
+fn masks_here(plan: &Plan) -> Masks {
+    if masked(plan).is_empty() || !am_root() {
+        return Masks::default();
+    }
+    masks_when(plan, root_looks_at, account_reaches)
+}
+
+/// What root finds at a path, asked as this process, which is root.
+fn root_looks_at(path: &Path) -> RootLook {
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => RootLook::Refused {
+            folder: path
+                .ancestors()
+                .skip(1)
+                .find(|above| std::fs::metadata(above).is_ok())
+                .unwrap_or(path)
+                .to_path_buf(),
+        },
+        _ => RootLook::Seen,
+    }
+}
+
+/// Whether an account reaches a path, asked as that account, since root is
+/// refused where this is asked. A missing path counts as reached where the
+/// account may search the nearest folder above it that it can see, since the
+/// engine may make the path there later. `None` where the account could not
+/// be asked, which only a word from the account's own shell rules out.
+///
+/// This is one fixed question and not a way to run things as an account: an
+/// empty environment, the path as the only argument, and one word back.
+fn account_reaches(account: &str, path: &Path) -> Option<bool> {
+    const ASK: &str = "p=$1\n\
+        if test -e \"$p\"; then echo reaches; exit 0; fi\n\
+        d=$(dirname -- \"$p\")\n\
+        while ! test -e \"$d\"; do d=$(dirname -- \"$d\"); done\n\
+        if test -d \"$d\" && test -x \"$d\"; then echo reaches; else echo closed; fi\n";
+    let out = Command::new("runuser")
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .args(["-u", account, "--", "sh", "-c", ASK, "sh"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "reaches" => Some(true),
+        "closed" => Some(false),
+        _ => None,
+    }
+}
+
+/// The paths each account is closed out of already, said in one sentence for
+/// each account, for the plan and for the restart after an update.
+fn closed_words(closed: &[(String, PathBuf)]) -> Vec<String> {
+    let mut accounts: Vec<&str> = Vec::new();
+    for (account, _) in closed {
+        if !accounts.contains(&account.as_str()) {
+            accounts.push(account);
+        }
+    }
+    accounts
+        .into_iter()
+        .map(|account| {
+            let paths: Vec<String> = closed
+                .iter()
+                .filter(|(a, _)| a == account)
+                .map(|(_, p)| p.display().to_string())
+                .collect();
+            let (is, them) = if paths.len() == 1 {
+                ("is", "it")
+            } else {
+                ("are", "them")
+            };
+            format!(
+                "{} {is} closed to {account} already, so the services that run as {account} do \
+                 not hide {them}: root cannot look at {them}, and a service that hides a path \
+                 root cannot look at does not start",
+                paths.join(", ")
+            )
+        })
+        .collect()
+}
+
+/// Each path no unit can hide from an account that reaches it, with the fix.
+/// `None` where there is none.
+fn in_reach_words(masks: &Masks) -> Option<String> {
+    if masks.in_reach.is_empty() {
+        return None;
+    }
+    let said: Vec<String> = masks
+        .in_reach
+        .iter()
+        .map(|r| {
+            let (account, path, folder) = (&r.account, r.path.display(), r.folder.display());
+            let reach = if r.seen {
+                format!("{account} can reach it")
+            } else {
+                format!("it could not be asked whether {account} can reach it")
+            };
+            format!(
+                "the services that run as {account} cannot be kept out of {path}, because root \
+                 cannot look at it and {reach}: give root search permission on {folder} (as \
+                 chmod 711 does), or close {path} to {account}"
+            )
+        })
+        .collect();
+    Some(said.join("; "))
+}
+
+/// Why this install's units cannot be written, said before anything is.
+fn in_reach_refusal(masks: &Masks) -> Option<String> {
+    in_reach_words(masks).map(|words| format!("{words}, and run nils setup again"))
+}
+
+/// A recorded install's paths looked at again before its units are written
+/// again, by an update or a repair: one can have come within an account's
+/// reach, or out of root's, since the install. What is closed already is
+/// kept in the plan; what an account can reach is refused, with nothing
+/// changed yet.
+fn recorded_masks_refusal(plan: &mut Plan) -> Option<String> {
+    let masks = masks_here(plan);
+    plan.closed = masks.closed.clone();
+    in_reach_refusal(&masks)
 }
 
 /// What each part reads and writes, and the account it runs as: what this
@@ -12828,6 +13103,26 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     {
         println!("{said}");
     }
+    // The paths the units hide are looked at again, since one can have come
+    // within an account's reach, or out of root's, since the install. What
+    // is closed already is left out, as setup leaves it out. What an account
+    // can reach is not refused here: the parts were replaced already, and
+    // leaving every service alone would keep the old ones running, one of
+    // them perhaps with that path in reach under a unit that no longer hides
+    // it. So its line stays, the services of that account do not start
+    // rather than start with the path in reach, everything else starts, and
+    // the fix is said.
+    let masks = masks_here(&plan);
+    for sentence in closed_words(&masks.closed) {
+        println!("{sentence}");
+    }
+    if let Some(words) = in_reach_words(&masks) {
+        println!(
+            "{words}, and run nils setup again; until then their units still hide it, so those \
+             services do not start rather than start with it in reach"
+        );
+    }
+    plan.closed = masks.closed;
     if let Some(engine) = state.parts.get("engine") {
         plan.version = engine.version.clone();
     }
@@ -14568,6 +14863,7 @@ mod tests {
             system: None,
             helper: None,
             site: None,
+            closed: Vec::new(),
         }
     }
 
@@ -16672,6 +16968,40 @@ mod tests {
             "{desk}"
         );
         assert!(desk.contains("InaccessiblePaths=-/data/source"), "{desk}");
+
+        // a path root cannot look at, closed to the desk's account already,
+        // is left out of the desk's unit with the reason beside it, and the
+        // assistant's account, which was not found closed out, keeps its line
+        let mut closed = plan.clone();
+        closed.closed = vec![("nils-desk".to_string(), PathBuf::from("/data/source"))];
+        let written = systemd_units(&closed, &state);
+        let text_of = |name: &str| {
+            written
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, text)| text.clone())
+                .unwrap_or_else(|| panic!("no {name} among {written:?}"))
+        };
+        let desk = text_of("nils-desk.service");
+        assert!(
+            !desk.lines().any(|l| l == "InaccessiblePaths=-/data/source"),
+            "a unit hiding a path root cannot look at does not start: {desk}"
+        );
+        assert!(
+            desk.contains(
+                "\n# InaccessiblePaths=-/data/source is left out: root cannot look at it, and \
+                 nils-desk cannot reach it\n"
+            ),
+            "{desk}"
+        );
+        assert!(
+            desk.contains("\nInaccessiblePaths=-/srv/nils/registry\n"),
+            "only the closed path is left out: {desk}"
+        );
+        assert!(
+            text_of("kvasir.service").contains("\nInaccessiblePaths=-/data/source\n"),
+            "a path is left out only for the account it is closed to"
+        );
         assert!(unit("kvasir.service").contains("User=nils-assistant\n"));
         assert!(unit("nils-assistant.service").contains("User=nils-assistant\n"));
         assert!(
@@ -16728,6 +17058,255 @@ mod tests {
         );
         assert_eq!(units_dir(true), PathBuf::from("/etc/systemd/system"));
         assert!(units_dir(false).ends_with("systemd/user"));
+    }
+
+    /// Root refused at the paths named, by the folder above each, and seen
+    /// everywhere else.
+    fn root_refused_at(paths: &[&str]) -> impl Fn(&Path) -> RootLook {
+        let refused: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        move |path| {
+            if refused.iter().any(|p| p == path) {
+                RootLook::Refused {
+                    folder: path.parent().unwrap().to_path_buf(),
+                }
+            } else {
+                RootLook::Seen
+            }
+        }
+    }
+
+    #[test]
+    fn a_path_root_can_look_at_keeps_its_line_and_no_account_is_asked() {
+        let plan = deployment();
+        assert_eq!(
+            masked(&plan),
+            vec![
+                ("nils-desk".to_string(), PathBuf::from("/srv/nils/registry")),
+                ("nils-desk".to_string(), PathBuf::from("/srv/nils/backups")),
+                ("nils-desk".to_string(), PathBuf::from("/data/source")),
+                (
+                    "nils-assistant".to_string(),
+                    PathBuf::from("/srv/nils/registry")
+                ),
+                (
+                    "nils-assistant".to_string(),
+                    PathBuf::from("/srv/nils/backups")
+                ),
+                ("nils-assistant".to_string(), PathBuf::from("/data/source")),
+            ],
+            "every path the units hide, for each account they are hidden from"
+        );
+        // root sees it, or it is missing, which the line forgives
+        let masks = masks_when(&plan, root_refused_at(&[]), |account, path| {
+            panic!("{account} was asked about {}", path.display())
+        });
+        assert_eq!(masks, Masks::default());
+        assert_eq!(in_reach_refusal(&masks), None);
+        assert!(closed_words(&masks.closed).is_empty());
+    }
+
+    #[test]
+    fn a_path_closed_to_the_account_already_is_left_out_and_the_plan_says_so() {
+        let mut plan = deployment();
+        // the archives on a share that squashes root, whose top only the
+        // engine's account may search
+        plan.site = Some(Site {
+            backup_dir: Some("/data/nils-archives/registry".to_string()),
+            ..Site::default()
+        });
+        let asked = std::cell::RefCell::new(Vec::new());
+        let masks = masks_when(
+            &plan,
+            root_refused_at(&["/data/nils-archives/registry"]),
+            |account, path| {
+                asked
+                    .borrow_mut()
+                    .push((account.to_string(), path.to_path_buf()));
+                Some(false)
+            },
+        );
+        let archives = PathBuf::from("/data/nils-archives/registry");
+        assert_eq!(
+            masks.closed,
+            vec![
+                ("nils-desk".to_string(), archives.clone()),
+                ("nils-assistant".to_string(), archives.clone()),
+            ]
+        );
+        assert!(masks.in_reach.is_empty(), "{masks:?}");
+        assert_eq!(
+            asked.borrow().len(),
+            2,
+            "an account is asked only where root is refused"
+        );
+        assert_eq!(in_reach_refusal(&masks), None, "nothing is refused");
+
+        plan.closed = masks.closed;
+        let said = closed_words(&plan.closed);
+        assert_eq!(
+            said,
+            vec![
+                "/data/nils-archives/registry is closed to nils-desk already, so the services \
+                 that run as nils-desk do not hide it: root cannot look at it, and a service \
+                 that hides a path root cannot look at does not start"
+                    .to_string(),
+                "/data/nils-archives/registry is closed to nils-assistant already, so the \
+                 services that run as nils-assistant do not hide it: root cannot look at it, \
+                 and a service that hides a path root cannot look at does not start"
+                    .to_string(),
+            ]
+        );
+        let rows = plan_rows(&plan);
+        assert!(
+            rows.iter()
+                .any(|(key, value)| *key == "closed" && *value == said[0]),
+            "{rows:?}"
+        );
+        let two = closed_words(&[
+            ("nils-desk".to_string(), PathBuf::from("/a")),
+            ("nils-desk".to_string(), PathBuf::from("/b")),
+        ]);
+        assert_eq!(two.len(), 1, "one sentence for each account");
+        assert!(
+            two[0].starts_with("/a, /b are closed to nils-desk already")
+                && two[0].contains("look at them"),
+            "{two:?}"
+        );
+
+        // --print shows the line left out, and why, where it shows the units
+        if !cfg!(target_os = "macos") {
+            let printed = commands_text(&plan, &Console::new(true));
+            assert!(
+                printed.contains(
+                    "# InaccessiblePaths=-/data/nils-archives/registry is left out: root cannot \
+                     look at it, and nils-desk cannot reach it"
+                ),
+                "{printed}"
+            );
+            assert!(
+                !printed
+                    .lines()
+                    .any(|l| l.trim() == "InaccessiblePaths=-/data/nils-archives/registry"),
+                "{printed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_the_account_can_reach_but_root_cannot_look_at_is_refused_with_the_fix() {
+        let plan = deployment();
+        let masks = masks_when(
+            &plan,
+            root_refused_at(&["/data/source"]),
+            |account, _| match account {
+                "nils-desk" => Some(true),
+                // the assistant's account could not be asked
+                _ => None,
+            },
+        );
+        assert!(
+            masks.closed.is_empty(),
+            "nothing is left out where an account reaches the path, or may: {masks:?}"
+        );
+        assert_eq!(masks.in_reach.len(), 2, "{masks:?}");
+        let refused = in_reach_refusal(&masks).expect("refused");
+        assert_eq!(
+            refused,
+            "the services that run as nils-desk cannot be kept out of /data/source, because root \
+             cannot look at it and nils-desk can reach it: give root search permission on /data \
+             (as chmod 711 does), or close /data/source to nils-desk; the services that run as \
+             nils-assistant cannot be kept out of /data/source, because root cannot look at it \
+             and it could not be asked whether nils-assistant can reach it: give root search \
+             permission on /data (as chmod 711 does), or close /data/source to nils-assistant, \
+             and run nils setup again"
+        );
+
+        // the plan leaves nothing out, so a unit written all the same, as
+        // the restart after an update writes it, hides the path and does not
+        // start rather than start with it in reach
+        let state = state_of(&plan, &deployed_parts());
+        for (name, text) in systemd_units(&plan, &state) {
+            if name != "nils-engine.service" {
+                assert!(
+                    text.contains("\nInaccessiblePaths=-/data/source\n"),
+                    "{name}: {text}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_fix_names_the_folder_root_may_not_search_and_an_account_not_asked_is_not_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        if am_root() {
+            // root searches a folder of this machine whatever its mode
+            return;
+        }
+        let dir = scratch("root-looks");
+        let locked = dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let looked = root_looks_at(&locked.join("inner").join("deeper"));
+        let missing = root_looks_at(&dir.join("not-there"));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            looked,
+            RootLook::Refused {
+                folder: locked.clone()
+            }
+        );
+        assert_eq!(missing, RootLook::Seen, "the line forgives a missing path");
+
+        // runuser is root's, so an account asked by anyone else says no word,
+        // and that is never read as closed
+        assert_eq!(account_reaches("nobody", Path::new("/")), None);
+    }
+
+    #[test]
+    fn the_paths_a_unit_hides_are_not_looked_at_without_the_services_of_a_machine() {
+        let never = |path: &Path| -> RootLook { panic!("{} was looked at", path.display()) };
+        let unasked = |account: &str, _: &Path| -> Option<bool> { panic!("{account} was asked") };
+
+        let plain = plan(Runtime::Machine);
+        assert!(plain.system.is_none());
+        assert!(masked(&plain).is_empty());
+        assert_eq!(masks_when(&plain, never, unasked), Masks::default());
+        assert_eq!(masks_here(&plain), Masks::default());
+
+        // nor where no unit is written
+        let mut unwritten = deployment();
+        unwritten.service = false;
+        assert!(masked(&unwritten).is_empty());
+
+        // nor where every part runs as the engine's account, which hides
+        // nothing from itself
+        let mut one_account = deployment();
+        one_account.system = Some(SystemUnits::default());
+        assert!(masked(&one_account).is_empty());
+
+        // an account the desk and the assistant share is asked once for
+        // each path
+        let mut shared = deployment();
+        if let Some(system) = shared.system.as_mut() {
+            system
+                .accounts
+                .insert("assistant".to_string(), "nils-desk".to_string());
+        }
+        assert_eq!(masked(&shared).len(), engine_data(&shared).len());
+
+        // and a plan that leaves a path out writes nothing of it without them
+        let mut closed = plan(Runtime::Machine);
+        closed.closed = vec![("nils".to_string(), PathBuf::from("/data/source"))];
+        let state = state_of(&closed, &[("engine", "binary"), ("desk", "binary")]);
+        for (name, text) in systemd_units(&closed, &state) {
+            assert!(!text.contains("InaccessiblePaths"), "{name}: {text}");
+        }
+        assert!(
+            !plan_rows(&closed).iter().any(|(key, _)| *key == "closed"),
+            "the plan of an install of this account says nothing of it"
+        );
     }
 
     /// The engine's account and binary of a site's install, as a step
