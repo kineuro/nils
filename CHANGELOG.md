@@ -4,8 +4,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.31] - 2026-09-17
+
 ### Added
 
+- The HTTP API contract is version 6. It is published as `contracts/openapi/v6/`, a new directory beside version 5, and `contracts/openapi/v5/` is untouched: version 6 is version 5 with the one door below added and nothing else changed. A client pinned to contract 5 is unaffected by this release and has nothing to change.
 - The engine serves the tag policy it owns (HTTP API contract version 6, decision record 28). `GET /api/pseudonymize/tags` answers what the pseudonymiser does to the standard elements it acts on: the four categories it removes tag for tag, patient, trial, provider and institution, and the hundred elements in them, each written `gggg,eeee` as a dataset's own lists are written, with its category and what becomes of it, `removed`, or `replaced` for the age, computed from the birth date and the study date and put in place of whatever was there, or `kept` for a covariate; the element the subject's code is written into, replaced rather than removed and in no category, so that it is never offered to keep; the two that are never removed, and why; and the three covariates a dataset keeps unless it opts out, with the switch that opts out named. Never the times, which are a release's and not the pseudonymiser's. The answer carries numbers, categories and fates and no tag names, which the engine has never held: the policy is the engine's and the words a reader needs belong to whatever shows the list. A dataset's own `keep` and `remove` lists are that dataset's and stay where they are, with the dataset. Any grant opens the door, which reads the constants of the binary and says nothing of the registry. A client pinned to contract 5 meets the engine it already knew.
 
 ## [1.0.0-alpha.30] - 2026-09-16
