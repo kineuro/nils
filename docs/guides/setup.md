@@ -195,6 +195,37 @@ repair write the same services rather than falling back to an account's own,
 and one run by somebody who cannot write them says so before it changes
 anything.
 
+Root runs setup for such an install, and root is not the account the registry
+has to answer: the engine's service reaches it as the engine's account. So
+setup takes every step on the registry as that account, through the engine's
+own binary under `runuser`, started in `/` with the environment the engine's
+service runs with and nothing of root's. That account adds the registry's key,
+with the passphrase on its input; makes the registry, with the pseudonym
+settings given outright; tries a Postgres, with the connection string on its
+input; declares the places; and reads the source places back. That is why a
+Postgres that authenticates peers, which refuses root, and a registry on a
+share that squashes root, which does not open to root, both work: each is
+asked by the account that will use it. A registry that does not answer that
+account is said, and never quietly replaced by the places in the setup record,
+which hold none added at the desk since: an install, an update, a repair and a
+reapply stop on it before they change anything, `--print` says it, and the
+restart after `nils update --all` says it and how to mend it.
+
+Kvasir's and the assistant's source is taken the same way, as the account
+those two run as. Git, `npm ci` and the build run under `runuser` in the part's
+folder, which setup makes that account's before the clone, or hands to it
+whole where a checkout is there already, so every file in it is born that
+account's and a rerun, `nils setup --update` and `nils update --all` find a
+checkout that account can fetch into and build. They run with the account's own home
+where it owns one and may write there, and otherwise with
+`<dir>/build-cache/<account>`, where npm keeps its cache; no part keeps
+anything there, so it can be removed whenever nothing is building. Where root
+cannot act as the account, because the machine no longer has it or has no
+`runuser`, root takes the steps itself, and each git command in the checkout
+names that one folder with `-c safe.directory` on its own command line.
+Nothing is written into root's git settings or the machine's, which would
+trust the folder for everything run as root from then on.
+
 Something has to restart those services and replace the parts' files when a
 release lands, and both are root's. The supervisor does not run as root to do
 it, and the account that runs the engine is not given sudo: it reads every
@@ -235,8 +266,13 @@ none of it: it restarts its own units and replaces files it already owns.
 **8. The plan, and then the work.** Everything decided, on one screen, and
 under `--print` the exact commands and unit files as well: for an install on
 this machine every unit it would write, where it would write them, and every
-call it would make to hand them over and start them; for a container run the
-commands and the quadlets or the compose file. Then the parts
+call it would make to hand them over and start them; for the services of a
+machine, each step taken as another account, after the `runuser` that runs
+it: the registry's key and `init` where there is no registry yet, the source
+steps of Kvasir and the assistant, with the home they build with where that is
+the build cache, and the places, with the password of a connection string kept
+out; for a container run the commands and the quadlets or the compose file.
+Then the parts
 that are missing are downloaded from their releases and checked against the
 release's `SHA256SUMS`, the registry is made, the places are declared, the
 desk's configuration is written, and the services are started. It ends with
