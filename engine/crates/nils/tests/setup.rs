@@ -901,6 +901,12 @@ fn print_says_the_units_and_the_calls_of_an_install_on_this_machine() {
     o.says("systemctl --user daemon-reload");
     o.says("systemctl --user restart nils-engine");
     assert!(!dir.exists(), "--print made {}", dir.display());
+    // and takes every step on the registry as itself
+    assert!(
+        !o.stdout.contains("runuser"),
+        "an install of this account's own acts as another:\n{}",
+        o.stdout
+    );
     // an install of this account's own restarts its own units and replaces
     // files it owns, so it is given no privilege at all
     assert!(
@@ -948,7 +954,24 @@ fn print_says_the_units_and_the_calls_of_an_install_on_this_machine() {
     o.says("/usr/local/sbin/nils-manage restart engine");
     o.says("/usr/local/sbin/nils-manage restart all");
     o.says("/usr/local/sbin/nils-manage reapply");
+    o.says("/usr/local/sbin/nils-manage reapply all");
     o.says("/usr/local/sbin/nils-manage update");
+    // and every step on the registry as the engine's account, through the
+    // engine binary, the way its service reaches the registry
+    let as_engine = format!(
+        "runuser -u nils -- {} --registry {}",
+        nils.path().display(),
+        dir.join("registry").display()
+    );
+    o.says(&format!("{as_engine} key add nils\n"));
+    o.says(&format!(
+        "{as_engine} setup-registry init --backend sqlite\n"
+    ));
+    o.says(&format!("{as_engine} setup-registry declare\n"));
+    o.says(&format!(
+        "      registry {} --role registry --backup backups",
+        dir.join("registry").display()
+    ));
     assert!(!dir.exists(), "--print made {}", dir.display());
     assert!(
         !config.path().join("nils").join("setup.toml").exists(),
@@ -1320,6 +1343,364 @@ fn an_uninstall_takes_away_the_privilege_it_was_given() {
     // and the data is the data
     assert!(dir.join("registry").join("nils.toml").is_file());
     assert!(!record.join("setup.toml").exists());
+}
+
+/// A command run with something on its input, retrying while the binary just
+/// copied is still held open for writing, as [`output`] does.
+fn with_input(command: &mut Command, input: &str) -> std::process::Output {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for _ in 0..40 {
+        match command.spawn() {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    // a command that stops before reading says why on stderr
+                    let _ = stdin.write_all(input.as_bytes());
+                }
+                return child.wait_with_output().expect("nils ran");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(e) => panic!("nils runs: {e}"),
+        }
+    }
+    panic!("the binary stayed busy");
+}
+
+/// What setup runs as the engine's account under runuser is the engine's own
+/// command, run here as this account: the places declared as setup declares
+/// them, with no dataset declared on a source and a place already named moved
+/// rather than refused, and the source places read back as the registry
+/// stands, or where it stands said, or a registry that does not answer failed
+/// with its reason.
+#[test]
+fn the_steps_taken_as_the_engines_account_declare_and_read_back_the_places_as_setup_does() {
+    let nils = Installed::new("nils-setup-registry-steps");
+    let base = TempDir::new("nils-setup-registry-steps-base");
+    let registry = base.path().join("registry");
+    let nils_at = |registry: &Path| {
+        let mut command = Command::new(nils.path());
+        command.arg("--registry").arg(registry);
+        command
+    };
+    let json = |out: &std::process::Output| -> serde_json::Value {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("one JSON document")
+    };
+
+    // the registry, made by the two steps setup takes, the passphrase on the input
+    let added = with_input(
+        nils_at(&registry).args(["key", "add", "nils"]),
+        "a fixture passphrase\n",
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let made = with_input(
+        nils_at(&registry).args(["setup-registry", "init", "--backend", "sqlite"]),
+        "",
+    );
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let settings = |db: &Path| -> Vec<(String, String)> {
+        let db = rusqlite::Connection::open(db).unwrap();
+        ["pseudonym_scheme", "display_length", "pseudonym_key"]
+            .iter()
+            .map(|key| {
+                let value: String = db
+                    .query_row(
+                        "SELECT value FROM registry_meta WHERE key = ?1",
+                        [key],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                ((*key).to_string(), value)
+            })
+            .collect()
+    };
+    let made_as_setup = [
+        ("pseudonym_scheme".to_string(), "blake2b-32".to_string()),
+        ("display_length".to_string(), "12".to_string()),
+        ("pseudonym_key".to_string(), "nils".to_string()),
+    ];
+    assert_eq!(
+        settings(&registry.join("registry.db")),
+        made_as_setup,
+        "the registry setup makes, with the settings of its own process"
+    );
+    let sources = json(&output(
+        nils_at(&registry).args(["setup-registry", "sources"]),
+    ));
+    assert_eq!(sources["registry"], true, "{sources}");
+    assert_eq!(sources["sources"], serde_json::json!([]), "{sources}");
+
+    // declared as setup declares them
+    let (first, moved, added) = (
+        base.path().join("dicom-a"),
+        base.path().join("dicom-b"),
+        base.path().join("scanner-2"),
+    );
+    for d in [first.join("dcm-raw"), moved.clone(), added.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let specs = |source: &Path| {
+        serde_json::json!([
+            {"name": "backups", "role": "backup", "path": base.path().join("backups"),
+             "backup": null, "snapshots": false, "protected": false, "fast": false},
+            {"name": "registry", "role": "registry", "path": registry,
+             "backup": "backups", "snapshots": false, "protected": false, "fast": false},
+            {"name": "source", "role": "source", "path": source,
+             "backup": null, "snapshots": false, "protected": false, "fast": false},
+        ])
+        .to_string()
+    };
+    let declared = with_input(
+        nils_at(&registry).args(["setup-registry", "declare"]),
+        &specs(&first),
+    );
+    assert!(
+        declared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&declared.stderr)
+    );
+    let answered = String::from_utf8_lossy(&declared.stdout).to_string();
+    let last: serde_json::Value =
+        serde_json::from_str(answered.lines().last().unwrap_or_default()).unwrap();
+    let names: Vec<&str> = last["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert_eq!(names, ["backups", "registry", "source"], "{answered}");
+    assert!(
+        base.path().join("backups").is_dir(),
+        "a place's missing directory is made by the account declaring it"
+    );
+    assert!(
+        first.join("dcm-raw").is_dir() && !first.join("dcm-anon").exists(),
+        "setup declares no dataset on a source, so nothing in its folder is renamed"
+    );
+
+    // a source added by hand, and a rerun that names another folder
+    let placed = output(
+        nils_at(&registry)
+            .args(["place", "add", "scanner2"])
+            .arg(&added)
+            .args(["--role", "source"]),
+    );
+    assert!(
+        placed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&placed.stderr)
+    );
+    let again = with_input(
+        nils_at(&registry).args(["setup-registry", "declare"]),
+        &specs(&moved),
+    );
+    let answered = String::from_utf8_lossy(&again.stdout).to_string();
+    assert!(again.status.success(), "{answered}");
+    let moved_to = std::fs::canonicalize(&moved).unwrap();
+    assert!(
+        answered.contains(&serde_json::json!({ "said": format!("the source place is now {}", moved_to.display()) }).to_string()),
+        "a place already named is moved, and that is said: {answered}"
+    );
+    assert!(answered.contains("scanner2"), "{answered}");
+
+    let sources = json(&output(
+        nils_at(&registry).args(["setup-registry", "sources"]),
+    ));
+    let listed: Vec<(String, String)> = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().unwrap().to_string(),
+                p["path"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        listed.contains(&("source".to_string(), moved_to.display().to_string())),
+        "{sources}"
+    );
+    assert!(
+        listed.iter().any(|(name, _)| name == "scanner2"),
+        "a source added at the desk is read back: {sources}"
+    );
+
+    // a registry at another schema is left as it is, and where it stands said
+    let db = rusqlite::Connection::open(registry.join("registry.db")).unwrap();
+    let version: String = db
+        .query_row(
+            "SELECT value FROM registry_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    db.execute(
+        "UPDATE registry_meta SET value = '1' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+    let sources = json(&output(
+        nils_at(&registry).args(["setup-registry", "sources"]),
+    ));
+    assert_eq!(sources["registry"], true, "{sources}");
+    assert_eq!(sources["ahead"], false, "{sources}");
+    assert!(
+        sources["schema"]
+            .as_str()
+            .is_some_and(|s| s.contains("schema version 1, behind")),
+        "{sources}"
+    );
+    let still: String = db
+        .query_row(
+            "SELECT value FROM registry_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(still, "1", "reading it did not migrate it");
+    assert_ne!(version, "1");
+
+    // no registry holds no places; one that does not answer fails, with why
+    let none = json(&output(
+        nils_at(&base.path().join("nothing")).args(["setup-registry", "sources"]),
+    ));
+    assert_eq!(none, serde_json::json!({ "registry": false }));
+    let broken = base.path().join("broken");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(broken.join("nils.toml"), "backend = 3\n").unwrap();
+    let refused = output(nils_at(&broken).args(["setup-registry", "sources"]));
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).starts_with("nils: nils.toml"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let unanswered = with_input(
+        Command::new(nils.path()).args(["setup-registry", "connect", "--schema", "nils"]),
+        "postgres://nils@127.0.0.1:1/nils\n",
+    );
+    assert!(!unanswered.status.success());
+    assert!(
+        String::from_utf8_lossy(&unanswered.stderr).starts_with("nils: "),
+        "{}",
+        String::from_utf8_lossy(&unanswered.stderr)
+    );
+}
+
+/// On Postgres the step that makes a registry is given the connection string
+/// on its input alone, and writes it into `nils.toml` as it was given, with
+/// the settings setup makes every registry with. Runs where a test DSN is set.
+#[test]
+fn the_step_that_makes_a_registry_on_postgres_reads_the_connection_string_from_its_input() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres test is skipped");
+        return;
+    };
+    let schema = "nils_setup_step_input";
+    let drop = || {
+        nils_registry::Store::connect_postgres(&dsn, schema)
+            .expect("connect")
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    let nils = Installed::new("nils-setup-registry-step-postgres");
+    let base = TempDir::new("nils-setup-registry-step-postgres");
+    let registry = base.path().join("registry");
+    let nils_at = || {
+        let mut command = Command::new(nils.path());
+        command.arg("--registry").arg(&registry);
+        command
+    };
+    let added = with_input(
+        nils_at().args(["key", "add", "nils"]),
+        "a fixture passphrase\n",
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let words = [
+        "setup-registry",
+        "init",
+        "--backend",
+        "postgres",
+        "--schema",
+        schema,
+    ];
+    assert!(
+        words.iter().all(|word| !word.contains(dsn.as_str())),
+        "a command line is every account's to read"
+    );
+    let made = with_input(nils_at().args(words), &format!("{dsn}\n"));
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(registry.join("nils.toml")).unwrap()).unwrap();
+    assert_eq!(config["backend"].as_str(), Some("postgres"));
+    assert_eq!(
+        config["dsn"].as_str(),
+        Some(dsn.as_str()),
+        "the connection string as it was given, without the line end after it"
+    );
+    assert_eq!(config["schema"].as_str(), Some(schema));
+    let mut store = nils_registry::Store::connect_postgres(&dsn, schema).expect("connect");
+    let meta = store
+        .query(
+            &format!(
+                "SELECT key, value FROM {} \
+                 WHERE key IN ('pseudonym_scheme', 'display_length', 'pseudonym_key') ORDER BY key",
+                store.qualified("registry_meta")
+            ),
+            &[],
+        )
+        .expect("the registry's settings");
+    let settings: Vec<(String, String)> = meta
+        .iter()
+        .map(|row| {
+            (
+                row.text(0).unwrap_or_default().to_string(),
+                row.text(1).unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        settings,
+        [
+            ("display_length".to_string(), "12".to_string()),
+            ("pseudonym_key".to_string(), "nils".to_string()),
+            ("pseudonym_scheme".to_string(), "blake2b-32".to_string()),
+        ]
+    );
+    drop();
 }
 
 #[test]

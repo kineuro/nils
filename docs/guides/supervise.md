@@ -175,14 +175,16 @@ supervisor runs as may call it with, and no others:
 nils-deploy ALL=(root) NOPASSWD: /usr/local/sbin/nils-manage restart engine,
 /usr/local/sbin/nils-manage restart desk, /usr/local/sbin/nils-manage restart gateway,
 /usr/local/sbin/nils-manage restart assistant, /usr/local/sbin/nils-manage restart all,
-/usr/local/sbin/nils-manage reapply, /usr/local/sbin/nils-manage update
+/usr/local/sbin/nils-manage reapply, /usr/local/sbin/nils-manage reapply all,
+/usr/local/sbin/nils-manage update
 ```
 
 sudo matches a command and its words exactly, so a call carrying any other
 word matches no rule and is turned away before the program is reached, and
 the program itself answers only to those words: `restart` with the name of a
 part of this install or `all`, `reapply`, which writes the engine's unit again
-from the record and starts it, and `update`, which runs `nils update --all`.
+from the record and starts it, `reapply all`, which writes every part's unit
+again and starts them in order, and `update`, which runs `nils update --all`.
 It takes no path, no unit name and no command of its caller's.
 
 The account is named with `--account supervisor=nils-deploy`, which `--system`
@@ -194,10 +196,16 @@ is written.
 
 So on such an install the doors go through it: `POST /api/supervise/restart`
 runs `sudo -n /usr/local/sbin/nils-manage restart <part>`, `POST
-/api/supervise/reapply` runs `... reapply`, and `POST
-/api/supervise/update-all` runs `... update`. Run as root, the same commands
-do the work themselves and ask sudo for nothing. An install whose services are
-an account's own has no helper and needs none: it restarts its own units.
+/api/supervise/reapply` runs `... reapply` for the engine and
+`... reapply all` with no part, and `POST /api/supervise/update-all` runs
+`... update`. Run as root, the same commands do the work themselves and ask
+sudo for nothing. An install whose services are an account's own has no
+helper and needs none: it restarts its own units.
+
+A helper written before `reapply all` was one of its words, on an install
+brought up to date since, is not asked for it: `nils update --all` writes
+neither the helper nor its rule. The reapply ends failed and says to run `nils
+setup` again as root, which writes both again.
 
 What the account can do with it is restart this install's services and put new
 files in place for its parts, which is what following a release is. What it

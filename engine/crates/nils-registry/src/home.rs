@@ -411,6 +411,16 @@ impl Home {
             ))),
         }
     }
+
+    /// Where the registry's schema stands against this binary's, with
+    /// nothing changed. A reader that [`Home::open_as_it_stands`] refused
+    /// asks this to tell a registry at another version, which it may leave
+    /// for later, from one that does not answer at all, which it may not.
+    pub fn standing(&self) -> Result<Standing, HomeError> {
+        let config = self.read_config()?;
+        let mut store = self.open_store(&config, Kind::Registry)?;
+        Ok(migrate::standing(&mut store, Kind::Registry)?)
+    }
 }
 
 impl Meta {
@@ -765,6 +775,29 @@ mod tests {
         drop(reg);
         let err = home.open().unwrap_err().to_string();
         assert!(err.contains("ahead of this binary"), "{err}");
+    }
+
+    #[test]
+    fn a_registry_not_read_as_it_stands_says_where_its_schema_stands() {
+        let dir = TempDir::new("home-standing");
+        let home = Home::new(dir.path());
+        assert!(
+            home.standing().is_err(),
+            "a home with no registry has no schema to stand anywhere"
+        );
+        home.keys(None).add("k", b"x").unwrap();
+        let mut reg = home.init(&opts("k")).unwrap();
+        assert_eq!(home.standing().unwrap(), Standing::Current);
+        assert!(home.open_as_it_stands().is_ok());
+        reg.set_meta("schema_version", &(SCHEMA_VERSION + 1).to_string())
+            .unwrap();
+        drop(reg);
+        assert!(home.open_as_it_stands().is_err());
+        assert_eq!(
+            home.standing().unwrap(),
+            Standing::Ahead(SCHEMA_VERSION + 1),
+            "a registry that answers at another version is told apart from one that does not"
+        );
     }
 
     #[test]

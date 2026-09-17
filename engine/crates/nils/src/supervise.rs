@@ -1637,10 +1637,7 @@ pub(crate) fn command(command: SuperviseCommand) -> Result<(), Exit> {
             let state = recorded()?;
             match part.as_deref() {
                 Some("engine") => crate::setup::reapply_engine(&state),
-                None | Some("all") => {
-                    crate::setup::restart_after_update(None);
-                    Ok(())
-                }
+                None | Some("all") => crate::setup::reapply_all(&state),
                 Some(other) => Err(usage(format!("{other}: reapply takes engine or all"))),
             }
         }

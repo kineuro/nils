@@ -168,6 +168,13 @@ enum Command {
     /// Install every part and make what they need: an install wizard that
     /// asks what you want, says what this machine can do, and writes it
     Setup(Box<setup::SetupArgs>),
+    /// The steps on a registry nils setup takes as the engine's account,
+    /// which setup runs itself under runuser
+    #[command(hide = true)]
+    SetupRegistry {
+        #[command(subcommand)]
+        command: setup::RegistryStep,
+    },
     /// Replace this binary with the newest release, and the packs with it
     Update(update::UpdateArgs),
     /// Remove what nils setup installed: NILS alone and keep the data, or everything
@@ -1699,6 +1706,7 @@ fn main() -> ExitCode {
         Command::Serve(args) => serve::serve(&home, *args),
         Command::Supervise { command } => supervise::command(command),
         Command::Setup(args) => setup::setup(*args),
+        Command::SetupRegistry { command } => setup::registry_step(&home, command),
         Command::Update(args) => update::update(&home, args),
         Command::Uninstall(args) => setup::uninstall(args),
         Command::Audit(AuditCommand::List {
