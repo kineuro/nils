@@ -11678,6 +11678,19 @@ fn start_everything(
             for refused in make_the_calls(&hand_units_to_systemd(&names, true, system), system)? {
                 console.warn(&format!("{refused} was refused"));
             }
+            // llama.cpp's unit names cache folders where it cannot see a
+            // home, and they are made here, where every run that writes the
+            // units passes, so the hand-over below gives them to its account
+            // before it starts. A cache that cannot be made is said, so that
+            // the unit which then fails has its reason said beside it.
+            if names.iter().any(|n| n == "nils-llama")
+                && let Err(e) = make_llama_cache(&plan.runtime_dir(), &llama_cache(plan))
+            {
+                console.warn(&format!(
+                    "llama.cpp's cache under {} was not made, so it may not start: {e}",
+                    plan.runtime_dir().display()
+                ));
+            }
             // Where the parts run as accounts of their own, what each reads
             // and writes is that account's before it starts.
             hand_over_files(plan, console);
@@ -11965,7 +11978,7 @@ fn service_of_machine(plan: &Plan, part: &str) -> String {
     if account == system.account("engine") {
         return out;
     }
-    if !under_home(&plan.dir) {
+    if home_out_of_reach(plan, part) {
         out.push_str("ProtectHome=yes\n");
     }
     for path in engine_data(plan) {
@@ -11985,6 +11998,17 @@ fn service_of_machine(plan: &Plan, part: &str) -> String {
         let _ = writeln!(out, "InaccessiblePaths=-{}", path.display());
     }
     out
+}
+
+/// Whether a part's service is kept out of the home directories: a service
+/// of this machine, for a part that runs as another account than the
+/// engine's, of an install that does not live in a home. Asked by the lines
+/// that shut the homes out and by what has to live elsewhere once they are.
+fn home_out_of_reach(plan: &Plan, part: &str) -> bool {
+    let Some(system) = &plan.system else {
+        return false;
+    };
+    part != "engine" && system.account(part) != system.account("engine") && !under_home(&plan.dir)
 }
 
 /// Whether a directory is under a home, where keeping the home directories
@@ -12517,15 +12541,80 @@ fn llama_argv(plan: &Plan, build: &Path, host: &str) -> Vec<String> {
 /// llama.cpp's systemd user unit, on this machine whichever runtime the parts
 /// use, started again when it fails.
 fn llama_unit(plan: &Plan, build: &Path, host: &str) -> String {
+    let environment: String = llama_cache(plan)
+        .iter()
+        .map(|(name, path)| unit_environment(name, path))
+        .collect();
     format!(
         "[Unit]\nDescription=llama.cpp, which runs the models Kvasir starts\n\
-         After=network-online.target\n\n[Service]\n{}ExecStart={}\nWorkingDirectory={}\n\
-         Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy={}\n",
+         After=network-online.target\n\n[Service]\n{}{environment}ExecStart={}\n\
+         WorkingDirectory={}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy={}\n",
         service_of_machine(plan, "assistant"),
         llama_argv(plan, build, host).join(" "),
         plan.runtime_dir().display(),
         wanted_by(plan.system.is_some())
     )
+}
+
+/// Where llama.cpp keeps the models it downloads, by the variables that name
+/// it, for a unit kept out of the home directories. llama.cpp keeps them
+/// under its account's home unless told otherwise, and a unit with
+/// `ProtectHome=yes` cannot even look there, so it stopped at start with
+/// "Permission denied" on `~/.cache/huggingface/hub`. They go under Kvasir's
+/// runtime folder, which is the account's already, in the folders a drop-in
+/// that set them by hand used, so that taking such a drop-in away moves
+/// nothing. While it is there it still wins: systemd reads a drop-in after
+/// the unit, and the last assignment of a variable is the one it keeps.
+///
+/// Empty where the unit sees its home: a service of an account's own, or an
+/// install that lives in a home. Its cache stays where it is, since pointing
+/// `HF_HOME` elsewhere would hide the models already downloaded into
+/// `~/.cache` and fetch every one of them again.
+fn llama_cache(plan: &Plan) -> Vec<(&'static str, PathBuf)> {
+    if !home_out_of_reach(plan, "assistant") {
+        return Vec::new();
+    }
+    llama_cache_in(&plan.runtime_dir())
+}
+
+/// The cache's folders inside a runtime folder, by the variable that names
+/// each.
+fn llama_cache_in(runtime: &Path) -> Vec<(&'static str, PathBuf)> {
+    let cache = runtime.join("cache");
+    vec![
+        ("LLAMA_CACHE", cache.join("llama.cpp")),
+        ("HF_HOME", cache.join("huggingface")),
+        ("HF_HUB_CACHE", cache.join("huggingface").join("hub")),
+    ]
+}
+
+/// One variable of a unit's environment. The assignment is quoted whole, so a
+/// directory with a space in it stays one value rather than two assignments;
+/// inside the quotes a backslash and a quote are escaped, and a percent sign
+/// is doubled, since systemd reads one as the start of a specifier.
+fn unit_environment(name: &str, value: &Path) -> String {
+    let value = value
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    format!("Environment=\"{name}={value}\"\n")
+}
+
+/// llama.cpp's cache folders made inside its runtime folder, before it
+/// starts, and left for the hand-over that follows to give to its account
+/// with the rest of Kvasir's folder. Made only inside a runtime folder that
+/// is there: without one llama.cpp has no presets or key to start with, and
+/// making it would leave a folder in Kvasir's place before Kvasir is.
+fn make_llama_cache(runtime: &Path, cache: &[(&str, PathBuf)]) -> std::io::Result<()> {
+    if !runtime.is_dir() {
+        return Ok(());
+    }
+    for (_, path) in cache {
+        std::fs::create_dir_all(path)?;
+    }
+    Ok(())
 }
 
 /// llama.cpp's command for a person to run, where no service runs it.
@@ -21041,6 +21130,134 @@ mod tests {
                 .iter()
                 .any(|(n, _)| n == "nils-llama.service")
         );
+    }
+
+    #[test]
+    fn llama_cpp_keeps_its_cache_under_the_runtime_folder_where_its_unit_cannot_see_a_home() {
+        let plan = deployment();
+        let unit = llama_unit(&plan, Path::new("/srv/nils/llama.cpp/b1"), "127.0.0.1");
+        assert!(unit.contains("ProtectHome=yes\n"), "{unit}");
+        for line in [
+            "Environment=\"LLAMA_CACHE=/srv/nils/kvasir/runtime/cache/llama.cpp\"\n",
+            "Environment=\"HF_HOME=/srv/nils/kvasir/runtime/cache/huggingface\"\n",
+            "Environment=\"HF_HUB_CACHE=/srv/nils/kvasir/runtime/cache/huggingface/hub\"\n",
+        ] {
+            assert!(unit.contains(line), "no {line} in {unit}");
+        }
+        // they are the service's, ahead of the command they are for
+        let service = unit.find("[Service]").unwrap();
+        let cache = unit.find("Environment=").unwrap();
+        let exec = unit.find("ExecStart=").unwrap();
+        assert!(service < cache && cache < exec, "{unit}");
+
+        // every one of them is under the runtime's cache folder, inside a
+        // folder that is handed to the account llama.cpp runs as
+        let folder = plan.runtime_dir().join("cache");
+        let named = llama_cache(&plan);
+        assert_eq!(named.len(), 3, "{named:?}");
+        for (name, path) in &named {
+            assert!(path.starts_with(&folder), "{name}: {}", path.display());
+        }
+        assert!(
+            files_of(&plan)
+                .iter()
+                .any(|(path, account)| folder.starts_with(path) && account == "nils-assistant"),
+            "the cache is not given to llama.cpp's account: {:?}",
+            files_of(&plan)
+        );
+
+        // and --print shows them where it shows the unit
+        if !cfg!(target_os = "macos") {
+            let mut printed = plan.clone();
+            printed.llama = Some(Llama {
+                variant: "ubuntu-x64",
+                loader: true,
+            });
+            let said = commands_text(&printed, &Console::new(true));
+            assert!(said.contains("nils-llama.service"), "{said}");
+            assert!(
+                said.contains(
+                    "    Environment=\"HF_HUB_CACHE=/srv/nils/kvasir/runtime/cache/huggingface/hub\"\n"
+                ),
+                "{said}"
+            );
+        }
+    }
+
+    #[test]
+    fn llama_cpp_keeps_its_cache_where_it_was_wherever_its_unit_sees_a_home() {
+        // this account's own units, outside a home
+        let mut own = plan(Runtime::Machine);
+        own.dir = PathBuf::from("/srv/nils");
+        own.parts.push(Part::Assistant);
+        // the machine's units, for an install that lives in a home
+        let mut at_home = deployment();
+        at_home.dir = PathBuf::from("/home/you/nils");
+        // the machine's units, with the assistant as the engine's account
+        let mut shared = deployment();
+        if let Some(system) = shared.system.as_mut() {
+            system.accounts.remove("assistant");
+        }
+        // llama.cpp beside parts in containers
+        let mut beside = plan(Runtime::Podman);
+        beside.dir = PathBuf::from("/srv/nils");
+        beside.parts.push(Part::Assistant);
+        for (why, plan) in [
+            ("its own units", own),
+            ("under a home", at_home),
+            ("as the engine's account", shared),
+            ("beside containers", beside),
+        ] {
+            let unit = llama_unit(&plan, Path::new("/srv/nils/llama.cpp/b1"), "127.0.0.1");
+            assert!(!unit.contains("ProtectHome"), "{why}: {unit}");
+            assert!(
+                !unit.contains("Environment=") && llama_cache(&plan).is_empty(),
+                "{why}: the models it downloaded before would be fetched again: {unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_with_a_space_stays_one_assignment_in_llama_cpps_environment() {
+        let mut plan = deployment();
+        plan.dir = PathBuf::from("/srv/nils 100%");
+        let unit = llama_unit(&plan, Path::new("/srv/nils/llama.cpp/b1"), "127.0.0.1");
+        assert!(
+            unit.contains(
+                "Environment=\"HF_HOME=/srv/nils 100%%/kvasir/runtime/cache/huggingface\"\n"
+            ),
+            "{unit}"
+        );
+        assert_eq!(
+            unit_environment("A", Path::new("/x \"y\" \\z")),
+            "Environment=\"A=/x \\\"y\\\" \\\\z\"\n",
+            "a quote and a backslash inside the quotes are escaped"
+        );
+    }
+
+    #[test]
+    fn llama_cpps_cache_is_made_only_inside_a_runtime_folder_that_is_there() {
+        let dir = scratch("llama-cache");
+        let runtime = dir.join("kvasir").join("runtime");
+        let cache = llama_cache_in(&runtime);
+        // before Kvasir's folder is there, nothing is made in its place
+        assert!(make_llama_cache(&runtime, &cache).is_ok());
+        assert!(
+            !dir.join("kvasir").exists(),
+            "a folder stands in for Kvasir"
+        );
+
+        std::fs::create_dir_all(&runtime).unwrap();
+        assert!(make_llama_cache(&runtime, &cache).is_ok());
+        for (name, path) in &cache {
+            assert!(path.is_dir(), "{name}: {}", path.display());
+        }
+        // a second run keeps what llama.cpp downloaded into it
+        let model = cache[2].1.join("a-model");
+        std::fs::write(&model, "weights").unwrap();
+        assert!(make_llama_cache(&runtime, &cache).is_ok());
+        assert_eq!(std::fs::read_to_string(&model).unwrap(), "weights");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
