@@ -6670,7 +6670,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     if plan.service {
         // llama.cpp alone is held back where it cannot start, as it said at
         // its own step.
-        let starting = holding_llama_back(plan, &state, llama_starts);
+        let starting = holding_llama_back(&state, llama_starts);
         match start_everything(plan, &starting, console, None) {
             Ok(started) => {
                 console.report(&started);
@@ -7691,7 +7691,7 @@ fn place(
     let mut services = Vec::new();
     if plan.service {
         console.begin(Stage::Services);
-        let starting = holding_llama_back(plan, state, llama_starts);
+        let starting = holding_llama_back(state, llama_starts);
         match start_everything(plan, &starting, console, answers.model.as_ref()) {
             Ok(started) => {
                 console.report(&started);
@@ -11635,14 +11635,32 @@ const LLAMA_HELD_ALONE: &str = "llama.cpp alone is held back, its unit stopped a
 /// and the log still show what it would run, and the setup or repair that
 /// can start llama.cpp again writes it, enables it and starts it, as it
 /// does every other unit.
-fn holding_llama_back<'a>(plan: &Plan, state: &'a State, llama_starts: bool) -> Cow<'a, State> {
-    if !llama_starts && state.parts.contains_key(LLAMA_PART) && !cfg!(target_os = "macos") {
-        for argv in hold_llama_back_calls(plan.system.is_some()) {
+fn holding_llama_back(state: &State, llama_starts: bool) -> Cow<'_, State> {
+    if !llama_starts {
+        for argv in llama_held_back_calls(state) {
             let words: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
             quietly(&argv[0], &words);
         }
     }
     services_to_start(state, llama_starts)
+}
+
+/// What holds llama.cpp's unit back, where this install runs one for it:
+/// the unit [`service_units`] names, on the manager it names it on. Only a
+/// unit of this install's is stopped, by the same reading of the record that
+/// says a port is this install's own to keep and that a part is this
+/// install's to stop while its files change; an install that writes no units
+/// has no `nils-llama` of its own, and stopping the one it found would be
+/// stopping another install's, or this machine's.
+fn llama_held_back_calls(state: &State) -> Vec<Vec<String>> {
+    if cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    service_units(state)
+        .into_iter()
+        .find(|unit| unit.part == LLAMA_PART && unit.watcher == "systemd")
+        .map(|unit| hold_llama_back_calls(unit.system))
+        .unwrap_or_default()
 }
 
 /// The calls that hold llama.cpp's unit back, on the manager that runs it:
@@ -14843,7 +14861,7 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     println!("restarting the services");
     match start_everything(
         &plan,
-        &holding_llama_back(&plan, &state, llama_starts),
+        &holding_llama_back(&state, llama_starts),
         &console,
         None,
     ) {
@@ -20919,6 +20937,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// An adoption rewrites the tracked files a built copy holds, which is
+    /// the part's own source, so it is one of the switches a part's unit is
+    /// stopped before. It is also the one switch that can still refuse once
+    /// it has begun, and everything it does before its checkout it does
+    /// inside the `.git` it made, so the part goes on answering until the
+    /// checkout is certain and is not stopped for a run that changes
+    /// nothing.
+    #[cfg(unix)]
+    #[test]
+    fn an_adoption_stops_the_part_just_before_its_checkout_and_a_refusal_stops_nothing() {
+        let root = scratch("adopt-stop");
+        let (repo, released) = released_repository(&root);
+        let console = Console::new(true);
+        let hands = SourceHands::Own;
+
+        // stopped once, with the copy's own files still in the folder: the
+        // fetch and the reading of what the release tracks are behind it
+        let into = root.join("kvasir");
+        lay_copy(&into);
+        let mut stopped_at = Vec::new();
+        adopt_folder(
+            &console,
+            &hands,
+            "Kvasir",
+            &repo,
+            "v1.0.0-alpha.1",
+            &into,
+            &root,
+            "nils setup",
+            &mut || {
+                stopped_at.push(std::fs::read_to_string(into.join("package.json")).unwrap());
+            },
+        )
+        .unwrap_or_else(|e| panic!("the copy is adopted: {}", e.message));
+        assert_eq!(
+            stopped_at,
+            vec!["{\"name\": \"built\"}\n".to_string()],
+            "stopped once, before the checkout replaced the copy's files"
+        );
+        assert_eq!(
+            source_head(&hands, &into, &root).map(|head| head.trim().to_string()),
+            Some(released),
+            "and the checkout was taken after it"
+        );
+
+        // A release that tracks the folder's data is refused with the folder
+        // as it was, so the part was never stopped.
+        let refused = root.join("assistant");
+        lay_copy(&refused);
+        let before = bytes_under(&refused);
+        let mut stops = 0;
+        let said = adopt_folder(
+            &console,
+            &hands,
+            "Kvasir",
+            &repo,
+            "v1.0.0-alpha.2",
+            &refused,
+            &root,
+            "nils setup",
+            &mut || stops += 1,
+        )
+        .expect_err("the release tracks kvasir.json");
+        assert!(said.message.contains("the folder is left as it was"));
+        assert_eq!(stops, 0, "a run that changes nothing stops nothing");
+        assert_eq!(bytes_under(&refused), before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn print_says_the_source_steps_as_the_parts_account_for_the_machines_services() {
         let console = Console::new(true);
@@ -22660,6 +22747,82 @@ mod tests {
         assert_eq!(desk_secret_file(&p), secret);
         assert!(write_desk_config(&p).is_ok());
         assert_eq!(desk_secret_file(&p), secret, "a rerun keeps it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Setup writes the desk's client secret where the configuration on disk
+    /// says the desk reads it, and only then writes the configuration; the
+    /// guard on the store is asked between the two, with the store the file
+    /// names now and the store the text about to be written names. So the
+    /// paths a run resolves before the write have to be the paths the file
+    /// holds after it, on every mode, or setup would put the secret in one
+    /// file and have the desk read another.
+    #[test]
+    fn the_paths_a_run_resolves_before_the_desks_configuration_is_written_are_the_ones_it_holds_after()
+     {
+        let dir = scratch("desk-paths-order");
+        let desk = dir.join("desk");
+        let people = desk.join("state").join("nils-desk.sqlite");
+        let empty = desk.join("nils-desk.sqlite");
+        desk_store_holding(&people, &["reader"], &[("reader", "Readers")]);
+        desk_store_holding(&empty, &[], &[]);
+        let secret = dir.join("secrets").join("desk-client");
+
+        // A desk set by hand: its people in a store of their own, its signing
+        // key and its client secret file named where a person put them.
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Oidc;
+        p.oidc = Some(OidcPlan {
+            issuer: "https://auth.example.org/application/o/nils/".into(),
+            client_id: "abc123".into(),
+            jwks: "https://auth.example.org/application/o/nils/jwks/".into(),
+            roles_claim: "roles".into(),
+            scopes: None,
+        });
+        let quoted = |path: &Path| path.display().to_string().replace('\\', "\\\\");
+        let hand = format!(
+            "mode = \"oidc\"\nstore = \"{}\"\n\n[local]\nkey = \"by-hand\"\n\n[oidc]\nissuer = \
+             \"https://auth.example.org/application/o/nils/\"\nclient_id = \
+             \"abc123\"\nclient_secret_file = \"{}\"\n",
+            quoted(&people),
+            quoted(&secret)
+        );
+        std::fs::create_dir_all(&desk).unwrap();
+        std::fs::write(p.desk_config(), &hand).unwrap();
+
+        // what the steps before the write resolve, from the file on disk
+        assert_eq!(desk_secret_file(&p), secret);
+        assert_eq!(desk_store(&desk, false, Some(&hand)), Some(people.clone()));
+        assert!(desk_has_people(&desk, false));
+
+        for mode in [Mode::Oidc, Mode::Local, Mode::Off] {
+            p.mode = mode;
+            assert!(write_desk_config(&p).is_ok(), "{mode:?}");
+            let on_disk = std::fs::read_to_string(p.desk_config()).unwrap();
+            assert_eq!(desk_secret_file(&p), secret, "{mode:?}: the same file");
+            assert_eq!(
+                desk_store(&desk, false, Some(&on_disk)),
+                Some(people.clone()),
+                "{mode:?}: the same store"
+            );
+            assert!(on_disk.contains("key = \"by-hand\""), "{mode:?}: {on_disk}");
+            assert!(desk_has_people(&desk, false), "{mode:?}");
+            // the guard is asked with those two, and has nothing to refuse
+            assert_eq!(
+                desk_store_left(
+                    desk_store(&desk, false, Some(&hand)).as_deref(),
+                    desk_store(&desk, false, Some(&on_disk)).as_deref()
+                ),
+                None
+            );
+        }
+        // and it stands in front of the write for a run that would move the
+        // desk off them
+        assert!(
+            desk_store_left(Some(&people), Some(&empty))
+                .is_some_and(|said| said.starts_with("the desk's configuration was left as it was"))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -24689,6 +24852,43 @@ mod tests {
                 vec!["systemctl", "--user", "disable", "nils-llama"],
             ],
             "llama.cpp beside parts in containers runs under the account's manager"
+        );
+
+        // The unit held back is the one this install runs llama.cpp under,
+        // read from the record the same way the ports are settled against it
+        // and a part is stopped while its files change, so the three never
+        // disagree about nils-llama.
+        state.service = "systemd".to_string();
+        assert_eq!(
+            service_units(&state)
+                .into_iter()
+                .find(|unit| unit.part == LLAMA_PART)
+                .map(|unit| unit.name),
+            Some("nils-llama".to_string())
+        );
+        assert!(state.system.is_none());
+        assert_eq!(llama_held_back_calls(&state), hold_llama_back_calls(false));
+        let mut machine = state.clone();
+        machine.system = Some(SystemUnits {
+            capabilities: Vec::new(),
+            accounts: BTreeMap::new(),
+        });
+        assert_eq!(
+            llama_held_back_calls(&machine),
+            hold_llama_back_calls(true),
+            "on the manager the unit is on"
+        );
+        let mut no_units = state.clone();
+        no_units.service = "none".to_string();
+        assert!(
+            llama_held_back_calls(&no_units).is_empty(),
+            "an install that runs no units has no nils-llama of its own to stop"
+        );
+        let mut no_build = state.clone();
+        no_build.parts.remove(LLAMA_PART);
+        assert!(
+            llama_held_back_calls(&no_build).is_empty(),
+            "and neither has one with no build on record"
         );
 
         // held back, llama.cpp's unit alone is left out of what is started
