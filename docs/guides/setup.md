@@ -144,8 +144,38 @@ on this machine whichever runtime the parts use: a systemd user unit of its
 own, `nils-llama.service`, started before Kvasir, or a launchd agent on macOS.
 `--service` / `--no-service`.
 
+Those are the services of the account that runs setup, which is what one
+machine with one person on it wants. `--system` writes the services of the
+machine instead, in `/etc/systemd/system`, and each part runs as an account
+of its own: `--account engine=nils --account desk=nils-desk --account
+assistant=nils-assistant`, and `nils` for a part not named. It is asked for
+outright and never arrived at, since it is written as root into a directory
+of the machine's; it needs Linux, systemd, root and `--runtime machine`. Each
+account named has to be on the machine already: a service account is the
+site's own to make, and setup makes none. One that is not there is named in a
+refusal before anything is written, at the question rather than when systemd
+would fail to start the unit.
+
+`--capabilities CAP_DAC_OVERRIDE,CAP_DAC_READ_SEARCH` gives the engine's
+service the capabilities it needs to read and write across the filesystems a
+site mounts, which is the reason for these services at all: a service of an
+account's own cannot carry a capability, whatever it is asked for. A part
+that runs as an account other than the engine's is kept out of the home
+directories, and out of the registry, the archives and the folders of DICOM,
+which it never reads: it asks the engine for what it shows. What each part
+reads and writes is given to the account that part runs as, so the desk's
+folder is the desk's and Kvasir's is the assistant's, while the base
+directory and the registry key's passphrase stay with the account that ran
+setup. The services and the accounts are written down, so an update and a
+repair write the same services rather than falling back to an account's own,
+and one run by somebody who cannot write them says so before it changes
+anything.
+
 **8. The plan, and then the work.** Everything decided, on one screen, and
-under `--print` the exact commands and unit files as well. Then the parts
+under `--print` the exact commands and unit files as well: for an install on
+this machine every unit it would write, where it would write them, and every
+call it would make to hand them over and start them; for a container run the
+commands and the quadlets or the compose file. Then the parts
 that are missing are downloaded from their releases and checked against the
 release's `SHA256SUMS`, the registry is made, the places are declared, the
 desk's configuration is written, and the services are started. It ends with
@@ -226,7 +256,10 @@ Podman is kept running by quadlets in `~/.config/containers/systemd/`
 the base directory, the parts with their versions and how each runs, the
 mode, the runtime, the service manager, the ports, the reachability, the
 address a browser opens the desk at where a proxy answers for it (`origin`,
-written only for such an install), the backend and the places declared:
+written only for such an install), the backend, the places declared, and for
+an install whose services are the machine's own the account each part runs as
+and the capabilities the engine keeps (`[system]`, written only for such an
+install):
 
 ```toml
 dir = "/home/you/nils"
@@ -252,6 +285,19 @@ path = "/home/you/nils/registry"
 version = "1.0.0-alpha.2"
 path = "ghcr.io/kineuro/nils:v1.0.0-alpha.2"
 kind = "podman"
+```
+
+An install whose services are the machine's own also records them:
+
+```toml
+service = "systemd system units"
+
+[system]
+capabilities = ["CAP_DAC_OVERRIDE", "CAP_DAC_READ_SEARCH"]
+
+[system.accounts]
+desk = "nils-desk"
+engine = "nils"
 ```
 
 Run `nils setup` again and it opens with what is installed, where, in what
@@ -303,6 +349,9 @@ key cannot be recovered. `--keep-data` and `--purge` answer it.
 | `--source PATH` | A directory of DICOM the engine may read |
 | `--key-file FILE` | The registry key's passphrase, instead of a prompt |
 | `--service`, `--no-service` | Write and start services, or do not |
+| `--system` | Write the services of this machine, in `/etc/systemd/system`; root's to do |
+| `--account PART=ACCOUNT` | With `--system`: the account a part runs as |
+| `--capabilities LIST` | With `--system`: the capabilities the engine's service keeps |
 | `--yes`, `-y` | Take every default without asking |
 | `--print` | Say what it would do, with every command and unit, and change nothing |
 | `--update` | Straight to the installs, for the parts already there |
