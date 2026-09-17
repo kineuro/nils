@@ -901,6 +901,13 @@ fn print_says_the_units_and_the_calls_of_an_install_on_this_machine() {
     o.says("systemctl --user daemon-reload");
     o.says("systemctl --user restart nils-engine");
     assert!(!dir.exists(), "--print made {}", dir.display());
+    // an install of this account's own restarts its own units and replaces
+    // files it owns, so it is given no privilege at all
+    assert!(
+        !o.stdout.contains("nils-manage") && !o.stdout.contains("sudoers"),
+        "an install of this account's own grew a privilege it does not need:\n{}",
+        o.stdout
+    );
 
     // the services of this machine, with an account of its own for the desk
     // and the capabilities the engine needs
@@ -912,6 +919,8 @@ fn print_says_the_units_and_the_calls_of_an_install_on_this_machine() {
             "--system",
             "--account",
             "desk=nils-desk",
+            "--account",
+            "supervisor=nils-deploy",
             "--capabilities",
             "CAP_DAC_OVERRIDE,CAP_DAC_READ_SEARCH",
             "--parts",
@@ -930,11 +939,48 @@ fn print_says_the_units_and_the_calls_of_an_install_on_this_machine() {
     o.says("WantedBy=multi-user.target");
     o.says("systemctl daemon-reload");
     o.says("systemctl enable nils-engine");
+    // and the privilege it keeps, whole, so an operator can read exactly
+    // what would go on the machine and put it there by hand
+    o.says("User=nils-deploy\n");
+    o.says("/usr/local/sbin/nils-manage");
+    o.says("/etc/sudoers.d/nils-manage");
+    o.says("nils-deploy ALL=(root) NOPASSWD:");
+    o.says("/usr/local/sbin/nils-manage restart engine");
+    o.says("/usr/local/sbin/nils-manage restart all");
+    o.says("/usr/local/sbin/nils-manage reapply");
+    o.says("/usr/local/sbin/nils-manage update");
     assert!(!dir.exists(), "--print made {}", dir.display());
     assert!(
         !config.path().join("nils").join("setup.toml").exists(),
         "--print wrote the state file"
     );
+
+    // the account that keeps the parts running is named outright and never
+    // fallen back to, so an install that leaves it out is told so, and no
+    // rule is written for an account nobody chose
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--print",
+            "--system",
+            "--parts",
+            "desk",
+            "--mode",
+            "local",
+            "--dir",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    o.says("--account supervisor=nils-deploy");
+    o.says("not the account any part runs as");
+    assert!(
+        !o.stdout.contains("NOPASSWD:"),
+        "a rule was written for an account nobody named:\n{}",
+        o.stdout
+    );
+    assert!(!dir.exists(), "--print made {}", dir.display());
 }
 
 /// The services of this machine are root's, and every account they run as
@@ -953,6 +999,8 @@ fn services_of_this_machine_are_refused_before_anything_is_written() {
         &[
             "--yes",
             "--system",
+            "--account",
+            "supervisor=nils-deploy",
             "--parts",
             "engine",
             "--dir",
@@ -1210,6 +1258,66 @@ fn an_uninstall_takes_kvasirs_state_and_keeps_the_data() {
         assistant.join("assistant.sqlite").is_file(),
         "the assistant's history is data"
     );
+    assert!(dir.join("registry").join("nils.toml").is_file());
+    assert!(!record.join("setup.toml").exists());
+}
+
+/// An uninstall takes away the privilege the install was given: the rule
+/// naming what may be run as root, and the program it named, the rule first.
+#[test]
+fn an_uninstall_takes_away_the_privilege_it_was_given() {
+    let nils = Installed::new("nils-setup-uninstall-privilege");
+    let config = TempDir::new("nils-setup-uninstall-privilege-config");
+    let base = TempDir::new("nils-setup-uninstall-privilege-base");
+    let dir = base.path().join("nils");
+    std::fs::create_dir_all(dir.join("registry")).unwrap();
+    std::fs::write(
+        dir.join("registry").join("nils.toml"),
+        "backend = \"sqlite\"\n",
+    )
+    .unwrap();
+    // the two files of the arrangement, where this test may write them
+    let helper = base.path().join("nils-manage");
+    let rule = base.path().join("sudoers.d-nils-manage");
+    std::fs::write(&helper, "#!/bin/sh\nexit 2\n").unwrap();
+    std::fs::write(
+        &rule,
+        "nils-deploy ALL=(root) NOPASSWD: /usr/local/sbin/nils-manage restart engine\n",
+    )
+    .unwrap();
+    let record = config.path().join("nils");
+    std::fs::create_dir_all(&record).unwrap();
+    std::fs::write(
+        record.join("setup.toml"),
+        format!(
+            "dir = \"{}\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"systemd system units\"\n\n\
+             [parts.engine]\nversion = \"1.0.0\"\npath = \"{}\"\nkind = \"binary\"\n\n\
+             [helper]\naccount = \"nils-deploy\"\npath = \"{}\"\nrule = \"{}\"\n",
+            dir.display(),
+            base.path().join("bin").join("nils").display(),
+            helper.display(),
+            rule.display()
+        ),
+    )
+    .unwrap();
+
+    let out = output(
+        Command::new(nils.path())
+            .args(["uninstall", "--keep-data", "--yes"])
+            .env("NILS_NO_TTY", "1")
+            .env("NO_COLOR", "1")
+            .env("XDG_CONFIG_HOME", config.path()),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("privilege"), "{stdout}");
+    assert!(!rule.exists(), "the rule stayed:\n{stdout}");
+    assert!(!helper.exists(), "the program stayed:\n{stdout}");
+    // and the data is the data
     assert!(dir.join("registry").join("nils.toml").is_file());
     assert!(!record.join("setup.toml").exists());
 }
