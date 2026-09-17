@@ -4,6 +4,12 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.33] - 2026-09-17
+
+### Fixed
+
+- A desk set up against a provider it is registered at already asks that provider for the entitlements scope where the provider offers it. `nils setup --oidc-issuer URL --oidc-client-id ID`, and the wizard's answer that the desk is registered at a provider already, wrote four scopes into the desk's configuration, `openid`, `profile`, `email` and `offline_access`, whatever the provider was, on the belief that only a registration setup itself makes at Authentik has an entitlements scope. A desk registered at Authentik by hand or by `nils-desk register` has one too, and the desk reads its people's entitlements from it, so after setup had written its configuration that desk stopped asking for them and everyone signed in with none: a person could do only what one of the desk's own groups gave them, and a desk whose access came from the provider's entitlements shut out its readers and its admins alike. Setup now reads the provider's discovery document once, for the signing keys as before and for the scopes it lists, and adds `entitlements` where `scopes_supported` names it. A provider that does not offer the scope is still asked for the four, since a scope a provider does not know fails the sign in.
+
 ## [1.0.0-alpha.32] - 2026-09-17
 
 ### Added
