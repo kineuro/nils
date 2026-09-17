@@ -6386,12 +6386,11 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     install_helper(plan, &state, console)?;
     console.begin(Stage::Services);
     let mut services = Vec::new();
-    if plan.service && !llama_starts {
-        // Started onto it, llama.cpp's unit would fail in a loop, and Kvasir
-        // would name a runtime that is not there.
-        console.warn(LLAMA_HOLDS_THE_SERVICES);
-    } else if plan.service {
-        match start_everything(plan, &state, console, None) {
+    if plan.service {
+        // llama.cpp alone is held back where it cannot start, as it said at
+        // its own step.
+        let starting = services_to_start(&state, llama_starts);
+        match start_everything(plan, &starting, console, None) {
             Ok(started) => {
                 console.report(&started);
                 services = started.services;
@@ -7397,15 +7396,12 @@ fn place(
     install_helper(plan, state, console)?;
 
     // Start it. Where llama.cpp cannot start an install has stopped already,
-    // and an update does not start the services onto it: its unit would fail
-    // in a loop, and Kvasir would name a runtime that is not there.
+    // and an update holds llama.cpp alone back, as it said at its own step.
     let mut services = Vec::new();
-    if plan.service && !llama_starts {
+    if plan.service {
         console.begin(Stage::Services);
-        console.warn(LLAMA_HOLDS_THE_SERVICES);
-    } else if plan.service {
-        console.begin(Stage::Services);
-        match start_everything(plan, state, console, answers.model.as_ref()) {
+        let starting = services_to_start(state, llama_starts);
+        match start_everything(plan, &starting, console, answers.model.as_ref()) {
             Ok(started) => {
                 console.report(&started);
                 let stopped: Vec<&str> = started
@@ -10537,8 +10533,8 @@ fn fetch_llama(plan: &Plan) -> Result<(PathBuf, bool), String> {
 /// or a repair, where Kvasir is then configured without it. So does a build
 /// that cannot start here, for a library the machine lacks or for anything
 /// else the loader says, and it is said before the services start rather
-/// than by its unit failing. Answers whether the services may be started,
-/// which they may not onto a build that cannot start.
+/// than by its unit failing. Answers whether llama.cpp can start; where it
+/// cannot, an update or a repair starts every other service without it.
 fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<bool, Exit> {
     let Some(llama) = plan.llama else {
         return Ok(true);
@@ -10574,12 +10570,10 @@ fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<bo
     console.progress(&format!("llama.cpp {LLAMA_BUILD} at {}", dir.display()));
     // What it links is read before it is run: the questions know only the
     // libraries named in advance, and ldd names the rest now it is here.
+    let install = console.strict.get();
     let lacks = llama_lacks_here(plan);
     if !lacks.is_empty() {
-        console.broken(&format!(
-            "llama.cpp {LLAMA_BUILD} cannot start, since this machine lacks {}",
-            lacks.join("; ")
-        ))?;
+        console.broken(&llama_held(llama_lacks_said(&lacks), install))?;
         return Ok(false);
     }
     match llama_devices(&dir.join("llama-server")) {
@@ -10588,8 +10582,9 @@ fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<bo
         ),
         Ok(devices) => console.say(&format!("llama.cpp runs a model on {}", devices.join("; "))),
         Err(said) => {
-            console.broken(&format!(
-                "llama.cpp {LLAMA_BUILD} does not run on this machine: {said}"
+            console.broken(&llama_held(
+                format!("llama.cpp {LLAMA_BUILD} does not run on this machine: {said}"),
+                install,
             ))?;
             return Ok(false);
         }
@@ -10600,11 +10595,44 @@ fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<bo
     Ok(true)
 }
 
-/// What an update or a repair says in place of starting the services onto a
-/// llama.cpp that cannot start, whose reason was said at its own step.
-const LLAMA_HOLDS_THE_SERVICES: &str = "the services were not started onto a llama.cpp that \
-                                        cannot start; once it can, nils setup and repair starts \
-                                        them";
+/// A llama.cpp that cannot start for what this machine lacks, as it is said.
+fn llama_lacks_said(lacks: &[String]) -> String {
+    format!(
+        "llama.cpp {LLAMA_BUILD} cannot start, since this machine lacks {}",
+        lacks.join("; ")
+    )
+}
+
+/// A llama.cpp that cannot start, in one sentence: on an install, the reason
+/// it stops; on an update, a repair or a restart, the reason and that
+/// llama.cpp alone is held back. The engine, the desk, Kvasir and the
+/// assistant run without it, and Kvasir copes with a backend that is down,
+/// so holding them all back would leave files just replaced under processes
+/// still running the old ones, for a part many sites use little.
+fn llama_held(said: String, install: bool) -> String {
+    if install {
+        said
+    } else {
+        format!("{said}; {LLAMA_HELD_ALONE}")
+    }
+}
+
+/// What an update, a repair or a restart adds where llama.cpp cannot start.
+const LLAMA_HELD_ALONE: &str = "llama.cpp alone is held back until nils setup and repair can \
+                                start it, and the other services start without it";
+
+/// The record the services are started from: the install's own, or, where
+/// llama.cpp cannot start, the same without its build, so that llama.cpp's
+/// unit is neither written nor started and every other unit is, as it would
+/// have been. The record kept on disk still names the build.
+fn services_to_start(state: &State, llama_starts: bool) -> std::borrow::Cow<'_, State> {
+    if llama_starts || !state.parts.contains_key(LLAMA_PART) {
+        return std::borrow::Cow::Borrowed(state);
+    }
+    let mut held = state.clone();
+    held.parts.remove(LLAMA_PART);
+    std::borrow::Cow::Owned(held)
+}
 
 /// After `nils update` moves this binary, the setup record says so. The
 /// wizard opens by naming what is installed, and it named the version the
@@ -13401,20 +13429,17 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     }
     plan.closed = masks.closed;
     // Restarted onto a llama.cpp that cannot start, its unit would fail in a
-    // loop and take the models Kvasir runs with it, so what the machine lacks
-    // is said and nothing is restarted. Only a build on record has a unit.
+    // loop, so what the machine lacks is said and llama.cpp alone is held
+    // back. Only a build on record has a unit.
+    let mut llama_starts = true;
     if plan.has(Part::Assistant)
         && state.parts.contains_key(LLAMA_PART)
         && llama_built(&plan).is_some()
     {
         let lacks = llama_lacks_here(&plan);
         if !lacks.is_empty() {
-            println!(
-                "the services were left alone: llama.cpp {LLAMA_BUILD} cannot start, since this \
-                 machine lacks {}; once it is installed, nils setup and repair starts them",
-                lacks.join("; ")
-            );
-            return;
+            println!("{}", llama_held(llama_lacks_said(&lacks), false));
+            llama_starts = false;
         }
     }
     if let Some(engine) = state.parts.get("engine") {
@@ -13427,7 +13452,12 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     }
     let console = Console::new(true);
     println!("restarting the services");
-    match start_everything(&plan, &state, &console, None) {
+    match start_everything(
+        &plan,
+        &services_to_start(&state, llama_starts),
+        &console,
+        None,
+    ) {
         Ok(started) => print!("{}", started.text),
         Err(e) => println!("the services were left alone: {}", e.message),
     }
@@ -21732,7 +21762,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_llama_cpp_that_cannot_start_stops_an_install_and_holds_the_services_on_an_update() {
+    fn a_llama_cpp_that_cannot_start_stops_an_install_and_is_held_back_alone_on_an_update() {
         let dir = scratch("llama-cannot-start");
         let mut plan = plan(Runtime::Machine);
         plan.dir = dir.clone();
@@ -21768,17 +21798,99 @@ mod tests {
             stopped.message
         );
         assert!(
+            !stopped.message.contains("held back"),
+            "an install stops rather than go on without it: {}",
+            stopped.message
+        );
+        assert!(
             state.parts.contains_key(LLAMA_PART),
             "the build is on record, so the stopped install can be removed"
         );
 
-        // an update or a repair says it and does not start the services
+        // an update or a repair says it, and answers that llama.cpp cannot
+        // start, so that it alone is held back
         console.strict.set(false);
         assert!(matches!(
             install_llama(&plan, &mut state, &console),
             Ok(false)
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_llama_cpp_held_back_is_said_in_one_sentence_with_what_the_machine_lacks() {
+        let lacks = llama_lacks("ubuntu-x64", &|_| false, None);
+        assert_eq!(
+            llama_held(llama_lacks_said(&lacks), false),
+            "llama.cpp b10964 cannot start, since this machine lacks libgomp.so.1, which \
+             llama.cpp links: install libgomp1 (Debian, Ubuntu); llama.cpp alone is held back \
+             until nils setup and repair can start it, and the other services start without it"
+        );
+        // an install stops on the reason alone
+        assert_eq!(
+            llama_held(llama_lacks_said(&lacks), true),
+            "llama.cpp b10964 cannot start, since this machine lacks libgomp.so.1, which \
+             llama.cpp links: install libgomp1 (Debian, Ubuntu)"
+        );
+    }
+
+    #[test]
+    fn every_other_service_starts_where_llama_cpp_alone_is_held_back() {
+        let mut plan = plan(Runtime::Machine);
+        plan.parts.push(Part::Assistant);
+        plan.llama = Some(Llama {
+            variant: "ubuntu-x64",
+            loader: true,
+        });
+        let mut state = state_of(
+            &plan,
+            &[
+                ("engine", "binary"),
+                ("desk", "binary"),
+                ("kvasir", "node"),
+                ("assistant", "node"),
+            ],
+        );
+        state.parts.insert(
+            LLAMA_PART.to_string(),
+            PartState {
+                version: LLAMA_BUILD.to_string(),
+                path: llama_build_dir(&plan.dir, "ubuntu-x64")
+                    .display()
+                    .to_string(),
+                kind: LLAMA_PART.to_string(),
+            },
+        );
+        let names = |state: &State| -> Vec<String> {
+            systemd_units(&plan, state)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        };
+        let all = names(&state);
+        assert!(all.contains(&"nils-llama.service".to_string()), "{all:?}");
+        assert_eq!(names(&services_to_start(&state, true)), all);
+
+        // held back, llama.cpp's unit alone is left out of what is started
+        let held = services_to_start(&state, false);
+        let mut others = all.clone();
+        others.retain(|name| name != "nils-llama.service");
+        assert_eq!(names(&held), others);
+        for unit in [
+            "nils-engine.service",
+            "nils-desk.service",
+            "kvasir.service",
+            "nils-assistant.service",
+        ] {
+            assert!(others.contains(&unit.to_string()), "{unit} in {others:?}");
+        }
+        // podman and docker start llama.cpp from the build on record, which
+        // the held record does not name
+        assert!(!held.parts.contains_key(LLAMA_PART));
+        assert!(
+            state.parts.contains_key(LLAMA_PART),
+            "the record kept still names the build"
+        );
     }
 
     #[test]

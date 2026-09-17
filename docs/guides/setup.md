@@ -140,8 +140,9 @@ Ubuntu, `vulkan-loader` on Fedora). On Linux, `ldd` reads what the build
 links once it is unpacked, and before anything is placed where an earlier run
 unpacked it: a library the machine lacks is named with its package where that
 is known, and an install stops before any service starts. A build that does not
-run at all is said in the loader's words. An update or a repair says the same
-and does not start the services onto it. Otherwise setup names the devices
+run at all is said in the loader's words. An update, a repair or the restart
+after `nils update --all` says the same, holds llama.cpp alone back and starts
+every other service, which runs without it. Otherwise setup names the devices
 llama.cpp runs a model on.
 
 The wizard never installs a model. It asks what the assistant talks to: a
