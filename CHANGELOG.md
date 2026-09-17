@@ -4,6 +4,12 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.34] - 2026-09-17
+
+### Fixed
+
+- An install whose archives are kept at a backup place the site declared no longer stops before it has done anything. `nils setup` counted the archives among the directories an install makes of its own and made them first, as the account running setup, whether they were under the install's directory or at the site's own path. A site keeps its declared places on its own filesystems, and a share can grant the engine's account alone: there the account running setup cannot even look inside the directory, so the install stopped at its first step with permission denied, having written nothing but its record. Archives at a place the site declared are now the site's own, like every other place it declared: made as the place is declared, and never made, looked into or handed to an account by setup. Archives under the install's own directory are made as before.
+
 ## [1.0.0-alpha.33] - 2026-09-17
 
 ### Fixed
