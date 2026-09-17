@@ -124,6 +124,17 @@ const LLAMA_ARCHIVES: [(&str, &str); 6] = [
     ),
 ];
 
+/// The libraries the Linux builds of llama.cpp link from the machine that a
+/// Debian or Ubuntu server may not have, each with the package that gives it
+/// there. Read from the NEEDED entries of every file in the four Linux
+/// archives of b10964: besides each other, they link the C and C++ runtimes,
+/// OpenSSL 3 and libgomp. OpenSSL 3 comes with systemd or apt on Debian 12
+/// and 13 and on Ubuntu 22.04 and 24.04, and libgomp with neither. The Vulkan
+/// loader is not here, since the Vulkan backend is loaded only where it can
+/// be, and a machine without it is told so on its own. A build pinned later
+/// has its entries read again.
+const LLAMA_LIBRARIES: [(&str, &str); 1] = [("libgomp.so.1", "libgomp1 (Debian, Ubuntu)")];
+
 /// The name the setup record keeps llama.cpp's build under, and its folder.
 const LLAMA_PART: &str = "llama.cpp";
 
@@ -2052,19 +2063,129 @@ fn render_node() -> bool {
 /// Whether the Vulkan loader is on this machine, as the dynamic linker lists
 /// it or where the distributions put it.
 fn vulkan_loader() -> bool {
-    let listed = ["ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"]
+    library_found("libvulkan.so.1", linker_list().as_deref(), &|path| {
+        path.exists()
+    })
+}
+
+/// The libraries the dynamic linker knows, as `ldconfig -p` lists them. The
+/// sbin folders ldconfig is in are often not on a person's path.
+fn linker_list() -> Option<String> {
+    ["ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"]
         .iter()
         .find_map(|ldconfig| run_quiet(ldconfig, &["-p"]))
-        .is_some_and(|list| list.contains("libvulkan.so.1"));
-    listed
-        || [
-            "/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
-            "/usr/lib/aarch64-linux-gnu/libvulkan.so.1",
-            "/usr/lib64/libvulkan.so.1",
-            "/usr/lib/libvulkan.so.1",
-        ]
+}
+
+/// Whether a library is in the linker's list, on a line that starts with its
+/// own name, or in a folder the distributions put libraries in. A name is
+/// matched whole, since libgomp.so.1 is not libgomp.so.10.
+fn library_found(name: &str, listed: Option<&str>, exists: &dyn Fn(&Path) -> bool) -> bool {
+    listed.is_some_and(|list| {
+        list.lines()
+            .any(|line| line.split_whitespace().next() == Some(name))
+    }) || [
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib",
+    ]
+    .iter()
+    .any(|dir| exists(&Path::new(dir).join(name)))
+}
+
+/// What this machine lacks for a Linux build of llama.cpp to start, each as a
+/// missing row says it: a library of [`LLAMA_LIBRARIES`] that `here` does not
+/// find, and, where `ldd` was asked about a build already here, each library
+/// or version it names as not found. A macOS build links nothing a Mac lacks.
+fn llama_lacks(variant: &str, here: &dyn Fn(&str) -> bool, ldd: Option<&str>) -> Vec<String> {
+    if !variant.starts_with("ubuntu-") {
+        return Vec::new();
+    }
+    let mut lacking: Vec<String> = LLAMA_LIBRARIES
         .iter()
-        .any(|path| Path::new(path).exists())
+        .map(|(library, _)| *library)
+        .filter(|library| !here(library))
+        .map(str::to_string)
+        .collect();
+    for unlinked in ldd.map(ldd_unlinked).unwrap_or_default() {
+        if !lacking.contains(&unlinked) {
+            lacking.push(unlinked);
+        }
+    }
+    lacking
+        .into_iter()
+        .map(|library| {
+            let known = LLAMA_LIBRARIES.iter().find(|(known, _)| *known == library);
+            match known {
+                Some((_, package)) => {
+                    format!("{library}, which llama.cpp links: install {package}")
+                }
+                None => format!("{library}, which llama.cpp links"),
+            }
+        })
+        .collect()
+}
+
+/// What `ldd` says a binary links and this machine cannot give it: each
+/// library it names as not found, and each version a library here is too old
+/// to have, as `<library> with <version>`. A line said on both of its
+/// streams is one lack, not two.
+fn ldd_unlinked(said: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in said.lines().map(str::trim) {
+        let lack = if let Some(library) = line.strip_suffix("=> not found") {
+            library.trim().to_string()
+        } else if let Some((before, after)) = line.split_once(": version `")
+            && let Some((version, _)) = after.split_once("' not found")
+        {
+            // The loader names the library by its path, after the binary.
+            let path = before.rsplit(": ").next().unwrap_or(before);
+            let library = Path::new(path)
+                .file_name()
+                .map_or_else(|| path.to_string(), |n| n.to_string_lossy().to_string());
+            format!("{library} with {version}")
+        } else {
+            continue;
+        };
+        if !lack.is_empty() && !out.contains(&lack) {
+            out.push(lack);
+        }
+    }
+    out
+}
+
+/// What `ldd` says of a binary, what it prints and its errors together. It
+/// reads the binary's links without running it, and a machine without ldd
+/// says nothing.
+fn ldd_says(binary: &Path) -> Option<String> {
+    let out = Command::new("ldd")
+        .arg(binary)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    Some(format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
+/// What this machine lacks for a plan's llama.cpp build to start, asked of
+/// the machine: the known libraries its linker does not find, and, where the
+/// build is here already, what `ldd` names. Asking changes nothing, so the
+/// questions ask it of a build an earlier run unpacked. Only on Linux, where
+/// the builds link what a machine may lack.
+fn llama_lacks_here(plan: &Plan) -> Vec<String> {
+    let Some(llama) = plan.llama.filter(|_| cfg!(target_os = "linux")) else {
+        return Vec::new();
+    };
+    let listed = linker_list();
+    let ldd = llama_built(plan).and_then(|server| ldd_says(&server));
+    llama_lacks(
+        llama.variant,
+        &|library| library_found(library, listed.as_deref(), &|path| path.exists()),
+        ldd.as_deref(),
+    )
 }
 
 /// The build this machine takes, where llama.cpp publishes one for it.
@@ -2209,31 +2330,37 @@ fn unpack_into(bytes: &[u8], to: &Path) -> Result<(), String> {
 
 /// The devices a build runs a model on, as `llama-server --list-devices`
 /// names them; none where it names none, or says nothing within ten seconds.
-fn llama_devices(server: &Path) -> Vec<String> {
+/// On Linux a build that does not run is an error in its own words, the
+/// loader's where the loader could not start it, and not a machine without a
+/// graphics device. Elsewhere it names none, as it did before.
+fn llama_devices(server: &Path) -> Result<Vec<String>, String> {
     use std::io::Read as _;
-    let Ok(mut child) = Command::new(server)
+    let linux = cfg!(target_os = "linux");
+    let mut child = match Command::new(server)
         .arg("--list-devices")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-    else {
-        return Vec::new();
+    {
+        Ok(child) => child,
+        Err(e) if linux => return Err(format!("{}: {e}", server.display())),
+        Err(_) => return Ok(Vec::new()),
     };
     let started = std::time::Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() < std::time::Duration::from_secs(10) => {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Vec::new();
+                return Ok(Vec::new());
             }
         }
-    }
+    };
     let mut said = String::new();
     if let Some(mut out) = child.stdout.take() {
         let _ = out.read_to_string(&mut said);
@@ -2241,7 +2368,27 @@ fn llama_devices(server: &Path) -> Vec<String> {
     if let Some(mut err) = child.stderr.take() {
         let _ = err.read_to_string(&mut said);
     }
-    devices_listed(&said)
+    let failed = (linux && !status.success()).then(|| format!("it ended with {status}"));
+    devices_said(&said, failed.as_deref())
+}
+
+/// The devices a build listed, from what it said and, where it did not end
+/// well, how it ended. One that ended badly without listing any did not run:
+/// its last words are the error, the loader's where the loader could not
+/// start it, and how it ended where it said nothing.
+fn devices_said(said: &str, failed: Option<&str>) -> Result<Vec<String>, String> {
+    let listed = said
+        .lines()
+        .any(|line| line.trim_start().starts_with("Available devices"));
+    match failed {
+        Some(ended) if !listed => Err(said
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .unwrap_or(ended)
+            .to_string()),
+        _ => Ok(devices_listed(said)),
+    }
 }
 
 /// The device lines of `--list-devices`: those under "Available devices",
@@ -6209,14 +6356,16 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     // Kvasir's file is mended, not rewritten, and the assistant's environment
     // is written where it is missing; the models are added and the key is
     // made during the start-up below, once Kvasir answers.
+    let mut llama_starts = true;
     if plan.has(Part::Assistant) {
         if plan.llama.is_some() {
             console.begin(Stage::Runtime);
             let before = state.parts.get(LLAMA_PART).map(|p| p.path.clone());
-            if install_llama(plan, &mut state, console).is_ok()
-                && state.parts.get(LLAMA_PART).map(|p| p.path.clone()) != before
-            {
-                let _ = write_state(&state);
+            if let Ok(starts) = install_llama(plan, &mut state, console) {
+                llama_starts = starts;
+                if state.parts.get(LLAMA_PART).map(|p| p.path.clone()) != before {
+                    let _ = write_state(&state);
+                }
             }
         }
         console.begin(Stage::Kvasir);
@@ -6237,7 +6386,11 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     install_helper(plan, &state, console)?;
     console.begin(Stage::Services);
     let mut services = Vec::new();
-    if plan.service {
+    if plan.service && !llama_starts {
+        // Started onto it, llama.cpp's unit would fail in a loop, and Kvasir
+        // would name a runtime that is not there.
+        console.warn(LLAMA_HOLDS_THE_SERVICES);
+    } else if plan.service {
         match start_everything(plan, &state, console, None) {
             Ok(started) => {
                 console.report(&started);
@@ -7164,9 +7317,10 @@ fn place(
 
     // llama.cpp, which runs the models Kvasir starts: here before Kvasir is
     // configured, since kvasir.json names only a build that is here.
+    let mut llama_starts = true;
     if plan.has(Part::Assistant) && plan.llama.is_some() {
         console.begin(Stage::Runtime);
-        install_llama(plan, state, console)?;
+        llama_starts = install_llama(plan, state, console)?;
         checkpoint(state);
     }
 
@@ -7242,9 +7396,14 @@ fn place(
     // that holds it.
     install_helper(plan, state, console)?;
 
-    // Start it.
+    // Start it. Where llama.cpp cannot start an install has stopped already,
+    // and an update does not start the services onto it: its unit would fail
+    // in a loop, and Kvasir would name a runtime that is not there.
     let mut services = Vec::new();
-    if plan.service {
+    if plan.service && !llama_starts {
+        console.begin(Stage::Services);
+        console.warn(LLAMA_HOLDS_THE_SERVICES);
+    } else if plan.service {
         console.begin(Stage::Services);
         match start_everything(plan, state, console, answers.model.as_ref()) {
             Ok(started) => {
@@ -8955,6 +9114,9 @@ fn missing_for(plan: &Plan, print: bool) -> Vec<String> {
                 out.push(format!("{tool}, which {does}"));
             }
         }
+        // A library llama.cpp links and this machine lacks stopped its unit
+        // only once the services started, and setup had said nothing.
+        out.extend(llama_lacks_here(plan));
     }
     out
 }
@@ -10372,10 +10534,14 @@ fn fetch_llama(plan: &Plan) -> Result<(PathBuf, bool), String> {
 /// llama.cpp placed for an install or a repair and recorded, with the devices
 /// it runs a model on said. An archive that cannot be downloaded, or whose
 /// sha256 is not the pinned one, stops an install, and is said on an update
-/// or a repair, where Kvasir is then configured without it.
-fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<(), Exit> {
+/// or a repair, where Kvasir is then configured without it. So does a build
+/// that cannot start here, for a library the machine lacks or for anything
+/// else the loader says, and it is said before the services start rather
+/// than by its unit failing. Answers whether the services may be started,
+/// which they may not onto a build that cannot start.
+fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<bool, Exit> {
     let Some(llama) = plan.llama else {
-        return Ok(());
+        return Ok(true);
     };
     console.doing(&format!(
         "taking llama.cpp {LLAMA_BUILD}, the {} build",
@@ -10392,9 +10558,11 @@ fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<()
                  folder or server holding {LLAMA_BUILD}/llama-{LLAMA_BUILD}-bin-{}.tar.gz",
                 llama.variant
             ));
-            return Ok(());
+            return Ok(true);
         }
     };
+    // On record before it is looked at, so that an install it stops can
+    // still be removed with what it placed.
     state.parts.insert(
         LLAMA_PART.to_string(),
         PartState {
@@ -10404,19 +10572,39 @@ fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<()
         },
     );
     console.progress(&format!("llama.cpp {LLAMA_BUILD} at {}", dir.display()));
-    let devices = llama_devices(&dir.join("llama-server"));
-    if devices.is_empty() {
-        console.say(
+    // What it links is read before it is run: the questions know only the
+    // libraries named in advance, and ldd names the rest now it is here.
+    let lacks = llama_lacks_here(plan);
+    if !lacks.is_empty() {
+        console.broken(&format!(
+            "llama.cpp {LLAMA_BUILD} cannot start, since this machine lacks {}",
+            lacks.join("; ")
+        ))?;
+        return Ok(false);
+    }
+    match llama_devices(&dir.join("llama-server")) {
+        Ok(devices) if devices.is_empty() => console.say(
             "llama.cpp finds no graphics device here, so a model Kvasir starts runs on the processor",
-        );
-    } else {
-        console.say(&format!("llama.cpp runs a model on {}", devices.join("; ")));
+        ),
+        Ok(devices) => console.say(&format!("llama.cpp runs a model on {}", devices.join("; "))),
+        Err(said) => {
+            console.broken(&format!(
+                "llama.cpp {LLAMA_BUILD} does not run on this machine: {said}"
+            ))?;
+            return Ok(false);
+        }
     }
     if !llama.loader {
         console.say(NO_VULKAN_LOADER);
     }
-    Ok(())
+    Ok(true)
 }
+
+/// What an update or a repair says in place of starting the services onto a
+/// llama.cpp that cannot start, whose reason was said at its own step.
+const LLAMA_HOLDS_THE_SERVICES: &str = "the services were not started onto a llama.cpp that \
+                                        cannot start; once it can, nils setup and repair starts \
+                                        them";
 
 /// After `nils update` moves this binary, the setup record says so. The
 /// wizard opens by naming what is installed, and it named the version the
@@ -13212,6 +13400,23 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
         );
     }
     plan.closed = masks.closed;
+    // Restarted onto a llama.cpp that cannot start, its unit would fail in a
+    // loop and take the models Kvasir runs with it, so what the machine lacks
+    // is said and nothing is restarted. Only a build on record has a unit.
+    if plan.has(Part::Assistant)
+        && state.parts.contains_key(LLAMA_PART)
+        && llama_built(&plan).is_some()
+    {
+        let lacks = llama_lacks_here(&plan);
+        if !lacks.is_empty() {
+            println!(
+                "the services were left alone: llama.cpp {LLAMA_BUILD} cannot start, since this \
+                 machine lacks {}; once it is installed, nils setup and repair starts them",
+                lacks.join("; ")
+            );
+            return;
+        }
+    }
     if let Some(engine) = state.parts.get("engine") {
         plan.version = engine.version.clone();
     }
@@ -21419,6 +21624,161 @@ mod tests {
                 .iter()
                 .any(|(stage, _)| *stage == Stage::Runtime)
         );
+    }
+
+    #[test]
+    fn ldd_names_each_library_and_version_a_binary_links_and_this_machine_lacks_once() {
+        // as the lab's Debian 13 said it of the CPU build without libgomp1
+        let said = "\tlinux-vdso.so.1 (0x00007ffd3c1e6000)\n\
+                    \tlibllama-server-impl.so => /srv/nils/llama.cpp/b10964-ubuntu-x64/libllama-server-impl.so (0x00007f0a1c000000)\n\
+                    \tlibgomp.so.1 => not found\n\
+                    \tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f0a1bc00000)\n\
+                    \tlibgomp.so.1 => not found\n\
+                    \t/lib64/ld-linux-x86-64.so.2 (0x00007f0a1c5e8000)\n";
+        assert_eq!(ldd_unlinked(said), vec!["libgomp.so.1"]);
+        // a library here too old for the build, which ldd says on both of
+        // its streams
+        let old = "/srv/nils/llama.cpp/b10964-ubuntu-arm64/llama-server: \
+                   /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found \
+                   (required by /srv/nils/llama.cpp/b10964-ubuntu-arm64/llama-server)\n\
+                   \tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x0000ffff9c000000)\n\
+                   /srv/nils/llama.cpp/b10964-ubuntu-arm64/llama-server: \
+                   /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found \
+                   (required by /srv/nils/llama.cpp/b10964-ubuntu-arm64/llama-server)\n";
+        assert_eq!(ldd_unlinked(old), vec!["libc.so.6 with GLIBC_2.38"]);
+        // a binary that finds everything, and a file that is not one
+        assert!(
+            ldd_unlinked(
+                "\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f0a1b800000)\n\
+                 \t/lib64/ld-linux-x86-64.so.2 (0x00007f0a1c5e8000)\n"
+            )
+            .is_empty()
+        );
+        assert!(ldd_unlinked("\tnot a dynamic executable\n").is_empty());
+    }
+
+    #[test]
+    fn a_library_llama_cpp_links_and_this_machine_lacks_is_a_missing_row_with_its_package() {
+        let nothing = |_: &str| false;
+        let everything = |_: &str| true;
+        let gomp = "libgomp.so.1, which llama.cpp links: install libgomp1 (Debian, Ubuntu)";
+        // before anything is downloaded, the libraries known to be missing
+        // on a Debian or Ubuntu server
+        assert_eq!(llama_lacks("ubuntu-x64", &nothing, None), vec![gomp]);
+        assert_eq!(
+            llama_lacks("ubuntu-vulkan-arm64", &nothing, None),
+            vec![gomp]
+        );
+        assert!(llama_lacks("ubuntu-x64", &everything, None).is_empty());
+        // a build here already has ldd's word too: what the list knows is
+        // said once with its package, and the rest without one
+        let ldd = "\tlibgomp.so.1 => not found\n\tlibssl.so.3 => not found\n";
+        let both = vec![gomp, "libssl.so.3, which llama.cpp links"];
+        assert_eq!(llama_lacks("ubuntu-x64", &nothing, Some(ldd)), both);
+        assert_eq!(llama_lacks("ubuntu-x64", &everything, Some(ldd)), both);
+        // a Mac's build links nothing a Mac lacks
+        assert!(llama_lacks("macos-arm64", &nothing, Some(ldd)).is_empty());
+
+        // the linker's list names a library by its whole name, and the
+        // distributions' folders are looked in where it names none
+        let listed = "1166 libs found in cache `/etc/ld.so.cache'\n\
+                      \tlibgomp.so.10 (libc6,x86-64) => /opt/gcc/lib64/libgomp.so.10\n\
+                      \tlibvulkan.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libvulkan.so.1\n";
+        let nowhere = |_: &Path| false;
+        assert!(library_found("libvulkan.so.1", Some(listed), &nowhere));
+        assert!(
+            !library_found("libgomp.so.1", Some(listed), &nowhere),
+            "libgomp.so.10 is another library"
+        );
+        assert!(!library_found("libgomp.so.1", None, &nowhere));
+        assert!(library_found("libgomp.so.1", None, &|path| {
+            path == Path::new("/usr/lib/aarch64-linux-gnu/libgomp.so.1")
+        }));
+    }
+
+    #[test]
+    fn a_llama_cpp_that_does_not_run_is_said_in_the_loaders_words_not_as_no_device() {
+        let loader = "/srv/nils/llama.cpp/b10964-ubuntu-x64/llama-server: error while loading \
+                      shared libraries: libgomp.so.1: cannot open shared object file: No such \
+                      file or directory";
+        assert_eq!(
+            devices_said(
+                &format!("{loader}\n"),
+                Some("it ended with exit status: 127")
+            ),
+            Err(loader.to_string())
+        );
+        // one that said nothing is said by how it ended
+        assert_eq!(
+            devices_said("", Some("it ended with signal: 4 (SIGILL)")),
+            Err("it ended with signal: 4 (SIGILL)".to_string())
+        );
+        // one that ran lists its devices, or none
+        assert_eq!(
+            devices_said("Available devices:\n  (none)\n", None),
+            Ok(vec![])
+        );
+        assert_eq!(
+            devices_said(
+                "Available devices:\n  Vulkan0: a card (8192 MiB, 8000 MiB free)\n",
+                Some("it ended with exit status: 1")
+            ),
+            Ok(vec![
+                "Vulkan0: a card (8192 MiB, 8000 MiB free)".to_string()
+            ]),
+            "a list said before it ended badly is still a list"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_llama_cpp_that_cannot_start_stops_an_install_and_holds_the_services_on_an_update() {
+        let dir = scratch("llama-cannot-start");
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.parts.push(Part::Assistant);
+        plan.llama = Some(Llama {
+            variant: "ubuntu-x64",
+            loader: true,
+        });
+        // A server here that refuses what it is asked and lists nothing: the
+        // shell, which is on every machine and runs nothing when given an
+        // option it does not know.
+        let build = llama_build_dir(&dir, "ubuntu-x64");
+        std::fs::create_dir_all(&build).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", build.join("llama-server")).unwrap();
+        // a machine without libgomp stops on that first, and as plainly
+        let lacks = llama_lacks_here(&plan);
+
+        let console = Console::new(true);
+        console.strict.set(true);
+        let mut state = State::default();
+        let Err(stopped) = install_llama(&plan, &mut state, &console) else {
+            panic!("an install went on past a llama.cpp that cannot start");
+        };
+        let said = if lacks.is_empty() {
+            "llama.cpp b10964 does not run on this machine: "
+        } else {
+            "llama.cpp b10964 cannot start, since this machine lacks "
+        };
+        assert!(stopped.message.starts_with(said), "{}", stopped.message);
+        assert!(
+            !stopped.message.contains("graphics device"),
+            "{}",
+            stopped.message
+        );
+        assert!(
+            state.parts.contains_key(LLAMA_PART),
+            "the build is on record, so the stopped install can be removed"
+        );
+
+        // an update or a repair says it and does not start the services
+        console.strict.set(false);
+        assert!(matches!(
+            install_llama(&plan, &mut state, &console),
+            Ok(false)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

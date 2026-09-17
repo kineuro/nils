@@ -110,8 +110,9 @@ to have run it.
 
 An install that would not work is not finished. Before anything is placed,
 the plan names what this machine lacks for it (Node 22, git and npm for the
-assistant; podman or docker for their runtime), and nothing is changed until
-it is there. A model is taken only once it answers one short question. While
+assistant, and on Linux the libraries llama.cpp links, such as `libgomp.so.1`
+from `libgomp1` on Debian and Ubuntu; podman or docker for their runtime), and
+nothing is changed until it is there. A model is taken only once it answers one short question. While
 installing, a failure that leaves a chosen part unusable stops the install
 with the reason: the desk not installed or nobody added to it, a place not
 declared, the rule packs, the assistant, Kvasir, its model or its key, or a
@@ -135,8 +136,13 @@ Linux the Vulkan build where there is a graphics card or a render node and the
 CPU build otherwise, and on macOS the build for its processor. Where a Linux
 machine has no Vulkan loader, the plan says that a model then runs on the
 processor, and names the package that brings one (`libvulkan1` on Debian and
-Ubuntu, `vulkan-loader` on Fedora). Once it is unpacked, setup names the
-devices llama.cpp runs a model on.
+Ubuntu, `vulkan-loader` on Fedora). On Linux, `ldd` reads what the build
+links once it is unpacked, and before anything is placed where an earlier run
+unpacked it: a library the machine lacks is named with its package where that
+is known, and an install stops before any service starts. A build that does not
+run at all is said in the loader's words. An update or a repair says the same
+and does not start the services onto it. Otherwise setup names the devices
+llama.cpp runs a model on.
 
 The wizard never installs a model. It asks what the assistant talks to: a
 model server on this machine or on another machine of yours, a commercial
