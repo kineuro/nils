@@ -6090,10 +6090,12 @@ fn questions(
     // the way systemd looks at it before the part starts, now that the
     // places and the accounts are settled. A path the part's account could
     // reach but no unit can hide is refused with nothing written, as the
-    // services of this machine are; `--print` says it and goes on.
+    // services of this machine are; `--print` says it and goes on. So does a
+    // run for real on a machine without runuser, where no account could be
+    // asked: the missing row names runuser, and the install stops there.
     let masks = console.probe("the paths the services hide", || masks_here(&plan));
     if let Some(refused) = in_reach_refusal(&masks) {
-        if !args.print {
+        if !args.print && runuser_here() {
             return Err(usage(refused).into());
         }
         console.note(&refused);
@@ -9084,6 +9086,7 @@ fn missing_for(plan: &Plan, print: bool) -> Vec<String> {
         plan.system.as_ref(),
         print,
         am_root,
+        || hides_from_root(plan),
         runuser_here,
     ));
     // The privilege the supervisor restarts the services with is written
@@ -9119,27 +9122,45 @@ fn missing_for(plan: &Plan, print: bool) -> Vec<String> {
 
 /// runuser, where a run needs it and this machine has none: root setting up
 /// the services of this machine, with the engine running as an account of its
-/// own. Every step on the registry is taken as that account through runuser,
-/// and unlike Kvasir's and the assistant's source steps, which root takes
-/// itself where it cannot act as their account, they have nothing to fall
-/// back on, so the install would stop at the registry with the engine already
-/// placed. A print changes nothing, and a run that is not root takes no step
-/// as another account, so neither asks the machine. Whether this process is
-/// root and whether runuser is here are given, so that every answer can be
-/// had on any machine.
+/// own, or with a unit that would hide a path root cannot look at. Every step
+/// on the registry is taken as the engine's account through runuser, and
+/// unlike Kvasir's and the assistant's source steps, which root takes itself
+/// where it cannot act as their account, they have nothing to fall back on,
+/// so the install would stop at the registry with the engine already placed.
+/// A path root cannot look at is left out of a unit only once its account,
+/// asked through runuser, is found closed out of it, so without runuser it
+/// is refused whatever the account reaches. A print changes nothing, and a
+/// run that is not root takes no step as another account, so neither asks
+/// the machine. Whether this process is root, whether a unit would hide a
+/// path root cannot look at, and whether runuser is here are given, so that
+/// every answer can be had on any machine.
 fn runuser_missing(
     system: Option<&SystemUnits>,
     print: bool,
     root: impl FnOnce() -> bool,
+    hides_from_root: impl FnOnce() -> bool,
     runuser: impl FnOnce() -> bool,
 ) -> Option<String> {
-    if print || system.is_none() {
+    if print || system.is_none() || !root() {
         return None;
     }
-    registry_account(system, root())?;
-    (!runuser()).then(|| {
-        "runuser, which setup takes the registry's steps as the engine's account with".to_string()
-    })
+    let row = if registry_account(system, true).is_some() {
+        "runuser, which setup takes the registry's steps as the engine's account with"
+    } else if hides_from_root() {
+        "runuser, which setup asks a part's account with whether it reaches a path root cannot \
+         look at"
+    } else {
+        return None;
+    };
+    (!runuser()).then(|| row.to_string())
+}
+
+/// Whether a unit would hide a path root cannot look at, which only an
+/// account asked through runuser lets it leave out.
+fn hides_from_root(plan: &Plan) -> bool {
+    masked(plan)
+        .iter()
+        .any(|(_, path)| matches!(root_looks_at(path), RootLook::Refused { .. }))
 }
 
 /// The major version of the Node on the path; 0 where there is none.
@@ -12377,22 +12398,30 @@ fn root_looks_at(path: &Path) -> RootLook {
 /// be asked, which only a word from the account's own shell rules out.
 ///
 /// This is one fixed question and not a way to run things as an account: an
-/// empty environment, the path as the only argument, and one word back.
+/// empty environment, in /, the path as the only argument, and one word back.
+/// runuser is found where the registry's steps find it, and on a machine
+/// without it the account is not asked, which the plan's missing row names.
 fn account_reaches(account: &str, path: &Path) -> Option<bool> {
     const ASK: &str = "p=$1\n\
         if test -e \"$p\"; then echo reaches; exit 0; fi\n\
         d=$(dirname -- \"$p\")\n\
         while ! test -e \"$d\"; do d=$(dirname -- \"$d\"); done\n\
         if test -d \"$d\" && test -x \"$d\"; then echo reaches; else echo closed; fi\n";
-    let out = Command::new("runuser")
-        .env_clear()
-        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-        .args(["-u", account, "--", "sh", "-c", ASK, "sh"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let mut args = runuser_words(account, false)[1..].to_vec();
+    args.extend(["sh", "-c", ASK, "sh"].map(str::to_string));
+    let out = as_the_service(
+        &runuser_program(),
+        &args,
+        &[(
+            "PATH".to_string(),
+            "/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+        )],
+    )
+    .arg(path)
+    .stdin(Stdio::null())
+    .stderr(Stdio::null())
+    .output()
+    .ok()?;
     match String::from_utf8_lossy(&out.stdout).trim() {
         "reaches" => Some(true),
         "closed" => Some(false),
@@ -17573,6 +17602,17 @@ mod tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
         let looked = root_looks_at(&locked.join("inner").join("deeper"));
         let missing = root_looks_at(&dir.join("not-there"));
+        // a unit hides a path root cannot look at where the install lives
+        // behind that folder, which the plan's missing row asks runuser for,
+        // and nothing of the kind where it does not
+        let at = |install: PathBuf| {
+            let mut plan = deployment();
+            plan.dir = install.clone();
+            plan.source = Some(install.join("source"));
+            hides_from_root(&plan)
+        };
+        let behind = at(locked.join("nils"));
+        let open = at(dir.join("open"));
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
@@ -17582,6 +17622,11 @@ mod tests {
             }
         );
         assert_eq!(missing, RootLook::Seen, "the line forgives a missing path");
+        assert!(behind, "the install behind a folder root may not search");
+        assert!(
+            !open,
+            "an install root can look at, or that is not there yet"
+        );
 
         // runuser is root's, so an account asked by anyone else says no word,
         // and that is never read as closed
@@ -17706,29 +17751,47 @@ mod tests {
     fn runuser_is_missing_at_the_question_where_root_takes_the_registry_as_the_engines_account() {
         let row = "runuser, which setup takes the registry's steps as the engine's account with";
         let machine = SystemUnits::default();
+        let asked = |_: &str| -> bool { panic!("a run that needs no runuser asks nothing") };
         assert_eq!(
-            runuser_missing(Some(&machine), false, || true, || false).as_deref(),
+            runuser_missing(Some(&machine), false, || true, || asked("hides"), || false).as_deref(),
             Some(row),
             "root setting up the services of this machine takes the registry as the engine's account"
         );
         assert_eq!(
-            runuser_missing(Some(&machine), false, || true, || true),
+            runuser_missing(Some(&machine), false, || true, || asked("hides"), || true),
             None,
             "a machine with runuser lacks nothing"
         );
-        let asked = |_: &str| -> bool { panic!("a run that needs no runuser asks nothing") };
         assert_eq!(
-            runuser_missing(Some(&machine), true, || asked("root"), || asked("runuser")),
+            runuser_missing(
+                Some(&machine),
+                true,
+                || asked("root"),
+                || asked("hides"),
+                || asked("runuser")
+            ),
             None,
             "a print changes nothing, so it is not refused for runuser"
         );
         assert_eq!(
-            runuser_missing(None, false, || asked("root"), || asked("runuser")),
+            runuser_missing(
+                None,
+                false,
+                || asked("root"),
+                || asked("hides"),
+                || asked("runuser")
+            ),
             None,
             "an install of an account's own takes its steps as itself"
         );
         assert_eq!(
-            runuser_missing(Some(&machine), false, || false, || asked("runuser")),
+            runuser_missing(
+                Some(&machine),
+                false,
+                || false,
+                || asked("hides"),
+                || asked("runuser")
+            ),
             None,
             "a run that is not root takes no step as another account"
         );
@@ -17741,7 +17804,14 @@ mod tests {
             ..SystemUnits::default()
         };
         assert_eq!(
-            runuser_missing(Some(&engine_as("nils")), false, || true, || false).as_deref(),
+            runuser_missing(
+                Some(&engine_as("nils")),
+                false,
+                || true,
+                || asked("hides"),
+                || false
+            )
+            .as_deref(),
             Some(row)
         );
         assert_eq!(
@@ -17749,11 +17819,27 @@ mod tests {
                 Some(&engine_as("root")),
                 false,
                 || true,
+                || false,
                 || asked("runuser")
             ),
             None,
             "an engine that runs as root takes the registry's steps in this process, and root \
              takes the source steps itself where it cannot act as their account"
+        );
+
+        // A unit that would hide a path root cannot look at leaves it out
+        // only once its account, asked through runuser, is closed out of it,
+        // so an engine that runs as root needs runuser there too.
+        assert_eq!(
+            runuser_missing(Some(&engine_as("root")), false, || true, || true, || false).as_deref(),
+            Some(
+                "runuser, which setup asks a part's account with whether it reaches a path root \
+                 cannot look at"
+            )
+        );
+        assert_eq!(
+            runuser_missing(Some(&engine_as("root")), false, || true, || true, || true),
+            None
         );
 
         // and the plan's own list says it only for a run for real
