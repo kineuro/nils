@@ -383,6 +383,25 @@ pub(crate) struct SetupArgs {
     /// A directory of DICOM the engine may read
     #[arg(long, value_name = "DIR")]
     source: Option<PathBuf>,
+    /// A place this site has: a name, a directory, and the words that say
+    /// what it is, as archives=/data/archives,role=backup,protected. The
+    /// words are role=source|registry|working|export|share|exchange|backup,
+    /// backup=NAME, snapshots, protected, fast and read, which makes it a
+    /// directory the engine reads DICOM from. Named once for each place,
+    /// and where none is named an install has the five of a laptop
+    #[arg(long, value_name = "NAME=DIR,role=ROLE,...")]
+    place: Vec<String>,
+    /// Where the engine writes its archives: the backup place the registry
+    /// names where the places name one, else <dir>/backups
+    #[arg(long, value_name = "DIR")]
+    backup_dir: Option<PathBuf>,
+    /// Where the engine reads its rule packs, where not the directory
+    /// beside the binary that this install puts them in
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<PathBuf>,
+    /// How many requests the engine answers at once
+    #[arg(long, value_name = "N")]
+    workers: Option<usize>,
     /// Who may reach the desk: this machine, or an address of this host
     #[arg(long, value_name = "loopback|network")]
     reach: Option<String>,
@@ -2514,6 +2533,12 @@ pub(crate) struct State {
     /// rather than falling back to this account's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) system: Option<SystemUnits>,
+    /// The layout a site described: the places it has, and where the
+    /// engine's archives, rule packs and request handlers were set.
+    /// Recorded, so that an update and a repair declare the same places and
+    /// write the same settings rather than the five of a laptop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) site: Option<Site>,
 }
 
 impl State {
@@ -2634,6 +2659,10 @@ pub(crate) struct Plan {
     /// the services are the account's own, which is every install on a
     /// laptop.
     pub(crate) system: Option<SystemUnits>,
+    /// The layout a site described, asked for with `--place` and the
+    /// settings beside it: `None` where the install has the five places of
+    /// a laptop and the engine's own defaults.
+    pub(crate) site: Option<Site>,
 }
 
 /// The provider the desk signs people in at, as the desk, the engine and
@@ -2768,20 +2797,53 @@ impl Plan {
     }
 
     /// The directories the engine reads, each by its place's name: the one
-    /// setup asked for first, under the name it declares it by, then the
-    /// registry's other source places.
+    /// setup asked for first, under the name it declares it by, then every
+    /// place this site marked as one the engine reads, whatever its role,
+    /// then the registry's other source places.
+    ///
+    /// A place of another role is read because it was marked and not
+    /// because of its role: a path keeps the role it has, and what may be
+    /// written there is still decided by that role. A place nobody marked
+    /// is not a directory the engine reads, so declaring one never widens
+    /// what the desk can browse or what a queued job may be pointed at.
     fn read_from(&self) -> Vec<(String, PathBuf)> {
         let mut out: Vec<(String, PathBuf)> = self
             .source
             .iter()
             .map(|path| ("source".to_string(), path.clone()))
             .collect();
-        for (name, path) in &self.sources {
-            if !out.iter().any(|(n, p)| n == name || p == path) {
-                out.push((name.clone(), path.clone()));
+        let marked = self
+            .declared()
+            .iter()
+            .filter(|p| p.read)
+            .map(|p| (p.name.clone(), PathBuf::from(&p.path)));
+        for (name, path) in marked.chain(self.sources.iter().cloned()) {
+            if !out.iter().any(|(n, p)| *n == name || *p == path) {
+                out.push((name, path));
             }
         }
         out
+    }
+
+    /// The places this site declared; empty where it declared none, which
+    /// is the install that has the five of a laptop.
+    fn declared(&self) -> &[PlaceDecl] {
+        self.site.as_ref().map_or(&[], |s| s.places.as_slice())
+    }
+
+    /// Where the engine writes its archives.
+    pub(crate) fn backups(&self) -> PathBuf {
+        backups_dir(self.site.as_ref(), &self.dir)
+    }
+
+    /// Where the engine reads its rule packs, where a site said.
+    fn pack_dir(&self) -> Option<PathBuf> {
+        self.site.as_ref()?.pack_dir.as_ref().map(PathBuf::from)
+    }
+
+    /// How many requests the engine answers at once, where a site said.
+    fn workers(&self) -> Option<usize> {
+        self.site.as_ref()?.workers
     }
 }
 
@@ -2836,6 +2898,7 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
         oidc: state.oidc.clone(),
         llama: llama_of_state(state),
         system: state.system.clone(),
+        site: state.site.clone(),
     }
 }
 
@@ -2909,6 +2972,21 @@ fn default_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(|h| PathBuf::from(h).join("nils"))
         .unwrap_or_else(|| PathBuf::from("nils"))
+}
+
+/// A directory named on the command line, held to a whole path: a service
+/// is started from wherever its manager starts it, so a directory named
+/// from where a person happened to be standing is a different one each
+/// time.
+fn whole_path(path: &Path) -> Result<String, String> {
+    let path = expand(&path.display().to_string());
+    if !path.is_absolute() {
+        return Err(format!(
+            "{} is not a directory of this machine: name the whole path, as /data/archives",
+            path.display()
+        ));
+    }
+    Ok(path.display().to_string())
 }
 
 /// A path with `~` for the home directory, as a person writes it.
@@ -3069,51 +3147,350 @@ fn origin_given(text: &str) -> Result<String, String> {
 
 // ------------------------------------------------------------- the places
 
-/// One place the engine will keep, in the order they must be added: a
-/// backup place exists before the registry that names it.
-pub(crate) struct PlaceSpec {
-    pub(crate) name: &'static str,
-    pub(crate) role: &'static str,
-    pub(crate) path: PathBuf,
-    pub(crate) backup: Option<&'static str>,
+/// The layout a site described: the places it has, with the roles and the
+/// guarantees that are the site's own to state, and the engine settings a
+/// deployment sets beside them. Kept whole, so that an update and a repair
+/// have what the install had.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Site {
+    /// Where the engine writes its archives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) backup_dir: Option<String>,
+    /// Where the engine reads its rule packs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pack_dir: Option<String>,
+    /// How many requests the engine answers at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workers: Option<usize>,
+    /// The places the site named, in the order it named them. Last, so that
+    /// the record reads as TOML: what is written as a table comes after
+    /// what is written as a value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) places: Vec<PlaceDecl>,
 }
 
-/// The places a fresh install declares: where the data is read from, where
-/// the registry is, where work in flight goes, where archives go, and where
-/// a release may be written.
-pub(crate) fn place_specs(plan: &Plan) -> Vec<PlaceSpec> {
-    let mut out = vec![PlaceSpec {
-        name: "backups",
-        role: "backup",
-        path: plan.dir.join("backups"),
-        backup: None,
-    }];
-    if let Some(source) = &plan.source {
-        out.push(PlaceSpec {
-            name: "source",
-            role: "source",
-            path: source.clone(),
-            backup: None,
-        });
+impl Site {
+    /// Whether a site said anything of its own at all.
+    fn said(&self) -> bool {
+        !self.places.is_empty()
+            || self.backup_dir.is_some()
+            || self.pack_dir.is_some()
+            || self.workers.is_some()
     }
-    out.push(PlaceSpec {
-        name: "registry",
-        role: "registry",
-        path: plan.registry(),
-        backup: Some("backups"),
-    });
-    out.push(PlaceSpec {
-        name: "working",
-        role: "working",
-        path: plan.dir.join("working"),
-        backup: None,
-    });
-    out.push(PlaceSpec {
-        name: "export",
-        role: "export",
-        path: plan.dir.join("export"),
-        backup: None,
-    });
+}
+
+/// One place a site declared: what `nils place add` is given for it, and
+/// whether the engine reads DICOM from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PlaceDecl {
+    pub(crate) name: String,
+    pub(crate) role: String,
+    pub(crate) path: String,
+    /// The place that backs this one up, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) backup: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) snapshots: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) protected: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) fast: bool,
+    /// Whether the engine reads DICOM from here: one of the directories it
+    /// is given, which the desk offers by name and a queued job may name.
+    /// A source place is a dataset, so it is always one of them; a place of
+    /// any other role is one because the site marked it, and the role it
+    /// keeps still decides what may be written there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) read: bool,
+}
+
+/// The roles a place can have, as a person reads them.
+fn roles_listed() -> String {
+    nils_registry::place::Role::ALL
+        .iter()
+        .map(|r| r.name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The words a place is described with, after its name and its directory.
+const PLACE_WORDS: &str = "role=ROLE, backup=NAME, snapshots, protected, fast and read";
+
+/// The places named on the command line, as
+/// `archives=/data/archives,role=backup,protected`. Everything that can be
+/// wrong with one is a sentence here, before an install is half written.
+fn places_given(given: &[String]) -> Result<Vec<PlaceDecl>, String> {
+    use nils_registry::place::Role;
+    let mut out: Vec<PlaceDecl> = Vec::new();
+    for word in given {
+        let mut fields = word.split(',').map(str::trim);
+        let head = fields.next().unwrap_or_default();
+        let Some((name, path)) = head.split_once('=') else {
+            return Err(format!(
+                "{word} names no place: --place is a name and a directory, then the words that \
+                 say what it is, as --place archives=/data/archives,role=backup,protected"
+            ));
+        };
+        let (name, path) = (name.trim(), path.trim());
+        let named = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
+        if name.is_empty() || !name.chars().all(named) {
+            return Err(format!(
+                "{name} is not the name of a place: one word, which the other places, the desk \
+                 and the engine refer to it by"
+            ));
+        }
+        if path.is_empty() || !Path::new(path).is_absolute() {
+            return Err(format!(
+                "the {name} place is at {path}, which is not a directory of this machine: a \
+                 place is named by its whole path, as /data/archives"
+            ));
+        }
+        let mut decl = PlaceDecl {
+            name: name.to_string(),
+            role: String::new(),
+            path: path.to_string(),
+            backup: None,
+            snapshots: false,
+            protected: false,
+            fast: false,
+            read: false,
+        };
+        for field in fields.filter(|f| !f.is_empty()) {
+            match field.split_once('=') {
+                Some(("role", value)) => decl.role = value.trim().to_string(),
+                Some(("backup", value)) => decl.backup = Some(value.trim().to_string()),
+                None if field == "snapshots" => decl.snapshots = true,
+                None if field == "protected" => decl.protected = true,
+                None if field == "fast" => decl.fast = true,
+                None if field == "read" => decl.read = true,
+                _ => {
+                    return Err(format!(
+                        "the {name} place is described with {field}, which says nothing about \
+                         it: the words a place takes are {PLACE_WORDS}"
+                    ));
+                }
+            }
+        }
+        if decl.role.is_empty() {
+            return Err(format!(
+                "the {name} place is given no role, and a role is what binds what may be \
+                 written there: add role=ROLE, one of {}",
+                roles_listed()
+            ));
+        }
+        let Some(role) = Role::parse(&decl.role) else {
+            return Err(format!(
+                "the {name} place is given the role {}, which is not one: the roles are {}",
+                decl.role,
+                roles_listed()
+            ));
+        };
+        if role == Role::Registry && decl.backup.is_none() {
+            return Err(format!(
+                "the {name} place keeps the registry and names nothing that backs it up: add \
+                 backup=NAME, a backup place named here, since a registry that is copied \
+                 nowhere else is refused"
+            ));
+        }
+        if role == Role::Registry && decl.read {
+            return Err(format!(
+                "the {name} place keeps the registry, the linkage store and the keys, so it is \
+                 never a directory DICOM is read from: leave read off it"
+            ));
+        }
+        // a source place is a dataset, and a dataset is read
+        if role == Role::Source {
+            decl.read = true;
+        }
+        if out.iter().any(|p| p.name == decl.name) {
+            return Err(format!(
+                "two places are named {name}: a name is one place's, since it is what the \
+                 engine and the desk refer to it by"
+            ));
+        }
+        if let Some(there) = out.iter().find(|p| p.path == decl.path) {
+            return Err(format!(
+                "the {name} place and the {} place are both at {path}: one directory is one \
+                 place",
+                there.name
+            ));
+        }
+        out.push(decl);
+    }
+    for place in &out {
+        if let Some(backup) = &place.backup
+            && !out
+                .iter()
+                .any(|p| &p.name == backup && p.role == Role::Backup.name())
+        {
+            return Err(format!(
+                "the {} place is backed up by {backup}, and no backup place is named {backup}: \
+                 name it with --place {backup}=DIR,role=backup",
+                place.name
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Where an install's archives go: the directory a site named, else the
+/// backup place its registry place names, else the one under the install's
+/// own directory, which is what an install that declares no places has.
+fn backups_dir(site: Option<&Site>, dir: &Path) -> PathBuf {
+    let Some(site) = site else {
+        return dir.join("backups");
+    };
+    if let Some(named) = &site.backup_dir {
+        return PathBuf::from(named);
+    }
+    match backup_place(&site.places) {
+        Some(place) => PathBuf::from(&place.path),
+        None => dir.join("backups"),
+    }
+}
+
+/// The directories an install makes of its own: the registry, the desk's
+/// folder and the archives, and for an install that declared no places the
+/// work in flight and what is exported, which are that install's own. A
+/// site that declared its places keeps the rest at paths of its own, made
+/// as they are declared.
+fn own_dirs(plan: &Plan) -> Vec<PathBuf> {
+    let mut out = vec![
+        plan.dir.join("registry"),
+        plan.dir.join("desk"),
+        plan.backups(),
+    ];
+    if plan.declared().is_empty() {
+        out.push(plan.dir.join("working"));
+        out.push(plan.dir.join("export"));
+    }
+    out
+}
+
+/// The backup place a site's archives belong in: the one the registry place
+/// names, else the first backup place of all.
+fn backup_place(places: &[PlaceDecl]) -> Option<&PlaceDecl> {
+    places
+        .iter()
+        .find(|p| p.role == "registry")
+        .and_then(|r| r.backup.as_deref())
+        .and_then(|name| places.iter().find(|p| p.name == name))
+        .or_else(|| places.iter().find(|p| p.role == "backup"))
+}
+
+/// Why the places a site named cannot be the places of this install, said
+/// with nothing written and the fix in the same sentence. `None` where they
+/// can.
+fn places_refusal(places: &[PlaceDecl], registry: &Path, backups: &Path) -> Option<String> {
+    match places.iter().find(|p| p.role == "registry") {
+        None => {
+            return Some(format!(
+                "the places named keep no registry, and this install keeps one at {0}: name it \
+                 with --place registry={0},role=registry,backup=NAME",
+                registry.display()
+            ));
+        }
+        Some(place) if Path::new(&place.path) != registry => {
+            let elsewhere = Path::new(&place.path)
+                .parent()
+                .map(|d| format!(", or install with --dir {}", d.display()))
+                .unwrap_or_default();
+            return Some(format!(
+                "the {} place keeps the registry at {}, and this install keeps its registry at \
+                 {}: name the same directory{elsewhere}",
+                place.name,
+                place.path,
+                registry.display()
+            ));
+        }
+        Some(_) => {}
+    }
+    if !places
+        .iter()
+        .any(|p| p.role == "backup" && backups.starts_with(&p.path))
+    {
+        return Some(format!(
+            "the engine writes its archives to {0}, and no backup place named holds it: name \
+             one with --place archives={0},role=backup, or point --backup-dir at a backup place \
+             that is named",
+            backups.display()
+        ));
+    }
+    None
+}
+
+/// Why a directory of DICOM cannot be named beside the places of a site.
+fn source_beside_places() -> String {
+    "a directory of DICOM is one of the places a site has: name it with --place \
+     NAME=DIR,role=source, rather than with --source, which is the one directory an install \
+     that declares no places reads"
+        .to_string()
+}
+
+/// One place the engine will keep, in the order they must be added: a
+/// backup place exists before the place that names it.
+pub(crate) struct PlaceSpec {
+    pub(crate) name: String,
+    pub(crate) role: String,
+    pub(crate) path: PathBuf,
+    pub(crate) backup: Option<String>,
+    pub(crate) snapshots: bool,
+    pub(crate) protected: bool,
+    pub(crate) fast: bool,
+}
+
+/// The places an install declares: the ones a site named, where it named
+/// any, and otherwise the five of an install that named none, which are
+/// where the data is read from, where the registry is, where work in flight
+/// goes, where archives go, and where a release may be written.
+pub(crate) fn place_specs(plan: &Plan) -> Vec<PlaceSpec> {
+    if !plan.declared().is_empty() {
+        return declared_specs(plan.declared());
+    }
+    let one = |name: &str, role: &str, path: PathBuf, backup: Option<&str>| PlaceSpec {
+        name: name.to_string(),
+        role: role.to_string(),
+        path,
+        backup: backup.map(str::to_string),
+        snapshots: false,
+        protected: false,
+        fast: false,
+    };
+    let mut out = vec![one("backups", "backup", plan.dir.join("backups"), None)];
+    if let Some(source) = &plan.source {
+        out.push(one("source", "source", source.clone(), None));
+    }
+    out.push(one(
+        "registry",
+        "registry",
+        plan.registry(),
+        Some("backups"),
+    ));
+    out.push(one("working", "working", plan.dir.join("working"), None));
+    out.push(one("export", "export", plan.dir.join("export"), None));
+    out
+}
+
+/// The places a site named, in an order the registry can take them in: one
+/// that another names as its backup is added before the place that names
+/// it.
+fn declared_specs(places: &[PlaceDecl]) -> Vec<PlaceSpec> {
+    let spec = |p: &PlaceDecl| PlaceSpec {
+        name: p.name.clone(),
+        role: p.role.clone(),
+        path: PathBuf::from(&p.path),
+        backup: p.backup.clone(),
+        snapshots: p.snapshots,
+        protected: p.protected,
+        fast: p.fast,
+    };
+    let backs = |p: &PlaceDecl| {
+        places
+            .iter()
+            .any(|other| other.backup.as_deref() == Some(p.name.as_str()))
+    };
+    let mut out: Vec<PlaceSpec> = places.iter().filter(|p| backs(p)).map(&spec).collect();
+    out.extend(places.iter().filter(|p| !backs(p)).map(&spec));
     out
 }
 
@@ -3123,14 +3500,23 @@ pub(crate) fn place_argv(spec: &PlaceSpec) -> Vec<String> {
         "nils".to_string(),
         "place".to_string(),
         "add".to_string(),
-        spec.name.to_string(),
+        spec.name.clone(),
         spec.path.display().to_string(),
         "--role".to_string(),
-        spec.role.to_string(),
+        spec.role.clone(),
     ];
-    if let Some(backup) = spec.backup {
+    if let Some(backup) = &spec.backup {
         argv.push("--backup".to_string());
-        argv.push(backup.to_string());
+        argv.push(backup.clone());
+    }
+    for (flag, given) in [
+        ("--snapshots", spec.snapshots),
+        ("--protected", spec.protected),
+        ("--fast", spec.fast),
+    ] {
+        if given {
+            argv.push(flag.to_string());
+        }
     }
     argv
 }
@@ -3154,6 +3540,14 @@ fn engine_args(plan: &Plan, registry: &str, backups: &str) -> Vec<String> {
         // the jobs the desk queues, a digest or a backup, run beside the doors
         "--worker".to_string(),
     ];
+    if let Some(dir) = plan.pack_dir() {
+        argv.push("--pack-dir".to_string());
+        argv.push(dir.display().to_string());
+    }
+    if let Some(workers) = plan.workers() {
+        argv.push("--workers".to_string());
+        argv.push(workers.to_string());
+    }
     match plan.mode {
         Mode::Off => {
             argv.push("--auth".to_string());
@@ -3254,7 +3648,7 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
     // machine, so the places the registry records are paths the engine sees.
     let (registry, backups) = (
         plan.registry().display().to_string(),
-        plan.dir.join("backups").display().to_string(),
+        plan.backups().display().to_string(),
     );
     let mut engine =
         format!("podman run -d --pod nils --name nils-engine -v {registry}:{registry}:U");
@@ -3298,7 +3692,7 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
     let mut out = vec!["docker network create nils".to_string()];
     let (registry, backups) = (
         plan.registry().display().to_string(),
-        plan.dir.join("backups").display().to_string(),
+        plan.backups().display().to_string(),
     );
     let mut engine = format!(
         "docker run -d --network nils --name nils-engine {}{}-v {registry}:{registry}",
@@ -3358,7 +3752,7 @@ pub(crate) fn docker_compose(plan: &Plan) -> String {
     let _ = writeln!(out, "    restart: unless-stopped");
     let (registry, backups) = (
         plan.registry().display().to_string(),
-        plan.dir.join("backups").display().to_string(),
+        plan.backups().display().to_string(),
     );
     let _ = writeln!(
         out,
@@ -3455,7 +3849,7 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
     let _ = writeln!(engine, "Pod=nils.pod");
     let (registry, backups) = (
         plan.registry().display().to_string(),
-        plan.dir.join("backups").display().to_string(),
+        plan.backups().display().to_string(),
     );
     let _ = writeln!(engine, "Volume={registry}:{registry}:U");
     let _ = writeln!(engine, "Volume={backups}:{backups}:U");
@@ -3772,9 +4166,60 @@ fn questions(
         dir.display()
     ));
     console.said(&tilde(&dir));
-    let source = match &args.source {
-        Some(s) => Some(s.clone()),
-        None => {
+    // The places a site has, where it named its own: these are the places
+    // this install declares, in place of the five an install that names
+    // none takes. Whatever is wrong with them is a sentence here, with the
+    // fix in it and nothing written.
+    let site = {
+        let mut site = existing.and_then(|s| s.site.clone()).unwrap_or_default();
+        let given = places_given(&args.place).map_err(usage)?;
+        if !given.is_empty() {
+            site.places = given;
+        }
+        if let Some(dir) = &args.backup_dir {
+            site.backup_dir = Some(whole_path(dir).map_err(usage)?);
+        }
+        if let Some(dir) = &args.pack_dir {
+            site.pack_dir = Some(whole_path(dir).map_err(usage)?);
+        }
+        if let Some(workers) = args.workers {
+            if workers == 0 {
+                return Err(usage(
+                    "--workers is how many requests the engine answers at once, so it is one or \
+                     more"
+                        .to_string(),
+                )
+                .into());
+            }
+            site.workers = Some(workers);
+        }
+        site.said().then_some(site)
+    };
+    if let Some(site) = &site
+        && (!args.place.is_empty() || args.backup_dir.is_some())
+        && let Some(refused) = places_refusal(
+            &site.places,
+            &dir.join("registry"),
+            &backups_dir(Some(site), &dir),
+        )
+    {
+        return Err(usage(refused).into());
+    }
+    let declared = site.as_ref().map(|s| s.places.as_slice()).unwrap_or(&[]);
+    if !declared.is_empty() {
+        console.note(&format!(
+            "{} places named here, {} of them read by the engine, and the archives at {}",
+            declared.len(),
+            declared.iter().filter(|p| p.read).count(),
+            backups_dir(site.as_ref(), &dir).display()
+        ));
+    }
+    let source = match (&args.source, declared.is_empty()) {
+        // a site that named its places has already said which are read
+        (Some(_), false) => return Err(usage(source_beside_places()).into()),
+        (_, false) => None,
+        (Some(s), true) => Some(s.clone()),
+        (None, true) => {
             // a rerun offers the directory read now, so Enter keeps it
             let reads = existing
                 .and_then(|s| {
@@ -4395,6 +4840,7 @@ fn questions(
         oidc,
         llama,
         system,
+        site,
     };
 
     // 8. the summary, then the work
@@ -4558,8 +5004,7 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         println!("nothing was changed");
         return Ok(());
     }
-    for sub in ["registry", "desk", "backups", "working", "export"] {
-        let path = plan.dir.join(sub);
+    for path in own_dirs(&plan) {
         std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
     }
     let mut stages = Vec::new();
@@ -4833,6 +5278,15 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
             .collect::<Vec<_>>()
             .join(", "),
     ));
+    if let Some(site) = &plan.site {
+        rows.push(("archives", plan.backups().display().to_string()));
+        if let Some(dir) = &site.pack_dir {
+            rows.push(("rule packs", dir.clone()));
+        }
+        if let Some(workers) = site.workers {
+            rows.push(("at once", format!("{workers} requests")));
+        }
+    }
     rows.push((
         "services",
         if plan.service {
@@ -5153,6 +5607,7 @@ fn do_it(
         unfinished: true,
         oidc: plan.oidc.clone(),
         system: plan.system.clone(),
+        site: plan.site.clone(),
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
@@ -5228,8 +5683,7 @@ fn place(
     let checkpoint = |state: &State| {
         let _ = write_state(state);
     };
-    for sub in ["registry", "desk", "backups", "working", "export"] {
-        let path = plan.dir.join(sub);
+    for path in own_dirs(plan) {
         std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
     }
 
@@ -5988,18 +6442,18 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Result<Vec<Pla
     })?;
     let mut declared: Vec<PlaceState> = Vec::new();
     for spec in place_specs(plan) {
-        let Some(role) = Role::parse(spec.role) else {
+        let Some(role) = Role::parse(&spec.role) else {
             continue;
         };
         let _ = std::fs::create_dir_all(&spec.path);
         let path = std::fs::canonicalize(&spec.path).unwrap_or_else(|_| spec.path.clone());
         let path = path.display().to_string();
         let row = PlaceState {
-            name: spec.name.to_string(),
-            role: spec.role.to_string(),
+            name: spec.name.clone(),
+            role: spec.role.clone(),
             path: path.clone(),
         };
-        match place::by_name(registry.store(), spec.name) {
+        match place::by_name(registry.store(), &spec.name) {
             Ok(Some(there)) => {
                 // A place setup declared follows the answer given now: a
                 // source named on a rerun moves the place, where keeping the
@@ -6046,14 +6500,16 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Result<Vec<Pla
         let made = place::add(
             registry.store(),
             &place::New {
-                name: spec.name,
+                name: &spec.name,
                 role,
                 path: &path,
+                // what a site declared about the storage behind it; what
+                // the engine measured is the probe beside it
                 guarantees: serde_json::json!({
                     "backup": spec.backup,
-                    "snapshots": false,
-                    "protected": false,
-                    "fast": false,
+                    "snapshots": spec.snapshots,
+                    "protected": spec.protected,
+                    "fast": spec.fast,
                 }),
                 probed: crate::places::probe(Path::new(&path)),
                 handling: serde_json::Value::Null,
@@ -6201,6 +6657,11 @@ fn install_packs(plan: &Plan, me: &Path, console: &mut Console) -> Result<(), Ex
 /// that prefix cannot be written, the registry's own directory, which the
 /// engine looks at first of all.
 fn pack_destination(plan: &Plan, me: &Path) -> PathBuf {
+    // where a site said its packs are, which is where the engine is told to
+    // read them from
+    if let Some(dir) = plan.pack_dir() {
+        return dir;
+    }
     if let Some(prefix) = me.parent().and_then(Path::parent) {
         let share = prefix.join("share").join("nils");
         if std::fs::create_dir_all(&share).is_ok() && update::writable(&share) {
@@ -9496,7 +9957,7 @@ fn under_home(dir: &Path) -> bool {
 /// What the engine alone reads: the registry, the archives and every folder
 /// of DICOM it is given.
 fn engine_data(plan: &Plan) -> Vec<PathBuf> {
-    let mut out = vec![plan.registry(), plan.dir.join("backups")];
+    let mut out = vec![plan.registry(), plan.backups()];
     for (_, path) in plan.read_from() {
         if !out.contains(&path) {
             out.push(path);
@@ -9505,12 +9966,13 @@ fn engine_data(plan: &Plan) -> Vec<PathBuf> {
     out
 }
 
-/// What each part reads and writes, and the account it runs as: the
-/// registry, the archives, the work in flight and what is exported are the
-/// engine's; the desk's folder is the desk's; Kvasir's and the assistant's
-/// are the assistant's. Nothing else is given away: the base directory
-/// itself, the passphrase written where there was no terminal to ask on, and
-/// the supervisor's folder stay with the account that ran setup.
+/// What each part reads and writes, and the account it runs as: what this
+/// install made under its own directory is the engine's; the desk's folder
+/// is the desk's; Kvasir's and the assistant's are the assistant's. Nothing
+/// else is given away: the base directory itself, the passphrase written
+/// where there was no terminal to ask on, and the supervisor's folder stay
+/// with the account that ran setup, and the places a site declared stay the
+/// site's own.
 ///
 /// Every file an install writes is written as whoever runs setup, which for
 /// the services of this machine is root. A part that runs as an account of
@@ -9522,10 +9984,16 @@ fn files_of(plan: &Plan) -> Vec<(PathBuf, String)> {
         return Vec::new();
     };
     let engine = system.account("engine").to_string();
-    let mut out: Vec<(PathBuf, String)> = ["registry", "backups", "working", "export"]
-        .iter()
-        .map(|sub| (plan.dir.join(sub), engine.clone()))
-        .collect();
+    // The places a site declared are the site's own: filesystems it mounts
+    // and shares with other work, whose ownership is not an installer's to
+    // change. The engine reaches them by the capabilities its service keeps.
+    // What is handed over is what this install made itself.
+    let mut out: Vec<(PathBuf, String)> = vec![(plan.dir.join("registry"), engine.clone())];
+    if plan.declared().is_empty() {
+        for sub in ["backups", "working", "export"] {
+            out.push((plan.dir.join(sub), engine.clone()));
+        }
+    }
     if plan.has(Part::Desk) {
         out.push((plan.desk_dir(), system.account("desk").to_string()));
     }
@@ -9655,7 +10123,7 @@ pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)>
             engine_args(
                 plan,
                 &plan.registry().display().to_string(),
-                &plan.dir.join("backups").display().to_string()
+                &plan.backups().display().to_string()
             )
             .join(" ")
         ),
@@ -9832,7 +10300,7 @@ pub(crate) fn launchd_plists(plan: &Plan, state: &State) -> Vec<(String, String)
     argv.extend(engine_args(
         plan,
         &plan.registry().display().to_string(),
-        &plan.dir.join("backups").display().to_string(),
+        &plan.backups().display().to_string(),
     ));
     let mut out = vec![(
         "se.kineuro.nils-engine.plist".to_string(),
@@ -9931,7 +10399,7 @@ fn summary(plan: &Plan, console: &Console, services: &[Service]) {
 /// a unit.
 fn start_commands(plan: &Plan) -> Vec<String> {
     let registry = plan.registry().display().to_string();
-    let backups = plan.dir.join("backups").display().to_string();
+    let backups = plan.backups().display().to_string();
     let mut out = vec![format!(
         "nils {}",
         engine_args(plan, &registry, &backups).join(" ")
@@ -11911,6 +12379,7 @@ mod tests {
             oidc: None,
             llama: None,
             system: None,
+            site: None,
         }
     }
 
@@ -14821,7 +15290,7 @@ mod tests {
     fn the_places_are_declared_in_an_order_the_registry_can_name() {
         let plan = plan(Runtime::Machine);
         let specs = place_specs(&plan);
-        let names: Vec<&str> = specs.iter().map(|s| s.name).collect();
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
             vec!["backups", "source", "registry", "working", "export"],
@@ -14830,6 +15299,323 @@ mod tests {
         let registry = specs.iter().find(|s| s.name == "registry").unwrap();
         assert_eq!(place_argv(registry).last().unwrap(), "backups");
         assert!(place_argv(registry).contains(&"--role".to_string()));
+    }
+
+    /// The places of the deployment this was written for: twelve of them
+    /// across several mounted filesystems, with a mix of roles, one archive
+    /// that is the backup target, and paths that are not under the install
+    /// directory at all. Ten are read.
+    fn a_sites_places() -> Vec<String> {
+        [
+            "archives=/data/nils-archives/registry,role=backup,snapshots,protected",
+            "registry=/srv/nils/registry,role=registry,backup=archives,snapshots,protected,fast",
+            "source=/data/source,role=source,snapshots,protected",
+            "archive=/data/archive,role=backup,protected,read",
+            "bids=/data/bids,role=export,snapshots,protected,read",
+            "results=/data/results,role=working,snapshots,protected,read",
+            "exchange=/data/exchange,role=exchange,snapshots,protected,read",
+            "shared=/data/shared,role=share,protected,fast,read",
+            "work=/work,role=working,protected,fast,read",
+            "scratch=/scratch/nils,role=working,fast,read",
+            "homes=/fast/home,role=working,snapshots,protected,fast,read",
+            "scratches=/fast/scratch,role=working,fast,read",
+        ]
+        .iter()
+        .map(|word| (*word).to_string())
+        .collect()
+    }
+
+    /// A plan whose places are that site's, as the wizard makes one: no one
+    /// directory of DICOM, since the places say which are read.
+    fn a_site(site: Site) -> Plan {
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = PathBuf::from("/srv/nils");
+        plan.source = None;
+        plan.site = Some(site);
+        plan
+    }
+
+    #[test]
+    fn a_site_declares_the_places_it_has_with_their_roles_and_guarantees() {
+        let places = places_given(&a_sites_places()).unwrap();
+        let plan = a_site(Site {
+            places,
+            ..Site::default()
+        });
+        let specs = place_specs(&plan);
+        assert_eq!(
+            specs.len(),
+            12,
+            "the places a site named are the places, not five more"
+        );
+        assert_eq!(
+            specs[0].name, "archives",
+            "a place another names as its backup is declared before it"
+        );
+        let registry = specs.iter().find(|s| s.name == "registry").unwrap();
+        assert_eq!(registry.role, "registry");
+        assert_eq!(registry.path, Path::new("/srv/nils/registry"));
+        let argv = place_argv(registry).join(" ");
+        assert_eq!(
+            argv,
+            "nils place add registry /srv/nils/registry --role registry --backup archives \
+             --snapshots --protected --fast",
+            "the guarantees a site declared are what the place is added with"
+        );
+        let scratch = specs.iter().find(|s| s.name == "scratch").unwrap();
+        assert_eq!(
+            place_argv(scratch).join(" "),
+            "nils place add scratch /scratch/nils --role working --fast",
+            "and nothing it did not declare"
+        );
+        let roles: Vec<&str> = specs.iter().map(|s| s.role.as_str()).collect();
+        assert!(
+            roles.contains(&"share") && roles.contains(&"exchange") && roles.contains(&"export"),
+            "a site's roles are its own: {roles:?}"
+        );
+    }
+
+    #[test]
+    fn the_engine_reads_the_places_a_site_marked_whatever_their_role() {
+        let plan = a_site(Site {
+            places: places_given(&a_sites_places()).unwrap(),
+            ..Site::default()
+        });
+        let read: Vec<String> = plan.read_from().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(
+            read,
+            vec![
+                "source",
+                "archive",
+                "bids",
+                "results",
+                "exchange",
+                "shared",
+                "work",
+                "scratch",
+                "homes",
+                "scratches"
+            ],
+            "ten roots, and not one of them declared a dataset it is not"
+        );
+        assert!(
+            !read.contains(&"registry".to_string()) && !read.contains(&"archives".to_string()),
+            "a place nobody marked is not a directory the engine reads: {read:?}"
+        );
+        let paths: Vec<String> = plan
+            .read_from()
+            .into_iter()
+            .map(|(_, path)| path.display().to_string())
+            .collect();
+        assert!(paths.contains(&"/fast/home".to_string()), "{paths:?}");
+    }
+
+    #[test]
+    fn the_engine_is_given_the_archives_the_packs_the_handlers_and_every_root() {
+        let plan = a_site(Site {
+            places: places_given(&a_sites_places()).unwrap(),
+            pack_dir: Some("/srv/nils/engine/packs".to_string()),
+            workers: Some(64),
+            backup_dir: None,
+        });
+        let argv = engine_args(
+            &plan,
+            &plan.registry().display().to_string(),
+            &plan.backups().display().to_string(),
+        )
+        .join(" ");
+        assert!(
+            argv.contains("--backup-dir /data/nils-archives/registry"),
+            "the archives go to the backup place the registry names: {argv}"
+        );
+        assert!(argv.contains("--pack-dir /srv/nils/engine/packs"), "{argv}");
+        assert!(argv.contains("--workers 64"), "{argv}");
+        assert_eq!(argv.matches("--ingest-root ").count(), 10, "{argv}");
+        assert!(argv.contains("--ingest-root work=/work"), "{argv}");
+        assert!(argv.contains("--ingest-root bids=/data/bids"), "{argv}");
+    }
+
+    #[test]
+    fn the_archives_go_where_the_site_said_and_otherwise_where_the_registry_names() {
+        let dir = Path::new("/srv/nils");
+        assert_eq!(backups_dir(None, dir), PathBuf::from("/srv/nils/backups"));
+        let site = Site {
+            places: places_given(&a_sites_places()).unwrap(),
+            ..Site::default()
+        };
+        assert_eq!(
+            backups_dir(Some(&site), dir),
+            PathBuf::from("/data/nils-archives/registry")
+        );
+        let named = Site {
+            backup_dir: Some("/data/elsewhere".to_string()),
+            ..site
+        };
+        assert_eq!(
+            backups_dir(Some(&named), dir),
+            PathBuf::from("/data/elsewhere"),
+            "a directory named outright is the one"
+        );
+        assert_eq!(
+            backups_dir(Some(&Site::default()), dir),
+            PathBuf::from("/srv/nils/backups")
+        );
+    }
+
+    #[test]
+    fn a_place_that_cannot_be_declared_is_a_sentence_and_not_half_an_install() {
+        let one = |word: &str| places_given(&[word.to_string()]).unwrap_err();
+        assert!(one("/data/archive").contains("--place is a name and a directory"));
+        assert!(
+            one("archives=data/archive,role=backup").contains("not a directory of this machine")
+        );
+        assert!(one("archives=/data/archive").contains("given no role"));
+        assert!(one("archives=/data/archive,role=vault").contains("the roles are"));
+        assert!(one("archives=/data/archive,role=backup,quick").contains("says nothing about it"));
+        assert!(
+            one("reg=/srv/nils/registry,role=registry").contains("names nothing that backs it up")
+        );
+        assert!(
+            one("reg=/srv/nils/registry,role=registry,backup=a,read")
+                .contains("never a directory DICOM is read from")
+        );
+        assert!(
+            one("reg=/srv/nils/registry,role=registry,backup=archives")
+                .contains("no backup place is named archives")
+        );
+        let named = |a: &str, b: &str| places_given(&[a.to_string(), b.to_string()]).unwrap_err();
+        assert!(
+            named("a=/data/one,role=working", "a=/data/two,role=working")
+                .contains("two places are named a")
+        );
+        assert!(
+            named("a=/data/one,role=working", "b=/data/one,role=export")
+                .contains("one directory is one place")
+        );
+    }
+
+    #[test]
+    fn places_that_do_not_hold_this_installs_registry_or_its_archives_are_refused() {
+        let places = places_given(&a_sites_places()).unwrap();
+        let registry = Path::new("/srv/nils/registry");
+        let backups = Path::new("/data/nils-archives/registry");
+        assert_eq!(places_refusal(&places, registry, backups), None);
+        let moved = places_refusal(&places, Path::new("/opt/nils/registry"), backups).unwrap();
+        assert!(moved.contains("or install with --dir /srv/nils"), "{moved}");
+        let without: Vec<PlaceDecl> = places
+            .iter()
+            .filter(|p| p.role != "registry")
+            .cloned()
+            .collect();
+        assert!(
+            places_refusal(&without, registry, backups)
+                .unwrap()
+                .contains("keep no registry")
+        );
+        let elsewhere = places_refusal(&places, registry, Path::new("/var/backups")).unwrap();
+        assert!(
+            elsewhere.contains("no backup place named holds it"),
+            "{elsewhere}"
+        );
+    }
+
+    #[test]
+    fn a_site_on_record_is_the_site_an_update_and_a_repair_declare() {
+        let site = Site {
+            backup_dir: None,
+            pack_dir: Some("/srv/nils/engine/packs".to_string()),
+            workers: Some(64),
+            places: places_given(&a_sites_places()).unwrap(),
+        };
+        let mut state = State {
+            dir: "/srv/nils".to_string(),
+            mode: "oidc".to_string(),
+            runtime: "machine".to_string(),
+            service: "systemd system units".to_string(),
+            site: Some(site.clone()),
+            ..State::default()
+        };
+        state.parts.insert(
+            "engine".to_string(),
+            PartState {
+                version: "1.0.0".to_string(),
+                path: "/srv/nils/engine/nils".to_string(),
+                kind: "binary".to_string(),
+            },
+        );
+        let written = toml::to_string(&state).unwrap();
+        assert!(written.contains("[[site.places]]"), "{written}");
+        let read: State = toml::from_str(&written).unwrap();
+        assert_eq!(read.site, Some(site), "a record is read back as it was");
+        let plan = plan_from_state(&read, None);
+        assert_eq!(
+            place_specs(&plan).len(),
+            12,
+            "an update and a repair declare the same places, and no more"
+        );
+        assert_eq!(plan.read_from().len(), 10);
+        assert_eq!(
+            plan.backups(),
+            PathBuf::from("/data/nils-archives/registry")
+        );
+        assert_eq!(
+            plan.pack_dir(),
+            Some(PathBuf::from("/srv/nils/engine/packs"))
+        );
+        assert_eq!(plan.workers(), Some(64));
+        let older: State = toml::from_str("dir = \"/x\"\nmode = \"off\"\n").unwrap();
+        assert!(
+            plan_from_state(&older, None).site.is_none(),
+            "a record from before this is the install it always was"
+        );
+    }
+
+    #[test]
+    fn an_install_that_declared_its_places_makes_and_gives_away_only_its_own() {
+        let mut plan = a_site(Site {
+            places: places_given(&a_sites_places()).unwrap(),
+            ..Site::default()
+        });
+        assert_eq!(
+            own_dirs(&plan),
+            vec![
+                PathBuf::from("/srv/nils/registry"),
+                PathBuf::from("/srv/nils/desk"),
+                PathBuf::from("/data/nils-archives/registry"),
+            ],
+            "a working and an export directory under the install directory are not this site's"
+        );
+        plan.system = Some(SystemUnits::default());
+        let files = files_of(&plan);
+        assert!(
+            files
+                .iter()
+                .any(|(p, _)| p == Path::new("/srv/nils/registry")),
+            "{files:?}"
+        );
+        assert!(
+            !files.iter().any(|(p, _)| p.starts_with("/data")),
+            "a site's own filesystems are not an installer's to hand to an account: {files:?}"
+        );
+    }
+
+    #[test]
+    fn an_install_that_names_no_places_is_the_install_it_was() {
+        let plan = plan(Runtime::Machine);
+        assert!(plan.site.is_none());
+        assert_eq!(plan.backups(), PathBuf::from("/home/x/nils/backups"));
+        assert_eq!(plan.pack_dir(), None);
+        assert_eq!(plan.workers(), None);
+        assert_eq!(own_dirs(&plan).len(), 5);
+        let argv = engine_args(&plan, "/r", "/b").join(" ");
+        assert!(!argv.contains("--pack-dir"), "{argv}");
+        assert!(!argv.contains("--workers"), "{argv}");
+        assert!(argv.contains("--backup-dir /b"), "{argv}");
+        assert_eq!(
+            argv.matches("--ingest-root ").count(),
+            1,
+            "the one directory it was given: {argv}"
+        );
     }
 
     fn state_of(plan: &Plan, kinds: &[(&str, &str)]) -> State {
