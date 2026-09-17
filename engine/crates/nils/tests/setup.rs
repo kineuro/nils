@@ -954,6 +954,7 @@ fn print_says_the_units_and_the_calls_of_an_install_on_this_machine() {
     o.says("/usr/local/sbin/nils-manage restart engine");
     o.says("/usr/local/sbin/nils-manage restart all");
     o.says("/usr/local/sbin/nils-manage reapply");
+    o.says("/usr/local/sbin/nils-manage reapply all");
     o.says("/usr/local/sbin/nils-manage update");
     // and every step on the registry as the engine's account, through the
     // engine binary, the way its service reaches the registry

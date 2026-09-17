@@ -202,14 +202,14 @@ scan in the registry, and sudo for it would make a compromise of the engine a
 compromise of the machine. Setup writes a small root owned program instead,
 `/usr/local/sbin/nils-manage`, and a rule in `/etc/sudoers.d/nils-manage`
 naming the exact command lines one account may run it with: `restart` with
-the name of a part of this install or `all`, `reapply`, and `update`. The
-program answers to those words and nothing else, and takes no path and no
-command of its caller's, so there is nothing to pass it that makes it do
-more. The rule is read by `visudo` before it is put in place, since a sudoers
-file sudo cannot parse shuts an operator out of root; where visudo refuses it
-nothing is written and the install stops with what visudo said. A machine
-without `sudo` or `visudo` is named among what the plan lacks, before
-anything is placed.
+the name of a part of this install or `all`, `reapply` with or without `all`,
+and `update`. The program answers to those words and nothing else, and takes
+no path and no command of its caller's, so there is nothing to pass it that
+makes it do more. The rule is read by `visudo` before it is put in place,
+since a sudoers file sudo cannot parse shuts an operator out of root; where
+visudo refuses it nothing is written and the install stops with what visudo
+said. A machine without `sudo` or `visudo` is named among what the plan lacks,
+before anything is placed.
 
 The supervisor runs as the account the rule names, and `--system` requires it:
 `--account supervisor=nils-deploy`. It is deliberately not the account any part

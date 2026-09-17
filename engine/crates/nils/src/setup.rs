@@ -1499,9 +1499,10 @@ fn supervisor_refusal(system: &SystemUnits, parts: &[Part]) -> Option<String> {
 
 /// Every command line the helper answers to: one word for each part of this
 /// install to restart, `all` for every one of them in the order they start,
-/// and the two that follow a release. This is the whole of what the
-/// privilege is, and both the program and the sudoers rule are written from
-/// it, so neither can name something the other does not.
+/// `reapply` for the engine and `reapply all` for every part, each written
+/// again from the record, and `update`, which follows a release. This is the
+/// whole of what the privilege is, and both the program and the sudoers rule
+/// are written from it, so neither can name something the other does not.
 fn helper_words(state: &State) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = Vec::new();
     for unit in service_units(state) {
@@ -1509,6 +1510,7 @@ fn helper_words(state: &State) -> Vec<Vec<String>> {
     }
     out.push(vec!["restart".to_string(), "all".to_string()]);
     out.push(vec!["reapply".to_string()]);
+    out.push(vec!["reapply".to_string(), "all".to_string()]);
     out.push(vec!["update".to_string()]);
     out
 }
@@ -1517,7 +1519,9 @@ fn helper_words(state: &State) -> Vec<Vec<String>> {
 /// on one install, written here when the install was made: it takes no path,
 /// no unit name and no command of its caller's, so there is nothing to pass
 /// it that makes it do anything else. A word it does not know is refused
-/// before anything runs.
+/// before anything runs. `reapply` with no other word stays the engine's, as
+/// it was before `reapply all` was one of its words, so a supervisor older
+/// than this helper still asks for what it always asked for.
 fn helper_text(plan: &Plan, state: &State) -> String {
     let nils = supervisor_binary(state);
     let units = service_units(state);
@@ -1563,15 +1567,20 @@ fn helper_text(plan: &Plan, state: &State) -> String {
          \x20   fi\n\
          \x20   ;;\n\
          \x20 reapply)\n\
-         \x20   [ \"$#\" -eq 1 ] || {{ echo \"nils-manage reapply takes no other word\" >&2; exit 2; }}\n\
-         \x20   exec {nils} supervise reapply --part engine\n\
+         \x20   if [ \"$#\" -eq 1 ]; then\n\
+         \x20     exec {nils} supervise reapply --part engine\n\
+         \x20   elif [ \"$#\" -eq 2 ] && [ \"$2\" = all ]; then\n\
+         \x20     exec {nils} supervise reapply --part all\n\
+         \x20   fi\n\
+         \x20   echo \"nils-manage reapply takes all, or no other word for the engine\" >&2\n\
+         \x20   exit 2\n\
          \x20   ;;\n\
          \x20 update)\n\
          \x20   [ \"$#\" -eq 1 ] || {{ echo \"nils-manage update takes no other word\" >&2; exit 2; }}\n\
          \x20   exec {nils} update --all\n\
          \x20   ;;\n\
          \x20 *)\n\
-         \x20   echo \"nils-manage: restart <part>, restart all, reapply or update\" >&2\n\
+         \x20   echo \"nils-manage: restart <part>, restart all, reapply, reapply all or update\" >&2\n\
          \x20   exit 2\n\
          \x20   ;;\n\
          esac\n",
@@ -1590,6 +1599,16 @@ fn helper_text(plan: &Plan, state: &State) -> String {
             parts.join(" ")
         },
     )
+}
+
+/// Whether a helper, as its text reads, answers `reapply all`. The line that
+/// does it is what every helper written before it lacks, so the program on
+/// the machine says which helper is there without anything being run.
+fn helper_reapplies_all(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("exec ") && line.ends_with(" supervise reapply --part all")
+    })
 }
 
 /// The sudoers rule: one whole command line for each thing the helper does,
@@ -13116,6 +13135,51 @@ pub(crate) fn reapply_engine(state: &State) -> Result<(), Exit> {
     Ok(())
 }
 
+/// Every part made to follow the record: each unit written again and started
+/// again in the order they start, as after an update. Writing the machine's
+/// own units is root's, so the supervisor asks the helper for it, as it does
+/// for the engine alone, and the helper runs this same command as root.
+pub(crate) fn reapply_all(state: &State) -> Result<(), Exit> {
+    // The helper is the machine's to read, like any program in
+    // /usr/local/sbin, so an older one is found before sudo is asked: sudo
+    // refuses a command line its rule does not name, and keeps the refusal in
+    // the machine's log as an attempt at something not allowed.
+    let installed = state
+        .helper
+        .as_ref()
+        .and_then(|helper| std::fs::read_to_string(&helper.path).ok());
+    match reapply_all_call(state, installed.as_deref()) {
+        Ok(Some(argv)) => run_helper(&argv),
+        Ok(None) => {
+            restart_after_update(None);
+            Ok(())
+        }
+        Err(what_to_do) => Err(fail(what_to_do)),
+    }
+}
+
+/// What reapplying every part runs: the helper's `reapply all` where this
+/// install has a helper and this process is not root, and `None` where the
+/// work is this process's own. A helper written before `reapply all` was one
+/// of its words is not asked at all, and what to do is said instead: its rule
+/// was written with it and does not name the line either, and only setup run
+/// as root writes the two again. A helper that could not be read is asked,
+/// so what sudo says about it is what the person sees.
+fn reapply_all_call(state: &State, installed: Option<&str>) -> Result<Option<Vec<String>>, String> {
+    let Some(argv) = helper_call(state, &["reapply", "all"]) else {
+        return Ok(None);
+    };
+    if installed.is_some_and(|text| !helper_reapplies_all(text)) {
+        return Err(
+            "nothing was restarted, since the helper on this machine was written before it could \
+             reapply every part: run nils setup again as root, which writes the helper and its \
+             rule again"
+                .to_string(),
+        );
+    }
+    Ok(Some(argv))
+}
+
 /// Where the supervisor listens: this machine's loopback, or for docker the
 /// bridge's own address, since a container reaches the host there and a
 /// server on the loopback alone does not answer it.
@@ -17920,10 +17984,17 @@ mod tests {
             "/usr/local/sbin/nils-manage restart assistant",
             "/usr/local/sbin/nils-manage restart all",
             "/usr/local/sbin/nils-manage reapply",
+            "/usr/local/sbin/nils-manage reapply all",
             "/usr/local/sbin/nils-manage update",
         ] {
             assert!(rule.contains(line), "{line} is not in {rule}");
         }
+        // reapplying the engine stays a command line of its own, so a
+        // supervisor older than this rule is still allowed what it asks for
+        assert!(
+            rule.contains("/usr/local/sbin/nils-manage reapply, "),
+            "{rule}"
+        );
         // nothing that would widen it: no wildcard, no bare program name that
         // would take whatever it was given, no command of the account's own
         assert!(!rule.contains('*'), "a wildcard takes anything: {rule}");
@@ -18043,6 +18114,10 @@ mod tests {
             vec!["restart"],
             vec!["restart", "engine", "desk"],
             vec!["reapply", "--part", "desk"],
+            vec!["reapply", "desk"],
+            vec!["reapply", "engine"],
+            vec!["reapply", "all", "desk"],
+            vec!["reapply", ""],
             vec!["update", "--all"],
             vec!["systemctl", "restart", "sshd"],
             vec!["/bin/sh"],
@@ -18069,6 +18144,193 @@ mod tests {
             "a unit name would come from what it was passed: {text}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The helper reapplies the engine with no other word, as it always did,
+    /// and every part with `all`, and a word beyond either is refused. The
+    /// recorded engine is `echo` here, so what the helper would run as root
+    /// is printed rather than run.
+    #[cfg(unix)]
+    #[test]
+    fn the_helper_reapplies_the_engine_alone_or_every_part_and_refuses_a_third_word() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let Some(echo) = ["/bin/echo", "/usr/bin/echo"]
+            .into_iter()
+            .find(|p| Path::new(p).exists())
+        else {
+            return;
+        };
+        let plan = deployment();
+        let mut state = deployed_state(&plan);
+        state.parts.get_mut("engine").expect("an engine").path = echo.to_string();
+        let text = helper_text(&plan, &state);
+        assert!(
+            text.contains(&format!("exec {echo} supervise reapply --part engine\n")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("exec {echo} supervise reapply --part all\n")),
+            "{text}"
+        );
+        assert!(helper_reapplies_all(&text), "{text}");
+
+        let dir = scratch("helper-reapply");
+        let script = dir.join("nils-manage");
+        std::fs::write(&script, &text).unwrap();
+
+        // the shell reads it whole before anything runs, as bash and as the
+        // sh it is written for
+        for shell in ["sh", "bash"] {
+            match Command::new(shell).arg("-n").arg(&script).output() {
+                Ok(out) => assert!(
+                    out.status.success(),
+                    "{shell} -n refused it: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+                Err(_) if shell == "bash" => {}
+                Err(e) => panic!("{shell}: {e}"),
+            }
+        }
+
+        let run = |args: &[&str]| {
+            Command::new("sh")
+                .arg(&script)
+                .args(args)
+                .output()
+                .expect("sh runs the helper")
+        };
+        for (args, runs) in [
+            (vec!["reapply"], "supervise reapply --part engine"),
+            (vec!["reapply", "all"], "supervise reapply --part all"),
+        ] {
+            let out = run(&args);
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                runs,
+                "{args:?}"
+            );
+        }
+        for args in [
+            vec!["reapply", "all", "all"],
+            vec!["reapply", "all", "engine"],
+            vec!["reapply", "engine"],
+        ] {
+            let out = run(&args);
+            let said = String::from_utf8_lossy(&out.stderr).to_string();
+            assert_eq!(out.status.code(), Some(2), "it took {args:?}: {said}");
+            assert!(out.stdout.is_empty(), "{args:?} ran something");
+            assert!(
+                said.contains("nils-manage reapply takes all, or no other word"),
+                "{args:?}: {said}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reapplying every part goes through the helper where the services are
+    /// the machine's own, as reapplying the engine does, and with a command
+    /// line the rule names. Root, and an install whose services are an
+    /// account's own, do the work themselves.
+    #[test]
+    fn reapplying_every_part_asks_the_helper_as_reapplying_the_engine_does() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let state = deployed_state(&plan);
+        let text = helper_text(&plan, &state);
+        let rule = sudoers_text(state.helper.as_ref().unwrap(), &state);
+
+        for installed in [Some(text.as_str()), None] {
+            let asked = reapply_all_call(&state, installed).expect("it is asked");
+            if am_root() {
+                assert_eq!(asked, None, "root does the work itself");
+                continue;
+            }
+            let asked = asked.expect("the supervisor asks the helper");
+            let asked: Vec<&str> = asked.iter().map(String::as_str).collect();
+            assert_eq!(
+                asked,
+                vec![
+                    "sudo",
+                    "-n",
+                    "/usr/local/sbin/nils-manage",
+                    "reapply",
+                    "all"
+                ]
+            );
+            assert!(rule.contains(&asked[2..].join(" ")), "{rule}");
+        }
+
+        // and the engine alone is asked for as it always was
+        if !am_root() {
+            let engine = helper_call(&state, &["reapply"]).expect("the helper");
+            assert_eq!(
+                engine.last().map(String::as_str),
+                Some("reapply"),
+                "{engine:?}"
+            );
+        }
+
+        // an install whose services are this account's own has no helper
+        let plain = State {
+            service: "systemd user units".to_string(),
+            system: None,
+            helper: None,
+            ..state.clone()
+        };
+        assert_eq!(reapply_all_call(&plain, None), Ok(None));
+    }
+
+    /// A helper written before `reapply all` was one of its words, on an
+    /// install whose binary has moved on, is not asked: its rule does not
+    /// name the line, and the person is told to run setup again as root
+    /// rather than that the services were left alone.
+    #[test]
+    fn a_helper_older_than_reapply_all_is_met_with_setup_run_again_as_root() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let state = deployed_state(&plan);
+        // the reapply of the helper 1.0.0-alpha.34 wrote
+        let older = "#!/bin/sh\n\
+                     case \"${1:-}\" in\n\
+                     \x20 reapply)\n\
+                     \x20   [ \"$#\" -eq 1 ] || { echo \"nils-manage reapply takes no other word\" >&2; exit 2; }\n\
+                     \x20   exec /opt/nils/engine supervise reapply --part engine\n\
+                     \x20   ;;\n\
+                     \x20 *)\n\
+                     \x20   echo \"nils-manage: restart <part>, restart all, reapply or update\" >&2\n\
+                     \x20   exit 2\n\
+                     \x20   ;;\n\
+                     esac\n";
+        assert!(!helper_reapplies_all(older));
+        assert!(helper_reapplies_all(&helper_text(&plan, &state)));
+
+        match reapply_all_call(&state, Some(older)) {
+            Ok(asked) => assert!(
+                am_root() && asked.is_none(),
+                "an older helper was asked: {asked:?}"
+            ),
+            Err(said) => {
+                assert!(!am_root(), "root needs no helper: {said}");
+                assert!(said.contains("nothing was restarted"), "{said}");
+                assert!(said.contains("run nils setup again as root"), "{said}");
+                assert!(
+                    said.contains("writes the helper and its rule again"),
+                    "{said}"
+                );
+                assert!(!said.contains("left alone"), "{said}");
+            }
+        }
     }
 
     /// A sudoers file is read by visudo before it is put in place, and one
