@@ -86,7 +86,13 @@ Choosing the network or a proxy while nobody signs in says plainly that
 anyone who reaches it gets the whole registry, and offers to keep the people
 in the desk instead. The desk's `bind`, `origin` and `also_origins` follow
 the answer. Where a default port is taken, the wizard says which and moves
-that part to the next free one; where they are free it asks nothing.
+that part to the next free one; where they are free it asks nothing. A port
+held by this install's own service is not taken: setup asks the machine which
+unit listens on it, and where that is the unit this install runs the part
+under, the port is kept and the service is started again on it. A rerun of an
+install that is up therefore keeps every port, and so does a rerun after a run
+that stopped partway, which takes its ports from the record that run left even
+though nothing else in it is gone on from.
 
 Behind a proxy the address a browser opens and the address the desk binds
 are two answers and not one. `--origin https://nils.example.org` gives the
@@ -292,12 +298,35 @@ registry yet, with the passphrase and the connection string on their input,
 the source steps of Kvasir and the assistant, with the home they build with
 where that is the build cache, and the one step that declares the places,
 with each place it is given on its input; for a container run the commands
-and the quadlets or the compose file.
+and the quadlets or the compose file; and, on a machine that is already
+running this install, the units the run would stop, under `stopped while
+their files change`.
 Then the parts
 that are missing are downloaded from their releases and checked against the
 release's `SHA256SUMS`, the registry is made, the places are declared, the
 desk's configuration is written, and the services are started. It ends with
 what was installed, where, the addresses, and the next commands.
+
+On an install that is already running, each part's unit is stopped just
+before that part's own files change and started again with the rest: llama.cpp
+before its older builds are removed, Kvasir before its source is taken and
+built, the assistant before its. So Kvasir goes on answering while llama.cpp
+is taken, and the assistant while Kvasir is built, and neither has its binary,
+its checkout or its packages replaced underneath it. A first install stops
+nothing, and a part this install runs no unit for is left alone. The
+supervisor is never stopped: its files are the engine's binary, replaced by a
+rename, and the run may be one it started itself. A stop the machine refuses
+is said, with the call that was refused, and the run goes on.
+
+The desk's configuration is written key by key: what setup writes is set
+again, everything else in the file stays, and the paths a person set by hand
+are kept as they set them, which is the `store`, `local.key` and
+`oidc.client_secret_file`. Whether the desk has anyone in it is read from the
+store the configuration names rather than from a fixed path, so a desk whose
+people live somewhere other than beside its configuration is seen for what it
+is. Setup never points a desk at a store that keeps nobody while its people
+are in another: it leaves the configuration exactly as it was and says both
+paths.
 
 ## Where the parts come from
 
@@ -318,6 +347,21 @@ from [`kineuro/kvasir`](https://github.com/kineuro/kvasir) and
 [`kineuro/nils-assistant`](https://github.com/kineuro/nils-assistant) at the
 release tags this version of `nils` names, and built with Node 22. Where
 Node 22, git or npm is missing, the plan says so and nothing is placed.
+
+A part's folder is read three ways. Missing or empty, it is cloned into. A
+checkout, it is fetched and checked out at the release tag. Anything else, a
+built copy another way of deploying left behind with the part's data beside
+it, is adopted in place: the repository is made in the folder, the release tag
+is fetched, and what that tag tracks is read out before anything is touched. A
+tracked path that would replace what the part keeps, which is `state/`,
+`runtime/`, `kvasir.json`, `backends-to-add.json`, `assistant.env`, Kvasir's
+seal and pepper, and any key or store at the folder's top, refuses the
+adoption: the folder is left exactly as it was, and the sentence names what
+would have gone, so you can move it out, or the folder aside, and run again.
+Otherwise the release's files replace the copy's and everything else in the
+folder stays as it was, byte for byte. `nils update --all` adopts a copy the
+same way, and leaves a folder with nothing in it for `nils setup` and then
+repair, since an update never clones.
 
 Kvasir's `kvasir.json` is written from its own example with the port this
 setup chose, an admin token made here, how Kvasir knows its callers, and
