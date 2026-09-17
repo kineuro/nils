@@ -611,8 +611,14 @@ pub(crate) struct SystemUnits {
 const DEFAULT_ACCOUNT: &str = "nils";
 
 /// The parts an account can be named for. Kvasir and llama.cpp are the
-/// assistant's own and run as the account it runs as.
-const ACCOUNT_PARTS: [&str; 3] = ["engine", "desk", "assistant"];
+/// assistant's own and run as the account it runs as. The supervisor is one
+/// of them: it restarts the services and replaces the parts' files, and it
+/// does that through a helper of its own rather than as root.
+const ACCOUNT_PARTS: [&str; 4] = ["engine", "desk", "assistant", SUPERVISOR_PART];
+
+/// The supervisor, as an account is named for it. It is not one of the parts
+/// a person chooses to install: every install runs one.
+const SUPERVISOR_PART: &str = "supervisor";
 
 /// The directory the services of a machine are written into.
 const SYSTEM_UNITS_DIR: &str = "/etc/systemd/system";
@@ -626,7 +632,9 @@ impl SystemUnits {
     }
 
     /// Every account this install needs, each named once, in the order the
-    /// parts are named.
+    /// parts are named, and the supervisor's last. A part that names none
+    /// runs as the default account; the supervisor never does, so it is here
+    /// only once it has been named.
     fn every_account(&self, parts: &[Part]) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for part in parts {
@@ -634,6 +642,11 @@ impl SystemUnits {
             if !out.contains(&account) {
                 out.push(account);
             }
+        }
+        if let Some(supervisor) = self.accounts.get(SUPERVISOR_PART)
+            && !out.contains(supervisor)
+        {
+            out.push(supervisor.clone());
         }
         out
     }
@@ -654,7 +667,8 @@ fn accounts_given(given: &[String]) -> Result<BTreeMap<String, String>, String> 
         let (part, account) = (part.trim(), account.trim());
         if !ACCOUNT_PARTS.contains(&part) {
             return Err(format!(
-                "{part} is not a part an account can be named for: engine, desk or assistant"
+                "{part} is not a part an account can be named for: engine, desk, assistant or \
+                 supervisor"
             ));
         }
         if account.is_empty() {
@@ -854,6 +868,375 @@ fn recorded_system_refusal(plan: &Plan) -> Option<String> {
         return None;
     }
     system_refusal(plan.runtime, system, &plan.parts)
+}
+
+// ------------------------------------ the privilege that keeps it running
+
+/// The root owned program that does the privileged work of one install.
+const HELPER_PATH: &str = "/usr/local/sbin/nils-manage";
+
+/// The sudoers file naming the command lines it may be called with. No dot
+/// in the name: sudo passes over a file in `/etc/sudoers.d` whose name holds
+/// one, so a rule written as `nils-manage.new` would be read by nobody.
+const HELPER_RULE: &str = "/etc/sudoers.d/nils-manage";
+
+/// The narrow privilege a setup managed install keeps: a root owned program
+/// with a closed set of words, and a sudoers rule naming exactly the command
+/// lines the supervisor calls it with.
+///
+/// Something has to restart the services of this machine and replace the
+/// parts' files when a release lands, and both are root's. The two answers
+/// not taken are a supervisor running as root, and sudo for the account that
+/// runs the engine: that account reads every scan in the registry, and a
+/// compromise of it would be a compromise of the machine. So the supervisor
+/// runs as an account like every other part, and the only thing that account
+/// may do as root is call this program with one of the words it was written
+/// with. `None` for every install whose services are an account's own, which
+/// needs no privilege at all and does not grow one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Helper {
+    /// The account that may call it, which is the account the supervisor
+    /// runs as.
+    pub(crate) account: String,
+    /// The program itself.
+    #[serde(default = "helper_path")]
+    pub(crate) path: String,
+    /// The sudoers file that names the command lines.
+    #[serde(default = "helper_rule")]
+    pub(crate) rule: String,
+}
+
+fn helper_path() -> String {
+    HELPER_PATH.to_string()
+}
+
+fn helper_rule() -> String {
+    HELPER_RULE.to_string()
+}
+
+/// The privilege an install needs, where it needs one: the services of this
+/// machine, written and started, with an account named to keep them running.
+/// An install whose services are an account's own restarts them as that
+/// account and replaces files it owns, so it needs nothing here, and a laptop
+/// never sees any of it. The account is the one named and never a default:
+/// falling back to the account a part runs as would hand that part the whole
+/// of this privilege, which is what it exists to keep apart.
+fn helper_of(system: Option<&SystemUnits>, service: bool) -> Option<Helper> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    let system = system?;
+    if !service {
+        return None;
+    }
+    Some(Helper {
+        account: system.accounts.get(SUPERVISOR_PART)?.clone(),
+        path: HELPER_PATH.to_string(),
+        rule: HELPER_RULE.to_string(),
+    })
+}
+
+/// Why the account that keeps the parts running cannot be the one given, or
+/// the want of one at all, said before anything is written. This account may
+/// restart the services and replace the parts' files, so it is deliberately
+/// not the account any part runs as: the engine's reads every scan in the
+/// registry, and an engine that could also replace the parts and restart them
+/// would carry the machine with it. `None` where a separate account was named.
+fn supervisor_refusal(system: &SystemUnits, parts: &[Part]) -> Option<String> {
+    let Some(named) = system.accounts.get(SUPERVISOR_PART) else {
+        return Some(
+            "--system writes the services of this machine, and the account that keeps them \
+             running is deliberately not the account any part runs as: name it with --account \
+             supervisor=nils-deploy. It is the one account that may restart the services and \
+             replace the parts' files, and like every account this installer names it has to be \
+             on this machine already"
+                .to_string(),
+        );
+    };
+    for part in parts {
+        if system.account(part.name()) == named {
+            return Some(format!(
+                "the supervisor would run as {named}, which is the account {} runs as: the \
+                 supervisor may restart the services and replace the parts' files, so a part \
+                 running as it could replace itself and every part beside it. Name another with \
+                 --account supervisor=nils-deploy",
+                part.name()
+            ));
+        }
+    }
+    None
+}
+
+/// Every command line the helper answers to: one word for each part of this
+/// install to restart, `all` for every one of them in the order they start,
+/// and the two that follow a release. This is the whole of what the
+/// privilege is, and both the program and the sudoers rule are written from
+/// it, so neither can name something the other does not.
+fn helper_words(state: &State) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    for unit in service_units(state) {
+        out.push(vec!["restart".to_string(), unit.part.to_string()]);
+    }
+    out.push(vec!["restart".to_string(), "all".to_string()]);
+    out.push(vec!["reapply".to_string()]);
+    out.push(vec!["update".to_string()]);
+    out
+}
+
+/// The helper itself. Every word it answers to stands for one fixed action
+/// on one install, written here when the install was made: it takes no path,
+/// no unit name and no command of its caller's, so there is nothing to pass
+/// it that makes it do anything else. A word it does not know is refused
+/// before anything runs.
+fn helper_text(plan: &Plan, state: &State) -> String {
+    let nils = supervisor_binary(state);
+    let units = service_units(state);
+    let mut arms = String::new();
+    for unit in &units {
+        let _ = writeln!(
+            arms,
+            "    {}) systemctl restart {} ;;",
+            unit.part, unit.name
+        );
+    }
+    let parts: Vec<&str> = units.iter().map(|u| u.part).collect();
+    let words = if parts.is_empty() {
+        "all".to_string()
+    } else {
+        format!("{} or all", parts.join(", "))
+    };
+    format!(
+        "#!/bin/sh\n\
+         # The privileged work of the NILS install in {dir}, and nothing else.\n\
+         # Written by nils setup. The supervisor calls it through sudo as {account}, which\n\
+         # may run the command lines in {rule} and no others on this machine.\n\
+         # It takes only the words below: no path, no unit name, and no command of its\n\
+         # caller's. Edit it by running nils setup again, not by hand.\n\
+         set -eu\n\
+         PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n\
+         export PATH\n\
+         \n\
+         one() {{\n\
+         \x20 case \"$1\" in\n\
+         {arms}\
+         \x20   *) echo \"nils-manage restart: {words}\" >&2; exit 2 ;;\n\
+         \x20 esac\n\
+         }}\n\
+         \n\
+         case \"${{1:-}}\" in\n\
+         \x20 restart)\n\
+         \x20   [ \"$#\" -eq 2 ] || {{ echo \"nils-manage restart takes one part: {words}\" >&2; exit 2; }}\n\
+         \x20   if [ \"$2\" = all ]; then\n\
+         \x20     for part in {every}; do one \"$part\"; done\n\
+         \x20   else\n\
+         \x20     one \"$2\"\n\
+         \x20   fi\n\
+         \x20   ;;\n\
+         \x20 reapply)\n\
+         \x20   [ \"$#\" -eq 1 ] || {{ echo \"nils-manage reapply takes no other word\" >&2; exit 2; }}\n\
+         \x20   exec {nils} supervise reapply --part engine\n\
+         \x20   ;;\n\
+         \x20 update)\n\
+         \x20   [ \"$#\" -eq 1 ] || {{ echo \"nils-manage update takes no other word\" >&2; exit 2; }}\n\
+         \x20   exec {nils} update --all\n\
+         \x20   ;;\n\
+         \x20 *)\n\
+         \x20   echo \"nils-manage: restart <part>, restart all, reapply or update\" >&2\n\
+         \x20   exit 2\n\
+         \x20   ;;\n\
+         esac\n",
+        dir = plan.dir.display(),
+        account = plan
+            .helper
+            .as_ref()
+            .map_or(DEFAULT_ACCOUNT, |h| h.account.as_str()),
+        rule = plan
+            .helper
+            .as_ref()
+            .map_or(HELPER_RULE, |h| h.rule.as_str()),
+        every = if parts.is_empty() {
+            String::new()
+        } else {
+            parts.join(" ")
+        },
+    )
+}
+
+/// The sudoers rule: one whole command line for each thing the helper does,
+/// and nothing else. sudo matches a command and its words exactly, so a call
+/// carrying any other word matches no rule at all and is refused by sudo
+/// before the helper is reached; there is no wildcard here and no bare
+/// program name that would take whatever it was given.
+fn sudoers_text(helper: &Helper, state: &State) -> String {
+    let commands: Vec<String> = helper_words(state)
+        .iter()
+        .map(|words| format!("{} {}", helper.path, words.join(" ")))
+        .collect();
+    format!(
+        "# Written by nils setup. The account the supervisor runs as may run the NILS\n\
+         # helper with the words below, and nothing else on this machine.\n\
+         {} ALL=(root) NOPASSWD: {}\n",
+        helper.account,
+        commands.join(", ")
+    )
+}
+
+/// visudo, wherever this machine keeps it. It lives in `/usr/sbin`, which is
+/// not on every account's path, so the usual places are tried by name first.
+fn visudo_program() -> Option<String> {
+    for path in ["/usr/sbin/visudo", "/sbin/visudo", "/usr/local/sbin/visudo"] {
+        if Path::new(path).exists() {
+            return Some(path.to_string());
+        }
+    }
+    have("visudo").then(|| "visudo".to_string())
+}
+
+/// A sudoers file written where it will live and read by visudo before it is
+/// put in place. A sudoers file sudo cannot parse shuts an operator out of
+/// root, so nothing is moved into place until visudo has passed it: it is
+/// written beside the rule under a name sudo passes over, checked there, and
+/// the answer is that file, ready to be moved.
+fn sudoers_prepared(rule: &Path, text: &str) -> Result<PathBuf, String> {
+    let staged = rule.with_extension("new");
+    let Some(visudo) = visudo_program() else {
+        return Err("this machine has no visudo to read it with".to_string());
+    };
+    write_root_file(&staged, text.as_bytes(), 0o440).map_err(|e| e.to_string())?;
+    let out = Command::new(&visudo)
+        .arg("-cqf")
+        .arg(&staged)
+        .output()
+        .map_err(|e| format!("{visudo}: {e}"));
+    match out {
+        Ok(out) if out.status.success() => Ok(staged),
+        Ok(out) => {
+            let _ = std::fs::remove_file(&staged);
+            let said = String::from_utf8_lossy(&out.stderr);
+            Err(said
+                .lines()
+                .find(|l| l.contains("syntax error") || l.contains("invalid"))
+                .unwrap_or("visudo would not read it")
+                .trim()
+                .to_string())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&staged);
+            Err(e)
+        }
+    }
+}
+
+/// A file of the machine's, written with the mode it must have from the
+/// moment it exists rather than afterwards.
+fn write_root_file(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let _ = std::fs::remove_file(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    let mut file = options.open(path)?;
+    file.write_all(bytes)
+}
+
+/// The helper and its rule put in place: the program first, then the rule,
+/// so there is no moment where a rule names a program that is not there. The
+/// rule is read by visudo before it is moved into place, and where visudo
+/// refuses it nothing is moved and the install stops with what visudo said.
+fn install_helper(plan: &Plan, state: &State, console: &Console) -> Result<(), Exit> {
+    let Some(helper) = &plan.helper else {
+        return Ok(());
+    };
+    let program = Path::new(&helper.path);
+    if let Err(e) = write_root_file(program, helper_text(plan, state).as_bytes(), 0o755) {
+        return console.broken(&format!("{} was not written: {e}", helper.path));
+    }
+    let rule = Path::new(&helper.rule);
+    match sudoers_prepared(rule, &sudoers_text(helper, state)) {
+        Ok(staged) => {
+            if let Err(e) = std::fs::rename(&staged, rule) {
+                let _ = std::fs::remove_file(&staged);
+                return console.broken(&format!("{} was not put in place: {e}", helper.rule));
+            }
+        }
+        Err(why) => {
+            return console.broken(&format!(
+                "{} was not written, and nothing of it was left behind: {why}",
+                helper.rule
+            ));
+        }
+    }
+    console.progress(&format!(
+        "{} may restart this install's services and replace its parts, through {}",
+        helper.account, helper.path
+    ));
+    Ok(())
+}
+
+/// The helper called for one of its words, where this install has one and
+/// this process is not the root that could do the work itself. Setup runs as
+/// root and asks systemd directly; the supervisor runs as an account of its
+/// own and asks the helper. `None` where the work is this process's own.
+fn helper_call(state: &State, words: &[&str]) -> Option<Vec<String>> {
+    let helper = state.helper.as_ref()?;
+    if am_root() {
+        return None;
+    }
+    let mut argv = vec!["sudo".to_string(), "-n".to_string(), helper.path.clone()];
+    argv.extend(words.iter().map(|word| (*word).to_string()));
+    Some(argv)
+}
+
+/// One call to the helper, with what it said kept for the person where it
+/// was refused: an account that is not the one the rule names is turned away
+/// by sudo, and saying so is the difference between that and a part that
+/// will not start.
+fn run_helper(argv: &[String]) -> Result<(), Exit> {
+    let Some((program, args)) = argv.split_first() else {
+        return Err(fail("no helper to call"));
+    };
+    let out = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| fail(format!("{program}: {e}")))?;
+    print!("{}", String::from_utf8_lossy(&out.stdout));
+    if out.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&out.stderr);
+    Err(fail(format!(
+        "{} was refused: {}",
+        argv.join(" "),
+        said.lines().last().unwrap_or("it failed").trim()
+    )))
+}
+
+/// `nils update --all` on an install whose services are the machine's own,
+/// run by the account the supervisor runs as: replacing the parts' files is
+/// root's, so it is asked of the helper, which runs this same command as
+/// root. `None` where this process does the work itself.
+pub(crate) fn update_by_helper() -> Option<Result<(), Exit>> {
+    let state = read_state()?;
+    let argv = helper_call(&state, &["update"])?;
+    Some(run_helper(&argv))
+}
+
+/// Where the supervisor reads the record from. The supervisor of an install
+/// whose services are the machine's own runs as an account of its own, and
+/// the record lives in the home of whoever installed it, which that account
+/// cannot read. It is written here as well, every time it is written, so the
+/// two never differ. It holds no secret: where the parts are, how they run,
+/// and what answers where.
+fn mirrored_config(dir: &Path) -> PathBuf {
+    dir.join("supervise").join("config")
 }
 
 /// Where the registry itself is kept.
@@ -2533,6 +2916,13 @@ pub(crate) struct State {
     /// rather than falling back to this account's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) system: Option<SystemUnits>,
+    /// The narrow privilege that keeps such an install running: the account
+    /// the supervisor runs as, and the root owned program it restarts the
+    /// services and replaces the parts' files through. Recorded, so that an
+    /// update and a repair lay down the same arrangement and an uninstall
+    /// takes it away again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) helper: Option<Helper>,
     /// The layout a site described: the places it has, and where the
     /// engine's archives, rule packs and request handlers were set.
     /// Recorded, so that an update and a repair declare the same places and
@@ -2591,8 +2981,30 @@ fn write_state(state: &State) -> Result<PathBuf, Exit> {
         std::fs::create_dir_all(dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
     }
     let text = toml::to_string(state).map_err(|e| fail(e.to_string()))?;
-    std::fs::write(&path, text).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+    std::fs::write(&path, &text).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+    mirror_state(state, &text);
     Ok(path)
+}
+
+/// The record written again where the supervisor can read it, for an install
+/// whose supervisor runs as an account of its own. Every write of the record
+/// goes through here, so the copy is never the older of the two. A failure
+/// is not an install's to stop on: the supervisor would report nothing until
+/// the next write, and everything else is as it was.
+fn mirror_state(state: &State, text: &str) {
+    let Some(helper) = &state.helper else {
+        return;
+    };
+    let config = mirrored_config(Path::new(&state.dir));
+    let dir = config.join("nils");
+    if std::fs::create_dir_all(&dir).is_err()
+        || std::fs::write(dir.join("setup.toml"), text).is_err()
+    {
+        return;
+    }
+    if let Some((uid, gid)) = account_ids(&helper.account) {
+        let _ = give_to(&config, uid, gid);
+    }
 }
 
 // --------------------------------------------------------------- the plan
@@ -2659,6 +3071,10 @@ pub(crate) struct Plan {
     /// the services are the account's own, which is every install on a
     /// laptop.
     pub(crate) system: Option<SystemUnits>,
+    /// The narrow privilege such an install keeps, so that the supervisor
+    /// restarts the services and replaces the parts' files without running
+    /// as root: `None` where the install needs none.
+    pub(crate) helper: Option<Helper>,
     /// The layout a site described, asked for with `--place` and the
     /// settings beside it: `None` where the install has the five places of
     /// a laptop and the engine's own defaults.
@@ -2898,6 +3314,7 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
         oidc: state.oidc.clone(),
         llama: llama_of_state(state),
         system: state.system.clone(),
+        helper: state.helper.clone(),
         site: state.site.clone(),
     }
 }
@@ -4809,6 +5226,21 @@ fn questions(
         (true, Runtime::Podman) => "quadlets",
         (true, Runtime::Docker) => "compose",
     });
+    // The supervisor restarts the services and replaces the parts' files, so
+    // on the services of this machine it runs as an account of its own and
+    // does that privileged work through a helper that may do those two
+    // things and nothing else.
+    // The account is named outright: a default that fell back to a part's
+    // own would undo the one separation this makes.
+    if let Some(system) = &system
+        && let Some(refused) = supervisor_refusal(system, &parts)
+    {
+        if !args.print {
+            return Err(usage(refused).into());
+        }
+        console.note(&refused);
+    }
+    let helper = helper_of(system.as_ref(), service);
 
     let postgres_here = matches!(&backend, BackendChoice::Postgres { dsn, .. }
         if dsn_for(Runtime::Podman, dsn) != *dsn);
@@ -4840,6 +5272,7 @@ fn questions(
         oidc,
         llama,
         system,
+        helper,
         site,
     };
 
@@ -5085,6 +5518,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
         }
     }
     hand_over_files(plan, console);
+    install_helper(plan, &state, console)?;
     console.begin(Stage::Services);
     let mut services = Vec::new();
     if plan.service {
@@ -5310,6 +5744,15 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
             rows.push(("engine keeps", system.capabilities.join(", ")));
         }
     }
+    if let Some(helper) = &plan.helper {
+        rows.push((
+            "supervisor",
+            format!(
+                "runs as {}, and restarts the services and replaces the parts through {}",
+                helper.account, helper.path
+            ),
+        ));
+    }
     rows.push(("state", state_path().display().to_string()));
     rows
 }
@@ -5403,6 +5846,24 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
                 let _ = writeln!(out, "\n{}", console.bold("  then"));
                 for line in unit_calls(plan, &names) {
                     let _ = writeln!(out, "    {line}");
+                }
+            }
+            // The privilege such an install keeps, whole: an operator can
+            // read exactly what would go on the machine, and put it there by
+            // hand where setup may not write it.
+            if let Some(helper) = &plan.helper {
+                let _ = writeln!(
+                    out,
+                    "\n{} {}",
+                    console.bold("  privilege"),
+                    console.dim(&helper.path)
+                );
+                for line in helper_text(plan, &state).lines() {
+                    let _ = writeln!(out, "{}", indent(line));
+                }
+                let _ = writeln!(out, "\n  {}", console.bold(&helper.rule));
+                for line in sudoers_text(helper, &state).lines() {
+                    let _ = writeln!(out, "{}", indent(line));
                 }
             }
         }
@@ -5607,6 +6068,7 @@ fn do_it(
         unfinished: true,
         oidc: plan.oidc.clone(),
         system: plan.system.clone(),
+        helper: plan.helper.clone(),
         site: plan.site.clone(),
     };
     let previous_parts = state.parts.clone();
@@ -5913,6 +6375,11 @@ fn place(
     // What each part reads and writes belongs to the account that part runs
     // as, before anything is started as that account.
     hand_over_files(plan, console);
+
+    // The narrow privilege the supervisor restarts the services and replaces
+    // the parts' files through, in place before anything runs as the account
+    // that holds it.
+    install_helper(plan, state, console)?;
 
     // Start it.
     let mut services = Vec::new();
@@ -7312,6 +7779,17 @@ fn missing_for(plan: &Plan) -> Vec<String> {
     let mut out = Vec::new();
     if plan.runtime.container() && !have(plan.runtime.name()) {
         out.push(format!("{}, which runs the parts", plan.runtime.name()));
+    }
+    // The privilege the supervisor restarts the services with is written
+    // with visudo and called through sudo; without them the supervisor could
+    // restart nothing, and the install would say so only afterwards.
+    if plan.helper.is_some() {
+        if !have("sudo") {
+            out.push("sudo, which the supervisor restarts the services through".to_string());
+        }
+        if visudo_program().is_none() {
+            out.push("visudo, which reads the rule before it is put in place".to_string());
+        }
     }
     if plan.has(Part::Assistant) {
         // the assistant and Kvasir are built on this machine, whatever runs them
@@ -10002,6 +10480,11 @@ fn files_of(plan: &Plan) -> Vec<(PathBuf, String)> {
         out.push((plan.dir.join("assistant"), assistant.clone()));
         out.push((plan.dir.join("kvasir"), assistant));
     }
+    // The supervisor's own folder: its configuration, its log, the runs it
+    // started, and the copy of the record it reports this install from.
+    if let Some(helper) = &plan.helper {
+        out.push((plan.dir.join("supervise"), helper.account.clone()));
+    }
     out
 }
 
@@ -10060,7 +10543,18 @@ fn planned_state(plan: &Plan) -> State {
     let mut state = State {
         dir: plan.dir.display().to_string(),
         ports: plan.ports,
+        runtime: plan.runtime.name().to_string(),
+        // the services this install would have, so that --print can say the
+        // unit of each part and the words the helper would answer to
+        service: if plan.service {
+            service_manager(plan.runtime, plan.system.is_some())
+                .unwrap_or("none")
+                .to_string()
+        } else {
+            "none".to_string()
+        },
         system: plan.system.clone(),
+        helper: plan.helper.clone(),
         ..State::default()
     };
     let mut part = |name: &str, path: &Path, kind: &str| {
@@ -11031,6 +11525,35 @@ pub(crate) fn install_doc(state: &State) -> serde_json::Value {
     })
 }
 
+/// What restarts one unit of a recorded install: whatever manager keeps it,
+/// or the helper, where the services are this machine's own and this process
+/// is not the root that could ask systemd itself. The supervisor runs as an
+/// account of its own and so asks the helper; setup runs as root and asks
+/// systemd.
+fn restart_argv(state: &State, unit: &Unit, uid: &str) -> Vec<String> {
+    let words = |argv: &[&str]| {
+        argv.iter()
+            .map(|word| (*word).to_string())
+            .collect::<Vec<String>>()
+    };
+    if unit.watcher == "systemd"
+        && unit.system
+        && let Some(argv) = helper_call(state, &["restart", unit.part])
+    {
+        return argv;
+    }
+    match unit.watcher {
+        "docker" => words(&["docker", "restart", &unit.name]),
+        "launchd" => words(&[
+            "launchctl",
+            "kickstart",
+            "-k",
+            &format!("gui/{uid}/{}", unit.name),
+        ]),
+        _ => systemctl_argv(unit.system, &["restart", &unit.name]),
+    }
+}
+
 /// Restart one part of a recorded install, or every part in the order they
 /// start. A digest that was running resumes when the engine is back.
 pub(crate) fn restart_units(state: &State, part: Option<&str>) -> Result<Vec<String>, Exit> {
@@ -11059,13 +11582,13 @@ pub(crate) fn restart_units(state: &State, part: Option<&str>) -> Result<Vec<Str
         .unwrap_or_default();
     let mut done: Vec<String> = Vec::new();
     for unit in chosen {
-        let ok = match unit.watcher {
-            "docker" => quietly("docker", &["restart", &unit.name]),
-            "launchd" => quietly(
-                "launchctl",
-                &["kickstart", "-k", &format!("gui/{uid}/{}", unit.name)],
-            ),
-            _ => systemctl(unit.system, &["restart", &unit.name]),
+        let argv = restart_argv(state, unit, &uid);
+        let ok = match argv.split_first() {
+            Some((program, args)) => {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                quietly(program, &args)
+            }
+            None => false,
         };
         if !ok {
             return Err(fail(format!(
@@ -11094,6 +11617,12 @@ pub(crate) fn reapply_engine(state: &State) -> Result<(), Exit> {
         return Err(fail(
             "this install runs no services; start the engine again yourself, with the folders it reads",
         ));
+    }
+    // Writing the engine's unit into the machine's own directory is root's,
+    // so the supervisor asks the helper, which runs this same command as
+    // root, from the record rather than from anything it was passed.
+    if let Some(argv) = helper_call(state, &["reapply"]) {
+        return run_helper(&argv);
     }
     let mut plan = plan_from_state(state, None);
     if let Some(engine) = state.parts.get("engine") {
@@ -11290,10 +11819,26 @@ fn supervisor_service(plan: &Plan, state: &State) -> (String, String) {
             ),
         );
     }
+    // Where the services are this machine's, the supervisor runs as an
+    // account like every part, and the privileged work goes through the
+    // helper. It reads the record from the copy written where that account
+    // can read it, and it is not shut out of anything else: looking inside a
+    // folder before a person adds it as a source is its own work.
+    let (account, environment) = match &plan.helper {
+        Some(helper) => (
+            format!("User={}\n", helper.account),
+            format!(
+                "Environment=XDG_CONFIG_HOME={}\n",
+                mirrored_config(&plan.dir).display()
+            ),
+        ),
+        None => (String::new(), String::new()),
+    };
     (
         "nils-supervise.service".to_string(),
         format!(
             "[Unit]\nDescription=NILS supervisor\nAfter=network-online.target\n\n[Service]\n\
+             {account}{environment}\
              ExecStart={nils} supervise run --config {config}\nRestart=on-failure\nRestartSec=5\n\
              # a run it started, an update among them, outlives a restart of the supervisor\n\
              KillMode=process\n\n[Install]\nWantedBy={}\n",
@@ -11403,6 +11948,10 @@ struct Removal {
     runtime: String,
     /// Whether the units are the machine's own rather than this account's.
     system: bool,
+    /// The root owned program the supervisor did the privileged work
+    /// through, and the sudoers rule that named it.
+    helper: Option<PathBuf>,
+    rule: Option<PathBuf>,
     /// Unit names to stop and disable, and the files that define them.
     units: Vec<String>,
     unit_files: Vec<PathBuf>,
@@ -11726,6 +12275,8 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         dir: dir.clone(),
         runtime: state.runtime.clone(),
         system: state.system.is_some(),
+        helper: None,
+        rule: None,
         units: Vec::new(),
         unit_files: Vec::new(),
         containers: Vec::new(),
@@ -11828,6 +12379,18 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
             }
         }
     }
+    // the privilege this install was given, and the rule that named it
+    if let Some(helper) = &state.helper {
+        let program = PathBuf::from(&helper.path);
+        if program.exists() {
+            removal.helper = Some(program);
+        }
+        let rule = PathBuf::from(&helper.rule);
+        if rule.exists() {
+            removal.rule = Some(rule);
+        }
+    }
+
     if matches!(state.runtime.as_str(), "podman" | "docker") {
         let engine = state.runtime.as_str();
         let listed = run_quiet(engine, &["images", "--format", "{{.Repository}}:{{.Tag}}"])
@@ -11957,6 +12520,13 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
             "postgres",
             format!("the {POSTGRES_CONTAINER} container"),
         );
+    }
+    if removal.helper.is_some() || removal.rule.is_some() {
+        let what: Vec<String> = [&removal.rule, &removal.helper]
+            .iter()
+            .filter_map(|path| path.as_ref().map(|p| p.display().to_string()))
+            .collect();
+        row(&mut out, "privilege", what.join(", "));
     }
     if !removal.containers.is_empty() {
         let what = if removal.runtime == "podman" {
@@ -12170,6 +12740,20 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
         ));
     }
 
+    // The rule goes before the program it named, so there is never a moment
+    // where an account may still call something that has been taken away.
+    for (path, what) in [
+        (&removal.rule, "the rule naming what it may run"),
+        (&removal.helper, "the helper it ran"),
+    ] {
+        if let Some(path) = path {
+            match std::fs::remove_file(path) {
+                Ok(()) => say(format!("removed {what}, {}", path.display())),
+                Err(e) => say(format!("{} was not removed: {e}", path.display())),
+            }
+        }
+    }
+
     if let Some(rt) = removal.postgres.as_deref()
         && quietly(rt, &["rm", "-f", POSTGRES_CONTAINER])
     {
@@ -12379,6 +12963,7 @@ mod tests {
             oidc: None,
             llama: None,
             system: None,
+            helper: None,
             site: None,
         }
     }
@@ -14418,8 +15003,10 @@ mod tests {
             accounts: BTreeMap::from([
                 ("desk".to_string(), "nils-desk".to_string()),
                 ("assistant".to_string(), "nils-assistant".to_string()),
+                (SUPERVISOR_PART.to_string(), "nils-deploy".to_string()),
             ]),
         });
+        plan.helper = helper_of(plan.system.as_ref(), plan.service);
         plan
     }
 
@@ -14490,11 +15077,16 @@ mod tests {
             "llama.cpp runs the assistant's models"
         );
 
-        // the supervisor restarts them and replaces their binaries, so it
-        // stays with the account that installed them
+        // the supervisor restarts them and replaces their files, and it does
+        // that through the helper rather than as root, so it runs as an
+        // account of its own like every other part
         let (name, supervisor) = supervisor_service(&plan, &state);
         assert_eq!(name, "nils-supervise.service");
-        assert!(!supervisor.contains("User="), "{supervisor}");
+        assert!(supervisor.contains("User=nils-deploy\n"), "{supervisor}");
+        assert!(
+            supervisor.contains("Environment=XDG_CONFIG_HOME=/srv/nils/supervise/config"),
+            "it reads the record where that account can: {supervisor}"
+        );
         assert!(
             supervisor.contains("WantedBy=multi-user.target"),
             "{supervisor}"
@@ -14744,9 +15336,11 @@ mod tests {
         assert_eq!(owner("/srv/nils/desk"), Some("nils-desk"));
         assert_eq!(owner("/srv/nils/kvasir"), Some("nils-assistant"));
         assert_eq!(owner("/srv/nils/assistant"), Some("nils-assistant"));
+        // the supervisor's own folder: its configuration, its log, the runs
+        // it started, and the copy of the record it reports this install from
+        assert_eq!(owner("/srv/nils/supervise"), Some("nils-deploy"));
         // what no part reads stays with the account that ran setup
         assert_eq!(owner("/srv/nils"), None);
-        assert_eq!(owner("/srv/nils/supervise"), None);
         assert_eq!(owner("/srv/nils/key.passphrase"), None);
 
         // and a tree is given whole, not only its top
@@ -14762,6 +15356,330 @@ mod tests {
             assert_eq!((file.uid(), file.gid()), (me.uid(), me.gid()));
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// A deployment's record, as the services and the privilege read it.
+    fn deployed_state(plan: &Plan) -> State {
+        let mut state = state_of(plan, &deployed_parts());
+        state.service = SYSTEM_MANAGER.to_string();
+        state.system = plan.system.clone();
+        state.helper = plan.helper.clone();
+        state
+    }
+
+    /// The rule names whole command lines, one for each word this install's
+    /// parts make, and nothing that would take an argument of the caller's.
+    #[test]
+    fn the_rule_names_the_command_lines_of_this_install_and_nothing_else() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let state = deployed_state(&plan);
+        let helper = plan.helper.clone().expect("a deployment keeps one");
+        assert_eq!(helper.account, "nils-deploy");
+
+        let rule = sudoers_text(&helper, &state);
+        assert!(rule.contains("nils-deploy ALL=(root) NOPASSWD: "), "{rule}");
+        for line in [
+            "/usr/local/sbin/nils-manage restart engine",
+            "/usr/local/sbin/nils-manage restart desk",
+            "/usr/local/sbin/nils-manage restart gateway",
+            "/usr/local/sbin/nils-manage restart assistant",
+            "/usr/local/sbin/nils-manage restart all",
+            "/usr/local/sbin/nils-manage reapply",
+            "/usr/local/sbin/nils-manage update",
+        ] {
+            assert!(rule.contains(line), "{line} is not in {rule}");
+        }
+        // nothing that would widen it: no wildcard, no bare program name that
+        // would take whatever it was given, no command of the account's own
+        assert!(!rule.contains('*'), "a wildcard takes anything: {rule}");
+        assert!(!rule.contains("NOPASSWD: ALL"), "{rule}");
+        assert!(
+            !rule.contains("systemctl") && !rule.contains("/bin/sh"),
+            "the account may run the helper, never a command of its own: {rule}"
+        );
+        assert_eq!(
+            rule.lines().filter(|l| !l.starts_with('#')).count(),
+            1,
+            "one account, one line: {rule}"
+        );
+
+        // an install that keeps its services to itself keeps none of this
+        assert!(helper_of(None, true).is_none());
+        assert!(
+            helper_of(plan.system.as_ref(), false).is_none(),
+            "an install that writes no services restarts none"
+        );
+        // and the account is never fallen back to: with none named there is
+        // no privilege to lay down at all
+        let unnamed = SystemUnits {
+            accounts: BTreeMap::from([("desk".to_string(), "nils-desk".to_string())]),
+            ..SystemUnits::default()
+        };
+        assert!(helper_of(Some(&unnamed), true).is_none());
+    }
+
+    /// The account that keeps the parts running is named outright, and is
+    /// never the account a part already runs as. Both are said before
+    /// anything is written.
+    #[test]
+    fn the_account_that_keeps_the_parts_running_is_named_and_is_nobody_elses() {
+        let parts = [Part::Engine, Part::Desk, Part::Assistant];
+
+        // named for nothing at all: the fallback that would hand the engine
+        // this privilege is refused rather than taken
+        let none = SystemUnits::default();
+        let said = supervisor_refusal(&none, &parts).expect("it has to be named");
+        assert!(said.contains("--account supervisor=nils-deploy"), "{said}");
+        assert!(
+            said.contains("not the account any part runs as"),
+            "it says why: {said}"
+        );
+        assert!(
+            said.contains("on this machine already"),
+            "a service account is the site's own to make: {said}"
+        );
+        assert!(!said.contains("useradd"), "setup makes no account: {said}");
+
+        // the account a part takes by default
+        let as_engine = SystemUnits {
+            accounts: BTreeMap::from([(SUPERVISOR_PART.to_string(), DEFAULT_ACCOUNT.to_string())]),
+            ..SystemUnits::default()
+        };
+        let said = supervisor_refusal(&as_engine, &parts).expect("nobody else's");
+        assert!(
+            said.contains("which is the account engine runs as"),
+            "{said}"
+        );
+
+        // and one a part was given outright
+        let as_desk = SystemUnits {
+            accounts: BTreeMap::from([
+                ("desk".to_string(), "nils-desk".to_string()),
+                (SUPERVISOR_PART.to_string(), "nils-desk".to_string()),
+            ]),
+            ..SystemUnits::default()
+        };
+        let said = supervisor_refusal(&as_desk, &parts).expect("nobody else's");
+        assert!(said.contains("which is the account desk runs as"), "{said}");
+
+        // an account of its own is what it asks for
+        let apart = SystemUnits {
+            accounts: BTreeMap::from([
+                ("desk".to_string(), "nils-desk".to_string()),
+                (SUPERVISOR_PART.to_string(), "nils-deploy".to_string()),
+            ]),
+            ..SystemUnits::default()
+        };
+        assert_eq!(supervisor_refusal(&apart, &parts), None);
+        assert!(
+            apart
+                .every_account(&parts)
+                .contains(&"nils-deploy".to_string()),
+            "the supervisor's account is one the machine must already have"
+        );
+        assert_eq!(
+            none.every_account(&parts),
+            vec![DEFAULT_ACCOUNT.to_string()],
+            "an unnamed supervisor asks the machine for no account of its own"
+        );
+    }
+
+    /// What the helper does with a word outside its job: nothing, with a
+    /// sentence saying what it takes. sudo turns such a call away before the
+    /// program is reached, and this is what holds if it is called any other
+    /// way.
+    #[cfg(unix)]
+    #[test]
+    fn the_helper_refuses_every_word_outside_its_job() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let state = deployed_state(&plan);
+        let dir = scratch("helper-refusals");
+        let script = dir.join("nils-manage");
+        let text = helper_text(&plan, &state);
+        std::fs::write(&script, &text).unwrap();
+
+        for args in [
+            vec!["restart", "/etc/shadow"],
+            vec!["restart", "nils-engine; id"],
+            vec!["restart", "sshd"],
+            vec!["restart"],
+            vec!["restart", "engine", "desk"],
+            vec!["reapply", "--part", "desk"],
+            vec!["update", "--all"],
+            vec!["systemctl", "restart", "sshd"],
+            vec!["/bin/sh"],
+            vec![],
+        ] {
+            let out = Command::new("sh")
+                .arg(&script)
+                .args(&args)
+                .output()
+                .expect("sh runs the helper");
+            let said = String::from_utf8_lossy(&out.stderr).to_string();
+            assert_eq!(out.status.code(), Some(2), "it took {args:?}: {said}");
+            assert!(
+                said.contains("nils-manage"),
+                "{args:?} was refused without saying what it takes: {said}"
+            );
+        }
+
+        // the units it restarts were written here, so none of them comes
+        // from a word it was handed
+        assert!(text.contains("systemctl restart nils-engine"), "{text}");
+        assert!(
+            !text.contains("systemctl restart \"$"),
+            "a unit name would come from what it was passed: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sudoers file is read by visudo before it is put in place, and one
+    /// visudo refuses leaves nothing behind: a file sudo cannot parse shuts
+    /// an operator out of root, which is worse than no file at all.
+    #[test]
+    fn a_sudoers_file_is_read_by_visudo_before_it_is_put_in_place() {
+        if visudo_program().is_none() {
+            return;
+        }
+        let plan = deployment();
+        let state = deployed_state(&plan);
+        let helper = plan.helper.clone().expect("a deployment keeps one");
+        let dir = scratch("sudoers-checked");
+        let rule = dir.join("nils-manage");
+
+        let staged =
+            sudoers_prepared(&rule, &sudoers_text(&helper, &state)).expect("visudo reads it");
+        assert!(staged.is_file(), "{}", staged.display());
+        assert!(
+            !rule.exists(),
+            "it was put in place before anything read it"
+        );
+        // a name sudo passes over, so a file half written is read by nobody
+        assert_eq!(staged.file_name().unwrap(), "nils-manage.new");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&staged).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o440, "a sudoers file is root's to read");
+        }
+        std::fs::remove_file(&staged).unwrap();
+
+        let refused = sudoers_prepared(&rule, "this is not a sudoers file at all\n")
+            .expect_err("visudo reads it as nothing");
+        assert!(!refused.is_empty(), "it was refused without a reason");
+        assert!(
+            !rule.exists() && !rule.with_extension("new").exists(),
+            "a file visudo refused was left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the supervisor runs to restart a part: the machine's own manager
+    /// where it may ask it, the helper where it may not, and for an install
+    /// whose services are an account's own, exactly what it always ran.
+    #[test]
+    fn the_supervisor_restarts_through_the_helper_only_on_the_machines_services() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let state = deployed_state(&plan);
+        let units = service_units(&state);
+        let engine = units
+            .iter()
+            .find(|u| u.part == "engine")
+            .expect("an engine among the services");
+        assert!(engine.system, "the services of this machine");
+
+        let asked = restart_argv(&state, engine, "1000");
+        let asked: Vec<&str> = asked.iter().map(String::as_str).collect();
+        if am_root() {
+            // root does the work itself and asks sudo for nothing
+            assert_eq!(asked, vec!["systemctl", "restart", "nils-engine"]);
+        } else {
+            assert_eq!(
+                asked,
+                vec![
+                    "sudo",
+                    "-n",
+                    "/usr/local/sbin/nils-manage",
+                    "restart",
+                    "engine"
+                ]
+            );
+            // and what it runs is one of the command lines the rule names
+            let rule = sudoers_text(state.helper.as_ref().unwrap(), &state);
+            assert!(rule.contains(&asked[2..].join(" ")), "{rule}");
+        }
+
+        // an install whose services are this account's own is what it was
+        let plain = State {
+            service: "systemd user units".to_string(),
+            system: None,
+            helper: None,
+            ..state.clone()
+        };
+        let units = service_units(&plain);
+        let engine = units.iter().find(|u| u.part == "engine").unwrap();
+        assert!(!engine.system);
+        let asked = restart_argv(&plain, engine, "1000");
+        let asked: Vec<&str> = asked.iter().map(String::as_str).collect();
+        assert_eq!(asked, vec!["systemctl", "--user", "restart", "nils-engine"]);
+    }
+
+    /// The privilege is on record, so an update and a repair lay down the
+    /// same arrangement rather than leaving the supervisor unable to restart
+    /// anything, and an uninstall knows what to take away.
+    #[test]
+    fn the_privilege_on_record_is_the_one_an_update_and_a_repair_write() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let state = deployed_state(&plan);
+
+        // it is written down, where a person can read it
+        let written = toml::to_string(&state).unwrap();
+        assert!(written.contains("[helper]"), "{written}");
+        assert!(written.contains("account = \"nils-deploy\""), "{written}");
+        assert!(
+            written.contains("path = \"/usr/local/sbin/nils-manage\""),
+            "{written}"
+        );
+        assert!(
+            written.contains("rule = \"/etc/sudoers.d/nils-manage\""),
+            "{written}"
+        );
+
+        // an update and a repair are made from the record and nothing else
+        let read: State = toml::from_str(&written).unwrap();
+        let again = plan_from_state(&read, None);
+        assert_eq!(again.helper, state.helper);
+        assert_eq!(
+            sudoers_text(again.helper.as_ref().unwrap(), &read),
+            sudoers_text(plan.helper.as_ref().unwrap(), &state),
+            "an update would name other command lines than the install did"
+        );
+        assert!(
+            supervisor_service(&again, &read)
+                .1
+                .contains("User=nils-deploy\n")
+        );
+
+        // and a record from before this is the install it always was
+        let before = State {
+            helper: None,
+            ..read
+        };
+        let plain = plan_from_state(&before, None);
+        assert!(plain.helper.is_none());
+        assert!(!supervisor_service(&plain, &before).1.contains("User="));
     }
 
     #[test]

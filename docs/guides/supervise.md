@@ -163,6 +163,47 @@ one at a time, and `GET /api/supervise/runs/{id}` says how each went, with the
 last lines of its output. By hand they are `nils supervise restart --part
 engine`, `nils supervise reapply --part engine` and `nils update --all`.
 
+## The privilege, where the services are the machine's own
+
+Restarting those services and replacing the parts' files is root's, and the
+supervisor does not run as root to do it. `nils setup --system` writes a small
+root owned program, `/usr/local/sbin/nils-manage`, and a rule in
+`/etc/sudoers.d/nils-manage` naming the whole command lines the account the
+supervisor runs as may call it with, and no others:
+
+```
+nils-deploy ALL=(root) NOPASSWD: /usr/local/sbin/nils-manage restart engine,
+/usr/local/sbin/nils-manage restart desk, /usr/local/sbin/nils-manage restart gateway,
+/usr/local/sbin/nils-manage restart assistant, /usr/local/sbin/nils-manage restart all,
+/usr/local/sbin/nils-manage reapply, /usr/local/sbin/nils-manage update
+```
+
+sudo matches a command and its words exactly, so a call carrying any other
+word matches no rule and is turned away before the program is reached, and
+the program itself answers only to those words: `restart` with the name of a
+part of this install or `all`, `reapply`, which writes the engine's unit again
+from the record and starts it, and `update`, which runs `nils update --all`.
+It takes no path, no unit name and no command of its caller's.
+
+The account is named with `--account supervisor=nils-deploy`, which `--system`
+requires, and it is deliberately not the account any part runs as: the engine's
+reads every scan in the registry, and an engine that could also replace the
+parts and restart them would carry the machine with it. An install that leaves
+it out, or names an account a part already runs as, is refused before anything
+is written.
+
+So on such an install the doors go through it: `POST /api/supervise/restart`
+runs `sudo -n /usr/local/sbin/nils-manage restart <part>`, `POST
+/api/supervise/reapply` runs `... reapply`, and `POST
+/api/supervise/update-all` runs `... update`. Run as root, the same commands
+do the work themselves and ask sudo for nothing. An install whose services are
+an account's own has no helper and needs none: it restarts its own units.
+
+What the account can do with it is restart this install's services and put new
+files in place for its parts, which is what following a release is. What it
+cannot do is run anything else as root, reach another install, or change the
+rule, the accounts the parts run as, or the capabilities the engine keeps.
+
 ## The same steps by hand
 
 Without a supervisor, or to see what one does, the four steps are these,

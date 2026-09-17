@@ -195,6 +195,43 @@ repair write the same services rather than falling back to an account's own,
 and one run by somebody who cannot write them says so before it changes
 anything.
 
+Something has to restart those services and replace the parts' files when a
+release lands, and both are root's. The supervisor does not run as root to do
+it, and the account that runs the engine is not given sudo: it reads every
+scan in the registry, and sudo for it would make a compromise of the engine a
+compromise of the machine. Setup writes a small root owned program instead,
+`/usr/local/sbin/nils-manage`, and a rule in `/etc/sudoers.d/nils-manage`
+naming the exact command lines one account may run it with: `restart` with
+the name of a part of this install or `all`, `reapply`, and `update`. The
+program answers to those words and nothing else, and takes no path and no
+command of its caller's, so there is nothing to pass it that makes it do
+more. The rule is read by `visudo` before it is put in place, since a sudoers
+file sudo cannot parse shuts an operator out of root; where visudo refuses it
+nothing is written and the install stops with what visudo said. A machine
+without `sudo` or `visudo` is named among what the plan lacks, before
+anything is placed.
+
+The supervisor runs as the account the rule names, and `--system` requires it:
+`--account supervisor=nils-deploy`. It is deliberately not the account any part
+runs as, so there is no fallback to `nils`, and an install that leaves it out,
+or that names an account a part already runs as, is refused at the question
+before anything is written. Like every account this installer names it has to
+be on the machine already, and setup makes none. That account can restart this
+install's
+services and put new files in place for its parts, which is what following a
+release is. It cannot run anything else as root, reach another install, or
+change the rule, the accounts the parts run as, or the capabilities the
+engine keeps. `--print` shows the program and the rule in full, which is also
+what to install by hand on a machine where setup may not write them.
+
+The supervisor reports this install from the record, which lives in the home
+of whoever installed it and which that account cannot read, so a copy of it
+is written to `<dir>/supervise/config` every time the record is written. It
+holds no secret: where the parts are, how they run, and what answers where.
+
+An install whose services are the account's own needs none of this and grows
+none of it: it restarts its own units and replaces files it already owns.
+
 **8. The plan, and then the work.** Everything decided, on one screen, and
 under `--print` the exact commands and unit files as well: for an install on
 this machine every unit it would write, where it would write them, and every
@@ -323,6 +360,12 @@ capabilities = ["CAP_DAC_OVERRIDE", "CAP_DAC_READ_SEARCH"]
 [system.accounts]
 desk = "nils-desk"
 engine = "nils"
+supervisor = "nils-deploy"
+
+[helper]
+account = "nils-deploy"
+path = "/usr/local/sbin/nils-manage"
+rule = "/etc/sudoers.d/nils-manage"
 ```
 
 A site that named its own places records them, with the settings beside
@@ -404,7 +447,7 @@ key cannot be recovered. `--keep-data` and `--purge` answer it.
 | `--key-file FILE` | The registry key's passphrase, instead of a prompt |
 | `--service`, `--no-service` | Write and start services, or do not |
 | `--system` | Write the services of this machine, in `/etc/systemd/system`; root's to do |
-| `--account PART=ACCOUNT` | With `--system`: the account a part runs as |
+| `--account PART=ACCOUNT` | With `--system`: the account a part runs as; `supervisor=` is required, and must be nobody else's |
 | `--capabilities LIST` | With `--system`: the capabilities the engine's service keeps |
 | `--yes`, `-y` | Take every default without asking |
 | `--print` | Say what it would do, with every command and unit, and change nothing |

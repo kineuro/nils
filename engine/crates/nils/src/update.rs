@@ -433,6 +433,12 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
             return Ok(());
         }
         crate::setup::setup_recorded()?;
+        // On an install whose services are the machine's own, replacing the
+        // parts' files is root's work, and the account the supervisor runs
+        // as asks the helper to run this same command as root.
+        if let Some(done) = crate::setup::update_by_helper() {
+            return done;
+        }
     }
     let wanted = match &args.version {
         Some(v) => v.trim().trim_start_matches('v').to_string(),
