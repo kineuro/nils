@@ -905,7 +905,15 @@ fn system_asked(
 /// running setup, as it always has, since that is the account its engine
 /// runs as. `None` there, and where the engine's account is root itself.
 fn registry_account(system: Option<&SystemUnits>, root: bool) -> Option<String> {
-    let account = system?.account("engine");
+    acting_account(system, "engine", root)
+}
+
+/// The account setup takes a part's steps as, where that is not the account
+/// running setup: the part's own, for an install whose services are this
+/// machine's, set up by root. `None` for every other install, and where the
+/// part runs as root itself, since then this process is that account.
+fn acting_account(system: Option<&SystemUnits>, part: &str, root: bool) -> Option<String> {
+    let account = system?.account(part);
     (root && account != "root").then(|| account.to_string())
 }
 
@@ -942,15 +950,12 @@ impl AsAccount {
     /// readable by every account on the machine, so nothing secret is ever
     /// among the words; a secret goes on the step's input.
     fn argv(&self, words: &[String]) -> Vec<String> {
-        let mut argv = vec![
-            "runuser".to_string(),
-            "-u".to_string(),
-            self.account.clone(),
-            "--".to_string(),
+        let mut argv = runuser_words(&self.account, false);
+        argv.extend([
             self.binary.display().to_string(),
             "--registry".to_string(),
             self.registry.display().to_string(),
-        ];
+        ]);
         argv.extend(words.iter().cloned());
         argv
     }
@@ -1062,13 +1067,43 @@ fn home_of_passwd(entry: &str) -> Option<String> {
 /// folder of root's the account may not enter, and with the environment
 /// given and nothing else.
 fn as_the_service(program: &str, args: &[String], environment: &[(String, String)]) -> Command {
+    as_the_service_in(program, args, environment, Path::new("/"))
+}
+
+/// The same, in a folder of the account's own, for a step that works on
+/// that folder.
+fn as_the_service_in(
+    program: &str,
+    args: &[String],
+    environment: &[(String, String)],
+    dir: &Path,
+) -> Command {
     let mut command = Command::new(program);
     command
         .args(args)
-        .current_dir("/")
+        .current_dir(dir)
         .env_clear()
         .envs(environment.iter().map(|(name, value)| (name, value)));
     command
+}
+
+/// The words that run a command as an account under runuser. runuser sets
+/// HOME, SHELL, USER and LOGNAME from the account's passwd entry over what
+/// it was given; `whole` keeps the environment given as it is instead, for
+/// a step whose home is not the one passwd names.
+fn runuser_words(account: &str, whole: bool) -> Vec<String> {
+    let mut words = vec!["runuser".to_string(), "-u".to_string(), account.to_string()];
+    if whole {
+        words.push("--preserve-environment".to_string());
+    }
+    words.push("--".to_string());
+    words
+}
+
+/// Whether runuser is on this machine for root to act as another account.
+fn runuser_here() -> bool {
+    let program = runuser_program();
+    Path::new(&program).is_absolute() || have(&program)
 }
 
 /// What a step taken as the engine's account came to.
@@ -3197,6 +3232,20 @@ impl Console {
     /// of warnings. When it fails, the end of that output is the first thing
     /// shown, because then it is the whole story.
     fn task(&self, label: &str, dir: &Path, program: &str, args: &[&str]) -> Result<(), Exit> {
+        let mut command = Command::new(program);
+        command.args(args).current_dir(dir);
+        self.task_command(label, command, &format!("{program} {}", args.join(" ")))
+    }
+
+    /// A step on a Node part's source, run as [`Console::task`] runs a
+    /// command, under the same label: where it failed, the command is said
+    /// as it was run, as whichever account ran it.
+    fn source_task(&self, label: &str, step: &SourceStep) -> Result<(), Exit> {
+        self.task_command(label, step.command(), &step.shown())
+    }
+
+    /// A task's command, whatever it runs as, and the words it was run with.
+    fn task_command(&self, label: &str, mut command: Command, shown: &str) -> Result<(), Exit> {
         use std::sync::{Arc, Mutex};
         let started = std::time::Instant::now();
         let drawn = self.checklist.as_ref().map(|(live, _)| live);
@@ -3205,14 +3254,12 @@ impl Console {
         }
         // the one line with its timer, where no checklist is drawn
         let live = drawn.is_none() && std::io::stdout().is_terminal();
-        let mut child = Command::new(program)
-            .args(args)
-            .current_dir(dir)
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| fail(format!("{program}: {e}")))?;
+            .map_err(|e| fail(format!("{}: {e}", command.get_program().to_string_lossy())))?;
         let heard = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut readers = Vec::new();
         for stream in [
@@ -3294,7 +3341,7 @@ impl Console {
                 println!("    {line}");
             }
         }
-        Err(fail(format!("{program} {} failed", args.join(" "))))
+        Err(fail(format!("{shown} failed")))
     }
 
     fn secret_once(&mut self, question: &str, as_typed: bool) -> Option<String> {
@@ -6553,6 +6600,7 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
     // engine's account, through the engine binary, so they are said as they
     // run, whoever asks for the print: it is root's install they describe.
     let Some(acting) = AsAccount::of(plan.system.as_ref(), true, plan.registry()) else {
+        out.push_str(&sources_text(plan, console));
         let _ = writeln!(out, "\n{}", console.bold("  places"));
         for spec in place_specs(plan) {
             let _ = writeln!(out, "    {}", place_argv(&spec).join(" "));
@@ -6577,6 +6625,7 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
             );
         }
     }
+    out.push_str(&sources_text(plan, console));
     let _ = writeln!(
         out,
         "\n{} {}",
@@ -6591,6 +6640,54 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
             "    {}",
             acting.argv(&place_argv(&spec)[1..]).join(" ")
         );
+    }
+    out
+}
+
+/// Under `--print`, the steps that take Kvasir's and the assistant's source
+/// and build it, where they are taken as the account those parts run as:
+/// said as they run, in the order the install takes them, whoever asks for
+/// the print. An install that takes them as its own account says nothing
+/// here, as it never did.
+fn sources_text(plan: &Plan, console: &Console) -> String {
+    let mut out = String::new();
+    if !plan.has(Part::Assistant) {
+        return out;
+    }
+    let hands = source_hands(plan.system.as_ref(), &plan.dir, true, true);
+    let SourceHands::As(taking) = &hands else {
+        return out;
+    };
+    for name in ["kvasir", "assistant"] {
+        let Some((repo, reference, said)) = node_source(name) else {
+            continue;
+        };
+        let into = plan.dir.join(name);
+        let mut note = format!("as {}, in {}", taking.account, into.display());
+        if taking.home == build_cache(&plan.dir, &taking.account) {
+            let _ = write!(note, ", with HOME {}", taking.home.display());
+        }
+        let _ = writeln!(
+            out,
+            "\n{} {}",
+            console.bold(&format!("  {name}")),
+            console.dim(&note)
+        );
+        let checked_out = into.join(".git").exists();
+        let steps = fetch_steps(
+            &hands,
+            said,
+            repo,
+            &reference,
+            &into,
+            &plan.dir,
+            checked_out,
+        )
+        .into_iter()
+        .chain(build_steps(&hands, said, &into, &plan.dir));
+        for (_, step) in steps {
+            let _ = writeln!(out, "    {}", step.shown());
+        }
     }
     out
 }
@@ -8812,6 +8909,374 @@ fn source_label(step: &[String], said: &str, reference: &str) -> String {
     }
 }
 
+/// Who takes a Node part's source steps: git, `npm ci` and the build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SourceHands {
+    /// The account running setup, as every install but the services of this
+    /// machine set up by root always has: that account is the one the parts
+    /// run as.
+    Own,
+    /// The account Kvasir and the assistant run as, under runuser, so that
+    /// every file the steps make is born that account's. Root cloned and
+    /// built before, and handed the folders over afterwards, so the next run
+    /// found a checkout git refuses to root as another account's.
+    As(PartAccount),
+    /// Root, where the parts' account cannot take the steps: this machine no
+    /// longer has that account, or has no runuser. The folder may still be
+    /// the account's from an earlier run, so each git command in it is told
+    /// that one folder is safe, on its own command line. Nothing is written
+    /// into root's settings or the machine's, which would trust the folder
+    /// for every command anyone runs as root from then on.
+    Root,
+}
+
+/// The account a Node part's source steps are taken as, and what they are
+/// given to run with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PartAccount {
+    account: String,
+    /// The home the steps run with: the account's own where it can write
+    /// there, else [`build_cache`].
+    home: PathBuf,
+    /// The language root runs setup in, as the registry's steps are given it.
+    lang: Option<String>,
+}
+
+/// The folder under an install whose subfolders are the homes source steps
+/// run with, one for each account, where the account's own home is missing
+/// or is not its to write: a service account often has none, or one on a
+/// share that squashes root. npm keeps its cache and its logs under a home,
+/// and git reads its settings there.
+///
+/// It sits beside the parts' folders rather than in them. In a checkout it
+/// would stand among the tracked files, and whatever a part's folder holds
+/// untracked is that part's data (`state/`, `runtime/`, `kvasir.json`,
+/// `assistant.env`, keys), which a folder setup adopts has to keep. No part
+/// keeps anything here, so it can be removed whenever nothing is building.
+const BUILD_CACHE: &str = "build-cache";
+
+/// The home an account's source steps run with where its own will not do.
+fn build_cache(dir: &Path, account: &str) -> PathBuf {
+    dir.join(BUILD_CACHE).join(account)
+}
+
+/// Who takes the source steps, from what this machine says: the account
+/// Kvasir and the assistant run as, where root sets up the services of this
+/// machine, if root can act as it. A print says root's run whoever asks for
+/// it, and takes the account as one root can act as, since setup refuses an
+/// account this machine lacks before anything is done.
+fn source_hands(system: Option<&SystemUnits>, dir: &Path, root: bool, print: bool) -> SourceHands {
+    let account = acting_account(system, "assistant", root);
+    let Some(name) = account.as_deref() else {
+        return SourceHands::Own;
+    };
+    let ids = account_ids(name);
+    let can_act = print || (ids.is_some() && runuser_here());
+    let home = ids.and_then(|(uid, _)| {
+        run_quiet("getent", &["passwd", name])
+            .as_deref()
+            .and_then(home_of_passwd)
+            .filter(|home| home_writable(Path::new(home), uid))
+    });
+    source_hands_when(account, can_act, home, dir, std::env::var("LANG").ok())
+}
+
+/// The same, from what was found: the acting account, whether root can act
+/// as it, and its own home where that account can write there. A home in
+/// Kvasir's or the assistant's folder is passed over too, since npm's cache
+/// would stand among a checkout's files there.
+fn source_hands_when(
+    account: Option<String>,
+    can_act: bool,
+    home: Option<String>,
+    dir: &Path,
+    lang: Option<String>,
+) -> SourceHands {
+    let Some(account) = account else {
+        return SourceHands::Own;
+    };
+    if !can_act {
+        return SourceHands::Root;
+    }
+    let home = home
+        .map(PathBuf::from)
+        .filter(|home| {
+            !["kvasir", "assistant"]
+                .iter()
+                .any(|part| home.starts_with(dir.join(part)))
+        })
+        .unwrap_or_else(|| build_cache(dir, &account));
+    SourceHands::As(PartAccount {
+        account,
+        home,
+        lang,
+    })
+}
+
+/// Whether a home is one its account writes in: a folder the account owns
+/// and may write. Asked by root, which cannot ask as the account without
+/// running something as it; a home that is writable some other way, through
+/// its group, is passed over for the install's own folder, which always is.
+fn home_writable(home: &Path, uid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(home).is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o200 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (home, uid);
+        false
+    }
+}
+
+/// One source step, as it is run and as it is shown: its words, the folder
+/// it runs in, and, where it runs as the part's account, the environment it
+/// is given in place of this process's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceStep {
+    argv: Vec<String>,
+    dir: PathBuf,
+    environment: Option<Vec<(String, String)>>,
+}
+
+impl SourceStep {
+    /// The command line, as it runs.
+    fn shown(&self) -> String {
+        self.argv.join(" ")
+    }
+
+    /// The command itself. A step as the part's account starts runuser from
+    /// wherever this machine keeps it, with nothing of root's environment.
+    fn command(&self) -> Command {
+        match &self.environment {
+            Some(environment) => {
+                as_the_service_in(&runuser_program(), &self.argv[1..], environment, &self.dir)
+            }
+            None => {
+                let mut command = Command::new(&self.argv[0]);
+                command.args(&self.argv[1..]).current_dir(&self.dir);
+                command
+            }
+        }
+    }
+}
+
+/// A git or npm command on a part's source, as whoever takes it runs it.
+///
+/// This account's own runs it as it always has: a clone from the install's
+/// folder, anything else in the part's. Root, where it cannot act as the
+/// account, runs the same, with the part's folder named safe on each git
+/// command that works in a checkout; a clone makes its own. The account runs
+/// it under runuser in the part's folder, which setup made the account's
+/// first, with the service's environment and the home it was given; git
+/// names the folder with `-C` as well, so the line says where it works.
+fn source_step(
+    hands: &SourceHands,
+    program: &str,
+    words: &[String],
+    into: &Path,
+    base: &Path,
+) -> SourceStep {
+    let git = program == "git";
+    let clone = git && words.first().is_some_and(|word| word == "clone");
+    let at = if clone { base } else { into };
+    let mut argv = Vec::new();
+    let mut environment = None;
+    let dir = match hands {
+        SourceHands::Own => {
+            argv.push(program.to_string());
+            at
+        }
+        SourceHands::Root => {
+            argv.push(program.to_string());
+            if git && !clone {
+                argv.extend([
+                    "-c".to_string(),
+                    format!("safe.directory={}", into.display()),
+                ]);
+            }
+            at
+        }
+        SourceHands::As(acting) => {
+            argv = runuser_words(&acting.account, true);
+            argv.push(program.to_string());
+            if git && !clone {
+                argv.extend(["-C".to_string(), into.display().to_string()]);
+            }
+            environment = Some(service_environment(
+                &acting.account,
+                Some(acting.home.display().to_string()),
+                acting.lang.clone(),
+            ));
+            into
+        }
+    };
+    argv.extend(words.iter().cloned());
+    SourceStep {
+        argv,
+        dir: dir.to_path_buf(),
+        environment,
+    }
+}
+
+/// The git steps that bring a part's source to a ref, each with its line.
+fn fetch_steps(
+    hands: &SourceHands,
+    said: &str,
+    repo: &str,
+    reference: &str,
+    into: &Path,
+    base: &Path,
+    checked_out: bool,
+) -> Vec<(String, SourceStep)> {
+    source_steps(repo, reference, into, checked_out)
+        .into_iter()
+        .map(|words| {
+            (
+                source_label(&words, said, reference),
+                source_step(hands, "git", &words, into, base),
+            )
+        })
+        .collect()
+}
+
+/// The npm steps that install a part's packages and build it, each with its
+/// line.
+fn build_steps(
+    hands: &SourceHands,
+    said: &str,
+    into: &Path,
+    base: &Path,
+) -> Vec<(String, SourceStep)> {
+    [
+        (
+            format!("installing {said}'s packages"),
+            owned_words(&["ci", "--no-audit", "--no-fund", "--loglevel=error"]),
+        ),
+        (format!("building {said}"), owned_words(&["run", "build"])),
+    ]
+    .into_iter()
+    .map(|(label, words)| (label, source_step(hands, "npm", &words, into, base)))
+    .collect()
+}
+
+/// The commit a part's checkout stands at, read as whoever takes its source
+/// steps, since git refuses root a checkout that is another account's; a
+/// checkout that went unread would be built again on every update.
+fn source_head(hands: &SourceHands, into: &Path, base: &Path) -> Option<String> {
+    let out = source_step(
+        hands,
+        "git",
+        &owned_words(&["rev-parse", "HEAD"]),
+        into,
+        base,
+    )
+    .command()
+    .stdin(Stdio::null())
+    .output()
+    .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// What the part's account needs before it takes the source steps: the
+/// home it was given, where that is the install's folder, and the part's
+/// folder, both its own. Nothing to do for the other hands.
+fn ready_for_sources(
+    hands: &SourceHands,
+    dir: &Path,
+    into: &Path,
+    make: bool,
+) -> Result<(), String> {
+    let SourceHands::As(acting) = hands else {
+        return Ok(());
+    };
+    let account = &acting.account;
+    let Some(ids) = account_ids(account) else {
+        return Err(format!(
+            "this machine has no {account} account to take the source of {} as",
+            into.display()
+        ));
+    };
+    if acting.home == build_cache(dir, account) {
+        ready_build_cache(&acting.home, ids).map_err(|e| {
+            format!(
+                "{} could not be made {account}'s, the home it builds with: {e}",
+                acting.home.display()
+            )
+        })?;
+    }
+    ready_part_folder(into, ids, make).map_err(|e| {
+        format!(
+            "{} could not be made {account}'s, which takes its source there: {e}",
+            into.display()
+        )
+    })
+}
+
+/// A part's folder, made ready for its account to take the source into it.
+///
+/// A checkout is given to the account whole: the source is the account's
+/// from here on, and a checkout root fetched or built in before holds files
+/// the account could not replace. Where there is no folder, and `make` asks
+/// for one, it is made the account's, since the account cannot make one in
+/// the install's folder, which is root's, and git clones into an empty
+/// folder that is there. An empty folder is given to it the same way. A
+/// folder that holds something and is not a checkout is left as it is.
+fn ready_part_folder(into: &Path, ids: (u32, u32), make: bool) -> std::io::Result<()> {
+    if into.join(".git").exists() {
+        return give_to(into, ids.0, ids.1);
+    }
+    match std::fs::read_dir(into) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if make {
+                owned_folder(into, ids)
+            } else {
+                Ok(())
+            }
+        }
+        Err(e) => Err(e),
+        Ok(mut entries) => {
+            if entries.next().is_none() {
+                owned_folder(into, ids)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// An account's home in [`BUILD_CACHE`], made its own. The folder that holds
+/// every account's is root's, and is made open for each account to pass
+/// through whatever mask root runs setup with, since an account that cannot
+/// reach its home cannot build.
+fn ready_build_cache(home: &Path, ids: (u32, u32)) -> std::io::Result<()> {
+    if let Some(all) = home.parent()
+        && !all.exists()
+    {
+        std::fs::create_dir_all(all)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(all, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
+    owned_folder(home, ids)
+}
+
+/// A folder made where it is not there yet, and given to an account: the
+/// folder alone, since whatever is in it that account made.
+fn owned_folder(path: &Path, (uid, gid): (u32, u32)) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+    #[cfg(not(unix))]
+    let _ = (uid, gid);
+    Ok(())
+}
+
 /// Kvasir and the assistant: taken at their release tags and built, since
 /// neither ships a binary. Anything missing is said rather than guessed at.
 fn install_node_parts(
@@ -8831,6 +9296,7 @@ fn install_node_parts(
         ));
     }
 
+    let hands = source_hands(plan.system.as_ref(), &plan.dir, am_root(), false);
     let mut out = Vec::new();
     for name in ["kvasir", "assistant"] {
         if name == "assistant" {
@@ -8842,18 +9308,21 @@ fn install_node_parts(
         let into = plan.dir.join(name);
         // a checkout is brought to the release, whatever it followed before
         let checked_out = into.join(".git").exists();
-        let at = if checked_out { &into } else { &plan.dir };
-        for step in source_steps(repo, &reference, &into, checked_out) {
-            let args: Vec<&str> = step.iter().map(String::as_str).collect();
-            console.task(&source_label(&step, said, &reference), at, "git", &args)?;
-        }
-        console.task(
-            &format!("installing {said}'s packages"),
+        ready_for_sources(&hands, &plan.dir, &into, true).map_err(fail)?;
+        let steps = fetch_steps(
+            &hands,
+            said,
+            repo,
+            &reference,
             &into,
-            "npm",
-            &["ci", "--no-audit", "--no-fund", "--loglevel=error"],
-        )?;
-        console.task(&format!("building {said}"), &into, "npm", &["run", "build"])?;
+            &plan.dir,
+            checked_out,
+        )
+        .into_iter()
+        .chain(build_steps(&hands, said, &into, &plan.dir));
+        for (label, step) in steps {
+            console.source_task(&label, &step)?;
+        }
         out.push((name, into));
     }
 
@@ -11393,7 +11862,10 @@ fn engine_data(plan: &Plan) -> Vec<PathBuf> {
 /// the services of this machine is root. A part that runs as an account of
 /// its own has to be able to read its own configuration and write its own
 /// store, or it starts and stops again while the install reports that it
-/// finished.
+/// finished. Kvasir's and the assistant's source and builds are born their
+/// account's already, since that account takes them ([`SourceHands`]); what
+/// setup writes beside them, their configuration, is still root's until
+/// it is handed over.
 fn files_of(plan: &Plan) -> Vec<(PathBuf, String)> {
     let Some(system) = &plan.system else {
         return Vec::new();
@@ -12114,40 +12586,35 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                     println!("{name}: not a part this can update");
                     continue;
                 };
-                let head = |dir: &Path| {
-                    run_quiet(
-                        "git",
-                        &["-C", &dir.display().to_string(), "rev-parse", "HEAD"],
-                    )
-                };
-                let before = head(&dir);
+                // Taken as the account the part runs as, where root updates
+                // the services of this machine, as setup takes it.
+                let base = PathBuf::from(&state.dir);
+                let hands = source_hands(state.system.as_ref(), &base, am_root(), false);
+                if let Err(why) = ready_for_sources(&hands, &base, &dir, false) {
+                    println!("{name}: {why}");
+                    continue;
+                }
+                let before = source_head(&hands, &dir, &base);
                 // the release this version names, from a checkout of main too
-                let fetched = source_steps(repo, &reference, &dir, true)
+                let fetched = fetch_steps(&hands, said, repo, &reference, &dir, &base, true)
                     .iter()
-                    .try_for_each(|step| {
-                        let args: Vec<&str> = step.iter().map(String::as_str).collect();
-                        console.task(&source_label(step, said, &reference), &dir, "git", &args)
-                    });
+                    .try_for_each(|(label, step)| console.source_task(label, step));
                 if let Err(e) = fetched {
                     println!("{name}: {}", e.message);
                     continue;
                 }
                 // Source that did not move is not built again; nils setup and
                 // repair builds it regardless.
-                if before.is_some() && head(&dir) == before && dir.join("dist").exists() {
+                if before.is_some()
+                    && source_head(&hands, &dir, &base) == before
+                    && dir.join("dist").exists()
+                {
                     println!("{name}: {reference} is the one built");
                     continue;
                 }
-                let built = console
-                    .task(
-                        &format!("installing {said}'s packages"),
-                        &dir,
-                        "npm",
-                        &["ci", "--no-audit", "--no-fund", "--loglevel=error"],
-                    )
-                    .and_then(|()| {
-                        console.task(&format!("building {said}"), &dir, "npm", &["run", "build"])
-                    });
+                let built = build_steps(&hands, said, &dir, &base)
+                    .iter()
+                    .try_for_each(|(label, step)| console.source_task(label, step));
                 match built {
                     Ok(()) => {
                         println!(
@@ -16440,6 +16907,592 @@ mod tests {
         let said = commands_text(&plan, &console);
         assert!(!said.contains("key add"), "{said}");
         assert!(said.contains("places as nils-engine"), "{said}");
+    }
+
+    /// The accounts of the group's install: the desk, Kvasir and the
+    /// assistant as nilsweb, the engine as nils.
+    fn the_groups_accounts() -> SystemUnits {
+        SystemUnits {
+            capabilities: Vec::new(),
+            accounts: BTreeMap::from([
+                ("engine".to_string(), "nils".to_string()),
+                ("desk".to_string(), "nilsweb".to_string()),
+                ("assistant".to_string(), "nilsweb".to_string()),
+            ]),
+        }
+    }
+
+    /// A source step's environment, sorted, as its command carries it.
+    fn envs_of(command: &Command) -> Vec<(String, String)> {
+        let mut set: Vec<(String, String)> = command
+            .get_envs()
+            .filter_map(|(name, value)| {
+                Some((
+                    name.to_string_lossy().to_string(),
+                    value?.to_string_lossy().to_string(),
+                ))
+            })
+            .collect();
+        set.sort();
+        set
+    }
+
+    #[test]
+    fn source_steps_are_the_parts_account_only_for_the_machines_services_set_up_by_root() {
+        let dir = Path::new("/srv/nils");
+        let group = the_groups_accounts();
+        assert_eq!(
+            acting_account(Some(&group), "assistant", true).as_deref(),
+            Some("nilsweb"),
+            "the account the parts' folders are handed to, not the engine's"
+        );
+        assert_eq!(acting_account(Some(&group), "assistant", false), None);
+        assert_eq!(acting_account(None, "assistant", true), None);
+        let as_root = SystemUnits {
+            accounts: BTreeMap::from([("assistant".to_string(), "root".to_string())]),
+            ..SystemUnits::default()
+        };
+        assert_eq!(
+            acting_account(Some(&as_root), "assistant", true),
+            None,
+            "parts that run as root are this process already"
+        );
+        assert_eq!(
+            source_hands(None, dir, true, false),
+            SourceHands::Own,
+            "an install of this account's own takes its source as itself, root or not"
+        );
+        assert_eq!(
+            source_hands(Some(&group), dir, false, false),
+            SourceHands::Own,
+            "a run that is not root runs nothing as another account"
+        );
+
+        assert_eq!(
+            source_hands_when(
+                Some("nilsweb".to_string()),
+                true,
+                Some("/home/nilsweb".to_string()),
+                dir,
+                Some("C.UTF-8".to_string()),
+            ),
+            SourceHands::As(PartAccount {
+                account: "nilsweb".to_string(),
+                home: PathBuf::from("/home/nilsweb"),
+                lang: Some("C.UTF-8".to_string()),
+            }),
+            "a home the account writes in is the home it builds with"
+        );
+        let SourceHands::As(taking) =
+            source_hands_when(Some("nilsweb".to_string()), true, None, dir, None)
+        else {
+            panic!("root can act as the account");
+        };
+        assert_eq!(
+            taking.home,
+            PathBuf::from("/srv/nils/build-cache/nilsweb"),
+            "a home it cannot write is replaced by the install's folder for it"
+        );
+        for kept in [
+            "kvasir",
+            "assistant",
+            "desk",
+            "registry",
+            "backups",
+            "supervise",
+            LLAMA_PART,
+        ] {
+            assert!(
+                !taking.home.starts_with(dir.join(kept)),
+                "the cache is in no part's folder and no folder of data: {}",
+                taking.home.display()
+            );
+        }
+        for inside in ["/srv/nils/assistant", "/srv/nils/kvasir/state"] {
+            let SourceHands::As(taking) = source_hands_when(
+                Some("nilsweb".to_string()),
+                true,
+                Some(inside.to_string()),
+                dir,
+                None,
+            ) else {
+                panic!("root can act as the account");
+            };
+            assert_eq!(
+                taking.home,
+                build_cache(dir, "nilsweb"),
+                "a home in a part's folder would put npm's cache in a checkout: {inside}"
+            );
+        }
+        assert_eq!(
+            source_hands_when(Some("nilsweb".to_string()), false, None, dir, None),
+            SourceHands::Root,
+            "an account root cannot act as leaves the steps to root"
+        );
+        assert_eq!(
+            source_hands_when(None, true, None, dir, None),
+            SourceHands::Own
+        );
+    }
+
+    #[test]
+    fn a_source_step_as_the_parts_account_runs_under_runuser_in_its_folder_with_the_services_environment()
+     {
+        let dir = Path::new("/srv/nils");
+        let into = dir.join("kvasir");
+        let hands = SourceHands::As(PartAccount {
+            account: "nilsweb".to_string(),
+            home: build_cache(dir, "nilsweb"),
+            lang: Some("C.UTF-8".to_string()),
+        });
+        let as_part = ["runuser", "-u", "nilsweb", "--preserve-environment", "--"];
+        let with = |rest: &[&str]| -> Vec<String> {
+            as_part
+                .iter()
+                .chain(rest)
+                .map(|word| (*word).to_string())
+                .collect()
+        };
+        let environment = vec![
+            ("PATH".to_string(), SERVICE_PATH.to_string()),
+            ("USER".to_string(), "nilsweb".to_string()),
+            ("LOGNAME".to_string(), "nilsweb".to_string()),
+            (
+                "HOME".to_string(),
+                "/srv/nils/build-cache/nilsweb".to_string(),
+            ),
+            ("LANG".to_string(), "C.UTF-8".to_string()),
+        ];
+
+        let clone = fetch_steps(&hands, "Kvasir", KVASIR_REPO, KVASIR_REF, &into, dir, false);
+        assert_eq!(clone.len(), 1);
+        assert_eq!(
+            clone[0].0, "fetching Kvasir at v1.0.0-alpha.7",
+            "a person reads the line they always read"
+        );
+        assert_eq!(
+            clone[0].1.argv,
+            with(&[
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                "v1.0.0-alpha.7",
+                "https://github.com/kineuro/kvasir",
+                "/srv/nils/kvasir"
+            ])
+        );
+        let fetched = fetch_steps(&hands, "Kvasir", KVASIR_REPO, KVASIR_REF, &into, dir, true);
+        assert_eq!(
+            fetched[0].1.argv,
+            with(&[
+                "git",
+                "-C",
+                "/srv/nils/kvasir",
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                "v1.0.0-alpha.7"
+            ])
+        );
+        assert_eq!(
+            fetched[1].1.argv,
+            with(&[
+                "git",
+                "-C",
+                "/srv/nils/kvasir",
+                "checkout",
+                "--detach",
+                "FETCH_HEAD"
+            ])
+        );
+        let built = build_steps(&hands, "Kvasir", &into, dir);
+        assert_eq!(
+            built
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>(),
+            ["installing Kvasir's packages", "building Kvasir"]
+        );
+        assert_eq!(
+            built[0].1.argv,
+            with(&["npm", "ci", "--no-audit", "--no-fund", "--loglevel=error"])
+        );
+        assert_eq!(built[1].1.argv, with(&["npm", "run", "build"]));
+        let head = source_step(
+            &hands,
+            "git",
+            &owned_words(&["rev-parse", "HEAD"]),
+            &into,
+            dir,
+        );
+        assert_eq!(
+            head.argv,
+            with(&["git", "-C", "/srv/nils/kvasir", "rev-parse", "HEAD"]),
+            "an update reads the checkout's commit as the account too"
+        );
+
+        for (_, step) in clone.iter().chain(&fetched).chain(&built) {
+            assert_eq!(
+                step.dir, into,
+                "in the part's folder, the clone too, never / or root's: {step:?}"
+            );
+            assert_eq!(step.environment.as_ref(), Some(&environment), "{step:?}");
+            assert!(
+                !step.argv.iter().any(|word| word.contains("safe.directory")),
+                "the account owns its folder and needs no exception: {step:?}"
+            );
+            assert_eq!(step.shown(), step.argv.join(" "));
+
+            let command = step.command();
+            assert_eq!(command.get_program(), runuser_program().as_str());
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                step.argv[1..]
+                    .iter()
+                    .map(std::ffi::OsStr::new)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(command.get_current_dir(), Some(into.as_path()));
+            let mut given = environment.clone();
+            given.sort();
+            assert_eq!(envs_of(&command), given, "and nothing of root's");
+        }
+        assert_eq!(
+            source_step(
+                &SourceHands::As(PartAccount {
+                    account: "nilsweb".to_string(),
+                    home: PathBuf::from("/home/nilsweb"),
+                    lang: None,
+                }),
+                "npm",
+                &owned_words(&["run", "build"]),
+                &into,
+                dir,
+            )
+            .environment,
+            Some(service_environment(
+                "nilsweb",
+                Some("/home/nilsweb".to_string()),
+                None
+            )),
+            "with a home of its own, exactly the service's environment"
+        );
+    }
+
+    #[test]
+    fn a_git_command_root_takes_for_an_account_it_cannot_act_as_trusts_that_one_folder_on_its_own_line()
+     {
+        let dir = Path::new("/srv/nils");
+        let into = dir.join("assistant");
+        let hands = SourceHands::Root;
+        let clone = fetch_steps(
+            &hands,
+            "the assistant",
+            ASSISTANT_REPO,
+            ASSISTANT_REF,
+            &into,
+            dir,
+            false,
+        );
+        assert_eq!(
+            clone[0].1.argv,
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                "v1.0.0-alpha.25",
+                "https://github.com/kineuro/nils-assistant",
+                "/srv/nils/assistant"
+            ],
+            "a clone makes its own repository, which is root's"
+        );
+        assert_eq!(clone[0].1.dir, dir);
+        let fetched = fetch_steps(
+            &hands,
+            "the assistant",
+            ASSISTANT_REPO,
+            ASSISTANT_REF,
+            &into,
+            dir,
+            true,
+        );
+        assert_eq!(
+            fetched[0].1.argv,
+            [
+                "git",
+                "-c",
+                "safe.directory=/srv/nils/assistant",
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                "v1.0.0-alpha.25"
+            ]
+        );
+        assert_eq!(
+            fetched[1].1.argv,
+            [
+                "git",
+                "-c",
+                "safe.directory=/srv/nils/assistant",
+                "checkout",
+                "--detach",
+                "FETCH_HEAD"
+            ]
+        );
+        assert_eq!(
+            source_step(
+                &hands,
+                "git",
+                &owned_words(&["rev-parse", "HEAD"]),
+                &into,
+                dir
+            )
+            .argv,
+            [
+                "git",
+                "-c",
+                "safe.directory=/srv/nils/assistant",
+                "rev-parse",
+                "HEAD"
+            ]
+        );
+        let built = build_steps(&hands, "the assistant", &into, dir);
+        assert_eq!(
+            built[0].1.argv,
+            ["npm", "ci", "--no-audit", "--no-fund", "--loglevel=error"]
+        );
+        assert_eq!(built[1].1.argv, ["npm", "run", "build"]);
+        for (_, step) in clone.iter().chain(&fetched).chain(&built) {
+            assert_eq!(step.environment, None, "root's own environment: {step:?}");
+            assert!(
+                !step
+                    .argv
+                    .iter()
+                    .any(|word| ["config", "--global", "--system"].contains(&word.as_str())),
+                "nothing is written into any git setting: {step:?}"
+            );
+        }
+        assert!(
+            fetched.iter().all(|(_, step)| step.dir == into
+                && step.argv[1..3] == ["-c", "safe.directory=/srv/nils/assistant"]),
+            "each command in the checkout names that folder alone"
+        );
+    }
+
+    #[test]
+    fn source_steps_of_an_install_of_this_accounts_own_are_the_commands_they_always_were() {
+        let dir = Path::new("/home/x/nils");
+        let into = dir.join("kvasir");
+        let hands = SourceHands::Own;
+        let clone = fetch_steps(&hands, "Kvasir", KVASIR_REPO, KVASIR_REF, &into, dir, false);
+        let mut words = vec!["git".to_string()];
+        words.extend(source_steps(KVASIR_REPO, KVASIR_REF, &into, false).remove(0));
+        assert_eq!(clone[0].1.argv, words);
+        assert_eq!(clone[0].1.dir, dir, "cloned from the install's folder");
+        let fetched = fetch_steps(&hands, "Kvasir", KVASIR_REPO, KVASIR_REF, &into, dir, true);
+        assert_eq!(
+            fetched[0].1.shown(),
+            "git fetch --depth 1 origin v1.0.0-alpha.7",
+            "and a failure says the command it always said"
+        );
+        assert_eq!(fetched[1].1.shown(), "git checkout --detach FETCH_HEAD");
+        let built = build_steps(&hands, "Kvasir", &into, dir);
+        assert_eq!(
+            built[0].1.shown(),
+            "npm ci --no-audit --no-fund --loglevel=error"
+        );
+        assert_eq!(built[1].1.shown(), "npm run build");
+        for (_, step) in fetched.iter().chain(&built) {
+            assert_eq!(step.dir, into);
+        }
+        for (_, step) in clone.iter().chain(&fetched).chain(&built) {
+            assert_eq!(step.environment, None);
+            let command = step.command();
+            assert_eq!(command.get_program(), step.argv[0].as_str());
+            assert_eq!(
+                command.get_envs().count(),
+                0,
+                "this process's environment, untouched"
+            );
+            assert_eq!(command.get_current_dir(), Some(step.dir.as_path()));
+        }
+        assert!(
+            ready_for_sources(&hands, dir, &scratch("source-own").join("kvasir"), true).is_ok()
+        );
+        assert!(
+            !scratch("source-own").join("kvasir").exists(),
+            "and no folder is made ahead of it"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_home_source_steps_run_with_is_the_accounts_own_only_where_that_account_writes_there() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let root = scratch("source-home");
+        let uid = std::fs::metadata(&root).unwrap().uid();
+        assert!(home_writable(&root, uid));
+        assert!(
+            !home_writable(&root, uid.wrapping_add(1)),
+            "another account's folder"
+        );
+        assert!(
+            !home_writable(&root.join("nonexistent"), uid),
+            "a home passwd names and nobody made"
+        );
+        let file = root.join("file");
+        std::fs::write(&file, "x").unwrap();
+        assert!(!home_writable(&file, uid));
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(
+            !home_writable(&locked, uid),
+            "a folder its owner may not write"
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_parts_folder_is_its_accounts_before_its_source_is_taken_and_one_holding_something_else_is_left()
+     {
+        use std::os::unix::fs::MetadataExt as _;
+        let root = scratch("source-folder");
+        let me = std::fs::metadata(&root).unwrap();
+        let ids = (me.uid(), me.gid());
+
+        let kvasir = root.join("kvasir");
+        ready_part_folder(&kvasir, ids, false).unwrap();
+        assert!(!kvasir.exists(), "an update makes no folder");
+        ready_part_folder(&kvasir, ids, true).unwrap();
+        assert!(
+            kvasir.is_dir() && std::fs::read_dir(&kvasir).unwrap().next().is_none(),
+            "an empty folder, for the account to clone into"
+        );
+        ready_part_folder(&kvasir, ids, true).unwrap();
+        let made = std::fs::metadata(&kvasir).unwrap();
+        assert_eq!((made.uid(), made.gid()), ids);
+
+        let assistant = root.join("assistant");
+        std::fs::create_dir_all(assistant.join(".git")).unwrap();
+        std::fs::write(assistant.join("assistant.env"), "KEEP=1\n").unwrap();
+        ready_part_folder(&assistant, ids, true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(assistant.join("assistant.env")).unwrap(),
+            "KEEP=1\n",
+            "a checkout is given over, not changed"
+        );
+
+        // a built copy that is not a checkout is a later question, not this one's
+        let copy = root.join("copy");
+        std::fs::create_dir_all(copy.join("state")).unwrap();
+        std::fs::write(copy.join("package.json"), "{}").unwrap();
+        ready_part_folder(&copy, ids, true).unwrap();
+        assert_eq!(
+            std::fs::read_dir(&copy).unwrap().count(),
+            2,
+            "left as it is"
+        );
+
+        let cache = build_cache(&root, "nilsweb");
+        ready_build_cache(&cache, ids).unwrap();
+        assert!(cache.is_dir());
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let all = std::fs::metadata(root.join(BUILD_CACHE)).unwrap();
+            assert_eq!(
+                all.permissions().mode() & 0o777,
+                0o755,
+                "every account passes through to its own"
+            );
+        }
+        ready_build_cache(&cache, ids).expect("and again, as a rerun does");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn print_says_the_source_steps_as_the_parts_account_for_the_machines_services() {
+        let console = Console::new(true);
+        let dir = scratch("print-sources");
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.parts = vec![Part::Engine, Part::Desk, Part::Assistant];
+        let said = commands_text(&plan, &console);
+        assert!(
+            !said.contains("git ") && !said.contains("npm "),
+            "an install of this account's own says what it always said: {said}"
+        );
+
+        // an account this machine has no passwd entry for, so no home either
+        let account = "nils-print-sources-nobody";
+        plan.system = Some(SystemUnits {
+            capabilities: Vec::new(),
+            accounts: BTreeMap::from([
+                ("engine".to_string(), "nils-engine".to_string()),
+                ("assistant".to_string(), account.to_string()),
+            ]),
+        });
+        let as_part = format!("runuser -u {account} --preserve-environment --");
+        let (kvasir, assistant) = (dir.join("kvasir"), dir.join("assistant"));
+        let (_, kvasir_ref, _) = node_source("kvasir").unwrap();
+        let (_, assistant_ref, _) = node_source("assistant").unwrap();
+        let said = commands_text(&plan, &console);
+        assert!(
+            said.contains(&format!(
+                "  kvasir as {account}, in {}, with HOME {}\n",
+                kvasir.display(),
+                build_cache(&dir, account).display()
+            )),
+            "{said}"
+        );
+        for line in [
+            format!(
+                "    {as_part} git clone --depth 1 --branch {kvasir_ref} {KVASIR_REPO} {}\n",
+                kvasir.display()
+            ),
+            format!("    {as_part} npm ci --no-audit --no-fund --loglevel=error\n"),
+            format!("    {as_part} npm run build\n"),
+            format!(
+                "    {as_part} git clone --depth 1 --branch {assistant_ref} {ASSISTANT_REPO} {}\n",
+                assistant.display()
+            ),
+        ] {
+            assert!(said.contains(&line), "{line}\n{said}");
+        }
+        let at = |text: &str| said.find(text).unwrap_or_else(|| panic!("{text}: {said}"));
+        assert!(
+            at("registry as nils-engine") < at("  kvasir as")
+                && at("  kvasir as") < at("  assistant as")
+                && at("  assistant as") < at("places as nils-engine"),
+            "in the order the install takes them: {said}"
+        );
+
+        // a checkout is fetched and checked out in its folder
+        std::fs::create_dir_all(kvasir.join(".git")).unwrap();
+        let said = commands_text(&plan, &console);
+        assert!(
+            said.contains(&format!(
+                "    {as_part} git -C {} fetch --depth 1 origin {kvasir_ref}\n",
+                kvasir.display()
+            )),
+            "{said}"
+        );
+        assert!(
+            said.contains(&format!(
+                "    {as_part} git -C {} checkout --detach FETCH_HEAD\n",
+                kvasir.display()
+            )),
+            "{said}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
