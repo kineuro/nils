@@ -6898,19 +6898,29 @@ fn sources_text(plan: &Plan, console: &Console) -> String {
             console.bold(&format!("  {name}")),
             console.dim(&note)
         );
-        let checked_out = into.join(".git").exists();
-        let steps = fetch_steps(
-            &hands,
-            said,
-            repo,
-            &reference,
-            &into,
-            &plan.dir,
-            checked_out,
-        )
-        .into_iter()
-        .chain(build_steps(&hands, said, &into, &plan.dir));
-        for (_, step) in steps {
+        let folder = source_folder(&into);
+        let fetched: Vec<SourceStep> = if folder == SourceFolder::Copy {
+            adopt_steps(&hands, said, repo, &reference, &into, &plan.dir)
+                .steps()
+                .into_iter()
+                .cloned()
+                .collect()
+        } else {
+            fetch_steps(
+                &hands,
+                said,
+                repo,
+                &reference,
+                &into,
+                &plan.dir,
+                folder == SourceFolder::Checkout,
+            )
+            .into_iter()
+            .map(|(_, step)| step)
+            .collect()
+        };
+        let built = build_steps(&hands, said, &into, &plan.dir);
+        for step in fetched.iter().chain(built.iter().map(|(_, step)| step)) {
             let _ = writeln!(out, "    {}", step.shown());
         }
     }
@@ -9408,7 +9418,35 @@ fn source_steps(repo: &str, reference: &str, into: &Path, checked_out: bool) -> 
 fn source_label(step: &[String], said: &str, reference: &str) -> String {
     match step.first().map(String::as_str) {
         Some("checkout") => format!("checking out {said} at {reference}"),
+        Some("init" | "remote") => format!("adopting {said}'s folder"),
         _ => format!("fetching {said} at {reference}"),
+    }
+}
+
+/// What a part's folder is to the steps that take its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceFolder {
+    /// No folder, or an empty one, which a clone makes or fills.
+    Empty,
+    /// A checkout, told by its `.git`, which is fetched and checked out.
+    Checkout,
+    /// A folder that holds something and is not a checkout, such as a built
+    /// copy another way of deploying left with the part's data beside it.
+    /// Git refuses to clone into it, and git run in it would look for a
+    /// repository in the folders above, so it is adopted in place.
+    Copy,
+}
+
+/// What a part's folder is, read from the folder. One this process cannot
+/// list counts as empty, which the clone then says as git does.
+fn source_folder(into: &Path) -> SourceFolder {
+    if into.join(".git").exists() {
+        return SourceFolder::Checkout;
+    }
+    if std::fs::read_dir(into).is_ok_and(|mut entries| entries.next().is_some()) {
+        SourceFolder::Copy
+    } else {
+        SourceFolder::Empty
     }
 }
 
@@ -9684,6 +9722,360 @@ fn source_head(hands: &SourceHands, into: &Path, base: &Path) -> Option<String> 
         .then(|| String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// The git steps that adopt a part's folder that holds something and is not
+/// a checkout, as whoever takes its source steps runs them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Adoption {
+    /// A repository made in the folder, the part's repository named its
+    /// origin, as a clone names it, so that a later update fetches from it,
+    /// and the ref fetched: each with its line. Nothing outside `.git`
+    /// changes yet.
+    fetch: Vec<(String, SourceStep)>,
+    /// The paths the ref tracks, read before anything in the folder is
+    /// replaced.
+    tracked: SourceStep,
+    /// The ref checked out, by force, since a plain checkout refuses to
+    /// replace the tracked files a built copy holds untracked, such as its
+    /// `package.json`. A forced checkout writes the paths the ref tracks and
+    /// nothing else: it runs no clean, and a file the ref does not track stays
+    /// as it was, unless it stands where the ref has a folder, or a folder of
+    /// it stands where the ref has a file, which [`adoption_collisions`]
+    /// refuses first.
+    checkout: (String, SourceStep),
+}
+
+impl Adoption {
+    /// Every step, in the order they run.
+    fn steps(&self) -> Vec<&SourceStep> {
+        self.fetch
+            .iter()
+            .map(|(_, step)| step)
+            .chain([&self.tracked, &self.checkout.1])
+            .collect()
+    }
+}
+
+/// The steps that adopt a part's folder, under whichever hands take them.
+fn adopt_steps(
+    hands: &SourceHands,
+    said: &str,
+    repo: &str,
+    reference: &str,
+    into: &Path,
+    base: &Path,
+) -> Adoption {
+    let step = |words: &[&str]| source_step(hands, "git", &owned_words(words), into, base);
+    let labelled = |words: &[&str]| {
+        (
+            source_label(&owned_words(words), said, reference),
+            step(words),
+        )
+    };
+    Adoption {
+        fetch: vec![
+            labelled(&["init"]),
+            labelled(&["remote", "add", "origin", repo]),
+            labelled(&["fetch", "--depth", "1", "origin", reference]),
+        ],
+        tracked: step(&["ls-tree", "-r", "-z", "--name-only", "FETCH_HEAD"]),
+        checkout: labelled(&["checkout", "--force", "--detach", "FETCH_HEAD"]),
+    }
+}
+
+/// The folders in a part's folder that hold its data: the part's state, and
+/// the runtime llama.cpp and Kvasir share, with its key, presets and caches.
+const DATA_FOLDERS: [&str; 2] = ["state", "runtime"];
+
+/// The files at the top of a part's folder that hold its data: the
+/// configuration Kvasir reads and setup mends, the backends kept for Kvasir
+/// to add, the assistant's environment, and Kvasir's seal and pepper. Keys
+/// (`.key`) and stores (`.sqlite`, with the files SQLite keeps beside one)
+/// are data too, whatever their names.
+const DATA_FILES: [&str; 6] = [
+    "kvasir.json",
+    "backends-to-add.json",
+    "assistant.env",
+    "kvasir.seal",
+    "kvasir.seal.new",
+    "kvasir.pepper",
+];
+
+/// Whether a path in a part's folder, written relative to it, holds that
+/// part's data: anything in [`DATA_FOLDERS`], or one of [`DATA_FILES`], a key
+/// or a store at the folder's top. A folder may be written with its slash.
+fn holds_data(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let (top, below) = path
+        .split_once('/')
+        .map_or((path, false), |(top, _)| (top, true));
+    DATA_FOLDERS.contains(&top)
+        || (!below
+            && (DATA_FILES.contains(&top)
+                || top.ends_with(".key")
+                || top.ends_with(".sqlite")
+                || top.contains(".sqlite-")))
+}
+
+/// What adopting a folder would take from it, from the paths the ref tracks
+/// and what the folder holds along them, each relative to the folder, a
+/// folder written with its slash. Empty where the folder may be adopted.
+///
+/// Three things are refused. Data the ref tracks, or tracks a path within,
+/// whatever its content: a file equal to the ref's today would be the
+/// repository's to change on every update after. A folder where the ref has
+/// a file, and a file where the ref has a folder, since the checkout removes
+/// either, with whatever the folder holds that the ref does not track. A
+/// file the ref tracks that holds no data is not refused: it is what a
+/// built copy holds from its source, and the ref's takes its place.
+///
+/// A path within another that is named already is not named again.
+fn adoption_collisions(tracked: &[String], present: &[String]) -> Vec<String> {
+    let mut lost = std::collections::BTreeSet::new();
+    for held in present {
+        let folder = held.ends_with('/');
+        let name = held.trim_end_matches('/');
+        let same = tracked.iter().any(|path| path == name);
+        let within = tracked.iter().any(|path| {
+            path.strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('/'))
+        });
+        if (holds_data(name) && (same || within)) || (folder && same) || (!folder && within) {
+            lost.insert(held.clone());
+        }
+    }
+    lost.iter()
+        .filter(|held| {
+            !lost.iter().any(|other| {
+                other != *held && other.ends_with('/') && held.starts_with(other.as_str())
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// What a part's folder holds along the paths a ref tracks: each path and
+/// every folder on the way to it that is there, a folder with its slash.
+/// Read with lstat, so a link counts as the file it is, and the walk stops
+/// at the first thing on a path that is not a folder. Nothing else in the
+/// folder is read, so a large `node_modules` costs nothing.
+fn present_along(into: &Path, tracked: &[String]) -> Vec<String> {
+    let mut found: BTreeMap<String, Option<bool>> = BTreeMap::new();
+    for path in tracked {
+        let mut at = String::new();
+        for part in path.split('/') {
+            if !at.is_empty() {
+                at.push('/');
+            }
+            at.push_str(part);
+            let folder = *found.entry(at.clone()).or_insert_with(|| {
+                std::fs::symlink_metadata(into.join(&at))
+                    .ok()
+                    .map(|m| m.is_dir())
+            });
+            if folder != Some(true) {
+                break;
+            }
+        }
+    }
+    found
+        .into_iter()
+        .filter_map(|(at, folder)| folder.map(|folder| if folder { format!("{at}/") } else { at }))
+        .collect()
+}
+
+/// The paths a ref tracks, as the step that lists them reads them.
+fn tracked_paths(step: &SourceStep) -> Result<Vec<String>, Exit> {
+    let out = step
+        .command()
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| fail(format!("{}: {e}", step.shown())))?;
+    if !out.status.success() {
+        return Err(fail(format!(
+            "{} failed: {}",
+            step.shown(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(out
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).to_string())
+        .collect())
+}
+
+/// Said once a folder is adopted.
+fn adopted_said(into: &Path, said: &str, reference: &str) -> String {
+    format!(
+        "{} held a copy of {said} that was not a checkout, and is adopted as a checkout of \
+         {reference}: the files the release tracks are its own now, and whatever else the folder \
+         holds stays as it was",
+        into.display()
+    )
+}
+
+/// Said where a folder is not adopted, with what adopting it would have
+/// taken and what a person does about it: `again` is the command they ran.
+fn adoption_refused(
+    into: &Path,
+    said: &str,
+    reference: &str,
+    lost: &[String],
+    again: &str,
+) -> String {
+    const NAMED: usize = 5;
+    let mut named = lost
+        .iter()
+        .take(NAMED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if lost.len() > NAMED {
+        let _ = write!(named, " and {} more", lost.len() - NAMED);
+    }
+    format!(
+        "{} is not a checkout, and adopting it as a checkout of {said} at {reference} would \
+         replace what it keeps: {named}; the folder is left as it was, so move those out of it, \
+         or the folder aside, and run {again} again",
+        into.display()
+    )
+}
+
+/// A part's folder that holds something and is not a checkout, adopted in
+/// place as a checkout of its ref, as whoever takes its source steps.
+///
+/// The part's account is lent the folder itself, not what it holds, so that
+/// it can make the repository there, and is given the folder whole only once
+/// nothing would be refused, as a checkout is given on every run; it needs
+/// that to replace a copy root laid down. Where the folder is not adopted,
+/// by a refusal or a step that failed before the checkout, the `.git` made
+/// here is removed, so that a rerun does not take the folder for a checkout,
+/// and the folder is its owner's again: the folder is as it was. A checkout
+/// that fails partway removes the `.git` too, so that a rerun adopts the
+/// folder again: what that checkout wrote is the release's own files, which
+/// a second adoption replaces as it replaces a copy's.
+#[allow(clippy::too_many_arguments)]
+fn adopt_folder(
+    console: &Console,
+    hands: &SourceHands,
+    said: &str,
+    repo: &str,
+    reference: &str,
+    into: &Path,
+    base: &Path,
+    again: &str,
+) -> Result<(), Exit> {
+    let adoption = adopt_steps(hands, said, repo, reference, into, base);
+    let lent = lend_folder(hands, into).map_err(fail)?;
+    let unmade = || {
+        let _ = std::fs::remove_dir_all(into.join(".git"));
+    };
+    let checked = fetched_collisions(console, &adoption, into).and_then(|lost| {
+        if lost.is_empty() {
+            Ok(())
+        } else {
+            Err(fail(adoption_refused(into, said, reference, &lost, again)))
+        }
+    });
+    if let Err(e) = checked {
+        unmade();
+        if let Some(lent) = &lent {
+            lent.give_back(into);
+        }
+        return Err(e);
+    }
+    let given = match &lent {
+        Some(lent) => give_to(into, lent.ids.0, lent.ids.1).map_err(|e| {
+            fail(format!(
+                "{} could not be made {}'s, which takes its source there: {e}",
+                into.display(),
+                lent.account
+            ))
+        }),
+        None => Ok(()),
+    };
+    given
+        .and_then(|()| console.source_task(&adoption.checkout.0, &adoption.checkout.1))
+        .inspect_err(|_| unmade())
+}
+
+/// An adoption's steps up to its checkout taken, and what the checkout would
+/// take from the folder: nothing outside its `.git` has changed yet.
+fn fetched_collisions(
+    console: &Console,
+    adoption: &Adoption,
+    into: &Path,
+) -> Result<Vec<String>, Exit> {
+    for (label, step) in &adoption.fetch {
+        console.source_task(label, step)?;
+    }
+    let tracked = tracked_paths(&adoption.tracked)?;
+    Ok(adoption_collisions(
+        &tracked,
+        &present_along(into, &tracked),
+    ))
+}
+
+/// The folder itself lent to the part's account for adopting it: the
+/// account, its ids, and the owner the folder had.
+struct Lent {
+    account: String,
+    ids: (u32, u32),
+    owner: (u32, u32),
+}
+
+impl Lent {
+    /// The folder its owner's again, where it was not adopted.
+    fn give_back(&self, into: &Path) {
+        #[cfg(unix)]
+        let _ = std::os::unix::fs::lchown(into, Some(self.owner.0), Some(self.owner.1));
+        #[cfg(not(unix))]
+        let _ = (into, self.owner);
+    }
+}
+
+/// Under the part's account, the folder lent to it; nothing for the other
+/// hands, which make the repository as the account running setup.
+fn lend_folder(hands: &SourceHands, into: &Path) -> Result<Option<Lent>, String> {
+    let SourceHands::As(acting) = hands else {
+        return Ok(None);
+    };
+    let account = &acting.account;
+    let Some(ids) = account_ids(account) else {
+        return Err(format!(
+            "this machine has no {account} account to take the source of {} as",
+            into.display()
+        ));
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let lend = || {
+            let had = std::fs::metadata(into)?;
+            std::os::unix::fs::lchown(into, Some(ids.0), Some(ids.1))?;
+            Ok::<_, std::io::Error>((had.uid(), had.gid()))
+        };
+        let owner = lend().map_err(|e| {
+            format!(
+                "{} could not be lent to {account}, which adopts it: {e}",
+                into.display()
+            )
+        })?;
+        Ok(Some(Lent {
+            account: account.clone(),
+            ids,
+            owner,
+        }))
+    }
+    #[cfg(not(unix))]
+    Ok(Some(Lent {
+        account: account.clone(),
+        ids,
+        owner: ids,
+    }))
+}
+
 /// What the part's account needs before it takes the source steps: the
 /// home it was given, where that is the install's folder, and the part's
 /// folder, both its own. Nothing to do for the other hands.
@@ -9727,7 +10119,9 @@ fn ready_for_sources(
 /// for one, it is made the account's, since the account cannot make one in
 /// the install's folder, which is root's, and git clones into an empty
 /// folder that is there. An empty folder is given to it the same way. A
-/// folder that holds something and is not a checkout is left as it is.
+/// folder that holds something and is not a checkout is left as it is here:
+/// [`adopt_folder`] lends it to the account, and gives it whole only once it
+/// knows the folder may be adopted.
 fn ready_part_folder(into: &Path, ids: (u32, u32), make: bool) -> std::io::Result<()> {
     if into.join(".git").exists() {
         return give_to(into, ids.0, ids.1);
@@ -9810,20 +10204,35 @@ fn install_node_parts(
         };
         let into = plan.dir.join(name);
         // a checkout is brought to the release, whatever it followed before
-        let checked_out = into.join(".git").exists();
+        let folder = source_folder(&into);
         ready_for_sources(&hands, &plan.dir, &into, true).map_err(fail)?;
-        let steps = fetch_steps(
-            &hands,
-            said,
-            repo,
-            &reference,
-            &into,
-            &plan.dir,
-            checked_out,
-        )
-        .into_iter()
-        .chain(build_steps(&hands, said, &into, &plan.dir));
-        for (label, step) in steps {
+        if folder == SourceFolder::Copy {
+            adopt_folder(
+                console,
+                &hands,
+                said,
+                repo,
+                &reference,
+                &into,
+                &plan.dir,
+                "nils setup",
+            )?;
+            console.say(&adopted_said(&into, said, &reference));
+        } else {
+            let fetched = fetch_steps(
+                &hands,
+                said,
+                repo,
+                &reference,
+                &into,
+                &plan.dir,
+                folder == SourceFolder::Checkout,
+            );
+            for (label, step) in fetched {
+                console.source_task(&label, &step)?;
+            }
+        }
+        for (label, step) in build_steps(&hands, said, &into, &plan.dir) {
             console.source_task(&label, &step)?;
         }
         out.push((name, into));
@@ -13521,15 +13930,46 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                 // the services of this machine, as setup takes it.
                 let base = PathBuf::from(&state.dir);
                 let hands = source_hands(state.system.as_ref(), &base, am_root(), false);
+                // Git in a folder that is not a checkout looks for a
+                // repository in the folders above and would fetch there, so
+                // a copy is adopted as setup adopts it, and a folder with
+                // nothing in it is left for setup to take again.
+                let folder = source_folder(&dir);
+                if folder == SourceFolder::Empty {
+                    println!(
+                        "{name}: {} holds no copy of its source; nils setup and then repair takes \
+                         it again",
+                        dir.display()
+                    );
+                    continue;
+                }
                 if let Err(why) = ready_for_sources(&hands, &base, &dir, false) {
                     println!("{name}: {why}");
                     continue;
                 }
-                let before = source_head(&hands, &dir, &base);
+                let before = if folder == SourceFolder::Checkout {
+                    source_head(&hands, &dir, &base)
+                } else {
+                    None
+                };
                 // the release this version names, from a checkout of main too
-                let fetched = fetch_steps(&hands, said, repo, &reference, &dir, &base, true)
-                    .iter()
-                    .try_for_each(|(label, step)| console.source_task(label, step));
+                let fetched = if folder == SourceFolder::Copy {
+                    adopt_folder(
+                        &console,
+                        &hands,
+                        said,
+                        repo,
+                        &reference,
+                        &dir,
+                        &base,
+                        "nils update --all",
+                    )
+                    .map(|()| println!("{name}: {}", adopted_said(&dir, said, &reference)))
+                } else {
+                    fetch_steps(&hands, said, repo, &reference, &dir, &base, true)
+                        .iter()
+                        .try_for_each(|(label, step)| console.source_task(label, step))
+                };
                 if let Err(e) = fetched {
                     println!("{name}: {}", e.message);
                     continue;
@@ -18938,7 +19378,8 @@ mod tests {
             "a checkout is given over, not changed"
         );
 
-        // a built copy that is not a checkout is a later question, not this one's
+        // a built copy that is not a checkout is adopted, which lends it to
+        // the account itself, only once it has read the folder
         let copy = root.join("copy");
         std::fs::create_dir_all(copy.join("state")).unwrap();
         std::fs::write(copy.join("package.json"), "{}").unwrap();
@@ -18962,6 +19403,445 @@ mod tests {
             );
         }
         ready_build_cache(&cache, ids).expect("and again, as a rerun does");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_parts_folder_is_cloned_into_where_it_is_empty_fetched_where_it_is_a_checkout_and_adopted_otherwise()
+     {
+        let root = scratch("source-folder-kind");
+        let into = root.join("kvasir");
+        assert_eq!(source_folder(&into), SourceFolder::Empty, "no folder");
+        std::fs::create_dir_all(&into).unwrap();
+        assert_eq!(source_folder(&into), SourceFolder::Empty, "an empty one");
+        std::fs::write(into.join("package.json"), "{}").unwrap();
+        assert_eq!(
+            source_folder(&into),
+            SourceFolder::Copy,
+            "a built copy another way of deploying left"
+        );
+        std::fs::create_dir_all(into.join(".git")).unwrap();
+        assert_eq!(source_folder(&into), SourceFolder::Checkout);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn adopting_a_folder_refuses_where_the_checkout_would_replace_its_data_or_remove_what_the_release_does_not_track()
+     {
+        let words = |list: &[&str]| list.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        for data in [
+            "state",
+            "state/",
+            "state/kvasir.sqlite",
+            "runtime/cache/llama.cpp/model.gguf",
+            "kvasir.json",
+            "backends-to-add.json",
+            "assistant.env",
+            "assistant.key",
+            "runtime.key",
+            "assistant.sqlite",
+            "notes.sqlite-wal",
+            "kvasir.seal",
+            "kvasir.pepper",
+        ] {
+            assert!(holds_data(data), "{data}");
+        }
+        for source in [
+            "package.json",
+            "kvasir.example.json",
+            "stations/intake/station.yml",
+            "src/state/machine.ts",
+            "docs/kvasir.json",
+            "test/fixtures/card.key",
+            "dist/",
+            "node_modules/",
+        ] {
+            assert!(!holds_data(source), "{source}");
+        }
+
+        // What the lab's copies held: the release's own files, the build, and
+        // the data beside them, none of which the release tracks.
+        let tracked = words(&[
+            ".gitignore",
+            "package.json",
+            "kvasir.example.json",
+            "src/main.ts",
+            "stations/intake/station.yml",
+        ]);
+        let copy = words(&[
+            "package.json",
+            "stations/",
+            "stations/intake/",
+            "stations/intake/station.yml",
+        ]);
+        assert_eq!(
+            adoption_collisions(&tracked, &copy),
+            Vec::<String>::new(),
+            "the files a built copy holds from its source are the release's to replace"
+        );
+
+        let with = |more: &[&str]| {
+            let mut all = tracked.clone();
+            all.extend(words(more));
+            all
+        };
+        assert_eq!(
+            adoption_collisions(&with(&["kvasir.json"]), &words(&["kvasir.json"])),
+            ["kvasir.json"],
+            "data the release tracks, whatever its content"
+        );
+        assert_eq!(
+            adoption_collisions(&with(&["kvasir.json"]), &copy),
+            Vec::<String>::new(),
+            "a data file the folder does not hold takes nothing from it"
+        );
+        assert_eq!(
+            adoption_collisions(
+                &with(&["state/.keep", "runtime/models.ini"]),
+                &words(&["state/", "runtime/", "runtime/models.ini"])
+            ),
+            ["runtime/", "state/"],
+            "a path within a data folder, named once by its folder"
+        );
+        assert_eq!(
+            adoption_collisions(
+                &with(&["assistant.key", "seam.sqlite", "backends-to-add.json"]),
+                &words(&["assistant.key", "seam.sqlite", "backends-to-add.json"])
+            ),
+            ["assistant.key", "backends-to-add.json", "seam.sqlite"]
+        );
+        assert_eq!(
+            adoption_collisions(&with(&["state"]), &words(&["state/"])),
+            ["state/"],
+            "a file where the folder keeps its state would remove the folder"
+        );
+        assert_eq!(
+            adoption_collisions(&with(&["dist"]), &words(&["dist/"])),
+            ["dist/"],
+            "a folder where the release has a file goes with what it holds, data or not"
+        );
+        assert_eq!(
+            adoption_collisions(&with(&["bin/serve.mjs"]), &words(&["bin"])),
+            ["bin"],
+            "and a file where the release has a folder"
+        );
+    }
+
+    #[test]
+    fn a_folders_adoption_is_the_same_git_steps_under_each_hands_and_reads_what_the_release_tracks_before_it_checks_it_out()
+     {
+        let dir = Path::new("/srv/nils");
+        let into = dir.join("kvasir");
+        let adopt =
+            |hands: &SourceHands| adopt_steps(hands, "Kvasir", KVASIR_REPO, KVASIR_REF, &into, dir);
+        let git_words = [
+            vec!["init"],
+            vec!["remote", "add", "origin", KVASIR_REPO],
+            vec!["fetch", "--depth", "1", "origin", KVASIR_REF],
+            vec!["ls-tree", "-r", "-z", "--name-only", "FETCH_HEAD"],
+            vec!["checkout", "--force", "--detach", "FETCH_HEAD"],
+        ];
+        let expect = |prefix: &[&str]| -> Vec<Vec<String>> {
+            git_words
+                .iter()
+                .map(|words| {
+                    prefix
+                        .iter()
+                        .chain(words)
+                        .map(|w| (*w).to_string())
+                        .collect()
+                })
+                .collect()
+        };
+        let argv = |adoption: &Adoption| -> Vec<Vec<String>> {
+            adoption
+                .steps()
+                .iter()
+                .map(|step| step.argv.clone())
+                .collect()
+        };
+
+        let own = adopt(&SourceHands::Own);
+        assert_eq!(argv(&own), expect(&["git"]));
+        assert_eq!(
+            own.fetch
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .chain([own.checkout.0.as_str()])
+                .collect::<Vec<_>>(),
+            [
+                "adopting Kvasir's folder",
+                "adopting Kvasir's folder",
+                "fetching Kvasir at v1.0.0-alpha.7",
+                "checking out Kvasir at v1.0.0-alpha.7"
+            ]
+        );
+        for step in own.steps() {
+            assert_eq!(
+                step.dir, into,
+                "in the folder, never the install's: {step:?}"
+            );
+            assert_eq!(step.environment, None);
+        }
+
+        let root = adopt(&SourceHands::Root);
+        assert_eq!(
+            argv(&root),
+            expect(&["git", "-c", "safe.directory=/srv/nils/kvasir"]),
+            "root trusts that one folder on each line, the repository it makes too"
+        );
+
+        let acting = PartAccount {
+            account: "nils-desk".to_string(),
+            home: build_cache(dir, "nils-desk"),
+            lang: None,
+        };
+        let as_part = adopt(&SourceHands::As(acting.clone()));
+        assert_eq!(
+            argv(&as_part),
+            expect(&[
+                "runuser",
+                "-u",
+                "nils-desk",
+                "--preserve-environment",
+                "--",
+                "git",
+                "-C",
+                "/srv/nils/kvasir"
+            ]),
+            "the account makes the repository, so everything in it is born the account's"
+        );
+        for step in as_part.steps() {
+            assert_eq!(step.dir, into);
+            assert_eq!(
+                step.environment,
+                Some(service_environment(
+                    "nils-desk",
+                    Some("/srv/nils/build-cache/nils-desk".to_string()),
+                    None
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn adopting_a_folder_is_said_and_a_refusal_names_what_it_would_replace_and_the_fix() {
+        let into = Path::new("/srv/nils/kvasir");
+        assert_eq!(
+            adopted_said(into, "Kvasir", KVASIR_REF),
+            "/srv/nils/kvasir held a copy of Kvasir that was not a checkout, and is adopted as a \
+             checkout of v1.0.0-alpha.7: the files the release tracks are its own now, and \
+             whatever else the folder holds stays as it was"
+        );
+        assert_eq!(
+            adoption_refused(
+                into,
+                "Kvasir",
+                KVASIR_REF,
+                &["kvasir.json".to_string(), "state/".to_string()],
+                "nils setup"
+            ),
+            "/srv/nils/kvasir is not a checkout, and adopting it as a checkout of Kvasir at \
+             v1.0.0-alpha.7 would replace what it keeps: kvasir.json, state/; the folder is left \
+             as it was, so move those out of it, or the folder aside, and run nils setup again"
+        );
+        let many: Vec<String> = (1..=7).map(|n| format!("card{n}.key")).collect();
+        let said = adoption_refused(
+            Path::new("/srv/nils/assistant"),
+            "the assistant",
+            ASSISTANT_REF,
+            &many,
+            "nils update --all",
+        );
+        assert!(
+            said.contains(
+                "would replace what it keeps: card1.key, card2.key, card3.key, card4.key, \
+                 card5.key and 2 more;"
+            ),
+            "{said}"
+        );
+        assert!(said.ends_with("and run nils update --all again"), "{said}");
+    }
+
+    /// Git in a test's own folder, with nothing of this machine's settings
+    /// that would sign a commit or run a hook.
+    #[cfg(unix)]
+    fn test_git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=nils",
+                "-c",
+                "user.email=nils@example.org",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Every file under a folder with its bytes, a repository's own left out.
+    #[cfg(unix)]
+    fn bytes_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        let mut folders = vec![root.to_path_buf()];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if path.file_name() != Some(std::ffi::OsStr::new(".git")) {
+                        folders.push(path);
+                    }
+                } else {
+                    out.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        std::fs::read(&path).unwrap(),
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_built_copy_is_adopted_in_place_with_its_data_kept_byte_for_byte_and_a_release_that_tracks_its_data_is_refused()
+     {
+        let root = scratch("adopt-copy");
+        // The part's repository, with a release that tracks only source and
+        // a later one that tracks a file the folder keeps as data.
+        let source = root.join("source");
+        std::fs::create_dir_all(source.join("src")).unwrap();
+        test_git(&source, &["init", "--quiet"]);
+        std::fs::write(source.join("package.json"), "{\"name\": \"kvasir\"}\n").unwrap();
+        std::fs::write(source.join("src").join("main.js"), "export {};\n").unwrap();
+        std::fs::write(source.join(".gitignore"), "node_modules/\ndist/\n").unwrap();
+        test_git(&source, &["add", "--all"]);
+        test_git(&source, &["commit", "--quiet", "-m", "source"]);
+        test_git(&source, &["tag", "v1.0.0-alpha.1"]);
+        let released = test_git(&source, &["rev-parse", "HEAD"]);
+        std::fs::write(source.join("kvasir.json"), "{}\n").unwrap();
+        test_git(&source, &["add", "--all"]);
+        test_git(&source, &["commit", "--quiet", "-m", "data"]);
+        test_git(&source, &["tag", "v1.0.0-alpha.2"]);
+        test_git(
+            &root,
+            &["clone", "--quiet", "--bare", "source", "remote.git"],
+        );
+        let repo = format!("file://{}", root.join("remote.git").display());
+
+        // A copy laid down by another way of deploying: its build, a
+        // package.json unlike the release's, and its data.
+        let lay_copy = |into: &Path| {
+            std::fs::create_dir_all(into.join("dist")).unwrap();
+            std::fs::create_dir_all(into.join("node_modules").join("left")).unwrap();
+            std::fs::create_dir_all(into.join("state")).unwrap();
+            std::fs::write(into.join("package.json"), "{\"name\": \"built\"}\n").unwrap();
+            std::fs::write(into.join("dist").join("main.js"), "built();\n").unwrap();
+            std::fs::write(
+                into.join("node_modules").join("left").join("index.js"),
+                "left();\n",
+            )
+            .unwrap();
+            std::fs::write(into.join("state").join("x"), [0u8, 1, 2, 255]).unwrap();
+            std::fs::write(into.join("kvasir.json"), "{\"auth\": \"kept\"}\n").unwrap();
+        };
+        let console = Console::new(true);
+        let hands = SourceHands::Own;
+
+        let into = root.join("kvasir");
+        lay_copy(&into);
+        let before = bytes_under(&into);
+        assert_eq!(source_folder(&into), SourceFolder::Copy);
+        adopt_folder(
+            &console,
+            &hands,
+            "Kvasir",
+            &repo,
+            "v1.0.0-alpha.1",
+            &into,
+            &root,
+            "nils setup",
+        )
+        .unwrap_or_else(|e| panic!("the copy is adopted: {}", e.message));
+        assert_eq!(source_folder(&into), SourceFolder::Checkout);
+        assert_eq!(
+            source_head(&hands, &into, &root).map(|head| head.trim().to_string()),
+            Some(released),
+            "at the release"
+        );
+        assert_eq!(
+            std::fs::read_to_string(into.join("package.json")).unwrap(),
+            "{\"name\": \"kvasir\"}\n",
+            "the copy's package.json is the release's"
+        );
+        assert!(into.join("src").join("main.js").is_file());
+        let after = bytes_under(&into);
+        for untracked in [
+            "state/x",
+            "kvasir.json",
+            "dist/main.js",
+            "node_modules/left/index.js",
+        ] {
+            let path = Path::new(untracked);
+            assert_eq!(
+                after.get(path),
+                before.get(path),
+                "{untracked} stays byte for byte"
+            );
+        }
+        assert_eq!(
+            test_git(&into, &["remote", "get-url", "origin"]),
+            repo,
+            "an update fetches from the part's repository"
+        );
+        assert_eq!(
+            test_git(&into, &["status", "--porcelain", "--untracked-files=no"]),
+            "",
+            "the tracked files are the release's"
+        );
+
+        let refused = root.join("assistant");
+        lay_copy(&refused);
+        let before = bytes_under(&refused);
+        let Err(e) = adopt_folder(
+            &console,
+            &hands,
+            "Kvasir",
+            &repo,
+            "v1.0.0-alpha.2",
+            &refused,
+            &root,
+            "nils setup",
+        ) else {
+            panic!("the release tracks kvasir.json");
+        };
+        assert!(
+            e.message
+                .contains("would replace what it keeps: kvasir.json;")
+                && e.message.ends_with("run nils setup again"),
+            "{}",
+            e.message
+        );
+        assert!(
+            !refused.join(".git").exists(),
+            "no .git left for a rerun to take for a checkout"
+        );
+        assert_eq!(bytes_under(&refused), before, "and the folder as it was");
+        assert_eq!(source_folder(&refused), SourceFolder::Copy);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -19038,6 +19918,30 @@ mod tests {
                 kvasir.display()
             )),
             "{said}"
+        );
+
+        // a folder holding a built copy is adopted, and the print says so
+        std::fs::create_dir_all(assistant.join("state")).unwrap();
+        std::fs::write(assistant.join("package.json"), "{}").unwrap();
+        let said = commands_text(&plan, &console);
+        let assistant_at = assistant.display();
+        let adopting = [
+            format!("    {as_part} git -C {assistant_at} init\n"),
+            format!("    {as_part} git -C {assistant_at} remote add origin {ASSISTANT_REPO}\n"),
+            format!("    {as_part} git -C {assistant_at} fetch --depth 1 origin {assistant_ref}\n"),
+            format!("    {as_part} git -C {assistant_at} ls-tree -r -z --name-only FETCH_HEAD\n"),
+            format!("    {as_part} git -C {assistant_at} checkout --force --detach FETCH_HEAD\n"),
+        ];
+        let mut after = 0;
+        for line in &adopting {
+            let found = said[after..]
+                .find(line.as_str())
+                .unwrap_or_else(|| panic!("{line} in order\n{said}"));
+            after += found + line.len();
+        }
+        assert!(
+            !said.contains(&format!("git clone --depth 1 --branch {assistant_ref}")),
+            "and no clone: {said}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
