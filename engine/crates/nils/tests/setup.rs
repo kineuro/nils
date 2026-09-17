@@ -857,6 +857,200 @@ fn an_install_that_cannot_keep_services_says_so_before_it_writes_anything() {
     );
 }
 
+/// Whether this run is root, which decides which sentence a refusal of the
+/// machine's own services carries.
+#[cfg(target_os = "linux")]
+fn as_root() -> bool {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0")
+        .unwrap_or(false)
+}
+
+/// `--print` says the units an install on this machine would write and the
+/// calls it would make to hand them over, for the services of this account
+/// and for the machine's own alike, and writes nothing either way.
+#[cfg(target_os = "linux")]
+#[test]
+fn print_says_the_units_and_the_calls_of_an_install_on_this_machine() {
+    let nils = Installed::new("nils-setup-print-units");
+    let config = TempDir::new("nils-setup-print-units-config");
+    let base = TempDir::new("nils-setup-print-units-base");
+    let dir = base.path().join("nils");
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--print",
+            "--service",
+            "--parts",
+            "desk",
+            "--mode",
+            "local",
+            "--dir",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    o.says("nils-engine.service");
+    o.says("nils-desk.service");
+    o.says("nils-supervise.service");
+    o.says("ExecStart=");
+    o.says("WantedBy=default.target");
+    o.says("systemctl --user daemon-reload");
+    o.says("systemctl --user restart nils-engine");
+    assert!(!dir.exists(), "--print made {}", dir.display());
+
+    // the services of this machine, with an account of its own for the desk
+    // and the capabilities the engine needs
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--print",
+            "--system",
+            "--account",
+            "desk=nils-desk",
+            "--capabilities",
+            "CAP_DAC_OVERRIDE,CAP_DAC_READ_SEARCH",
+            "--parts",
+            "desk",
+            "--mode",
+            "local",
+            "--dir",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert!(o.ok, "{}", o.stderr);
+    o.says("/etc/systemd/system");
+    o.says("User=nils\n");
+    o.says("User=nils-desk\n");
+    o.says("AmbientCapabilities=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH");
+    o.says("WantedBy=multi-user.target");
+    o.says("systemctl daemon-reload");
+    o.says("systemctl enable nils-engine");
+    assert!(!dir.exists(), "--print made {}", dir.display());
+    assert!(
+        !config.path().join("nils").join("setup.toml").exists(),
+        "--print wrote the state file"
+    );
+}
+
+/// The services of this machine are root's, and every account they run as
+/// has to be there: what this run cannot have is said before a file is
+/// written, with the fix in the same sentence.
+#[cfg(target_os = "linux")]
+#[test]
+fn services_of_this_machine_are_refused_before_anything_is_written() {
+    let nils = Installed::new("nils-setup-system-refused");
+    let config = TempDir::new("nils-setup-system-refused-config");
+    let base = TempDir::new("nils-setup-system-refused-base");
+    let dir = base.path().join("nils");
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--system",
+            "--parts",
+            "engine",
+            "--dir",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert!(!o.ok, "it went on and installed:\n{}", o.stdout);
+    if as_root() {
+        assert!(
+            o.stderr.contains("no account on this machine named")
+                || o.stderr.contains("no accounts on this machine named")
+                || o.stderr.contains("no systemd"),
+            "{}",
+            o.stderr
+        );
+    } else {
+        assert!(
+            o.stderr.contains("is root's to do") || o.stderr.contains("no systemd"),
+            "{}",
+            o.stderr
+        );
+    }
+    assert!(!dir.exists(), "{} was made", dir.display());
+    assert!(
+        !config.path().join("nils").join("setup.toml").exists(),
+        "the record was written"
+    );
+
+    // a capability is a thing a service of this account cannot carry at all
+    let o = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--no-service",
+            "--capabilities",
+            "CAP_DAC_OVERRIDE",
+            "--dir",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert!(!o.ok, "{}", o.stdout);
+    assert!(
+        o.stderr.contains("--capabilities goes with --system"),
+        "{}",
+        o.stderr
+    );
+    assert!(!dir.exists(), "{} was made", dir.display());
+}
+
+/// An install whose services are the machine's own is updated as the install
+/// it is: a run that cannot write those services says so and changes
+/// nothing, rather than writing half an install of this account's.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_update_of_the_machines_services_says_what_it_cannot_do() {
+    let nils = Installed::new("nils-setup-system-update");
+    let config = TempDir::new("nils-setup-system-update-config");
+    let base = TempDir::new("nils-setup-system-update-base");
+    let dir = base.path().join("nils");
+    std::fs::create_dir_all(dir.join("registry")).unwrap();
+    std::fs::create_dir_all(config.path().join("nils")).unwrap();
+    let record = config.path().join("nils").join("setup.toml");
+    let written = format!(
+        "dir = \"{}\"\nmode = \"off\"\nruntime = \"machine\"\n\
+         service = \"systemd system units\"\nreach = \"loopback\"\nbackend = \"sqlite\"\n\n\
+         [parts.engine]\nversion = \"1.0.0\"\npath = \"/usr/local/bin/nils\"\nkind = \"binary\"\n\n\
+         [system]\ncapabilities = [\"CAP_DAC_OVERRIDE\"]\n\n\
+         [system.accounts]\nengine = \"nils-nobody-of-this-machine\"\n",
+        dir.display()
+    );
+    std::fs::write(&record, &written).unwrap();
+
+    let o = setup(&nils.path(), config.path(), &["--update", "--yes"]);
+    assert!(!o.ok, "it went on and updated:\n{}", o.stdout);
+    assert!(o.stderr.contains("nothing was changed"), "{}", o.stderr);
+    if as_root() {
+        assert!(
+            o.stderr.contains("nils-nobody-of-this-machine"),
+            "{}",
+            o.stderr
+        );
+    } else {
+        assert!(o.stderr.contains("is root's to do"), "{}", o.stderr);
+    }
+    assert_eq!(
+        std::fs::read_to_string(&record).unwrap(),
+        written,
+        "the record was rewritten by a run that could not do the work"
+    );
+    assert!(
+        !config.path().join("systemd").exists(),
+        "units of this account were written for an install whose services are the machine's"
+    );
+}
+
 #[test]
 fn the_network_and_no_login_are_not_offered_together() {
     let nils = Installed::new("nils-setup-reach");

@@ -93,7 +93,9 @@ channel = "https://releases.example.org/nils"
 capabilities = "http://127.0.0.1:8437/api/capabilities"
 ```
 
-Relative paths are read beside the file. Every part names where it is
+Relative paths are read beside the file. An install whose services are the
+machine's own restarts them without `--user`: `systemctl restart
+nils-engine`. Every part names where it is
 installed, the command that restarts it (run by `sh -c`), the channel, and
 how the supervisor tells it came back: its capabilities door, whose
 `engine.version` (or `desk.version`, or `version`) must answer with the new
@@ -203,7 +205,9 @@ with the same verbs.
    curl -s http://127.0.0.1:8437/api/capabilities | grep '"version"'
    ```
 
-   If it does not, put `.previous/nils` back and restart again.
+   Where the services are the machine's own, that is `systemctl restart
+   nils-engine`, without `--user`. If the part does not come back, put
+   `.previous/nils` back and restart again.
 
 `nils supervise update --config supervise.toml engine` does the four steps
 in one go from the command line, with the same log row the door writes.

@@ -400,6 +400,18 @@ pub(crate) struct SetupArgs {
     /// Write no services
     #[arg(long, conflicts_with = "service")]
     no_service: bool,
+    /// Write the services of this machine, in /etc/systemd/system, each part
+    /// running as an account of its own; root's to do, and Linux only
+    #[arg(long, conflicts_with = "no_service")]
+    system: bool,
+    /// With --system: the account a part runs as, as engine=nils; named once
+    /// for each part, and nils for a part not named
+    #[arg(long, value_name = "PART=ACCOUNT")]
+    account: Vec<String>,
+    /// With --system: the capabilities the engine's service keeps, as
+    /// CAP_DAC_OVERRIDE,CAP_DAC_READ_SEARCH
+    #[arg(long, value_name = "LIST")]
+    capabilities: Option<String>,
     /// Take every default without asking
     #[arg(long, short = 'y')]
     yes: bool,
@@ -555,6 +567,274 @@ impl Reach {
             _ => None,
         }
     }
+}
+
+// --------------------------------------------- the services of this machine
+
+/// The services of the machine rather than of the account that ran setup:
+/// unit files in `/etc/systemd/system`, each part running as an account of
+/// its own, and the engine keeping the capabilities it needs to read and
+/// write across the filesystems a site mounts. A service of an account's own
+/// cannot carry a capability at all, so this is a kind of service and not a
+/// setting beside them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SystemUnits {
+    /// The capabilities the engine's service keeps, by their own names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) capabilities: Vec<String>,
+    /// The account each part runs as, by the part's name. A part not named
+    /// here runs as [`DEFAULT_ACCOUNT`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) accounts: BTreeMap<String, String>,
+}
+
+/// The account a part runs as where an install names none for it.
+const DEFAULT_ACCOUNT: &str = "nils";
+
+/// The parts an account can be named for. Kvasir and llama.cpp are the
+/// assistant's own and run as the account it runs as.
+const ACCOUNT_PARTS: [&str; 3] = ["engine", "desk", "assistant"];
+
+/// The directory the services of a machine are written into.
+const SYSTEM_UNITS_DIR: &str = "/etc/systemd/system";
+
+impl SystemUnits {
+    /// The account a part runs as: the one named for it, else the default.
+    pub(crate) fn account(&self, part: &str) -> &str {
+        self.accounts
+            .get(part)
+            .map_or(DEFAULT_ACCOUNT, String::as_str)
+    }
+
+    /// Every account this install needs, each named once, in the order the
+    /// parts are named.
+    fn every_account(&self, parts: &[Part]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for part in parts {
+            let account = self.account(part.name()).to_string();
+            if !out.contains(&account) {
+                out.push(account);
+            }
+        }
+        out
+    }
+}
+
+/// The accounts named on the command line, as `engine=nils`. A part that is
+/// not a part, or a name that is not an account's, is refused here, before
+/// anything is written.
+fn accounts_given(given: &[String]) -> Result<BTreeMap<String, String>, String> {
+    let mut out = BTreeMap::new();
+    for word in given {
+        let Some((part, account)) = word.split_once('=') else {
+            return Err(format!(
+                "{word} names no account: --account is a part and an account, as --account \
+                 desk=nils-desk"
+            ));
+        };
+        let (part, account) = (part.trim(), account.trim());
+        if !ACCOUNT_PARTS.contains(&part) {
+            return Err(format!(
+                "{part} is not a part an account can be named for: engine, desk or assistant"
+            ));
+        }
+        if account.is_empty() {
+            return Err(format!("--account {part}= names no account"));
+        }
+        let named = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '$');
+        if !account.chars().all(named) || account.starts_with('-') {
+            return Err(format!("{account} is not the name of an account"));
+        }
+        out.insert(part.to_string(), account.to_string());
+    }
+    Ok(out)
+}
+
+/// Every capability a service can be given, so that one misspelled is a
+/// sentence here rather than a service systemd refuses to start.
+const CAPABILITY_NAMES: [&str; 41] = [
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_DAC_READ_SEARCH",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_KILL",
+    "CAP_SETGID",
+    "CAP_SETUID",
+    "CAP_SETPCAP",
+    "CAP_LINUX_IMMUTABLE",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_NET_BROADCAST",
+    "CAP_NET_ADMIN",
+    "CAP_NET_RAW",
+    "CAP_IPC_LOCK",
+    "CAP_IPC_OWNER",
+    "CAP_SYS_MODULE",
+    "CAP_SYS_RAWIO",
+    "CAP_SYS_CHROOT",
+    "CAP_SYS_PTRACE",
+    "CAP_SYS_PACCT",
+    "CAP_SYS_ADMIN",
+    "CAP_SYS_BOOT",
+    "CAP_SYS_NICE",
+    "CAP_SYS_RESOURCE",
+    "CAP_SYS_TIME",
+    "CAP_SYS_TTY_CONFIG",
+    "CAP_MKNOD",
+    "CAP_LEASE",
+    "CAP_AUDIT_WRITE",
+    "CAP_AUDIT_CONTROL",
+    "CAP_SETFCAP",
+    "CAP_MAC_OVERRIDE",
+    "CAP_MAC_ADMIN",
+    "CAP_SYSLOG",
+    "CAP_WAKE_ALARM",
+    "CAP_BLOCK_SUSPEND",
+    "CAP_AUDIT_READ",
+    "CAP_PERFMON",
+    "CAP_BPF",
+    "CAP_CHECKPOINT_RESTORE",
+];
+
+/// The capabilities named on the command line, as
+/// `CAP_DAC_OVERRIDE,CAP_DAC_READ_SEARCH`. Written however a person writes
+/// them, and held to the names the kernel knows.
+fn capabilities_given(text: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for word in text
+        .split([',', ' ', '\t'])
+        .filter(|w| !w.trim().is_empty())
+    {
+        let word = word.trim().to_ascii_uppercase();
+        let name = if word.starts_with("CAP_") {
+            word
+        } else {
+            format!("CAP_{word}")
+        };
+        if !CAPABILITY_NAMES.contains(&name.as_str()) {
+            return Err(format!(
+                "{name} is not a capability a service can keep; the engine's are usually \
+                 CAP_DAC_OVERRIDE and CAP_DAC_READ_SEARCH, which let it read and write across the \
+                 filesystems a site mounts"
+            ));
+        }
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    Ok(out)
+}
+
+/// The numbers an account has on this machine, asked of the system so that
+/// whatever keeps the accounts answers.
+fn account_ids(name: &str) -> Option<(u32, u32)> {
+    let uid = run_quiet("id", &["-u", name])?.trim().parse().ok()?;
+    let gid = run_quiet("id", &["-g", name])?.trim().parse().ok()?;
+    Some((uid, gid))
+}
+
+/// Whether this process is root, which writing into `/etc/systemd/system`
+/// and running the parts as other accounts both need.
+fn am_root() -> bool {
+    run_quiet("id", &["-u"]).is_some_and(|out| out.trim() == "0")
+}
+
+/// Whether systemd runs this machine, which is what takes a service of its
+/// own. Asked of the machine rather than of the binary, which answers
+/// wherever it is installed.
+fn systemd_here() -> bool {
+    cfg!(target_os = "linux") && Path::new("/run/systemd/system").exists()
+}
+
+/// Why this machine cannot be given services of its own, said so that a
+/// person can act on it before anything is written. `None` where it can.
+fn system_refusal(runtime: Runtime, system: &SystemUnits, parts: &[Part]) -> Option<String> {
+    let missing: Vec<String> = system
+        .every_account(parts)
+        .into_iter()
+        .filter(|name| account_ids(name).is_none())
+        .collect();
+    system_refusal_when(runtime, am_root(), systemd_here(), &missing)
+}
+
+/// The same, for a machine with or without each of the things it asks for,
+/// so that every answer can be had on any machine.
+fn system_refusal_when(
+    runtime: Runtime,
+    root: bool,
+    systemd: bool,
+    missing: &[String],
+) -> Option<String> {
+    if runtime.container() {
+        return Some(format!(
+            "--system writes a service for each part that runs on this machine, and with {} the \
+             parts run in containers their own runtime keeps: install with --runtime machine, or \
+             leave --system off",
+            runtime.name()
+        ));
+    }
+    if !systemd {
+        return Some(
+            "this machine has no systemd to take a service of its own: leave --system off, and \
+             the parts are kept the way this account keeps its own"
+                .to_string(),
+        );
+    }
+    if !root {
+        return Some(format!(
+            "writing services into {SYSTEM_UNITS_DIR}, and running the parts as accounts of their \
+             own, is root's to do: run nils setup again as root, or leave --system off and the \
+             services are this account's own"
+        ));
+    }
+    if !missing.is_empty() {
+        // The accounts are the site's: it keeps them, it numbers them, and
+        // it may keep them somewhere other than this machine's own files.
+        // Setup names one in a unit; it never makes one.
+        let (there, them) = if missing.len() == 1 {
+            ("is no account", "it")
+        } else {
+            ("are no accounts", "them")
+        };
+        return Some(format!(
+            "there {there} on this machine named {}, and the parts would run as {them}: a service \
+             account is the site's own to make, so add {them} and run nils setup again",
+            missing.join(", ")
+        ));
+    }
+    None
+}
+
+/// Why an account or a capability named without the services of this machine
+/// cannot be taken. `None` where neither was named.
+fn without_system(accounts: bool, capabilities: bool) -> Option<String> {
+    if capabilities {
+        return Some(
+            "a capability belongs to a service of this machine: a service of this account cannot \
+             carry one at all, so --capabilities goes with --system"
+                .to_string(),
+        );
+    }
+    if accounts {
+        return Some(
+            "an account of its own belongs to a service of this machine: a service of this \
+             account runs as this account, so --account goes with --system"
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// An install whose services are this machine's, brought up to date or
+/// repaired where they cannot be written now: said before anything is
+/// touched, since the record says what the services are and this run would
+/// otherwise write half an install and leave the rest as it was.
+fn recorded_system_refusal(plan: &Plan) -> Option<String> {
+    let system = plan.system.as_ref()?;
+    if !plan.service {
+        return None;
+    }
+    system_refusal(plan.runtime, system, &plan.parts)
 }
 
 /// Where the registry itself is kept.
@@ -2228,6 +2508,12 @@ pub(crate) struct State {
     /// The provider the desk signs people in at, in `oidc` mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) oidc: Option<OidcPlan>,
+    /// The services of this machine, where the install has them: the account
+    /// each part runs as and the capabilities the engine keeps. Recorded, so
+    /// that an update and a repair write the services this install has
+    /// rather than falling back to this account's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) system: Option<SystemUnits>,
 }
 
 impl State {
@@ -2344,6 +2630,10 @@ pub(crate) struct Plan {
     /// The llama.cpp build the models Kvasir starts run on, where the plan
     /// has the assistant and llama.cpp publishes a build for this machine.
     pub(crate) llama: Option<Llama>,
+    /// The services of this machine, asked for with `--system`: `None` where
+    /// the services are the account's own, which is every install on a
+    /// laptop.
+    pub(crate) system: Option<SystemUnits>,
 }
 
 /// The provider the desk signs people in at, as the desk, the engine and
@@ -2545,6 +2835,7 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
             .map(|runtime| ManagedPostgres { runtime }),
         oidc: state.oidc.clone(),
         llama: llama_of_state(state),
+        system: state.system.clone(),
     }
 }
 
@@ -4003,17 +4294,58 @@ fn questions(
 
     // 7. services
     console.step(7);
-    let manager = service_manager(runtime);
-    let service = match (args.no_service, args.service, manager) {
+    // The services of this machine are asked for outright and never arrived
+    // at: they are written as root, into a directory of the machine's, and
+    // they run the parts as accounts of their own. An install that has them
+    // keeps them on a rerun, since the record says so.
+    let accounts = accounts_given(&args.account).map_err(usage)?;
+    let capabilities = match &args.capabilities {
+        Some(text) => capabilities_given(text).map_err(usage)?,
+        None => Vec::new(),
+    };
+    let system = match (args.system, existing.and_then(|s| s.system.clone())) {
+        (false, None) => {
+            if let Some(refused) = without_system(!accounts.is_empty(), !capabilities.is_empty()) {
+                return Err(usage(refused).into());
+            }
+            None
+        }
+        (_, recorded) => {
+            let mut system = recorded.unwrap_or_default();
+            if !accounts.is_empty() {
+                system.accounts = accounts;
+            }
+            if !capabilities.is_empty() {
+                system.capabilities = capabilities;
+            }
+            Some(system)
+        }
+    };
+    // What this machine cannot be given is said here, with nothing written
+    // and the fix in the same sentence. `--print` changes nothing anyway, so
+    // it says it and goes on to show what such an install would be.
+    if let Some(system) = &system
+        && let Some(refused) = system_refusal(runtime, system, &parts)
+    {
+        if !args.print {
+            return Err(usage(refused).into());
+        }
+        console.note(&refused);
+    }
+    let wants_services = args.service || system.is_some();
+    let manager = service_manager(runtime, system.is_some());
+    let service = match (args.no_service, wants_services, manager) {
         (true, _, _) => false,
         // Asked for outright where nothing here can write or start them:
         // said now, with nothing changed, rather than after every file is
         // written and every part installed. `--print` changes nothing
         // anyway, and goes on to show what would be written.
-        (_, true, None) if !args.print => return Err(usage(no_manager_here(runtime)).into()),
+        (_, true, None) if !args.print => {
+            return Err(usage(no_manager_here(runtime, system.is_some())).into());
+        }
         (_, true, _) => true,
         (_, _, None) => {
-            console.note(&no_manager_here(runtime));
+            console.note(&no_manager_here(runtime, system.is_some()));
             false
         }
         (_, _, Some(manager)) => {
@@ -4026,6 +4358,7 @@ fn questions(
     };
     console.said(match (service, runtime) {
         (false, _) => "by hand",
+        (true, _) if system.is_some() => "the machine's systemd",
         (true, Runtime::Machine) if cfg!(target_os = "macos") => "launchd",
         (true, Runtime::Machine) => "systemd",
         (true, Runtime::Podman) => "quadlets",
@@ -4061,6 +4394,7 @@ fn questions(
         version: update::VERSION.to_string(),
         oidc,
         llama,
+        system,
     };
 
     // 8. the summary, then the work
@@ -4143,6 +4477,9 @@ fn what_is_there(state: &State) -> String {
 /// names, brought to the newest release, without a question.
 fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
     let mut plan = plan_from_state(state, args.channel.as_deref());
+    if let Some(refused) = recorded_system_refusal(&plan) {
+        return Err(fail(format!("nothing was changed: {refused}")));
+    }
     if let Ok(newest) = update::newest_version(&update::engine_base(args.channel.as_deref())) {
         plan.version = newest;
     }
@@ -4209,6 +4546,9 @@ fn update_engine_binary(channel: Option<&str>, console: &mut Console) {
 /// what the state records, for an install whose files were lost or edited.
 fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
     let plan = plan_from_state(state, args.channel.as_deref());
+    if let Some(refused) = recorded_system_refusal(&plan) {
+        return Err(fail(format!("nothing was changed: {refused}")));
+    }
     println!();
     println!("{}", console.bold("Repairing"));
     print!("{}", plan_text(&plan, console));
@@ -4299,6 +4639,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
             ));
         }
     }
+    hand_over_files(plan, console);
     console.begin(Stage::Services);
     let mut services = Vec::new();
     if plan.service {
@@ -4333,11 +4674,19 @@ fn user_session() -> bool {
         && run_quiet("systemctl", &["--user", "show", "--property=Version"]).is_some()
 }
 
-/// Which service manager this machine and runtime use, if any. The units of
-/// a machine or a podman install are this account's own, so a user manager
-/// must be there to take them; docker's own daemon brings its containers
-/// back and asks nothing of this account.
-fn service_manager(runtime: Runtime) -> Option<&'static str> {
+/// What the plan, the record and the wizard call the services of this
+/// machine.
+const SYSTEM_MANAGER: &str = "systemd system units";
+
+/// Which service manager this machine and runtime use, if any. The services
+/// of this machine are systemd's own and ask nothing of any account; the
+/// units of a machine or a podman install are this account's own, so a user
+/// manager must be there to take them; docker's own daemon brings its
+/// containers back and asks nothing of this account either.
+fn service_manager(runtime: Runtime, system: bool) -> Option<&'static str> {
+    if system {
+        return systemd_here().then_some(SYSTEM_MANAGER);
+    }
     service_manager_when(runtime, user_session())
 }
 
@@ -4361,7 +4710,12 @@ fn service_manager_when(runtime: Runtime, session: bool) -> Option<&'static str>
 /// Why nothing here can keep the parts running, said so that a person can
 /// act on it: on Linux the units want a session of the account that runs
 /// NILS, which is what a machine nobody is logged in to has not got.
-fn no_manager_here(runtime: Runtime) -> String {
+fn no_manager_here(runtime: Runtime, system: bool) -> String {
+    if system {
+        return "this machine has no systemd to take a service of its own: leave --system off, \
+                and the parts are kept the way this account keeps its own"
+            .to_string();
+    }
     no_manager_words(runtime, user_session())
 }
 
@@ -4482,11 +4836,26 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
     rows.push((
         "services",
         if plan.service {
-            service_manager(plan.runtime).unwrap_or("none").to_string()
+            service_manager(plan.runtime, plan.system.is_some())
+                .unwrap_or("none")
+                .to_string()
         } else {
             "none; the commands are printed".to_string()
         },
     ));
+    if let Some(system) = &plan.system {
+        rows.push((
+            "accounts",
+            plan.parts
+                .iter()
+                .map(|part| format!("{} as {}", part.name(), system.account(part.name())))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+        if !system.capabilities.is_empty() {
+            rows.push(("engine keeps", system.capabilities.join(", ")));
+        }
+    }
     rows.push(("state", state_path().display().to_string()));
     rows
 }
@@ -4542,7 +4911,53 @@ fn indent(line: &str) -> String {
 fn commands_text(plan: &Plan, console: &Console) -> String {
     let mut out = String::new();
     match plan.runtime {
-        Runtime::Machine => {}
+        Runtime::Machine if plan.service => {
+            // Every unit the install would write, and every call it would
+            // make: the services are the likeliest thing to go wrong, and
+            // the services of a machine the likeliest of those.
+            let state = planned_state(plan);
+            let mac = cfg!(target_os = "macos");
+            let mut units = if mac {
+                launchd_plists(plan, &state)
+            } else {
+                systemd_units(plan, &state)
+            };
+            units.push(supervisor_service(plan, &state));
+            let where_they_go = if mac {
+                "~/Library/LaunchAgents".to_string()
+            } else {
+                units_dir(plan.system.is_some()).display().to_string()
+            };
+            let _ = writeln!(
+                out,
+                "\n{} {}",
+                console.bold("  services"),
+                console.dim(&where_they_go)
+            );
+            for (name, text) in &units {
+                let _ = writeln!(out, "\n  {}", console.bold(name));
+                for line in text.lines() {
+                    let _ = writeln!(out, "{}", indent(line));
+                }
+            }
+            if !mac {
+                let names: Vec<String> = units
+                    .iter()
+                    .filter_map(|(name, _)| name.strip_suffix(".service"))
+                    .map(str::to_string)
+                    .collect();
+                let _ = writeln!(out, "\n{}", console.bold("  then"));
+                for line in unit_calls(plan, &names) {
+                    let _ = writeln!(out, "    {line}");
+                }
+            }
+        }
+        Runtime::Machine => {
+            let _ = writeln!(out, "\n{}", console.bold("  start it"));
+            for line in start_commands(plan) {
+                let _ = writeln!(out, "    {line}");
+            }
+        }
         Runtime::Podman => {
             let _ = writeln!(out, "\n{}", console.bold("  podman"));
             for line in podman_commands(plan) {
@@ -4703,7 +5118,9 @@ fn do_it(
         mode: plan.mode.name().to_string(),
         runtime: plan.runtime.name().to_string(),
         service: if plan.service {
-            service_manager(plan.runtime).unwrap_or("none").to_string()
+            service_manager(plan.runtime, plan.system.is_some())
+                .unwrap_or("none")
+                .to_string()
         } else {
             "none".to_string()
         },
@@ -4735,6 +5152,7 @@ fn do_it(
             .unwrap_or_default(),
         unfinished: true,
         oidc: plan.oidc.clone(),
+        system: plan.system.clone(),
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
@@ -5038,6 +5456,10 @@ fn place(
     }
     checkpoint(state);
 
+    // What each part reads and writes belongs to the account that part runs
+    // as, before anything is started as that account.
+    hand_over_files(plan, console);
+
     // Start it.
     let mut services = Vec::new();
     if plan.service {
@@ -5278,14 +5700,15 @@ fn start_postgres(plan: &Plan, pg: ManagedPostgres, console: &Console) -> Result
             &["pull", "--quiet", POSTGRES_IMAGE],
         )?;
     }
-    let with_systemd = plan.service && service_manager(Runtime::Podman).is_some();
+    // a Postgres this setup runs is podman's, in a quadlet of this account's
+    let with_systemd = plan.service && service_manager(Runtime::Podman, false).is_some();
     match pg.runtime {
         Runtime::Podman if with_systemd => {
             let dir = quadlet_dir();
             std::fs::create_dir_all(&dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
             std::fs::write(dir.join("nils-postgres.container"), postgres_quadlet(plan))
                 .map_err(|e| fail(format!("{}: {e}", dir.display())))?;
-            make_the_calls(&hand_units_to_systemd(&[], false))?;
+            make_the_calls(&hand_units_to_systemd(&[], false, false), false)?;
             if !quietly("systemctl", &["--user", "restart", "nils-postgres"]) {
                 return Err(fail(
                     "Postgres did not start; its log: journalctl --user -u nils-postgres",
@@ -8530,13 +8953,63 @@ fn assistant_key(plan: &Plan, kvasir: &Kvasir, console: &Console) -> Result<bool
 
 // ------------------------------------------------------------- the services
 
-fn units_dir() -> PathBuf {
+/// Where an install's units live: the machine's own directory for the
+/// services of this machine, and this account's directory for its own.
+fn units_dir(system: bool) -> PathBuf {
+    if system {
+        return PathBuf::from(SYSTEM_UNITS_DIR);
+    }
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from(".config"))
         .join("systemd")
         .join("user")
+}
+
+/// A `systemctl` call in the scope an install's units live in: the machine's
+/// own manager for the services of this machine, and this account's manager
+/// for its own.
+fn systemctl_argv(system: bool, args: &[&str]) -> Vec<String> {
+    let mut out = vec!["systemctl".to_string()];
+    if !system {
+        out.push("--user".to_string());
+    }
+    out.extend(args.iter().map(|word| (*word).to_string()));
+    out
+}
+
+/// Such a call, run for its effect.
+fn systemctl(system: bool, args: &[&str]) -> bool {
+    let argv = systemctl_argv(system, args);
+    let rest: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+    quietly("systemctl", &rest)
+}
+
+/// Such a call, run for what it says.
+fn systemctl_says(system: bool, args: &[&str]) -> Option<String> {
+    let argv = systemctl_argv(system, args);
+    let rest: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+    run_quiet("systemctl", &rest)
+}
+
+/// Where a unit's log is, as a person would read it.
+fn journal_line(system: bool, unit: &str) -> String {
+    if system {
+        format!("its log: journalctl -u {unit}")
+    } else {
+        format!("its log: journalctl --user -u {unit}")
+    }
+}
+
+/// What a unit is wanted by: the machine's own target for a service of this
+/// machine, and the account's for its own.
+fn wanted_by(system: bool) -> &'static str {
+    if system {
+        "multi-user.target"
+    } else {
+        "default.target"
+    }
 }
 
 fn quadlet_dir() -> PathBuf {
@@ -8581,7 +9054,7 @@ fn start_everything(
             }
             // the account is lingered before this, since a machine nobody is
             // logged in as has no user manager to reload until it is
-            for refused in make_the_calls(&hand_units_to_systemd(&[], false))? {
+            for refused in make_the_calls(&hand_units_to_systemd(&[], false, false), false)? {
                 console.warn(&format!("{refused} was refused"));
             }
             // A quadlet's unit is generated, so it is never enabled: the
@@ -8613,7 +9086,11 @@ fn start_everything(
                 quietly("systemctl", &["--user", "restart", "nils-assistant"]);
                 units.push("nils-assistant".to_string());
             }
-            Ok(Started::of(unit_report(&units, console, Watcher::Systemd)))
+            Ok(Started::of(unit_report(
+                &units,
+                console,
+                Watcher::Systemd { system: false },
+            )))
         }
         (Runtime::Docker, _) => {
             let path = plan.dir.join("compose.yaml");
@@ -8649,7 +9126,11 @@ fn start_everything(
             }
             let mut reported = unit_report(&containers, console, Watcher::Docker);
             if let Some(unit) = llama {
-                reported.extend(unit_report(&[unit], console, Watcher::Systemd));
+                reported.extend(unit_report(
+                    &[unit],
+                    console,
+                    Watcher::Systemd { system: false },
+                ));
             }
             let mut started = Started::of(reported);
             let _ = writeln!(
@@ -8691,7 +9172,8 @@ fn start_everything(
             })
         }
         (Runtime::Machine, false) => {
-            let dir = units_dir();
+            let system = plan.system.is_some();
+            let dir = units_dir(system);
             std::fs::create_dir_all(&dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
             let mut names = Vec::new();
             for (name, text) in systemd_units(plan, state) {
@@ -8703,11 +9185,15 @@ fn start_everything(
             // enabled: on a machine nobody is logged in as there is no user
             // manager to read them until an account lingers, and this ran
             // the other way about, so nothing started and nothing said so.
-            // Enabling prints a line for every link it makes, which is
-            // systemd's business and not the person's.
-            for refused in make_the_calls(&hand_units_to_systemd(&names, true))? {
+            // The machine's own manager asks for no lingering. Enabling
+            // prints a line for every link it makes, which is systemd's
+            // business and not the person's.
+            for refused in make_the_calls(&hand_units_to_systemd(&names, true, system), system)? {
                 console.warn(&format!("{refused} was refused"));
             }
+            // Where the parts run as accounts of their own, what each reads
+            // and writes is that account's before it starts.
+            hand_over_files(plan, console);
             // The assistant reads a key Kvasir makes, so everything else
             // starts first, the key is made once Kvasir answers, and the
             // assistant starts last. Started together, the assistant died
@@ -8715,15 +9201,22 @@ fn start_everything(
             let (assistant, rest): (Vec<&String>, Vec<&String>) =
                 names.iter().partition(|u| u.as_str() == "nils-assistant");
             for unit in &rest {
-                quietly("systemctl", &["--user", "restart", unit]);
+                systemctl(system, &["restart", unit]);
             }
             if !assistant.is_empty() {
                 ready_kvasir(plan, console, chosen)?;
+                // the key Kvasir has just made is read by the account the
+                // assistant runs as, not by the one that made it
+                hand_over_files(plan, console);
                 for unit in &assistant {
-                    quietly("systemctl", &["--user", "restart", unit]);
+                    systemctl(system, &["restart", unit]);
                 }
             }
-            Ok(Started::of(unit_report(&names, console, Watcher::Systemd)))
+            Ok(Started::of(unit_report(
+                &names,
+                console,
+                Watcher::Systemd { system },
+            )))
         }
     }
 }
@@ -8741,7 +9234,11 @@ fn quietly(program: &str, args: &[&str]) -> bool {
 /// quadlets, or docker, for its containers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Watcher {
-    Systemd,
+    /// systemd, and whether the units are the machine's own rather than this
+    /// account's.
+    Systemd {
+        system: bool,
+    },
     Docker,
 }
 
@@ -8751,8 +9248,9 @@ enum Watcher {
 /// instant reported it running while it crashed in a loop.
 fn unit_report(names: &[String], console: &Console, watcher: Watcher) -> Vec<Service> {
     let look = |unit: &str| match watcher {
-        Watcher::Systemd => run_quiet("systemctl", &["--user", "is-active", unit])
-            .is_some_and(|s| s.trim() == "active"),
+        Watcher::Systemd { system } => {
+            systemctl_says(system, &["is-active", unit]).is_some_and(|s| s.trim() == "active")
+        }
         Watcher::Docker => run_quiet("docker", &["inspect", "-f", "{{.State.Running}}", unit])
             .is_some_and(|s| s.trim() == "true"),
     };
@@ -8780,7 +9278,7 @@ fn unit_report(names: &[String], console: &Console, watcher: Watcher) -> Vec<Ser
                     }
                 }
                 said.push(match watcher {
-                    Watcher::Systemd => format!("its log: journalctl --user -u {unit}"),
+                    Watcher::Systemd { system } => journal_line(system, unit),
                     Watcher::Docker => format!("its log: docker logs {unit}"),
                 });
             }
@@ -8817,10 +9315,13 @@ fn services_text(services: &[Service]) -> String {
 /// The line of a unit's log most likely to say why it stopped.
 fn last_error(unit: &str, watcher: Watcher) -> Option<String> {
     let log = match watcher {
-        Watcher::Systemd => run_quiet(
-            "journalctl",
-            &["--user", "-u", unit, "-n", "80", "--no-pager", "-o", "cat"],
-        )?,
+        Watcher::Systemd { system } => {
+            let mut args = vec!["-u", unit, "-n", "80", "--no-pager", "-o", "cat"];
+            if !system {
+                args.insert(0, "--user");
+            }
+            run_quiet("journalctl", &args)?
+        }
         Watcher::Docker => {
             let out = Command::new("docker")
                 .args(["logs", "--tail", "80", unit])
@@ -8878,28 +9379,32 @@ struct UnitCall {
 /// a user manager at all, and every call after it needs one. Enabling is for
 /// units written as files; podman's quadlets are generated from the files
 /// and carry their own `[Install]` section instead.
-fn hand_units_to_systemd(units: &[String], enable: bool) -> Vec<UnitCall> {
-    let words = |argv: &[&str]| {
-        argv.iter()
-            .map(|w| (*w).to_string())
-            .collect::<Vec<String>>()
-    };
-    let linger = match whoami() {
-        Some(me) => words(&["loginctl", "enable-linger", me.as_str()]),
-        None => words(&["loginctl", "enable-linger"]),
-    };
-    let mut out = vec![UnitCall {
-        argv: linger,
-        needed: false,
-    }];
+fn hand_units_to_systemd(units: &[String], enable: bool, system: bool) -> Vec<UnitCall> {
+    let mut out = Vec::new();
+    // The machine's own manager is there whoever is logged in, and asks for
+    // no lingering at all.
+    if !system {
+        let words = |argv: &[&str]| {
+            argv.iter()
+                .map(|w| (*w).to_string())
+                .collect::<Vec<String>>()
+        };
+        out.push(UnitCall {
+            argv: match whoami() {
+                Some(me) => words(&["loginctl", "enable-linger", me.as_str()]),
+                None => words(&["loginctl", "enable-linger"]),
+            },
+            needed: false,
+        });
+    }
     out.push(UnitCall {
-        argv: words(&["systemctl", "--user", "daemon-reload"]),
+        argv: systemctl_argv(system, &["daemon-reload"]),
         needed: true,
     });
     if enable {
         for unit in units {
             out.push(UnitCall {
-                argv: words(&["systemctl", "--user", "enable", unit]),
+                argv: systemctl_argv(system, &["enable", unit]),
                 needed: false,
             });
         }
@@ -8913,7 +9418,7 @@ fn hand_units_to_systemd(units: &[String], enable: bool) -> Vec<UnitCall> {
 /// saying so here is the difference between a sentence and an install that
 /// writes every file and then reports that nothing started. The rest are
 /// given back rather than swallowed, for the person to read.
-fn make_the_calls(calls: &[UnitCall]) -> Result<Vec<String>, Exit> {
+fn make_the_calls(calls: &[UnitCall], system: bool) -> Result<Vec<String>, Exit> {
     let mut refused = Vec::new();
     for call in calls {
         let Some((program, args)) = call.argv.split_first() else {
@@ -8924,12 +9429,19 @@ fn make_the_calls(calls: &[UnitCall]) -> Result<Vec<String>, Exit> {
             continue;
         }
         if call.needed {
+            let fix = if system {
+                "run nils setup as root on a machine systemd runs".to_string()
+            } else {
+                format!(
+                    "sign in as the account that runs NILS, or allow it to keep services without \
+                     a login (loginctl enable-linger {})",
+                    whoami().unwrap_or_else(|| "<account>".to_string())
+                )
+            };
             return Err(fail(format!(
                 "systemd would not take the services: {} was refused, so nothing here was \
-                 started; sign in as the account that runs NILS, or allow it to keep services \
-                 without a login (loginctl enable-linger {}), and run nils setup again",
-                call.argv.join(" "),
-                whoami().unwrap_or_else(|| "<account>".to_string())
+                 started; {fix}, and run nils setup again",
+                call.argv.join(" ")
             )));
         }
         refused.push(call.argv.join(" "));
@@ -8937,8 +9449,191 @@ fn make_the_calls(calls: &[UnitCall]) -> Result<Vec<String>, Exit> {
     Ok(refused)
 }
 
+/// The lines a service of this machine carries that a service of an
+/// account's own cannot: the account it runs as, the capabilities the engine
+/// keeps, and, for a part that runs as another account than the engine's,
+/// the home directories and the data it never reads kept out of its reach.
+/// Empty for the services of this account, which is every install on a
+/// laptop.
+fn service_of_machine(plan: &Plan, part: &str) -> String {
+    let Some(system) = &plan.system else {
+        return String::new();
+    };
+    let account = system.account(part);
+    let mut out = format!("User={account}\n");
+    if part == "engine" {
+        if !system.capabilities.is_empty() {
+            let named = system.capabilities.join(" ");
+            let _ = write!(
+                out,
+                "AmbientCapabilities={named}\nCapabilityBoundingSet={named}\n"
+            );
+        }
+        return out;
+    }
+    // A part that does not run as the engine's account is one that never
+    // reads the archive: it asks the engine at its own address. What it does
+    // not read is kept out of its reach, and the home directories with it,
+    // unless this install lives in one.
+    if account == system.account("engine") {
+        return out;
+    }
+    if !under_home(&plan.dir) {
+        out.push_str("ProtectHome=yes\n");
+    }
+    for path in engine_data(plan) {
+        let _ = writeln!(out, "InaccessiblePaths=-{}", path.display());
+    }
+    out
+}
+
+/// Whether a directory is under a home, where keeping the home directories
+/// out of a service's reach would keep its own files out with them.
+fn under_home(dir: &Path) -> bool {
+    dir.starts_with("/home") || dir.starts_with("/root") || dir.starts_with("/Users")
+}
+
+/// What the engine alone reads: the registry, the archives and every folder
+/// of DICOM it is given.
+fn engine_data(plan: &Plan) -> Vec<PathBuf> {
+    let mut out = vec![plan.registry(), plan.dir.join("backups")];
+    for (_, path) in plan.read_from() {
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// What each part reads and writes, and the account it runs as: the
+/// registry, the archives, the work in flight and what is exported are the
+/// engine's; the desk's folder is the desk's; Kvasir's and the assistant's
+/// are the assistant's. Nothing else is given away: the base directory
+/// itself, the passphrase written where there was no terminal to ask on, and
+/// the supervisor's folder stay with the account that ran setup.
+///
+/// Every file an install writes is written as whoever runs setup, which for
+/// the services of this machine is root. A part that runs as an account of
+/// its own has to be able to read its own configuration and write its own
+/// store, or it starts and stops again while the install reports that it
+/// finished.
+fn files_of(plan: &Plan) -> Vec<(PathBuf, String)> {
+    let Some(system) = &plan.system else {
+        return Vec::new();
+    };
+    let engine = system.account("engine").to_string();
+    let mut out: Vec<(PathBuf, String)> = ["registry", "backups", "working", "export"]
+        .iter()
+        .map(|sub| (plan.dir.join(sub), engine.clone()))
+        .collect();
+    if plan.has(Part::Desk) {
+        out.push((plan.desk_dir(), system.account("desk").to_string()));
+    }
+    if plan.has(Part::Assistant) {
+        let assistant = system.account("assistant").to_string();
+        out.push((plan.dir.join("assistant"), assistant.clone()));
+        out.push((plan.dir.join("kvasir"), assistant));
+    }
+    out
+}
+
+/// The files of each part given to the account that part runs as. A path
+/// that is not there yet is passed over: this runs before the services start
+/// and again once a part has been given what it needed to start, so a file
+/// written between the two is caught by the second.
+fn hand_over_files(plan: &Plan, console: &Console) {
+    for (path, account) in files_of(plan) {
+        if !path.exists() {
+            continue;
+        }
+        let Some((uid, gid)) = account_ids(&account) else {
+            console.warn(&format!(
+                "{} was left as it is, since this machine has no {account} account",
+                path.display()
+            ));
+            continue;
+        };
+        if let Err(e) = give_to(&path, uid, gid) {
+            console.warn(&format!(
+                "{} did not become {account}'s, so that part may not read it: {e}",
+                path.display()
+            ));
+        }
+    }
+}
+
+/// One file, or one tree, given to an account. A symbolic link is changed
+/// rather than followed, so that a link into someone else's folder leaves
+/// that folder alone.
+fn give_to(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+        if path.is_symlink() || !path.is_dir() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(path)? {
+            give_to(&entry?.path(), uid, gid)?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, uid, gid);
+    Ok(())
+}
+
+/// The record an install of this plan would write, as far as the units read
+/// it: the parts there would be, and what each runs from. For `--print`,
+/// which writes nothing and so has no record to read.
+fn planned_state(plan: &Plan) -> State {
+    let me = std::env::current_exe()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .unwrap_or_else(|_| PathBuf::from("nils"));
+    let into = binary_dir(&me, plan);
+    let mut state = State {
+        dir: plan.dir.display().to_string(),
+        ports: plan.ports,
+        system: plan.system.clone(),
+        ..State::default()
+    };
+    let mut part = |name: &str, path: &Path, kind: &str| {
+        state.parts.insert(
+            name.to_string(),
+            PartState {
+                version: plan.version.clone(),
+                path: path.display().to_string(),
+                kind: kind.to_string(),
+            },
+        );
+    };
+    part("engine", &me, "binary");
+    if plan.has(Part::Desk) && !plan.runtime.container() {
+        part("desk", &into.join("nils-desk"), "binary");
+    }
+    if plan.has(Part::Assistant) {
+        part("kvasir", &plan.dir.join("kvasir"), "node");
+        part("assistant", &plan.dir.join("assistant"), "node");
+    }
+    state
+}
+
+/// What an install hands systemd once the units are written, as a person
+/// would type it: the calls that give them over, then the restart of each.
+fn unit_calls(plan: &Plan, names: &[String]) -> Vec<String> {
+    let system = plan.system.is_some();
+    let mut out: Vec<String> = hand_units_to_systemd(names, true, system)
+        .iter()
+        .map(|call| call.argv.join(" "))
+        .collect();
+    for name in names {
+        out.push(systemctl_argv(system, &["restart", name]).join(" "));
+    }
+    out
+}
+
 /// One unit per part, for the parts that run on the machine.
 pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)> {
+    let system = plan.system.is_some();
+    let wanted = wanted_by(system);
     let engine = state
         .parts
         .get("engine")
@@ -8954,8 +9649,9 @@ pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)>
     let mut out = vec![(
         "nils-engine.service".to_string(),
         format!(
-            "[Unit]\nDescription=NILS engine\nAfter=network-online.target\n{postgres_after}\n[Service]\n\
-             ExecStart={engine} {}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
+            "[Unit]\nDescription=NILS engine\nAfter=network-online.target\n{postgres_after}\n[Service]\n{}\
+             ExecStart={engine} {}\nRestart=on-failure\n\n[Install]\nWantedBy={wanted}\n",
+            service_of_machine(plan, "engine"),
             engine_args(
                 plan,
                 &plan.registry().display().to_string(),
@@ -8968,9 +9664,10 @@ pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)>
         out.push((
             "nils-desk.service".to_string(),
             format!(
-                "[Unit]\nDescription=NILS desk\nAfter=nils-engine.service\n\n[Service]\n\
+                "[Unit]\nDescription=NILS desk\nAfter=nils-engine.service\n\n[Service]\n{}\
                  ExecStart={} serve --config {}\nWorkingDirectory={}\nRestart=on-failure\n\n\
-                 [Install]\nWantedBy=default.target\n",
+                 [Install]\nWantedBy={wanted}\n",
+                service_of_machine(plan, "desk"),
                 desk.path,
                 plan.desk_config().display(),
                 plan.desk_dir().display(),
@@ -8988,9 +9685,10 @@ pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)>
         out.push((
             "kvasir.service".to_string(),
             format!(
-                "[Unit]\nDescription=Kvasir, the model gateway\n\n[Service]\n\
+                "[Unit]\nDescription=Kvasir, the model gateway\n\n[Service]\n{}\
                  ExecStart=/usr/bin/env node dist/main.js --config kvasir.json\n\
-                 WorkingDirectory={}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
+                 WorkingDirectory={}\nRestart=on-failure\n\n[Install]\nWantedBy={wanted}\n",
+                service_of_machine(plan, "assistant"),
                 plan.dir.join("kvasir").display()
             ),
         ));
@@ -9001,9 +9699,10 @@ pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)>
             "nils-assistant.service".to_string(),
             format!(
                 "[Unit]\nDescription=NILS assistant\nAfter=nils-engine.service kvasir.service\n\n\
-                 [Service]\nEnvironmentFile={}\n\
+                 [Service]\n{}EnvironmentFile={}\n\
                  ExecStart=/usr/bin/env node {}\n\
-                 WorkingDirectory={}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
+                 WorkingDirectory={}\nRestart=on-failure\n\n[Install]\nWantedBy={wanted}\n",
+                service_of_machine(plan, "assistant"),
                 dir.join("assistant.env").display(),
                 assistant_entry(&dir),
                 dir.display()
@@ -9065,10 +9764,12 @@ fn llama_argv(plan: &Plan, build: &Path, host: &str) -> Vec<String> {
 fn llama_unit(plan: &Plan, build: &Path, host: &str) -> String {
     format!(
         "[Unit]\nDescription=llama.cpp, which runs the models Kvasir starts\n\
-         After=network-online.target\n\n[Service]\nExecStart={}\nWorkingDirectory={}\n\
-         Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
+         After=network-online.target\n\n[Service]\n{}ExecStart={}\nWorkingDirectory={}\n\
+         Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy={}\n",
+        service_of_machine(plan, "assistant"),
         llama_argv(plan, build, host).join(" "),
-        plan.runtime_dir().display()
+        plan.runtime_dir().display(),
+        wanted_by(plan.system.is_some())
     )
 }
 
@@ -9086,16 +9787,17 @@ fn start_llama_unit(plan: &Plan, state: &State) -> Option<String> {
         return None;
     }
     let part = state.parts.get(LLAMA_PART)?;
-    let dir = units_dir();
+    let system = plan.system.is_some();
+    let dir = units_dir(system);
     std::fs::create_dir_all(&dir).ok()?;
     std::fs::write(
         dir.join("nils-llama.service"),
         llama_unit(plan, Path::new(&part.path), &llama_host(plan)),
     )
     .ok()?;
-    quietly("systemctl", &["--user", "daemon-reload"]);
-    quietly("systemctl", &["--user", "enable", "nils-llama"]);
-    quietly("systemctl", &["--user", "restart", "nils-llama"]);
+    systemctl(system, &["daemon-reload"]);
+    systemctl(system, &["enable", "nils-llama"]);
+    systemctl(system, &["restart", "nils-llama"]);
     Some("nils-llama".to_string())
 }
 
@@ -9640,6 +10342,10 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
         return;
     }
     let mut plan = plan_from_state(&state, channel);
+    if let Some(refused) = recorded_system_refusal(&plan) {
+        println!("the services were left alone: {refused}");
+        return;
+    }
     if let Some(engine) = state.parts.get("engine") {
         plan.version = engine.version.clone();
     }
@@ -9667,6 +10373,8 @@ pub(crate) struct Unit {
     pub(crate) name: String,
     /// `systemd`, `docker` or `launchd`.
     pub(crate) watcher: &'static str,
+    /// Whether a systemd unit is the machine's own rather than the account's.
+    pub(crate) system: bool,
 }
 
 /// The unit each part of a recorded install runs under, in the order the
@@ -9678,12 +10386,14 @@ pub(crate) fn service_units(state: &State) -> Vec<Unit> {
         return Vec::new();
     }
     let runtime = Runtime::parse(&state.runtime).unwrap_or(Runtime::Machine);
+    let system = state.system.is_some();
     let mut out = Vec::new();
     let mut push = |part: &'static str, name: &str, watcher: &'static str| {
         out.push(Unit {
             part,
             name: name.to_string(),
             watcher,
+            system,
         });
     };
     match state.parts.get("postgres").map(|p| p.kind.as_str()) {
@@ -9763,7 +10473,7 @@ pub(crate) fn unit_running(unit: &Unit) -> bool {
         "launchd" => {
             run_quiet("launchctl", &["list", &unit.name]).is_some_and(|s| s.contains("\"PID\""))
         }
-        _ => run_quiet("systemctl", &["--user", "is-active", &unit.name])
+        _ => systemctl_says(unit.system, &["is-active", &unit.name])
             .is_some_and(|s| s.trim() == "active"),
     }
 }
@@ -9887,7 +10597,7 @@ pub(crate) fn restart_units(state: &State, part: Option<&str>) -> Result<Vec<Str
                 "launchctl",
                 &["kickstart", "-k", &format!("gui/{uid}/{}", unit.name)],
             ),
-            _ => quietly("systemctl", &["--user", "restart", &unit.name]),
+            _ => systemctl(unit.system, &["restart", &unit.name]),
         };
         if !ok {
             return Err(fail(format!(
@@ -9969,18 +10679,20 @@ pub(crate) fn reapply_engine(state: &State) -> Result<(), Exit> {
                 .output();
         }
         (Runtime::Machine, false) => {
-            let dir = units_dir();
+            let system = plan.system.is_some();
+            let dir = units_dir(system);
             let (name, unit) = systemd_units(&plan, state)
                 .into_iter()
                 .find(|(n, _)| n == "nils-engine.service")
                 .ok_or_else(|| fail("no unit names the engine"))?;
             std::fs::write(dir.join(&name), unit)
                 .map_err(|e| fail(format!("{}: {e}", dir.display())))?;
-            quietly("systemctl", &["--user", "daemon-reload"]);
-            if !quietly("systemctl", &["--user", "restart", "nils-engine"]) {
-                return Err(fail(
-                    "the engine did not start again; its log: journalctl --user -u nils-engine",
-                ));
+            systemctl(system, &["daemon-reload"]);
+            if !systemctl(system, &["restart", "nils-engine"]) {
+                return Err(fail(format!(
+                    "the engine did not start again; {}",
+                    journal_line(system, "nils-engine")
+                )));
             }
         }
     }
@@ -10090,7 +10802,9 @@ fn supervisor_binary(state: &State) -> String {
 }
 
 /// The supervisor as a service of its own, on this host and outside every
-/// container, since it restarts them.
+/// container, since it restarts them. Where the services are this machine's
+/// it stays root's: it restarts them and replaces the binaries they run, and
+/// an account that could do that is an account that runs the install.
 fn supervisor_service(plan: &Plan, state: &State) -> (String, String) {
     let nils = supervisor_binary(state);
     let config = supervisor_config(plan).display().to_string();
@@ -10114,7 +10828,8 @@ fn supervisor_service(plan: &Plan, state: &State) -> (String, String) {
             "[Unit]\nDescription=NILS supervisor\nAfter=network-online.target\n\n[Service]\n\
              ExecStart={nils} supervise run --config {config}\nRestart=on-failure\nRestartSec=5\n\
              # a run it started, an update among them, outlives a restart of the supervisor\n\
-             KillMode=process\n\n[Install]\nWantedBy=default.target\n"
+             KillMode=process\n\n[Install]\nWantedBy={}\n",
+            wanted_by(plan.system.is_some())
         ),
     )
 }
@@ -10151,19 +10866,23 @@ fn start_supervisor(plan: &Plan, state: &State, console: &Console) {
         }
         return;
     }
-    let dir = units_dir();
+    let system = plan.system.is_some();
+    let dir = units_dir(system);
     if let Err(e) =
         std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(&name), unit))
     {
         console.warn(&format!("the supervisor's unit was not written: {e}"));
         return;
     }
-    quietly("systemctl", &["--user", "daemon-reload"]);
-    quietly("systemctl", &["--user", "enable", "nils-supervise"]);
-    if quietly("systemctl", &["--user", "restart", "nils-supervise"]) {
+    systemctl(system, &["daemon-reload"]);
+    systemctl(system, &["enable", "nils-supervise"]);
+    if systemctl(system, &["restart", "nils-supervise"]) {
         console.progress(&format!("the supervisor on {}", supervisor_bind(plan)));
     } else {
-        console.warn("the supervisor did not start; its log: journalctl --user -u nils-supervise");
+        console.warn(&format!(
+            "the supervisor did not start; {}",
+            journal_line(system, "nils-supervise")
+        ));
     }
 }
 
@@ -10214,6 +10933,8 @@ const FIRST_PARTY_PACKS: [&str; 2] = ["mri", "clinical"];
 struct Removal {
     dir: PathBuf,
     runtime: String,
+    /// Whether the units are the machine's own rather than this account's.
+    system: bool,
     /// Unit names to stop and disable, and the files that define them.
     units: Vec<String>,
     unit_files: Vec<PathBuf>,
@@ -10536,6 +11257,7 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
     let mut removal = Removal {
         dir: dir.clone(),
         runtime: state.runtime.clone(),
+        system: state.system.is_some(),
         units: Vec::new(),
         unit_files: Vec::new(),
         containers: Vec::new(),
@@ -10608,7 +11330,7 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         }
         _ => {
             for unit in ["nils-assistant", "kvasir", "nils-desk", "nils-engine"] {
-                let path = units_dir().join(format!("{unit}.service"));
+                let path = units_dir(removal.system).join(format!("{unit}.service"));
                 if path.exists() {
                     removal.units.push(unit.to_string());
                     removal.unit_files.push(path);
@@ -10631,7 +11353,7 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         }
     } else {
         for unit in ["nils-supervise", "nils-llama"] {
-            let path = units_dir().join(format!("{unit}.service"));
+            let path = units_dir(removal.system).join(format!("{unit}.service"));
             if path.exists() {
                 removal.units.push(unit.to_string());
                 removal.unit_files.push(path);
@@ -10950,9 +11672,9 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
     // the units on this machine, the supervisor and llama.cpp among them on a
     // docker install too, whose containers go below
     if !removal.units.is_empty() {
-        let mut args = vec!["--user", "disable", "--now"];
+        let mut args = vec!["disable", "--now"];
         args.extend(removal.units.iter().map(String::as_str));
-        quietly("systemctl", &args);
+        systemctl(removal.system, &args);
     }
     if cfg!(target_os = "macos") {
         for file in &removal.unit_files {
@@ -10966,10 +11688,10 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
         let _ = std::fs::remove_file(file);
     }
     if !removal.unit_files.is_empty() && !cfg!(target_os = "macos") {
-        quietly("systemctl", &["--user", "daemon-reload"]);
-        let mut args = vec!["--user", "reset-failed"];
+        systemctl(removal.system, &["daemon-reload"]);
+        let mut args = vec!["reset-failed"];
         args.extend(removal.units.iter().map(String::as_str));
-        quietly("systemctl", &args);
+        systemctl(removal.system, &args);
         say(format!(
             "stopped and removed {}",
             if removal.units.is_empty() {
@@ -11188,6 +11910,7 @@ mod tests {
             postgres: None,
             oidc: None,
             llama: None,
+            system: None,
         }
     }
 
@@ -13155,7 +13878,7 @@ mod tests {
     #[test]
     fn the_account_is_lingered_before_systemd_is_given_anything() {
         let units = vec!["nils-engine".to_string(), "nils-desk".to_string()];
-        let calls = hand_units_to_systemd(&units, true);
+        let calls = hand_units_to_systemd(&units, true, false);
         let said: Vec<String> = calls.iter().map(|c| c.argv.join(" ")).collect();
         assert!(
             said[0].starts_with("loginctl enable-linger"),
@@ -13177,7 +13900,7 @@ mod tests {
             assert!(said[0].ends_with(&me), "{said:?}");
         }
         // a quadlet is generated and carries its own [Install] section
-        assert_eq!(hand_units_to_systemd(&[], false).len(), 2);
+        assert_eq!(hand_units_to_systemd(&[], false, false).len(), 2);
     }
 
     #[test]
@@ -13210,6 +13933,412 @@ mod tests {
             no_manager_words(Runtime::Machine, true),
             "no service manager here, so the commands are printed instead"
         );
+    }
+
+    /// A plan with the services of this machine, each part as its own
+    /// account, in a directory that is nobody's home.
+    fn deployment() -> Plan {
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = PathBuf::from("/srv/nils");
+        plan.parts = vec![Part::Engine, Part::Desk, Part::Assistant];
+        plan.system = Some(SystemUnits {
+            capabilities: vec![
+                "CAP_DAC_OVERRIDE".to_string(),
+                "CAP_DAC_READ_SEARCH".to_string(),
+            ],
+            accounts: BTreeMap::from([
+                ("desk".to_string(), "nils-desk".to_string()),
+                ("assistant".to_string(), "nils-assistant".to_string()),
+            ]),
+        });
+        plan
+    }
+
+    /// Every part of a deployment, as its record names them.
+    fn deployed_parts() -> [(&'static str, &'static str); 4] {
+        [
+            ("engine", "binary"),
+            ("desk", "binary"),
+            ("kvasir", "node"),
+            ("assistant", "node"),
+        ]
+    }
+
+    #[test]
+    fn the_services_of_a_machine_name_an_account_and_the_engines_capabilities() {
+        let plan = deployment();
+        let state = state_of(&plan, &deployed_parts());
+        let units = systemd_units(&plan, &state);
+        let unit = |name: &str| {
+            units
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, text)| text.clone())
+                .unwrap_or_else(|| panic!("no {name} among {units:?}"))
+        };
+
+        // the engine keeps what it needs to read and write across the
+        // filesystems a site mounts, which no unit of an account's own can
+        let engine = unit("nils-engine.service");
+        assert!(engine.contains("User=nils\n"), "{engine}");
+        assert!(
+            engine.contains("AmbientCapabilities=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH"),
+            "{engine}"
+        );
+        assert!(
+            engine.contains("CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH"),
+            "{engine}"
+        );
+        assert!(engine.contains("WantedBy=multi-user.target"), "{engine}");
+        assert!(
+            !engine.contains("InaccessiblePaths") && !engine.contains("ProtectHome"),
+            "the engine is the part that reads the data: {engine}"
+        );
+
+        // the parts a browser reaches run as another account, and what they
+        // never read is out of their reach
+        let desk = unit("nils-desk.service");
+        assert!(desk.contains("User=nils-desk\n"), "{desk}");
+        assert!(
+            !desk.contains("AmbientCapabilities"),
+            "only the engine keeps capabilities: {desk}"
+        );
+        assert!(desk.contains("ProtectHome=yes"), "{desk}");
+        assert!(
+            desk.contains("InaccessiblePaths=-/srv/nils/registry"),
+            "{desk}"
+        );
+        assert!(
+            desk.contains("InaccessiblePaths=-/srv/nils/backups"),
+            "{desk}"
+        );
+        assert!(desk.contains("InaccessiblePaths=-/data/source"), "{desk}");
+        assert!(unit("kvasir.service").contains("User=nils-assistant\n"));
+        assert!(unit("nils-assistant.service").contains("User=nils-assistant\n"));
+        assert!(
+            llama_unit(&plan, Path::new("/srv/nils/llama.cpp/b1"), "127.0.0.1")
+                .contains("User=nils-assistant\n"),
+            "llama.cpp runs the assistant's models"
+        );
+
+        // the supervisor restarts them and replaces their binaries, so it
+        // stays with the account that installed them
+        let (name, supervisor) = supervisor_service(&plan, &state);
+        assert_eq!(name, "nils-supervise.service");
+        assert!(!supervisor.contains("User="), "{supervisor}");
+        assert!(
+            supervisor.contains("WantedBy=multi-user.target"),
+            "{supervisor}"
+        );
+
+        // an install inside a home is not shut out of its own files
+        let mut at_home = plan.clone();
+        at_home.dir = PathBuf::from("/home/you/nils");
+        let state = state_of(&at_home, &deployed_parts());
+        let desk = systemd_units(&at_home, &state)
+            .into_iter()
+            .find(|(n, _)| n == "nils-desk.service")
+            .map(|(_, text)| text)
+            .unwrap();
+        assert!(desk.contains("User=nils-desk\n"), "{desk}");
+        assert!(
+            !desk.contains("ProtectHome"),
+            "its own files are under a home: {desk}"
+        );
+    }
+
+    #[test]
+    fn a_plain_install_writes_the_units_it_always_wrote() {
+        let plan = plan(Runtime::Machine);
+        assert!(plan.system.is_none());
+        let state = state_of(&plan, &[("engine", "binary"), ("desk", "binary")]);
+        for (name, text) in systemd_units(&plan, &state) {
+            assert!(!text.contains("User="), "{name}: {text}");
+            assert!(!text.contains("AmbientCapabilities"), "{name}: {text}");
+            assert!(!text.contains("ProtectHome"), "{name}: {text}");
+            assert!(text.contains("WantedBy=default.target"), "{name}: {text}");
+        }
+        assert!(
+            files_of(&plan).is_empty(),
+            "an install of this account gives nothing away"
+        );
+        assert_eq!(units_dir(true), PathBuf::from("/etc/systemd/system"));
+        assert!(units_dir(false).ends_with("systemd/user"));
+    }
+
+    #[test]
+    fn the_services_of_a_machine_are_refused_where_they_cannot_be_had() {
+        let refused = |runtime, root, systemd, missing: &[&str]| {
+            let missing: Vec<String> = missing.iter().map(|m| (*m).to_string()).collect();
+            system_refusal_when(runtime, root, systemd, &missing)
+        };
+        let said = refused(Runtime::Podman, true, true, &[]).unwrap();
+        assert!(said.contains("--runtime machine"), "{said}");
+        let said = refused(Runtime::Machine, true, false, &[]).unwrap();
+        assert!(said.contains("no systemd"), "{said}");
+        let said = refused(Runtime::Machine, false, true, &[]).unwrap();
+        assert!(said.contains("is root's to do"), "{said}");
+        let said = refused(Runtime::Machine, true, true, &["nils", "nils-desk"]).unwrap();
+        assert!(
+            said.contains("there are no accounts on this machine named nils, nils-desk"),
+            "{said}"
+        );
+        let said = refused(Runtime::Machine, true, true, &["nils-desk"]).unwrap();
+        assert!(
+            said.contains("there is no account on this machine named nils-desk"),
+            "the account named is the one said: {said}"
+        );
+        assert!(
+            !said.contains("useradd"),
+            "a service account is the site's own to make, and setup makes none: {said}"
+        );
+        assert_eq!(refused(Runtime::Machine, true, true, &[]), None);
+
+        // what a service of this account cannot carry is not taken for one
+        let said = without_system(false, true).unwrap();
+        assert!(said.contains("--capabilities goes with --system"), "{said}");
+        let said = without_system(true, false).unwrap();
+        assert!(said.contains("--account goes with --system"), "{said}");
+        assert_eq!(without_system(false, false), None);
+    }
+
+    #[test]
+    fn an_account_and_a_capability_are_read_as_what_they_are() {
+        let given = accounts_given(&["desk=nils-desk".to_string(), "engine=nils".to_string()])
+            .expect("two parts");
+        assert_eq!(given.get("desk").map(String::as_str), Some("nils-desk"));
+        let system = SystemUnits {
+            accounts: given,
+            ..SystemUnits::default()
+        };
+        assert_eq!(system.account("desk"), "nils-desk");
+        assert_eq!(
+            system.account("assistant"),
+            "nils",
+            "a part not named runs as the default account"
+        );
+        for (bad, says) in [
+            ("nils", "names no account"),
+            ("gateway=nils", "is not a part"),
+            ("desk=", "names no account"),
+            ("desk=a b", "is not the name of an account"),
+        ] {
+            let refused = accounts_given(&[bad.to_string()]).unwrap_err();
+            assert!(refused.contains(says), "{bad}: {refused}");
+        }
+
+        assert_eq!(
+            capabilities_given("cap_dac_override, dac_read_search").unwrap(),
+            vec![
+                "CAP_DAC_OVERRIDE".to_string(),
+                "CAP_DAC_READ_SEARCH".to_string()
+            ],
+            "written however a person writes them"
+        );
+        assert!(capabilities_given("").unwrap().is_empty());
+        let refused = capabilities_given("CAP_DAC_OVERIDE").unwrap_err();
+        assert!(
+            refused.contains("is not a capability a service can keep"),
+            "one misspelled is said here, not by a service that will not start: {refused}"
+        );
+    }
+
+    #[test]
+    fn the_services_a_record_names_are_the_services_an_update_writes() {
+        let dir = scratch("system-record");
+        let state = State {
+            dir: dir.display().to_string(),
+            mode: "off".to_string(),
+            runtime: "machine".to_string(),
+            service: SYSTEM_MANAGER.to_string(),
+            reach: "loopback".to_string(),
+            parts: BTreeMap::from([
+                (
+                    "engine".to_string(),
+                    PartState {
+                        version: "1.0.0".to_string(),
+                        path: "/usr/local/bin/nils".to_string(),
+                        kind: "binary".to_string(),
+                    },
+                ),
+                (
+                    "desk".to_string(),
+                    PartState {
+                        version: "1.0.0".to_string(),
+                        path: "/usr/local/bin/nils-desk".to_string(),
+                        kind: "binary".to_string(),
+                    },
+                ),
+            ]),
+            system: Some(SystemUnits {
+                capabilities: vec!["CAP_DAC_OVERRIDE".to_string()],
+                accounts: BTreeMap::from([("desk".to_string(), "nils-desk".to_string())]),
+            }),
+            ..State::default()
+        };
+
+        // it is written down, where a person can read it
+        let written = toml::to_string(&state).unwrap();
+        assert!(
+            written.contains("service = \"systemd system units\""),
+            "{written}"
+        );
+        assert!(
+            written.contains("capabilities = [\"CAP_DAC_OVERRIDE\"]"),
+            "{written}"
+        );
+        assert!(written.contains("[system.accounts]"), "{written}");
+        assert!(written.contains("desk = \"nils-desk\""), "{written}");
+
+        // an update and a repair are made from the record and nothing else
+        let read: State = toml::from_str(&written).unwrap();
+        let plan = plan_from_state(&read, None);
+        assert_eq!(plan.system, state.system);
+        let units = systemd_units(&plan, &read);
+        assert!(units[0].1.contains("User=nils\n"), "{}", units[0].1);
+        assert!(
+            units[0].1.contains("AmbientCapabilities=CAP_DAC_OVERRIDE"),
+            "{}",
+            units[0].1
+        );
+        assert!(
+            units
+                .iter()
+                .any(|(n, t)| n == "nils-desk.service" && t.contains("User=nils-desk\n")),
+            "{units:?}"
+        );
+        // they go to the machine's directory, and to its manager
+        let calls = unit_calls(&plan, &["nils-engine".to_string()]);
+        assert!(
+            !calls.iter().any(|call| call.contains("loginctl")),
+            "the machine's manager is there whoever is logged in: {calls:?}"
+        );
+        assert!(
+            calls.contains(&"systemctl daemon-reload".to_string()),
+            "{calls:?}"
+        );
+        assert!(
+            calls.contains(&"systemctl enable nils-engine".to_string()),
+            "{calls:?}"
+        );
+        assert!(
+            calls.contains(&"systemctl restart nils-engine".to_string()),
+            "{calls:?}"
+        );
+        assert!(
+            service_units(&read).iter().all(|unit| unit.system),
+            "the supervisor asks the machine's manager too"
+        );
+        assert_eq!(install_doc(&read)["service"], SYSTEM_MANAGER);
+
+        // and a record from before this, or one of an account's own, is
+        // what it always was
+        let plain = State {
+            service: "systemd user units".to_string(),
+            system: None,
+            ..read
+        };
+        let plan = plan_from_state(&plain, None);
+        assert!(plan.system.is_none());
+        assert!(!systemd_units(&plan, &plain)[0].1.contains("User="));
+        let calls = unit_calls(&plan, &["nils-engine".to_string()]);
+        assert!(calls[0].starts_with("loginctl enable-linger"), "{calls:?}");
+        assert!(
+            calls.contains(&"systemctl --user enable nils-engine".to_string()),
+            "{calls:?}"
+        );
+        assert!(service_units(&plain).iter().all(|unit| !unit.system));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_files_of_a_part_are_the_account_that_part_runs_as() {
+        let plan = deployment();
+        let files = files_of(&plan);
+        let owner = |path: &str| {
+            files
+                .iter()
+                .find(|(at, _)| at == Path::new(path))
+                .map(|(_, account)| account.as_str())
+        };
+        // the engine writes the registry, the archives and the work in flight
+        for path in [
+            "/srv/nils/registry",
+            "/srv/nils/backups",
+            "/srv/nils/working",
+            "/srv/nils/export",
+        ] {
+            assert_eq!(owner(path), Some("nils"), "{path}");
+        }
+        // the desk reads its own configuration and writes its own store, and
+        // Kvasir's folder holds the key the assistant reads
+        assert_eq!(owner("/srv/nils/desk"), Some("nils-desk"));
+        assert_eq!(owner("/srv/nils/kvasir"), Some("nils-assistant"));
+        assert_eq!(owner("/srv/nils/assistant"), Some("nils-assistant"));
+        // what no part reads stays with the account that ran setup
+        assert_eq!(owner("/srv/nils"), None);
+        assert_eq!(owner("/srv/nils/supervise"), None);
+        assert_eq!(owner("/srv/nils/key.passphrase"), None);
+
+        // and a tree is given whole, not only its top
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let dir = scratch("system-files");
+            std::fs::create_dir_all(dir.join("desk")).unwrap();
+            std::fs::write(dir.join("desk").join("nils-desk.toml"), "bind = \"\"").unwrap();
+            let me = std::fs::metadata(&dir).unwrap();
+            give_to(&dir, me.uid(), me.gid()).expect("the tree is given");
+            let file = std::fs::metadata(dir.join("desk").join("nils-desk.toml")).unwrap();
+            assert_eq!((file.uid(), file.gid()), (me.uid(), me.gid()));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn print_says_the_units_of_an_install_on_this_machine() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let console = Console::new(true);
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = PathBuf::from("/srv/nils");
+        let said = commands_text(&plan, &console);
+        assert!(said.contains("nils-engine.service"), "{said}");
+        assert!(said.contains("ExecStart="), "{said}");
+        assert!(
+            said.contains("nils-supervise.service"),
+            "the supervisor is a unit this writes too: {said}"
+        );
+        assert!(said.contains("systemctl --user daemon-reload"), "{said}");
+        assert!(
+            said.contains("systemctl --user restart nils-engine"),
+            "{said}"
+        );
+
+        // the services of this machine, which are the ones worth reading
+        plan.system = Some(SystemUnits {
+            capabilities: vec!["CAP_DAC_OVERRIDE".to_string()],
+            accounts: BTreeMap::new(),
+        });
+        let said = commands_text(&plan, &console);
+        assert!(said.contains("/etc/systemd/system"), "{said}");
+        assert!(said.contains("User=nils"), "{said}");
+        assert!(
+            said.contains("AmbientCapabilities=CAP_DAC_OVERRIDE"),
+            "{said}"
+        );
+        assert!(said.contains("systemctl daemon-reload"), "{said}");
+        assert!(
+            !said.contains("--user"),
+            "these are the machine's, not an account's: {said}"
+        );
+
+        // an install that writes none says how to start it by hand
+        plan.service = false;
+        let said = commands_text(&plan, &console);
+        assert!(said.contains("nils serve --bind"), "{said}");
+        assert!(!said.contains("ExecStart="), "{said}");
     }
 
     #[test]
