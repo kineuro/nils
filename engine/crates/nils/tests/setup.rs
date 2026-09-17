@@ -965,7 +965,7 @@ fn print_says_the_units_and_the_calls_of_an_install_on_this_machine() {
     );
     o.says(&format!("{as_engine} key add nils\n"));
     o.says(&format!(
-        "{as_engine} init --key nils --backend sqlite --scheme blake2b-32 --display-length 12\n"
+        "{as_engine} setup-registry init --backend sqlite\n"
     ));
     o.says(&format!(
         "{as_engine} place add registry {} --role registry --backup backups",
@@ -1406,11 +1406,40 @@ fn the_steps_taken_as_the_engines_account_declare_and_read_back_the_places_as_se
         "{}",
         String::from_utf8_lossy(&added.stderr)
     );
-    let made = output(nils_at(&registry).args(["init", "--key", "nils", "--backend", "sqlite"]));
+    let made = with_input(
+        nils_at(&registry).args(["setup-registry", "init", "--backend", "sqlite"]),
+        "",
+    );
     assert!(
         made.status.success(),
         "{}",
         String::from_utf8_lossy(&made.stderr)
+    );
+    let settings = |db: &Path| -> Vec<(String, String)> {
+        let db = rusqlite::Connection::open(db).unwrap();
+        ["pseudonym_scheme", "display_length", "pseudonym_key"]
+            .iter()
+            .map(|key| {
+                let value: String = db
+                    .query_row(
+                        "SELECT value FROM registry_meta WHERE key = ?1",
+                        [key],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                ((*key).to_string(), value)
+            })
+            .collect()
+    };
+    let made_as_setup = [
+        ("pseudonym_scheme".to_string(), "blake2b-32".to_string()),
+        ("display_length".to_string(), "12".to_string()),
+        ("pseudonym_key".to_string(), "nils".to_string()),
+    ];
+    assert_eq!(
+        settings(&registry.join("registry.db")),
+        made_as_setup,
+        "the registry setup makes, with the settings of its own process"
     );
     let sources = json(&output(
         nils_at(&registry).args(["setup-registry", "sources"]),
@@ -1574,6 +1603,103 @@ fn the_steps_taken_as_the_engines_account_declare_and_read_back_the_places_as_se
         "{}",
         String::from_utf8_lossy(&unanswered.stderr)
     );
+}
+
+/// On Postgres the step that makes a registry is given the connection string
+/// on its input alone, and writes it into `nils.toml` as it was given, with
+/// the settings setup makes every registry with. Runs where a test DSN is set.
+#[test]
+fn the_step_that_makes_a_registry_on_postgres_reads_the_connection_string_from_its_input() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres test is skipped");
+        return;
+    };
+    let schema = "nils_setup_step_input";
+    let drop = || {
+        nils_registry::Store::connect_postgres(&dsn, schema)
+            .expect("connect")
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    let nils = Installed::new("nils-setup-registry-step-postgres");
+    let base = TempDir::new("nils-setup-registry-step-postgres");
+    let registry = base.path().join("registry");
+    let nils_at = || {
+        let mut command = Command::new(nils.path());
+        command.arg("--registry").arg(&registry);
+        command
+    };
+    let added = with_input(
+        nils_at().args(["key", "add", "nils"]),
+        "a fixture passphrase\n",
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let words = [
+        "setup-registry",
+        "init",
+        "--backend",
+        "postgres",
+        "--schema",
+        schema,
+    ];
+    assert!(
+        words.iter().all(|word| !word.contains(dsn.as_str())),
+        "a command line is every account's to read"
+    );
+    let made = with_input(nils_at().args(words), &format!("{dsn}\n"));
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(registry.join("nils.toml")).unwrap()).unwrap();
+    assert_eq!(config["backend"].as_str(), Some("postgres"));
+    assert_eq!(
+        config["dsn"].as_str(),
+        Some(dsn.as_str()),
+        "the connection string as it was given, without the line end after it"
+    );
+    assert_eq!(config["schema"].as_str(), Some(schema));
+    let mut store = nils_registry::Store::connect_postgres(&dsn, schema).expect("connect");
+    let meta = store
+        .query(
+            &format!(
+                "SELECT key, value FROM {} \
+                 WHERE key IN ('pseudonym_scheme', 'display_length', 'pseudonym_key') ORDER BY key",
+                store.qualified("registry_meta")
+            ),
+            &[],
+        )
+        .expect("the registry's settings");
+    let settings: Vec<(String, String)> = meta
+        .iter()
+        .map(|row| {
+            (
+                row.text(0).unwrap_or_default().to_string(),
+                row.text(1).unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        settings,
+        [
+            ("display_length".to_string(), "12".to_string()),
+            ("pseudonym_key".to_string(), "nils".to_string()),
+            ("pseudonym_scheme".to_string(), "blake2b-32".to_string()),
+        ]
+    );
+    drop();
 }
 
 #[test]

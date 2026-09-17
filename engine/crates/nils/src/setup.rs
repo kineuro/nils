@@ -1025,11 +1025,11 @@ const SERVICE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin";
 /// The environment the engine's service runs with, which a step taken as its
 /// account runs with too, and nothing of root's. runuser keeps the caller's
 /// environment but for a few names, and the engine reads some of it: a
-/// `NILS_DSN` would send `nils init` to another database than the one it
-/// writes into `nils.toml`, and every step after it to that one, while the
-/// service reads the file; `NILS_PRINCIPAL`, `NILS_ACTOR` and `HOSTNAME` would
-/// sign the audit rows of the places declared; and root's `TMPDIR` may be a
-/// folder the account cannot enter. The unit sets none of those, so neither
+/// `NILS_DSN` would send the step that makes the registry to another database
+/// than the one it writes into `nils.toml`, and every step after it to that
+/// one, while the service reads the file; `NILS_PRINCIPAL`, `NILS_ACTOR` and
+/// `HOSTNAME` would sign the audit rows of the places declared; and root's
+/// `TMPDIR` may be a folder the account cannot enter. The unit sets none of those, so neither
 /// does this: the path systemd gives a service, the account's own name and
 /// the home its passwd entry names, as `User=` sets them, and the language
 /// root runs setup in, where it has one.
@@ -1178,39 +1178,36 @@ fn registry_init(backend: &BackendChoice) -> InitOptions {
     }
 }
 
-/// The two steps that make a registry, as the documentation gives them and
-/// as the container install takes them: the key added, with its passphrase
-/// on the input, then the registry made on that key. The passphrase goes
-/// over as it was given, since `nils key add` drops one final newline just
-/// as setup did when it added the key in its own process, so the key is the
-/// same either way. `nils init` is given every setting of [`registry_init`]
-/// outright rather than left to its defaults, which could change without
-/// this noticing; it takes the connection string on its command line, as the
-/// container install gives it. The default session scheme is `nils init`'s
-/// without the flag, as it is setup's.
+/// The two steps that make a registry: the key added, with its passphrase on
+/// the input, then the registry made on that key. The passphrase goes over as
+/// it was given, since `nils key add` drops one final newline just as setup
+/// did when it added the key in its own process, so the key is the same
+/// either way.
+///
+/// The registry is made by the hidden step rather than by `nils init`, since
+/// a Postgres connection string can carry a password and a command line is
+/// every account's to read: the step is named the backend and the schema, and
+/// reads the connection string from its input. It makes the registry from
+/// [`registry_init`] itself, as setup's own process does, so the pseudonym
+/// settings are one place's and cannot drift between the two.
 fn registry_made_steps(backend: &BackendChoice, passphrase: &str) -> Vec<AccountStep> {
-    let opts = registry_init(backend);
-    let mut init = vec![
-        "init".to_string(),
-        "--key".to_string(),
-        opts.key.clone(),
-        "--backend".to_string(),
-        opts.backend.name().to_string(),
-    ];
-    if let (Some(dsn), Some(schema)) = (&opts.dsn, &opts.schema) {
-        init.extend([
-            "--dsn".to_string(),
-            dsn.clone(),
-            "--schema".to_string(),
-            schema.clone(),
-        ]);
-    }
-    init.extend([
-        "--scheme".to_string(),
-        opts.scheme.name().to_string(),
-        "--display-length".to_string(),
-        opts.display_length.to_string(),
-    ]);
+    let (init, input) = match backend {
+        BackendChoice::Sqlite => (
+            owned_words(&[REGISTRY_STEP, "init", "--backend", Backend::Sqlite.name()]),
+            None,
+        ),
+        BackendChoice::Postgres { dsn, schema } => (
+            owned_words(&[
+                REGISTRY_STEP,
+                "init",
+                "--backend",
+                Backend::Postgres.name(),
+                "--schema",
+                schema,
+            ]),
+            Some(dsn.as_bytes().to_vec()),
+        ),
+    };
     vec![
         AccountStep {
             words: owned_words(&["key", "add", "nils"]),
@@ -1219,7 +1216,7 @@ fn registry_made_steps(backend: &BackendChoice, passphrase: &str) -> Vec<Account
         },
         AccountStep {
             words: init,
-            input: None,
+            input,
             undone: "make the registry",
         },
     ]
@@ -6627,21 +6624,23 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
         return out;
     };
     if !plan.registry_exists {
+        let dsn = match plan.backend {
+            BackendChoice::Postgres { .. } => {
+                format!(", the connection string on the input of {REGISTRY_STEP} init")
+            }
+            BackendChoice::Sqlite => String::new(),
+        };
         let _ = writeln!(
             out,
             "\n{} {}",
             console.bold("  registry"),
             console.dim(&format!(
-                "as {}, the key's passphrase on the input of key add",
+                "as {}, the key's passphrase on the input of key add{dsn}",
                 acting.account
             ))
         );
         for step in registry_made_steps(&plan.backend, "") {
-            let _ = writeln!(
-                out,
-                "    {}",
-                acting.argv(&shown_words(&step.words)).join(" ")
-            );
+            let _ = writeln!(out, "    {}", acting.argv(&step.words).join(" "));
         }
     }
     out.push_str(&sources_text(plan, console));
@@ -6707,22 +6706,6 @@ fn sources_text(plan: &Plan, console: &Console) -> String {
         for (_, step) in steps {
             let _ = writeln!(out, "    {}", step.shown());
         }
-    }
-    out
-}
-
-/// A step's words as a print shows them, with the password of a connection
-/// string kept out.
-fn shown_words(words: &[String]) -> Vec<String> {
-    let mut out = Vec::with_capacity(words.len());
-    let mut dsn = false;
-    for word in words {
-        out.push(if dsn {
-            crate::redact_dsn(word)
-        } else {
-            word.clone()
-        });
-        dsn = word == "--dsn";
     }
     out
 }
@@ -7958,8 +7941,9 @@ fn declare_in(
 /// and runs itself, through the engine binary under runuser. Each does what
 /// setup did in its own process before; only the account doing it is
 /// another. Not a command a person types: `nils init`, `nils key add` and
-/// `nils place add` are those, and a source place added with the last is
-/// declared as a dataset, which setup never does.
+/// `nils place add` are those, but `nils init` takes a connection string on
+/// its command line, which every account can read, and a source place added
+/// with `nils place add` is declared as a dataset, which setup never does.
 #[derive(Debug, Subcommand)]
 pub(crate) enum RegistryStep {
     /// Whether a Postgres answers this account, with the connection string
@@ -7967,6 +7951,15 @@ pub(crate) enum RegistryStep {
     Connect {
         #[arg(long, value_name = "NAME")]
         schema: String,
+    },
+    /// Make the registry as setup makes it, on the key named nils; on
+    /// postgres the connection string is read from the input
+    Init {
+        #[arg(long, value_name = "sqlite|postgres")]
+        backend: String,
+        /// The Postgres schema of the registry
+        #[arg(long, value_name = "NAME")]
+        schema: Option<String>,
     },
     /// The registry's source places as it stands, as JSON; a registry at
     /// another schema is left as it is, and where it stands is said instead
@@ -7980,15 +7973,22 @@ pub(crate) enum RegistryStep {
 pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit> {
     match step {
         RegistryStep::Connect { schema } => {
-            let mut dsn = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut dsn)
-                .map_err(|e| fail(format!("stdin: {e}")))?;
-            nils_registry::store::Store::connect_postgres(
-                dsn.trim_end_matches(['\r', '\n']),
-                &schema,
-            )
-            .map(|_| ())
-            .map_err(|e| fail(with_causes(&e)))
+            let dsn = dsn_on_input(std::io::stdin().lock())?;
+            nils_registry::store::Store::connect_postgres(&dsn, &schema)
+                .map(|_| ())
+                .map_err(|e| fail(with_causes(&e)))
+        }
+        RegistryStep::Init { backend, schema } => {
+            let meta = registry_made_here(home, &backend, schema, std::io::stdin().lock())?;
+            println!(
+                "initialised {} on {backend}: registry {}, schema version {}, pseudonyms {} from key {}",
+                home.dir().display(),
+                meta.registry_id,
+                meta.schema_version,
+                meta.pseudonym_scheme,
+                meta.pseudonym_key
+            );
+            Ok(())
         }
         RegistryStep::Sources => {
             println!("{}", sources_here(home)?);
@@ -8013,6 +8013,55 @@ pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit>
             Ok(())
         }
     }
+}
+
+/// A connection string, as a step reads it from its input: the whole input,
+/// without the line end a person or a pipe may leave after it.
+fn dsn_on_input(mut input: impl std::io::Read) -> Result<String, Exit> {
+    let mut dsn = String::new();
+    input
+        .read_to_string(&mut dsn)
+        .map_err(|e| fail(format!("stdin: {e}")))?;
+    Ok(dsn.trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// The registry made by the account running this, as setup makes it in its
+/// own process: from [`registry_init`], on the key named `nils`, so every
+/// pseudonym setting is the same whichever account made it. On Postgres the
+/// connection string comes from the input and never from the command line,
+/// and goes into `nils.toml` as it was given, as it does from setup's own
+/// process.
+fn registry_made_here(
+    home: &Home,
+    backend: &str,
+    schema: Option<String>,
+    input: impl std::io::Read,
+) -> Result<nils_registry::Meta, Exit> {
+    let backend: Backend = backend
+        .parse()
+        .map_err(|_| usage(format!("--backend {backend}: sqlite or postgres")))?;
+    let choice = match (backend, schema) {
+        (Backend::Sqlite, None) => BackendChoice::Sqlite,
+        (Backend::Sqlite, Some(_)) => {
+            return Err(usage("a schema goes with --backend postgres".to_string()));
+        }
+        (Backend::Postgres, None) => {
+            return Err(usage("--backend postgres needs --schema".to_string()));
+        }
+        (Backend::Postgres, Some(schema)) => {
+            let dsn = dsn_on_input(input)?;
+            if dsn.is_empty() {
+                return Err(usage(
+                    "the connection string goes on the input, and there was none".to_string(),
+                ));
+            }
+            BackendChoice::Postgres { dsn, schema }
+        }
+    };
+    let registry = home
+        .init(&registry_init(&choice))
+        .map_err(|e| fail(e.to_string()))?;
+    Ok(registry.meta().clone())
 }
 
 /// The registry's source places as the account running this finds them, as
@@ -16730,11 +16779,12 @@ mod tests {
     }
 
     #[test]
-    fn the_registry_is_made_as_the_engines_account_with_the_passphrase_on_its_input_alone() {
+    fn the_registry_is_made_as_the_engines_account_with_its_secrets_on_the_input_alone() {
         let acting = as_the_engine();
         let passphrase = "correct horse battery staple\n";
+        let dsn = "postgresql://nils:s3cret@db.example.org/nils";
         let postgres = BackendChoice::Postgres {
-            dsn: "postgresql://nils@%2Frun%2Fpostgresql/nils".to_string(),
+            dsn: dsn.to_string(),
             schema: "nils".to_string(),
         };
         let steps = registry_made_steps(&postgres, passphrase);
@@ -16748,91 +16798,174 @@ mod tests {
         assert_eq!(
             steps[1].words,
             [
+                "setup-registry",
                 "init",
-                "--key",
-                "nils",
                 "--backend",
                 "postgres",
-                "--dsn",
-                "postgresql://nils@%2Frun%2Fpostgresql/nils",
                 "--schema",
-                "nils",
-                "--scheme",
-                "blake2b-32",
-                "--display-length",
-                "12"
+                "nils"
             ]
         );
-        assert_eq!(steps[1].input, None);
+        assert_eq!(
+            steps[1].input.as_deref(),
+            Some(dsn.as_bytes()),
+            "the connection string goes over as it was given"
+        );
         for step in &steps {
             let argv = acting.argv(&step.words);
             assert_eq!(&argv[..4], ["runuser", "-u", "nils", "--"]);
             assert!(
-                argv.iter().all(|word| !word.contains("horse battery")),
+                argv.iter().all(|word| !word.contains("horse battery")
+                    && !word.contains("s3cret")
+                    && !word.contains("db.example.org")),
                 "a command line is every account's to read: {argv:?}"
             );
         }
         let sqlite = registry_made_steps(&BackendChoice::Sqlite, passphrase);
         assert_eq!(
             sqlite[1].words,
-            [
-                "init",
-                "--key",
-                "nils",
-                "--backend",
-                "sqlite",
-                "--scheme",
-                "blake2b-32",
-                "--display-length",
-                "12"
-            ]
+            ["setup-registry", "init", "--backend", "sqlite"]
         );
+        assert_eq!(sqlite[1].input, None);
+    }
+
+    /// A registry made both ways, from the words setup gives the engine's
+    /// account and from setup's own process, and what each came to.
+    fn made_both_ways(
+        backend: &BackendChoice,
+        dir: &Path,
+        clear: &dyn Fn(),
+    ) -> [(nils_registry::Meta, String); 2] {
+        use clap::Parser as _;
+        let steps = registry_made_steps(backend, "a passphrase");
+        let argv = as_the_engine().argv(&steps[1].words);
+        // the words as the engine binary reads them
+        let cli = crate::Cli::try_parse_from(&argv[4..])
+            .unwrap_or_else(|e| panic!("{argv:?} is not a command nils takes: {e}"));
+        assert_eq!(
+            cli.registry.as_deref(),
+            Some(Path::new("/srv/nils/registry"))
+        );
+        let crate::Command::SetupRegistry {
+            command:
+                RegistryStep::Init {
+                    backend: named,
+                    schema,
+                },
+        } = cli.command
+        else {
+            panic!("{argv:?} is not the step that makes a registry");
+        };
+        let home_at = |name: &str| {
+            let home = Home::new(dir.join(name));
+            home.keys(None).add("nils", b"a passphrase").unwrap();
+            home
+        };
+        clear();
+        let step = home_at("as-the-account");
+        let input = steps[1].input.clone().unwrap_or_default();
+        let by_step = registry_made_here(&step, &named, schema, input.as_slice())
+            .unwrap_or_else(|e| panic!("{argv:?} was refused: {}", e.message));
+        let by_step_config = std::fs::read_to_string(step.config_path()).unwrap();
+        clear();
+        let own = home_at("in-process");
+        let in_process = own.init(&registry_init(backend)).unwrap().meta().clone();
+        let own_config = std::fs::read_to_string(own.config_path()).unwrap();
+        clear();
+        [(by_step, by_step_config), (in_process, own_config)]
     }
 
     #[test]
     fn a_registry_made_as_the_engines_account_is_the_registry_setup_makes_in_its_own_process() {
-        use clap::Parser as _;
-        for backend in [
-            BackendChoice::Sqlite,
-            BackendChoice::Postgres {
-                dsn: "postgresql://nils@%2Frun%2Fpostgresql/nils".to_string(),
-                schema: "nils".to_string(),
-            },
-        ] {
-            let steps = registry_made_steps(&backend, "a passphrase");
-            let argv = as_the_engine().argv(&steps[1].words);
-            // read back from the engine binary's words, as nils init reads them
-            let cli = crate::Cli::try_parse_from(&argv[4..])
-                .unwrap_or_else(|e| panic!("{argv:?} is not a command nils takes: {e}"));
-            assert_eq!(
-                cli.registry.as_deref(),
-                Some(Path::new("/srv/nils/registry"))
-            );
-            let crate::Command::Init(args) = cli.command else {
-                panic!("{argv:?} is not nils init");
-            };
-            let given = crate::init_options(args)
-                .unwrap_or_else(|e| panic!("{argv:?} was refused: {}", e.message));
-            let own = registry_init(&backend);
-            assert_eq!(given.backend, own.backend, "{argv:?}");
-            assert_eq!(given.dsn, own.dsn, "{argv:?}");
-            assert_eq!(given.schema, own.schema, "{argv:?}");
-            assert_eq!(given.key, own.key, "{argv:?}");
-            assert_eq!(
-                given.scheme, own.scheme,
-                "every pseudonym follows from the scheme: {argv:?}"
-            );
-            assert_eq!(
-                given.display_length, own.display_length,
-                "and the length a code is shown at: {argv:?}"
-            );
-            assert_eq!(given.session_scheme, own.session_scheme, "{argv:?}");
+        let dir = scratch("registry-both-ways");
+        let mut backends = vec![(BackendChoice::Sqlite, None)];
+        match std::env::var("NILS_TEST_POSTGRES_DSN") {
+            Ok(dsn) if !dsn.is_empty() => {
+                let schema = "nils_setup_registry_step".to_string();
+                backends.push((
+                    BackendChoice::Postgres {
+                        dsn: dsn.clone(),
+                        schema: schema.clone(),
+                    },
+                    Some((dsn, schema)),
+                ));
+            }
+            _ => eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped"),
         }
-        assert_eq!(
-            registry_init(&BackendChoice::Sqlite).scheme,
-            Scheme::Blake2b32
+        for (backend, postgres) in backends {
+            let at = dir.join(match backend {
+                BackendChoice::Sqlite => "sqlite",
+                BackendChoice::Postgres { .. } => "postgres",
+            });
+            let clear = || {
+                if let Some((dsn, schema)) = &postgres {
+                    nils_registry::store::Store::connect_postgres(dsn, schema)
+                        .unwrap()
+                        .batch(&format!(
+                            "DROP SCHEMA IF EXISTS {schema} CASCADE; \
+                             DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+                        ))
+                        .unwrap();
+                }
+            };
+            let [(step, step_config), (own, own_config)] = made_both_ways(&backend, &at, &clear);
+            assert_eq!(
+                step.pseudonym_scheme,
+                Scheme::Blake2b32,
+                "every pseudonym follows from the scheme: {backend:?}"
+            );
+            assert_eq!(
+                step.display_length, 12,
+                "and the length a code is shown at: {backend:?}"
+            );
+            assert_eq!(step.pseudonym_key, "nils", "{backend:?}");
+            assert_eq!(step.pseudonym_scheme, own.pseudonym_scheme, "{backend:?}");
+            assert_eq!(step.display_length, own.display_length, "{backend:?}");
+            assert_eq!(step.pseudonym_key, own.pseudonym_key, "{backend:?}");
+            assert_eq!(step.session_scheme, own.session_scheme, "{backend:?}");
+            assert_eq!(step.schema_version, own.schema_version, "{backend:?}");
+            assert_eq!(
+                step_config, own_config,
+                "nils.toml is written alike, the connection string as it was given"
+            );
+            if let Some((dsn, _)) = &postgres {
+                let config: nils_registry::home::Config = toml::from_str(&step_config).unwrap();
+                assert_eq!(config.dsn.as_deref(), Some(dsn.as_str()));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_step_that_makes_a_registry_takes_a_connection_string_only_on_its_input() {
+        let dir = scratch("registry-step-refusals");
+        let home = Home::new(dir.join("registry"));
+        let refused = |backend: &str, schema: Option<&str>, input: &str| {
+            registry_made_here(&home, backend, schema.map(str::to_string), input.as_bytes())
+                .map(|_| ())
+                .unwrap_err()
+                .message
+        };
+        assert!(
+            refused("postgres", Some("nils"), "")
+                .contains("the connection string goes on the input"),
         );
-        assert_eq!(registry_init(&BackendChoice::Sqlite).display_length, 12);
+        assert!(
+            refused("postgres", None, "postgres://nils@db.example.org/nils").contains("--schema")
+        );
+        assert!(
+            refused("sqlite", Some("nils"), "").contains("a schema goes with --backend postgres")
+        );
+        assert!(refused("mysql", None, "").contains("sqlite or postgres"));
+        assert!(!home.exists(), "nothing was made");
+        assert_eq!(
+            dsn_on_input("postgres://nils@db.example.org/nils\r\n".as_bytes())
+                .map_err(|e| e.message)
+                .unwrap(),
+            "postgres://nils@db.example.org/nils",
+            "a line end after it is not part of it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -16933,20 +17066,30 @@ mod tests {
             "runuser -u nils-engine -- {} --registry /srv/nils/registry",
             running_binary().display()
         );
-        assert!(said.contains("registry as nils-engine"), "{said}");
+        assert!(
+            said.contains(
+                "registry as nils-engine, the key's passphrase on the input of key add, the \
+                 connection string on the input of setup-registry init"
+            ),
+            "{said}"
+        );
         assert!(
             said.contains(&format!("{as_engine} key add nils\n")),
             "{said}"
         );
         assert!(
             said.contains(&format!(
-                "{as_engine} init --key nils --backend postgres --dsn \
-                 postgres://nils:***@db.example.org/nils --schema nils --scheme blake2b-32 \
-                 --display-length 12\n"
+                "{as_engine} setup-registry init --backend postgres --schema nils\n"
             )),
             "{said}"
         );
         assert!(!said.contains("s3cret"), "{said}");
+        assert!(
+            said.lines()
+                .filter(|line| line.contains("runuser"))
+                .all(|line| !line.contains("db.example.org") && !line.contains("postgres://")),
+            "no line taken as the account holds the connection string: {said}"
+        );
         assert!(said.contains("places as nils-engine"), "{said}");
         assert!(
             said.contains(&format!(

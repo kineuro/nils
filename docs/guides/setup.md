@@ -200,9 +200,10 @@ has to answer: the engine's service reaches it as the engine's account. So
 setup takes every step on the registry as that account, through the engine's
 own binary under `runuser`, started in `/` with the environment the engine's
 service runs with and nothing of root's. That account adds the registry's key,
-with the passphrase on its input; makes the registry, with the pseudonym
-settings given outright; tries a Postgres, with the connection string on its
-input; declares the places; and reads the source places back. That is why a
+with the passphrase on its input; makes the registry, with setup's own
+pseudonym settings and the connection string on its input, never on a
+command line, which every account on the machine can read; tries a Postgres,
+the same way; declares the places; and reads the source places back. That is why a
 Postgres that authenticates peers, which refuses root, and a registry on a
 share that squashes root, which does not open to root, both work: each is
 asked by the account that will use it. A registry that does not answer that
@@ -268,10 +269,11 @@ under `--print` the exact commands and unit files as well: for an install on
 this machine every unit it would write, where it would write them, and every
 call it would make to hand them over and start them; for the services of a
 machine, each step taken as another account, after the `runuser` that runs
-it: the registry's key and `init` where there is no registry yet, the source
-steps of Kvasir and the assistant, with the home they build with where that is
-the build cache, and the places, with the password of a connection string kept
-out; for a container run the commands and the quadlets or the compose file.
+it: the registry's key and the step that makes the registry where there is no
+registry yet, with the passphrase and the connection string on their input,
+the source steps of Kvasir and the assistant, with the home they build with
+where that is the build cache, and the places; for a container run the
+commands and the quadlets or the compose file.
 Then the parts
 that are missing are downloaded from their releases and checked against the
 release's `SHA256SUMS`, the registry is made, the places are declared, the

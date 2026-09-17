@@ -1771,25 +1771,6 @@ impl From<nils_registry::Error> for Exit {
 }
 
 fn init(home: &Home, args: InitArgs) -> Result<(), Exit> {
-    let opts = init_options(args)?;
-    let registry = home.init(&opts)?;
-    let meta = registry.meta();
-    println!(
-        "initialised {} on {}: registry {}, schema version {}, pseudonyms {} from key {}",
-        home.dir().display(),
-        opts.backend.name(),
-        meta.registry_id,
-        meta.schema_version,
-        meta.pseudonym_scheme,
-        meta.pseudonym_key
-    );
-    Ok(())
-}
-
-/// What `nils init` was given, as the registry takes it. `nils setup` makes
-/// a registry as the engine's account through these same words, so its
-/// tests read them back here.
-fn init_options(args: InitArgs) -> Result<InitOptions, Exit> {
     let backend: Backend = args
         .backend
         .parse()
@@ -1805,7 +1786,7 @@ fn init_options(args: InitArgs) -> Result<InitOptions, Exit> {
         ),
         None => None,
     };
-    Ok(InitOptions {
+    let opts = InitOptions {
         backend,
         dsn: args.dsn,
         schema: args.schema,
@@ -1813,7 +1794,19 @@ fn init_options(args: InitArgs) -> Result<InitOptions, Exit> {
         key: args.key,
         display_length: args.display_length,
         session_scheme,
-    })
+    };
+    let registry = home.init(&opts)?;
+    let meta = registry.meta();
+    println!(
+        "initialised {} on {}: registry {}, schema version {}, pseudonyms {} from key {}",
+        home.dir().display(),
+        backend.name(),
+        meta.registry_id,
+        meta.schema_version,
+        meta.pseudonym_scheme,
+        meta.pseudonym_key
+    );
+    Ok(())
 }
 
 fn key(home: &Home, command: KeyCommand) -> Result<(), Exit> {
