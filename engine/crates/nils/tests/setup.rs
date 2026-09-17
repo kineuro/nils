@@ -1212,6 +1212,17 @@ fn the_plan_names_llama_cpp_beside_the_assistant() {
     o.says("runs the models Kvasir starts, on 127.0.0.1:7110");
     if o.stdout.contains("nils-llama.service") {
         o.says("--no-models-autoload --models-max 1");
+        // and the units a run stops while their files change, each just
+        // before its own
+        o.says("stopped while their files change");
+        o.says("stop nils-llama  while the older llama.cpp builds are removed");
+        o.says("stop kvasir  while Kvasir's source is taken and built");
+        o.says("stop nils-assistant  while the assistant's source is taken and built");
+        assert!(
+            !o.stdout.contains("stop nils-supervise"),
+            "the supervisor would be stopped:\n{}",
+            o.stdout
+        );
     }
 }
 

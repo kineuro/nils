@@ -4187,6 +4187,249 @@ pub(crate) fn next_free_port(start: u16, taken: &dyn Fn(u16) -> bool) -> u16 {
     start
 }
 
+impl Ports {
+    /// The port of a part, by the name the ports are settled under.
+    fn of(&mut self, part: &str) -> Option<&mut u16> {
+        Some(match part {
+            "engine" => &mut self.engine,
+            "desk" => &mut self.desk,
+            "kvasir" => &mut self.kvasir,
+            "assistant" => &mut self.assistant,
+            "postgres" => &mut self.postgres,
+            SUPERVISOR_PART => &mut self.supervisor,
+            LLAMA_PART => &mut self.llama,
+            _ => return None,
+        })
+    }
+}
+
+/// A part whose port is settled: what a person reads it as, the name its
+/// port and its unit go by, whether this run has it listen on this machine,
+/// and whether the record of an install that finished names it.
+struct Listener {
+    name: &'static str,
+    part: &'static str,
+    listens: bool,
+    /// A part the record of a finished install names keeps its port whatever
+    /// holds it, as it always has: its own service is what holds it.
+    recorded: bool,
+}
+
+/// Where every part listens, from the ports on record. A part keeps its port
+/// where nothing holds it, where it is recorded, and where one of this
+/// install's own units is what holds it, since that unit is started again on
+/// it. A port something else holds moves to the next free one, as on a first
+/// install. Answers the ports, and a sentence for each port that moved or was
+/// kept because a unit of this install's held it.
+///
+/// Which unit is this install's own is `own`'s to answer, and it is asked
+/// only about a port that is taken. The record alone cannot say it: a run
+/// that stopped partway leaves a record naming only some of its parts, while
+/// the units of the parts it did start still hold their ports, and counted
+/// as taken, the engine's own port would move under its running engine.
+fn settle_ports(
+    recorded: Ports,
+    listeners: &[Listener],
+    taken: &dyn Fn(u16) -> bool,
+    own: &dyn Fn(&str, u16) -> bool,
+) -> (Ports, Vec<String>) {
+    let mut ports = recorded;
+    let mut chosen: Vec<u16> = Vec::new();
+    let mut said = Vec::new();
+    for listener in listeners {
+        let Some(port) = ports.of(listener.part) else {
+            continue;
+        };
+        if listener.listens && !listener.recorded {
+            let at = *port;
+            let mine = !chosen.contains(&at) && taken(at) && own(listener.part, at);
+            let held = |p: u16| taken(p) && !(mine && p == at);
+            if let Some(free) = settle_port(at, &chosen, &held) {
+                said.push(format!(
+                    "port {at} is taken, so {} takes {free}",
+                    listener.name
+                ));
+                *port = free;
+            } else if mine {
+                said.push(format!(
+                    "port {at} is held by {}'s own service, which is started again on it",
+                    listener.name
+                ));
+            }
+        }
+        chosen.push(*port);
+    }
+    (ports, said)
+}
+
+/// The unit a part's port is held by when this install runs it, where that
+/// can be told from the process that listens: on a machine systemd runs, the
+/// part's own unit. In podman and docker a part's port is published by the
+/// runtime's own process, so only llama.cpp and the supervisor, which run on
+/// the machine beside the containers, are told apart there. Postgres always
+/// runs in a container, and launchd is not asked.
+fn listening_unit(runtime: Runtime, part: &str) -> Option<&'static str> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    match part {
+        LLAMA_PART => Some("nils-llama"),
+        SUPERVISOR_PART => Some("nils-supervise"),
+        _ if runtime.container() => None,
+        "engine" => Some("nils-engine"),
+        "desk" => Some("nils-desk"),
+        "kvasir" => Some("kvasir"),
+        "assistant" => Some("nils-assistant"),
+        _ => None,
+    }
+}
+
+/// A service a process runs under, as its control group names it: the unit,
+/// and the account whose own manager runs it, or `None` for the machine's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServiceOf {
+    unit: String,
+    user: Option<u32>,
+}
+
+/// The service a process's `/proc/<pid>/cgroup` names, if it runs under one.
+/// The first `.service` along the path is the unit, whatever it made below
+/// itself; one inside `user@<uid>.service` is that account's own. Of the
+/// older hierarchies, only systemd's own line says the unit.
+fn service_of_cgroup(text: &str) -> Option<ServiceOf> {
+    text.lines().find_map(|line| {
+        let mut fields = line.splitn(3, ':');
+        let (_, controllers, path) = (fields.next()?, fields.next()?, fields.next()?);
+        if !(controllers.is_empty() || controllers == "name=systemd") {
+            return None;
+        }
+        let mut user = None;
+        for step in path.split('/') {
+            if let Some(uid) = step
+                .strip_prefix("user@")
+                .and_then(|rest| rest.strip_suffix(".service"))
+            {
+                user = Some(uid.parse().ok()?);
+                continue;
+            }
+            if let Some(unit) = step.strip_suffix(".service") {
+                return Some(ServiceOf {
+                    unit: unit.to_string(),
+                    user,
+                });
+            }
+        }
+        None
+    })
+}
+
+/// The inodes of the sockets listening on a port, from `/proc/net/tcp` or
+/// `/proc/net/tcp6`: a line's second field is the local address and port in
+/// hexadecimal, its fourth the state (`0A` is listening), its tenth the inode.
+fn listening_inodes(table: &str, port: u16) -> Vec<u64> {
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (_, hex) = fields.get(1)?.rsplit_once(':')?;
+            let listens = u16::from_str_radix(hex, 16).ok()? == port && *fields.get(3)? == "0A";
+            listens.then(|| fields.get(9)?.parse().ok())?
+        })
+        .collect()
+}
+
+/// The inode of a socket, from what `/proc/<pid>/fd/<n>` links to.
+fn socket_inode(link: &str) -> Option<u64> {
+    link.strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+}
+
+/// The services whose processes listen on a port of this machine: every
+/// socket listening on it, and every process under a service that holds one
+/// open. A process of another account's is read only by root, which is the
+/// account that sets up the services of a machine; one this process may not
+/// read is passed over, so its port stays taken.
+fn services_listening(port: u16) -> Vec<ServiceOf> {
+    let mut inodes = Vec::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        if let Ok(text) = std::fs::read_to_string(table) {
+            inodes.extend(listening_inodes(&text, port));
+        }
+    }
+    let mut out = Vec::new();
+    if inodes.is_empty() {
+        return out;
+    }
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for process in processes.flatten() {
+        let numbered = process
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.bytes().all(|b| b.is_ascii_digit()));
+        if !numbered {
+            continue;
+        }
+        let Some(service) = std::fs::read_to_string(process.path().join("cgroup"))
+            .ok()
+            .as_deref()
+            .and_then(service_of_cgroup)
+        else {
+            continue;
+        };
+        if out.contains(&service) {
+            continue;
+        }
+        let Ok(open) = std::fs::read_dir(process.path().join("fd")) else {
+            continue;
+        };
+        let holds = open.flatten().any(|fd| {
+            std::fs::read_link(fd.path())
+                .ok()
+                .and_then(|link| socket_inode(&link.to_string_lossy()))
+                .is_some_and(|inode| inodes.contains(&inode))
+        });
+        if holds {
+            out.push(service);
+        }
+    }
+    out
+}
+
+/// The account this process runs as, as the owner of its own `/proc` entry.
+fn this_uid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata("/proc/self").ok().map(|m| m.uid())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Whether a port is held by one of this install's own units, from the
+/// services that hold it: the unit this install runs the part under, in the
+/// manager it writes its units to, which is the machine's for the services of
+/// this machine and this account's otherwise. A unit of that name there is
+/// this install's whoever wrote it last, since this run writes over it and
+/// starts it again.
+fn own_unit_holds(unit: &str, system: bool, uid: Option<u32>, holding: &[ServiceOf]) -> bool {
+    let manager = match (system, uid) {
+        (true, _) => None,
+        (false, Some(uid)) => Some(uid),
+        (false, None) => return false,
+    };
+    holding
+        .iter()
+        .any(|held| held.unit == unit && held.user == manager)
+}
+
 /// This host's own address on the network, for a desk other machines open.
 fn host_address() -> Option<String> {
     // The address the kernel would use to reach the world, without sending
@@ -5101,13 +5344,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         ));
     }
     let mut console = Console::new(args.yes || args.print);
-    let mut existing = read_state();
-    // An install that stopped partway is not one to update or repair: it is
-    // started again, and its record is what an uninstall would remove.
-    let restarted = existing.as_ref().is_some_and(|s| s.unfinished);
-    if restarted {
-        existing = None;
-    }
+    let (existing, restarted) = go_on_from(read_state());
     let facts = Facts::probe();
 
     let flow = if console.can_draw_screens() {
@@ -5155,6 +5392,20 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     }
 }
 
+/// The record a setup goes on from, and the ports of a last run that stopped
+/// partway. An install that stopped partway is not one to update or repair:
+/// it is started again, and its record is what an uninstall would remove. Its
+/// ports are all that is taken from it. Its parts may be half there, and it
+/// names only those it placed, while the units of the parts it did start may
+/// still be running on the ports it chose; so the rerun starts from those
+/// ports, and each is still asked what holds it.
+fn go_on_from(record: Option<State>) -> (Option<State>, Option<Ports>) {
+    match record {
+        Some(state) if state.unfinished => (None, Some(state.ports)),
+        record => (record, None),
+    }
+}
+
 /// What a person wants, asked a step at a time: a plan and the answers to
 /// install it with, or another thing to do with the setup that is there.
 /// Asked on lines, or on screens, which run this again from the start after
@@ -5165,12 +5416,12 @@ fn questions(
     args: &SetupArgs,
     existing: Option<&State>,
     facts: &Facts,
-    restarted: bool,
+    restarted: Option<Ports>,
 ) -> Result<Flow, Stop> {
-    if restarted {
+    if restarted.is_some() {
         console.note(
-            "an earlier setup stopped before it finished, so this one starts again; nils \
-             uninstall removes what it placed instead",
+            "an earlier setup stopped before it finished, so this one starts again from the \
+             ports it chose; nils uninstall removes what it placed instead",
         );
     }
 
@@ -5887,9 +6138,10 @@ fn questions(
     }
 
     // ports, once the parts are settled: each part this machine will listen
-    // for, and none this setup already holds, since its own running service
-    // is what holds it
-    let mut ports = existing.map(|s| s.ports).unwrap_or_default();
+    // for, and none this install's own services already hold. They start
+    // from the record, or where the last run stopped partway, from the ports
+    // that run chose, which its units may be running on.
+    let recorded = existing.map(|s| s.ports).or(restarted).unwrap_or_default();
     let ours = |part: &str| existing.is_some_and(|s| s.parts.contains_key(part));
     let assistant = parts.contains(&Part::Assistant);
     // llama.cpp runs beside Kvasir wherever there is a build for this machine;
@@ -5897,43 +6149,55 @@ fn questions(
     let llama = facts
         .llama
         .filter(|_| assistant && !(runtime.container() && cfg!(target_os = "macos")));
-    let mut chosen: Vec<u16> = Vec::new();
     // a supervisor this setup started holds its own port on a rerun
     let supervised = dir.join("supervise").join("supervise.toml").exists();
-    for (name, part, port, listens) in [
-        ("the engine", "engine", &mut ports.engine, true),
-        (
-            "the desk",
-            "desk",
-            &mut ports.desk,
-            parts.contains(&Part::Desk),
-        ),
-        ("Kvasir", "kvasir", &mut ports.kvasir, assistant),
+    let listener = |name: &'static str, part: &'static str, listens: bool| Listener {
+        name,
+        part,
+        listens,
+        recorded: ours(part) || (part == SUPERVISOR_PART && supervised),
+    };
+    let listeners = [
+        listener("the engine", "engine", true),
+        listener("the desk", "desk", parts.contains(&Part::Desk)),
+        listener("Kvasir", "kvasir", assistant),
         // in a container the assistant is published nowhere
-        (
+        listener(
             "the assistant",
             "assistant",
-            &mut ports.assistant,
             assistant && !runtime.container(),
         ),
-        (
-            "Postgres",
-            "postgres",
-            &mut ports.postgres,
-            postgres.is_some(),
-        ),
-        ("the supervisor", "supervisor", &mut ports.supervisor, true),
-        ("llama.cpp", LLAMA_PART, &mut ports.llama, llama.is_some()),
-    ] {
-        if listens
-            && !ours(part)
-            && !(part == "supervisor" && supervised)
-            && let Some(free) = settle_port(*port, &chosen, &port_taken)
-        {
-            console.note(&format!("port {} is taken, so {name} takes {free}", *port));
-            *port = free;
-        }
-        chosen.push(*port);
+        listener("Postgres", "postgres", postgres.is_some()),
+        listener("the supervisor", SUPERVISOR_PART, true),
+        listener("llama.cpp", LLAMA_PART, llama.is_some()),
+    ];
+    // A unit is this install's own by its name, in the manager this run writes
+    // its units to: the machine's where the services of this machine were
+    // asked for or are on record, as step 7 reads them, and this account's
+    // otherwise. A run that writes no units has none. What holds a port is
+    // read once for each port, however often the screens ask again.
+    let system_here = system_asked(
+        args.system,
+        accounts_given(&args.account).unwrap_or_default(),
+        Vec::new(),
+        existing.and_then(|s| s.system.clone()),
+    )
+    .is_some();
+    let (ports, said) = {
+        let console = &*console;
+        let own = |part: &str, port: u16| {
+            !args.no_service
+                && listening_unit(runtime, part).is_some_and(|unit| {
+                    let holding = console.probe(&format!("what listens on port {port}"), || {
+                        services_listening(port)
+                    });
+                    own_unit_holds(unit, system_here, this_uid(), &holding)
+                })
+        };
+        settle_ports(recorded, &listeners, &port_taken, &own)
+    };
+    for line in &said {
+        console.note(line);
     }
     if postgres.is_some() && !registry_exists {
         // A password kept from an earlier install of this directory, since
@@ -6142,6 +6406,7 @@ fn questions(
     }
     if args.print {
         print!("{}", commands_text(&plan, console));
+        print!("{}", stops_text(&plan, Run::Place, console));
         println!();
         println!("nothing was changed");
         return Ok(Flow::Printed);
@@ -6201,6 +6466,7 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
     print!("{}", plan_text(&plan, console));
     if args.print {
         print!("{}", commands_text(&plan, console));
+        print!("{}", stops_text(&plan, Run::Place, console));
         println!();
         println!("nothing was changed");
         return Ok(());
@@ -6310,6 +6576,7 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
     print!("{}", plan_text(&plan, console));
     if args.print {
         print!("{}", commands_text(&plan, console));
+        print!("{}", stops_text(&plan, Run::Repair, console));
         println!();
         println!("nothing was changed");
         return Ok(());
@@ -9414,6 +9681,12 @@ fn source_steps(repo: &str, reference: &str, into: &Path, checked_out: bool) -> 
     }
 }
 
+/// Whether a source step checks a ref out, which is the first of them to
+/// change the files of a checkout.
+fn checks_out(step: &SourceStep) -> bool {
+    step.argv.iter().any(|word| word == "checkout")
+}
+
 /// A git command's line on screen: what it does, to which part, at which ref.
 fn source_label(step: &[String], said: &str, reference: &str) -> String {
     match step.first().map(String::as_str) {
@@ -9785,17 +10058,16 @@ fn build_steps(
 /// steps, since git refuses root a checkout that is another account's; a
 /// checkout that went unread would be built again on every update.
 fn source_head(hands: &SourceHands, into: &Path, base: &Path) -> Option<String> {
-    let out = source_step(
-        hands,
-        "git",
-        &owned_words(&["rev-parse", "HEAD"]),
-        into,
-        base,
-    )
-    .command()
-    .stdin(Stdio::null())
-    .output()
-    .ok()?;
+    source_rev(hands, into, base, "HEAD")
+}
+
+/// Any revision of a part's checkout, read the same way.
+fn source_rev(hands: &SourceHands, into: &Path, base: &Path, rev: &str) -> Option<String> {
+    let out = source_step(hands, "git", &owned_words(&["rev-parse", rev]), into, base)
+        .command()
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).to_string())
@@ -10034,6 +10306,11 @@ fn adoption_refused(
 /// that fails partway removes the `.git` too, so that a rerun adopts the
 /// folder again: what that checkout wrote is the release's own files, which
 /// a second adoption replaces as it replaces a copy's.
+///
+/// `before_checkout` is called once the checkout is certain and nothing else
+/// has been written outside that `.git`, for the caller to stop the unit the
+/// part runs under; a refusal never reaches it, so a run that changes
+/// nothing leaves a running part running.
 #[allow(clippy::too_many_arguments)]
 fn adopt_folder(
     console: &Console,
@@ -10044,6 +10321,7 @@ fn adopt_folder(
     into: &Path,
     base: &Path,
     again: &str,
+    before_checkout: &mut dyn FnMut(),
 ) -> Result<(), Exit> {
     let adoption = adopt_steps(hands, said, repo, reference, into, base);
     let lent = lend_folder(hands, into).map_err(fail)?;
@@ -10074,6 +10352,10 @@ fn adopt_folder(
         }),
         None => Ok(()),
     };
+    // The checkout below is the first thing an adoption writes outside the
+    // `.git` it made, so the part stops here: everything before it was read,
+    // fetched or refused, and a refusal leaves a running part running.
+    before_checkout();
     given
         .and_then(|()| console.source_task(&adoption.checkout.0, &adoption.checkout.1))
         .inspect_err(|_| unmade())
@@ -10273,8 +10555,9 @@ fn install_node_parts(
     }
 
     let hands = source_hands(plan.system.as_ref(), &plan.dir, am_root(), false);
+    let units = planned_units(plan);
     let mut out = Vec::new();
-    for name in ["kvasir", "assistant"] {
+    for (name, switch) in [("kvasir", Switch::Kvasir), ("assistant", Switch::Assistant)] {
         if name == "assistant" {
             console.begin(Stage::Assistant);
         }
@@ -10288,7 +10571,14 @@ fn install_node_parts(
             console.say(&line);
         }
         ready_for_sources(&hands, &plan.dir, &into, true).map_err(fail)?;
+        // Every step below changes the folder the part runs from, and the
+        // build always runs, so the part's unit stops before the first of
+        // them and starts again with the rest. An adoption is the one run
+        // that may still refuse once it has begun, and nothing it does
+        // before its checkout leaves the `.git` it made, so it stops the
+        // unit itself, just before that checkout.
         if folder == SourceFolder::Copy {
+            let console: &Console = console;
             adopt_folder(
                 console,
                 &hands,
@@ -10298,9 +10588,11 @@ fn install_node_parts(
                 &into,
                 &plan.dir,
                 "nils setup",
+                &mut || stop_said(switch, &units, console),
             )?;
             console.say(&adopted_said(&into, said, &reference));
         } else {
+            stop_said(switch, &units, console);
             let fetched = fetch_steps(
                 &hands,
                 said,
@@ -11197,7 +11489,12 @@ fn mend_kvasir_runtime(plan: &Plan) {
 /// checked against the pinned sha256 and unpacked, unless it is here already,
 /// and a build this install took before removed once it is. Answers the
 /// build's folder, and whether it was taken now.
-fn fetch_llama(plan: &Plan) -> Result<(PathBuf, bool), String> {
+///
+/// `before_removing` is called once, just before an older build is removed,
+/// and not at all where there is none: the running server is started from
+/// one of them, so that is where its unit is stopped, after the download and
+/// the unpacking it runs on through.
+fn fetch_llama(plan: &Plan, before_removing: &mut dyn FnMut()) -> Result<(PathBuf, bool), String> {
     let llama = plan
         .llama
         .ok_or_else(|| "llama.cpp publishes no build for this machine".to_string())?;
@@ -11210,13 +11507,22 @@ fn fetch_llama(plan: &Plan) -> Result<(PathBuf, bool), String> {
     let url = llama_archive(&llama_base(), llama.variant);
     let bytes = crate::supervise::fetch(&url)?;
     unpack_llama(&bytes, want, &dir).map_err(|e| format!("{url}: {e}"))?;
-    if let Ok(entries) = std::fs::read_dir(plan.dir.join(LLAMA_PART)) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path != dir && llama_recorded(&path.display().to_string()).is_some() {
-                let _ = std::fs::remove_dir_all(&path);
-            }
-        }
+    let older: Vec<PathBuf> = std::fs::read_dir(plan.dir.join(LLAMA_PART))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    *path != dir && llama_recorded(&path.display().to_string()).is_some()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !older.is_empty() {
+        before_removing();
+    }
+    for path in older {
+        let _ = std::fs::remove_dir_all(&path);
     }
     Ok((dir, true))
 }
@@ -11237,7 +11543,11 @@ fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<bo
         "taking llama.cpp {LLAMA_BUILD}, the {} build",
         llama_words(llama.variant)
     ));
-    let dir = match fetch_llama(plan) {
+    let units = planned_units(plan);
+    let taken = fetch_llama(plan, &mut || {
+        stop_said(Switch::LlamaBuilds, &units, console);
+    });
+    let dir = match taken {
         Ok((dir, _)) => dir,
         Err(e) => {
             console.broken(&format!(
@@ -12446,6 +12756,255 @@ fn quadlet_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".config"))
         .join("containers")
         .join("systemd")
+}
+
+/// A run of setup that changes the files of parts that may be running.
+/// `nils update --all` is the third, and takes the parts its record names in
+/// the order the record keeps them ([`switch_of_part`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Run {
+    /// An install, a rerun and `--update`, which place every part again.
+    Place,
+    /// A repair, which writes the configuration and the units again and
+    /// takes llama.cpp's build where this version names another.
+    Repair,
+}
+
+/// A part's files changed in place, in the folder a running unit runs from.
+/// A binary replaced by a rename is not among them, since a running process
+/// keeps the file it started from, and neither is an image pulled for a
+/// container. Git and npm in a live Node folder are: the checkout rewrites
+/// the source, `npm ci` removes the packages before it installs them again,
+/// and the build rewrites what the part loads. So is removing a llama.cpp
+/// build, which the running server was started from and starts the process
+/// of every model from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Switch {
+    LlamaBuilds,
+    Kvasir,
+    Assistant,
+}
+
+impl Switch {
+    /// The part whose unit runs from what changes, as [`service_units`]
+    /// names it.
+    fn part(self) -> &'static str {
+        match self {
+            Switch::LlamaBuilds => LLAMA_PART,
+            Switch::Kvasir => "gateway",
+            Switch::Assistant => "assistant",
+        }
+    }
+
+    /// What changes, as a person reads it after "while".
+    fn words(self) -> &'static str {
+        match self {
+            Switch::LlamaBuilds => "the older llama.cpp builds are removed",
+            Switch::Kvasir => "Kvasir's source is taken and built",
+            Switch::Assistant => "the assistant's source is taken and built",
+        }
+    }
+}
+
+/// What a run of setup switches, in the order it switches it: an install
+/// places llama.cpp before Kvasir, which names its build, and a repair takes
+/// only llama.cpp.
+fn switches(run: Run, assistant: bool, llama: bool) -> Vec<Switch> {
+    if !assistant {
+        return Vec::new();
+    }
+    let llama = llama.then_some(Switch::LlamaBuilds);
+    match run {
+        Run::Place => llama
+            .into_iter()
+            .chain([Switch::Kvasir, Switch::Assistant])
+            .collect(),
+        Run::Repair => llama.into_iter().collect(),
+    }
+}
+
+/// What updating a part the record names switches, by the part's name there.
+fn switch_of_part(name: &str) -> Option<Switch> {
+    match name {
+        "kvasir" => Some(Switch::Kvasir),
+        "assistant" => Some(Switch::Assistant),
+        LLAMA_PART => Some(Switch::LlamaBuilds),
+        _ => None,
+    }
+}
+
+/// One thing a run does to a part that may be running, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Turn {
+    /// A unit stopped, where it runs, by these words.
+    Stop(Vec<String>),
+    /// A part's files switched.
+    Switch(Switch),
+    /// Every unit started again, where the run starts its units.
+    Start,
+}
+
+/// A run's turns: each part's unit stopped just before that part's files are
+/// switched, and every unit started again once all of them are, where units
+/// start today. Stopping each part only as its own files change keeps it
+/// running for as long as it can: Kvasir answers while llama.cpp is taken,
+/// and the assistant while Kvasir is built. A part this install runs no unit
+/// for is switched with nothing stopped.
+///
+/// The supervisor is never stopped: its files are the engine's binary,
+/// replaced by a rename, and an update of every part may be a run it
+/// started. It is started again last, as it always was, by a restart its
+/// unit's `KillMode=process` lets that run outlive.
+fn turns(switches: &[Switch], units: &[Unit], uid: &str) -> Vec<Turn> {
+    let mut out = Vec::new();
+    for switch in switches {
+        if let Some(unit) = units.iter().find(|u| u.part == switch.part()) {
+            out.push(Turn::Stop(stop_argv(unit, uid)));
+        }
+        out.push(Turn::Switch(*switch));
+    }
+    if !units.is_empty() {
+        out.push(Turn::Start);
+    }
+    out
+}
+
+/// The units an install of a plan runs the parts a run switches under, as
+/// [`service_units`] names them once those parts are placed. None where the
+/// plan writes no services. Read from the plan rather than the record, since
+/// the record of an install names a part only once it is placed, and a rerun
+/// after one that stopped partway starts from no record at all.
+fn planned_units(plan: &Plan) -> Vec<Unit> {
+    let mut state = State {
+        runtime: plan.runtime.name().to_string(),
+        // any manager at all, which is all service_units asks of it
+        service: if plan.service { "planned" } else { "none" }.to_string(),
+        system: plan.system.clone(),
+        ..State::default()
+    };
+    let mut place = |name: &str, kind: &str| {
+        state.parts.insert(
+            name.to_string(),
+            PartState {
+                version: String::new(),
+                path: String::new(),
+                kind: kind.to_string(),
+            },
+        );
+    };
+    if plan.has(Part::Assistant) {
+        place("kvasir", "node");
+        place("assistant", "node");
+        if plan.llama.is_some() {
+            place(LLAMA_PART, LLAMA_PART);
+        }
+    }
+    service_units(&state)
+}
+
+/// What stops one unit of an install, by whatever manager keeps it. Setup
+/// runs as root for the services of this machine, and `nils update --all`
+/// asks the helper to run it as root there, so a stop is never the helper's
+/// to make, and the helper is given no word for it.
+fn stop_argv(unit: &Unit, uid: &str) -> Vec<String> {
+    let words = |argv: &[&str]| {
+        argv.iter()
+            .map(|word| (*word).to_string())
+            .collect::<Vec<String>>()
+    };
+    match unit.watcher {
+        "docker" => words(&["docker", "stop", &unit.name]),
+        "launchd" => words(&["launchctl", "bootout", &format!("gui/{uid}/{}", unit.name)]),
+        _ => systemctl_argv(unit.system, &["stop", &unit.name]),
+    }
+}
+
+/// Whether a systemd unit, by what `is-active` says, may run the part's files
+/// while they change: one running, and one systemd is starting again after a
+/// failure, which would start from half of them.
+fn may_run(active: &str) -> bool {
+    matches!(active.trim(), "active" | "activating" | "reloading")
+}
+
+/// A part's unit stopped just before its files are switched, where it runs,
+/// and what came of it: the sentence to say, or where the stop was refused,
+/// the one to warn with. `None` where this install runs no unit for the part
+/// or its unit is not running, so a first install stops nothing and says
+/// nothing.
+fn stop_before(switch: Switch, units: &[Unit]) -> Option<Result<String, String>> {
+    let unit = units.iter().find(|u| u.part == switch.part())?;
+    let running = match unit.watcher {
+        "systemd" => systemctl_says(unit.system, &["is-active", &unit.name])
+            .is_some_and(|said| may_run(&said)),
+        _ => unit_running(unit),
+    };
+    if !running {
+        return None;
+    }
+    let uid = run_quiet("id", &["-u"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let argv = stop_argv(unit, &uid);
+    let (program, args) = argv.split_first()?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    Some(if quietly(program, &args) {
+        Ok(format!("{} is stopped while {}", unit.name, switch.words()))
+    } else {
+        Err(format!(
+            "{} was not stopped, so it runs while {}: {} was refused",
+            unit.name,
+            switch.words(),
+            argv.join(" ")
+        ))
+    })
+}
+
+/// The same on an install's console.
+fn stop_said(switch: Switch, units: &[Unit], console: &Console) {
+    match stop_before(switch, units) {
+        None => {}
+        Some(Ok(said)) => console.say(&said),
+        Some(Err(why)) => console.warn(&why),
+    }
+}
+
+/// Under `--print`, the units a run would stop, each where it runs and just
+/// before its own files change, with what changes; every one of them starts
+/// again with the rest, by the calls listed beside the units.
+fn stops_text(plan: &Plan, run: Run, console: &Console) -> String {
+    let mut out = String::new();
+    let uid = run_quiet("id", &["-u"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let turns = turns(
+        &switches(run, plan.has(Part::Assistant), plan.llama.is_some()),
+        &planned_units(plan),
+        &uid,
+    );
+    let lines: Vec<String> = turns
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [Turn::Stop(argv), Turn::Switch(switch)] => Some(format!(
+                "    {}  {}",
+                argv.join(" "),
+                console.dim(&format!("while {}", switch.words()))
+            )),
+            _ => None,
+        })
+        .collect();
+    if lines.is_empty() {
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "\n{} {}",
+        console.bold("  stopped while their files change"),
+        console.dim("where each runs, and started again with the rest")
+    );
+    for line in lines {
+        let _ = writeln!(out, "{line}");
+    }
+    out
 }
 
 /// Whatever this machine and runtime use to keep the parts running. Kvasir is
@@ -13949,6 +14508,9 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
     let newest = update::newest_version(&update::engine_base(channel)).ok();
     let console = Console::new(true);
     let mut changed = false;
+    // The units the parts run under, so that each is stopped just before its
+    // own files change and started again by the restart that follows.
+    let units = service_units(&state);
 
     let names: Vec<String> = state
         .parts
@@ -14004,7 +14566,9 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
             }
             "node" => {
                 let dir = PathBuf::from(&part.path);
-                let Some((repo, reference, said)) = node_source(&name) else {
+                let (Some((repo, reference, said)), Some(switch)) =
+                    (node_source(&name), switch_of_part(&name))
+                else {
                     println!("{name}: not a part this can update");
                     continue;
                 };
@@ -14037,7 +14601,14 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                 } else {
                     None
                 };
-                // the release this version names, from a checkout of main too
+                // The release this version names, from a checkout of main too.
+                // A fetch leaves the checkout as it stands, so the part runs on
+                // through it. Its unit is stopped just before the checkout, and
+                // only where the commit fetched is not the one built, since the
+                // checkout and the build after it change the folder it runs
+                // from; a part whose source did not move is not stopped at all.
+                // An adoption rewrites the tracked files a built copy holds, so
+                // it stops the unit itself, once its checkout is certain.
                 let fetched = if folder == SourceFolder::Copy {
                     adopt_folder(
                         &console,
@@ -14048,12 +14619,25 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                         &dir,
                         &base,
                         "nils update --all",
+                        &mut || changed |= stopped_for_update(&name, switch, &units),
                     )
                     .map(|()| println!("{name}: {}", adopted_said(&dir, said, &reference)))
                 } else {
                     fetch_steps(&hands, said, repo, &reference, &dir, &base, true)
                         .iter()
-                        .try_for_each(|(label, step)| console.source_task(label, step))
+                        .try_for_each(|(label, step)| {
+                            if checks_out(step)
+                                && source_moves(
+                                    before.as_deref(),
+                                    source_rev(&hands, &dir, &base, "FETCH_HEAD^{commit}")
+                                        .as_deref(),
+                                    dir.join("dist").exists(),
+                                )
+                            {
+                                changed |= stopped_for_update(&name, switch, &units);
+                            }
+                            console.source_task(label, step)
+                        })
                 };
                 if let Err(e) = fetched {
                     println!("{name}: {}", e.message);
@@ -14068,6 +14652,9 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                     println!("{name}: {reference} is the one built");
                     continue;
                 }
+                // stopped above where the checkout moved, and here where it
+                // did not and there is still a build to make
+                changed |= stopped_for_update(&name, switch, &units);
                 let built = build_steps(&hands, said, &dir, &base)
                     .iter()
                     .try_for_each(|(label, step)| console.source_task(label, step));
@@ -14085,7 +14672,12 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
             // llama.cpp is taken again where this version pins another build
             LLAMA_PART => {
                 let plan = plan_from_state(&state, channel);
-                match fetch_llama(&plan) {
+                let mut stopped = false;
+                let taken = fetch_llama(&plan, &mut || {
+                    stopped = stopped_for_update(&name, Switch::LlamaBuilds, &units);
+                });
+                changed |= stopped;
+                match taken {
                     Ok((dir, taken)) => {
                         state.parts.insert(
                             name.clone(),
@@ -14123,7 +14715,12 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
     if state.parts.contains_key("assistant") && !state.parts.contains_key(LLAMA_PART) {
         let plan = plan_from_state(&state, channel);
         if plan.llama.is_some() {
-            match fetch_llama(&plan) {
+            let mut stopped = false;
+            let taken = fetch_llama(&plan, &mut || {
+                stopped = stopped_for_update(LLAMA_PART, Switch::LlamaBuilds, &units);
+            });
+            changed |= stopped;
+            match taken {
                 Ok((dir, _)) => {
                     state.parts.insert(
                         LLAMA_PART.to_string(),
@@ -14148,6 +14745,31 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
     state.at = nils_registry::time::now_iso();
     write_state(&state)?;
     Ok(changed)
+}
+
+/// A part's unit stopped before an update switches its files, said on the
+/// update's lines, and whether it was stopped. A stopped part counts as a
+/// change whatever the update came to after, since only a change is followed
+/// by the restart that starts it again.
+fn stopped_for_update(name: &str, switch: Switch, units: &[Unit]) -> bool {
+    match stop_before(switch, units) {
+        None => false,
+        Some(Ok(said)) => {
+            println!("{name}: {said}");
+            true
+        }
+        Some(Err(why)) => {
+            println!("{name}: {why}");
+            false
+        }
+    }
+}
+
+/// Whether an update's checkout changes the folder a Node part runs from:
+/// where the commit fetched is not the one checked out, where either could
+/// not be read, and where there is no build to run from at all.
+fn source_moves(checked_out: Option<&str>, fetched: Option<&str>, built: bool) -> bool {
+    !built || checked_out.is_none() || fetched != checked_out
 }
 
 /// After an update the services run what is now installed. The units are
@@ -16086,7 +16708,7 @@ mod tests {
             llama: None,
         };
         let (outcome, drawn) = on_screens(
-            |console| questions(console, &args, None, &facts, false),
+            |console| questions(console, &args, None, &facts, None),
             vec![
                 Enter, // the engine and the desk
                 Enter, // no directory of DICOM
@@ -17735,6 +18357,282 @@ mod tests {
             settle_port(7200, &[7200], &|_| false),
             Some(7201),
             "two parts are never given one port"
+        );
+    }
+
+    /// Every part an install may have, each listening, with the ones a
+    /// finished record names marked so.
+    fn every_listener(recorded: &[&str]) -> Vec<Listener> {
+        [
+            ("the engine", "engine"),
+            ("the desk", "desk"),
+            ("Kvasir", "kvasir"),
+            ("the assistant", "assistant"),
+            ("Postgres", "postgres"),
+            ("the supervisor", SUPERVISOR_PART),
+            ("llama.cpp", LLAMA_PART),
+        ]
+        .into_iter()
+        .map(|(name, part)| Listener {
+            name,
+            part,
+            listens: true,
+            recorded: recorded.contains(&part),
+        })
+        .collect()
+    }
+
+    /// A run that stopped partway leaves a record that names only the parts
+    /// it placed, while the units of the parts it started run on the ports it
+    /// chose. The rerun starts again from nothing but those ports, and keeps
+    /// every one that nothing else holds.
+    #[test]
+    fn an_install_whose_last_run_stopped_partway_keeps_the_ports_it_chose() {
+        let chosen = Ports {
+            engine: 8438,
+            desk: 7203,
+            kvasir: 7101,
+            assistant: 7301,
+            postgres: 5433,
+            supervisor: 8471,
+            llama: 7111,
+        };
+        let mut stopped = State {
+            dir: "/srv/nils".to_string(),
+            ports: chosen,
+            unfinished: true,
+            ..State::default()
+        };
+        stopped.parts.insert(
+            "engine".to_string(),
+            PartState {
+                version: "1.0.0".to_string(),
+                path: "/srv/nils/engine/nils".to_string(),
+                kind: "binary".to_string(),
+            },
+        );
+        let (existing, restarted) = go_on_from(Some(stopped.clone()));
+        assert!(
+            existing.is_none(),
+            "a run that stopped partway is started again, not updated"
+        );
+        assert_eq!(restarted, Some(chosen), "its ports are taken from it");
+
+        // one that finished is gone on from as it is, and nothing is restarted
+        let finished = State {
+            unfinished: false,
+            ..stopped
+        };
+        let (existing, restarted) = go_on_from(Some(finished));
+        assert!(existing.is_some() && restarted.is_none());
+        let (existing, restarted) = go_on_from(None);
+        assert!(existing.is_none() && restarted.is_none());
+
+        // Only the engine was on its record. The engine, Kvasir, the
+        // assistant and llama.cpp run under this install's units on the ports
+        // it chose, and the rest are free: every port is kept.
+        let held = [8438, 7101, 7301, 7111];
+        let taken = |port: u16| held.contains(&port);
+        let own = |part: &str, port: u16| {
+            matches!(
+                (part, port),
+                ("engine", 8438) | ("kvasir", 7101) | ("assistant", 7301) | (LLAMA_PART, 7111)
+            )
+        };
+        let (ports, said) = settle_ports(chosen, &every_listener(&[]), &taken, &own);
+        assert_eq!(ports, chosen, "{said:?}");
+        assert!(
+            said.iter().all(|line| !line.contains("is taken")),
+            "{said:?}"
+        );
+    }
+
+    /// A port one of this install's own units holds is that part's already,
+    /// and the unit is started again on it: it is kept, and the reason said.
+    /// A unit is this install's own by its name, in the manager the install
+    /// writes its units to.
+    #[test]
+    fn a_port_one_of_this_installs_own_units_holds_is_not_moved() {
+        let taken = |port: u16| port == 8437 || port == 7100;
+        let own = |part: &str, port: u16| part == "engine" && port == 8437;
+        let (ports, said) =
+            settle_ports(Ports::default(), &every_listener(&["kvasir"]), &taken, &own);
+        assert_eq!(ports.engine, 8437);
+        assert_eq!(
+            ports.kvasir, 7100,
+            "a part on record keeps its port as before"
+        );
+        assert_eq!(
+            said,
+            vec!["port 8437 is held by the engine's own service, which is started again on it"]
+        );
+
+        // the services of this machine are the machine's manager's
+        let engine = ServiceOf {
+            unit: "nils-engine".to_string(),
+            user: None,
+        };
+        assert!(own_unit_holds(
+            "nils-engine",
+            true,
+            Some(0),
+            std::slice::from_ref(&engine)
+        ));
+        // and an install of an account's own is that account's manager's
+        let mine = ServiceOf {
+            unit: "nils-engine".to_string(),
+            user: Some(1500),
+        };
+        assert!(own_unit_holds(
+            "nils-engine",
+            false,
+            Some(1500),
+            std::slice::from_ref(&mine)
+        ));
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                listening_unit(Runtime::Machine, "engine"),
+                Some("nils-engine")
+            );
+            assert_eq!(listening_unit(Runtime::Machine, "kvasir"), Some("kvasir"));
+            assert_eq!(
+                listening_unit(Runtime::Podman, LLAMA_PART),
+                Some("nils-llama")
+            );
+            assert_eq!(
+                listening_unit(Runtime::Docker, SUPERVISOR_PART),
+                Some("nils-supervise")
+            );
+            // a container's port is published by the runtime, which says
+            // nothing of whose container it is
+            assert_eq!(listening_unit(Runtime::Docker, "desk"), None);
+            assert_eq!(listening_unit(Runtime::Machine, "postgres"), None);
+        }
+    }
+
+    /// A port held by anything but this install's own unit for that part
+    /// moves to the next free one, as it always did: another part's unit, a
+    /// unit of the same name in another manager, a process under no service,
+    /// and what this process may not read.
+    #[test]
+    fn a_port_something_else_holds_moves_as_it_always_did() {
+        let found = |port: u16| match port {
+            // the engine's name, but an account's own while the install
+            // writes the services of this machine
+            8437 => vec![ServiceOf {
+                unit: "nils-engine".to_string(),
+                user: Some(1000),
+            }],
+            // the desk's unit on Kvasir's port
+            7100 => vec![ServiceOf {
+                unit: "nils-desk".to_string(),
+                user: None,
+            }],
+            // nothing under a service, or nothing this process may read
+            _ => Vec::new(),
+        };
+        let unit_of = |part: &str| match part {
+            "engine" => Some("nils-engine"),
+            "desk" => Some("nils-desk"),
+            "kvasir" => Some("kvasir"),
+            "assistant" => Some("nils-assistant"),
+            _ => None,
+        };
+        let taken = |port: u16| [8437, 7100, 7300].contains(&port);
+        let own = |part: &str, port: u16| {
+            unit_of(part).is_some_and(|unit| own_unit_holds(unit, true, Some(0), &found(port)))
+        };
+        let (ports, said) = settle_ports(Ports::default(), &every_listener(&[]), &taken, &own);
+        assert_eq!(
+            (ports.engine, ports.kvasir, ports.assistant),
+            (8438, 7101, 7301)
+        );
+        assert_eq!(
+            said,
+            vec![
+                "port 8437 is taken, so the engine takes 8438",
+                "port 7100 is taken, so Kvasir takes 7101",
+                "port 7300 is taken, so the assistant takes 7301",
+            ]
+        );
+        // an account's own unit is not the machine's, nor the other way about,
+        // and a user manager is nobody's where this account is not known
+        let system = ServiceOf {
+            unit: "nils-engine".to_string(),
+            user: None,
+        };
+        assert!(!own_unit_holds(
+            "nils-engine",
+            false,
+            Some(1000),
+            std::slice::from_ref(&system)
+        ));
+        assert!(!own_unit_holds("nils-engine", false, None, &found(8437)));
+    }
+
+    #[test]
+    fn what_listens_on_a_port_is_read_from_the_socket_tables_and_the_control_groups() {
+        let tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   \
+             0: 0100007F:20F5 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1500        0 4038913 1 0000000000000000 100 0 0 10 0\n   \
+             1: 0100007F:20F5 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1500        0 4038999 1 0000000000000000 100 0 0 10 0\n   \
+             2: 00000000:1C20 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1501        0 4039001 1 0000000000000000 100 0 0 10 0\n";
+        assert_eq!(
+            listening_inodes(tcp, 8437),
+            vec![4038913],
+            "a connection is not a listener"
+        );
+        assert_eq!(listening_inodes(tcp, 7200), vec![4039001]);
+        assert!(listening_inodes(tcp, 7100).is_empty());
+        let tcp6 = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   \
+             0: 00000000000000000000000000000000:20F5 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1500        0 555 1 0000000000000000 100 0 0 10 0\n";
+        assert_eq!(listening_inodes(tcp6, 8437), vec![555]);
+
+        assert_eq!(socket_inode("socket:[4038913]"), Some(4038913));
+        assert_eq!(socket_inode("pipe:[4038913]"), None);
+        assert_eq!(socket_inode("/dev/null"), None);
+
+        let service = |unit: &str, user: Option<u32>| {
+            Some(ServiceOf {
+                unit: unit.to_string(),
+                user,
+            })
+        };
+        assert_eq!(
+            service_of_cgroup("0::/system.slice/nils-engine.service\n"),
+            service("nils-engine", None)
+        );
+        assert_eq!(
+            service_of_cgroup(
+                "0::/user.slice/user-1500.slice/user@1500.service/app.slice/kvasir.service\n"
+            ),
+            service("kvasir", Some(1500))
+        );
+        assert_eq!(
+            service_of_cgroup(
+                "0::/user.slice/user-1500.slice/user@1500.service/nils-llama.service\n"
+            ),
+            service("nils-llama", Some(1500))
+        );
+        // what a unit makes below itself is still that unit's
+        assert_eq!(
+            service_of_cgroup("0::/system.slice/nils-llama.service/models\n"),
+            service("nils-llama", None)
+        );
+        // the older hierarchies say the unit on systemd's own line
+        assert_eq!(
+            service_of_cgroup(
+                "12:cpu,cpuacct:/system.slice/other.service\n1:name=systemd:/system.slice/nils-desk.service\n"
+            ),
+            service("nils-desk", None)
+        );
+        // a session, and a user manager itself, are under no service
+        assert_eq!(
+            service_of_cgroup("0::/user.slice/user-1500.slice/session-3.scope\n"),
+            None
+        );
+        assert_eq!(
+            service_of_cgroup("0::/user.slice/user-1500.slice/user@1500.service/init.scope\n"),
+            None
         );
     }
 
@@ -19871,6 +20769,7 @@ mod tests {
             &into,
             &root,
             "nils setup",
+            &mut || {},
         )
         .unwrap_or_else(|e| panic!("the copy is adopted: {}", e.message));
         assert_eq!(source_folder(&into), SourceFolder::Checkout);
@@ -19922,6 +20821,7 @@ mod tests {
             &refused,
             &root,
             "nils setup",
+            &mut || {},
         ) else {
             panic!("the release tracks kvasir.json");
         };
@@ -19980,6 +20880,7 @@ mod tests {
             &into,
             &root,
             "nils setup",
+            &mut || {},
         )
         .unwrap_or_else(|e| panic!("the copy is adopted: {}", e.message));
         assert_eq!(
@@ -20985,6 +21886,206 @@ mod tests {
         let asked = restart_argv(&plain, engine, "1000");
         let asked: Vec<&str> = asked.iter().map(String::as_str).collect();
         assert_eq!(asked, vec!["systemctl", "--user", "restart", "nils-engine"]);
+    }
+
+    /// Every path that switches a part's files in place stops that part's
+    /// unit just before, and starts every unit again after: an install, a
+    /// rerun and `--update` for llama.cpp, Kvasir and the assistant, a repair
+    /// for llama.cpp, and `nils update --all` for each part its record names,
+    /// in the order it takes them. The supervisor is never stopped.
+    #[test]
+    fn each_part_is_stopped_just_before_its_files_are_switched_on_every_path() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        use Switch::{Assistant, Kvasir, LlamaBuilds};
+        let mut plan = deployment();
+        plan.llama = Some(Llama {
+            variant: "ubuntu-x64",
+            loader: true,
+        });
+        let stop = |words: &[&str]| Turn::Stop(words.iter().map(|w| (*w).to_string()).collect());
+        let units = planned_units(&plan);
+
+        // an install, a rerun and --update place every part again
+        let placed = turns(&switches(Run::Place, true, true), &units, "0");
+        assert_eq!(
+            placed,
+            vec![
+                stop(&["systemctl", "stop", "nils-llama"]),
+                Turn::Switch(LlamaBuilds),
+                stop(&["systemctl", "stop", "kvasir"]),
+                Turn::Switch(Kvasir),
+                stop(&["systemctl", "stop", "nils-assistant"]),
+                Turn::Switch(Assistant),
+                Turn::Start,
+            ]
+        );
+        // a repair takes llama.cpp alone
+        let repaired = turns(&switches(Run::Repair, true, true), &units, "0");
+        assert_eq!(
+            repaired,
+            vec![
+                stop(&["systemctl", "stop", "nils-llama"]),
+                Turn::Switch(LlamaBuilds),
+                Turn::Start,
+            ]
+        );
+        // nils update --all takes the parts its record names in the order the
+        // record keeps them
+        let mut state = deployed_state(&plan);
+        state.parts.insert(
+            LLAMA_PART.to_string(),
+            PartState {
+                version: LLAMA_BUILD.to_string(),
+                path: "/srv/nils/llama.cpp/b10964-ubuntu-x64".to_string(),
+                kind: LLAMA_PART.to_string(),
+            },
+        );
+        let taken: Vec<Switch> = state
+            .parts
+            .keys()
+            .filter_map(|name| switch_of_part(name))
+            .collect();
+        let updated = turns(&taken, &service_units(&state), "0");
+        assert_eq!(
+            updated,
+            vec![
+                stop(&["systemctl", "stop", "nils-assistant"]),
+                Turn::Switch(Assistant),
+                stop(&["systemctl", "stop", "kvasir"]),
+                Turn::Switch(Kvasir),
+                stop(&["systemctl", "stop", "nils-llama"]),
+                Turn::Switch(LlamaBuilds),
+                Turn::Start,
+            ]
+        );
+        for path in [&placed, &repaired, &updated] {
+            for (at, turn) in path.iter().enumerate() {
+                if let Turn::Switch(_) = turn {
+                    assert!(
+                        at > 0 && matches!(path[at - 1], Turn::Stop(_)),
+                        "a switch with no stop before it: {path:?}"
+                    );
+                }
+            }
+            assert_eq!(path.last(), Some(&Turn::Start));
+            assert!(
+                !path
+                    .iter()
+                    .any(|turn| matches!(turn, Turn::Stop(argv) if argv.iter().any(|w| w == "nils-supervise"))),
+                "the supervisor was stopped: {path:?}"
+            );
+        }
+
+        // the services of an account's own are stopped in its own manager, and
+        // docker's containers by docker, with llama.cpp beside them
+        let own = Plan {
+            system: None,
+            helper: None,
+            ..plan.clone()
+        };
+        assert_eq!(
+            turns(&[Kvasir], &planned_units(&own), "1000")[0],
+            stop(&["systemctl", "--user", "stop", "kvasir"])
+        );
+        let docker = Plan {
+            runtime: Runtime::Docker,
+            ..own.clone()
+        };
+        assert_eq!(
+            turns(&[LlamaBuilds, Kvasir], &planned_units(&docker), "1000"),
+            vec![
+                stop(&["systemctl", "--user", "stop", "nils-llama"]),
+                Turn::Switch(LlamaBuilds),
+                stop(&["docker", "stop", "nils-kvasir"]),
+                Turn::Switch(Kvasir),
+                Turn::Start,
+            ]
+        );
+
+        // an install with no services has no unit to stop or start, and one
+        // without the assistant switches nothing in place
+        let unserved = Plan {
+            service: false,
+            ..plan.clone()
+        };
+        assert_eq!(
+            turns(
+                &switches(Run::Place, true, true),
+                &planned_units(&unserved),
+                "0"
+            ),
+            vec![
+                Turn::Switch(LlamaBuilds),
+                Turn::Switch(Kvasir),
+                Turn::Switch(Assistant)
+            ]
+        );
+        assert!(switches(Run::Place, false, true).is_empty());
+    }
+
+    /// An update fetches a Node part's source with the part running, and
+    /// stops it before the checkout only where the checkout moves it; a unit
+    /// systemd is starting again after a failure is stopped like one running.
+    #[test]
+    fn an_update_stops_a_node_part_only_where_its_source_moves() {
+        assert!(
+            !source_moves(Some("abc\n"), Some("abc\n"), true),
+            "the commit built"
+        );
+        assert!(source_moves(Some("abc\n"), Some("def\n"), true));
+        assert!(
+            source_moves(Some("abc\n"), Some("abc\n"), false),
+            "nothing built"
+        );
+        assert!(source_moves(None, Some("abc\n"), true), "a checkout unread");
+        assert!(source_moves(Some("abc\n"), None, true), "a fetch unread");
+        let steps = fetch_steps(
+            &SourceHands::Own,
+            "Kvasir",
+            KVASIR_REPO,
+            KVASIR_REF,
+            Path::new("/srv/nils/kvasir"),
+            Path::new("/srv/nils"),
+            true,
+        );
+        let checks: Vec<bool> = steps.iter().map(|(_, step)| checks_out(step)).collect();
+        assert_eq!(checks, vec![false, true], "the fetch, then the checkout");
+
+        assert!(may_run("active\n") && may_run("activating") && may_run("reloading"));
+        assert!(!may_run("inactive") && !may_run("failed") && !may_run(""));
+    }
+
+    #[test]
+    fn print_says_which_units_a_run_stops_while_their_files_change() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let mut console = Console::new(true);
+        console.colour = false;
+        let mut plan = deployment();
+        plan.llama = Some(Llama {
+            variant: "ubuntu-x64",
+            loader: true,
+        });
+        let said = stops_text(&plan, Run::Place, &console);
+        assert!(said.contains("stopped while their files change"), "{said}");
+        for line in [
+            "    systemctl stop nils-llama  while the older llama.cpp builds are removed\n",
+            "    systemctl stop kvasir  while Kvasir's source is taken and built\n",
+            "    systemctl stop nils-assistant  while the assistant's source is taken and built\n",
+        ] {
+            assert!(said.contains(line), "{line} is not in: {said}");
+        }
+        for untouched in ["nils-engine", "nils-desk", "nils-supervise"] {
+            assert!(!said.contains(untouched), "{untouched} is stopped: {said}");
+        }
+        let said = stops_text(&plan, Run::Repair, &console);
+        assert!(said.contains("systemctl stop nils-llama"), "{said}");
+        assert!(!said.contains("stop kvasir"), "{said}");
+        plan.parts = vec![Part::Engine, Part::Desk];
+        assert_eq!(stops_text(&plan, Run::Place, &console), "");
     }
 
     /// The privilege is on record, so an update and a repair lay down the
