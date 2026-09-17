@@ -7442,7 +7442,11 @@ fn choose_provider(
             .as_ref()
             .and_then(|file| std::fs::read_to_string(file).ok())
             .map(|secret| secret.trim().to_string());
-        let jwks = args.oidc_jwks.clone().or_else(|| discover_jwks(issuer));
+        let discovery = discover(issuer);
+        let jwks = args
+            .oidc_jwks
+            .clone()
+            .or_else(|| discovery.as_ref().and_then(jwks_of));
         match jwks {
             Some(jwks) => {
                 answers.provider = Some(Provider::Registered { secret });
@@ -7454,7 +7458,7 @@ fn choose_provider(
                         .oidc_roles_claim
                         .clone()
                         .unwrap_or_else(|| "roles".into()),
-                    scopes: Some(plain_scopes()),
+                    scopes: Some(scopes_for(discovery.as_ref())),
                 }));
             }
             None => console.note(&format!(
@@ -7522,8 +7526,8 @@ fn choose_provider(
                 .ask_line("The claim that carries the entitlements", "roles")?
                 .trim()
                 .to_string();
-            let found = console.probe(&format!("jwks {issuer}"), || discover_jwks(&issuer));
-            let jwks = match found {
+            let discovery = console.probe(&format!("discovery {issuer}"), || discover(&issuer));
+            let jwks = match discovery.as_ref().and_then(jwks_of) {
                 Some(jwks) => {
                     console.note(&format!("{issuer} publishes its keys at {jwks}"));
                     jwks
@@ -7543,15 +7547,14 @@ fn choose_provider(
                 client_id,
                 jwks,
                 roles_claim,
-                scopes: Some(plain_scopes()),
+                scopes: Some(scopes_for(discovery.as_ref())),
             }))
         }
         _ => Ok(None),
     }
 }
 
-/// The scopes the desk asks a provider for that has no entitlements scope,
-/// which is one only a registration at Authentik makes.
+/// The scopes the desk asks a provider for that has no entitlements scope.
 fn plain_scopes() -> Vec<String> {
     ["openid", "profile", "email", "offline_access"]
         .iter()
@@ -7559,9 +7562,27 @@ fn plain_scopes() -> Vec<String> {
         .collect()
 }
 
-/// Where a provider publishes its signing keys, as its discovery document
-/// says.
-fn discover_jwks(issuer: &str) -> Option<String> {
+/// The scopes the desk asks a provider it is registered at already: the plain
+/// four, and `entitlements` where the provider's discovery document lists that
+/// scope. A registration at Authentik is not only one setup makes: a desk
+/// registered there by hand or by `nils-desk register` reads its people's
+/// entitlements from that scope too, and a desk that stopped asking for it
+/// signed everyone in with none. A provider that does not offer the scope is
+/// never asked for it, since a scope a provider does not know fails the sign in.
+fn scopes_for(discovery: Option<&serde_json::Value>) -> Vec<String> {
+    let mut scopes = plain_scopes();
+    let offered = discovery
+        .and_then(|doc| doc["scopes_supported"].as_array())
+        .is_some_and(|listed| listed.iter().any(|s| s.as_str() == Some("entitlements")));
+    if offered {
+        scopes.push("entitlements".to_string());
+    }
+    scopes
+}
+
+/// A provider's discovery document, where it publishes one: where its keys
+/// are, and which scopes it offers.
+fn discover(issuer: &str) -> Option<serde_json::Value> {
     let url = format!(
         "{}/.well-known/openid-configuration",
         issuer.trim().trim_end_matches('/')
@@ -7577,8 +7598,13 @@ fn discover_jwks(issuer: &str) -> Option<String> {
         .body_mut()
         .read_to_string()
         .ok()?;
-    let doc: serde_json::Value = serde_json::from_str(&text).ok()?;
-    doc["jwks_uri"].as_str().map(str::to_string)
+    serde_json::from_str(&text).ok()
+}
+
+/// Where a provider publishes its signing keys, as its discovery document
+/// says.
+fn jwks_of(discovery: &serde_json::Value) -> Option<String> {
+    discovery["jwks_uri"].as_str().map(str::to_string)
 }
 
 /// The desk registered at an Authentik by the desk's own register command:
@@ -12900,6 +12926,36 @@ fn remove_path(path: &Path, runtime: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_provider_that_offers_entitlements_is_asked_for_them() {
+        let authentik = serde_json::json!({
+            "jwks_uri": "https://auth.example.org/application/o/nils/jwks/",
+            "scopes_supported": ["openid", "offline_access", "profile", "entitlements", "email"],
+        });
+        assert_eq!(
+            scopes_for(Some(&authentik)),
+            [
+                "openid",
+                "profile",
+                "email",
+                "offline_access",
+                "entitlements"
+            ]
+        );
+        assert_eq!(
+            jwks_of(&authentik).as_deref(),
+            Some("https://auth.example.org/application/o/nils/jwks/")
+        );
+    }
+
+    #[test]
+    fn a_provider_without_entitlements_or_discovery_gets_the_plain_scopes() {
+        let other = serde_json::json!({"scopes_supported": ["openid", "profile", "email"]});
+        assert_eq!(scopes_for(Some(&other)), plain_scopes());
+        assert_eq!(scopes_for(Some(&serde_json::json!({}))), plain_scopes());
+        assert_eq!(scopes_for(None), plain_scopes());
+    }
 
     #[test]
     fn the_first_person_is_held_to_the_desks_rules_where_it_is_asked() {
