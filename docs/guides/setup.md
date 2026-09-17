@@ -108,17 +108,17 @@ answer the desk would refuse is asked for again. For an identity provider it
 prints the `nils-desk register --authentik ...` line rather than pretending
 to have run it.
 
-An install that would not work is not finished. Before anything is placed,
-the plan names what this machine lacks for it (Node 22, git and npm for the
+An install that would not work is not finished. Before anything is placed, the
+plan names what this machine lacks for it (Node 22, git and npm for the
 assistant, and on Linux the libraries llama.cpp links, such as `libgomp.so.1`
 from `libgomp1` on Debian and Ubuntu; podman or docker for their runtime), and
-nothing is changed until it is there. A model is taken only once it answers one short question. While
-installing, a failure that leaves a chosen part unusable stops the install
-with the reason: the desk not installed or nobody added to it, a place not
-declared, the rule packs, the assistant, Kvasir, its model or its key, or a
-service that does not start. `nils uninstall` removes what was placed,
-and `nils setup` starts again. An update or a repair says the same and goes
-on, so what still works keeps running.
+nothing is changed until it is there. A model is taken only once it answers
+one short question. While installing, a failure that leaves a chosen part
+unusable stops the install with the reason: the desk not installed or nobody
+added to it, a place not declared, the rule packs, the assistant, Kvasir, its
+model or its key, or a service that does not start. `nils uninstall` removes
+what was placed, and `nils setup` starts again. An update or a repair says the
+same and goes on, so what still works keeps running.
 
 **6. What this machine can do.** The wizard reads the graphics card
 (`nvidia-smi`, then `rocm-smi`, then an Apple machine's unified memory) and
@@ -193,9 +193,17 @@ site mounts, which is the reason for these services at all: a service of an
 account's own cannot carry a capability, whatever it is asked for. A part
 that runs as an account other than the engine's is kept out of the home
 directories, and out of the registry, the archives and the folders of DICOM,
-which it never reads: it asks the engine for what it shows. What each part
-reads and writes is given to the account that part runs as, so the desk's
-folder is the desk's and Kvasir's is the assistant's, while the base
+which it never reads: it asks the engine for what it shows. systemd looks at
+each of those paths as root before the part starts, and one root cannot look
+at, as on a share that squashes root, stops the part, so setup looks at them
+first: a path the part's account cannot reach either is left out of its unit,
+with a comment saying why, and one the account can reach is refused before
+anything is written, with the folder to give root search permission on. Kept
+out of the homes, llama.cpp is given `LLAMA_CACHE`, `HF_HOME` and
+`HF_HUB_CACHE` under `<dir>/kvasir/runtime/cache` for the models it
+downloads; where its unit sees a home, its cache stays where it was. What
+each part reads and writes is given to the account that part runs as, so the
+desk's folder is the desk's and Kvasir's is the assistant's, while the base
 directory and the registry key's passphrase stay with the account that ran
 setup. The services and the accounts are written down, so an update and a
 repair write the same services rather than falling back to an account's own,
