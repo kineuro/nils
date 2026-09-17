@@ -386,6 +386,11 @@ pub(crate) struct SetupArgs {
     /// Who may reach the desk: this machine, or an address of this host
     #[arg(long, value_name = "loopback|network")]
     reach: Option<String>,
+    /// The address a browser opens the desk at, where a proxy of yours
+    /// answers for it: with --reach network the desk is bound for a proxy on
+    /// another machine, and otherwise for one here
+    #[arg(long, value_name = "URL")]
+    origin: Option<String>,
     /// The registry key's passphrase, from a file instead of a prompt
     #[arg(long, value_name = "FILE")]
     key_file: Option<PathBuf>,
@@ -519,6 +524,37 @@ impl Runtime {
 pub(crate) enum Reach {
     Loopback,
     Network(String),
+    /// A proxy of the site's answers for the desk at `origin`: the address a
+    /// browser opens, which the desk compares a write against, signs its
+    /// tokens with and sends a person back to after a sign in. Where the
+    /// desk binds is a separate matter, and `network` carries it: a proxy on
+    /// another machine reaches the desk on this machine's address, one here
+    /// reaches it on the loopback.
+    Behind {
+        origin: String,
+        network: bool,
+    },
+}
+
+impl Reach {
+    /// Whether the desk itself answers beyond this machine's own loopback,
+    /// which is what a container publishes and what an open desk with no
+    /// login is warned about.
+    fn beyond_loopback(&self) -> bool {
+        match self {
+            Reach::Loopback => false,
+            Reach::Network(_) => true,
+            Reach::Behind { network, .. } => *network,
+        }
+    }
+
+    /// The origin a proxy answers at, where one does.
+    fn proxied(&self) -> Option<&str> {
+        match self {
+            Reach::Behind { origin, .. } => Some(origin),
+            _ => None,
+        }
+    }
 }
 
 /// Where the registry itself is kept.
@@ -2163,6 +2199,11 @@ pub(crate) struct State {
     pub(crate) service: String,
     #[serde(default)]
     pub(crate) reach: String,
+    /// The address a browser opens the desk at, where a proxy answers for
+    /// it; empty where the desk is opened where it binds. Recorded, so that
+    /// an update and a repair write the same origin the install did.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) origin: String,
     #[serde(default)]
     pub(crate) backend: String,
     #[serde(default)]
@@ -2480,10 +2521,7 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
             None => BackendChoice::Sqlite,
         },
         ports: state.ports,
-        reach: match state.reach.as_str() {
-            "" | "loopback" => Reach::Loopback,
-            address => Reach::Network(address.to_string()),
-        },
+        reach: recorded_reach(state),
         source: state
             .places
             .iter()
@@ -2507,6 +2545,22 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
             .map(|runtime| ManagedPostgres { runtime }),
         oidc: state.oidc.clone(),
         llama: llama_of_state(state),
+    }
+}
+
+/// Where a recorded install's desk answers and where it binds: the origin a
+/// proxy of the site's answers at, where one was named, and otherwise the
+/// address the record keeps. Read by the plan an update and a repair are
+/// made from, so that neither writes an origin the install never had.
+fn recorded_reach(state: &State) -> Reach {
+    let network = !matches!(state.reach.as_str(), "" | "loopback");
+    match state.origin.trim() {
+        "" if network => Reach::Network(state.reach.clone()),
+        "" => Reach::Loopback,
+        origin => Reach::Behind {
+            origin: origin.to_string(),
+            network,
+        },
     }
 }
 
@@ -2612,12 +2666,23 @@ fn host_address() -> Option<String> {
     Some(addr.ip().to_string())
 }
 
-/// What the desk's three address keys are, for a reach and a port.
+/// What the desk's three address keys are, for a reach and a port. The
+/// binding and the origin are two answers and not one: behind a proxy the
+/// desk is bound where only the proxy reaches it and answers at a name with
+/// a certificate, and either address on its own would be wrong.
 pub(crate) fn desk_binding(
     reach: &Reach,
     port: u16,
     container: bool,
 ) -> (String, String, Vec<String>) {
+    // whatever it answers at, the desk is opened on this machine too: from a
+    // browser here, and by whatever asks it for its keys
+    let here = || {
+        vec![
+            format!("http://127.0.0.1:{port}"),
+            format!("http://localhost:{port}"),
+        ]
+    };
     match reach {
         Reach::Loopback => (
             if container {
@@ -2631,12 +2696,84 @@ pub(crate) fn desk_binding(
         Reach::Network(addr) => (
             format!("0.0.0.0:{port}"),
             format!("http://{addr}:{port}"),
-            vec![
-                format!("http://127.0.0.1:{port}"),
-                format!("http://localhost:{port}"),
-            ],
+            here(),
+        ),
+        Reach::Behind { origin, network } => (
+            if container || *network {
+                format!("0.0.0.0:{port}")
+            } else {
+                format!("127.0.0.1:{port}")
+            },
+            origin.clone(),
+            here(),
         ),
     }
+}
+
+/// The origin a person gave, as the desk will hold it: a scheme and a host,
+/// with nothing after them. It is the address a browser opens, so what is
+/// wrong with one that cannot be is said in those terms.
+fn origin_given(text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(
+            "an origin is the address a browser opens the desk at, such as \
+             https://nils.example.org"
+                .to_string(),
+        );
+    }
+    if text.split_whitespace().count() > 1 {
+        return Err(format!(
+            "{text} has a space in it, so it is not one address"
+        ));
+    }
+    let Some((scheme, rest)) = text.split_once("://") else {
+        return Err(format!("{text} has no scheme: write https://{text}"));
+    };
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return Err(format!(
+            "{scheme} is not a scheme a browser opens the desk on: http or https"
+        ));
+    }
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if let Some(at) = rest.find(['/', '?', '#']) {
+        return Err(format!(
+            "an origin is a scheme and a host with nothing after them, so leave off {}",
+            &rest[at..]
+        ));
+    }
+    if rest.contains('@') {
+        return Err(format!(
+            "an origin carries no sign in, so leave off what is before the @ in {rest}"
+        ));
+    }
+    let (host, port) = match rest.rsplit_once(':') {
+        // [::1]:7200 is a host and a port; [::1] is a host
+        Some((host, port)) if !host.ends_with(']') => (host, Some(port)),
+        _ => (rest, None),
+    };
+    if host.is_empty() {
+        return Err(format!(
+            "{text} names no host: write https://nils.example.org"
+        ));
+    }
+    let named =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']' | ':');
+    if !host.chars().all(named) {
+        return Err(format!("{host} is not a host a browser can open"));
+    }
+    if let Some(port) = port
+        && port.parse::<u16>().is_err()
+    {
+        return Err(format!("{port} is not a port: a number up to 65535"));
+    }
+    // a browser sends the host lower case, and the desk compares what it is
+    // given with what it holds
+    Ok(format!(
+        "{}://{}",
+        scheme.to_ascii_lowercase(),
+        rest.to_ascii_lowercase()
+    ))
 }
 
 // ------------------------------------------------------------- the places
@@ -2794,13 +2931,22 @@ fn desk_trust(plan: &Plan) -> (String, String) {
     (issuer, format!("{keys}/.well-known/jwks.json"))
 }
 
+/// How the desk's port is published: on this machine's loopback where only
+/// this machine opens the desk, which includes a proxy running here, and on
+/// every address where another machine reaches it.
+fn desk_publish(plan: &Plan) -> String {
+    let p = plan.ports.desk;
+    if plan.reach.beyond_loopback() {
+        format!("{p}:{p}")
+    } else {
+        format!("127.0.0.1:{p}:{p}")
+    }
+}
+
 /// The commands a podman run is, in order, exactly as a person would type
 /// them. `--print` shows these and the wizard runs them.
 pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
-    let publish = match &plan.reach {
-        Reach::Loopback => format!("127.0.0.1:{p}:{p}", p = plan.ports.desk),
-        Reach::Network(_) => format!("{p}:{p}", p = plan.ports.desk),
-    };
+    let publish = desk_publish(plan);
     let mut pod = format!("podman pod create --name nils -p {publish}");
     if plan.has(Part::Assistant) {
         // Kvasir, on this machine's loopback only, for what setup asks of it
@@ -2857,10 +3003,7 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
 /// The same for docker, which has no pod: a network of its own, the desk
 /// publishing the port, and no `:U` because it does not remap the user.
 pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
-    let publish = match &plan.reach {
-        Reach::Loopback => format!("127.0.0.1:{p}:{p}", p = plan.ports.desk),
-        Reach::Network(_) => format!("{p}:{p}", p = plan.ports.desk),
-    };
+    let publish = desk_publish(plan);
     let mut out = vec!["docker network create nils".to_string()];
     let (registry, backups) = (
         plan.registry().display().to_string(),
@@ -2942,10 +3085,7 @@ pub(crate) fn docker_compose(plan: &Plan) -> String {
         let _ = writeln!(out, "      - {0}:{0}:ro", path.display());
     }
     if plan.has(Part::Desk) {
-        let publish = match &plan.reach {
-            Reach::Loopback => format!("127.0.0.1:{p}:{p}", p = plan.ports.desk),
-            Reach::Network(_) => format!("{p}:{p}", p = plan.ports.desk),
-        };
+        let publish = desk_publish(plan);
         let _ = writeln!(out, "  desk:");
         let _ = writeln!(out, "    image: {DESK_IMAGE}:{}", plan.tag());
         let _ = writeln!(out, "    container_name: nils-desk");
@@ -3002,10 +3142,7 @@ pub(crate) fn docker_compose(plan: &Plan) -> String {
 
 /// Podman's quadlets: systemd builds the units from these.
 pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
-    let publish = match &plan.reach {
-        Reach::Loopback => format!("127.0.0.1:{p}:{p}", p = plan.ports.desk),
-        Reach::Network(_) => format!("{p}:{p}", p = plan.ports.desk),
-    };
+    let publish = desk_publish(plan);
     let mut pod = format!("[Pod]\nPodName=nils\nPublishPort={publish}\n");
     if plan.has(Part::Assistant) {
         let _ = writeln!(pod, "PublishPort=127.0.0.1:{p}:{p}", p = plan.ports.kvasir);
@@ -3577,36 +3714,98 @@ fn questions(
 
     console.note(mode.words());
 
-    let mut reach = match &args.reach {
-        Some(r) if r.trim() == "network" => {
-            Reach::Network(host_address().unwrap_or_else(|| "127.0.0.1".to_string()))
-        }
-        Some(r) if r.trim() == "loopback" => Reach::Loopback,
+    // An address given outright is the one a browser opens, whatever the
+    // desk binds: a name of the site's, with a certificate, that a proxy
+    // answers for. It is refused here, before anything is written, since an
+    // address a browser cannot open leaves a desk nobody can sign in to.
+    let given_origin = match &args.origin {
+        Some(text) => Some(origin_given(text).map_err(usage)?),
+        None => None,
+    };
+    let recorded_origin = existing
+        .map(|s| s.origin.trim().to_string())
+        .filter(|o| !o.is_empty());
+    let recorded_network = existing.is_some_and(|s| !matches!(s.reach.as_str(), "" | "loopback"));
+    let reach_word = match args.reach.as_deref().map(str::trim) {
+        None => None,
+        Some("network") => Some(true),
+        Some("loopback") => Some(false),
         Some(other) => {
             return Err(usage(format!("{other} is not a reach: loopback or network")).into());
         }
-        None if !parts.contains(&Part::Desk) => Reach::Loopback,
-        None => {
+    };
+    let mut reach = match (&given_origin, reach_word) {
+        // the desk binds for a proxy on another machine only where it is
+        // told to; the origin says nothing about that
+        (Some(origin), given) => Reach::Behind {
+            origin: origin.clone(),
+            network: given.unwrap_or(false),
+        },
+        (None, Some(true)) => {
+            Reach::Network(host_address().unwrap_or_else(|| "127.0.0.1".to_string()))
+        }
+        (None, Some(false)) => Reach::Loopback,
+        (None, None) if !parts.contains(&Part::Desk) => Reach::Loopback,
+        (None, None) => {
             let address = host_address().unwrap_or_else(|| "this host".to_string());
             let choices = [
                 ("Only this machine", "the desk answers on 127.0.0.1"),
                 ("This network", "other machines here can open it"),
+                (
+                    "Behind a proxy of yours",
+                    "a name and a certificate of yours answer for it",
+                ),
             ];
-            if console.ask_choice("Who may open the desk?", &choices, 0)? == 0 {
-                Reach::Loopback
+            // a rerun opens on what is on record, so an install behind a
+            // proxy stays behind it without being asked twice
+            let default = if recorded_origin.is_some() {
+                2
             } else {
-                Reach::Network(address)
+                usize::from(recorded_network)
+            };
+            match console.ask_choice("Who may open the desk?", &choices, default)? {
+                0 => Reach::Loopback,
+                1 => Reach::Network(address),
+                _ => {
+                    let mut suggested = recorded_origin.clone().unwrap_or_default();
+                    let origin = loop {
+                        let answer =
+                            console.ask_line("The address a browser opens it at", &suggested)?;
+                        match origin_given(&answer) {
+                            Ok(origin) => break origin,
+                            Err(refused) if console.interactive() => {
+                                console.note(&refused);
+                                suggested = String::new();
+                            }
+                            Err(refused) => return Err(usage(refused).into()),
+                        }
+                    };
+                    let here = console
+                        .ask_yes_no("Does that proxy run on this machine?", !recorded_network)?;
+                    Reach::Behind {
+                        origin,
+                        network: !here,
+                    }
+                }
             }
         }
     };
-    if matches!(reach, Reach::Network(_)) && mode == Mode::Off {
-        console.note(
-            "off mode has no login, so anyone on that network who finds the port gets the \
-             whole registry",
-        );
+    if reach.proxied().is_some() && !parts.contains(&Part::Desk) {
+        console.note("the desk is not installed here, so nothing answers at that address yet");
+    }
+    if (reach.beyond_loopback() || reach.proxied().is_some()) && mode == Mode::Off {
+        console.note(match reach.proxied() {
+            Some(_) => {
+                "off mode has no login, so anyone who opens that address gets the whole registry"
+            }
+            None => {
+                "off mode has no login, so anyone on that network who finds the port gets the \
+                 whole registry"
+            }
+        });
         if console.ask_yes_no("Keep the people in the desk instead (local mode)?", true)? {
             mode = Mode::Local;
-        } else if !console.interactive() {
+        } else if !console.interactive() && reach.proxied().is_none() {
             reach = Reach::Loopback;
         }
     }
@@ -3807,9 +4006,14 @@ fn questions(
     let manager = service_manager(runtime);
     let service = match (args.no_service, args.service, manager) {
         (true, _, _) => false,
+        // Asked for outright where nothing here can write or start them:
+        // said now, with nothing changed, rather than after every file is
+        // written and every part installed. `--print` changes nothing
+        // anyway, and goes on to show what would be written.
+        (_, true, None) if !args.print => return Err(usage(no_manager_here(runtime)).into()),
         (_, true, _) => true,
         (_, _, None) => {
-            console.note("no service manager here, so the commands are printed instead");
+            console.note(&no_manager_here(runtime));
             false
         }
         (_, _, Some(manager)) => {
@@ -4103,7 +4307,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
                 console.report(&started);
                 services = started.services;
             }
-            Err(e) => console.warn(&format!("no services were written: {}", e.message)),
+            Err(e) => console.warn(&format!("the services were not started: {}", e.message)),
         }
     } else {
         for line in container_commands(plan) {
@@ -4120,19 +4324,62 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     Ok(services)
 }
 
-/// Which service manager this machine and runtime use, if any.
+/// Whether this account has a systemd user manager here that would take
+/// units. `systemctl --user --version` answers from the binary wherever it
+/// is installed, session or none, so the manager itself is asked: reading a
+/// property of it needs the bus, which is there only where a session is.
+fn user_session() -> bool {
+    cfg!(target_os = "linux")
+        && run_quiet("systemctl", &["--user", "show", "--property=Version"]).is_some()
+}
+
+/// Which service manager this machine and runtime use, if any. The units of
+/// a machine or a podman install are this account's own, so a user manager
+/// must be there to take them; docker's own daemon brings its containers
+/// back and asks nothing of this account.
 fn service_manager(runtime: Runtime) -> Option<&'static str> {
+    service_manager_when(runtime, user_session())
+}
+
+/// The same, for a machine with or without a session of this account: the
+/// probe is asked once and the answer read here, so that both answers can be
+/// had on any machine.
+fn service_manager_when(runtime: Runtime, session: bool) -> Option<&'static str> {
     if cfg!(target_os = "macos") {
         return (runtime == Runtime::Machine).then_some("launchd agents");
     }
-    if !cfg!(target_os = "linux") || run_quiet("systemctl", &["--user", "--version"]).is_none() {
+    if !cfg!(target_os = "linux") {
         return None;
     }
-    Some(match runtime {
-        Runtime::Machine => "systemd user units",
-        Runtime::Podman => "podman quadlets",
-        Runtime::Docker => "a compose file",
-    })
+    match runtime {
+        Runtime::Docker => Some("a compose file"),
+        Runtime::Machine => session.then_some("systemd user units"),
+        Runtime::Podman => session.then_some("podman quadlets"),
+    }
+}
+
+/// Why nothing here can keep the parts running, said so that a person can
+/// act on it: on Linux the units want a session of the account that runs
+/// NILS, which is what a machine nobody is logged in to has not got.
+fn no_manager_here(runtime: Runtime) -> String {
+    no_manager_words(runtime, user_session())
+}
+
+fn no_manager_words(runtime: Runtime, session: bool) -> String {
+    if !session && cfg!(target_os = "linux") {
+        return format!(
+            "this account has no systemd session on this machine, so nothing here can keep {} \
+             running: sign in as the account that runs NILS, or allow it to keep services \
+             without a login (loginctl enable-linger {}), and run nils setup again",
+            if runtime.container() {
+                "the containers"
+            } else {
+                "the parts"
+            },
+            whoami().unwrap_or_else(|| "<account>".to_string())
+        );
+    }
+    "no service manager here, so the commands are printed instead".to_string()
 }
 
 /// The plan as a person reads it before anything happens: a row for each
@@ -4460,10 +4707,17 @@ fn do_it(
         } else {
             "none".to_string()
         },
+        // where the desk binds, which behind a proxy is its own answer: the
+        // address a browser opens is the origin beside it
         reach: match &plan.reach {
             Reach::Loopback => "loopback".to_string(),
             Reach::Network(addr) => addr.clone(),
+            Reach::Behind { network: true, .. } => {
+                host_address().unwrap_or_else(|| "network".to_string())
+            }
+            Reach::Behind { network: false, .. } => "loopback".to_string(),
         },
+        origin: plan.reach.proxied().unwrap_or_default().to_string(),
         backend: match &plan.backend {
             BackendChoice::Sqlite => "sqlite".to_string(),
             BackendChoice::Postgres { schema, .. } => format!("postgres:{schema}"),
@@ -4807,7 +5061,7 @@ fn place(
                 }
                 services = started.services;
             }
-            Err(e) => console.broken(&format!("no services were written: {}", e.message))?,
+            Err(e) => console.broken(&format!("the services were not started: {}", e.message))?,
         }
     } else if plan.runtime.container() {
         console.begin(Stage::Services);
@@ -5031,8 +5285,12 @@ fn start_postgres(plan: &Plan, pg: ManagedPostgres, console: &Console) -> Result
             std::fs::create_dir_all(&dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
             std::fs::write(dir.join("nils-postgres.container"), postgres_quadlet(plan))
                 .map_err(|e| fail(format!("{}: {e}", dir.display())))?;
-            quietly("systemctl", &["--user", "daemon-reload"]);
-            quietly("systemctl", &["--user", "restart", "nils-postgres"]);
+            make_the_calls(&hand_units_to_systemd(&[], false))?;
+            if !quietly("systemctl", &["--user", "restart", "nils-postgres"]) {
+                return Err(fail(
+                    "Postgres did not start; its log: journalctl --user -u nils-postgres",
+                ));
+            }
         }
         Runtime::Docker => {
             quietly("docker", &["rm", "-f", POSTGRES_CONTAINER]);
@@ -8321,7 +8579,11 @@ fn start_everything(
                     let _ = std::fs::remove_file(dir.join(name));
                 }
             }
-            quietly("systemctl", &["--user", "daemon-reload"]);
+            // the account is lingered before this, since a machine nobody is
+            // logged in as has no user manager to reload until it is
+            for refused in make_the_calls(&hand_units_to_systemd(&[], false))? {
+                console.warn(&format!("{refused} was refused"));
+            }
             // A quadlet's unit is generated, so it is never enabled: the
             // [Install] section of the file is what systemd reads. The pod
             // is restarted, since what it publishes and how it is networked
@@ -8351,7 +8613,6 @@ fn start_everything(
                 quietly("systemctl", &["--user", "restart", "nils-assistant"]);
                 units.push("nils-assistant".to_string());
             }
-            linger();
             Ok(Started::of(unit_report(&units, console, Watcher::Systemd)))
         }
         (Runtime::Docker, _) => {
@@ -8438,11 +8699,14 @@ fn start_everything(
                     .map_err(|e| fail(format!("{}: {e}", dir.display())))?;
                 names.push(name.trim_end_matches(".service").to_string());
             }
-            quietly("systemctl", &["--user", "daemon-reload"]);
+            // The account is lingered first, then the units are read and
+            // enabled: on a machine nobody is logged in as there is no user
+            // manager to read them until an account lingers, and this ran
+            // the other way about, so nothing started and nothing said so.
             // Enabling prints a line for every link it makes, which is
             // systemd's business and not the person's.
-            for unit in &names {
-                quietly("systemctl", &["--user", "enable", unit]);
+            for refused in make_the_calls(&hand_units_to_systemd(&names, true))? {
+                console.warn(&format!("{refused} was refused"));
             }
             // The assistant reads a key Kvasir makes, so everything else
             // starts first, the key is made once Kvasir answers, and the
@@ -8459,7 +8723,6 @@ fn start_everything(
                     quietly("systemctl", &["--user", "restart", unit]);
                 }
             }
-            linger();
             Ok(Started::of(unit_report(&names, console, Watcher::Systemd)))
         }
     }
@@ -8584,16 +8847,94 @@ fn last_error(unit: &str, watcher: Watcher) -> Option<String> {
     Some(text)
 }
 
-/// Keep this account's services running after it logs out. Where that is
-/// not allowed the services still run while the person is logged in, and
-/// loginctl's refusal is not the person's business.
-fn linger() {
-    if let Some(user) = std::env::var_os("USER") {
-        let _ = Command::new("loginctl")
-            .arg("enable-linger")
-            .arg(user)
-            .output();
+/// The account this process runs as, asked of the system rather than of the
+/// environment: `$USER` names whoever last logged in, which under `pct exec`
+/// and other contexts nobody logged in to is another account or none, and
+/// the units written here belong to the account writing them.
+fn whoami() -> Option<String> {
+    for args in [["id", "-un"], ["id", "-u"]] {
+        if let Some(out) = run_quiet(args[0], &args[1..])
+            && !out.trim().is_empty()
+        {
+            return Some(out.trim().to_string());
+        }
     }
+    None
+}
+
+/// One call that hands systemd this account's units: what to run, and
+/// whether an install can go on when it is refused.
+#[derive(Debug)]
+struct UnitCall {
+    argv: Vec<String>,
+    /// False where a refusal costs something short of the install: lingering
+    /// is not allowed on every machine, and where it is not the services
+    /// still run while the person is logged in.
+    needed: bool,
+}
+
+/// What hands systemd the units just written, in the order it must happen.
+/// Lingering comes first: it is what gives an account nobody is logged in as
+/// a user manager at all, and every call after it needs one. Enabling is for
+/// units written as files; podman's quadlets are generated from the files
+/// and carry their own `[Install]` section instead.
+fn hand_units_to_systemd(units: &[String], enable: bool) -> Vec<UnitCall> {
+    let words = |argv: &[&str]| {
+        argv.iter()
+            .map(|w| (*w).to_string())
+            .collect::<Vec<String>>()
+    };
+    let linger = match whoami() {
+        Some(me) => words(&["loginctl", "enable-linger", me.as_str()]),
+        None => words(&["loginctl", "enable-linger"]),
+    };
+    let mut out = vec![UnitCall {
+        argv: linger,
+        needed: false,
+    }];
+    out.push(UnitCall {
+        argv: words(&["systemctl", "--user", "daemon-reload"]),
+        needed: true,
+    });
+    if enable {
+        for unit in units {
+            out.push(UnitCall {
+                argv: words(&["systemctl", "--user", "enable", unit]),
+                needed: false,
+            });
+        }
+    }
+    out
+}
+
+/// The calls made in the order they are given. One that is needed and is
+/// refused stops the install there, with what was refused named: a daemon
+/// that will not read the units means nothing of this install runs, and
+/// saying so here is the difference between a sentence and an install that
+/// writes every file and then reports that nothing started. The rest are
+/// given back rather than swallowed, for the person to read.
+fn make_the_calls(calls: &[UnitCall]) -> Result<Vec<String>, Exit> {
+    let mut refused = Vec::new();
+    for call in calls {
+        let Some((program, args)) = call.argv.split_first() else {
+            continue;
+        };
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        if quietly(program, &args) {
+            continue;
+        }
+        if call.needed {
+            return Err(fail(format!(
+                "systemd would not take the services: {} was refused, so nothing here was \
+                 started; sign in as the account that runs NILS, or allow it to keep services \
+                 without a login (loginctl enable-linger {}), and run nils setup again",
+                call.argv.join(" "),
+                whoami().unwrap_or_else(|| "<account>".to_string())
+            )));
+        }
+        refused.push(call.argv.join(" "));
+    }
+    Ok(refused)
 }
 
 /// One unit per part, for the parts that run on the machine.
@@ -9430,10 +9771,7 @@ pub(crate) fn unit_running(unit: &Unit) -> bool {
 /// Where each part of a recorded install answers, and who can reach it there.
 pub(crate) fn addresses(state: &State) -> Vec<serde_json::Value> {
     let runtime = Runtime::parse(&state.runtime).unwrap_or(Runtime::Machine);
-    let reach = match state.reach.as_str() {
-        "" | "loopback" => Reach::Loopback,
-        address => Reach::Network(address.to_string()),
-    };
+    let reach = recorded_reach(state);
     let ports = state.ports;
     let inside = match runtime {
         Runtime::Docker => "inside docker only",
@@ -9450,6 +9788,7 @@ pub(crate) fn addresses(state: &State) -> Vec<serde_json::Value> {
         let who = match reach {
             Reach::Loopback => "this machine only",
             Reach::Network(_) => "this network",
+            Reach::Behind { .. } => "whoever reaches that address",
         };
         out.push(serde_json::json!({ "part": "desk", "address": origin, "reach": who }));
     }
@@ -12644,6 +12983,233 @@ mod tests {
         assert_eq!(bind, "0.0.0.0:7200");
         assert_eq!(origin, "http://10.0.0.5:7200");
         assert!(also.contains(&"http://127.0.0.1:7200".to_string()));
+    }
+
+    #[test]
+    fn a_desk_behind_a_proxy_answers_at_its_origin_and_binds_where_it_is_told() {
+        let behind = |network| Reach::Behind {
+            origin: "https://nils.example.org".to_string(),
+            network,
+        };
+        let (bind, origin, also) = desk_binding(&behind(false), 7200, false);
+        assert_eq!(bind, "127.0.0.1:7200", "a proxy here reaches the loopback");
+        assert_eq!(origin, "https://nils.example.org");
+        assert!(
+            also.contains(&"http://127.0.0.1:7200".to_string())
+                && also.contains(&"http://localhost:7200".to_string()),
+            "a browser on the machine still opens it: {also:?}"
+        );
+        let (bind, _, _) = desk_binding(&behind(true), 7200, false);
+        assert_eq!(
+            bind, "0.0.0.0:7200",
+            "a proxy elsewhere reaches this machine's address"
+        );
+        let (bind, _, _) = desk_binding(&behind(false), 7200, true);
+        assert_eq!(bind, "0.0.0.0:7200", "a container binds inside itself");
+
+        // what the parts are told follows the same address: the desk signs as
+        // the address a browser opens, and its keys are fetched where it runs
+        let mut p = plan(Runtime::Machine);
+        p.mode = Mode::Local;
+        p.reach = behind(false);
+        let (issuer, jwks) = desk_trust(&p);
+        assert_eq!(issuer, "https://nils.example.org");
+        assert_eq!(jwks, "http://127.0.0.1:7200/.well-known/jwks.json");
+        assert!(
+            engine_args(&p, "/r", "/b")
+                .join(" ")
+                .contains("--oidc-trust issuer=https://nils.example.org,audience=nils"),
+            "the engine trusts what the desk signs"
+        );
+
+        // the port is published for a proxy here, and opened for one elsewhere
+        p.runtime = Runtime::Podman;
+        assert!(
+            podman_commands(&p)[0].contains("-p 127.0.0.1:7200:7200"),
+            "{}",
+            podman_commands(&p)[0]
+        );
+        p.reach = behind(true);
+        assert!(
+            podman_commands(&p)[0].contains("-p 7200:7200"),
+            "{}",
+            podman_commands(&p)[0]
+        );
+    }
+
+    #[test]
+    fn an_origin_is_a_scheme_and_a_host_and_anything_else_is_said() {
+        assert_eq!(
+            origin_given(" https://nils.example.org/ ").unwrap(),
+            "https://nils.example.org",
+            "the spaces around it and a trailing slash are not part of it"
+        );
+        assert_eq!(
+            origin_given("HTTPS://Nils.Example.org").unwrap(),
+            "https://nils.example.org",
+            "a browser sends the host lower case"
+        );
+        assert_eq!(
+            origin_given("http://10.0.0.5:7200").unwrap(),
+            "http://10.0.0.5:7200"
+        );
+        assert_eq!(
+            origin_given("https://[::1]:7200").unwrap(),
+            "https://[::1]:7200"
+        );
+        for (bad, says) in [
+            ("nils.example.org", "has no scheme"),
+            ("ftp://nils.example.org", "is not a scheme"),
+            ("https://nils.example.org/desk", "leave off /desk"),
+            ("https://nils.example.org?q=1", "leave off ?q=1"),
+            ("https://someone@nils.example.org", "carries no sign in"),
+            ("https://nils.example.org:door", "is not a port"),
+            ("https://", "names no host"),
+            ("", "an origin is the address"),
+            ("https://one two", "has a space in it"),
+        ] {
+            let refused = origin_given(bad).unwrap_err();
+            assert!(refused.contains(says), "{bad}: {refused}");
+        }
+    }
+
+    #[test]
+    fn an_origin_on_record_is_the_origin_an_update_writes() {
+        let dir = scratch("origin-record");
+        let state = State {
+            dir: dir.display().to_string(),
+            mode: "local".to_string(),
+            runtime: "machine".to_string(),
+            service: "systemd user units".to_string(),
+            reach: "loopback".to_string(),
+            origin: "https://nils.example.org".to_string(),
+            parts: BTreeMap::from([(
+                "desk".to_string(),
+                PartState {
+                    version: "1.0.0-alpha.2".to_string(),
+                    path: "nils-desk".to_string(),
+                    kind: "binary".to_string(),
+                },
+            )]),
+            ..State::default()
+        };
+        // it is written down, where a person can read it
+        let written = toml::to_string(&state).unwrap();
+        assert!(
+            written.contains("origin = \"https://nils.example.org\""),
+            "{written}"
+        );
+
+        // an update and a repair are made from the record and nothing else
+        let plan = plan_from_state(&state, None);
+        assert_eq!(
+            plan.reach,
+            Reach::Behind {
+                origin: "https://nils.example.org".to_string(),
+                network: false
+            }
+        );
+        let text = desk_config_text(&plan);
+        assert!(
+            text.contains("origin = \"https://nils.example.org\""),
+            "{text}"
+        );
+        assert!(text.contains("bind = \"127.0.0.1:7200\""), "{text}");
+        assert!(
+            text.contains("also_origins = [\"http://127.0.0.1:7200\", \"http://localhost:7200\"]"),
+            "{text}"
+        );
+
+        // written once, an update has nothing to change in it
+        std::fs::create_dir_all(plan.desk_dir()).unwrap();
+        assert!(write_desk_config(&plan).is_ok());
+        assert_eq!(
+            desk_config_fate(&plan),
+            DeskConfigFate::Kept,
+            "an update stamped an address of its own over it"
+        );
+        let on_disk = std::fs::read_to_string(plan.desk_config()).unwrap();
+        assert!(
+            on_disk.contains("origin = \"https://nils.example.org\""),
+            "{on_disk}"
+        );
+
+        // and the install reports the address a person opens
+        let said = addresses(&state);
+        assert_eq!(said[0]["part"], "desk", "{said:?}");
+        assert_eq!(said[0]["address"], "https://nils.example.org", "{said:?}");
+
+        // a record from before this, with no origin in it, is what it was
+        let plain = State {
+            origin: String::new(),
+            reach: "10.0.0.5".to_string(),
+            ..state
+        };
+        assert_eq!(
+            plan_from_state(&plain, None).reach,
+            Reach::Network("10.0.0.5".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_account_is_lingered_before_systemd_is_given_anything() {
+        let units = vec!["nils-engine".to_string(), "nils-desk".to_string()];
+        let calls = hand_units_to_systemd(&units, true);
+        let said: Vec<String> = calls.iter().map(|c| c.argv.join(" ")).collect();
+        assert!(
+            said[0].starts_with("loginctl enable-linger"),
+            "the account is lingered first, since the calls after it need a user manager: {said:?}"
+        );
+        assert_eq!(said[1], "systemctl --user daemon-reload", "{said:?}");
+        assert_eq!(said[2], "systemctl --user enable nils-engine", "{said:?}");
+        assert_eq!(said[3], "systemctl --user enable nils-desk", "{said:?}");
+        assert!(
+            !calls[0].needed,
+            "lingering is not allowed everywhere, and an install does not stop on it"
+        );
+        assert!(
+            calls[1].needed,
+            "a daemon that will not read the units means nothing runs"
+        );
+        // the account is the one running this, not the one $USER names
+        if let Some(me) = whoami() {
+            assert!(said[0].ends_with(&me), "{said:?}");
+        }
+        // a quadlet is generated and carries its own [Install] section
+        assert_eq!(hand_units_to_systemd(&[], false).len(), 2);
+    }
+
+    #[test]
+    fn units_of_this_account_want_a_session_and_dockers_containers_do_not() {
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                service_manager_when(Runtime::Machine, true),
+                Some("systemd user units")
+            );
+            assert_eq!(
+                service_manager_when(Runtime::Podman, true),
+                Some("podman quadlets")
+            );
+            assert_eq!(
+                service_manager_when(Runtime::Machine, false),
+                None,
+                "a binary that answers --version is not a session that takes units"
+            );
+            assert_eq!(service_manager_when(Runtime::Podman, false), None);
+            assert_eq!(
+                service_manager_when(Runtime::Docker, false),
+                Some("a compose file"),
+                "docker's own daemon brings its containers back"
+            );
+            let said = no_manager_words(Runtime::Machine, false);
+            assert!(said.contains("no systemd session"), "{said}");
+            assert!(said.contains("loginctl enable-linger"), "{said}");
+        }
+        assert_eq!(
+            no_manager_words(Runtime::Machine, true),
+            "no service manager here, so the commands are printed instead"
+        );
     }
 
     #[test]

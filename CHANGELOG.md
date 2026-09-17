@@ -4,6 +4,14 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- An install behind a proxy can be described: `nils setup --origin URL` names the address a browser opens the desk at, where a name and a certificate of the site's answer for it. It is what the desk compares a write against, what it signs the tokens the other parts trust with, and what a person is sent back to after signing in at a provider, so the engine's trust in the desk is derived from the same address. Where the desk itself binds stays a separate answer: this machine's loopback for a proxy running here, and with `--reach network` every address for a proxy on another machine; the loopback stays among the addresses the desk also answers at either way, so a browser on the machine keeps working. An address that is not a scheme and a host is refused before anything is written, in words naming what is wrong with it. The wizard asks for it as a third answer to who may open the desk, and a rerun opens on what is on record. The address is written down in the setup record as `origin`, and an update and a repair write the same address the install did, where before every run stamped `http://<address>:<port>` over it: a desk behind a proxy refused every write by its own cross origin check, dropped `Secure` from its session cookie and sent people back to an address their provider had never heard of, and a correct address set by hand lasted until the next update.
+
+### Fixed
+
+- An install on a machine nobody is logged in to says so before it writes anything, rather than writing every file and reporting at the end that nothing started. The account is lingered before the units are handed to systemd instead of after them, since lingering is what gives an account nobody is logged in as a user manager at all; the account lingered is the one running setup, read from the system rather than from `$USER`, which names another account under `pct exec` and in other contexts nobody logged in to; and whether services can be kept running here is settled by asking the user manager itself, where `systemctl --user --version` was asked before and answers from the binary alone, session or none, so setup believed it could manage services it could not. A `systemctl --user daemon-reload` that is refused now stops the install with what was refused named and the fix in the same sentence, where its status was swallowed; `--service` on such a machine is refused at the question rather than at the end; and a docker install, whose containers its own daemon brings back, no longer wants a session of this account at all.
+
 ## [1.0.0-alpha.31] - 2026-09-17
 
 ### Added
