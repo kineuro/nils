@@ -967,8 +967,9 @@ fn print_says_the_units_and_the_calls_of_an_install_on_this_machine() {
     o.says(&format!(
         "{as_engine} setup-registry init --backend sqlite\n"
     ));
+    o.says(&format!("{as_engine} setup-registry declare\n"));
     o.says(&format!(
-        "{as_engine} place add registry {} --role registry --backup backups",
+        "      registry {} --role registry --backup backups",
         dir.join("registry").display()
     ));
     assert!(!dir.exists(), "--print made {}", dir.display());

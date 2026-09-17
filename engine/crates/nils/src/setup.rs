@@ -6648,16 +6648,24 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
         out,
         "\n{} {}",
         console.bold("  places"),
-        console.dim(&format!("as {}", acting.account))
+        console.dim(&format!(
+            "as {}, in one step with the places below on its input",
+            acting.account
+        ))
+    );
+    // One step declares them all, as the run takes it, and not `nils place
+    // add` for each: a source place added that way is declared as a dataset,
+    // which setup never does. Each place is said with the words that follow
+    // `place add`, which name what it is declared with.
+    let _ = writeln!(
+        out,
+        "    {}",
+        acting
+            .argv(&owned_words(&[REGISTRY_STEP, "declare"]))
+            .join(" ")
     );
     for spec in place_specs(plan) {
-        // the command a person would type, as the account: its first word is
-        // the binary the prefix already names
-        let _ = writeln!(
-            out,
-            "    {}",
-            acting.argv(&place_argv(&spec)[1..]).join(" ")
-        );
+        let _ = writeln!(out, "      {}", place_argv(&spec)[3..].join(" "));
     }
     out
 }
@@ -17198,9 +17206,11 @@ mod tests {
         );
         assert!(said.contains("places as nils-engine"), "{said}");
         assert!(
-            said.contains(&format!(
-                "{as_engine} place add registry /srv/nils/registry --role registry --backup backups"
-            )),
+            said.contains(&format!("    {as_engine} setup-registry declare\n")),
+            "{said}"
+        );
+        assert!(
+            said.contains("      registry /srv/nils/registry --role registry --backup backups"),
             "{said}"
         );
         let places = said
@@ -17208,11 +17218,16 @@ mod tests {
             .nth(1)
             .unwrap_or_default();
         assert!(
+            !places.contains("place add"),
+            "the places are declared in the one step the run takes: {places}"
+        );
+        assert_eq!(
             places
                 .lines()
-                .filter(|line| !line.trim().is_empty())
-                .all(|line| line.trim_start().starts_with(&as_engine)),
-            "every place is declared as the account: {places}"
+                .filter(|line| line.contains("runuser"))
+                .count(),
+            1,
+            "one step declares every place as the account: {places}"
         );
 
         // a registry that is there already is not made again

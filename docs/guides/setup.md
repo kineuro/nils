@@ -274,8 +274,9 @@ machine, each step taken as another account, after the `runuser` that runs
 it: the registry's key and the step that makes the registry where there is no
 registry yet, with the passphrase and the connection string on their input,
 the source steps of Kvasir and the assistant, with the home they build with
-where that is the build cache, and the places; for a container run the
-commands and the quadlets or the compose file.
+where that is the build cache, and the one step that declares the places,
+with each place it is given on its input; for a container run the commands
+and the quadlets or the compose file.
 Then the parts
 that are missing are downloaded from their releases and checked against the
 release's `SHA256SUMS`, the registry is made, the places are declared, the
