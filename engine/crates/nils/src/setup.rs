@@ -22,7 +22,7 @@ use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use clap::Args;
+use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
 use crate::{Exit, fail, usage};
@@ -868,6 +868,403 @@ fn recorded_system_refusal(plan: &Plan) -> Option<String> {
         return None;
     }
     system_refusal(plan.runtime, system, &plan.parts)
+}
+
+/// The services of this machine an install has: asked for with `--system`,
+/// or kept from the record, with the accounts and the capabilities named now
+/// in place of the recorded ones. `None` for the services of an account's
+/// own, which is every install on a laptop.
+fn system_asked(
+    asked: bool,
+    accounts: BTreeMap<String, String>,
+    capabilities: Vec<String>,
+    recorded: Option<SystemUnits>,
+) -> Option<SystemUnits> {
+    if !asked && recorded.is_none() {
+        return None;
+    }
+    let mut system = recorded.unwrap_or_default();
+    if !accounts.is_empty() {
+        system.accounts = accounts;
+    }
+    if !capabilities.is_empty() {
+        system.capabilities = capabilities;
+    }
+    Some(system)
+}
+
+// ------------------------------------------ the registry, as the engine's account
+
+/// The account setup takes the registry's steps as, where that is not the
+/// account running setup: the engine's, for an install whose services are
+/// this machine's, set up by root. The engine's service is what the registry
+/// has to answer, and root is not that account. A Postgres that
+/// authenticates peers refuses root, and a share that squashes root does not
+/// open to it, so a step root took there stopped the install, or read nothing
+/// and said nothing. Every other install takes the steps as the account
+/// running setup, as it always has, since that is the account its engine
+/// runs as. `None` there, and where the engine's account is root itself.
+fn registry_account(system: Option<&SystemUnits>, root: bool) -> Option<String> {
+    let account = system?.account("engine");
+    (root && account != "root").then(|| account.to_string())
+}
+
+/// The registry's steps taken as the engine's account: the engine binary,
+/// run as that account under runuser, with the registry named outright as
+/// its service names it.
+///
+/// The binary is the one running setup, which knows every step it asks for.
+/// It is the engine's own binary on the paths an install is kept by: an
+/// install records it as the engine's and its units run it, `nils update --all`
+/// hands over to the binary it has just installed before it restarts
+/// anything, and the helper runs the recorded one. Where the account cannot
+/// run it, as with a copy under root's home, runuser says so; an install
+/// from there would have given the engine's service a binary it cannot run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AsAccount {
+    account: String,
+    binary: PathBuf,
+    registry: PathBuf,
+}
+
+impl AsAccount {
+    /// The engine's account, where setup acts on this registry as it.
+    fn of(system: Option<&SystemUnits>, root: bool, registry: PathBuf) -> Option<AsAccount> {
+        Some(AsAccount {
+            account: registry_account(system, root)?,
+            binary: running_binary(),
+            registry,
+        })
+    }
+
+    /// The command line of one step: runuser, the account, and the engine
+    /// binary given the registry and the step's words. A command line is
+    /// readable by every account on the machine, so nothing secret is ever
+    /// among the words; a secret goes on the step's input.
+    fn argv(&self, words: &[String]) -> Vec<String> {
+        let mut argv = vec![
+            "runuser".to_string(),
+            "-u".to_string(),
+            self.account.clone(),
+            "--".to_string(),
+            self.binary.display().to_string(),
+            "--registry".to_string(),
+            self.registry.display().to_string(),
+        ];
+        argv.extend(words.iter().cloned());
+        argv
+    }
+
+    /// One step, run: what it printed, and where it failed, what it said.
+    fn run(&self, words: &[String], input: Option<&[u8]>) -> Ran {
+        let argv = self.argv(words);
+        let failed = |why: String| Ran {
+            ok: false,
+            stdout: String::new(),
+            why,
+        };
+        // Started in /, as systemd starts the service, rather than in a
+        // folder of root's that the account may not enter.
+        let spawned = Command::new(runuser_program())
+            .args(&argv[1..])
+            .current_dir("/")
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(e) => return failed(format!("runuser: {e}")),
+        };
+        if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
+            // A step that stops before reading its input says why below; the
+            // input is closed as this goes, so one that reads it sees its end.
+            let _ = stdin.write_all(bytes);
+        }
+        let out = match child.wait_with_output() {
+            Ok(out) => out,
+            Err(e) => return failed(format!("runuser: {e}")),
+        };
+        let said = String::from_utf8_lossy(&out.stderr);
+        let lines: Vec<&str> = said
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        // The engine's own sentence where it gave one, else runuser's.
+        let why = lines
+            .iter()
+            .rev()
+            .find_map(|line| line.strip_prefix("nils: "))
+            .or_else(|| lines.last().copied())
+            .map_or_else(|| format!("it ended with {}", out.status), str::to_string);
+        Ran {
+            ok: out.status.success(),
+            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+            why,
+        }
+    }
+}
+
+/// What a step taken as the engine's account came to.
+struct Ran {
+    ok: bool,
+    stdout: String,
+    /// What it said as it failed: the engine's own sentence, or runuser's.
+    why: String,
+}
+
+/// runuser, wherever this machine keeps it. It lives in `/usr/sbin` or
+/// `/sbin`, which not every path root runs setup with names, so the usual
+/// places are tried first.
+fn runuser_program() -> String {
+    for path in [
+        "/usr/sbin/runuser",
+        "/sbin/runuser",
+        "/usr/bin/runuser",
+        "/bin/runuser",
+    ] {
+        if Path::new(path).exists() {
+            return path.to_string();
+        }
+    }
+    "runuser".to_string()
+}
+
+/// This binary, by the whole path a unit names it with.
+fn running_binary() -> PathBuf {
+    std::env::current_exe()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .unwrap_or_else(|_| PathBuf::from("nils"))
+}
+
+/// Words, as a command line holds them.
+fn owned_words(words: &[&str]) -> Vec<String> {
+    words.iter().map(|word| (*word).to_string()).collect()
+}
+
+/// The hidden command a step taken as the engine's account runs, where no
+/// command a person types does what setup does.
+const REGISTRY_STEP: &str = "setup-registry";
+
+/// One step on the registry taken as the engine's account: the engine's
+/// words, what goes on its input, and what failing it leaves undone.
+struct AccountStep {
+    words: Vec<String>,
+    input: Option<Vec<u8>>,
+    undone: &'static str,
+}
+
+/// The two steps that make a registry, as the documentation gives them and
+/// as the container install takes them: the key added, with its passphrase
+/// on the input, then the registry made on that key. The passphrase goes
+/// over as it was given, since `nils key add` drops one final newline just
+/// as setup did when it added the key in its own process, so the key is the
+/// same either way. `nils init` takes the connection string on its command
+/// line, as the container install gives it.
+fn registry_made_steps(backend: &BackendChoice, passphrase: &str) -> Vec<AccountStep> {
+    let mut init = owned_words(&["init", "--key", "nils", "--backend"]);
+    match backend {
+        BackendChoice::Sqlite => init.push("sqlite".to_string()),
+        BackendChoice::Postgres { dsn, schema } => init.extend([
+            "postgres".to_string(),
+            "--dsn".to_string(),
+            dsn.clone(),
+            "--schema".to_string(),
+            schema.clone(),
+        ]),
+    }
+    vec![
+        AccountStep {
+            words: owned_words(&["key", "add", "nils"]),
+            input: Some(passphrase.as_bytes().to_vec()),
+            undone: "add the registry's key",
+        },
+        AccountStep {
+            words: init,
+            input: None,
+            undone: "make the registry",
+        },
+    ]
+}
+
+/// Whether a Postgres answers the engine's account, asked as that account:
+/// `None` where it does, and what it said where it does not. The connection
+/// string goes on the input, since it can carry a password.
+fn postgres_refused_as(acting: &AsAccount, dsn: &str, schema: &str) -> Option<String> {
+    let ran = acting.run(
+        &owned_words(&[REGISTRY_STEP, "connect", "--schema", schema]),
+        Some(dsn.as_bytes()),
+    );
+    (!ran.ok).then_some(ran.why)
+}
+
+/// What reading a registry's source places as the engine's account came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SourcesRead {
+    /// There is no registry there yet, so it holds none.
+    NoRegistry,
+    /// The registry's own, by name.
+    Read(Vec<(String, PathBuf)>),
+    /// The registry answered at a schema this binary does not read as it
+    /// stands: where it stands, as said, and whether that is ahead of this
+    /// binary.
+    Schema { said: String, ahead: bool },
+    /// The registry did not answer: what was said.
+    Unread(String),
+}
+
+impl SourcesRead {
+    /// The source places a plan is made with: the registry's where they were
+    /// read, and otherwise the ones the setup recorded.
+    fn or_record(self, recorded: Vec<(String, PathBuf)>) -> Vec<(String, PathBuf)> {
+        match self {
+            SourcesRead::Read(sources) => sources,
+            _ => recorded,
+        }
+    }
+}
+
+/// The registry's source places, read as the engine's account.
+fn sources_as(acting: &AsAccount) -> SourcesRead {
+    let ran = acting.run(&owned_words(&[REGISTRY_STEP, "sources"]), None);
+    if !ran.ok {
+        return SourcesRead::Unread(ran.why);
+    }
+    sources_said(&ran.stdout)
+}
+
+/// What the engine's account said of the registry's source places, as the
+/// hidden command writes it.
+fn sources_said(text: &str) -> SourcesRead {
+    let unread = || {
+        SourcesRead::Unread(format!(
+            "the engine answered with nothing setup reads: {}",
+            text.trim()
+        ))
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
+        return unread();
+    };
+    if doc["registry"] == false {
+        return SourcesRead::NoRegistry;
+    }
+    if let Some(said) = doc["schema"].as_str() {
+        return SourcesRead::Schema {
+            said: said.to_string(),
+            ahead: doc["ahead"].as_bool().unwrap_or(false),
+        };
+    }
+    let Some(listed) = doc["sources"].as_array() else {
+        return unread();
+    };
+    SourcesRead::Read(
+        listed
+            .iter()
+            .filter_map(|p| {
+                Some((
+                    p["name"].as_str()?.to_string(),
+                    PathBuf::from(p["path"].as_str()?),
+                ))
+            })
+            .collect(),
+    )
+}
+
+/// The runs that read a registry's source places, which cannot all do the
+/// same where the registry did not answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    /// An install or a rerun, at its questions, with nothing written yet.
+    Install,
+    /// `--print`, which writes nothing either way.
+    Print,
+    /// `--update`, and the update the menu offers.
+    Update,
+    /// The repair the menu offers.
+    Repair,
+    /// The services started again once `nils update --all` has replaced the
+    /// parts.
+    Restart,
+    /// The engine made to follow the registry.
+    Reapply,
+}
+
+/// What a run does where the registry's source places were not read as the
+/// engine's account: `Ok` with the sentence it says as it goes on, with the
+/// setup's record standing in for them, or `Err` with why it stops before it
+/// changes anything. `None` where they were read, or where there is no
+/// registry yet to hold any.
+///
+/// A registry that does not answer the engine's account stops every run that
+/// has changed nothing yet: the engine will not reach it either, and a
+/// service written without the places added at the desk is a loss nobody is
+/// told of. The restart after an update goes on, since the parts are
+/// replaced by then, and services left running the old ones are worse off
+/// than an engine given the recorded places and told how to mend it. A
+/// registry at another schema did answer, and is only not read as it stands:
+/// an install reads the places back once it has declared them, before any
+/// service is written, and an update, a repair and a restart say it and go
+/// on. A reapply stops on either, since following the registry is the whole
+/// of its work, and the engine it leaves running reads what it read before.
+fn unread_sources(
+    reading: Reading,
+    read: &SourcesRead,
+    account: &str,
+) -> Option<Result<String, String>> {
+    let recorded = "the setup's record stands in for them, and it holds no source place added \
+                    at the desk since it was written";
+    let mended = "reapplying the engine gives it every source place";
+    Some(match read {
+        SourcesRead::NoRegistry | SourcesRead::Read(_) => return None,
+        SourcesRead::Unread(why) => {
+            let unanswered = format!(
+                "the registry did not answer {account}, the account the engine runs as, so its \
+                 source places were not read: {why}"
+            );
+            match reading {
+                Reading::Install => Err(format!(
+                    "{unanswered}. Setup takes every step on the registry as {account}, as the \
+                     engine's service does, so {account} has to reach it first"
+                )),
+                Reading::Print => Ok(format!(
+                    "{unanswered}; here {recorded}, and a run for real stops on it"
+                )),
+                Reading::Update | Reading::Repair => Err(unanswered),
+                Reading::Restart => Ok(format!(
+                    "{unanswered}; {recorded}. Once the registry answers {account}, {mended}"
+                )),
+                Reading::Reapply => Err(format!("the engine was left as it is: {unanswered}")),
+            }
+        }
+        SourcesRead::Schema { said, ahead } => {
+            let at = format!(
+                "the registry is at {said}, so its source places were not read as it stands"
+            );
+            match reading {
+                Reading::Install if *ahead => Err(format!(
+                    "the registry is at {said}, so this binary cannot declare its places in it: \
+                     run setup with the nils that runs on it, or a newer one"
+                )),
+                Reading::Install => Ok(format!(
+                    "{at}; they are read back from it as {account} once this run has declared \
+                     its places, before any service is written"
+                )),
+                Reading::Print => Ok(format!("{at}; here {recorded}")),
+                Reading::Update | Reading::Repair | Reading::Restart => Ok(format!(
+                    "{at}; {recorded}. Once the engine runs on the registry, {mended}"
+                )),
+                Reading::Reapply => Err(format!(
+                    "the engine was left as it is: {at}. Restart the engine, which brings its \
+                     registry to its own schema, and reapply it then"
+                )),
+            }
+        }
+    })
 }
 
 // ------------------------------------ the privilege that keeps it running
@@ -3268,7 +3665,35 @@ impl Plan {
 /// Postgres connection string is only needed to make a registry, and neither
 /// of those two makes one.
 pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
+    plan_and_sources(state, channel).0
+}
+
+/// The same plan, and where its registry's source places were read as the
+/// engine's account, the account and what reading them came to, for a run
+/// that says it or stops on it. `None` where they were read as this process
+/// reads them, as always, which quietly takes the record's where the registry
+/// holds none it can read.
+fn plan_and_sources(state: &State, channel: Option<&str>) -> (Plan, Option<(String, SourcesRead)>) {
     let dir = PathBuf::from(&state.dir);
+    // asked of the machine only for the services of a machine, so a laptop's
+    // record is read as it always was
+    let acting = state
+        .system
+        .as_ref()
+        .and_then(|system| AsAccount::of(Some(system), am_root(), dir.join("registry")));
+    let (sources, read) = match acting {
+        None => (
+            registry_sources(&dir).unwrap_or_else(|| recorded_sources(&state.places)),
+            None,
+        ),
+        Some(acting) => {
+            let read = sources_as(&acting);
+            (
+                read.clone().or_record(recorded_sources(&state.places)),
+                Some((acting.account, read)),
+            )
+        }
+    };
     let mut parts = vec![Part::Engine];
     if state.parts.contains_key("desk") {
         parts.push(Part::Desk);
@@ -3276,7 +3701,7 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
     if state.parts.contains_key("assistant") {
         parts.push(Part::Assistant);
     }
-    Plan {
+    let plan = Plan {
         dir: dir.clone(),
         parts,
         mode: Mode::parse(&state.mode).unwrap_or(Mode::Off),
@@ -3295,7 +3720,7 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
             .iter()
             .find(|p| p.name == "source" && p.role == "source")
             .map(|p| PathBuf::from(&p.path)),
-        sources: registry_sources(&dir).unwrap_or_else(|| recorded_sources(&state.places)),
+        sources,
         registry_exists: true,
         service: !state.service.is_empty() && state.service != "none",
         channel: channel.map(str::to_string),
@@ -3316,7 +3741,8 @@ pub(crate) fn plan_from_state(state: &State, channel: Option<&str>) -> Plan {
         system: state.system.clone(),
         helper: state.helper.clone(),
         site: state.site.clone(),
-    }
+    };
+    (plan, read)
 }
 
 /// Where a recorded install's desk answers and where it binds: the origin a
@@ -3854,7 +4280,9 @@ fn source_beside_places() -> String {
 }
 
 /// One place the engine will keep, in the order they must be added: a
-/// backup place exists before the place that names it.
+/// backup place exists before the place that names it. Written as JSON for
+/// the engine's account, where setup declares the places as that account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlaceSpec {
     pub(crate) name: String,
     pub(crate) role: String,
@@ -4788,23 +5216,64 @@ fn questions(
                         Some(s) => s.clone(),
                         None => console.ask_line("The schema", "nils")?,
                     };
+                    // Asked as the account that will connect, where setup acts
+                    // as the engine's: a Postgres that authenticates peers
+                    // answers that account and refuses root, and one that
+                    // answers root may still refuse the engine. The services
+                    // are settled at step 7, so they are read here from what
+                    // was named and what the record keeps, as step 7 reads
+                    // them.
+                    let asking = AsAccount::of(
+                        system_asked(
+                            args.system,
+                            accounts_given(&args.account).unwrap_or_default(),
+                            Vec::new(),
+                            existing.and_then(|s| s.system.clone()),
+                        )
+                        .as_ref(),
+                        console.probe("this process is root", am_root),
+                        dir.join("registry"),
+                    );
+                    // An account that is not on this machine is refused at step
+                    // 7 with the fix in the sentence; asking the database as it
+                    // here would only say the database did not answer.
+                    let unasked = asking.as_ref().filter(|acting| {
+                        !console.probe(&format!("an account named {}", acting.account), || {
+                            account_ids(&acting.account).is_some()
+                        })
+                    });
+                    if let Some(acting) = unasked {
+                        console.note(&format!(
+                            "the database is asked as {}, the account the engine runs as, once \
+                             that account is on this machine",
+                            acting.account
+                        ));
+                    }
                     // Tried now, from this machine, so a database that is not there
                     // is said here rather than after the plan and the images.
-                    loop {
-                        let refused = console.probe(&format!("postgres {dsn} {schema}"), || {
-                            nils_registry::store::Store::connect_postgres(&dsn, &schema)
+                    while unasked.is_none() {
+                        let (key, as_whom) = match &asking {
+                            None => (format!("postgres {dsn} {schema}"), String::new()),
+                            Some(acting) => (
+                                format!("postgres {dsn} {schema} as {}", acting.account),
+                                format!(" {}, the account the engine runs as", acting.account),
+                            ),
+                        };
+                        let refused = console.probe(&key, || match &asking {
+                            None => nils_registry::store::Store::connect_postgres(&dsn, &schema)
                                 .err()
-                                .map(|e| with_causes(&e))
+                                .map(|e| with_causes(&e)),
+                            Some(acting) => postgres_refused_as(acting, &dsn, &schema),
                         });
                         let Some(why) = refused else {
                             console.note(&format!(
-                                "the database at {} answered",
+                                "the database at {} answered{as_whom}",
                                 crate::redact_dsn(&dsn)
                             ));
                             break;
                         };
                         console.note(&format!(
-                            "the database at {} did not answer: {why}",
+                            "the database at {} did not answer{as_whom}: {why}",
                             crate::redact_dsn(&dsn)
                         ));
                         if args.print {
@@ -5174,24 +5643,14 @@ fn questions(
         Some(text) => capabilities_given(text).map_err(usage)?,
         None => Vec::new(),
     };
-    let system = match (args.system, existing.and_then(|s| s.system.clone())) {
-        (false, None) => {
-            if let Some(refused) = without_system(!accounts.is_empty(), !capabilities.is_empty()) {
-                return Err(usage(refused).into());
-            }
-            None
-        }
-        (_, recorded) => {
-            let mut system = recorded.unwrap_or_default();
-            if !accounts.is_empty() {
-                system.accounts = accounts;
-            }
-            if !capabilities.is_empty() {
-                system.capabilities = capabilities;
-            }
-            Some(system)
-        }
-    };
+    let recorded = existing.and_then(|s| s.system.clone());
+    if !args.system
+        && recorded.is_none()
+        && let Some(refused) = without_system(!accounts.is_empty(), !capabilities.is_empty())
+    {
+        return Err(usage(refused).into());
+    }
+    let system = system_asked(args.system, accounts, capabilities, recorded);
     // What this machine cannot be given is said here, with nothing written
     // and the fix in the same sentence. `--print` changes nothing anyway, so
     // it says it and goes on to show what such an install would be.
@@ -5257,11 +5716,35 @@ fn questions(
     let host_loopback = runtime == Runtime::Podman
         && (parts.contains(&Part::Assistant) || parts.contains(&Part::Desk) || postgres_here)
         && podman_has_pasta();
-    let sources = registry_sources(&dir).unwrap_or_else(|| {
-        existing
-            .map(|s| recorded_sources(&s.places))
-            .unwrap_or_default()
-    });
+    let recorded_places = existing
+        .map(|s| recorded_sources(&s.places))
+        .unwrap_or_default();
+    let sources = match AsAccount::of(
+        system.as_ref(),
+        console.probe("this process is root", am_root),
+        dir.join("registry"),
+    ) {
+        None => registry_sources(&dir).unwrap_or(recorded_places),
+        // Read as the engine's account, and where the registry did not
+        // answer it, said rather than stood in for without a word: nothing
+        // is written yet, so a run for real stops here.
+        Some(acting) => {
+            let read = console.probe(&format!("source places as {}", acting.account), || {
+                sources_as(&acting)
+            });
+            let reading = if args.print {
+                Reading::Print
+            } else {
+                Reading::Install
+            };
+            match unread_sources(reading, &read, &acting.account) {
+                None => {}
+                Some(Ok(said)) => console.note(&said),
+                Some(Err(why)) => return Err(fail(format!("nothing was written: {why}")).into()),
+            }
+            read.or_record(recorded_places)
+        }
+    };
     let plan = Plan {
         dir,
         parts,
@@ -5364,10 +5847,16 @@ fn what_is_there(state: &State) -> String {
 /// `--update`, and the first thing the menu offers: the parts the state
 /// names, brought to the newest release, without a question.
 fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
-    let mut plan = plan_from_state(state, args.channel.as_deref());
+    let (mut plan, read) = plan_and_sources(state, args.channel.as_deref());
     if let Some(refused) = recorded_system_refusal(&plan) {
         return Err(fail(format!("nothing was changed: {refused}")));
     }
+    let reading = if args.print {
+        Reading::Print
+    } else {
+        Reading::Update
+    };
+    sources_said_or_stop(reading, read.as_ref(), console)?;
     if let Ok(newest) = update::newest_version(&update::engine_base(args.channel.as_deref())) {
         plan.version = newest;
     }
@@ -5430,13 +5919,40 @@ fn update_engine_binary(channel: Option<&str>, console: &mut Console) {
     }
 }
 
+/// Where an update or a repair read the registry's source places as the
+/// engine's account and they were not read: said before anything is done, or
+/// the run stopped with nothing changed.
+fn sources_said_or_stop(
+    reading: Reading,
+    read: Option<&(String, SourcesRead)>,
+    console: &Console,
+) -> Result<(), Exit> {
+    let Some((account, read)) = read else {
+        return Ok(());
+    };
+    match unread_sources(reading, read, account) {
+        None => Ok(()),
+        Some(Ok(said)) => {
+            console.say(&said);
+            Ok(())
+        }
+        Some(Err(why)) => Err(fail(format!("nothing was changed: {why}"))),
+    }
+}
+
 /// The menu's last offer: the configuration and the units written again from
 /// what the state records, for an install whose files were lost or edited.
 fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
-    let plan = plan_from_state(state, args.channel.as_deref());
+    let (plan, read) = plan_and_sources(state, args.channel.as_deref());
     if let Some(refused) = recorded_system_refusal(&plan) {
         return Err(fail(format!("nothing was changed: {refused}")));
     }
+    let reading = if args.print {
+        Reading::Print
+    } else {
+        Reading::Repair
+    };
+    sources_said_or_stop(reading, read.as_ref(), console)?;
     println!();
     println!("{}", console.bold("Repairing"));
     print!("{}", plan_text(&plan, console));
@@ -5935,9 +6451,64 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
             let _ = writeln!(out, "{}", indent(line));
         }
     }
-    let _ = writeln!(out, "\n{}", console.bold("  places"));
+    // The services of this machine take every step on the registry as the
+    // engine's account, through the engine binary, so they are said as they
+    // run, whoever asks for the print: it is root's install they describe.
+    let Some(acting) = AsAccount::of(plan.system.as_ref(), true, plan.registry()) else {
+        let _ = writeln!(out, "\n{}", console.bold("  places"));
+        for spec in place_specs(plan) {
+            let _ = writeln!(out, "    {}", place_argv(&spec).join(" "));
+        }
+        return out;
+    };
+    if !plan.registry_exists {
+        let _ = writeln!(
+            out,
+            "\n{} {}",
+            console.bold("  registry"),
+            console.dim(&format!(
+                "as {}, the key's passphrase on the input of key add",
+                acting.account
+            ))
+        );
+        for step in registry_made_steps(&plan.backend, "") {
+            let _ = writeln!(
+                out,
+                "    {}",
+                acting.argv(&shown_words(&step.words)).join(" ")
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        "\n{} {}",
+        console.bold("  places"),
+        console.dim(&format!("as {}", acting.account))
+    );
     for spec in place_specs(plan) {
-        let _ = writeln!(out, "    {}", place_argv(&spec).join(" "));
+        // the command a person would type, as the account: its first word is
+        // the binary the prefix already names
+        let _ = writeln!(
+            out,
+            "    {}",
+            acting.argv(&place_argv(&spec)[1..]).join(" ")
+        );
+    }
+    out
+}
+
+/// A step's words as a print shows them, with the password of a connection
+/// string kept out.
+fn shown_words(words: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(words.len());
+    let mut dsn = false;
+    for word in words {
+        out.push(if dsn {
+            crate::redact_dsn(word)
+        } else {
+            word.clone()
+        });
+        dsn = word == "--dsn";
     }
     out
 }
@@ -6163,6 +6734,10 @@ fn place(
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
         .map_err(|e| fail(format!("this binary cannot say where it is: {e}")))?;
     let into = binary_dir(&me, plan);
+    // Where the services are this machine's and root sets them up, every
+    // step on the registry is the engine's account's, as the engine's
+    // service will be.
+    let acting = AsAccount::of(plan.system.as_ref(), am_root(), plan.registry());
 
     console.begin(Stage::Engine);
     if plan.runtime.container() {
@@ -6239,7 +6814,14 @@ fn place(
     let home = Home::new(plan.registry());
     if !plan.registry_exists && !only_update {
         console.begin(Stage::Registry);
-        make_registry(plan, &home, console, args, answers.passphrase.as_deref())?;
+        make_registry(
+            plan,
+            &home,
+            console,
+            args,
+            answers.passphrase.as_deref(),
+            acting.as_ref(),
+        )?;
     }
     // A Postgres registry is backed up with pg_dump. The engine's image
     // carries it; on the machine it has to be there already.
@@ -6377,9 +6959,41 @@ fn place(
     if only_update {
         state.places = existing_places;
     } else {
-        state.places = declare_places(plan, &home, console)?;
+        // Declared as the engine's account, the install's own folders are
+        // that account's first, so a place among them is probed as the
+        // folder the engine will write rather than one only root may.
+        if acting.is_some() {
+            hand_over_files(plan, console);
+        }
+        state.places = declare_places(plan, &home, console, acting.as_ref())?;
     }
     checkpoint(state);
+    // The engine's service is written with the source places the registry
+    // holds once its places are declared, read back as its account. At the
+    // questions a registry at another schema was not read as it stands, and
+    // the record stood in; declaring the places has brought it up to date.
+    let read_back;
+    let plan = match acting.as_ref().filter(|_| !only_update) {
+        None => plan,
+        Some(acting) => match sources_as(acting) {
+            SourcesRead::NoRegistry => plan,
+            SourcesRead::Read(sources) => {
+                read_back = Plan {
+                    sources,
+                    ..plan.clone()
+                };
+                &read_back
+            }
+            SourcesRead::Schema { said: why, .. } | SourcesRead::Unread(why) => {
+                console.warn(&format!(
+                    "the registry's source places were not read back as {} once its places \
+                     were declared, so the engine is given the ones read before: {why}",
+                    acting.account
+                ));
+                plan
+            }
+        },
+    };
 
     // What each part reads and writes belongs to the account that part runs
     // as, before anything is started as that account.
@@ -6727,13 +7341,15 @@ fn start_postgres(plan: &Plan, pg: ManagedPostgres, console: &Console) -> Result
 }
 
 /// A key and an empty registry, the two commands the documentation gives,
-/// run here or inside the container that will use them.
+/// run here, inside the container that will use them, or as the engine's
+/// account that will.
 fn make_registry(
     plan: &Plan,
     home: &Home,
     console: &mut Console,
     args: &SetupArgs,
     asked: Option<&str>,
+    acting: Option<&AsAccount>,
 ) -> Result<(), Exit> {
     let passphrase = match (&args.key_file, asked) {
         (Some(path), _) => std::fs::read_to_string(path)
@@ -6757,12 +7373,19 @@ fn make_registry(
 
     if let BackendChoice::Postgres { dsn, schema } = &plan.backend {
         // Try the connection before anything is written, so a wrong dsn
-        // costs a sentence rather than half a registry.
-        if let Err(e) = nils_registry::store::Store::connect_postgres(dsn, schema) {
+        // costs a sentence rather than half a registry: as the account that
+        // will connect, where that is not this one.
+        let refused = match acting {
+            None => nils_registry::store::Store::connect_postgres(dsn, schema)
+                .err()
+                .map(|e| with_causes(&e)),
+            Some(acting) => postgres_refused_as(acting, dsn, schema)
+                .map(|why| format!("{why} (asked as {})", acting.account)),
+        };
+        if let Some(why) = refused {
             return Err(fail(format!(
-                "the database refused the connection: {}\n  check the connection string, that \
-                 the database exists, and that the role may create a schema",
-                with_causes(&e)
+                "the database refused the connection: {why}\n  check the connection string, that \
+                 the database exists, and that the role may create a schema"
             )));
         }
         console.note("the database answered");
@@ -6874,6 +7497,35 @@ fn make_registry(
         return Ok(());
     }
 
+    if let Some(acting) = acting {
+        // The registry's folder is the engine's before its account writes
+        // the key into it; it would be handed over after the places anyway.
+        let Some((uid, gid)) = account_ids(&acting.account) else {
+            return Err(fail(format!(
+                "there is no account on this machine named {}, which the registry is made as",
+                acting.account
+            )));
+        };
+        give_to(&acting.registry, uid, gid).map_err(|e| {
+            fail(format!(
+                "{} did not become {}'s, so the registry could not be made as that account: {e}",
+                acting.registry.display(),
+                acting.account
+            ))
+        })?;
+        for step in registry_made_steps(&plan.backend, &passphrase) {
+            let ran = acting.run(&step.words, step.input.as_deref());
+            if !ran.ok {
+                return Err(fail(format!(
+                    "{}, the account the engine runs as, could not {}: {}",
+                    acting.account, step.undone, ran.why
+                )));
+            }
+        }
+        console.progress(&format!("registry at {}", home.dir().display()));
+        return Ok(());
+    }
+
     let (bytes, _) = nils_registry::keys::strip_newline(passphrase.as_bytes());
     home.keys(None)
         .add("nils", bytes)
@@ -6906,18 +7558,100 @@ fn make_registry(
 /// The places the engine now keeps, added in an order that lets the
 /// registry name its backup. A place already there is left as it is, so a
 /// second run of the wizard says the same thing as the first.
-fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Result<Vec<PlaceState>, Exit> {
+///
+/// Where setup acts as the engine's account, that account declares them
+/// through the engine binary, so each directory is made, resolved and
+/// probed as the engine finds it, and the registry is opened as the engine
+/// opens it.
+fn declare_places(
+    plan: &Plan,
+    home: &Home,
+    console: &Console,
+    acting: Option<&AsAccount>,
+) -> Result<Vec<PlaceState>, Exit> {
+    let specs = place_specs(plan);
+    let declared = match acting {
+        None => {
+            // a place asked for and not declared is a registry that does not
+            // read the directory the person named, so each failure here stops
+            // the install
+            let mut registry = crate::open(home).map_err(|e| {
+                fail(format!(
+                    "the registry did not open to declare its places: {}",
+                    e.message
+                ))
+            })?;
+            declare_in(&mut registry, &specs, &mut |line| console.progress(&line)).map_err(fail)?
+        }
+        Some(acting) => declared_as(acting, &specs, console)?,
+    };
+    if !declared.is_empty() {
+        console.progress(&format!("places: {}", say_places(&declared)));
+    }
+    Ok(declared)
+}
+
+/// The places declared by the engine's account, which hands back what it
+/// said as it went and the places it declared, one JSON document a line.
+/// What it said before a failure is said too, since that much was done.
+fn declared_as(
+    acting: &AsAccount,
+    specs: &[PlaceSpec],
+    console: &Console,
+) -> Result<Vec<PlaceState>, Exit> {
+    let input = serde_json::to_vec(specs).map_err(|e| fail(e.to_string()))?;
+    let ran = acting.run(
+        &owned_words(&[REGISTRY_STEP, "declare"]),
+        Some(input.as_slice()),
+    );
+    let (said, declared) = declared_said(&ran.stdout);
+    for line in said {
+        console.progress(&line);
+    }
+    match (ran.ok, declared) {
+        (true, Some(declared)) => Ok(declared),
+        (true, None) => Err(fail(format!(
+            "{} declared the places, and what it answered does not say which",
+            acting.account
+        ))),
+        (false, _) => Err(fail(format!(
+            "the places were not declared as {}, the account the engine runs as: {}",
+            acting.account, ran.why
+        ))),
+    }
+}
+
+/// What the engine's account said as it declared the places, and the places,
+/// where it got as far as saying them.
+fn declared_said(text: &str) -> (Vec<String>, Option<Vec<PlaceState>>) {
+    let mut said = Vec::new();
+    let mut declared = None;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(line) = doc["said"].as_str() {
+            said.push(line.to_string());
+        } else if let Ok(places) = serde_json::from_value(doc["places"].clone()) {
+            declared = Some(places);
+        }
+    }
+    (said, declared)
+}
+
+/// The places declared in a registry that is open, by whichever account
+/// opened it: each directory made where it is missing, resolved and probed,
+/// a place already named kept or moved, and every other source place kept on
+/// record beside them. What is worth a person's reading is handed to `said`
+/// as it happens.
+fn declare_in(
+    registry: &mut nils_registry::Registry,
+    specs: &[PlaceSpec],
+    said: &mut dyn FnMut(String),
+) -> Result<Vec<PlaceState>, String> {
     use nils_registry::place::{self, Role};
-    // a place asked for and not declared is a registry that does not read
-    // the directory the person named, so each failure here stops the install
-    let mut registry = crate::open(home).map_err(|e| {
-        fail(format!(
-            "the registry did not open to declare its places: {}",
-            e.message
-        ))
-    })?;
     let mut declared: Vec<PlaceState> = Vec::new();
-    for spec in place_specs(plan) {
+    for spec in specs {
         let Some(role) = Role::parse(&spec.role) else {
             continue;
         };
@@ -6942,19 +7676,19 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Result<Vec<Pla
                     match place::set(registry.store(), there.id, Some(&path), None, Some(&probed)) {
                         Ok(_) => {
                             let _ = crate::audit(
-                                &mut registry,
+                                registry,
                                 nils_registry::audit::Action::PlaceSet,
                                 serde_json::json!({"place": there.id, "name": spec.name, "moved": true}),
                                 None,
                             );
-                            console.progress(&format!("the {} place is now {path}", spec.name));
+                            said(format!("the {} place is now {path}", spec.name));
                             declared.push(row);
                         }
                         Err(e) => {
-                            return Err(fail(format!(
+                            return Err(format!(
                                 "the {} place was not moved to {path}: {e}",
                                 spec.name
-                            )));
+                            ));
                         }
                     }
                     continue;
@@ -6967,10 +7701,7 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Result<Vec<Pla
             }
             Ok(None) => {}
             Err(e) => {
-                return Err(fail(format!(
-                    "the {} place could not be read: {e}",
-                    spec.name
-                )));
+                return Err(format!("the {} place could not be read: {e}", spec.name));
             }
         }
         let made = place::add(
@@ -6997,7 +7728,7 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Result<Vec<Pla
         match made {
             Ok(id) => {
                 let _ = crate::audit(
-                    &mut registry,
+                    registry,
                     nils_registry::audit::Action::PlaceAdd,
                     serde_json::json!({"place": id, "name": spec.name, "role": spec.role}),
                     None,
@@ -7005,10 +7736,7 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Result<Vec<Pla
                 declared.push(row);
             }
             Err(e) => {
-                return Err(fail(format!(
-                    "the {} place was not declared: {e}",
-                    spec.name
-                )));
+                return Err(format!("the {} place was not declared: {e}", spec.name));
             }
         }
     }
@@ -7026,10 +7754,105 @@ fn declare_places(plan: &Plan, home: &Home, console: &Console) -> Result<Vec<Pla
             }
         }
     }
-    if !declared.is_empty() {
-        console.progress(&format!("places: {}", say_places(&declared)));
-    }
     Ok(declared)
+}
+
+// ------------------------------------------ the engine's account's own side
+
+/// The steps on a registry that nils setup takes as the engine's account,
+/// and runs itself, through the engine binary under runuser. Each does what
+/// setup did in its own process before; only the account doing it is
+/// another. Not a command a person types: `nils init`, `nils key add` and
+/// `nils place add` are those, and a source place added with the last is
+/// declared as a dataset, which setup never does.
+#[derive(Debug, Subcommand)]
+pub(crate) enum RegistryStep {
+    /// Whether a Postgres answers this account, with the connection string
+    /// read from the input; nothing is written
+    Connect {
+        #[arg(long, value_name = "NAME")]
+        schema: String,
+    },
+    /// The registry's source places as it stands, as JSON; a registry at
+    /// another schema is left as it is, and where it stands is said instead
+    Sources,
+    /// Declare the places given as JSON on the input as setup declares them,
+    /// saying what it did one JSON document a line
+    Declare,
+}
+
+/// One step of the registry's, taken by the account running this.
+pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit> {
+    match step {
+        RegistryStep::Connect { schema } => {
+            let mut dsn = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut dsn)
+                .map_err(|e| fail(format!("stdin: {e}")))?;
+            nils_registry::store::Store::connect_postgres(
+                dsn.trim_end_matches(['\r', '\n']),
+                &schema,
+            )
+            .map(|_| ())
+            .map_err(|e| fail(with_causes(&e)))
+        }
+        RegistryStep::Sources => {
+            println!("{}", sources_here(home)?);
+            Ok(())
+        }
+        RegistryStep::Declare => {
+            let specs: Vec<PlaceSpec> = serde_json::from_reader(std::io::stdin().lock())
+                .map_err(|e| usage(format!("the places on the input: {e}")))?;
+            let mut registry = crate::open(home).map_err(|e| {
+                fail(format!(
+                    "the registry did not open to declare its places: {}",
+                    e.message
+                ))
+            })?;
+            // each line as it is said, so what was done before a failure is
+            // said as well
+            let declared = declare_in(&mut registry, &specs, &mut |line| {
+                println!("{}", serde_json::json!({ "said": line }));
+            })
+            .map_err(fail)?;
+            println!("{}", serde_json::json!({ "places": declared }));
+            Ok(())
+        }
+    }
+}
+
+/// The registry's source places as the account running this finds them, as
+/// the registry stands. A registry at another schema is left as it is, since
+/// bringing it to this binary's would change it under an engine still running
+/// on it, and where its schema stands is said instead; one that does not
+/// answer at all is this command's failure, with what it said.
+fn sources_here(home: &Home) -> Result<serde_json::Value, Exit> {
+    use nils_registry::migrate::Standing;
+    use nils_registry::place::{self, Role};
+    if !home.exists() {
+        return Ok(serde_json::json!({ "registry": false }));
+    }
+    let mut store = match home.open_as_it_stands() {
+        Ok(store) => store,
+        Err(refused) => {
+            return match home.standing() {
+                Ok(standing @ (Standing::Behind(_) | Standing::Ahead(_))) => {
+                    Ok(serde_json::json!({
+                        "registry": true,
+                        "schema": standing.to_string(),
+                        "ahead": matches!(standing, Standing::Ahead(_)),
+                    }))
+                }
+                _ => Err(fail(refused.to_string())),
+            };
+        }
+    };
+    let sources: Vec<serde_json::Value> = place::active(&mut store)
+        .map_err(|e| fail(e.to_string()))?
+        .into_iter()
+        .filter(|p| p.role == Role::Source)
+        .map(|p| serde_json::json!({ "name": p.name, "path": p.path }))
+        .collect();
+    Ok(serde_json::json!({ "registry": true, "sources": sources }))
 }
 
 /// The places as one line: `backups as backup, registry as registry`.
@@ -11338,10 +12161,17 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
         println!("no services were written for this setup, so restart what you run yourself");
         return;
     }
-    let mut plan = plan_from_state(&state, channel);
+    let (mut plan, read) = plan_and_sources(&state, channel);
     if let Some(refused) = recorded_system_refusal(&plan) {
         println!("the services were left alone: {refused}");
         return;
+    }
+    // The parts are replaced by now, so the services start again whatever
+    // the registry answered; where it did not, that is said, with the mend.
+    if let Some((account, read)) = &read
+        && let Some(Ok(said)) = unread_sources(Reading::Restart, read, account)
+    {
+        println!("{said}");
     }
     if let Some(engine) = state.parts.get("engine") {
         plan.version = engine.version.clone();
@@ -11659,7 +12489,15 @@ pub(crate) fn reapply_engine(state: &State) -> Result<(), Exit> {
     if let Some(argv) = helper_call(state, &["reapply"]) {
         return run_helper(&argv);
     }
-    let mut plan = plan_from_state(state, None);
+    let (mut plan, read) = plan_and_sources(state, None);
+    // Following the registry is the whole of this work, so where its source
+    // places were not read the engine is left running as it is, reading what
+    // it read before, rather than written again from the record.
+    if let Some((account, read)) = &read
+        && let Some(Err(why)) = unread_sources(Reading::Reapply, read, account)
+    {
+        return Err(fail(why));
+    }
     if let Some(engine) = state.parts.get("engine") {
         plan.version = engine.version.clone();
     }
@@ -15190,6 +16028,370 @@ mod tests {
         );
         assert_eq!(units_dir(true), PathBuf::from("/etc/systemd/system"));
         assert!(units_dir(false).ends_with("systemd/user"));
+    }
+
+    /// The engine's account and binary of the group's install, as a step
+    /// taken as that account names them.
+    fn as_the_engine() -> AsAccount {
+        AsAccount {
+            account: "nils".to_string(),
+            binary: PathBuf::from("/srv/nils/engine/nils"),
+            registry: PathBuf::from("/srv/nils/registry"),
+        }
+    }
+
+    #[test]
+    fn the_registry_is_the_engines_account_only_for_the_machines_services_set_up_by_root() {
+        let machine = SystemUnits::default();
+        assert_eq!(
+            registry_account(Some(&machine), true).as_deref(),
+            Some("nils"),
+            "the services of this machine, set up by root, act as the engine's account"
+        );
+        assert_eq!(
+            registry_account(None, true),
+            None,
+            "an install of this account's own acts as itself, root or not"
+        );
+        assert_eq!(registry_account(None, false), None);
+        assert_eq!(
+            registry_account(Some(&machine), false),
+            None,
+            "a run that is not root runs nothing as another account"
+        );
+        let named = |engine: &str| SystemUnits {
+            accounts: BTreeMap::from([("engine".to_string(), engine.to_string())]),
+            ..SystemUnits::default()
+        };
+        assert_eq!(
+            registry_account(Some(&named("nils-engine")), true).as_deref(),
+            Some("nils-engine"),
+            "the account named for the engine, not another part's"
+        );
+        assert_eq!(
+            registry_account(Some(&named("root")), true),
+            None,
+            "an engine that runs as root is this process already"
+        );
+        assert!(AsAccount::of(None, true, PathBuf::from("/srv/nils/registry")).is_none());
+
+        // the services asked for at the registry's question are the ones the
+        // services step settles on
+        assert_eq!(system_asked(false, BTreeMap::new(), Vec::new(), None), None);
+        assert_eq!(
+            system_asked(true, BTreeMap::new(), Vec::new(), None),
+            Some(SystemUnits::default())
+        );
+        let recorded = named("nils");
+        assert_eq!(
+            system_asked(false, BTreeMap::new(), Vec::new(), Some(recorded.clone())),
+            Some(recorded.clone()),
+            "a rerun keeps the services on record"
+        );
+        let renamed = system_asked(
+            false,
+            BTreeMap::from([("engine".to_string(), "nils-engine".to_string())]),
+            vec!["CAP_DAC_OVERRIDE".to_string()],
+            Some(recorded),
+        )
+        .unwrap();
+        assert_eq!(renamed.account("engine"), "nils-engine");
+        assert_eq!(renamed.capabilities, ["CAP_DAC_OVERRIDE"]);
+    }
+
+    #[test]
+    fn a_step_as_the_engines_account_runs_the_engine_under_runuser_with_its_registry() {
+        let acting = as_the_engine();
+        assert_eq!(
+            acting.argv(&owned_words(&[REGISTRY_STEP, "sources"])),
+            [
+                "runuser",
+                "-u",
+                "nils",
+                "--",
+                "/srv/nils/engine/nils",
+                "--registry",
+                "/srv/nils/registry",
+                "setup-registry",
+                "sources"
+            ],
+            "as the engine's service runs: its account, its binary, its registry"
+        );
+    }
+
+    #[test]
+    fn the_registry_is_made_as_the_engines_account_with_the_passphrase_on_its_input_alone() {
+        let acting = as_the_engine();
+        let passphrase = "correct horse battery staple\n";
+        let postgres = BackendChoice::Postgres {
+            dsn: "postgresql://nils@%2Frun%2Fpostgresql/nils".to_string(),
+            schema: "nils".to_string(),
+        };
+        let steps = registry_made_steps(&postgres, passphrase);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].words, ["key", "add", "nils"]);
+        assert_eq!(
+            steps[0].input.as_deref(),
+            Some(passphrase.as_bytes()),
+            "the passphrase goes over as it was given"
+        );
+        assert_eq!(
+            steps[1].words,
+            [
+                "init",
+                "--key",
+                "nils",
+                "--backend",
+                "postgres",
+                "--dsn",
+                "postgresql://nils@%2Frun%2Fpostgresql/nils",
+                "--schema",
+                "nils"
+            ]
+        );
+        assert_eq!(steps[1].input, None);
+        for step in &steps {
+            let argv = acting.argv(&step.words);
+            assert_eq!(&argv[..4], ["runuser", "-u", "nils", "--"]);
+            assert!(
+                argv.iter().all(|word| !word.contains("horse battery")),
+                "a command line is every account's to read: {argv:?}"
+            );
+        }
+        let sqlite = registry_made_steps(&BackendChoice::Sqlite, passphrase);
+        assert_eq!(
+            sqlite[1].words,
+            ["init", "--key", "nils", "--backend", "sqlite"]
+        );
+    }
+
+    #[test]
+    fn print_says_the_registrys_steps_as_the_engines_account_for_the_machines_services() {
+        let console = Console::new(true);
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = PathBuf::from("/srv/nils");
+        plan.backend = BackendChoice::Postgres {
+            dsn: "postgres://nils:s3cret@db.example.org/nils".to_string(),
+            schema: "nils".to_string(),
+        };
+        let said = commands_text(&plan, &console);
+        assert!(
+            said.contains("    nils place add registry /srv/nils/registry --role registry"),
+            "an install of this account's own says the commands as it always did: {said}"
+        );
+        assert!(!said.contains("runuser"), "{said}");
+        assert!(!said.contains("key add"), "{said}");
+
+        plan.system = Some(SystemUnits {
+            capabilities: Vec::new(),
+            accounts: BTreeMap::from([("engine".to_string(), "nils-engine".to_string())]),
+        });
+        let said = commands_text(&plan, &console);
+        let as_engine = format!(
+            "runuser -u nils-engine -- {} --registry /srv/nils/registry",
+            running_binary().display()
+        );
+        assert!(said.contains("registry as nils-engine"), "{said}");
+        assert!(
+            said.contains(&format!("{as_engine} key add nils\n")),
+            "{said}"
+        );
+        assert!(
+            said.contains(&format!(
+                "{as_engine} init --key nils --backend postgres --dsn \
+                 postgres://nils:***@db.example.org/nils --schema nils\n"
+            )),
+            "{said}"
+        );
+        assert!(!said.contains("s3cret"), "{said}");
+        assert!(said.contains("places as nils-engine"), "{said}");
+        assert!(
+            said.contains(&format!(
+                "{as_engine} place add registry /srv/nils/registry --role registry --backup backups"
+            )),
+            "{said}"
+        );
+        let places = said
+            .split("places as nils-engine")
+            .nth(1)
+            .unwrap_or_default();
+        assert!(
+            places
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .all(|line| line.trim_start().starts_with(&as_engine)),
+            "every place is declared as the account: {places}"
+        );
+
+        // a registry that is there already is not made again
+        plan.registry_exists = true;
+        let said = commands_text(&plan, &console);
+        assert!(!said.contains("key add"), "{said}");
+        assert!(said.contains("places as nils-engine"), "{said}");
+    }
+
+    #[test]
+    fn what_the_engines_account_answers_of_the_source_places_is_read_back_as_it_was_meant() {
+        assert_eq!(
+            sources_said(r#"{"registry": false}"#),
+            SourcesRead::NoRegistry
+        );
+        let read = sources_said(
+            r#"{"registry": true, "sources": [{"name": "source", "path": "/data/source"},
+                {"name": "scanner2", "path": "/data/scanner-2"}]}"#,
+        );
+        assert_eq!(
+            read,
+            SourcesRead::Read(vec![
+                ("source".to_string(), PathBuf::from("/data/source")),
+                ("scanner2".to_string(), PathBuf::from("/data/scanner-2")),
+            ])
+        );
+        let recorded = vec![("source".to_string(), PathBuf::from("/data/source"))];
+        assert_eq!(
+            read.or_record(recorded.clone()).len(),
+            2,
+            "a source added at the desk is the registry's, not the record's"
+        );
+        let behind = sources_said(
+            r#"{"registry": true, "schema": "schema version 43, behind this binary's 44", "ahead": false}"#,
+        );
+        assert_eq!(
+            behind,
+            SourcesRead::Schema {
+                said: "schema version 43, behind this binary's 44".to_string(),
+                ahead: false
+            }
+        );
+        assert_eq!(behind.or_record(recorded.clone()), recorded);
+        for nothing in ["", "not json", r#"{"registry": true}"#] {
+            assert!(
+                matches!(sources_said(nothing), SourcesRead::Unread(_)),
+                "{nothing:?} is no answer"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unanswered_registry_stops_what_changed_nothing_and_is_said_after_an_update() {
+        let unread = SourcesRead::Unread(
+            r#"postgres: Peer authentication failed for user "nils""#.to_string(),
+        );
+        let verdict = |reading| unread_sources(reading, &unread, "nils").unwrap();
+        for reading in [
+            Reading::Install,
+            Reading::Update,
+            Reading::Repair,
+            Reading::Reapply,
+        ] {
+            let why = verdict(reading).unwrap_err();
+            assert!(
+                why.contains("Peer authentication failed") && why.contains("nils"),
+                "{reading:?} says why and as whom: {why}"
+            );
+        }
+        assert!(
+            verdict(Reading::Reapply)
+                .unwrap_err()
+                .contains("left as it is")
+        );
+        let said = verdict(Reading::Restart).unwrap();
+        assert!(
+            said.contains("Peer authentication failed")
+                && said.contains("record stands in")
+                && said.contains("reapplying the engine"),
+            "the parts are replaced already, so the services start and the mend is said: {said}"
+        );
+        let said = verdict(Reading::Print).unwrap();
+        assert!(said.contains("a run for real stops on it"), "{said}");
+
+        // read, or no registry to read, is nothing to say
+        for read in [SourcesRead::NoRegistry, SourcesRead::Read(Vec::new())] {
+            for reading in [
+                Reading::Install,
+                Reading::Print,
+                Reading::Update,
+                Reading::Repair,
+                Reading::Restart,
+                Reading::Reapply,
+            ] {
+                assert_eq!(unread_sources(reading, &read, "nils"), None);
+            }
+        }
+    }
+
+    #[test]
+    fn a_registry_at_another_schema_is_said_and_stops_only_what_cannot_go_on_without_it() {
+        let behind = SourcesRead::Schema {
+            said: "schema version 43, behind this binary's 44".to_string(),
+            ahead: false,
+        };
+        let verdict = |reading, read: &SourcesRead| unread_sources(reading, read, "nils").unwrap();
+        let said = verdict(Reading::Install, &behind).unwrap();
+        assert!(
+            said.contains("read back from it as nils") && said.contains("before any service"),
+            "an install declares its places and reads them back before a unit is written: {said}"
+        );
+        for reading in [
+            Reading::Print,
+            Reading::Update,
+            Reading::Repair,
+            Reading::Restart,
+        ] {
+            let said = verdict(reading, &behind).unwrap();
+            assert!(
+                said.contains("schema version 43") && said.contains("record stands in"),
+                "{reading:?}: {said}"
+            );
+        }
+        let why = verdict(Reading::Reapply, &behind).unwrap_err();
+        assert!(why.contains("left as it is"), "{why}");
+        let ahead = SourcesRead::Schema {
+            said: "schema version 45, ahead of this binary's 44".to_string(),
+            ahead: true,
+        };
+        let why = verdict(Reading::Install, &ahead).unwrap_err();
+        assert!(
+            why.contains("cannot declare its places"),
+            "a binary behind its registry cannot declare into it: {why}"
+        );
+    }
+
+    #[test]
+    fn the_places_go_over_whole_and_what_was_done_comes_back_even_from_a_failure() {
+        let places = places_given(&a_sites_places()).unwrap();
+        let plan = a_site(Site {
+            places,
+            ..Site::default()
+        });
+        let specs = place_specs(&plan);
+        let text = serde_json::to_string(&specs).unwrap();
+        let back: Vec<PlaceSpec> = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, specs, "every place and every guarantee, in order");
+
+        let answered = concat!(
+            r#"{"said":"the source place is now /data/source-b"}"#,
+            "\n",
+            r#"{"places":[{"name":"source","role":"source","path":"/data/source-b"},"#,
+            r#"{"name":"scanner2","role":"source","path":"/data/scanner-2"}]}"#,
+            "\n"
+        );
+        let (said, declared) = declared_said(answered);
+        assert_eq!(said, ["the source place is now /data/source-b"]);
+        let declared = declared.unwrap();
+        assert_eq!(declared.len(), 2);
+        assert_eq!(
+            recorded_sources(&declared),
+            [
+                ("source".to_string(), PathBuf::from("/data/source-b")),
+                ("scanner2".to_string(), PathBuf::from("/data/scanner-2")),
+            ],
+            "a source added at the desk is kept on record beside the ones setup declared"
+        );
+        let (said, declared) =
+            declared_said("{\"said\":\"the source place is now /data/source-b\"}\n");
+        assert_eq!(said.len(), 1, "a move made before a failure is still said");
+        assert_eq!(declared, None);
     }
 
     #[test]
