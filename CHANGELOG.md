@@ -4,6 +4,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.32] - 2026-09-17
+
 ### Added
 
 - An install behind a proxy can be described: `nils setup --origin URL` names the address a browser opens the desk at, where a name and a certificate of the site's answer for it. It is what the desk compares a write against, what it signs the tokens the other parts trust with, and what a person is sent back to after signing in at a provider, so the engine's trust in the desk is derived from the same address. Where the desk itself binds stays a separate answer: this machine's loopback for a proxy running here, and with `--reach network` every address for a proxy on another machine; the loopback stays among the addresses the desk also answers at either way, so a browser on the machine keeps working. An address that is not a scheme and a host is refused before anything is written, in words naming what is wrong with it. The wizard asks for it as a third answer to who may open the desk, and a rerun opens on what is on record. The address is written down in the setup record as `origin`, and an update and a repair write the same address the install did, where before every run stamped `http://<address>:<port>` over it: a desk behind a proxy refused every write by its own cross origin check, dropped `Secure` from its session cookie and sent people back to an address their provider had never heard of, and a correct address set by hand lasted until the next update.
