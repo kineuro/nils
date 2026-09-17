@@ -17464,13 +17464,13 @@ mod tests {
         // the archives on a share that squashes root, whose top only the
         // engine's account may search
         plan.site = Some(Site {
-            backup_dir: Some("/data/nils-archives/registry".to_string()),
+            backup_dir: Some("/data/archives/registry".to_string()),
             ..Site::default()
         });
         let asked = std::cell::RefCell::new(Vec::new());
         let masks = masks_when(
             &plan,
-            root_refused_at(&["/data/nils-archives/registry"]),
+            root_refused_at(&["/data/archives/registry"]),
             |account, path| {
                 asked
                     .borrow_mut()
@@ -17478,7 +17478,7 @@ mod tests {
                 Some(false)
             },
         );
-        let archives = PathBuf::from("/data/nils-archives/registry");
+        let archives = PathBuf::from("/data/archives/registry");
         assert_eq!(
             masks.closed,
             vec![
@@ -17499,11 +17499,11 @@ mod tests {
         assert_eq!(
             said,
             vec![
-                "/data/nils-archives/registry is closed to nils-desk already, so the services \
+                "/data/archives/registry is closed to nils-desk already, so the services \
                  that run as nils-desk do not hide it: root cannot look at it, and a service \
                  that hides a path root cannot look at does not start"
                     .to_string(),
-                "/data/nils-archives/registry is closed to nils-assistant already, so the \
+                "/data/archives/registry is closed to nils-assistant already, so the \
                  services that run as nils-assistant do not hide it: root cannot look at it, \
                  and a service that hides a path root cannot look at does not start"
                     .to_string(),
@@ -17531,7 +17531,7 @@ mod tests {
             let printed = commands_text(&plan, &Console::new(true));
             assert!(
                 printed.contains(
-                    "# InaccessiblePaths=-/data/nils-archives/registry is left out: root cannot \
+                    "# InaccessiblePaths=-/data/archives/registry is left out: root cannot \
                      look at it, and nils-desk cannot reach it"
                 ),
                 "{printed}"
@@ -17539,7 +17539,7 @@ mod tests {
             assert!(
                 !printed
                     .lines()
-                    .any(|l| l.trim() == "InaccessiblePaths=-/data/nils-archives/registry"),
+                    .any(|l| l.trim() == "InaccessiblePaths=-/data/archives/registry"),
                 "{printed}"
             );
         }
@@ -21744,7 +21744,7 @@ mod tests {
 
     #[test]
     fn ldd_names_each_library_and_version_a_binary_links_and_this_machine_lacks_once() {
-        // as the lab's Debian 13 said it of the CPU build without libgomp1
+        // as ldd says it on Debian 13 of the CPU build without libgomp1
         let said = "\tlinux-vdso.so.1 (0x00007ffd3c1e6000)\n\
                     \tlibllama-server-impl.so => /srv/nils/llama.cpp/b10964-ubuntu-x64/libllama-server-impl.so (0x00007f0a1c000000)\n\
                     \tlibgomp.so.1 => not found\n\
