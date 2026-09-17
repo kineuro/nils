@@ -4187,6 +4187,249 @@ pub(crate) fn next_free_port(start: u16, taken: &dyn Fn(u16) -> bool) -> u16 {
     start
 }
 
+impl Ports {
+    /// The port of a part, by the name the ports are settled under.
+    fn of(&mut self, part: &str) -> Option<&mut u16> {
+        Some(match part {
+            "engine" => &mut self.engine,
+            "desk" => &mut self.desk,
+            "kvasir" => &mut self.kvasir,
+            "assistant" => &mut self.assistant,
+            "postgres" => &mut self.postgres,
+            SUPERVISOR_PART => &mut self.supervisor,
+            LLAMA_PART => &mut self.llama,
+            _ => return None,
+        })
+    }
+}
+
+/// A part whose port is settled: what a person reads it as, the name its
+/// port and its unit go by, whether this run has it listen on this machine,
+/// and whether the record of an install that finished names it.
+struct Listener {
+    name: &'static str,
+    part: &'static str,
+    listens: bool,
+    /// A part the record of a finished install names keeps its port whatever
+    /// holds it, as it always has: its own service is what holds it.
+    recorded: bool,
+}
+
+/// Where every part listens, from the ports on record. A part keeps its port
+/// where nothing holds it, where it is recorded, and where one of this
+/// install's own units is what holds it, since that unit is started again on
+/// it. A port something else holds moves to the next free one, as on a first
+/// install. Answers the ports, and a sentence for each port that moved or was
+/// kept because a unit of this install's held it.
+///
+/// Which unit is this install's own is `own`'s to answer, and it is asked
+/// only about a port that is taken. The record alone cannot say it: a run
+/// that stopped partway leaves a record naming only some of its parts, while
+/// the units of the parts it did start still hold their ports, and counted
+/// as taken, the engine's own port would move under its running engine.
+fn settle_ports(
+    recorded: Ports,
+    listeners: &[Listener],
+    taken: &dyn Fn(u16) -> bool,
+    own: &dyn Fn(&str, u16) -> bool,
+) -> (Ports, Vec<String>) {
+    let mut ports = recorded;
+    let mut chosen: Vec<u16> = Vec::new();
+    let mut said = Vec::new();
+    for listener in listeners {
+        let Some(port) = ports.of(listener.part) else {
+            continue;
+        };
+        if listener.listens && !listener.recorded {
+            let at = *port;
+            let mine = !chosen.contains(&at) && taken(at) && own(listener.part, at);
+            let held = |p: u16| taken(p) && !(mine && p == at);
+            if let Some(free) = settle_port(at, &chosen, &held) {
+                said.push(format!(
+                    "port {at} is taken, so {} takes {free}",
+                    listener.name
+                ));
+                *port = free;
+            } else if mine {
+                said.push(format!(
+                    "port {at} is held by {}'s own service, which is started again on it",
+                    listener.name
+                ));
+            }
+        }
+        chosen.push(*port);
+    }
+    (ports, said)
+}
+
+/// The unit a part's port is held by when this install runs it, where that
+/// can be told from the process that listens: on a machine systemd runs, the
+/// part's own unit. In podman and docker a part's port is published by the
+/// runtime's own process, so only llama.cpp and the supervisor, which run on
+/// the machine beside the containers, are told apart there. Postgres always
+/// runs in a container, and launchd is not asked.
+fn listening_unit(runtime: Runtime, part: &str) -> Option<&'static str> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    match part {
+        LLAMA_PART => Some("nils-llama"),
+        SUPERVISOR_PART => Some("nils-supervise"),
+        _ if runtime.container() => None,
+        "engine" => Some("nils-engine"),
+        "desk" => Some("nils-desk"),
+        "kvasir" => Some("kvasir"),
+        "assistant" => Some("nils-assistant"),
+        _ => None,
+    }
+}
+
+/// A service a process runs under, as its control group names it: the unit,
+/// and the account whose own manager runs it, or `None` for the machine's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServiceOf {
+    unit: String,
+    user: Option<u32>,
+}
+
+/// The service a process's `/proc/<pid>/cgroup` names, if it runs under one.
+/// The first `.service` along the path is the unit, whatever it made below
+/// itself; one inside `user@<uid>.service` is that account's own. Of the
+/// older hierarchies, only systemd's own line says the unit.
+fn service_of_cgroup(text: &str) -> Option<ServiceOf> {
+    text.lines().find_map(|line| {
+        let mut fields = line.splitn(3, ':');
+        let (_, controllers, path) = (fields.next()?, fields.next()?, fields.next()?);
+        if !(controllers.is_empty() || controllers == "name=systemd") {
+            return None;
+        }
+        let mut user = None;
+        for step in path.split('/') {
+            if let Some(uid) = step
+                .strip_prefix("user@")
+                .and_then(|rest| rest.strip_suffix(".service"))
+            {
+                user = Some(uid.parse().ok()?);
+                continue;
+            }
+            if let Some(unit) = step.strip_suffix(".service") {
+                return Some(ServiceOf {
+                    unit: unit.to_string(),
+                    user,
+                });
+            }
+        }
+        None
+    })
+}
+
+/// The inodes of the sockets listening on a port, from `/proc/net/tcp` or
+/// `/proc/net/tcp6`: a line's second field is the local address and port in
+/// hexadecimal, its fourth the state (`0A` is listening), its tenth the inode.
+fn listening_inodes(table: &str, port: u16) -> Vec<u64> {
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (_, hex) = fields.get(1)?.rsplit_once(':')?;
+            let listens = u16::from_str_radix(hex, 16).ok()? == port && *fields.get(3)? == "0A";
+            listens.then(|| fields.get(9)?.parse().ok())?
+        })
+        .collect()
+}
+
+/// The inode of a socket, from what `/proc/<pid>/fd/<n>` links to.
+fn socket_inode(link: &str) -> Option<u64> {
+    link.strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+}
+
+/// The services whose processes listen on a port of this machine: every
+/// socket listening on it, and every process under a service that holds one
+/// open. A process of another account's is read only by root, which is the
+/// account that sets up the services of a machine; one this process may not
+/// read is passed over, so its port stays taken.
+fn services_listening(port: u16) -> Vec<ServiceOf> {
+    let mut inodes = Vec::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        if let Ok(text) = std::fs::read_to_string(table) {
+            inodes.extend(listening_inodes(&text, port));
+        }
+    }
+    let mut out = Vec::new();
+    if inodes.is_empty() {
+        return out;
+    }
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for process in processes.flatten() {
+        let numbered = process
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.bytes().all(|b| b.is_ascii_digit()));
+        if !numbered {
+            continue;
+        }
+        let Some(service) = std::fs::read_to_string(process.path().join("cgroup"))
+            .ok()
+            .as_deref()
+            .and_then(service_of_cgroup)
+        else {
+            continue;
+        };
+        if out.contains(&service) {
+            continue;
+        }
+        let Ok(open) = std::fs::read_dir(process.path().join("fd")) else {
+            continue;
+        };
+        let holds = open.flatten().any(|fd| {
+            std::fs::read_link(fd.path())
+                .ok()
+                .and_then(|link| socket_inode(&link.to_string_lossy()))
+                .is_some_and(|inode| inodes.contains(&inode))
+        });
+        if holds {
+            out.push(service);
+        }
+    }
+    out
+}
+
+/// The account this process runs as, as the owner of its own `/proc` entry.
+fn this_uid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata("/proc/self").ok().map(|m| m.uid())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Whether a port is held by one of this install's own units, from the
+/// services that hold it: the unit this install runs the part under, in the
+/// manager it writes its units to, which is the machine's for the services of
+/// this machine and this account's otherwise. A unit of that name there is
+/// this install's whoever wrote it last, since this run writes over it and
+/// starts it again.
+fn own_unit_holds(unit: &str, system: bool, uid: Option<u32>, holding: &[ServiceOf]) -> bool {
+    let manager = match (system, uid) {
+        (true, _) => None,
+        (false, Some(uid)) => Some(uid),
+        (false, None) => return false,
+    };
+    holding
+        .iter()
+        .any(|held| held.unit == unit && held.user == manager)
+}
+
 /// This host's own address on the network, for a desk other machines open.
 fn host_address() -> Option<String> {
     // The address the kernel would use to reach the world, without sending
@@ -5101,13 +5344,7 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
         ));
     }
     let mut console = Console::new(args.yes || args.print);
-    let mut existing = read_state();
-    // An install that stopped partway is not one to update or repair: it is
-    // started again, and its record is what an uninstall would remove.
-    let restarted = existing.as_ref().is_some_and(|s| s.unfinished);
-    if restarted {
-        existing = None;
-    }
+    let (existing, restarted) = go_on_from(read_state());
     let facts = Facts::probe();
 
     let flow = if console.can_draw_screens() {
@@ -5155,6 +5392,20 @@ pub(crate) fn setup(args: SetupArgs) -> Result<(), Exit> {
     }
 }
 
+/// The record a setup goes on from, and the ports of a last run that stopped
+/// partway. An install that stopped partway is not one to update or repair:
+/// it is started again, and its record is what an uninstall would remove. Its
+/// ports are all that is taken from it. Its parts may be half there, and it
+/// names only those it placed, while the units of the parts it did start may
+/// still be running on the ports it chose; so the rerun starts from those
+/// ports, and each is still asked what holds it.
+fn go_on_from(record: Option<State>) -> (Option<State>, Option<Ports>) {
+    match record {
+        Some(state) if state.unfinished => (None, Some(state.ports)),
+        record => (record, None),
+    }
+}
+
 /// What a person wants, asked a step at a time: a plan and the answers to
 /// install it with, or another thing to do with the setup that is there.
 /// Asked on lines, or on screens, which run this again from the start after
@@ -5165,12 +5416,12 @@ fn questions(
     args: &SetupArgs,
     existing: Option<&State>,
     facts: &Facts,
-    restarted: bool,
+    restarted: Option<Ports>,
 ) -> Result<Flow, Stop> {
-    if restarted {
+    if restarted.is_some() {
         console.note(
-            "an earlier setup stopped before it finished, so this one starts again; nils \
-             uninstall removes what it placed instead",
+            "an earlier setup stopped before it finished, so this one starts again from the \
+             ports it chose; nils uninstall removes what it placed instead",
         );
     }
 
@@ -5770,7 +6021,7 @@ fn questions(
     // in it
     if mode == Mode::Local
         && parts.contains(&Part::Desk)
-        && !desk_has_people(&dir)
+        && !desk_has_people(&dir.join("desk"), runtime.container())
         && console.interactive()
         && console.ask_yes_no("Add the first person now, who may do everything?", true)?
     {
@@ -5887,9 +6138,10 @@ fn questions(
     }
 
     // ports, once the parts are settled: each part this machine will listen
-    // for, and none this setup already holds, since its own running service
-    // is what holds it
-    let mut ports = existing.map(|s| s.ports).unwrap_or_default();
+    // for, and none this install's own services already hold. They start
+    // from the record, or where the last run stopped partway, from the ports
+    // that run chose, which its units may be running on.
+    let recorded = existing.map(|s| s.ports).or(restarted).unwrap_or_default();
     let ours = |part: &str| existing.is_some_and(|s| s.parts.contains_key(part));
     let assistant = parts.contains(&Part::Assistant);
     // llama.cpp runs beside Kvasir wherever there is a build for this machine;
@@ -5897,43 +6149,55 @@ fn questions(
     let llama = facts
         .llama
         .filter(|_| assistant && !(runtime.container() && cfg!(target_os = "macos")));
-    let mut chosen: Vec<u16> = Vec::new();
     // a supervisor this setup started holds its own port on a rerun
     let supervised = dir.join("supervise").join("supervise.toml").exists();
-    for (name, part, port, listens) in [
-        ("the engine", "engine", &mut ports.engine, true),
-        (
-            "the desk",
-            "desk",
-            &mut ports.desk,
-            parts.contains(&Part::Desk),
-        ),
-        ("Kvasir", "kvasir", &mut ports.kvasir, assistant),
+    let listener = |name: &'static str, part: &'static str, listens: bool| Listener {
+        name,
+        part,
+        listens,
+        recorded: ours(part) || (part == SUPERVISOR_PART && supervised),
+    };
+    let listeners = [
+        listener("the engine", "engine", true),
+        listener("the desk", "desk", parts.contains(&Part::Desk)),
+        listener("Kvasir", "kvasir", assistant),
         // in a container the assistant is published nowhere
-        (
+        listener(
             "the assistant",
             "assistant",
-            &mut ports.assistant,
             assistant && !runtime.container(),
         ),
-        (
-            "Postgres",
-            "postgres",
-            &mut ports.postgres,
-            postgres.is_some(),
-        ),
-        ("the supervisor", "supervisor", &mut ports.supervisor, true),
-        ("llama.cpp", LLAMA_PART, &mut ports.llama, llama.is_some()),
-    ] {
-        if listens
-            && !ours(part)
-            && !(part == "supervisor" && supervised)
-            && let Some(free) = settle_port(*port, &chosen, &port_taken)
-        {
-            console.note(&format!("port {} is taken, so {name} takes {free}", *port));
-            *port = free;
-        }
-        chosen.push(*port);
+        listener("Postgres", "postgres", postgres.is_some()),
+        listener("the supervisor", SUPERVISOR_PART, true),
+        listener("llama.cpp", LLAMA_PART, llama.is_some()),
+    ];
+    // A unit is this install's own by its name, in the manager this run writes
+    // its units to: the machine's where the services of this machine were
+    // asked for or are on record, as step 7 reads them, and this account's
+    // otherwise. A run that writes no units has none. What holds a port is
+    // read once for each port, however often the screens ask again.
+    let system_here = system_asked(
+        args.system,
+        accounts_given(&args.account).unwrap_or_default(),
+        Vec::new(),
+        existing.and_then(|s| s.system.clone()),
+    )
+    .is_some();
+    let (ports, said) = {
+        let console = &*console;
+        let own = |part: &str, port: u16| {
+            !args.no_service
+                && listening_unit(runtime, part).is_some_and(|unit| {
+                    let holding = console.probe(&format!("what listens on port {port}"), || {
+                        services_listening(port)
+                    });
+                    own_unit_holds(unit, system_here, this_uid(), &holding)
+                })
+        };
+        settle_ports(recorded, &listeners, &port_taken, &own)
+    };
+    for line in &said {
+        console.note(line);
     }
     if postgres.is_some() && !registry_exists {
         // A password kept from an earlier install of this directory, since
@@ -6142,6 +6406,7 @@ fn questions(
     }
     if args.print {
         print!("{}", commands_text(&plan, console));
+        print!("{}", stops_text(&plan, Run::Place, console));
         println!();
         println!("nothing was changed");
         return Ok(Flow::Printed);
@@ -6201,6 +6466,7 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
     print!("{}", plan_text(&plan, console));
     if args.print {
         print!("{}", commands_text(&plan, console));
+        print!("{}", stops_text(&plan, Run::Place, console));
         println!();
         println!("nothing was changed");
         return Ok(());
@@ -6310,6 +6576,7 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
     print!("{}", plan_text(&plan, console));
     if args.print {
         print!("{}", commands_text(&plan, console));
+        print!("{}", stops_text(&plan, Run::Repair, console));
         println!();
         println!("nothing was changed");
         return Ok(());
@@ -6403,7 +6670,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     if plan.service {
         // llama.cpp alone is held back where it cannot start, as it said at
         // its own step.
-        let starting = holding_llama_back(plan, &state, llama_starts);
+        let starting = holding_llama_back(&state, llama_starts);
         match start_everything(plan, &starting, console, None) {
             Ok(started) => {
                 console.report(&started);
@@ -6898,19 +7165,29 @@ fn sources_text(plan: &Plan, console: &Console) -> String {
             console.bold(&format!("  {name}")),
             console.dim(&note)
         );
-        let checked_out = into.join(".git").exists();
-        let steps = fetch_steps(
-            &hands,
-            said,
-            repo,
-            &reference,
-            &into,
-            &plan.dir,
-            checked_out,
-        )
-        .into_iter()
-        .chain(build_steps(&hands, said, &into, &plan.dir));
-        for (_, step) in steps {
+        let folder = source_folder(&into);
+        let fetched: Vec<SourceStep> = if folder == SourceFolder::Copy {
+            adopt_steps(&hands, said, repo, &reference, &into, &plan.dir)
+                .steps()
+                .into_iter()
+                .cloned()
+                .collect()
+        } else {
+            fetch_steps(
+                &hands,
+                said,
+                repo,
+                &reference,
+                &into,
+                &plan.dir,
+                folder == SourceFolder::Checkout,
+            )
+            .into_iter()
+            .map(|(_, step)| step)
+            .collect()
+        };
+        let built = build_steps(&hands, said, &into, &plan.dir);
+        for step in fetched.iter().chain(built.iter().map(|(_, step)| step)) {
             let _ = writeln!(out, "    {}", step.shown());
         }
     }
@@ -7290,7 +7567,7 @@ fn place(
             secret: Some(secret),
         }) = &answers.provider
         {
-            write_secret(&plan.desk_dir().join("client-secret"), secret)?;
+            write_secret(&desk_secret_file(plan), secret)?;
         }
         if let Err(e) = write_supervisor(plan) {
             console.warn(&format!("the supervisor was not set up: {}", e.message));
@@ -7323,7 +7600,7 @@ fn place(
                 desk_binding(&plan.reach, plan.ports.desk, plan.runtime.container());
             console.say(&format!(
                 "  nils-desk register --authentik https://auth.example.org --token ./api-token \\\n      --origin {origin} --allow <group> --bind reader=<group> --secret-file {}",
-                plan.desk_dir().join("client-secret").display()
+                desk_secret_file(plan).display()
             ));
         }
     }
@@ -7414,7 +7691,7 @@ fn place(
     let mut services = Vec::new();
     if plan.service {
         console.begin(Stage::Services);
-        let starting = holding_llama_back(plan, state, llama_starts);
+        let starting = holding_llama_back(state, llama_starts);
         match start_everything(plan, &starting, console, answers.model.as_ref()) {
             Ok(started) => {
                 console.report(&started);
@@ -8425,19 +8702,42 @@ fn pack_destination(plan: &Plan, me: &Path) -> PathBuf {
 }
 
 /// The desk's configuration once a plan is set: written whole where there is
-/// none or where the file no longer reads as TOML, and otherwise the file on
-/// disk with what setup writes set in it, keeping what a person set by hand.
+/// none, written whole on the store it still names where the file no longer
+/// reads as TOML, and otherwise the file on disk with what setup writes set in
+/// it, keeping what a person set by hand. A configuration that would take the
+/// desk from a store that keeps people to one that keeps nobody is not written.
 fn write_desk_config(plan: &Plan) -> Result<(), Exit> {
     let path = plan.desk_config();
+    let existing = std::fs::read_to_string(&path).ok();
     let written = desk_config_text(plan);
-    let text = match std::fs::read_to_string(&path) {
-        Err(_) => written,
-        Ok(existing) => match desk_config_merged(&existing, &written) {
-            Ok(Some(merged)) => merged,
-            Ok(None) => return Ok(()),
-            Err(()) => written,
-        },
+    let text = match existing
+        .as_deref()
+        .map(|text| desk_config_merged(text, &written))
+    {
+        None => written,
+        Some(Ok(Some(merged))) => merged,
+        Some(Ok(None)) => return Ok(()),
+        // A file that no longer reads may still say where the people are, and
+        // the configuration written in its place keeps the desk there.
+        Some(Err(())) => existing
+            .as_deref()
+            .and_then(desk_store_line)
+            .and_then(|store| {
+                let named = format!("store = {}\n", toml::Value::String(store));
+                desk_config_merged(&named, &written).ok().flatten()
+            })
+            .unwrap_or(written),
     };
+    // The desk starts on whatever store it is named, making an empty one
+    // where there is none, and says nothing: a rerun once left a desk with no
+    // one in it while its people sat in the store it had been named before.
+    let (desk, container) = (plan.desk_dir(), plan.runtime.container());
+    if let Some(refused) = desk_store_left(
+        desk_store(&desk, container, existing.as_deref()).as_deref(),
+        desk_store(&desk, container, Some(&text)).as_deref(),
+    ) {
+        return Err(fail(refused));
+    }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
     }
@@ -8466,11 +8766,13 @@ const DESK_MANAGED: [&str; 11] = [
 /// keys in it stay, and Kvasir's and the assistant's tables removed
 /// with them. A `[local]` or an `[oidc]` table stays for a desk that goes
 /// back, and every key setup does not write is kept, though not the file's
-/// comments. `Ok(None)` when nothing setup writes has changed; an error when
+/// comments. The paths `desk_paths_kept` names are kept as the file sets
+/// them. `Ok(None)` when nothing setup writes has changed; an error when
 /// either text does not read as TOML.
 fn desk_config_merged(existing: &str, written: &str) -> Result<Option<String>, ()> {
     let mut have: toml::Table = toml::from_str(existing).map_err(|_| ())?;
-    let want: toml::Table = toml::from_str(written).map_err(|_| ())?;
+    let mut want: toml::Table = toml::from_str(written).map_err(|_| ())?;
+    desk_paths_kept(&have, &mut want);
     let mut changed = false;
     for key in DESK_MANAGED {
         match (have.get(key).cloned(), want.get(key)) {
@@ -8506,23 +8808,162 @@ fn desk_config_merged(existing: &str, written: &str) -> Result<Option<String>, (
     )))
 }
 
-/// Whether the desk under a directory keeps anyone who signs in with a
-/// password, read from its store without changing it. A store that is not
-/// there, or does not read, keeps nobody.
-fn desk_has_people(dir: &Path) -> bool {
-    let store = dir.join("desk").join("nils-desk.sqlite");
-    if !store.exists() {
-        return false;
+/// The desk's store where its configuration names none: beside the
+/// configuration, where the desk makes it.
+const DESK_STORE: &str = "nils-desk.sqlite";
+
+/// What setup writes in the desk's configuration only where the file sets
+/// nothing: the store, where the people are; `[local] key`, which signs every
+/// token the desk has minted; and `[oidc] client_secret_file`, which holds
+/// the provider's secret. A value the file sets is kept whatever it is, the
+/// default among them. Setup cannot tell a path it wrote from one a person
+/// wrote, since the file keeps no record of either, and whoever wrote it, the
+/// desk has been reading from there: replacing any of them points the desk at
+/// another file, and for the store that is a desk with nobody in it. A key the
+/// file names nowhere stays unnamed, since the desk keeps that one beside its
+/// store and naming setup's would move it.
+fn desk_paths_kept(have: &toml::Table, want: &mut toml::Table) {
+    if let Some(store) = have.get("store") {
+        want.insert("store".to_string(), store.clone());
+    }
+    if let Some(toml::Value::Table(local)) = want.get_mut("local") {
+        match have.get("local").and_then(|mine| mine.get("key")) {
+            Some(key) => local.insert("key".to_string(), key.clone()),
+            None => local.remove("key"),
+        };
+    }
+    if let (Some(file), Some(toml::Value::Table(oidc))) = (
+        have.get("oidc")
+            .and_then(|mine| mine.get("client_secret_file")),
+        want.get_mut("oidc"),
+    ) {
+        oidc.insert("client_secret_file".to_string(), file.clone());
+    }
+}
+
+/// Where this machine finds a file the desk's configuration names, taken as
+/// the desk takes it (nils-desk's `Config::beside`): a relative path beside
+/// the configuration, an absolute one as it stands. A desk in a container
+/// reads its folder at IN_DESK, so a path under that is the same file in the
+/// folder here, and a path outside it is not on this machine at all.
+fn desk_file(desk_dir: &Path, container: bool, named: &str) -> Option<PathBuf> {
+    let named = Path::new(named);
+    if named.is_relative() {
+        Some(desk_dir.join(named))
+    } else if container {
+        named
+            .strip_prefix(IN_DESK)
+            .ok()
+            .map(|rest| desk_dir.join(rest))
+    } else {
+        Some(named.to_path_buf())
+    }
+}
+
+/// The store a desk's configuration names, where this machine finds it: the
+/// one beside the configuration where there is none or it names none. A file
+/// that no longer reads as TOML is read for its store line by line.
+fn desk_store(desk_dir: &Path, container: bool, config: Option<&str>) -> Option<PathBuf> {
+    let named = config
+        .and_then(|text| match toml::from_str::<toml::Table>(text) {
+            Ok(table) => table.get("store")?.as_str().map(str::to_string),
+            Err(_) => desk_store_line(text),
+        })
+        .unwrap_or_else(|| DESK_STORE.to_string());
+    desk_file(desk_dir, container, &named)
+}
+
+/// The store a desk's configuration sets on a line of its own before its
+/// first table, which is found even where something else in the file stops
+/// it reading as TOML.
+fn desk_store_line(text: &str) -> Option<String> {
+    text.lines()
+        .take_while(|line| !line.trim_start().starts_with('['))
+        .filter_map(|line| toml::from_str::<toml::Table>(line).ok())
+        .find_map(|table| table.get("store")?.as_str().map(str::to_string))
+}
+
+/// How many rows the named tables of a desk's store hold together, read
+/// without changing the store. A store that is not there counts none, and so
+/// does a table an older desk had not made yet.
+fn desk_rows(store: &Path, tables: &[&str]) -> i64 {
+    if !store.is_file() {
+        return 0;
     }
     let Ok(conn) =
-        rusqlite::Connection::open_with_flags(&store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        rusqlite::Connection::open_with_flags(store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
     else {
-        return false;
+        return 0;
     };
-    conn.query_row("SELECT EXISTS(SELECT 1 FROM user)", [], |r| {
-        r.get::<_, i64>(0)
-    })
-    .is_ok_and(|n| n != 0)
+    tables
+        .iter()
+        .map(|table| {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap_or(0)
+        })
+        .sum()
+}
+
+/// Whether the desk in a folder keeps anyone who signs in with a password,
+/// read from the store its configuration names, as the desk's own
+/// `has_users` reads it: the people in its `user` table.
+fn desk_has_people(desk_dir: &Path, container: bool) -> bool {
+    let config = std::fs::read_to_string(desk_dir.join("nils-desk.toml")).ok();
+    desk_store(desk_dir, container, config.as_deref())
+        .is_some_and(|store| desk_rows(&store, &["user"]) > 0)
+}
+
+/// Whether a desk's store keeps anything a person made: someone who signs in
+/// with a password, someone who has signed in at all, a membership of a group
+/// or grants of a person's own. The groups are not counted, since the desk
+/// makes a new store with four.
+fn desk_store_keeps_people(store: &Path) -> bool {
+    desk_rows(store, &["user", "person", "member", "own"]) > 0
+}
+
+/// Why a desk's configuration may not be written, where it would take the
+/// desk from a store that keeps people to one that keeps nobody, or to one
+/// this machine cannot see. Setup keeps the store a configuration names, so
+/// nothing it writes moves one; a change that ever does has to carry the file
+/// across first and say so, and this is what stops it where it does not.
+fn desk_store_left(before: Option<&Path>, after: Option<&Path>) -> Option<String> {
+    let before = before?;
+    if after == Some(before)
+        || after.is_some_and(desk_store_keeps_people)
+        || !desk_store_keeps_people(before)
+    {
+        return None;
+    }
+    let after = after.map_or_else(
+        || "a store this machine cannot see".to_string(),
+        |store| format!("{}, which keeps nobody", store.display()),
+    );
+    Some(format!(
+        "the desk's configuration was left as it was: it would have named {after}, while the \
+         desk's people are in {}",
+        before.display()
+    ))
+}
+
+/// The file the desk reads its provider's secret from, where this machine
+/// finds it: the one its configuration names, which setup keeps, or setup's
+/// own beside the configuration. A secret setup is given goes where the desk
+/// will read it, not beside a name the desk no longer looks at.
+fn desk_secret_file(plan: &Plan) -> PathBuf {
+    std::fs::read_to_string(plan.desk_config())
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+        .and_then(|table| {
+            table
+                .get("oidc")?
+                .get("client_secret_file")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .and_then(|named| desk_file(&plan.desk_dir(), plan.runtime.container(), &named))
+        .unwrap_or_else(|| plan.desk_dir().join("client-secret"))
 }
 
 /// The desk's configuration as setup writes it for a plan: the mode chosen,
@@ -8547,7 +8988,7 @@ fn desk_config_text(plan: &Plan) -> String {
             .join(", ")
     );
     let _ = writeln!(text, "mode = \"{}\"", plan.mode.name());
-    let _ = writeln!(text, "store = \"nils-desk.sqlite\"");
+    let _ = writeln!(text, "store = \"{DESK_STORE}\"");
     if plan.mode == Mode::Local {
         let _ = writeln!(text, "\n[local]");
         let _ = writeln!(text, "key = \"nils-desk.key\"");
@@ -8896,8 +9337,8 @@ fn jwks_of(discovery: &serde_json::Value) -> Option<String> {
 /// The desk registered at an Authentik by the desk's own register command:
 /// the application, its provider and signing key, and the groups bound to
 /// the entitlements, each made where it is not there yet. The client's
-/// secret goes beside the desk's configuration; the API token is kept only
-/// while the command runs.
+/// secret goes to the file the desk's configuration names, beside it unless
+/// a person named another; the API token is kept only while the command runs.
 fn register_desk(
     plan: &Plan,
     state: &State,
@@ -8931,6 +9372,12 @@ fn register_desk(
     } else {
         dir.clone()
     };
+    // the secret goes where the desk's configuration has the desk read it,
+    // which in a container is under the folder setup gives the desk
+    let secret = desk_secret_file(plan);
+    let secret = secret
+        .strip_prefix(&dir)
+        .map_or_else(|_| secret.clone(), |rest| at.join(rest));
     let mut argv: Vec<String> = vec![
         "register".into(),
         "--authentik".into(),
@@ -8940,7 +9387,7 @@ fn register_desk(
         "--origin".into(),
         origin,
         "--secret-file".into(),
-        at.join("client-secret").display().to_string(),
+        secret.display().to_string(),
     ];
     for group in [users, admins] {
         argv.push("--allow".into());
@@ -9234,12 +9681,125 @@ fn source_steps(repo: &str, reference: &str, into: &Path, checked_out: bool) -> 
     }
 }
 
+/// Whether a source step checks a ref out, which is the first of them to
+/// change the files of a checkout.
+fn checks_out(step: &SourceStep) -> bool {
+    step.argv.iter().any(|word| word == "checkout")
+}
+
 /// A git command's line on screen: what it does, to which part, at which ref.
 fn source_label(step: &[String], said: &str, reference: &str) -> String {
     match step.first().map(String::as_str) {
         Some("checkout") => format!("checking out {said} at {reference}"),
+        Some("init" | "remote") => format!("adopting {said}'s folder"),
         _ => format!("fetching {said} at {reference}"),
     }
+}
+
+/// What a part's folder is to the steps that take its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceFolder {
+    /// No folder, or an empty one, which a clone makes or fills.
+    Empty,
+    /// A checkout, told by its `.git`, which is fetched and checked out.
+    Checkout,
+    /// A folder that holds something and is not a checkout, such as a built
+    /// copy another way of deploying left with the part's data beside it.
+    /// Git refuses to clone into it, and git run in it would look for a
+    /// repository in the folders above, so it is adopted in place.
+    Copy,
+}
+
+/// What a part's folder is, read from the folder. One this process cannot
+/// list counts as empty, which the clone then says as git does.
+fn source_folder(into: &Path) -> SourceFolder {
+    if into.join(".git").exists() {
+        return SourceFolder::Checkout;
+    }
+    if std::fs::read_dir(into).is_ok_and(|mut entries| entries.next().is_some()) {
+        SourceFolder::Copy
+    } else {
+        SourceFolder::Empty
+    }
+}
+
+/// What a part's folder is, as the steps that take its source find it, with
+/// an adoption that stopped partway taken back first: where the folder's own
+/// `.git` holds no commit and the folder holds a copy beside it, that `.git`
+/// is removed and the folder is a copy to adopt again, with the line that
+/// says so. Git refuses a plain checkout over the copy's files, so taking it
+/// for a checkout would stop every run after. A `.git` with a commit stays a
+/// checkout, and so does one git does not take for this folder's repository.
+fn source_folder_resumed(
+    hands: &SourceHands,
+    into: &Path,
+    base: &Path,
+) -> (SourceFolder, Option<String>) {
+    let folder = source_folder(into);
+    if folder != SourceFolder::Checkout {
+        return (folder, None);
+    }
+    // Asked as whoever takes the source steps, since git refuses anyone else
+    // a repository that is another account's; a question git does not answer
+    // leaves the folder a checkout, as it always was.
+    let read = |words: &[&str]| {
+        let out = source_step(hands, "git", &owned_words(words), into, base)
+            .command()
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let git = into.join(".git");
+    let own = [
+        std::fs::canonicalize(&git).unwrap_or_else(|_| git.clone()),
+        git.clone(),
+    ];
+    let git_dir = read(&["rev-parse", "--absolute-git-dir"]);
+    let committed = || read(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).is_some();
+    let holds_more = || {
+        std::fs::read_dir(into)
+            .is_ok_and(|entries| entries.flatten().any(|entry| entry.file_name() != ".git"))
+    };
+    if !adoption_unfinished(git_dir.as_deref(), &own, committed, holds_more) {
+        return (folder, None);
+    }
+    if let Err(e) = std::fs::remove_dir_all(&git) {
+        return (
+            folder,
+            Some(format!(
+                "{} holds no commit, left by an adoption that stopped partway, and could not be \
+                 removed: {e}",
+                git.display()
+            )),
+        );
+    }
+    (
+        SourceFolder::Copy,
+        Some(format!(
+            "{} held a .git with no commit, left by an adoption that stopped partway; that .git \
+             is removed and the folder adopted again",
+            into.display()
+        )),
+    )
+}
+
+/// Whether a folder's `.git` is what an adoption that stopped partway
+/// leaves: the repository git finds is that `.git` itself, not one in a
+/// folder above, its HEAD names no commit, and the folder holds more than
+/// the `.git`. Asked in that order, so that git is not asked of a commit in
+/// a repository that is not the folder's.
+fn adoption_unfinished(
+    git_dir: Option<&str>,
+    own: &[PathBuf],
+    committed: impl FnOnce() -> bool,
+    holds_more: impl FnOnce() -> bool,
+) -> bool {
+    git_dir.is_some_and(|dir| own.iter().any(|own| own == Path::new(dir)))
+        && !committed()
+        && holds_more()
 }
 
 /// Who takes a Node part's source steps: git, `npm ci` and the build.
@@ -9498,20 +10058,383 @@ fn build_steps(
 /// steps, since git refuses root a checkout that is another account's; a
 /// checkout that went unread would be built again on every update.
 fn source_head(hands: &SourceHands, into: &Path, base: &Path) -> Option<String> {
-    let out = source_step(
-        hands,
-        "git",
-        &owned_words(&["rev-parse", "HEAD"]),
-        into,
-        base,
-    )
-    .command()
-    .stdin(Stdio::null())
-    .output()
-    .ok()?;
+    source_rev(hands, into, base, "HEAD")
+}
+
+/// Any revision of a part's checkout, read the same way.
+fn source_rev(hands: &SourceHands, into: &Path, base: &Path, rev: &str) -> Option<String> {
+    let out = source_step(hands, "git", &owned_words(&["rev-parse", rev]), into, base)
+        .command()
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// The git steps that adopt a part's folder that holds something and is not
+/// a checkout, as whoever takes its source steps runs them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Adoption {
+    /// A repository made in the folder, the part's repository named its
+    /// origin, as a clone names it, so that a later update fetches from it,
+    /// and the ref fetched: each with its line. Nothing outside `.git`
+    /// changes yet.
+    fetch: Vec<(String, SourceStep)>,
+    /// The paths the ref tracks, read before anything in the folder is
+    /// replaced.
+    tracked: SourceStep,
+    /// The ref checked out, by force, since a plain checkout refuses to
+    /// replace the tracked files a built copy holds untracked, such as its
+    /// `package.json`. A forced checkout writes the paths the ref tracks and
+    /// nothing else: it runs no clean, and a file the ref does not track stays
+    /// as it was, unless it stands where the ref has a folder, or a folder of
+    /// it stands where the ref has a file, which [`adoption_collisions`]
+    /// refuses first.
+    checkout: (String, SourceStep),
+}
+
+impl Adoption {
+    /// Every step, in the order they run.
+    fn steps(&self) -> Vec<&SourceStep> {
+        self.fetch
+            .iter()
+            .map(|(_, step)| step)
+            .chain([&self.tracked, &self.checkout.1])
+            .collect()
+    }
+}
+
+/// The steps that adopt a part's folder, under whichever hands take them.
+fn adopt_steps(
+    hands: &SourceHands,
+    said: &str,
+    repo: &str,
+    reference: &str,
+    into: &Path,
+    base: &Path,
+) -> Adoption {
+    let step = |words: &[&str]| source_step(hands, "git", &owned_words(words), into, base);
+    let labelled = |words: &[&str]| {
+        (
+            source_label(&owned_words(words), said, reference),
+            step(words),
+        )
+    };
+    Adoption {
+        fetch: vec![
+            labelled(&["init"]),
+            labelled(&["remote", "add", "origin", repo]),
+            labelled(&["fetch", "--depth", "1", "origin", reference]),
+        ],
+        tracked: step(&["ls-tree", "-r", "-z", "--name-only", "FETCH_HEAD"]),
+        checkout: labelled(&["checkout", "--force", "--detach", "FETCH_HEAD"]),
+    }
+}
+
+/// The folders in a part's folder that hold its data: the part's state, and
+/// the runtime llama.cpp and Kvasir share, with its key, presets and caches.
+const DATA_FOLDERS: [&str; 2] = ["state", "runtime"];
+
+/// The files at the top of a part's folder that hold its data: the
+/// configuration Kvasir reads and setup mends, the backends kept for Kvasir
+/// to add, the assistant's environment, and Kvasir's seal and pepper. Keys
+/// (`.key`) and stores (`.sqlite`, with the files SQLite keeps beside one)
+/// are data too, whatever their names.
+const DATA_FILES: [&str; 6] = [
+    "kvasir.json",
+    "backends-to-add.json",
+    "assistant.env",
+    "kvasir.seal",
+    "kvasir.seal.new",
+    "kvasir.pepper",
+];
+
+/// Whether a path in a part's folder, written relative to it, holds that
+/// part's data: anything in [`DATA_FOLDERS`], or one of [`DATA_FILES`], a key
+/// or a store at the folder's top. A folder may be written with its slash.
+fn holds_data(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let (top, below) = path
+        .split_once('/')
+        .map_or((path, false), |(top, _)| (top, true));
+    DATA_FOLDERS.contains(&top)
+        || (!below
+            && (DATA_FILES.contains(&top)
+                || top.ends_with(".key")
+                || top.ends_with(".sqlite")
+                || top.contains(".sqlite-")))
+}
+
+/// What adopting a folder would take from it, from the paths the ref tracks
+/// and what the folder holds along them, each relative to the folder, a
+/// folder written with its slash. Empty where the folder may be adopted.
+///
+/// Three things are refused. Data the ref tracks, or tracks a path within,
+/// whatever its content: a file equal to the ref's today would be the
+/// repository's to change on every update after. A folder where the ref has
+/// a file, and a file where the ref has a folder, since the checkout removes
+/// either, with whatever the folder holds that the ref does not track. A
+/// file the ref tracks that holds no data is not refused: it is what a
+/// built copy holds from its source, and the ref's takes its place.
+///
+/// A path within another that is named already is not named again.
+fn adoption_collisions(tracked: &[String], present: &[String]) -> Vec<String> {
+    let mut lost = std::collections::BTreeSet::new();
+    for held in present {
+        let folder = held.ends_with('/');
+        let name = held.trim_end_matches('/');
+        let same = tracked.iter().any(|path| path == name);
+        let within = tracked.iter().any(|path| {
+            path.strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('/'))
+        });
+        if (holds_data(name) && (same || within)) || (folder && same) || (!folder && within) {
+            lost.insert(held.clone());
+        }
+    }
+    lost.iter()
+        .filter(|held| {
+            !lost.iter().any(|other| {
+                other != *held && other.ends_with('/') && held.starts_with(other.as_str())
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// What a part's folder holds along the paths a ref tracks: each path and
+/// every folder on the way to it that is there, a folder with its slash.
+/// Read with lstat, so a link counts as the file it is, and the walk stops
+/// at the first thing on a path that is not a folder. Nothing else in the
+/// folder is read, so a large `node_modules` costs nothing.
+fn present_along(into: &Path, tracked: &[String]) -> Vec<String> {
+    let mut found: BTreeMap<String, Option<bool>> = BTreeMap::new();
+    for path in tracked {
+        let mut at = String::new();
+        for part in path.split('/') {
+            if !at.is_empty() {
+                at.push('/');
+            }
+            at.push_str(part);
+            let folder = *found.entry(at.clone()).or_insert_with(|| {
+                std::fs::symlink_metadata(into.join(&at))
+                    .ok()
+                    .map(|m| m.is_dir())
+            });
+            if folder != Some(true) {
+                break;
+            }
+        }
+    }
+    found
+        .into_iter()
+        .filter_map(|(at, folder)| folder.map(|folder| if folder { format!("{at}/") } else { at }))
+        .collect()
+}
+
+/// The paths a ref tracks, as the step that lists them reads them.
+fn tracked_paths(step: &SourceStep) -> Result<Vec<String>, Exit> {
+    let out = step
+        .command()
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| fail(format!("{}: {e}", step.shown())))?;
+    if !out.status.success() {
+        return Err(fail(format!(
+            "{} failed: {}",
+            step.shown(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(out
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).to_string())
+        .collect())
+}
+
+/// Said once a folder is adopted.
+fn adopted_said(into: &Path, said: &str, reference: &str) -> String {
+    format!(
+        "{} held a copy of {said} that was not a checkout, and is adopted as a checkout of \
+         {reference}: the files the release tracks are its own now, and whatever else the folder \
+         holds stays as it was",
+        into.display()
+    )
+}
+
+/// Said where a folder is not adopted, with what adopting it would have
+/// taken and what a person does about it: `again` is the command they ran.
+fn adoption_refused(
+    into: &Path,
+    said: &str,
+    reference: &str,
+    lost: &[String],
+    again: &str,
+) -> String {
+    const NAMED: usize = 5;
+    let mut named = lost
+        .iter()
+        .take(NAMED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if lost.len() > NAMED {
+        let _ = write!(named, " and {} more", lost.len() - NAMED);
+    }
+    format!(
+        "{} is not a checkout, and adopting it as a checkout of {said} at {reference} would \
+         replace what it keeps: {named}; the folder is left as it was, so move those out of it, \
+         or the folder aside, and run {again} again",
+        into.display()
+    )
+}
+
+/// A part's folder that holds something and is not a checkout, adopted in
+/// place as a checkout of its ref, as whoever takes its source steps.
+///
+/// The part's account is lent the folder itself, not what it holds, so that
+/// it can make the repository there, and is given the folder whole only once
+/// nothing would be refused, as a checkout is given on every run; it needs
+/// that to replace a copy root laid down. Where the folder is not adopted,
+/// by a refusal or a step that failed before the checkout, the `.git` made
+/// here is removed, so that a rerun does not take the folder for a checkout,
+/// and the folder is its owner's again: the folder is as it was. A checkout
+/// that fails partway removes the `.git` too, so that a rerun adopts the
+/// folder again: what that checkout wrote is the release's own files, which
+/// a second adoption replaces as it replaces a copy's.
+///
+/// `before_checkout` is called once the checkout is certain and nothing else
+/// has been written outside that `.git`, for the caller to stop the unit the
+/// part runs under; a refusal never reaches it, so a run that changes
+/// nothing leaves a running part running.
+#[allow(clippy::too_many_arguments)]
+fn adopt_folder(
+    console: &Console,
+    hands: &SourceHands,
+    said: &str,
+    repo: &str,
+    reference: &str,
+    into: &Path,
+    base: &Path,
+    again: &str,
+    before_checkout: &mut dyn FnMut(),
+) -> Result<(), Exit> {
+    let adoption = adopt_steps(hands, said, repo, reference, into, base);
+    let lent = lend_folder(hands, into).map_err(fail)?;
+    let unmade = || {
+        let _ = std::fs::remove_dir_all(into.join(".git"));
+    };
+    let checked = fetched_collisions(console, &adoption, into).and_then(|lost| {
+        if lost.is_empty() {
+            Ok(())
+        } else {
+            Err(fail(adoption_refused(into, said, reference, &lost, again)))
+        }
+    });
+    if let Err(e) = checked {
+        unmade();
+        if let Some(lent) = &lent {
+            lent.give_back(into);
+        }
+        return Err(e);
+    }
+    let given = match &lent {
+        Some(lent) => give_to(into, lent.ids.0, lent.ids.1).map_err(|e| {
+            fail(format!(
+                "{} could not be made {}'s, which takes its source there: {e}",
+                into.display(),
+                lent.account
+            ))
+        }),
+        None => Ok(()),
+    };
+    // The checkout below is the first thing an adoption writes outside the
+    // `.git` it made, so the part stops here: everything before it was read,
+    // fetched or refused, and a refusal leaves a running part running.
+    before_checkout();
+    given
+        .and_then(|()| console.source_task(&adoption.checkout.0, &adoption.checkout.1))
+        .inspect_err(|_| unmade())
+}
+
+/// An adoption's steps up to its checkout taken, and what the checkout would
+/// take from the folder: nothing outside its `.git` has changed yet.
+fn fetched_collisions(
+    console: &Console,
+    adoption: &Adoption,
+    into: &Path,
+) -> Result<Vec<String>, Exit> {
+    for (label, step) in &adoption.fetch {
+        console.source_task(label, step)?;
+    }
+    let tracked = tracked_paths(&adoption.tracked)?;
+    Ok(adoption_collisions(
+        &tracked,
+        &present_along(into, &tracked),
+    ))
+}
+
+/// The folder itself lent to the part's account for adopting it: the
+/// account, its ids, and the owner the folder had.
+struct Lent {
+    account: String,
+    ids: (u32, u32),
+    owner: (u32, u32),
+}
+
+impl Lent {
+    /// The folder its owner's again, where it was not adopted.
+    fn give_back(&self, into: &Path) {
+        #[cfg(unix)]
+        let _ = std::os::unix::fs::lchown(into, Some(self.owner.0), Some(self.owner.1));
+        #[cfg(not(unix))]
+        let _ = (into, self.owner);
+    }
+}
+
+/// Under the part's account, the folder lent to it; nothing for the other
+/// hands, which make the repository as the account running setup.
+fn lend_folder(hands: &SourceHands, into: &Path) -> Result<Option<Lent>, String> {
+    let SourceHands::As(acting) = hands else {
+        return Ok(None);
+    };
+    let account = &acting.account;
+    let Some(ids) = account_ids(account) else {
+        return Err(format!(
+            "this machine has no {account} account to take the source of {} as",
+            into.display()
+        ));
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let lend = || {
+            let had = std::fs::metadata(into)?;
+            std::os::unix::fs::lchown(into, Some(ids.0), Some(ids.1))?;
+            Ok::<_, std::io::Error>((had.uid(), had.gid()))
+        };
+        let owner = lend().map_err(|e| {
+            format!(
+                "{} could not be lent to {account}, which adopts it: {e}",
+                into.display()
+            )
+        })?;
+        Ok(Some(Lent {
+            account: account.clone(),
+            ids,
+            owner,
+        }))
+    }
+    #[cfg(not(unix))]
+    Ok(Some(Lent {
+        account: account.clone(),
+        ids,
+        owner: ids,
+    }))
 }
 
 /// What the part's account needs before it takes the source steps: the
@@ -9557,7 +10480,9 @@ fn ready_for_sources(
 /// for one, it is made the account's, since the account cannot make one in
 /// the install's folder, which is root's, and git clones into an empty
 /// folder that is there. An empty folder is given to it the same way. A
-/// folder that holds something and is not a checkout is left as it is.
+/// folder that holds something and is not a checkout is left as it is here:
+/// [`adopt_folder`] lends it to the account, and gives it whole only once it
+/// knows the folder may be adopted.
 fn ready_part_folder(into: &Path, ids: (u32, u32), make: bool) -> std::io::Result<()> {
     if into.join(".git").exists() {
         return give_to(into, ids.0, ids.1);
@@ -9630,8 +10555,9 @@ fn install_node_parts(
     }
 
     let hands = source_hands(plan.system.as_ref(), &plan.dir, am_root(), false);
+    let units = planned_units(plan);
     let mut out = Vec::new();
-    for name in ["kvasir", "assistant"] {
+    for (name, switch) in [("kvasir", Switch::Kvasir), ("assistant", Switch::Assistant)] {
         if name == "assistant" {
             console.begin(Stage::Assistant);
         }
@@ -9640,20 +10566,47 @@ fn install_node_parts(
         };
         let into = plan.dir.join(name);
         // a checkout is brought to the release, whatever it followed before
-        let checked_out = into.join(".git").exists();
+        let (folder, resumed) = source_folder_resumed(&hands, &into, &plan.dir);
+        if let Some(line) = resumed {
+            console.say(&line);
+        }
         ready_for_sources(&hands, &plan.dir, &into, true).map_err(fail)?;
-        let steps = fetch_steps(
-            &hands,
-            said,
-            repo,
-            &reference,
-            &into,
-            &plan.dir,
-            checked_out,
-        )
-        .into_iter()
-        .chain(build_steps(&hands, said, &into, &plan.dir));
-        for (label, step) in steps {
+        // Every step below changes the folder the part runs from, and the
+        // build always runs, so the part's unit stops before the first of
+        // them and starts again with the rest. An adoption is the one run
+        // that may still refuse once it has begun, and nothing it does
+        // before its checkout leaves the `.git` it made, so it stops the
+        // unit itself, just before that checkout.
+        if folder == SourceFolder::Copy {
+            let console: &Console = console;
+            adopt_folder(
+                console,
+                &hands,
+                said,
+                repo,
+                &reference,
+                &into,
+                &plan.dir,
+                "nils setup",
+                &mut || stop_said(switch, &units, console),
+            )?;
+            console.say(&adopted_said(&into, said, &reference));
+        } else {
+            stop_said(switch, &units, console);
+            let fetched = fetch_steps(
+                &hands,
+                said,
+                repo,
+                &reference,
+                &into,
+                &plan.dir,
+                folder == SourceFolder::Checkout,
+            );
+            for (label, step) in fetched {
+                console.source_task(&label, &step)?;
+            }
+        }
+        for (label, step) in build_steps(&hands, said, &into, &plan.dir) {
             console.source_task(&label, &step)?;
         }
         out.push((name, into));
@@ -10536,7 +11489,12 @@ fn mend_kvasir_runtime(plan: &Plan) {
 /// checked against the pinned sha256 and unpacked, unless it is here already,
 /// and a build this install took before removed once it is. Answers the
 /// build's folder, and whether it was taken now.
-fn fetch_llama(plan: &Plan) -> Result<(PathBuf, bool), String> {
+///
+/// `before_removing` is called once, just before an older build is removed,
+/// and not at all where there is none: the running server is started from
+/// one of them, so that is where its unit is stopped, after the download and
+/// the unpacking it runs on through.
+fn fetch_llama(plan: &Plan, before_removing: &mut dyn FnMut()) -> Result<(PathBuf, bool), String> {
     let llama = plan
         .llama
         .ok_or_else(|| "llama.cpp publishes no build for this machine".to_string())?;
@@ -10549,13 +11507,22 @@ fn fetch_llama(plan: &Plan) -> Result<(PathBuf, bool), String> {
     let url = llama_archive(&llama_base(), llama.variant);
     let bytes = crate::supervise::fetch(&url)?;
     unpack_llama(&bytes, want, &dir).map_err(|e| format!("{url}: {e}"))?;
-    if let Ok(entries) = std::fs::read_dir(plan.dir.join(LLAMA_PART)) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path != dir && llama_recorded(&path.display().to_string()).is_some() {
-                let _ = std::fs::remove_dir_all(&path);
-            }
-        }
+    let older: Vec<PathBuf> = std::fs::read_dir(plan.dir.join(LLAMA_PART))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    *path != dir && llama_recorded(&path.display().to_string()).is_some()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !older.is_empty() {
+        before_removing();
+    }
+    for path in older {
+        let _ = std::fs::remove_dir_all(&path);
     }
     Ok((dir, true))
 }
@@ -10576,7 +11543,11 @@ fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<bo
         "taking llama.cpp {LLAMA_BUILD}, the {} build",
         llama_words(llama.variant)
     ));
-    let dir = match fetch_llama(plan) {
+    let units = planned_units(plan);
+    let taken = fetch_llama(plan, &mut || {
+        stop_said(Switch::LlamaBuilds, &units, console);
+    });
+    let dir = match taken {
         Ok((dir, _)) => dir,
         Err(e) => {
             console.broken(&format!(
@@ -10664,14 +11635,32 @@ const LLAMA_HELD_ALONE: &str = "llama.cpp alone is held back, its unit stopped a
 /// and the log still show what it would run, and the setup or repair that
 /// can start llama.cpp again writes it, enables it and starts it, as it
 /// does every other unit.
-fn holding_llama_back<'a>(plan: &Plan, state: &'a State, llama_starts: bool) -> Cow<'a, State> {
-    if !llama_starts && state.parts.contains_key(LLAMA_PART) && !cfg!(target_os = "macos") {
-        for argv in hold_llama_back_calls(plan.system.is_some()) {
+fn holding_llama_back(state: &State, llama_starts: bool) -> Cow<'_, State> {
+    if !llama_starts {
+        for argv in llama_held_back_calls(state) {
             let words: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
             quietly(&argv[0], &words);
         }
     }
     services_to_start(state, llama_starts)
+}
+
+/// What holds llama.cpp's unit back, where this install runs one for it:
+/// the unit [`service_units`] names, on the manager it names it on. Only a
+/// unit of this install's is stopped, by the same reading of the record that
+/// says a port is this install's own to keep and that a part is this
+/// install's to stop while its files change; an install that writes no units
+/// has no `nils-llama` of its own, and stopping the one it found would be
+/// stopping another install's, or this machine's.
+fn llama_held_back_calls(state: &State) -> Vec<Vec<String>> {
+    if cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    service_units(state)
+        .into_iter()
+        .find(|unit| unit.part == LLAMA_PART && unit.watcher == "systemd")
+        .map(|unit| hold_llama_back_calls(unit.system))
+        .unwrap_or_default()
 }
 
 /// The calls that hold llama.cpp's unit back, on the manager that runs it:
@@ -11785,6 +12774,255 @@ fn quadlet_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".config"))
         .join("containers")
         .join("systemd")
+}
+
+/// A run of setup that changes the files of parts that may be running.
+/// `nils update --all` is the third, and takes the parts its record names in
+/// the order the record keeps them ([`switch_of_part`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Run {
+    /// An install, a rerun and `--update`, which place every part again.
+    Place,
+    /// A repair, which writes the configuration and the units again and
+    /// takes llama.cpp's build where this version names another.
+    Repair,
+}
+
+/// A part's files changed in place, in the folder a running unit runs from.
+/// A binary replaced by a rename is not among them, since a running process
+/// keeps the file it started from, and neither is an image pulled for a
+/// container. Git and npm in a live Node folder are: the checkout rewrites
+/// the source, `npm ci` removes the packages before it installs them again,
+/// and the build rewrites what the part loads. So is removing a llama.cpp
+/// build, which the running server was started from and starts the process
+/// of every model from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Switch {
+    LlamaBuilds,
+    Kvasir,
+    Assistant,
+}
+
+impl Switch {
+    /// The part whose unit runs from what changes, as [`service_units`]
+    /// names it.
+    fn part(self) -> &'static str {
+        match self {
+            Switch::LlamaBuilds => LLAMA_PART,
+            Switch::Kvasir => "gateway",
+            Switch::Assistant => "assistant",
+        }
+    }
+
+    /// What changes, as a person reads it after "while".
+    fn words(self) -> &'static str {
+        match self {
+            Switch::LlamaBuilds => "the older llama.cpp builds are removed",
+            Switch::Kvasir => "Kvasir's source is taken and built",
+            Switch::Assistant => "the assistant's source is taken and built",
+        }
+    }
+}
+
+/// What a run of setup switches, in the order it switches it: an install
+/// places llama.cpp before Kvasir, which names its build, and a repair takes
+/// only llama.cpp.
+fn switches(run: Run, assistant: bool, llama: bool) -> Vec<Switch> {
+    if !assistant {
+        return Vec::new();
+    }
+    let llama = llama.then_some(Switch::LlamaBuilds);
+    match run {
+        Run::Place => llama
+            .into_iter()
+            .chain([Switch::Kvasir, Switch::Assistant])
+            .collect(),
+        Run::Repair => llama.into_iter().collect(),
+    }
+}
+
+/// What updating a part the record names switches, by the part's name there.
+fn switch_of_part(name: &str) -> Option<Switch> {
+    match name {
+        "kvasir" => Some(Switch::Kvasir),
+        "assistant" => Some(Switch::Assistant),
+        LLAMA_PART => Some(Switch::LlamaBuilds),
+        _ => None,
+    }
+}
+
+/// One thing a run does to a part that may be running, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Turn {
+    /// A unit stopped, where it runs, by these words.
+    Stop(Vec<String>),
+    /// A part's files switched.
+    Switch(Switch),
+    /// Every unit started again, where the run starts its units.
+    Start,
+}
+
+/// A run's turns: each part's unit stopped just before that part's files are
+/// switched, and every unit started again once all of them are, where units
+/// start today. Stopping each part only as its own files change keeps it
+/// running for as long as it can: Kvasir answers while llama.cpp is taken,
+/// and the assistant while Kvasir is built. A part this install runs no unit
+/// for is switched with nothing stopped.
+///
+/// The supervisor is never stopped: its files are the engine's binary,
+/// replaced by a rename, and an update of every part may be a run it
+/// started. It is started again last, as it always was, by a restart its
+/// unit's `KillMode=process` lets that run outlive.
+fn turns(switches: &[Switch], units: &[Unit], uid: &str) -> Vec<Turn> {
+    let mut out = Vec::new();
+    for switch in switches {
+        if let Some(unit) = units.iter().find(|u| u.part == switch.part()) {
+            out.push(Turn::Stop(stop_argv(unit, uid)));
+        }
+        out.push(Turn::Switch(*switch));
+    }
+    if !units.is_empty() {
+        out.push(Turn::Start);
+    }
+    out
+}
+
+/// The units an install of a plan runs the parts a run switches under, as
+/// [`service_units`] names them once those parts are placed. None where the
+/// plan writes no services. Read from the plan rather than the record, since
+/// the record of an install names a part only once it is placed, and a rerun
+/// after one that stopped partway starts from no record at all.
+fn planned_units(plan: &Plan) -> Vec<Unit> {
+    let mut state = State {
+        runtime: plan.runtime.name().to_string(),
+        // any manager at all, which is all service_units asks of it
+        service: if plan.service { "planned" } else { "none" }.to_string(),
+        system: plan.system.clone(),
+        ..State::default()
+    };
+    let mut place = |name: &str, kind: &str| {
+        state.parts.insert(
+            name.to_string(),
+            PartState {
+                version: String::new(),
+                path: String::new(),
+                kind: kind.to_string(),
+            },
+        );
+    };
+    if plan.has(Part::Assistant) {
+        place("kvasir", "node");
+        place("assistant", "node");
+        if plan.llama.is_some() {
+            place(LLAMA_PART, LLAMA_PART);
+        }
+    }
+    service_units(&state)
+}
+
+/// What stops one unit of an install, by whatever manager keeps it. Setup
+/// runs as root for the services of this machine, and `nils update --all`
+/// asks the helper to run it as root there, so a stop is never the helper's
+/// to make, and the helper is given no word for it.
+fn stop_argv(unit: &Unit, uid: &str) -> Vec<String> {
+    let words = |argv: &[&str]| {
+        argv.iter()
+            .map(|word| (*word).to_string())
+            .collect::<Vec<String>>()
+    };
+    match unit.watcher {
+        "docker" => words(&["docker", "stop", &unit.name]),
+        "launchd" => words(&["launchctl", "bootout", &format!("gui/{uid}/{}", unit.name)]),
+        _ => systemctl_argv(unit.system, &["stop", &unit.name]),
+    }
+}
+
+/// Whether a systemd unit, by what `is-active` says, may run the part's files
+/// while they change: one running, and one systemd is starting again after a
+/// failure, which would start from half of them.
+fn may_run(active: &str) -> bool {
+    matches!(active.trim(), "active" | "activating" | "reloading")
+}
+
+/// A part's unit stopped just before its files are switched, where it runs,
+/// and what came of it: the sentence to say, or where the stop was refused,
+/// the one to warn with. `None` where this install runs no unit for the part
+/// or its unit is not running, so a first install stops nothing and says
+/// nothing.
+fn stop_before(switch: Switch, units: &[Unit]) -> Option<Result<String, String>> {
+    let unit = units.iter().find(|u| u.part == switch.part())?;
+    let running = match unit.watcher {
+        "systemd" => systemctl_says(unit.system, &["is-active", &unit.name])
+            .is_some_and(|said| may_run(&said)),
+        _ => unit_running(unit),
+    };
+    if !running {
+        return None;
+    }
+    let uid = run_quiet("id", &["-u"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let argv = stop_argv(unit, &uid);
+    let (program, args) = argv.split_first()?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    Some(if quietly(program, &args) {
+        Ok(format!("{} is stopped while {}", unit.name, switch.words()))
+    } else {
+        Err(format!(
+            "{} was not stopped, so it runs while {}: {} was refused",
+            unit.name,
+            switch.words(),
+            argv.join(" ")
+        ))
+    })
+}
+
+/// The same on an install's console.
+fn stop_said(switch: Switch, units: &[Unit], console: &Console) {
+    match stop_before(switch, units) {
+        None => {}
+        Some(Ok(said)) => console.say(&said),
+        Some(Err(why)) => console.warn(&why),
+    }
+}
+
+/// Under `--print`, the units a run would stop, each where it runs and just
+/// before its own files change, with what changes; every one of them starts
+/// again with the rest, by the calls listed beside the units.
+fn stops_text(plan: &Plan, run: Run, console: &Console) -> String {
+    let mut out = String::new();
+    let uid = run_quiet("id", &["-u"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let turns = turns(
+        &switches(run, plan.has(Part::Assistant), plan.llama.is_some()),
+        &planned_units(plan),
+        &uid,
+    );
+    let lines: Vec<String> = turns
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [Turn::Stop(argv), Turn::Switch(switch)] => Some(format!(
+                "    {}  {}",
+                argv.join(" "),
+                console.dim(&format!("while {}", switch.words()))
+            )),
+            _ => None,
+        })
+        .collect();
+    if lines.is_empty() {
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "\n{} {}",
+        console.bold("  stopped while their files change"),
+        console.dim("where each runs, and started again with the rest")
+    );
+    for line in lines {
+        let _ = writeln!(out, "{line}");
+    }
+    out
 }
 
 /// Whatever this machine and runtime use to keep the parts running. Kvasir is
@@ -13005,7 +14243,8 @@ pub(crate) fn launchd_plists(plan: &Plan, state: &State) -> Vec<(String, String)
 /// yet: the command that adds the first, since without one the desk opens on
 /// a login nobody can pass.
 fn nobody_yet(plan: &Plan) -> Option<String> {
-    (plan.mode == Mode::Local && plan.has(Part::Desk) && !desk_has_people(&plan.dir)).then(|| {
+    let keeps_its_own = plan.mode == Mode::Local && plan.has(Part::Desk);
+    (keeps_its_own && !desk_has_people(&plan.desk_dir(), plan.runtime.container())).then(|| {
         format!(
             "add the first person, who may do everything: nils-desk user add <name> --admin --config {}",
             plan.desk_config().display()
@@ -13287,6 +14526,9 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
     let newest = update::newest_version(&update::engine_base(channel)).ok();
     let console = Console::new(true);
     let mut changed = false;
+    // The units the parts run under, so that each is stopped just before its
+    // own files change and started again by the restart that follows.
+    let units = service_units(&state);
 
     let names: Vec<String> = state
         .parts
@@ -13342,7 +14584,9 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
             }
             "node" => {
                 let dir = PathBuf::from(&part.path);
-                let Some((repo, reference, said)) = node_source(&name) else {
+                let (Some((repo, reference, said)), Some(switch)) =
+                    (node_source(&name), switch_of_part(&name))
+                else {
                     println!("{name}: not a part this can update");
                     continue;
                 };
@@ -13350,15 +14594,69 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                 // the services of this machine, as setup takes it.
                 let base = PathBuf::from(&state.dir);
                 let hands = source_hands(state.system.as_ref(), &base, am_root(), false);
+                // Git in a folder that is not a checkout looks for a
+                // repository in the folders above and would fetch there, so
+                // a copy is adopted as setup adopts it, and a folder with
+                // nothing in it is left for setup to take again.
+                let (folder, resumed) = source_folder_resumed(&hands, &dir, &base);
+                if let Some(line) = resumed {
+                    println!("{name}: {line}");
+                }
+                if folder == SourceFolder::Empty {
+                    println!(
+                        "{name}: {} holds no copy of its source; nils setup and then repair takes \
+                         it again",
+                        dir.display()
+                    );
+                    continue;
+                }
                 if let Err(why) = ready_for_sources(&hands, &base, &dir, false) {
                     println!("{name}: {why}");
                     continue;
                 }
-                let before = source_head(&hands, &dir, &base);
-                // the release this version names, from a checkout of main too
-                let fetched = fetch_steps(&hands, said, repo, &reference, &dir, &base, true)
-                    .iter()
-                    .try_for_each(|(label, step)| console.source_task(label, step));
+                let before = if folder == SourceFolder::Checkout {
+                    source_head(&hands, &dir, &base)
+                } else {
+                    None
+                };
+                // The release this version names, from a checkout of main too.
+                // A fetch leaves the checkout as it stands, so the part runs on
+                // through it. Its unit is stopped just before the checkout, and
+                // only where the commit fetched is not the one built, since the
+                // checkout and the build after it change the folder it runs
+                // from; a part whose source did not move is not stopped at all.
+                // An adoption rewrites the tracked files a built copy holds, so
+                // it stops the unit itself, once its checkout is certain.
+                let fetched = if folder == SourceFolder::Copy {
+                    adopt_folder(
+                        &console,
+                        &hands,
+                        said,
+                        repo,
+                        &reference,
+                        &dir,
+                        &base,
+                        "nils update --all",
+                        &mut || changed |= stopped_for_update(&name, switch, &units),
+                    )
+                    .map(|()| println!("{name}: {}", adopted_said(&dir, said, &reference)))
+                } else {
+                    fetch_steps(&hands, said, repo, &reference, &dir, &base, true)
+                        .iter()
+                        .try_for_each(|(label, step)| {
+                            if checks_out(step)
+                                && source_moves(
+                                    before.as_deref(),
+                                    source_rev(&hands, &dir, &base, "FETCH_HEAD^{commit}")
+                                        .as_deref(),
+                                    dir.join("dist").exists(),
+                                )
+                            {
+                                changed |= stopped_for_update(&name, switch, &units);
+                            }
+                            console.source_task(label, step)
+                        })
+                };
                 if let Err(e) = fetched {
                     println!("{name}: {}", e.message);
                     continue;
@@ -13372,6 +14670,9 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
                     println!("{name}: {reference} is the one built");
                     continue;
                 }
+                // stopped above where the checkout moved, and here where it
+                // did not and there is still a build to make
+                changed |= stopped_for_update(&name, switch, &units);
                 let built = build_steps(&hands, said, &dir, &base)
                     .iter()
                     .try_for_each(|(label, step)| console.source_task(label, step));
@@ -13389,7 +14690,12 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
             // llama.cpp is taken again where this version pins another build
             LLAMA_PART => {
                 let plan = plan_from_state(&state, channel);
-                match fetch_llama(&plan) {
+                let mut stopped = false;
+                let taken = fetch_llama(&plan, &mut || {
+                    stopped = stopped_for_update(&name, Switch::LlamaBuilds, &units);
+                });
+                changed |= stopped;
+                match taken {
                     Ok((dir, taken)) => {
                         state.parts.insert(
                             name.clone(),
@@ -13427,7 +14733,12 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
     if state.parts.contains_key("assistant") && !state.parts.contains_key(LLAMA_PART) {
         let plan = plan_from_state(&state, channel);
         if plan.llama.is_some() {
-            match fetch_llama(&plan) {
+            let mut stopped = false;
+            let taken = fetch_llama(&plan, &mut || {
+                stopped = stopped_for_update(LLAMA_PART, Switch::LlamaBuilds, &units);
+            });
+            changed |= stopped;
+            match taken {
                 Ok((dir, _)) => {
                     state.parts.insert(
                         LLAMA_PART.to_string(),
@@ -13452,6 +14763,31 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
     state.at = nils_registry::time::now_iso();
     write_state(&state)?;
     Ok(changed)
+}
+
+/// A part's unit stopped before an update switches its files, said on the
+/// update's lines, and whether it was stopped. A stopped part counts as a
+/// change whatever the update came to after, since only a change is followed
+/// by the restart that starts it again.
+fn stopped_for_update(name: &str, switch: Switch, units: &[Unit]) -> bool {
+    match stop_before(switch, units) {
+        None => false,
+        Some(Ok(said)) => {
+            println!("{name}: {said}");
+            true
+        }
+        Some(Err(why)) => {
+            println!("{name}: {why}");
+            false
+        }
+    }
+}
+
+/// Whether an update's checkout changes the folder a Node part runs from:
+/// where the commit fetched is not the one checked out, where either could
+/// not be read, and where there is no build to run from at all.
+fn source_moves(checked_out: Option<&str>, fetched: Option<&str>, built: bool) -> bool {
+    !built || checked_out.is_none() || fetched != checked_out
 }
 
 /// After an update the services run what is now installed. The units are
@@ -13525,7 +14861,7 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     println!("restarting the services");
     match start_everything(
         &plan,
-        &holding_llama_back(&plan, &state, llama_starts),
+        &holding_llama_back(&state, llama_starts),
         &console,
         None,
     ) {
@@ -15390,7 +16726,7 @@ mod tests {
             llama: None,
         };
         let (outcome, drawn) = on_screens(
-            |console| questions(console, &args, None, &facts, false),
+            |console| questions(console, &args, None, &facts, None),
             vec![
                 Enter, // the engine and the desk
                 Enter, // no directory of DICOM
@@ -17039,6 +18375,282 @@ mod tests {
             settle_port(7200, &[7200], &|_| false),
             Some(7201),
             "two parts are never given one port"
+        );
+    }
+
+    /// Every part an install may have, each listening, with the ones a
+    /// finished record names marked so.
+    fn every_listener(recorded: &[&str]) -> Vec<Listener> {
+        [
+            ("the engine", "engine"),
+            ("the desk", "desk"),
+            ("Kvasir", "kvasir"),
+            ("the assistant", "assistant"),
+            ("Postgres", "postgres"),
+            ("the supervisor", SUPERVISOR_PART),
+            ("llama.cpp", LLAMA_PART),
+        ]
+        .into_iter()
+        .map(|(name, part)| Listener {
+            name,
+            part,
+            listens: true,
+            recorded: recorded.contains(&part),
+        })
+        .collect()
+    }
+
+    /// A run that stopped partway leaves a record that names only the parts
+    /// it placed, while the units of the parts it started run on the ports it
+    /// chose. The rerun starts again from nothing but those ports, and keeps
+    /// every one that nothing else holds.
+    #[test]
+    fn an_install_whose_last_run_stopped_partway_keeps_the_ports_it_chose() {
+        let chosen = Ports {
+            engine: 8438,
+            desk: 7203,
+            kvasir: 7101,
+            assistant: 7301,
+            postgres: 5433,
+            supervisor: 8471,
+            llama: 7111,
+        };
+        let mut stopped = State {
+            dir: "/srv/nils".to_string(),
+            ports: chosen,
+            unfinished: true,
+            ..State::default()
+        };
+        stopped.parts.insert(
+            "engine".to_string(),
+            PartState {
+                version: "1.0.0".to_string(),
+                path: "/srv/nils/engine/nils".to_string(),
+                kind: "binary".to_string(),
+            },
+        );
+        let (existing, restarted) = go_on_from(Some(stopped.clone()));
+        assert!(
+            existing.is_none(),
+            "a run that stopped partway is started again, not updated"
+        );
+        assert_eq!(restarted, Some(chosen), "its ports are taken from it");
+
+        // one that finished is gone on from as it is, and nothing is restarted
+        let finished = State {
+            unfinished: false,
+            ..stopped
+        };
+        let (existing, restarted) = go_on_from(Some(finished));
+        assert!(existing.is_some() && restarted.is_none());
+        let (existing, restarted) = go_on_from(None);
+        assert!(existing.is_none() && restarted.is_none());
+
+        // Only the engine was on its record. The engine, Kvasir, the
+        // assistant and llama.cpp run under this install's units on the ports
+        // it chose, and the rest are free: every port is kept.
+        let held = [8438, 7101, 7301, 7111];
+        let taken = |port: u16| held.contains(&port);
+        let own = |part: &str, port: u16| {
+            matches!(
+                (part, port),
+                ("engine", 8438) | ("kvasir", 7101) | ("assistant", 7301) | (LLAMA_PART, 7111)
+            )
+        };
+        let (ports, said) = settle_ports(chosen, &every_listener(&[]), &taken, &own);
+        assert_eq!(ports, chosen, "{said:?}");
+        assert!(
+            said.iter().all(|line| !line.contains("is taken")),
+            "{said:?}"
+        );
+    }
+
+    /// A port one of this install's own units holds is that part's already,
+    /// and the unit is started again on it: it is kept, and the reason said.
+    /// A unit is this install's own by its name, in the manager the install
+    /// writes its units to.
+    #[test]
+    fn a_port_one_of_this_installs_own_units_holds_is_not_moved() {
+        let taken = |port: u16| port == 8437 || port == 7100;
+        let own = |part: &str, port: u16| part == "engine" && port == 8437;
+        let (ports, said) =
+            settle_ports(Ports::default(), &every_listener(&["kvasir"]), &taken, &own);
+        assert_eq!(ports.engine, 8437);
+        assert_eq!(
+            ports.kvasir, 7100,
+            "a part on record keeps its port as before"
+        );
+        assert_eq!(
+            said,
+            vec!["port 8437 is held by the engine's own service, which is started again on it"]
+        );
+
+        // the services of this machine are the machine's manager's
+        let engine = ServiceOf {
+            unit: "nils-engine".to_string(),
+            user: None,
+        };
+        assert!(own_unit_holds(
+            "nils-engine",
+            true,
+            Some(0),
+            std::slice::from_ref(&engine)
+        ));
+        // and an install of an account's own is that account's manager's
+        let mine = ServiceOf {
+            unit: "nils-engine".to_string(),
+            user: Some(1500),
+        };
+        assert!(own_unit_holds(
+            "nils-engine",
+            false,
+            Some(1500),
+            std::slice::from_ref(&mine)
+        ));
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                listening_unit(Runtime::Machine, "engine"),
+                Some("nils-engine")
+            );
+            assert_eq!(listening_unit(Runtime::Machine, "kvasir"), Some("kvasir"));
+            assert_eq!(
+                listening_unit(Runtime::Podman, LLAMA_PART),
+                Some("nils-llama")
+            );
+            assert_eq!(
+                listening_unit(Runtime::Docker, SUPERVISOR_PART),
+                Some("nils-supervise")
+            );
+            // a container's port is published by the runtime, which says
+            // nothing of whose container it is
+            assert_eq!(listening_unit(Runtime::Docker, "desk"), None);
+            assert_eq!(listening_unit(Runtime::Machine, "postgres"), None);
+        }
+    }
+
+    /// A port held by anything but this install's own unit for that part
+    /// moves to the next free one, as it always did: another part's unit, a
+    /// unit of the same name in another manager, a process under no service,
+    /// and what this process may not read.
+    #[test]
+    fn a_port_something_else_holds_moves_as_it_always_did() {
+        let found = |port: u16| match port {
+            // the engine's name, but an account's own while the install
+            // writes the services of this machine
+            8437 => vec![ServiceOf {
+                unit: "nils-engine".to_string(),
+                user: Some(1000),
+            }],
+            // the desk's unit on Kvasir's port
+            7100 => vec![ServiceOf {
+                unit: "nils-desk".to_string(),
+                user: None,
+            }],
+            // nothing under a service, or nothing this process may read
+            _ => Vec::new(),
+        };
+        let unit_of = |part: &str| match part {
+            "engine" => Some("nils-engine"),
+            "desk" => Some("nils-desk"),
+            "kvasir" => Some("kvasir"),
+            "assistant" => Some("nils-assistant"),
+            _ => None,
+        };
+        let taken = |port: u16| [8437, 7100, 7300].contains(&port);
+        let own = |part: &str, port: u16| {
+            unit_of(part).is_some_and(|unit| own_unit_holds(unit, true, Some(0), &found(port)))
+        };
+        let (ports, said) = settle_ports(Ports::default(), &every_listener(&[]), &taken, &own);
+        assert_eq!(
+            (ports.engine, ports.kvasir, ports.assistant),
+            (8438, 7101, 7301)
+        );
+        assert_eq!(
+            said,
+            vec![
+                "port 8437 is taken, so the engine takes 8438",
+                "port 7100 is taken, so Kvasir takes 7101",
+                "port 7300 is taken, so the assistant takes 7301",
+            ]
+        );
+        // an account's own unit is not the machine's, nor the other way about,
+        // and a user manager is nobody's where this account is not known
+        let system = ServiceOf {
+            unit: "nils-engine".to_string(),
+            user: None,
+        };
+        assert!(!own_unit_holds(
+            "nils-engine",
+            false,
+            Some(1000),
+            std::slice::from_ref(&system)
+        ));
+        assert!(!own_unit_holds("nils-engine", false, None, &found(8437)));
+    }
+
+    #[test]
+    fn what_listens_on_a_port_is_read_from_the_socket_tables_and_the_control_groups() {
+        let tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   \
+             0: 0100007F:20F5 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1500        0 4038913 1 0000000000000000 100 0 0 10 0\n   \
+             1: 0100007F:20F5 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1500        0 4038999 1 0000000000000000 100 0 0 10 0\n   \
+             2: 00000000:1C20 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1501        0 4039001 1 0000000000000000 100 0 0 10 0\n";
+        assert_eq!(
+            listening_inodes(tcp, 8437),
+            vec![4038913],
+            "a connection is not a listener"
+        );
+        assert_eq!(listening_inodes(tcp, 7200), vec![4039001]);
+        assert!(listening_inodes(tcp, 7100).is_empty());
+        let tcp6 = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   \
+             0: 00000000000000000000000000000000:20F5 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1500        0 555 1 0000000000000000 100 0 0 10 0\n";
+        assert_eq!(listening_inodes(tcp6, 8437), vec![555]);
+
+        assert_eq!(socket_inode("socket:[4038913]"), Some(4038913));
+        assert_eq!(socket_inode("pipe:[4038913]"), None);
+        assert_eq!(socket_inode("/dev/null"), None);
+
+        let service = |unit: &str, user: Option<u32>| {
+            Some(ServiceOf {
+                unit: unit.to_string(),
+                user,
+            })
+        };
+        assert_eq!(
+            service_of_cgroup("0::/system.slice/nils-engine.service\n"),
+            service("nils-engine", None)
+        );
+        assert_eq!(
+            service_of_cgroup(
+                "0::/user.slice/user-1500.slice/user@1500.service/app.slice/kvasir.service\n"
+            ),
+            service("kvasir", Some(1500))
+        );
+        assert_eq!(
+            service_of_cgroup(
+                "0::/user.slice/user-1500.slice/user@1500.service/nils-llama.service\n"
+            ),
+            service("nils-llama", Some(1500))
+        );
+        // what a unit makes below itself is still that unit's
+        assert_eq!(
+            service_of_cgroup("0::/system.slice/nils-llama.service/models\n"),
+            service("nils-llama", None)
+        );
+        // the older hierarchies say the unit on systemd's own line
+        assert_eq!(
+            service_of_cgroup(
+                "12:cpu,cpuacct:/system.slice/other.service\n1:name=systemd:/system.slice/nils-desk.service\n"
+            ),
+            service("nils-desk", None)
+        );
+        // a session, and a user manager itself, are under no service
+        assert_eq!(
+            service_of_cgroup("0::/user.slice/user-1500.slice/session-3.scope\n"),
+            None
+        );
+        assert_eq!(
+            service_of_cgroup("0::/user.slice/user-1500.slice/user@1500.service/init.scope\n"),
+            None
         );
     }
 
@@ -18767,7 +20379,8 @@ mod tests {
             "a checkout is given over, not changed"
         );
 
-        // a built copy that is not a checkout is a later question, not this one's
+        // a built copy that is not a checkout is adopted, which lends it to
+        // the account itself, only once it has read the folder
         let copy = root.join("copy");
         std::fs::create_dir_all(copy.join("state")).unwrap();
         std::fs::write(copy.join("package.json"), "{}").unwrap();
@@ -18791,6 +20404,605 @@ mod tests {
             );
         }
         ready_build_cache(&cache, ids).expect("and again, as a rerun does");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_parts_folder_is_cloned_into_where_it_is_empty_fetched_where_it_is_a_checkout_and_adopted_otherwise()
+     {
+        let root = scratch("source-folder-kind");
+        let into = root.join("kvasir");
+        assert_eq!(source_folder(&into), SourceFolder::Empty, "no folder");
+        std::fs::create_dir_all(&into).unwrap();
+        assert_eq!(source_folder(&into), SourceFolder::Empty, "an empty one");
+        std::fs::write(into.join("package.json"), "{}").unwrap();
+        assert_eq!(
+            source_folder(&into),
+            SourceFolder::Copy,
+            "a built copy another way of deploying left"
+        );
+        std::fs::create_dir_all(into.join(".git")).unwrap();
+        assert_eq!(source_folder(&into), SourceFolder::Checkout);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn adopting_a_folder_refuses_where_the_checkout_would_replace_its_data_or_remove_what_the_release_does_not_track()
+     {
+        let words = |list: &[&str]| list.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        for data in [
+            "state",
+            "state/",
+            "state/kvasir.sqlite",
+            "runtime/cache/llama.cpp/model.gguf",
+            "kvasir.json",
+            "backends-to-add.json",
+            "assistant.env",
+            "assistant.key",
+            "runtime.key",
+            "assistant.sqlite",
+            "notes.sqlite-wal",
+            "kvasir.seal",
+            "kvasir.pepper",
+        ] {
+            assert!(holds_data(data), "{data}");
+        }
+        for source in [
+            "package.json",
+            "kvasir.example.json",
+            "stations/intake/station.yml",
+            "src/state/machine.ts",
+            "docs/kvasir.json",
+            "test/fixtures/card.key",
+            "dist/",
+            "node_modules/",
+        ] {
+            assert!(!holds_data(source), "{source}");
+        }
+
+        // What the lab's copies held: the release's own files, the build, and
+        // the data beside them, none of which the release tracks.
+        let tracked = words(&[
+            ".gitignore",
+            "package.json",
+            "kvasir.example.json",
+            "src/main.ts",
+            "stations/intake/station.yml",
+        ]);
+        let copy = words(&[
+            "package.json",
+            "stations/",
+            "stations/intake/",
+            "stations/intake/station.yml",
+        ]);
+        assert_eq!(
+            adoption_collisions(&tracked, &copy),
+            Vec::<String>::new(),
+            "the files a built copy holds from its source are the release's to replace"
+        );
+
+        let with = |more: &[&str]| {
+            let mut all = tracked.clone();
+            all.extend(words(more));
+            all
+        };
+        assert_eq!(
+            adoption_collisions(&with(&["kvasir.json"]), &words(&["kvasir.json"])),
+            ["kvasir.json"],
+            "data the release tracks, whatever its content"
+        );
+        assert_eq!(
+            adoption_collisions(&with(&["kvasir.json"]), &copy),
+            Vec::<String>::new(),
+            "a data file the folder does not hold takes nothing from it"
+        );
+        assert_eq!(
+            adoption_collisions(
+                &with(&["state/.keep", "runtime/models.ini"]),
+                &words(&["state/", "runtime/", "runtime/models.ini"])
+            ),
+            ["runtime/", "state/"],
+            "a path within a data folder, named once by its folder"
+        );
+        assert_eq!(
+            adoption_collisions(
+                &with(&["assistant.key", "seam.sqlite", "backends-to-add.json"]),
+                &words(&["assistant.key", "seam.sqlite", "backends-to-add.json"])
+            ),
+            ["assistant.key", "backends-to-add.json", "seam.sqlite"]
+        );
+        assert_eq!(
+            adoption_collisions(&with(&["state"]), &words(&["state/"])),
+            ["state/"],
+            "a file where the folder keeps its state would remove the folder"
+        );
+        assert_eq!(
+            adoption_collisions(&with(&["dist"]), &words(&["dist/"])),
+            ["dist/"],
+            "a folder where the release has a file goes with what it holds, data or not"
+        );
+        assert_eq!(
+            adoption_collisions(&with(&["bin/serve.mjs"]), &words(&["bin"])),
+            ["bin"],
+            "and a file where the release has a folder"
+        );
+    }
+
+    #[test]
+    fn a_folders_adoption_is_the_same_git_steps_under_each_hands_and_reads_what_the_release_tracks_before_it_checks_it_out()
+     {
+        let dir = Path::new("/srv/nils");
+        let into = dir.join("kvasir");
+        let adopt =
+            |hands: &SourceHands| adopt_steps(hands, "Kvasir", KVASIR_REPO, KVASIR_REF, &into, dir);
+        let git_words = [
+            vec!["init"],
+            vec!["remote", "add", "origin", KVASIR_REPO],
+            vec!["fetch", "--depth", "1", "origin", KVASIR_REF],
+            vec!["ls-tree", "-r", "-z", "--name-only", "FETCH_HEAD"],
+            vec!["checkout", "--force", "--detach", "FETCH_HEAD"],
+        ];
+        let expect = |prefix: &[&str]| -> Vec<Vec<String>> {
+            git_words
+                .iter()
+                .map(|words| {
+                    prefix
+                        .iter()
+                        .chain(words)
+                        .map(|w| (*w).to_string())
+                        .collect()
+                })
+                .collect()
+        };
+        let argv = |adoption: &Adoption| -> Vec<Vec<String>> {
+            adoption
+                .steps()
+                .iter()
+                .map(|step| step.argv.clone())
+                .collect()
+        };
+
+        let own = adopt(&SourceHands::Own);
+        assert_eq!(argv(&own), expect(&["git"]));
+        assert_eq!(
+            own.fetch
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .chain([own.checkout.0.as_str()])
+                .collect::<Vec<_>>(),
+            [
+                "adopting Kvasir's folder",
+                "adopting Kvasir's folder",
+                "fetching Kvasir at v1.0.0-alpha.7",
+                "checking out Kvasir at v1.0.0-alpha.7"
+            ]
+        );
+        for step in own.steps() {
+            assert_eq!(
+                step.dir, into,
+                "in the folder, never the install's: {step:?}"
+            );
+            assert_eq!(step.environment, None);
+        }
+
+        let root = adopt(&SourceHands::Root);
+        assert_eq!(
+            argv(&root),
+            expect(&["git", "-c", "safe.directory=/srv/nils/kvasir"]),
+            "root trusts that one folder on each line, the repository it makes too"
+        );
+
+        let acting = PartAccount {
+            account: "nils-desk".to_string(),
+            home: build_cache(dir, "nils-desk"),
+            lang: None,
+        };
+        let as_part = adopt(&SourceHands::As(acting.clone()));
+        assert_eq!(
+            argv(&as_part),
+            expect(&[
+                "runuser",
+                "-u",
+                "nils-desk",
+                "--preserve-environment",
+                "--",
+                "git",
+                "-C",
+                "/srv/nils/kvasir"
+            ]),
+            "the account makes the repository, so everything in it is born the account's"
+        );
+        for step in as_part.steps() {
+            assert_eq!(step.dir, into);
+            assert_eq!(
+                step.environment,
+                Some(service_environment(
+                    "nils-desk",
+                    Some("/srv/nils/build-cache/nils-desk".to_string()),
+                    None
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn adopting_a_folder_is_said_and_a_refusal_names_what_it_would_replace_and_the_fix() {
+        let into = Path::new("/srv/nils/kvasir");
+        assert_eq!(
+            adopted_said(into, "Kvasir", KVASIR_REF),
+            "/srv/nils/kvasir held a copy of Kvasir that was not a checkout, and is adopted as a \
+             checkout of v1.0.0-alpha.7: the files the release tracks are its own now, and \
+             whatever else the folder holds stays as it was"
+        );
+        assert_eq!(
+            adoption_refused(
+                into,
+                "Kvasir",
+                KVASIR_REF,
+                &["kvasir.json".to_string(), "state/".to_string()],
+                "nils setup"
+            ),
+            "/srv/nils/kvasir is not a checkout, and adopting it as a checkout of Kvasir at \
+             v1.0.0-alpha.7 would replace what it keeps: kvasir.json, state/; the folder is left \
+             as it was, so move those out of it, or the folder aside, and run nils setup again"
+        );
+        let many: Vec<String> = (1..=7).map(|n| format!("card{n}.key")).collect();
+        let said = adoption_refused(
+            Path::new("/srv/nils/assistant"),
+            "the assistant",
+            ASSISTANT_REF,
+            &many,
+            "nils update --all",
+        );
+        assert!(
+            said.contains(
+                "would replace what it keeps: card1.key, card2.key, card3.key, card4.key, \
+                 card5.key and 2 more;"
+            ),
+            "{said}"
+        );
+        assert!(said.ends_with("and run nils update --all again"), "{said}");
+    }
+
+    /// Git in a test's own folder, with nothing of this machine's settings
+    /// that would sign a commit or run a hook.
+    #[cfg(unix)]
+    fn test_git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=nils",
+                "-c",
+                "user.email=nils@example.org",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Every file under a folder with its bytes, a repository's own left out.
+    #[cfg(unix)]
+    fn bytes_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        let mut folders = vec![root.to_path_buf()];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if path.file_name() != Some(std::ffi::OsStr::new(".git")) {
+                        folders.push(path);
+                    }
+                } else {
+                    out.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        std::fs::read(&path).unwrap(),
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// A part's repository in a test's folder, as a `file://` address: a
+    /// release that tracks only source, `v1.0.0-alpha.1`, whose commit is
+    /// answered too, and a later one that tracks a file a part's folder keeps
+    /// as data, `v1.0.0-alpha.2`.
+    #[cfg(unix)]
+    fn released_repository(root: &Path) -> (String, String) {
+        let source = root.join("source");
+        std::fs::create_dir_all(source.join("src")).unwrap();
+        test_git(&source, &["init", "--quiet"]);
+        std::fs::write(source.join("package.json"), "{\"name\": \"kvasir\"}\n").unwrap();
+        std::fs::write(source.join("src").join("main.js"), "export {};\n").unwrap();
+        std::fs::write(source.join(".gitignore"), "node_modules/\ndist/\n").unwrap();
+        test_git(&source, &["add", "--all"]);
+        test_git(&source, &["commit", "--quiet", "-m", "source"]);
+        test_git(&source, &["tag", "v1.0.0-alpha.1"]);
+        let released = test_git(&source, &["rev-parse", "HEAD"]);
+        std::fs::write(source.join("kvasir.json"), "{}\n").unwrap();
+        test_git(&source, &["add", "--all"]);
+        test_git(&source, &["commit", "--quiet", "-m", "data"]);
+        test_git(&source, &["tag", "v1.0.0-alpha.2"]);
+        test_git(
+            root,
+            &["clone", "--quiet", "--bare", "source", "remote.git"],
+        );
+        (
+            format!("file://{}", root.join("remote.git").display()),
+            released,
+        )
+    }
+
+    /// A copy laid down by another way of deploying: its build, a
+    /// package.json unlike the release's, and its data.
+    #[cfg(unix)]
+    fn lay_copy(into: &Path) {
+        std::fs::create_dir_all(into.join("dist")).unwrap();
+        std::fs::create_dir_all(into.join("node_modules").join("left")).unwrap();
+        std::fs::create_dir_all(into.join("state")).unwrap();
+        std::fs::write(into.join("package.json"), "{\"name\": \"built\"}\n").unwrap();
+        std::fs::write(into.join("dist").join("main.js"), "built();\n").unwrap();
+        std::fs::write(
+            into.join("node_modules").join("left").join("index.js"),
+            "left();\n",
+        )
+        .unwrap();
+        std::fs::write(into.join("state").join("x"), [0u8, 1, 2, 255]).unwrap();
+        std::fs::write(into.join("kvasir.json"), "{\"auth\": \"kept\"}\n").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_built_copy_is_adopted_in_place_with_its_data_kept_byte_for_byte_and_a_release_that_tracks_its_data_is_refused()
+     {
+        let root = scratch("adopt-copy");
+        let (repo, released) = released_repository(&root);
+        let console = Console::new(true);
+        let hands = SourceHands::Own;
+
+        let into = root.join("kvasir");
+        lay_copy(&into);
+        let before = bytes_under(&into);
+        assert_eq!(source_folder(&into), SourceFolder::Copy);
+        adopt_folder(
+            &console,
+            &hands,
+            "Kvasir",
+            &repo,
+            "v1.0.0-alpha.1",
+            &into,
+            &root,
+            "nils setup",
+            &mut || {},
+        )
+        .unwrap_or_else(|e| panic!("the copy is adopted: {}", e.message));
+        assert_eq!(source_folder(&into), SourceFolder::Checkout);
+        assert_eq!(
+            source_head(&hands, &into, &root).map(|head| head.trim().to_string()),
+            Some(released),
+            "at the release"
+        );
+        assert_eq!(
+            std::fs::read_to_string(into.join("package.json")).unwrap(),
+            "{\"name\": \"kvasir\"}\n",
+            "the copy's package.json is the release's"
+        );
+        assert!(into.join("src").join("main.js").is_file());
+        let after = bytes_under(&into);
+        for untracked in [
+            "state/x",
+            "kvasir.json",
+            "dist/main.js",
+            "node_modules/left/index.js",
+        ] {
+            let path = Path::new(untracked);
+            assert_eq!(
+                after.get(path),
+                before.get(path),
+                "{untracked} stays byte for byte"
+            );
+        }
+        assert_eq!(
+            test_git(&into, &["remote", "get-url", "origin"]),
+            repo,
+            "an update fetches from the part's repository"
+        );
+        assert_eq!(
+            test_git(&into, &["status", "--porcelain", "--untracked-files=no"]),
+            "",
+            "the tracked files are the release's"
+        );
+
+        let refused = root.join("assistant");
+        lay_copy(&refused);
+        let before = bytes_under(&refused);
+        let Err(e) = adopt_folder(
+            &console,
+            &hands,
+            "Kvasir",
+            &repo,
+            "v1.0.0-alpha.2",
+            &refused,
+            &root,
+            "nils setup",
+            &mut || {},
+        ) else {
+            panic!("the release tracks kvasir.json");
+        };
+        assert!(
+            e.message
+                .contains("would replace what it keeps: kvasir.json;")
+                && e.message.ends_with("run nils setup again"),
+            "{}",
+            e.message
+        );
+        assert!(
+            !refused.join(".git").exists(),
+            "no .git left for a rerun to take for a checkout"
+        );
+        assert_eq!(bytes_under(&refused), before, "and the folder as it was");
+        assert_eq!(source_folder(&refused), SourceFolder::Copy);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_whose_adoption_stopped_before_its_checkout_is_adopted_again_on_the_next_run() {
+        let root = scratch("adopt-resumed");
+        let (repo, released) = released_repository(&root);
+        let console = Console::new(true);
+        let hands = SourceHands::Own;
+
+        // What a run killed between the repository being made and the
+        // checkout leaves: the copy, and a .git with no commit.
+        let into = root.join("kvasir");
+        lay_copy(&into);
+        let state = bytes_under(&into.join("state"));
+        test_git(&into, &["init", "--quiet"]);
+        assert_eq!(source_folder(&into), SourceFolder::Checkout, "by its .git");
+
+        let (folder, said) = source_folder_resumed(&hands, &into, &root);
+        assert_eq!(folder, SourceFolder::Copy);
+        assert_eq!(
+            said.as_deref(),
+            Some(
+                format!(
+                    "{} held a .git with no commit, left by an adoption that stopped partway; \
+                     that .git is removed and the folder adopted again",
+                    into.display()
+                )
+                .as_str()
+            )
+        );
+        assert!(!into.join(".git").exists(), "that .git alone is removed");
+        adopt_folder(
+            &console,
+            &hands,
+            "Kvasir",
+            &repo,
+            "v1.0.0-alpha.1",
+            &into,
+            &root,
+            "nils setup",
+            &mut || {},
+        )
+        .unwrap_or_else(|e| panic!("the copy is adopted: {}", e.message));
+        assert_eq!(
+            source_head(&hands, &into, &root).map(|head| head.trim().to_string()),
+            Some(released)
+        );
+        assert_eq!(
+            bytes_under(&into.join("state")),
+            state,
+            "state/ byte for byte"
+        );
+        assert!(!state.is_empty());
+        assert_eq!(
+            source_folder_resumed(&hands, &into, &root),
+            (SourceFolder::Checkout, None),
+            "a .git with a commit stays a checkout"
+        );
+
+        // A repository with no commit and nothing beside it is a clone that
+        // stopped, which a checkout's steps finish.
+        let bare = root.join("assistant");
+        std::fs::create_dir_all(&bare).unwrap();
+        test_git(&bare, &["init", "--quiet"]);
+        assert_eq!(
+            source_folder_resumed(&hands, &bare, &root),
+            (SourceFolder::Checkout, None)
+        );
+        assert!(bare.join(".git").is_dir());
+
+        // Where git finds a repository in a folder above, the .git is not
+        // this folder's, and is left for git to say what it is.
+        let own = [into.join(".git")];
+        let above = root.join(".git").display().to_string();
+        assert!(!adoption_unfinished(Some(&above), &own, || false, || true));
+        assert!(!adoption_unfinished(None, &own, || false, || true));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An adoption rewrites the tracked files a built copy holds, which is
+    /// the part's own source, so it is one of the switches a part's unit is
+    /// stopped before. It is also the one switch that can still refuse once
+    /// it has begun, and everything it does before its checkout it does
+    /// inside the `.git` it made, so the part goes on answering until the
+    /// checkout is certain and is not stopped for a run that changes
+    /// nothing.
+    #[cfg(unix)]
+    #[test]
+    fn an_adoption_stops_the_part_just_before_its_checkout_and_a_refusal_stops_nothing() {
+        let root = scratch("adopt-stop");
+        let (repo, released) = released_repository(&root);
+        let console = Console::new(true);
+        let hands = SourceHands::Own;
+
+        // stopped once, with the copy's own files still in the folder: the
+        // fetch and the reading of what the release tracks are behind it
+        let into = root.join("kvasir");
+        lay_copy(&into);
+        let mut stopped_at = Vec::new();
+        adopt_folder(
+            &console,
+            &hands,
+            "Kvasir",
+            &repo,
+            "v1.0.0-alpha.1",
+            &into,
+            &root,
+            "nils setup",
+            &mut || {
+                stopped_at.push(std::fs::read_to_string(into.join("package.json")).unwrap());
+            },
+        )
+        .unwrap_or_else(|e| panic!("the copy is adopted: {}", e.message));
+        assert_eq!(
+            stopped_at,
+            vec!["{\"name\": \"built\"}\n".to_string()],
+            "stopped once, before the checkout replaced the copy's files"
+        );
+        assert_eq!(
+            source_head(&hands, &into, &root).map(|head| head.trim().to_string()),
+            Some(released),
+            "and the checkout was taken after it"
+        );
+
+        // A release that tracks the folder's data is refused with the folder
+        // as it was, so the part was never stopped.
+        let refused = root.join("assistant");
+        lay_copy(&refused);
+        let before = bytes_under(&refused);
+        let mut stops = 0;
+        let said = adopt_folder(
+            &console,
+            &hands,
+            "Kvasir",
+            &repo,
+            "v1.0.0-alpha.2",
+            &refused,
+            &root,
+            "nils setup",
+            &mut || stops += 1,
+        )
+        .expect_err("the release tracks kvasir.json");
+        assert!(said.message.contains("the folder is left as it was"));
+        assert_eq!(stops, 0, "a run that changes nothing stops nothing");
+        assert_eq!(bytes_under(&refused), before);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -18867,6 +21079,30 @@ mod tests {
                 kvasir.display()
             )),
             "{said}"
+        );
+
+        // a folder holding a built copy is adopted, and the print says so
+        std::fs::create_dir_all(assistant.join("state")).unwrap();
+        std::fs::write(assistant.join("package.json"), "{}").unwrap();
+        let said = commands_text(&plan, &console);
+        let assistant_at = assistant.display();
+        let adopting = [
+            format!("    {as_part} git -C {assistant_at} init\n"),
+            format!("    {as_part} git -C {assistant_at} remote add origin {ASSISTANT_REPO}\n"),
+            format!("    {as_part} git -C {assistant_at} fetch --depth 1 origin {assistant_ref}\n"),
+            format!("    {as_part} git -C {assistant_at} ls-tree -r -z --name-only FETCH_HEAD\n"),
+            format!("    {as_part} git -C {assistant_at} checkout --force --detach FETCH_HEAD\n"),
+        ];
+        let mut after = 0;
+        for line in &adopting {
+            let found = said[after..]
+                .find(line.as_str())
+                .unwrap_or_else(|| panic!("{line} in order\n{said}"));
+            after += found + line.len();
+        }
+        assert!(
+            !said.contains(&format!("git clone --depth 1 --branch {assistant_ref}")),
+            "and no clone: {said}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -19739,6 +21975,206 @@ mod tests {
         assert_eq!(asked, vec!["systemctl", "--user", "restart", "nils-engine"]);
     }
 
+    /// Every path that switches a part's files in place stops that part's
+    /// unit just before, and starts every unit again after: an install, a
+    /// rerun and `--update` for llama.cpp, Kvasir and the assistant, a repair
+    /// for llama.cpp, and `nils update --all` for each part its record names,
+    /// in the order it takes them. The supervisor is never stopped.
+    #[test]
+    fn each_part_is_stopped_just_before_its_files_are_switched_on_every_path() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        use Switch::{Assistant, Kvasir, LlamaBuilds};
+        let mut plan = deployment();
+        plan.llama = Some(Llama {
+            variant: "ubuntu-x64",
+            loader: true,
+        });
+        let stop = |words: &[&str]| Turn::Stop(words.iter().map(|w| (*w).to_string()).collect());
+        let units = planned_units(&plan);
+
+        // an install, a rerun and --update place every part again
+        let placed = turns(&switches(Run::Place, true, true), &units, "0");
+        assert_eq!(
+            placed,
+            vec![
+                stop(&["systemctl", "stop", "nils-llama"]),
+                Turn::Switch(LlamaBuilds),
+                stop(&["systemctl", "stop", "kvasir"]),
+                Turn::Switch(Kvasir),
+                stop(&["systemctl", "stop", "nils-assistant"]),
+                Turn::Switch(Assistant),
+                Turn::Start,
+            ]
+        );
+        // a repair takes llama.cpp alone
+        let repaired = turns(&switches(Run::Repair, true, true), &units, "0");
+        assert_eq!(
+            repaired,
+            vec![
+                stop(&["systemctl", "stop", "nils-llama"]),
+                Turn::Switch(LlamaBuilds),
+                Turn::Start,
+            ]
+        );
+        // nils update --all takes the parts its record names in the order the
+        // record keeps them
+        let mut state = deployed_state(&plan);
+        state.parts.insert(
+            LLAMA_PART.to_string(),
+            PartState {
+                version: LLAMA_BUILD.to_string(),
+                path: "/srv/nils/llama.cpp/b10964-ubuntu-x64".to_string(),
+                kind: LLAMA_PART.to_string(),
+            },
+        );
+        let taken: Vec<Switch> = state
+            .parts
+            .keys()
+            .filter_map(|name| switch_of_part(name))
+            .collect();
+        let updated = turns(&taken, &service_units(&state), "0");
+        assert_eq!(
+            updated,
+            vec![
+                stop(&["systemctl", "stop", "nils-assistant"]),
+                Turn::Switch(Assistant),
+                stop(&["systemctl", "stop", "kvasir"]),
+                Turn::Switch(Kvasir),
+                stop(&["systemctl", "stop", "nils-llama"]),
+                Turn::Switch(LlamaBuilds),
+                Turn::Start,
+            ]
+        );
+        for path in [&placed, &repaired, &updated] {
+            for (at, turn) in path.iter().enumerate() {
+                if let Turn::Switch(_) = turn {
+                    assert!(
+                        at > 0 && matches!(path[at - 1], Turn::Stop(_)),
+                        "a switch with no stop before it: {path:?}"
+                    );
+                }
+            }
+            assert_eq!(path.last(), Some(&Turn::Start));
+            assert!(
+                !path
+                    .iter()
+                    .any(|turn| matches!(turn, Turn::Stop(argv) if argv.iter().any(|w| w == "nils-supervise"))),
+                "the supervisor was stopped: {path:?}"
+            );
+        }
+
+        // the services of an account's own are stopped in its own manager, and
+        // docker's containers by docker, with llama.cpp beside them
+        let own = Plan {
+            system: None,
+            helper: None,
+            ..plan.clone()
+        };
+        assert_eq!(
+            turns(&[Kvasir], &planned_units(&own), "1000")[0],
+            stop(&["systemctl", "--user", "stop", "kvasir"])
+        );
+        let docker = Plan {
+            runtime: Runtime::Docker,
+            ..own.clone()
+        };
+        assert_eq!(
+            turns(&[LlamaBuilds, Kvasir], &planned_units(&docker), "1000"),
+            vec![
+                stop(&["systemctl", "--user", "stop", "nils-llama"]),
+                Turn::Switch(LlamaBuilds),
+                stop(&["docker", "stop", "nils-kvasir"]),
+                Turn::Switch(Kvasir),
+                Turn::Start,
+            ]
+        );
+
+        // an install with no services has no unit to stop or start, and one
+        // without the assistant switches nothing in place
+        let unserved = Plan {
+            service: false,
+            ..plan.clone()
+        };
+        assert_eq!(
+            turns(
+                &switches(Run::Place, true, true),
+                &planned_units(&unserved),
+                "0"
+            ),
+            vec![
+                Turn::Switch(LlamaBuilds),
+                Turn::Switch(Kvasir),
+                Turn::Switch(Assistant)
+            ]
+        );
+        assert!(switches(Run::Place, false, true).is_empty());
+    }
+
+    /// An update fetches a Node part's source with the part running, and
+    /// stops it before the checkout only where the checkout moves it; a unit
+    /// systemd is starting again after a failure is stopped like one running.
+    #[test]
+    fn an_update_stops_a_node_part_only_where_its_source_moves() {
+        assert!(
+            !source_moves(Some("abc\n"), Some("abc\n"), true),
+            "the commit built"
+        );
+        assert!(source_moves(Some("abc\n"), Some("def\n"), true));
+        assert!(
+            source_moves(Some("abc\n"), Some("abc\n"), false),
+            "nothing built"
+        );
+        assert!(source_moves(None, Some("abc\n"), true), "a checkout unread");
+        assert!(source_moves(Some("abc\n"), None, true), "a fetch unread");
+        let steps = fetch_steps(
+            &SourceHands::Own,
+            "Kvasir",
+            KVASIR_REPO,
+            KVASIR_REF,
+            Path::new("/srv/nils/kvasir"),
+            Path::new("/srv/nils"),
+            true,
+        );
+        let checks: Vec<bool> = steps.iter().map(|(_, step)| checks_out(step)).collect();
+        assert_eq!(checks, vec![false, true], "the fetch, then the checkout");
+
+        assert!(may_run("active\n") && may_run("activating") && may_run("reloading"));
+        assert!(!may_run("inactive") && !may_run("failed") && !may_run(""));
+    }
+
+    #[test]
+    fn print_says_which_units_a_run_stops_while_their_files_change() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let mut console = Console::new(true);
+        console.colour = false;
+        let mut plan = deployment();
+        plan.llama = Some(Llama {
+            variant: "ubuntu-x64",
+            loader: true,
+        });
+        let said = stops_text(&plan, Run::Place, &console);
+        assert!(said.contains("stopped while their files change"), "{said}");
+        for line in [
+            "    systemctl stop nils-llama  while the older llama.cpp builds are removed\n",
+            "    systemctl stop kvasir  while Kvasir's source is taken and built\n",
+            "    systemctl stop nils-assistant  while the assistant's source is taken and built\n",
+        ] {
+            assert!(said.contains(line), "{line} is not in: {said}");
+        }
+        for untouched in ["nils-engine", "nils-desk", "nils-supervise"] {
+            assert!(!said.contains(untouched), "{untouched} is stopped: {said}");
+        }
+        let said = stops_text(&plan, Run::Repair, &console);
+        assert!(said.contains("systemctl stop nils-llama"), "{said}");
+        assert!(!said.contains("stop kvasir"), "{said}");
+        plan.parts = vec![Part::Engine, Part::Desk];
+        assert_eq!(stops_text(&plan, Run::Place, &console), "");
+    }
+
     /// The privilege is on record, so an update and a repair lay down the
     /// same arrangement rather than leaving the supervisor unable to restart
     /// anything, and an uninstall knows what to take away.
@@ -20010,13 +22446,396 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A desk's store made as the desk makes it (nils-desk's `store.rs`):
+    /// its four groups, and the people and memberships given.
+    fn desk_store_holding(store: &Path, people: &[&str], memberships: &[(&str, &str)]) {
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(store).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE person (subject TEXT PRIMARY KEY, display TEXT NOT NULL, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL);
+             CREATE TABLE user (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, display TEXT NOT NULL, entitlements TEXT NOT NULL DEFAULT '[]', admin INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+             CREATE TABLE grp (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, grants TEXT NOT NULL DEFAULT '[]', detail TEXT NOT NULL DEFAULT 'plain', follows TEXT NOT NULL DEFAULT '[]', made_at TEXT NOT NULL);
+             CREATE TABLE member (subject TEXT NOT NULL, grp INTEGER NOT NULL, PRIMARY KEY (subject, grp));
+             CREATE TABLE own (subject TEXT PRIMARY KEY, grants TEXT NOT NULL DEFAULT '[]', detail TEXT);
+             INSERT INTO grp (name, made_at) VALUES ('Readers', 'now'), ('Reviewers', 'now'), ('Operators', 'now'), ('Admins', 'now');",
+        )
+        .unwrap();
+        for name in people {
+            conn.execute(
+                "INSERT INTO user VALUES (?1, 'x', ?1, '[]', 0, '2026-09-17T00:00:00Z')",
+                [name],
+            )
+            .unwrap();
+        }
+        for (name, group) in memberships {
+            conn.execute(
+                "INSERT INTO member (subject, grp) SELECT ?1, id FROM grp WHERE name = ?2",
+                [name, group],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn setup_keeps_the_store_the_signing_key_and_the_secret_file_a_desk_was_given_by_hand() {
+        let mut p = plan(Runtime::Machine);
+        p.mode = Mode::Local;
+        let written = desk_config_text(&p);
+        assert!(
+            written.contains("store = \"nils-desk.sqlite\""),
+            "{written}"
+        );
+        assert!(written.contains("key = \"nils-desk.key\""), "{written}");
+
+        // the store and the key where an earlier deployment put them
+        let hand = written
+            .replace(
+                "store = \"nils-desk.sqlite\"",
+                "store = \"/srv/nils/desk/state/nils-desk.sqlite\"",
+            )
+            .replace(
+                "key = \"nils-desk.key\"",
+                "key = \"/srv/nils/desk/state/nils-desk.key\"",
+            );
+        assert_eq!(
+            desk_config_merged(&hand, &written),
+            Ok(None),
+            "a rerun with nothing else changed keeps the file as it is"
+        );
+        p.reach = Reach::Network("lab.example.org".to_string());
+        let merged = desk_config_merged(&hand, &desk_config_text(&p))
+            .unwrap()
+            .expect("the reach changed");
+        let table: toml::Table = toml::from_str(&merged).unwrap();
+        assert_eq!(table["bind"].as_str(), Some("0.0.0.0:7200"), "{merged}");
+        assert_eq!(
+            table["store"].as_str(),
+            Some("/srv/nils/desk/state/nils-desk.sqlite"),
+            "the desk stays on the store its people are in: {merged}"
+        );
+        assert_eq!(
+            table["local"]["key"].as_str(),
+            Some("/srv/nils/desk/state/nils-desk.key"),
+            "the desk keeps the key its tokens were signed with: {merged}"
+        );
+
+        // A desk that signed people in at a provider, its key named nowhere and
+        // so kept beside its store, keeps that key when it moves to its own
+        // people: naming setup's would have made it a new one.
+        let mut o = plan(Runtime::Machine);
+        o.mode = Mode::Oidc;
+        o.oidc = Some(OidcPlan {
+            issuer: "https://auth.example.org/application/o/nils/".into(),
+            client_id: "abc123".into(),
+            jwks: "https://auth.example.org/application/o/nils/jwks/".into(),
+            roles_claim: "roles".into(),
+            scopes: None,
+        });
+        let provider = desk_config_text(&o)
+            .replace(
+                "store = \"nils-desk.sqlite\"",
+                "store = \"/srv/nils/desk/state/nils-desk.sqlite\"",
+            )
+            .replace(
+                "client_secret_file = \"client-secret\"",
+                "client_secret_file = \"/srv/nils/secrets/desk-client\"",
+            );
+        assert_eq!(
+            desk_config_merged(&provider, &desk_config_text(&o)),
+            Ok(None)
+        );
+        o.reach = Reach::Network("lab.example.org".to_string());
+        let merged = desk_config_merged(&provider, &desk_config_text(&o))
+            .unwrap()
+            .expect("the reach changed");
+        let table: toml::Table = toml::from_str(&merged).unwrap();
+        assert_eq!(
+            table["oidc"]["client_secret_file"].as_str(),
+            Some("/srv/nils/secrets/desk-client"),
+            "the desk reads its secret where it always did: {merged}"
+        );
+        assert_eq!(
+            table["store"].as_str(),
+            Some("/srv/nils/desk/state/nils-desk.sqlite"),
+            "{merged}"
+        );
+        o.mode = Mode::Local;
+        let local = desk_config_merged(&merged, &desk_config_text(&o))
+            .unwrap()
+            .expect("the mode changed");
+        let table: toml::Table = toml::from_str(&local).unwrap();
+        assert_eq!(table["local"]["audience"].as_str(), Some("nils"), "{local}");
+        assert_eq!(
+            table["local"].get("key"),
+            None,
+            "the key stays beside the store, where the desk keeps one named nowhere: {local}"
+        );
+        assert_eq!(
+            table["oidc"]["client_secret_file"].as_str(),
+            Some("/srv/nils/secrets/desk-client"),
+            "an [oidc] table stays for a desk that goes back: {local}"
+        );
+        assert_eq!(desk_config_merged(&local, &desk_config_text(&o)), Ok(None));
+
+        // a file that names none of them is given setup's, which are the desk's own defaults
+        let bare =
+            "origin = \"http://127.0.0.1:7200\"\n\n[engine]\nurl = \"http://127.0.0.1:8437\"\n";
+        let merged = desk_config_merged(bare, &desk_config_text(&p))
+            .unwrap()
+            .expect("setup's keys are set");
+        let table: toml::Table = toml::from_str(&merged).unwrap();
+        assert_eq!(table["store"].as_str(), Some(DESK_STORE), "{merged}");
+    }
+
+    #[test]
+    fn the_people_check_reads_the_store_the_desks_configuration_names() {
+        let dir = scratch("desk-people-named");
+        let desk = dir.join("desk");
+        let store = desk.join("state").join("nils-desk.sqlite");
+        desk_store_holding(&store, &["reader", "other"], &[("reader", "Readers")]);
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Local;
+        let config = |text: String| std::fs::write(desk.join("nils-desk.toml"), text).unwrap();
+
+        // with no configuration the desk's store is the one beside it, which is not there
+        assert!(!desk_has_people(&desk, false));
+        assert!(nobody_yet(&p).is_some());
+
+        config(format!(
+            "origin = \"http://127.0.0.1:7200\"\nstore = \"{}\"\n",
+            store.display().to_string().replace('\\', "\\\\")
+        ));
+        assert!(
+            desk_has_people(&desk, false),
+            "an absolute store is read where it is"
+        );
+        assert!(
+            nobody_yet(&p).is_none(),
+            "the end of setup does not ask for a first person"
+        );
+
+        config("origin = \"http://127.0.0.1:7200\"\nstore = \"state/nils-desk.sqlite\"\n".into());
+        assert!(
+            desk_has_people(&desk, false),
+            "a relative store is beside the configuration"
+        );
+
+        // a desk in a container reads its folder at IN_DESK
+        config(format!(
+            "origin = \"http://127.0.0.1:7200\"\nstore = \"{IN_DESK}/state/nils-desk.sqlite\"\n"
+        ));
+        assert!(desk_has_people(&desk, true));
+        assert_eq!(
+            desk_file(&desk, true, "/elsewhere/nils-desk.sqlite"),
+            None,
+            "a path outside the folder is not on this machine"
+        );
+
+        // counted as the desk counts people who sign in with a password
+        let empty = desk.join("nils-desk.sqlite");
+        desk_store_holding(&empty, &[], &[]);
+        config("origin = \"http://127.0.0.1:7200\"\n".into());
+        assert!(
+            !desk_has_people(&desk, false),
+            "four groups and nobody in them"
+        );
+        assert!(!desk_store_keeps_people(&empty));
+        assert!(desk_store_keeps_people(&store));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setup_never_points_a_desk_at_an_empty_store_while_its_people_are_in_another() {
+        let dir = scratch("desk-store-left");
+        let desk = dir.join("desk");
+        let people = desk.join("state").join("nils-desk.sqlite");
+        let empty = desk.join("nils-desk.sqlite");
+        desk_store_holding(&people, &["reader", "other"], &[("reader", "Readers")]);
+        desk_store_holding(&empty, &[], &[]);
+
+        let refused = desk_store_left(Some(&people), Some(&empty))
+            .expect("a desk taken from its people to an empty store is refused");
+        assert!(
+            refused.contains(&people.display().to_string())
+                && refused.contains(&empty.display().to_string()),
+            "{refused}"
+        );
+        assert!(
+            desk_store_left(Some(&people), None).is_some(),
+            "nor to one not here"
+        );
+        assert_eq!(desk_store_left(Some(&people), Some(&people)), None);
+        assert_eq!(
+            desk_store_left(Some(&empty), Some(&people)),
+            None,
+            "a store carried across first is where the people are"
+        );
+        assert_eq!(desk_store_left(None, Some(&empty)), None);
+
+        // Every way setup writes the configuration leaves a desk with people on
+        // their store: a rerun, a changed reach, a changed mode.
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Local;
+        let named = people.display().to_string().replace('\\', "\\\\");
+        let hand = desk_config_text(&p).replace(
+            "store = \"nils-desk.sqlite\"",
+            &format!("store = \"{named}\""),
+        );
+        std::fs::write(p.desk_config(), &hand).unwrap();
+        for change in 0..3 {
+            match change {
+                1 => p.reach = Reach::Network("lab.example.org".to_string()),
+                2 => p.mode = Mode::Off,
+                _ => {}
+            }
+            assert!(write_desk_config(&p).is_ok());
+            let on_disk = std::fs::read_to_string(p.desk_config()).unwrap();
+            assert_eq!(
+                desk_store(&desk, false, Some(&on_disk)),
+                Some(people.clone()),
+                "the desk was pointed away from its people: {on_disk}"
+            );
+            assert_eq!(desk_config_fate(&p), DeskConfigFate::Kept);
+        }
+        p.mode = Mode::Local;
+        assert!(write_desk_config(&p).is_ok());
+        assert!(desk_has_people(&desk, false));
+        assert!(nobody_yet(&p).is_none());
+
+        // a file broken below its store line is written again on the same store
+        std::fs::write(
+            p.desk_config(),
+            format!("mode = \"local\"\nstore = \"{named}\"\n\n[local\nkey = \n"),
+        )
+        .unwrap();
+        assert_eq!(desk_config_fate(&p), DeskConfigFate::Replaced);
+        assert!(
+            desk_has_people(&desk, false),
+            "the people check finds it too"
+        );
+        assert!(write_desk_config(&p).is_ok());
+        let on_disk = std::fs::read_to_string(p.desk_config()).unwrap();
+        assert_eq!(
+            desk_store(&desk, false, Some(&on_disk)),
+            Some(people.clone()),
+            "{on_disk}"
+        );
+        assert!(on_disk.contains("audience = \"nils\""), "{on_disk}");
+
+        // a secret setup is given goes where the desk reads it
+        p.mode = Mode::Oidc;
+        p.oidc = Some(OidcPlan {
+            issuer: "https://auth.example.org/application/o/nils/".into(),
+            client_id: "abc123".into(),
+            jwks: "https://auth.example.org/application/o/nils/jwks/".into(),
+            roles_claim: "roles".into(),
+            scopes: None,
+        });
+        assert!(write_desk_config(&p).is_ok());
+        assert_eq!(desk_secret_file(&p), desk.join("client-secret"));
+        let secret = dir.join("secrets").join("desk-client");
+        let on_disk = std::fs::read_to_string(p.desk_config()).unwrap().replace(
+            "client_secret_file = \"client-secret\"",
+            &format!(
+                "client_secret_file = \"{}\"",
+                secret.display().to_string().replace('\\', "\\\\")
+            ),
+        );
+        std::fs::write(p.desk_config(), on_disk).unwrap();
+        assert_eq!(desk_secret_file(&p), secret);
+        assert!(write_desk_config(&p).is_ok());
+        assert_eq!(desk_secret_file(&p), secret, "a rerun keeps it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Setup writes the desk's client secret where the configuration on disk
+    /// says the desk reads it, and only then writes the configuration; the
+    /// guard on the store is asked between the two, with the store the file
+    /// names now and the store the text about to be written names. So the
+    /// paths a run resolves before the write have to be the paths the file
+    /// holds after it, on every mode, or setup would put the secret in one
+    /// file and have the desk read another.
+    #[test]
+    fn the_paths_a_run_resolves_before_the_desks_configuration_is_written_are_the_ones_it_holds_after()
+     {
+        let dir = scratch("desk-paths-order");
+        let desk = dir.join("desk");
+        let people = desk.join("state").join("nils-desk.sqlite");
+        let empty = desk.join("nils-desk.sqlite");
+        desk_store_holding(&people, &["reader"], &[("reader", "Readers")]);
+        desk_store_holding(&empty, &[], &[]);
+        let secret = dir.join("secrets").join("desk-client");
+
+        // A desk set by hand: its people in a store of their own, its signing
+        // key and its client secret file named where a person put them.
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Oidc;
+        p.oidc = Some(OidcPlan {
+            issuer: "https://auth.example.org/application/o/nils/".into(),
+            client_id: "abc123".into(),
+            jwks: "https://auth.example.org/application/o/nils/jwks/".into(),
+            roles_claim: "roles".into(),
+            scopes: None,
+        });
+        let quoted = |path: &Path| path.display().to_string().replace('\\', "\\\\");
+        let hand = format!(
+            "mode = \"oidc\"\nstore = \"{}\"\n\n[local]\nkey = \"by-hand\"\n\n[oidc]\nissuer = \
+             \"https://auth.example.org/application/o/nils/\"\nclient_id = \
+             \"abc123\"\nclient_secret_file = \"{}\"\n",
+            quoted(&people),
+            quoted(&secret)
+        );
+        std::fs::create_dir_all(&desk).unwrap();
+        std::fs::write(p.desk_config(), &hand).unwrap();
+
+        // what the steps before the write resolve, from the file on disk
+        assert_eq!(desk_secret_file(&p), secret);
+        assert_eq!(desk_store(&desk, false, Some(&hand)), Some(people.clone()));
+        assert!(desk_has_people(&desk, false));
+
+        for mode in [Mode::Oidc, Mode::Local, Mode::Off] {
+            p.mode = mode;
+            assert!(write_desk_config(&p).is_ok(), "{mode:?}");
+            let on_disk = std::fs::read_to_string(p.desk_config()).unwrap();
+            assert_eq!(desk_secret_file(&p), secret, "{mode:?}: the same file");
+            assert_eq!(
+                desk_store(&desk, false, Some(&on_disk)),
+                Some(people.clone()),
+                "{mode:?}: the same store"
+            );
+            assert!(on_disk.contains("key = \"by-hand\""), "{mode:?}: {on_disk}");
+            assert!(desk_has_people(&desk, false), "{mode:?}");
+            // the guard is asked with those two, and has nothing to refuse
+            assert_eq!(
+                desk_store_left(
+                    desk_store(&desk, false, Some(&hand)).as_deref(),
+                    desk_store(&desk, false, Some(&on_disk)).as_deref()
+                ),
+                None
+            );
+        }
+        // and it stands in front of the write for a run that would move the
+        // desk off them
+        assert!(
+            desk_store_left(Some(&people), Some(&empty))
+                .is_some_and(|said| said.starts_with("the desk's configuration was left as it was"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_desk_keeps_people_only_once_one_is_added() {
         let dir = scratch("desk-people");
         let mut p = plan(Runtime::Machine);
         p.dir = dir.clone();
         p.mode = Mode::Local;
-        assert!(!desk_has_people(&dir), "no store, nobody");
+        assert!(
+            !desk_has_people(&dir.join("desk"), false),
+            "no store, nobody"
+        );
         std::fs::create_dir_all(dir.join("desk")).unwrap();
         let conn = rusqlite::Connection::open(dir.join("desk").join("nils-desk.sqlite")).unwrap();
         conn.execute_batch(
@@ -20024,7 +22843,7 @@ mod tests {
         )
         .unwrap();
         // the store a desk that ran with nobody signing in has: there, and empty
-        assert!(!desk_has_people(&dir));
+        assert!(!desk_has_people(&dir.join("desk"), false));
         assert!(
             nobody_yet(&p).is_some_and(|line| line.contains("nils-desk user add <name> --admin")),
             "the end of setup says how to add the first"
@@ -20034,7 +22853,7 @@ mod tests {
             [],
         )
         .unwrap();
-        assert!(desk_has_people(&dir));
+        assert!(desk_has_people(&dir.join("desk"), false));
         assert!(nobody_yet(&p).is_none());
         p.mode = Mode::Off;
         drop(conn);
@@ -20331,7 +23150,7 @@ mod tests {
     /// directory at all. Ten are read.
     fn a_sites_places() -> Vec<String> {
         [
-            "archives=/data/nils-archives/registry,role=backup,snapshots,protected",
+            "archives=/data/archives/registry,role=backup,snapshots,protected",
             "registry=/srv/nils/registry,role=registry,backup=archives,snapshots,protected,fast",
             "source=/data/source,role=source,snapshots,protected",
             "archive=/data/archive,role=backup,protected,read",
@@ -20449,7 +23268,7 @@ mod tests {
         )
         .join(" ");
         assert!(
-            argv.contains("--backup-dir /data/nils-archives/registry"),
+            argv.contains("--backup-dir /data/archives/registry"),
             "the archives go to the backup place the registry names: {argv}"
         );
         assert!(argv.contains("--pack-dir /srv/nils/engine/packs"), "{argv}");
@@ -20469,7 +23288,7 @@ mod tests {
         };
         assert_eq!(
             backups_dir(Some(&site), dir),
-            PathBuf::from("/data/nils-archives/registry")
+            PathBuf::from("/data/archives/registry")
         );
         let named = Site {
             backup_dir: Some("/data/elsewhere".to_string()),
@@ -20522,7 +23341,7 @@ mod tests {
     fn places_that_do_not_hold_this_installs_registry_or_its_archives_are_refused() {
         let places = places_given(&a_sites_places()).unwrap();
         let registry = Path::new("/srv/nils/registry");
-        let backups = Path::new("/data/nils-archives/registry");
+        let backups = Path::new("/data/archives/registry");
         assert_eq!(places_refusal(&places, registry, backups), None);
         let moved = places_refusal(&places, Path::new("/opt/nils/registry"), backups).unwrap();
         assert!(moved.contains("or install with --dir /srv/nils"), "{moved}");
@@ -20578,10 +23397,7 @@ mod tests {
             "an update and a repair declare the same places, and no more"
         );
         assert_eq!(plan.read_from().len(), 10);
-        assert_eq!(
-            plan.backups(),
-            PathBuf::from("/data/nils-archives/registry")
-        );
+        assert_eq!(plan.backups(), PathBuf::from("/data/archives/registry"));
         assert_eq!(
             plan.pack_dir(),
             Some(PathBuf::from("/srv/nils/engine/packs"))
@@ -20609,10 +23425,7 @@ mod tests {
             "a working and an export directory under the install directory are not this site's, \
              and archives at a backup place it declared are on its own filesystem"
         );
-        assert_eq!(
-            plan.backups(),
-            PathBuf::from("/data/nils-archives/registry")
-        );
+        assert_eq!(plan.backups(), PathBuf::from("/data/archives/registry"));
         let inside = a_site(Site {
             places: places_given(&[
                 "archives=/srv/nils/archives,role=backup".to_string(),
@@ -22033,6 +24846,43 @@ mod tests {
                 vec!["systemctl", "--user", "disable", "nils-llama"],
             ],
             "llama.cpp beside parts in containers runs under the account's manager"
+        );
+
+        // The unit held back is the one this install runs llama.cpp under,
+        // read from the record the same way the ports are settled against it
+        // and a part is stopped while its files change, so the three never
+        // disagree about nils-llama.
+        state.service = "systemd".to_string();
+        assert_eq!(
+            service_units(&state)
+                .into_iter()
+                .find(|unit| unit.part == LLAMA_PART)
+                .map(|unit| unit.name),
+            Some("nils-llama".to_string())
+        );
+        assert!(state.system.is_none());
+        assert_eq!(llama_held_back_calls(&state), hold_llama_back_calls(false));
+        let mut machine = state.clone();
+        machine.system = Some(SystemUnits {
+            capabilities: Vec::new(),
+            accounts: BTreeMap::new(),
+        });
+        assert_eq!(
+            llama_held_back_calls(&machine),
+            hold_llama_back_calls(true),
+            "on the manager the unit is on"
+        );
+        let mut no_units = state.clone();
+        no_units.service = "none".to_string();
+        assert!(
+            llama_held_back_calls(&no_units).is_empty(),
+            "an install that runs no units has no nils-llama of its own to stop"
+        );
+        let mut no_build = state.clone();
+        no_build.parts.remove(LLAMA_PART);
+        assert!(
+            llama_held_back_calls(&no_build).is_empty(),
+            "and neither has one with no build on record"
         );
 
         // held back, llama.cpp's unit alone is left out of what is started
