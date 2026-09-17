@@ -141,9 +141,10 @@ links once it is unpacked, and before anything is placed where an earlier run
 unpacked it: a library the machine lacks is named with its package where that
 is known, and an install stops before any service starts. A build that does not
 run at all is said in the loader's words. An update, a repair or the restart
-after `nils update --all` says the same, holds llama.cpp alone back and starts
-every other service, which runs without it. Otherwise setup names the devices
-llama.cpp runs a model on.
+after `nils update --all` says the same and holds llama.cpp alone back: its
+unit is stopped and taken out of the boot, rather than left failing and
+restarting on a build that has been replaced, and every other service starts
+without it. Otherwise setup names the devices llama.cpp runs a model on.
 
 The wizard never installs a model. It asks what the assistant talks to: a
 model server on this machine or on another machine of yours, a commercial

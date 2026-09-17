@@ -16,6 +16,7 @@
 //! is decided by a pure function that says what the commands are; the
 //! wizard then runs them. `--print` stops after saying, which is what the
 //! tests read.
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
@@ -6191,9 +6192,7 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
         Reading::Update
     };
     sources_said_or_stop(reading, read.as_ref(), console)?;
-    if let Some(refused) = recorded_masks_refusal(&mut plan) {
-        return Err(fail(format!("nothing was changed: {refused}")));
-    }
+    masks_said_or_stop(recorded_masks_refusal(&mut plan), args.print, console)?;
     if let Ok(newest) = update::newest_version(&update::engine_base(args.channel.as_deref())) {
         plan.version = newest;
     }
@@ -6256,6 +6255,21 @@ fn update_engine_binary(channel: Option<&str>, console: &mut Console) {
     }
 }
 
+/// What an update or a repair does with a path no unit can hide from a
+/// part's account: a run for real stops with nothing changed, and `--print`
+/// says it and goes on, as the questions do, since a print changes nothing
+/// and refuses nothing.
+fn masks_said_or_stop(refused: Option<String>, print: bool, console: &Console) -> Result<(), Exit> {
+    match refused {
+        None => Ok(()),
+        Some(refused) if print => {
+            console.note(&refused);
+            Ok(())
+        }
+        Some(refused) => Err(fail(format!("nothing was changed: {refused}"))),
+    }
+}
+
 /// Where an update or a repair read the registry's source places as the
 /// engine's account and they were not read: said before anything is done, or
 /// the run stopped with nothing changed.
@@ -6290,9 +6304,7 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         Reading::Repair
     };
     sources_said_or_stop(reading, read.as_ref(), console)?;
-    if let Some(refused) = recorded_masks_refusal(&mut plan) {
-        return Err(fail(format!("nothing was changed: {refused}")));
-    }
+    masks_said_or_stop(recorded_masks_refusal(&mut plan), args.print, console)?;
     println!();
     println!("{}", console.bold("Repairing"));
     print!("{}", plan_text(&plan, console));
@@ -6391,7 +6403,7 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     if plan.service {
         // llama.cpp alone is held back where it cannot start, as it said at
         // its own step.
-        let starting = services_to_start(&state, llama_starts);
+        let starting = holding_llama_back(plan, &state, llama_starts);
         match start_everything(plan, &starting, console, None) {
             Ok(started) => {
                 console.report(&started);
@@ -7402,7 +7414,7 @@ fn place(
     let mut services = Vec::new();
     if plan.service {
         console.begin(Stage::Services);
-        let starting = services_to_start(state, llama_starts);
+        let starting = holding_llama_back(plan, state, llama_starts);
         match start_everything(plan, &starting, console, answers.model.as_ref()) {
             Ok(started) => {
                 console.report(&started);
@@ -10639,20 +10651,50 @@ fn llama_held(said: String, install: bool) -> String {
 }
 
 /// What an update, a repair or a restart adds where llama.cpp cannot start.
-const LLAMA_HELD_ALONE: &str = "llama.cpp alone is held back until nils setup and repair can \
-                                start it, and the other services start without it";
+const LLAMA_HELD_ALONE: &str = "llama.cpp alone is held back, its unit stopped and taken out of \
+                                the boot until nils setup and repair can start it, and the other \
+                                services start without it";
+
+/// llama.cpp held back: its unit stopped and taken out of the boot, and the
+/// record every other service is started from. An update replaces the build
+/// its unit names, so a unit left running is a process whose files are gone,
+/// restarted every few seconds by `Restart=on-failure`, and one left enabled
+/// starts into the same loop at the next boot; stopped and disabled, it is
+/// quiet until it can run. The unit file is left where it is, so `--print`
+/// and the log still show what it would run, and the setup or repair that
+/// can start llama.cpp again writes it, enables it and starts it, as it
+/// does every other unit.
+fn holding_llama_back<'a>(plan: &Plan, state: &'a State, llama_starts: bool) -> Cow<'a, State> {
+    if !llama_starts && state.parts.contains_key(LLAMA_PART) && !cfg!(target_os = "macos") {
+        for argv in hold_llama_back_calls(plan.system.is_some()) {
+            let words: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+            quietly(&argv[0], &words);
+        }
+    }
+    services_to_start(state, llama_starts)
+}
+
+/// The calls that hold llama.cpp's unit back, on the manager that runs it:
+/// the machine's own where the services are the machine's, and the account's
+/// where llama.cpp runs beside parts in containers.
+fn hold_llama_back_calls(system: bool) -> Vec<Vec<String>> {
+    vec![
+        systemctl_argv(system, &["stop", "nils-llama"]),
+        systemctl_argv(system, &["disable", "nils-llama"]),
+    ]
+}
 
 /// The record the services are started from: the install's own, or, where
 /// llama.cpp cannot start, the same without its build, so that llama.cpp's
 /// unit is neither written nor started and every other unit is, as it would
 /// have been. The record kept on disk still names the build.
-fn services_to_start(state: &State, llama_starts: bool) -> std::borrow::Cow<'_, State> {
+fn services_to_start(state: &State, llama_starts: bool) -> Cow<'_, State> {
     if llama_starts || !state.parts.contains_key(LLAMA_PART) {
-        return std::borrow::Cow::Borrowed(state);
+        return Cow::Borrowed(state);
     }
     let mut held = state.clone();
     held.parts.remove(LLAMA_PART);
-    std::borrow::Cow::Owned(held)
+    Cow::Owned(held)
 }
 
 /// After `nils update` moves this binary, the setup record says so. The
@@ -13483,7 +13525,7 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     println!("restarting the services");
     match start_everything(
         &plan,
-        &services_to_start(&state, llama_starts),
+        &holding_llama_back(&plan, &state, llama_starts),
         &console,
         None,
     ) {
@@ -17586,6 +17628,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn an_update_and_a_repair_stop_on_a_path_no_unit_can_hide_and_a_print_says_it_and_goes_on() {
+        let plan = deployment();
+        let masks = masks_when(&plan, root_refused_at(&["/data/source"]), |_, _| Some(true));
+        let refused = in_reach_refusal(&masks).expect("refused");
+        let console = Console::new(true);
+        // both an update and a repair say it this way, with nothing changed
+        let stopped = masks_said_or_stop(Some(refused.clone()), false, &console)
+            .expect_err("a run for real stops");
+        assert_eq!(stopped.message, format!("nothing was changed: {refused}"));
+        assert!(
+            masks_said_or_stop(Some(refused), true, &console).is_ok(),
+            "a print changes nothing, so it refuses nothing"
+        );
+        assert!(masks_said_or_stop(None, false, &console).is_ok());
     }
 
     #[cfg(unix)]
@@ -21909,8 +21968,9 @@ mod tests {
         assert_eq!(
             llama_held(llama_lacks_said(&lacks), false),
             "llama.cpp b10964 cannot start, since this machine lacks libgomp.so.1, which \
-             llama.cpp links: install libgomp1 (Debian, Ubuntu); llama.cpp alone is held back \
-             until nils setup and repair can start it, and the other services start without it"
+             llama.cpp links: install libgomp1 (Debian, Ubuntu); llama.cpp alone is held back, \
+             its unit stopped and taken out of the boot until nils setup and repair can start \
+             it, and the other services start without it"
         );
         // an install stops on the reason alone
         assert_eq!(
@@ -21956,6 +22016,24 @@ mod tests {
         let all = names(&state);
         assert!(all.contains(&"nils-llama.service".to_string()), "{all:?}");
         assert_eq!(names(&services_to_start(&state, true)), all);
+
+        // held back, its unit is stopped and taken out of the boot, on the
+        // manager that runs it, and left where it is for setup to write again
+        assert_eq!(
+            hold_llama_back_calls(true),
+            vec![
+                vec!["systemctl", "stop", "nils-llama"],
+                vec!["systemctl", "disable", "nils-llama"],
+            ]
+        );
+        assert_eq!(
+            hold_llama_back_calls(false),
+            vec![
+                vec!["systemctl", "--user", "stop", "nils-llama"],
+                vec!["systemctl", "--user", "disable", "nils-llama"],
+            ],
+            "llama.cpp beside parts in containers runs under the account's manager"
+        );
 
         // held back, llama.cpp's unit alone is left out of what is started
         let held = services_to_start(&state, false);
