@@ -16722,7 +16722,7 @@ mod tests {
         assert!(units_dir(false).ends_with("systemd/user"));
     }
 
-    /// The engine's account and binary of the group's install, as a step
+    /// The engine's account and binary of a site's install, as a step
     /// taken as that account names them.
     fn as_the_engine() -> AsAccount {
         AsAccount {
@@ -17078,7 +17078,7 @@ mod tests {
     fn a_step_as_the_engines_account_has_the_services_environment_and_none_of_roots() {
         let environment = service_environment(
             "nils",
-            home_of_passwd("nils:x:1500:1500::/home/nils:/bin/bash\n"),
+            home_of_passwd("nils:x:999:999::/home/nils:/bin/bash\n"),
             Some("C.UTF-8".to_string()),
         );
         assert_eq!(
@@ -17097,7 +17097,7 @@ mod tests {
             "no home and no language where there are none"
         );
         assert_eq!(
-            home_of_passwd("nilsweb:x:1501:1501::/nonexistent:/usr/sbin/nologin").as_deref(),
+            home_of_passwd("nils-desk:x:998:998::/nonexistent:/usr/sbin/nologin").as_deref(),
             Some("/nonexistent")
         );
 
@@ -17222,15 +17222,15 @@ mod tests {
         assert!(said.contains("places as nils-engine"), "{said}");
     }
 
-    /// The accounts of the group's install: the desk, Kvasir and the
-    /// assistant as nilsweb, the engine as nils.
-    fn the_groups_accounts() -> SystemUnits {
+    /// The accounts of a site's install: the desk, Kvasir and the
+    /// assistant as nils-desk, the engine as nils.
+    fn a_sites_accounts() -> SystemUnits {
         SystemUnits {
             capabilities: Vec::new(),
             accounts: BTreeMap::from([
                 ("engine".to_string(), "nils".to_string()),
-                ("desk".to_string(), "nilsweb".to_string()),
-                ("assistant".to_string(), "nilsweb".to_string()),
+                ("desk".to_string(), "nils-desk".to_string()),
+                ("assistant".to_string(), "nils-desk".to_string()),
             ]),
         }
     }
@@ -17253,13 +17253,13 @@ mod tests {
     #[test]
     fn source_steps_are_the_parts_account_only_for_the_machines_services_set_up_by_root() {
         let dir = Path::new("/srv/nils");
-        let group = the_groups_accounts();
+        let site = a_sites_accounts();
         assert_eq!(
-            acting_account(Some(&group), "assistant", true).as_deref(),
-            Some("nilsweb"),
+            acting_account(Some(&site), "assistant", true).as_deref(),
+            Some("nils-desk"),
             "the account the parts' folders are handed to, not the engine's"
         );
-        assert_eq!(acting_account(Some(&group), "assistant", false), None);
+        assert_eq!(acting_account(Some(&site), "assistant", false), None);
         assert_eq!(acting_account(None, "assistant", true), None);
         let as_root = SystemUnits {
             accounts: BTreeMap::from([("assistant".to_string(), "root".to_string())]),
@@ -17276,34 +17276,34 @@ mod tests {
             "an install of this account's own takes its source as itself, root or not"
         );
         assert_eq!(
-            source_hands(Some(&group), dir, false, false),
+            source_hands(Some(&site), dir, false, false),
             SourceHands::Own,
             "a run that is not root runs nothing as another account"
         );
 
         assert_eq!(
             source_hands_when(
-                Some("nilsweb".to_string()),
+                Some("nils-desk".to_string()),
                 true,
-                Some("/home/nilsweb".to_string()),
+                Some("/home/nils-desk".to_string()),
                 dir,
                 Some("C.UTF-8".to_string()),
             ),
             SourceHands::As(PartAccount {
-                account: "nilsweb".to_string(),
-                home: PathBuf::from("/home/nilsweb"),
+                account: "nils-desk".to_string(),
+                home: PathBuf::from("/home/nils-desk"),
                 lang: Some("C.UTF-8".to_string()),
             }),
             "a home the account writes in is the home it builds with"
         );
         let SourceHands::As(taking) =
-            source_hands_when(Some("nilsweb".to_string()), true, None, dir, None)
+            source_hands_when(Some("nils-desk".to_string()), true, None, dir, None)
         else {
             panic!("root can act as the account");
         };
         assert_eq!(
             taking.home,
-            PathBuf::from("/srv/nils/build-cache/nilsweb"),
+            PathBuf::from("/srv/nils/build-cache/nils-desk"),
             "a home it cannot write is replaced by the install's folder for it"
         );
         for kept in [
@@ -17323,7 +17323,7 @@ mod tests {
         }
         for inside in ["/srv/nils/assistant", "/srv/nils/kvasir/state"] {
             let SourceHands::As(taking) = source_hands_when(
-                Some("nilsweb".to_string()),
+                Some("nils-desk".to_string()),
                 true,
                 Some(inside.to_string()),
                 dir,
@@ -17333,12 +17333,12 @@ mod tests {
             };
             assert_eq!(
                 taking.home,
-                build_cache(dir, "nilsweb"),
+                build_cache(dir, "nils-desk"),
                 "a home in a part's folder would put npm's cache in a checkout: {inside}"
             );
         }
         assert_eq!(
-            source_hands_when(Some("nilsweb".to_string()), false, None, dir, None),
+            source_hands_when(Some("nils-desk".to_string()), false, None, dir, None),
             SourceHands::Root,
             "an account root cannot act as leaves the steps to root"
         );
@@ -17354,11 +17354,11 @@ mod tests {
         let dir = Path::new("/srv/nils");
         let into = dir.join("kvasir");
         let hands = SourceHands::As(PartAccount {
-            account: "nilsweb".to_string(),
-            home: build_cache(dir, "nilsweb"),
+            account: "nils-desk".to_string(),
+            home: build_cache(dir, "nils-desk"),
             lang: Some("C.UTF-8".to_string()),
         });
-        let as_part = ["runuser", "-u", "nilsweb", "--preserve-environment", "--"];
+        let as_part = ["runuser", "-u", "nils-desk", "--preserve-environment", "--"];
         let with = |rest: &[&str]| -> Vec<String> {
             as_part
                 .iter()
@@ -17368,11 +17368,11 @@ mod tests {
         };
         let environment = vec![
             ("PATH".to_string(), SERVICE_PATH.to_string()),
-            ("USER".to_string(), "nilsweb".to_string()),
-            ("LOGNAME".to_string(), "nilsweb".to_string()),
+            ("USER".to_string(), "nils-desk".to_string()),
+            ("LOGNAME".to_string(), "nils-desk".to_string()),
             (
                 "HOME".to_string(),
-                "/srv/nils/build-cache/nilsweb".to_string(),
+                "/srv/nils/build-cache/nils-desk".to_string(),
             ),
             ("LANG".to_string(), "C.UTF-8".to_string()),
         ];
@@ -17476,8 +17476,8 @@ mod tests {
         assert_eq!(
             source_step(
                 &SourceHands::As(PartAccount {
-                    account: "nilsweb".to_string(),
-                    home: PathBuf::from("/home/nilsweb"),
+                    account: "nils-desk".to_string(),
+                    home: PathBuf::from("/home/nils-desk"),
                     lang: None,
                 }),
                 "npm",
@@ -17487,8 +17487,8 @@ mod tests {
             )
             .environment,
             Some(service_environment(
-                "nilsweb",
-                Some("/home/nilsweb".to_string()),
+                "nils-desk",
+                Some("/home/nils-desk".to_string()),
                 None
             )),
             "with a home of its own, exactly the service's environment"
@@ -17715,7 +17715,7 @@ mod tests {
             "left as it is"
         );
 
-        let cache = build_cache(&root, "nilsweb");
+        let cache = build_cache(&root, "nils-desk");
         ready_build_cache(&cache, ids).unwrap();
         assert!(cache.is_dir());
         {
@@ -17816,13 +17816,13 @@ mod tests {
         );
         let read = sources_said(
             r#"{"registry": true, "sources": [{"name": "source", "path": "/data/source"},
-                {"name": "scanner2", "path": "/data/scanner-2"}]}"#,
+                {"name": "scanner2", "path": "/data/two"}]}"#,
         );
         assert_eq!(
             read,
             SourcesRead::Read(vec![
                 ("source".to_string(), PathBuf::from("/data/source")),
-                ("scanner2".to_string(), PathBuf::from("/data/scanner-2")),
+                ("scanner2".to_string(), PathBuf::from("/data/two")),
             ])
         );
         let recorded = vec![("source".to_string(), PathBuf::from("/data/source"))];
@@ -17948,26 +17948,26 @@ mod tests {
         assert_eq!(back, specs, "every place and every guarantee, in order");
 
         let answered = concat!(
-            r#"{"said":"the source place is now /data/source-b"}"#,
+            r#"{"said":"the source place is now /data/moved"}"#,
             "\n",
-            r#"{"places":[{"name":"source","role":"source","path":"/data/source-b"},"#,
-            r#"{"name":"scanner2","role":"source","path":"/data/scanner-2"}]}"#,
+            r#"{"places":[{"name":"source","role":"source","path":"/data/moved"},"#,
+            r#"{"name":"scanner2","role":"source","path":"/data/two"}]}"#,
             "\n"
         );
         let (said, declared) = declared_said(answered);
-        assert_eq!(said, ["the source place is now /data/source-b"]);
+        assert_eq!(said, ["the source place is now /data/moved"]);
         let declared = declared.unwrap();
         assert_eq!(declared.len(), 2);
         assert_eq!(
             recorded_sources(&declared),
             [
-                ("source".to_string(), PathBuf::from("/data/source-b")),
-                ("scanner2".to_string(), PathBuf::from("/data/scanner-2")),
+                ("source".to_string(), PathBuf::from("/data/moved")),
+                ("scanner2".to_string(), PathBuf::from("/data/two")),
             ],
             "a source added at the desk is kept on record beside the ones setup declared"
         );
         let (said, declared) =
-            declared_said("{\"said\":\"the source place is now /data/source-b\"}\n");
+            declared_said("{\"said\":\"the source place is now /data/moved\"}\n");
         assert_eq!(said.len(), 1, "a move made before a failure is still said");
         assert_eq!(declared, None);
     }
