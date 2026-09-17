@@ -963,11 +963,14 @@ impl AsAccount {
             stdout: String::new(),
             why,
         };
-        // Started in /, as systemd starts the service, rather than in a
-        // folder of root's that the account may not enter.
-        let spawned = Command::new(runuser_program())
-            .args(&argv[1..])
-            .current_dir("/")
+        let environment = service_environment(
+            &self.account,
+            run_quiet("getent", &["passwd", &self.account])
+                .as_deref()
+                .and_then(home_of_passwd),
+            std::env::var("LANG").ok(),
+        );
+        let spawned = as_the_service(&runuser_program(), &argv[1..], &environment)
             .stdin(if input.is_some() {
                 Stdio::piped()
             } else {
@@ -1008,6 +1011,64 @@ impl AsAccount {
             why,
         }
     }
+}
+
+/// systemd's own path for the services of a machine, which a unit that
+/// names none, as the engine's does not, runs with.
+const SERVICE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin";
+
+/// The environment the engine's service runs with, which a step taken as its
+/// account runs with too, and nothing of root's. runuser keeps the caller's
+/// environment but for a few names, and the engine reads some of it: a
+/// `NILS_DSN` would send `nils init` to another database than the one it
+/// writes into `nils.toml`, and every step after it to that one, while the
+/// service reads the file; `NILS_PRINCIPAL`, `NILS_ACTOR` and `HOSTNAME` would
+/// sign the audit rows of the places declared; and root's `TMPDIR` may be a
+/// folder the account cannot enter. The unit sets none of those, so neither
+/// does this: the path systemd gives a service, the account's own name and
+/// the home its passwd entry names, as `User=` sets them, and the language
+/// root runs setup in, where it has one.
+fn service_environment(
+    account: &str,
+    home: Option<String>,
+    lang: Option<String>,
+) -> Vec<(String, String)> {
+    let mut out = vec![
+        ("PATH".to_string(), SERVICE_PATH.to_string()),
+        ("USER".to_string(), account.to_string()),
+        ("LOGNAME".to_string(), account.to_string()),
+    ];
+    if let Some(home) = home {
+        out.push(("HOME".to_string(), home));
+    }
+    if let Some(lang) = lang.filter(|l| !l.is_empty()) {
+        out.push(("LANG".to_string(), lang));
+    }
+    out
+}
+
+/// The home an account's passwd entry names, from what `getent passwd` says.
+fn home_of_passwd(entry: &str) -> Option<String> {
+    entry
+        .lines()
+        .next()?
+        .split(':')
+        .nth(5)
+        .filter(|home| !home.is_empty())
+        .map(str::to_string)
+}
+
+/// A command started as the engine's service is: in /, rather than in a
+/// folder of root's the account may not enter, and with the environment
+/// given and nothing else.
+fn as_the_service(program: &str, args: &[String], environment: &[(String, String)]) -> Command {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir("/")
+        .env_clear()
+        .envs(environment.iter().map(|(name, value)| (name, value)));
+    command
 }
 
 /// What a step taken as the engine's account came to.
@@ -1059,25 +1120,62 @@ struct AccountStep {
     undone: &'static str,
 }
 
+/// The registry an install makes: its backend, the key named `nils`, and the
+/// pseudonym scheme and the length a code is shown at. The same whichever
+/// account makes it, since every pseudonym the registry ever gives follows
+/// from these, so a registry made in setup's own process and one made as the
+/// engine's account are both made from this.
+fn registry_init(backend: &BackendChoice) -> InitOptions {
+    let (backend, dsn, schema) = match backend {
+        BackendChoice::Sqlite => (Backend::Sqlite, None, None),
+        BackendChoice::Postgres { dsn, schema } => {
+            (Backend::Postgres, Some(dsn.clone()), Some(schema.clone()))
+        }
+    };
+    InitOptions {
+        backend,
+        dsn,
+        schema,
+        scheme: Scheme::Blake2b32,
+        key: "nils".to_string(),
+        display_length: 12,
+        session_scheme: None,
+    }
+}
+
 /// The two steps that make a registry, as the documentation gives them and
 /// as the container install takes them: the key added, with its passphrase
 /// on the input, then the registry made on that key. The passphrase goes
 /// over as it was given, since `nils key add` drops one final newline just
 /// as setup did when it added the key in its own process, so the key is the
-/// same either way. `nils init` takes the connection string on its command
-/// line, as the container install gives it.
+/// same either way. `nils init` is given every setting of [`registry_init`]
+/// outright rather than left to its defaults, which could change without
+/// this noticing; it takes the connection string on its command line, as the
+/// container install gives it. The default session scheme is `nils init`'s
+/// without the flag, as it is setup's.
 fn registry_made_steps(backend: &BackendChoice, passphrase: &str) -> Vec<AccountStep> {
-    let mut init = owned_words(&["init", "--key", "nils", "--backend"]);
-    match backend {
-        BackendChoice::Sqlite => init.push("sqlite".to_string()),
-        BackendChoice::Postgres { dsn, schema } => init.extend([
-            "postgres".to_string(),
+    let opts = registry_init(backend);
+    let mut init = vec![
+        "init".to_string(),
+        "--key".to_string(),
+        opts.key.clone(),
+        "--backend".to_string(),
+        opts.backend.name().to_string(),
+    ];
+    if let (Some(dsn), Some(schema)) = (&opts.dsn, &opts.schema) {
+        init.extend([
             "--dsn".to_string(),
             dsn.clone(),
             "--schema".to_string(),
             schema.clone(),
-        ]),
+        ]);
     }
+    init.extend([
+        "--scheme".to_string(),
+        opts.scheme.name().to_string(),
+        "--display-length".to_string(),
+        opts.display_length.to_string(),
+    ]);
     vec![
         AccountStep {
             words: owned_words(&["key", "add", "nils"]),
@@ -7530,27 +7628,8 @@ fn make_registry(
     home.keys(None)
         .add("nils", bytes)
         .map_err(|e| fail(e.to_string()))?;
-    let opts = match &plan.backend {
-        BackendChoice::Sqlite => InitOptions {
-            backend: Backend::Sqlite,
-            dsn: None,
-            schema: None,
-            scheme: Scheme::Blake2b32,
-            key: "nils".to_string(),
-            display_length: 12,
-            session_scheme: None,
-        },
-        BackendChoice::Postgres { dsn, schema } => InitOptions {
-            backend: Backend::Postgres,
-            dsn: Some(dsn.clone()),
-            schema: Some(schema.clone()),
-            scheme: Scheme::Blake2b32,
-            key: "nils".to_string(),
-            display_length: 12,
-            session_scheme: None,
-        },
-    };
-    home.init(&opts).map_err(|e| fail(e.to_string()))?;
+    home.init(&registry_init(&plan.backend))
+        .map_err(|e| fail(e.to_string()))?;
     console.progress(&format!("registry at {}", home.dir().display()));
     Ok(())
 }
@@ -16146,7 +16225,11 @@ mod tests {
                 "--dsn",
                 "postgresql://nils@%2Frun%2Fpostgresql/nils",
                 "--schema",
-                "nils"
+                "nils",
+                "--scheme",
+                "blake2b-32",
+                "--display-length",
+                "12"
             ]
         );
         assert_eq!(steps[1].input, None);
@@ -16161,8 +16244,136 @@ mod tests {
         let sqlite = registry_made_steps(&BackendChoice::Sqlite, passphrase);
         assert_eq!(
             sqlite[1].words,
-            ["init", "--key", "nils", "--backend", "sqlite"]
+            [
+                "init",
+                "--key",
+                "nils",
+                "--backend",
+                "sqlite",
+                "--scheme",
+                "blake2b-32",
+                "--display-length",
+                "12"
+            ]
         );
+    }
+
+    #[test]
+    fn a_registry_made_as_the_engines_account_is_the_registry_setup_makes_in_its_own_process() {
+        use clap::Parser as _;
+        for backend in [
+            BackendChoice::Sqlite,
+            BackendChoice::Postgres {
+                dsn: "postgresql://nils@%2Frun%2Fpostgresql/nils".to_string(),
+                schema: "nils".to_string(),
+            },
+        ] {
+            let steps = registry_made_steps(&backend, "a passphrase");
+            let argv = as_the_engine().argv(&steps[1].words);
+            // read back from the engine binary's words, as nils init reads them
+            let cli = crate::Cli::try_parse_from(&argv[4..])
+                .unwrap_or_else(|e| panic!("{argv:?} is not a command nils takes: {e}"));
+            assert_eq!(
+                cli.registry.as_deref(),
+                Some(Path::new("/srv/nils/registry"))
+            );
+            let crate::Command::Init(args) = cli.command else {
+                panic!("{argv:?} is not nils init");
+            };
+            let given = crate::init_options(args)
+                .unwrap_or_else(|e| panic!("{argv:?} was refused: {}", e.message));
+            let own = registry_init(&backend);
+            assert_eq!(given.backend, own.backend, "{argv:?}");
+            assert_eq!(given.dsn, own.dsn, "{argv:?}");
+            assert_eq!(given.schema, own.schema, "{argv:?}");
+            assert_eq!(given.key, own.key, "{argv:?}");
+            assert_eq!(
+                given.scheme, own.scheme,
+                "every pseudonym follows from the scheme: {argv:?}"
+            );
+            assert_eq!(
+                given.display_length, own.display_length,
+                "and the length a code is shown at: {argv:?}"
+            );
+            assert_eq!(given.session_scheme, own.session_scheme, "{argv:?}");
+        }
+        assert_eq!(
+            registry_init(&BackendChoice::Sqlite).scheme,
+            Scheme::Blake2b32
+        );
+        assert_eq!(registry_init(&BackendChoice::Sqlite).display_length, 12);
+    }
+
+    #[test]
+    fn a_step_as_the_engines_account_has_the_services_environment_and_none_of_roots() {
+        let environment = service_environment(
+            "nils",
+            home_of_passwd("nils:x:1500:1500::/home/nils:/bin/bash\n"),
+            Some("C.UTF-8".to_string()),
+        );
+        assert_eq!(
+            environment,
+            [
+                ("PATH".to_string(), SERVICE_PATH.to_string()),
+                ("USER".to_string(), "nils".to_string()),
+                ("LOGNAME".to_string(), "nils".to_string()),
+                ("HOME".to_string(), "/home/nils".to_string()),
+                ("LANG".to_string(), "C.UTF-8".to_string()),
+            ]
+        );
+        assert_eq!(
+            service_environment("nils", home_of_passwd(""), None).len(),
+            3,
+            "no home and no language where there are none"
+        );
+        assert_eq!(
+            home_of_passwd("nilsweb:x:1501:1501::/nonexistent:/usr/sbin/nologin").as_deref(),
+            Some("/nonexistent")
+        );
+
+        let argv = as_the_engine().argv(&owned_words(&[REGISTRY_STEP, "sources"]));
+        let command = as_the_service("runuser", &argv[1..], &environment);
+        assert_eq!(command.get_program(), "runuser");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            argv[1..]
+                .iter()
+                .map(std::ffi::OsStr::new)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(command.get_current_dir(), Some(Path::new("/")));
+        let mut set: Vec<(String, String)> = command
+            .get_envs()
+            .filter_map(|(name, value)| {
+                Some((
+                    name.to_string_lossy().to_string(),
+                    value?.to_string_lossy().to_string(),
+                ))
+            })
+            .collect();
+        set.sort();
+        let mut given = environment.clone();
+        given.sort();
+        assert_eq!(set, given);
+
+        // and nothing else reaches it: this test runs under cargo, whose
+        // environment is full of names, and the command sees only these
+        if cfg!(unix) && Path::new("/usr/bin/env").exists() {
+            let out = as_the_service("/usr/bin/env", &[], &environment)
+                .output()
+                .expect("env runs");
+            let mut seen: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect();
+            seen.sort();
+            let mut want: Vec<String> = environment
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect();
+            want.sort();
+            assert_eq!(seen, want);
+        }
     }
 
     #[test]
@@ -16199,7 +16410,8 @@ mod tests {
         assert!(
             said.contains(&format!(
                 "{as_engine} init --key nils --backend postgres --dsn \
-                 postgres://nils:***@db.example.org/nils --schema nils\n"
+                 postgres://nils:***@db.example.org/nils --schema nils --scheme blake2b-32 \
+                 --display-length 12\n"
             )),
             "{said}"
         );

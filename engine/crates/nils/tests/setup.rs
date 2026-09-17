@@ -963,7 +963,9 @@ fn print_says_the_units_and_the_calls_of_an_install_on_this_machine() {
         dir.join("registry").display()
     );
     o.says(&format!("{as_engine} key add nils\n"));
-    o.says(&format!("{as_engine} init --key nils --backend sqlite\n"));
+    o.says(&format!(
+        "{as_engine} init --key nils --backend sqlite --scheme blake2b-32 --display-length 12\n"
+    ));
     o.says(&format!(
         "{as_engine} place add registry {} --role registry --backup backups",
         dir.join("registry").display()
