@@ -108,16 +108,17 @@ answer the desk would refuse is asked for again. For an identity provider it
 prints the `nils-desk register --authentik ...` line rather than pretending
 to have run it.
 
-An install that would not work is not finished. Before anything is placed,
-the plan names what this machine lacks for it (Node 22, git and npm for the
-assistant; podman or docker for their runtime), and nothing is changed until
-it is there. A model is taken only once it answers one short question. While
-installing, a failure that leaves a chosen part unusable stops the install
-with the reason: the desk not installed or nobody added to it, a place not
-declared, the rule packs, the assistant, Kvasir, its model or its key, or a
-service that does not start. `nils uninstall` removes what was placed,
-and `nils setup` starts again. An update or a repair says the same and goes
-on, so what still works keeps running.
+An install that would not work is not finished. Before anything is placed, the
+plan names what this machine lacks for it (Node 22, git and npm for the
+assistant, and on Linux the libraries llama.cpp links, such as `libgomp.so.1`
+from `libgomp1` on Debian and Ubuntu; podman or docker for their runtime), and
+nothing is changed until it is there. A model is taken only once it answers
+one short question. While installing, a failure that leaves a chosen part
+unusable stops the install with the reason: the desk not installed or nobody
+added to it, a place not declared, the rule packs, the assistant, Kvasir, its
+model or its key, or a service that does not start. `nils uninstall` removes
+what was placed, and `nils setup` starts again. An update or a repair says the
+same and goes on, so what still works keeps running.
 
 **6. What this machine can do.** The wizard reads the graphics card
 (`nvidia-smi`, then `rocm-smi`, then an Apple machine's unified memory) and
@@ -135,8 +136,15 @@ Linux the Vulkan build where there is a graphics card or a render node and the
 CPU build otherwise, and on macOS the build for its processor. Where a Linux
 machine has no Vulkan loader, the plan says that a model then runs on the
 processor, and names the package that brings one (`libvulkan1` on Debian and
-Ubuntu, `vulkan-loader` on Fedora). Once it is unpacked, setup names the
-devices llama.cpp runs a model on.
+Ubuntu, `vulkan-loader` on Fedora). On Linux, `ldd` reads what the build
+links once it is unpacked, and before anything is placed where an earlier run
+unpacked it: a library the machine lacks is named with its package where that
+is known, and an install stops before any service starts. A build that does not
+run at all is said in the loader's words. An update, a repair or the restart
+after `nils update --all` says the same and holds llama.cpp alone back: its
+unit is stopped and taken out of the boot, rather than left failing and
+restarting on a build that has been replaced, and every other service starts
+without it. Otherwise setup names the devices llama.cpp runs a model on.
 
 The wizard never installs a model. It asks what the assistant talks to: a
 model server on this machine or on another machine of yours, a commercial
@@ -186,9 +194,17 @@ site mounts, which is the reason for these services at all: a service of an
 account's own cannot carry a capability, whatever it is asked for. A part
 that runs as an account other than the engine's is kept out of the home
 directories, and out of the registry, the archives and the folders of DICOM,
-which it never reads: it asks the engine for what it shows. What each part
-reads and writes is given to the account that part runs as, so the desk's
-folder is the desk's and Kvasir's is the assistant's, while the base
+which it never reads: it asks the engine for what it shows. systemd looks at
+each of those paths as root before the part starts, and one root cannot look
+at, as on a share that squashes root, stops the part, so setup looks at them
+first: a path the part's account cannot reach either is left out of its unit,
+with a comment saying why, and one the account can reach is refused before
+anything is written, with the folder to give root search permission on. Kept
+out of the homes, llama.cpp is given `LLAMA_CACHE`, `HF_HOME` and
+`HF_HUB_CACHE` under `<dir>/kvasir/runtime/cache` for the models it
+downloads; where its unit sees a home, its cache stays where it was. What
+each part reads and writes is given to the account that part runs as, so the
+desk's folder is the desk's and Kvasir's is the assistant's, while the base
 directory and the registry key's passphrase stay with the account that ran
 setup. The services and the accounts are written down, so an update and a
 repair write the same services rather than falling back to an account's own,

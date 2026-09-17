@@ -16,6 +16,7 @@
 //! is decided by a pure function that says what the commands are; the
 //! wizard then runs them. `--print` stops after saying, which is what the
 //! tests read.
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
@@ -123,6 +124,17 @@ const LLAMA_ARCHIVES: [(&str, &str); 6] = [
         "03430a394d0a169a5e6d8f01c09f48cf58eb026af6fc95940a4a528e2e50cf38",
     ),
 ];
+
+/// The libraries the Linux builds of llama.cpp link from the machine that a
+/// Debian or Ubuntu server may not have, each with the package that gives it
+/// there. Read from the NEEDED entries of every file in the four Linux
+/// archives of b10964: besides each other, they link the C and C++ runtimes,
+/// OpenSSL 3 and libgomp. OpenSSL 3 comes with systemd or apt on Debian 12
+/// and 13 and on Ubuntu 22.04 and 24.04, and libgomp with neither. The Vulkan
+/// loader is not here, since the Vulkan backend is loaded only where it can
+/// be, and a machine without it is told so on its own. A build pinned later
+/// has its entries read again.
+const LLAMA_LIBRARIES: [(&str, &str); 1] = [("libgomp.so.1", "libgomp1 (Debian, Ubuntu)")];
 
 /// The name the setup record keeps llama.cpp's build under, and its folder.
 const LLAMA_PART: &str = "llama.cpp";
@@ -2052,19 +2064,129 @@ fn render_node() -> bool {
 /// Whether the Vulkan loader is on this machine, as the dynamic linker lists
 /// it or where the distributions put it.
 fn vulkan_loader() -> bool {
-    let listed = ["ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"]
+    library_found("libvulkan.so.1", linker_list().as_deref(), &|path| {
+        path.exists()
+    })
+}
+
+/// The libraries the dynamic linker knows, as `ldconfig -p` lists them. The
+/// sbin folders ldconfig is in are often not on a person's path.
+fn linker_list() -> Option<String> {
+    ["ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"]
         .iter()
         .find_map(|ldconfig| run_quiet(ldconfig, &["-p"]))
-        .is_some_and(|list| list.contains("libvulkan.so.1"));
-    listed
-        || [
-            "/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
-            "/usr/lib/aarch64-linux-gnu/libvulkan.so.1",
-            "/usr/lib64/libvulkan.so.1",
-            "/usr/lib/libvulkan.so.1",
-        ]
+}
+
+/// Whether a library is in the linker's list, on a line that starts with its
+/// own name, or in a folder the distributions put libraries in. A name is
+/// matched whole, since libgomp.so.1 is not libgomp.so.10.
+fn library_found(name: &str, listed: Option<&str>, exists: &dyn Fn(&Path) -> bool) -> bool {
+    listed.is_some_and(|list| {
+        list.lines()
+            .any(|line| line.split_whitespace().next() == Some(name))
+    }) || [
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib",
+    ]
+    .iter()
+    .any(|dir| exists(&Path::new(dir).join(name)))
+}
+
+/// What this machine lacks for a Linux build of llama.cpp to start, each as a
+/// missing row says it: a library of [`LLAMA_LIBRARIES`] that `here` does not
+/// find, and, where `ldd` was asked about a build already here, each library
+/// or version it names as not found. A macOS build links nothing a Mac lacks.
+fn llama_lacks(variant: &str, here: &dyn Fn(&str) -> bool, ldd: Option<&str>) -> Vec<String> {
+    if !variant.starts_with("ubuntu-") {
+        return Vec::new();
+    }
+    let mut lacking: Vec<String> = LLAMA_LIBRARIES
         .iter()
-        .any(|path| Path::new(path).exists())
+        .map(|(library, _)| *library)
+        .filter(|library| !here(library))
+        .map(str::to_string)
+        .collect();
+    for unlinked in ldd.map(ldd_unlinked).unwrap_or_default() {
+        if !lacking.contains(&unlinked) {
+            lacking.push(unlinked);
+        }
+    }
+    lacking
+        .into_iter()
+        .map(|library| {
+            let known = LLAMA_LIBRARIES.iter().find(|(known, _)| *known == library);
+            match known {
+                Some((_, package)) => {
+                    format!("{library}, which llama.cpp links: install {package}")
+                }
+                None => format!("{library}, which llama.cpp links"),
+            }
+        })
+        .collect()
+}
+
+/// What `ldd` says a binary links and this machine cannot give it: each
+/// library it names as not found, and each version a library here is too old
+/// to have, as `<library> with <version>`. A line said on both of its
+/// streams is one lack, not two.
+fn ldd_unlinked(said: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in said.lines().map(str::trim) {
+        let lack = if let Some(library) = line.strip_suffix("=> not found") {
+            library.trim().to_string()
+        } else if let Some((before, after)) = line.split_once(": version `")
+            && let Some((version, _)) = after.split_once("' not found")
+        {
+            // The loader names the library by its path, after the binary.
+            let path = before.rsplit(": ").next().unwrap_or(before);
+            let library = Path::new(path)
+                .file_name()
+                .map_or_else(|| path.to_string(), |n| n.to_string_lossy().to_string());
+            format!("{library} with {version}")
+        } else {
+            continue;
+        };
+        if !lack.is_empty() && !out.contains(&lack) {
+            out.push(lack);
+        }
+    }
+    out
+}
+
+/// What `ldd` says of a binary, what it prints and its errors together. It
+/// reads the binary's links without running it, and a machine without ldd
+/// says nothing.
+fn ldd_says(binary: &Path) -> Option<String> {
+    let out = Command::new("ldd")
+        .arg(binary)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    Some(format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
+/// What this machine lacks for a plan's llama.cpp build to start, asked of
+/// the machine: the known libraries its linker does not find, and, where the
+/// build is here already, what `ldd` names. Asking changes nothing, so the
+/// questions ask it of a build an earlier run unpacked. Only on Linux, where
+/// the builds link what a machine may lack.
+fn llama_lacks_here(plan: &Plan) -> Vec<String> {
+    let Some(llama) = plan.llama.filter(|_| cfg!(target_os = "linux")) else {
+        return Vec::new();
+    };
+    let listed = linker_list();
+    let ldd = llama_built(plan).and_then(|server| ldd_says(&server));
+    llama_lacks(
+        llama.variant,
+        &|library| library_found(library, listed.as_deref(), &|path| path.exists()),
+        ldd.as_deref(),
+    )
 }
 
 /// The build this machine takes, where llama.cpp publishes one for it.
@@ -2209,31 +2331,37 @@ fn unpack_into(bytes: &[u8], to: &Path) -> Result<(), String> {
 
 /// The devices a build runs a model on, as `llama-server --list-devices`
 /// names them; none where it names none, or says nothing within ten seconds.
-fn llama_devices(server: &Path) -> Vec<String> {
+/// On Linux a build that does not run is an error in its own words, the
+/// loader's where the loader could not start it, and not a machine without a
+/// graphics device. Elsewhere it names none, as it did before.
+fn llama_devices(server: &Path) -> Result<Vec<String>, String> {
     use std::io::Read as _;
-    let Ok(mut child) = Command::new(server)
+    let linux = cfg!(target_os = "linux");
+    let mut child = match Command::new(server)
         .arg("--list-devices")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-    else {
-        return Vec::new();
+    {
+        Ok(child) => child,
+        Err(e) if linux => return Err(format!("{}: {e}", server.display())),
+        Err(_) => return Ok(Vec::new()),
     };
     let started = std::time::Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() < std::time::Duration::from_secs(10) => {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Vec::new();
+                return Ok(Vec::new());
             }
         }
-    }
+    };
     let mut said = String::new();
     if let Some(mut out) = child.stdout.take() {
         let _ = out.read_to_string(&mut said);
@@ -2241,7 +2369,27 @@ fn llama_devices(server: &Path) -> Vec<String> {
     if let Some(mut err) = child.stderr.take() {
         let _ = err.read_to_string(&mut said);
     }
-    devices_listed(&said)
+    let failed = (linux && !status.success()).then(|| format!("it ended with {status}"));
+    devices_said(&said, failed.as_deref())
+}
+
+/// The devices a build listed, from what it said and, where it did not end
+/// well, how it ended. One that ended badly without listing any did not run:
+/// its last words are the error, the loader's where the loader could not
+/// start it, and how it ended where it said nothing.
+fn devices_said(said: &str, failed: Option<&str>) -> Result<Vec<String>, String> {
+    let listed = said
+        .lines()
+        .any(|line| line.trim_start().starts_with("Available devices"));
+    match failed {
+        Some(ended) if !listed => Err(said
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .unwrap_or(ended)
+            .to_string()),
+        _ => Ok(devices_listed(said)),
+    }
 }
 
 /// The device lines of `--list-devices`: those under "Available devices",
@@ -3637,6 +3785,13 @@ pub(crate) struct Plan {
     /// settings beside it: `None` where the install has the five places of
     /// a laptop and the engine's own defaults.
     pub(crate) site: Option<Site>,
+    /// The paths a unit would keep a part's account out of that are closed
+    /// to that account already, each with the account: root cannot look at
+    /// them, so the line that would hide one is left out. Found when the plan
+    /// is made, by [`masks_here`], and never while a unit is written, so that
+    /// writing a unit stays a matter of text. Empty for every install whose
+    /// services are an account's own.
+    pub(crate) closed: Vec<(String, PathBuf)>,
 }
 
 /// The provider the desk signs people in at, as the desk, the engine and
@@ -3902,6 +4057,9 @@ fn plan_and_sources(state: &State, channel: Option<&str>) -> (Plan, Option<(Stri
         system: state.system.clone(),
         helper: state.helper.clone(),
         site: state.site.clone(),
+        // not recorded: a path can come within an account's reach, or out of
+        // root's, after the install, so every run that writes units looks
+        closed: Vec::new(),
     };
     (plan, read)
 }
@@ -5906,7 +6064,7 @@ fn questions(
             read.or_record(recorded_places)
         }
     };
-    let plan = Plan {
+    let mut plan = Plan {
         dir,
         parts,
         mode,
@@ -5927,7 +6085,23 @@ fn questions(
         system,
         helper,
         site,
+        closed: Vec::new(),
     };
+    // Every path a unit would keep a part out of is looked at here, as root,
+    // the way systemd looks at it before the part starts, now that the
+    // places and the accounts are settled. A path the part's account could
+    // reach but no unit can hide is refused with nothing written, as the
+    // services of this machine are; `--print` says it and goes on. So does a
+    // run for real on a machine without runuser, where no account could be
+    // asked: the missing row names runuser, and the install stops there.
+    let masks = console.probe("the paths the services hide", || masks_here(&plan));
+    if let Some(refused) = in_reach_refusal(&masks) {
+        if !args.print && runuser_here() {
+            return Err(usage(refused).into());
+        }
+        console.note(&refused);
+    }
+    plan.closed = masks.closed;
 
     // 8. the summary, then the work
     console.step(8);
@@ -6018,6 +6192,7 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
         Reading::Update
     };
     sources_said_or_stop(reading, read.as_ref(), console)?;
+    masks_said_or_stop(recorded_masks_refusal(&mut plan), args.print, console)?;
     if let Ok(newest) = update::newest_version(&update::engine_base(args.channel.as_deref())) {
         plan.version = newest;
     }
@@ -6080,6 +6255,21 @@ fn update_engine_binary(channel: Option<&str>, console: &mut Console) {
     }
 }
 
+/// What an update or a repair does with a path no unit can hide from a
+/// part's account: a run for real stops with nothing changed, and `--print`
+/// says it and goes on, as the questions do, since a print changes nothing
+/// and refuses nothing.
+fn masks_said_or_stop(refused: Option<String>, print: bool, console: &Console) -> Result<(), Exit> {
+    match refused {
+        None => Ok(()),
+        Some(refused) if print => {
+            console.note(&refused);
+            Ok(())
+        }
+        Some(refused) => Err(fail(format!("nothing was changed: {refused}"))),
+    }
+}
+
 /// Where an update or a repair read the registry's source places as the
 /// engine's account and they were not read: said before anything is done, or
 /// the run stopped with nothing changed.
@@ -6104,7 +6294,7 @@ fn sources_said_or_stop(
 /// The menu's last offer: the configuration and the units written again from
 /// what the state records, for an install whose files were lost or edited.
 fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), Exit> {
-    let (plan, read) = plan_and_sources(state, args.channel.as_deref());
+    let (mut plan, read) = plan_and_sources(state, args.channel.as_deref());
     if let Some(refused) = recorded_system_refusal(&plan) {
         return Err(fail(format!("nothing was changed: {refused}")));
     }
@@ -6114,6 +6304,7 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         Reading::Repair
     };
     sources_said_or_stop(reading, read.as_ref(), console)?;
+    masks_said_or_stop(recorded_masks_refusal(&mut plan), args.print, console)?;
     println!();
     println!("{}", console.bold("Repairing"));
     print!("{}", plan_text(&plan, console));
@@ -6179,14 +6370,16 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     // Kvasir's file is mended, not rewritten, and the assistant's environment
     // is written where it is missing; the models are added and the key is
     // made during the start-up below, once Kvasir answers.
+    let mut llama_starts = true;
     if plan.has(Part::Assistant) {
         if plan.llama.is_some() {
             console.begin(Stage::Runtime);
             let before = state.parts.get(LLAMA_PART).map(|p| p.path.clone());
-            if install_llama(plan, &mut state, console).is_ok()
-                && state.parts.get(LLAMA_PART).map(|p| p.path.clone()) != before
-            {
-                let _ = write_state(&state);
+            if let Ok(starts) = install_llama(plan, &mut state, console) {
+                llama_starts = starts;
+                if state.parts.get(LLAMA_PART).map(|p| p.path.clone()) != before {
+                    let _ = write_state(&state);
+                }
             }
         }
         console.begin(Stage::Kvasir);
@@ -6208,7 +6401,10 @@ fn mend(plan: &Plan, state: &State, console: &mut Console) -> Result<Vec<Service
     console.begin(Stage::Services);
     let mut services = Vec::new();
     if plan.service {
-        match start_everything(plan, &state, console, None) {
+        // llama.cpp alone is held back where it cannot start, as it said at
+        // its own step.
+        let starting = holding_llama_back(plan, &state, llama_starts);
+        match start_everything(plan, &starting, console, None) {
             Ok(started) => {
                 console.report(&started);
                 services = started.services;
@@ -6428,6 +6624,9 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
         ));
         if !system.capabilities.is_empty() {
             rows.push(("engine keeps", system.capabilities.join(", ")));
+        }
+        for sentence in closed_words(&plan.closed) {
+            rows.push(("closed", sentence));
         }
     }
     if let Some(helper) = &plan.helper {
@@ -7131,9 +7330,10 @@ fn place(
 
     // llama.cpp, which runs the models Kvasir starts: here before Kvasir is
     // configured, since kvasir.json names only a build that is here.
+    let mut llama_starts = true;
     if plan.has(Part::Assistant) && plan.llama.is_some() {
         console.begin(Stage::Runtime);
-        install_llama(plan, state, console)?;
+        llama_starts = install_llama(plan, state, console)?;
         checkpoint(state);
     }
 
@@ -7209,11 +7409,13 @@ fn place(
     // that holds it.
     install_helper(plan, state, console)?;
 
-    // Start it.
+    // Start it. Where llama.cpp cannot start an install has stopped already,
+    // and an update holds llama.cpp alone back, as it said at its own step.
     let mut services = Vec::new();
     if plan.service {
         console.begin(Stage::Services);
-        match start_everything(plan, state, console, answers.model.as_ref()) {
+        let starting = holding_llama_back(plan, state, llama_starts);
+        match start_everything(plan, &starting, console, answers.model.as_ref()) {
             Ok(started) => {
                 console.report(&started);
                 let stopped: Vec<&str> = started
@@ -8896,6 +9098,7 @@ fn missing_for(plan: &Plan, print: bool) -> Vec<String> {
         plan.system.as_ref(),
         print,
         am_root,
+        || hides_from_root(plan),
         runuser_here,
     ));
     // The privilege the supervisor restarts the services with is written
@@ -8922,33 +9125,54 @@ fn missing_for(plan: &Plan, print: bool) -> Vec<String> {
                 out.push(format!("{tool}, which {does}"));
             }
         }
+        // A library llama.cpp links and this machine lacks stopped its unit
+        // only once the services started, and setup had said nothing.
+        out.extend(llama_lacks_here(plan));
     }
     out
 }
 
 /// runuser, where a run needs it and this machine has none: root setting up
 /// the services of this machine, with the engine running as an account of its
-/// own. Every step on the registry is taken as that account through runuser,
-/// and unlike Kvasir's and the assistant's source steps, which root takes
-/// itself where it cannot act as their account, they have nothing to fall
-/// back on, so the install would stop at the registry with the engine already
-/// placed. A print changes nothing, and a run that is not root takes no step
-/// as another account, so neither asks the machine. Whether this process is
-/// root and whether runuser is here are given, so that every answer can be
-/// had on any machine.
+/// own, or with a unit that would hide a path root cannot look at. Every step
+/// on the registry is taken as the engine's account through runuser, and
+/// unlike Kvasir's and the assistant's source steps, which root takes itself
+/// where it cannot act as their account, they have nothing to fall back on,
+/// so the install would stop at the registry with the engine already placed.
+/// A path root cannot look at is left out of a unit only once its account,
+/// asked through runuser, is found closed out of it, so without runuser it
+/// is refused whatever the account reaches. A print changes nothing, and a
+/// run that is not root takes no step as another account, so neither asks
+/// the machine. Whether this process is root, whether a unit would hide a
+/// path root cannot look at, and whether runuser is here are given, so that
+/// every answer can be had on any machine.
 fn runuser_missing(
     system: Option<&SystemUnits>,
     print: bool,
     root: impl FnOnce() -> bool,
+    hides_from_root: impl FnOnce() -> bool,
     runuser: impl FnOnce() -> bool,
 ) -> Option<String> {
-    if print || system.is_none() {
+    if print || system.is_none() || !root() {
         return None;
     }
-    registry_account(system, root())?;
-    (!runuser()).then(|| {
-        "runuser, which setup takes the registry's steps as the engine's account with".to_string()
-    })
+    let row = if registry_account(system, true).is_some() {
+        "runuser, which setup takes the registry's steps as the engine's account with"
+    } else if hides_from_root() {
+        "runuser, which setup asks a part's account with whether it reaches a path root cannot \
+         look at"
+    } else {
+        return None;
+    };
+    (!runuser()).then(|| row.to_string())
+}
+
+/// Whether a unit would hide a path root cannot look at, which only an
+/// account asked through runuser lets it leave out.
+fn hides_from_root(plan: &Plan) -> bool {
+    masked(plan)
+        .iter()
+        .any(|(_, path)| matches!(root_looks_at(path), RootLook::Refused { .. }))
 }
 
 /// The major version of the Node on the path; 0 where there is none.
@@ -10339,10 +10563,14 @@ fn fetch_llama(plan: &Plan) -> Result<(PathBuf, bool), String> {
 /// llama.cpp placed for an install or a repair and recorded, with the devices
 /// it runs a model on said. An archive that cannot be downloaded, or whose
 /// sha256 is not the pinned one, stops an install, and is said on an update
-/// or a repair, where Kvasir is then configured without it.
-fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<(), Exit> {
+/// or a repair, where Kvasir is then configured without it. So does a build
+/// that cannot start here, for a library the machine lacks or for anything
+/// else the loader says, and it is said before the services start rather
+/// than by its unit failing. Answers whether llama.cpp can start; where it
+/// cannot, an update or a repair starts every other service without it.
+fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<bool, Exit> {
     let Some(llama) = plan.llama else {
-        return Ok(());
+        return Ok(true);
     };
     console.doing(&format!(
         "taking llama.cpp {LLAMA_BUILD}, the {} build",
@@ -10359,9 +10587,11 @@ fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<()
                  folder or server holding {LLAMA_BUILD}/llama-{LLAMA_BUILD}-bin-{}.tar.gz",
                 llama.variant
             ));
-            return Ok(());
+            return Ok(true);
         }
     };
+    // On record before it is looked at, so that an install it stops can
+    // still be removed with what it placed.
     state.parts.insert(
         LLAMA_PART.to_string(),
         PartState {
@@ -10371,18 +10601,100 @@ fn install_llama(plan: &Plan, state: &mut State, console: &Console) -> Result<()
         },
     );
     console.progress(&format!("llama.cpp {LLAMA_BUILD} at {}", dir.display()));
-    let devices = llama_devices(&dir.join("llama-server"));
-    if devices.is_empty() {
-        console.say(
+    // What it links is read before it is run: the questions know only the
+    // libraries named in advance, and ldd names the rest now it is here.
+    let install = console.strict.get();
+    let lacks = llama_lacks_here(plan);
+    if !lacks.is_empty() {
+        console.broken(&llama_held(llama_lacks_said(&lacks), install))?;
+        return Ok(false);
+    }
+    match llama_devices(&dir.join("llama-server")) {
+        Ok(devices) if devices.is_empty() => console.say(
             "llama.cpp finds no graphics device here, so a model Kvasir starts runs on the processor",
-        );
-    } else {
-        console.say(&format!("llama.cpp runs a model on {}", devices.join("; ")));
+        ),
+        Ok(devices) => console.say(&format!("llama.cpp runs a model on {}", devices.join("; "))),
+        Err(said) => {
+            console.broken(&llama_held(
+                format!("llama.cpp {LLAMA_BUILD} does not run on this machine: {said}"),
+                install,
+            ))?;
+            return Ok(false);
+        }
     }
     if !llama.loader {
         console.say(NO_VULKAN_LOADER);
     }
-    Ok(())
+    Ok(true)
+}
+
+/// A llama.cpp that cannot start for what this machine lacks, as it is said.
+fn llama_lacks_said(lacks: &[String]) -> String {
+    format!(
+        "llama.cpp {LLAMA_BUILD} cannot start, since this machine lacks {}",
+        lacks.join("; ")
+    )
+}
+
+/// A llama.cpp that cannot start, in one sentence: on an install, the reason
+/// it stops; on an update, a repair or a restart, the reason and that
+/// llama.cpp alone is held back. The engine, the desk, Kvasir and the
+/// assistant run without it, and Kvasir copes with a backend that is down,
+/// so holding them all back would leave files just replaced under processes
+/// still running the old ones, for a part many sites use little.
+fn llama_held(said: String, install: bool) -> String {
+    if install {
+        said
+    } else {
+        format!("{said}; {LLAMA_HELD_ALONE}")
+    }
+}
+
+/// What an update, a repair or a restart adds where llama.cpp cannot start.
+const LLAMA_HELD_ALONE: &str = "llama.cpp alone is held back, its unit stopped and taken out of \
+                                the boot until nils setup and repair can start it, and the other \
+                                services start without it";
+
+/// llama.cpp held back: its unit stopped and taken out of the boot, and the
+/// record every other service is started from. An update replaces the build
+/// its unit names, so a unit left running is a process whose files are gone,
+/// restarted every few seconds by `Restart=on-failure`, and one left enabled
+/// starts into the same loop at the next boot; stopped and disabled, it is
+/// quiet until it can run. The unit file is left where it is, so `--print`
+/// and the log still show what it would run, and the setup or repair that
+/// can start llama.cpp again writes it, enables it and starts it, as it
+/// does every other unit.
+fn holding_llama_back<'a>(plan: &Plan, state: &'a State, llama_starts: bool) -> Cow<'a, State> {
+    if !llama_starts && state.parts.contains_key(LLAMA_PART) && !cfg!(target_os = "macos") {
+        for argv in hold_llama_back_calls(plan.system.is_some()) {
+            let words: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+            quietly(&argv[0], &words);
+        }
+    }
+    services_to_start(state, llama_starts)
+}
+
+/// The calls that hold llama.cpp's unit back, on the manager that runs it:
+/// the machine's own where the services are the machine's, and the account's
+/// where llama.cpp runs beside parts in containers.
+fn hold_llama_back_calls(system: bool) -> Vec<Vec<String>> {
+    vec![
+        systemctl_argv(system, &["stop", "nils-llama"]),
+        systemctl_argv(system, &["disable", "nils-llama"]),
+    ]
+}
+
+/// The record the services are started from: the install's own, or, where
+/// llama.cpp cannot start, the same without its build, so that llama.cpp's
+/// unit is neither written nor started and every other unit is, as it would
+/// have been. The record kept on disk still names the build.
+fn services_to_start(state: &State, llama_starts: bool) -> Cow<'_, State> {
+    if llama_starts || !state.parts.contains_key(LLAMA_PART) {
+        return Cow::Borrowed(state);
+    }
+    let mut held = state.clone();
+    held.parts.remove(LLAMA_PART);
+    Cow::Owned(held)
 }
 
 /// After `nils update` moves this binary, the setup record says so. The
@@ -11645,6 +11957,19 @@ fn start_everything(
             for refused in make_the_calls(&hand_units_to_systemd(&names, true, system), system)? {
                 console.warn(&format!("{refused} was refused"));
             }
+            // llama.cpp's unit names cache folders where it cannot see a
+            // home, and they are made here, where every run that writes the
+            // units passes, so the hand-over below gives them to its account
+            // before it starts. A cache that cannot be made is said, so that
+            // the unit which then fails has its reason said beside it.
+            if names.iter().any(|n| n == "nils-llama")
+                && let Err(e) = make_llama_cache(&plan.runtime_dir(), &llama_cache(plan))
+            {
+                console.warn(&format!(
+                    "llama.cpp's cache under {} was not made, so it may not start: {e}",
+                    plan.runtime_dir().display()
+                ));
+            }
             // Where the parts run as accounts of their own, what each reads
             // and writes is that account's before it starts.
             hand_over_files(plan, console);
@@ -11932,13 +12257,37 @@ fn service_of_machine(plan: &Plan, part: &str) -> String {
     if account == system.account("engine") {
         return out;
     }
-    if !under_home(&plan.dir) {
+    if home_out_of_reach(plan, part) {
         out.push_str("ProtectHome=yes\n");
     }
     for path in engine_data(plan) {
+        // Systemd looks at a path it hides as root before the part starts,
+        // and a path root cannot look at stops the part. One the account is
+        // closed out of already needs no hiding, so its line is left out,
+        // and the unit says why for whoever reads it.
+        if plan.closed.iter().any(|(a, p)| a == account && *p == path) {
+            let _ = writeln!(
+                out,
+                "# InaccessiblePaths=-{} is left out: root cannot look at it, and {account} \
+                 cannot reach it",
+                path.display()
+            );
+            continue;
+        }
         let _ = writeln!(out, "InaccessiblePaths=-{}", path.display());
     }
     out
+}
+
+/// Whether a part's service is kept out of the home directories: a service
+/// of this machine, for a part that runs as another account than the
+/// engine's, of an install that does not live in a home. Asked by the lines
+/// that shut the homes out and by what has to live elsewhere once they are.
+fn home_out_of_reach(plan: &Plan, part: &str) -> bool {
+    let Some(system) = &plan.system else {
+        return false;
+    };
+    part != "engine" && system.account(part) != system.account("engine") && !under_home(&plan.dir)
 }
 
 /// Whether a directory is under a home, where keeping the home directories
@@ -11957,6 +12306,243 @@ fn engine_data(plan: &Plan) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+// ------------------------------------------ the paths a unit hides, looked at
+
+/// What root finds at a path a unit would hide. Systemd looks at every such
+/// path as root before the part starts, and one it is refused at stops the
+/// part with `226/NAMESPACE`: the `-` before the path forgives only a path
+/// that is missing. A share that squashes root refuses root in this way,
+/// while the engine's account reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RootLook {
+    /// Root can look at it, or it is missing, or it failed some other way
+    /// that systemd is left to meet as it always was: the line stays.
+    Seen,
+    /// Root is refused. The folder is the nearest above the path that root
+    /// can look at, which is the one root may not search, and so the one a
+    /// fix is given for.
+    Refused { folder: PathBuf },
+}
+
+/// A path root cannot look at, which a service running as the account could
+/// reach were its line left out, and which no unit can hide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InReach {
+    account: String,
+    path: PathBuf,
+    /// The folder root may not search.
+    folder: PathBuf,
+    /// Whether the account was seen to reach it. A line is left out only
+    /// where the account is known to be closed out already, so one that
+    /// could not be asked is refused as one that reaches it.
+    seen: bool,
+}
+
+/// What became of the lines that hide the engine's data from the parts that
+/// run as other accounts, once each path was looked at.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Masks {
+    /// Each path root cannot look at that the account cannot reach either,
+    /// with the account: its line is left out.
+    closed: Vec<(String, PathBuf)>,
+    /// Each path root cannot look at that the account can reach.
+    in_reach: Vec<InReach>,
+}
+
+/// Every path a unit would hide, with the account whose services it is hidden
+/// from: the engine's data, for each part that runs as an account other than
+/// the engine's, each account once. Empty where no unit is written or none
+/// hides anything, which is every install whose services are an account's
+/// own.
+fn masked(plan: &Plan) -> Vec<(String, PathBuf)> {
+    let Some(system) = &plan.system else {
+        return Vec::new();
+    };
+    if !plan.service {
+        return Vec::new();
+    }
+    // the same parts, and the same test, as the units that carry the lines
+    let engine = system.account("engine");
+    let mut accounts: Vec<&str> = Vec::new();
+    for part in [Part::Desk, Part::Assistant] {
+        let account = system.account(part.name());
+        if plan.has(part) && account != engine && !accounts.contains(&account) {
+            accounts.push(account);
+        }
+    }
+    let data = engine_data(plan);
+    accounts
+        .into_iter()
+        .flat_map(|account| {
+            data.iter()
+                .map(move |path| (account.to_string(), path.clone()))
+        })
+        .collect()
+}
+
+/// What becomes of each line, with what root finds and whether an account
+/// reaches a path given, so that every answer can be had on any machine.
+/// The account is asked only where root is refused.
+fn masks_when(
+    plan: &Plan,
+    root: impl Fn(&Path) -> RootLook,
+    reaches: impl Fn(&str, &Path) -> Option<bool>,
+) -> Masks {
+    let mut out = Masks::default();
+    for (account, path) in masked(plan) {
+        let RootLook::Refused { folder } = root(&path) else {
+            continue;
+        };
+        match reaches(&account, &path) {
+            Some(false) => out.closed.push((account, path)),
+            seen => out.in_reach.push(InReach {
+                account,
+                path,
+                folder,
+                seen: seen.is_some(),
+            }),
+        }
+    }
+    out
+}
+
+/// The same, looked at on this machine. Only root's look is the one systemd
+/// takes, so a run that is not root, as `--print` may be, finds nothing and
+/// every line stays as it was.
+fn masks_here(plan: &Plan) -> Masks {
+    if masked(plan).is_empty() || !am_root() {
+        return Masks::default();
+    }
+    masks_when(plan, root_looks_at, account_reaches)
+}
+
+/// What root finds at a path, asked as this process, which is root.
+fn root_looks_at(path: &Path) -> RootLook {
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => RootLook::Refused {
+            folder: path
+                .ancestors()
+                .skip(1)
+                .find(|above| std::fs::metadata(above).is_ok())
+                .unwrap_or(path)
+                .to_path_buf(),
+        },
+        _ => RootLook::Seen,
+    }
+}
+
+/// Whether an account reaches a path, asked as that account, since root is
+/// refused where this is asked. A missing path counts as reached where the
+/// account may search the nearest folder above it that it can see, since the
+/// engine may make the path there later. `None` where the account could not
+/// be asked, which only a word from the account's own shell rules out.
+///
+/// This is one fixed question and not a way to run things as an account: an
+/// empty environment, in /, the path as the only argument, and one word back.
+/// runuser is found where the registry's steps find it, and on a machine
+/// without it the account is not asked, which the plan's missing row names.
+fn account_reaches(account: &str, path: &Path) -> Option<bool> {
+    const ASK: &str = "p=$1\n\
+        if test -e \"$p\"; then echo reaches; exit 0; fi\n\
+        d=$(dirname -- \"$p\")\n\
+        while ! test -e \"$d\"; do d=$(dirname -- \"$d\"); done\n\
+        if test -d \"$d\" && test -x \"$d\"; then echo reaches; else echo closed; fi\n";
+    let mut args = runuser_words(account, false)[1..].to_vec();
+    args.extend(["sh", "-c", ASK, "sh"].map(str::to_string));
+    let out = as_the_service(
+        &runuser_program(),
+        &args,
+        &[(
+            "PATH".to_string(),
+            "/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+        )],
+    )
+    .arg(path)
+    .stdin(Stdio::null())
+    .stderr(Stdio::null())
+    .output()
+    .ok()?;
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "reaches" => Some(true),
+        "closed" => Some(false),
+        _ => None,
+    }
+}
+
+/// The paths each account is closed out of already, said in one sentence for
+/// each account, for the plan and for the restart after an update.
+fn closed_words(closed: &[(String, PathBuf)]) -> Vec<String> {
+    let mut accounts: Vec<&str> = Vec::new();
+    for (account, _) in closed {
+        if !accounts.contains(&account.as_str()) {
+            accounts.push(account);
+        }
+    }
+    accounts
+        .into_iter()
+        .map(|account| {
+            let paths: Vec<String> = closed
+                .iter()
+                .filter(|(a, _)| a == account)
+                .map(|(_, p)| p.display().to_string())
+                .collect();
+            let (is, them) = if paths.len() == 1 {
+                ("is", "it")
+            } else {
+                ("are", "them")
+            };
+            format!(
+                "{} {is} closed to {account} already, so the services that run as {account} do \
+                 not hide {them}: root cannot look at {them}, and a service that hides a path \
+                 root cannot look at does not start",
+                paths.join(", ")
+            )
+        })
+        .collect()
+}
+
+/// Each path no unit can hide from an account that reaches it, with the fix.
+/// `None` where there is none.
+fn in_reach_words(masks: &Masks) -> Option<String> {
+    if masks.in_reach.is_empty() {
+        return None;
+    }
+    let said: Vec<String> = masks
+        .in_reach
+        .iter()
+        .map(|r| {
+            let (account, path, folder) = (&r.account, r.path.display(), r.folder.display());
+            let reach = if r.seen {
+                format!("{account} can reach it")
+            } else {
+                format!("it could not be asked whether {account} can reach it")
+            };
+            format!(
+                "the services that run as {account} cannot be kept out of {path}, because root \
+                 cannot look at it and {reach}: give root search permission on {folder} (as \
+                 chmod 711 does), or close {path} to {account}"
+            )
+        })
+        .collect();
+    Some(said.join("; "))
+}
+
+/// Why this install's units cannot be written, said before anything is.
+fn in_reach_refusal(masks: &Masks) -> Option<String> {
+    in_reach_words(masks).map(|words| format!("{words}, and run nils setup again"))
+}
+
+/// A recorded install's paths looked at again before its units are written
+/// again, by an update or a repair: one can have come within an account's
+/// reach, or out of root's, since the install. What is closed already is
+/// kept in the plan; what an account can reach is refused, with nothing
+/// changed yet.
+fn recorded_masks_refusal(plan: &mut Plan) -> Option<String> {
+    let masks = masks_here(plan);
+    plan.closed = masks.closed.clone();
+    in_reach_refusal(&masks)
 }
 
 /// What each part reads and writes, and the account it runs as: what this
@@ -12242,15 +12828,80 @@ fn llama_argv(plan: &Plan, build: &Path, host: &str) -> Vec<String> {
 /// llama.cpp's systemd user unit, on this machine whichever runtime the parts
 /// use, started again when it fails.
 fn llama_unit(plan: &Plan, build: &Path, host: &str) -> String {
+    let environment: String = llama_cache(plan)
+        .iter()
+        .map(|(name, path)| unit_environment(name, path))
+        .collect();
     format!(
         "[Unit]\nDescription=llama.cpp, which runs the models Kvasir starts\n\
-         After=network-online.target\n\n[Service]\n{}ExecStart={}\nWorkingDirectory={}\n\
-         Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy={}\n",
+         After=network-online.target\n\n[Service]\n{}{environment}ExecStart={}\n\
+         WorkingDirectory={}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy={}\n",
         service_of_machine(plan, "assistant"),
         llama_argv(plan, build, host).join(" "),
         plan.runtime_dir().display(),
         wanted_by(plan.system.is_some())
     )
+}
+
+/// Where llama.cpp keeps the models it downloads, by the variables that name
+/// it, for a unit kept out of the home directories. llama.cpp keeps them
+/// under its account's home unless told otherwise, and a unit with
+/// `ProtectHome=yes` cannot even look there, so it stopped at start with
+/// "Permission denied" on `~/.cache/huggingface/hub`. They go under Kvasir's
+/// runtime folder, which is the account's already, in the folders a drop-in
+/// that set them by hand used, so that taking such a drop-in away moves
+/// nothing. While it is there it still wins: systemd reads a drop-in after
+/// the unit, and the last assignment of a variable is the one it keeps.
+///
+/// Empty where the unit sees its home: a service of an account's own, or an
+/// install that lives in a home. Its cache stays where it is, since pointing
+/// `HF_HOME` elsewhere would hide the models already downloaded into
+/// `~/.cache` and fetch every one of them again.
+fn llama_cache(plan: &Plan) -> Vec<(&'static str, PathBuf)> {
+    if !home_out_of_reach(plan, "assistant") {
+        return Vec::new();
+    }
+    llama_cache_in(&plan.runtime_dir())
+}
+
+/// The cache's folders inside a runtime folder, by the variable that names
+/// each.
+fn llama_cache_in(runtime: &Path) -> Vec<(&'static str, PathBuf)> {
+    let cache = runtime.join("cache");
+    vec![
+        ("LLAMA_CACHE", cache.join("llama.cpp")),
+        ("HF_HOME", cache.join("huggingface")),
+        ("HF_HUB_CACHE", cache.join("huggingface").join("hub")),
+    ]
+}
+
+/// One variable of a unit's environment. The assignment is quoted whole, so a
+/// directory with a space in it stays one value rather than two assignments;
+/// inside the quotes a backslash and a quote are escaped, and a percent sign
+/// is doubled, since systemd reads one as the start of a specifier.
+fn unit_environment(name: &str, value: &Path) -> String {
+    let value = value
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    format!("Environment=\"{name}={value}\"\n")
+}
+
+/// llama.cpp's cache folders made inside its runtime folder, before it
+/// starts, and left for the hand-over that follows to give to its account
+/// with the rest of Kvasir's folder. Made only inside a runtime folder that
+/// is there: without one llama.cpp has no presets or key to start with, and
+/// making it would leave a folder in Kvasir's place before Kvasir is.
+fn make_llama_cache(runtime: &Path, cache: &[(&str, PathBuf)]) -> std::io::Result<()> {
+    if !runtime.is_dir() {
+        return Ok(());
+    }
+    for (_, path) in cache {
+        std::fs::create_dir_all(path)?;
+    }
+    Ok(())
 }
 
 /// llama.cpp's command for a person to run, where no service runs it.
@@ -12828,6 +13479,40 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     {
         println!("{said}");
     }
+    // The paths the units hide are looked at again, since one can have come
+    // within an account's reach, or out of root's, since the install. What
+    // is closed already is left out, as setup leaves it out. What an account
+    // can reach is not refused here: the parts were replaced already, and
+    // leaving every service alone would keep the old ones running, one of
+    // them perhaps with that path in reach under a unit that no longer hides
+    // it. So its line stays, the services of that account do not start
+    // rather than start with the path in reach, everything else starts, and
+    // the fix is said.
+    let masks = masks_here(&plan);
+    for sentence in closed_words(&masks.closed) {
+        println!("{sentence}");
+    }
+    if let Some(words) = in_reach_words(&masks) {
+        println!(
+            "{words}, and run nils setup again; until then their units still hide it, so those \
+             services do not start rather than start with it in reach"
+        );
+    }
+    plan.closed = masks.closed;
+    // Restarted onto a llama.cpp that cannot start, its unit would fail in a
+    // loop, so what the machine lacks is said and llama.cpp alone is held
+    // back. Only a build on record has a unit.
+    let mut llama_starts = true;
+    if plan.has(Part::Assistant)
+        && state.parts.contains_key(LLAMA_PART)
+        && llama_built(&plan).is_some()
+    {
+        let lacks = llama_lacks_here(&plan);
+        if !lacks.is_empty() {
+            println!("{}", llama_held(llama_lacks_said(&lacks), false));
+            llama_starts = false;
+        }
+    }
     if let Some(engine) = state.parts.get("engine") {
         plan.version = engine.version.clone();
     }
@@ -12838,7 +13523,12 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     }
     let console = Console::new(true);
     println!("restarting the services");
-    match start_everything(&plan, &state, &console, None) {
+    match start_everything(
+        &plan,
+        &holding_llama_back(&plan, &state, llama_starts),
+        &console,
+        None,
+    ) {
         Ok(started) => print!("{}", started.text),
         Err(e) => println!("the services were left alone: {}", e.message),
     }
@@ -14568,6 +15258,7 @@ mod tests {
             system: None,
             helper: None,
             site: None,
+            closed: Vec::new(),
         }
     }
 
@@ -16672,6 +17363,40 @@ mod tests {
             "{desk}"
         );
         assert!(desk.contains("InaccessiblePaths=-/data/source"), "{desk}");
+
+        // a path root cannot look at, closed to the desk's account already,
+        // is left out of the desk's unit with the reason beside it, and the
+        // assistant's account, which was not found closed out, keeps its line
+        let mut closed = plan.clone();
+        closed.closed = vec![("nils-desk".to_string(), PathBuf::from("/data/source"))];
+        let written = systemd_units(&closed, &state);
+        let text_of = |name: &str| {
+            written
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, text)| text.clone())
+                .unwrap_or_else(|| panic!("no {name} among {written:?}"))
+        };
+        let desk = text_of("nils-desk.service");
+        assert!(
+            !desk.lines().any(|l| l == "InaccessiblePaths=-/data/source"),
+            "a unit hiding a path root cannot look at does not start: {desk}"
+        );
+        assert!(
+            desk.contains(
+                "\n# InaccessiblePaths=-/data/source is left out: root cannot look at it, and \
+                 nils-desk cannot reach it\n"
+            ),
+            "{desk}"
+        );
+        assert!(
+            desk.contains("\nInaccessiblePaths=-/srv/nils/registry\n"),
+            "only the closed path is left out: {desk}"
+        );
+        assert!(
+            text_of("kvasir.service").contains("\nInaccessiblePaths=-/data/source\n"),
+            "a path is left out only for the account it is closed to"
+        );
         assert!(unit("kvasir.service").contains("User=nils-assistant\n"));
         assert!(unit("nils-assistant.service").contains("User=nils-assistant\n"));
         assert!(
@@ -16728,6 +17453,288 @@ mod tests {
         );
         assert_eq!(units_dir(true), PathBuf::from("/etc/systemd/system"));
         assert!(units_dir(false).ends_with("systemd/user"));
+    }
+
+    /// Root refused at the paths named, by the folder above each, and seen
+    /// everywhere else.
+    fn root_refused_at(paths: &[&str]) -> impl Fn(&Path) -> RootLook {
+        let refused: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        move |path| {
+            if refused.iter().any(|p| p == path) {
+                RootLook::Refused {
+                    folder: path.parent().unwrap().to_path_buf(),
+                }
+            } else {
+                RootLook::Seen
+            }
+        }
+    }
+
+    #[test]
+    fn a_path_root_can_look_at_keeps_its_line_and_no_account_is_asked() {
+        let plan = deployment();
+        assert_eq!(
+            masked(&plan),
+            vec![
+                ("nils-desk".to_string(), PathBuf::from("/srv/nils/registry")),
+                ("nils-desk".to_string(), PathBuf::from("/srv/nils/backups")),
+                ("nils-desk".to_string(), PathBuf::from("/data/source")),
+                (
+                    "nils-assistant".to_string(),
+                    PathBuf::from("/srv/nils/registry")
+                ),
+                (
+                    "nils-assistant".to_string(),
+                    PathBuf::from("/srv/nils/backups")
+                ),
+                ("nils-assistant".to_string(), PathBuf::from("/data/source")),
+            ],
+            "every path the units hide, for each account they are hidden from"
+        );
+        // root sees it, or it is missing, which the line forgives
+        let masks = masks_when(&plan, root_refused_at(&[]), |account, path| {
+            panic!("{account} was asked about {}", path.display())
+        });
+        assert_eq!(masks, Masks::default());
+        assert_eq!(in_reach_refusal(&masks), None);
+        assert!(closed_words(&masks.closed).is_empty());
+    }
+
+    #[test]
+    fn a_path_closed_to_the_account_already_is_left_out_and_the_plan_says_so() {
+        let mut plan = deployment();
+        // the archives on a share that squashes root, whose top only the
+        // engine's account may search
+        plan.site = Some(Site {
+            backup_dir: Some("/data/archives/registry".to_string()),
+            ..Site::default()
+        });
+        let asked = std::cell::RefCell::new(Vec::new());
+        let masks = masks_when(
+            &plan,
+            root_refused_at(&["/data/archives/registry"]),
+            |account, path| {
+                asked
+                    .borrow_mut()
+                    .push((account.to_string(), path.to_path_buf()));
+                Some(false)
+            },
+        );
+        let archives = PathBuf::from("/data/archives/registry");
+        assert_eq!(
+            masks.closed,
+            vec![
+                ("nils-desk".to_string(), archives.clone()),
+                ("nils-assistant".to_string(), archives.clone()),
+            ]
+        );
+        assert!(masks.in_reach.is_empty(), "{masks:?}");
+        assert_eq!(
+            asked.borrow().len(),
+            2,
+            "an account is asked only where root is refused"
+        );
+        assert_eq!(in_reach_refusal(&masks), None, "nothing is refused");
+
+        plan.closed = masks.closed;
+        let said = closed_words(&plan.closed);
+        assert_eq!(
+            said,
+            vec![
+                "/data/archives/registry is closed to nils-desk already, so the services \
+                 that run as nils-desk do not hide it: root cannot look at it, and a service \
+                 that hides a path root cannot look at does not start"
+                    .to_string(),
+                "/data/archives/registry is closed to nils-assistant already, so the \
+                 services that run as nils-assistant do not hide it: root cannot look at it, \
+                 and a service that hides a path root cannot look at does not start"
+                    .to_string(),
+            ]
+        );
+        let rows = plan_rows(&plan);
+        assert!(
+            rows.iter()
+                .any(|(key, value)| *key == "closed" && *value == said[0]),
+            "{rows:?}"
+        );
+        let two = closed_words(&[
+            ("nils-desk".to_string(), PathBuf::from("/a")),
+            ("nils-desk".to_string(), PathBuf::from("/b")),
+        ]);
+        assert_eq!(two.len(), 1, "one sentence for each account");
+        assert!(
+            two[0].starts_with("/a, /b are closed to nils-desk already")
+                && two[0].contains("look at them"),
+            "{two:?}"
+        );
+
+        // --print shows the line left out, and why, where it shows the units
+        if !cfg!(target_os = "macos") {
+            let printed = commands_text(&plan, &Console::new(true));
+            assert!(
+                printed.contains(
+                    "# InaccessiblePaths=-/data/archives/registry is left out: root cannot \
+                     look at it, and nils-desk cannot reach it"
+                ),
+                "{printed}"
+            );
+            assert!(
+                !printed
+                    .lines()
+                    .any(|l| l.trim() == "InaccessiblePaths=-/data/archives/registry"),
+                "{printed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_the_account_can_reach_but_root_cannot_look_at_is_refused_with_the_fix() {
+        let plan = deployment();
+        let masks = masks_when(
+            &plan,
+            root_refused_at(&["/data/source"]),
+            |account, _| match account {
+                "nils-desk" => Some(true),
+                // the assistant's account could not be asked
+                _ => None,
+            },
+        );
+        assert!(
+            masks.closed.is_empty(),
+            "nothing is left out where an account reaches the path, or may: {masks:?}"
+        );
+        assert_eq!(masks.in_reach.len(), 2, "{masks:?}");
+        let refused = in_reach_refusal(&masks).expect("refused");
+        assert_eq!(
+            refused,
+            "the services that run as nils-desk cannot be kept out of /data/source, because root \
+             cannot look at it and nils-desk can reach it: give root search permission on /data \
+             (as chmod 711 does), or close /data/source to nils-desk; the services that run as \
+             nils-assistant cannot be kept out of /data/source, because root cannot look at it \
+             and it could not be asked whether nils-assistant can reach it: give root search \
+             permission on /data (as chmod 711 does), or close /data/source to nils-assistant, \
+             and run nils setup again"
+        );
+
+        // the plan leaves nothing out, so a unit written all the same, as
+        // the restart after an update writes it, hides the path and does not
+        // start rather than start with it in reach
+        let state = state_of(&plan, &deployed_parts());
+        for (name, text) in systemd_units(&plan, &state) {
+            if name != "nils-engine.service" {
+                assert!(
+                    text.contains("\nInaccessiblePaths=-/data/source\n"),
+                    "{name}: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_update_and_a_repair_stop_on_a_path_no_unit_can_hide_and_a_print_says_it_and_goes_on() {
+        let plan = deployment();
+        let masks = masks_when(&plan, root_refused_at(&["/data/source"]), |_, _| Some(true));
+        let refused = in_reach_refusal(&masks).expect("refused");
+        let console = Console::new(true);
+        // both an update and a repair say it this way, with nothing changed
+        let stopped = masks_said_or_stop(Some(refused.clone()), false, &console)
+            .expect_err("a run for real stops");
+        assert_eq!(stopped.message, format!("nothing was changed: {refused}"));
+        assert!(
+            masks_said_or_stop(Some(refused), true, &console).is_ok(),
+            "a print changes nothing, so it refuses nothing"
+        );
+        assert!(masks_said_or_stop(None, false, &console).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_fix_names_the_folder_root_may_not_search_and_an_account_not_asked_is_not_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        if am_root() {
+            // root searches a folder of this machine whatever its mode
+            return;
+        }
+        let dir = scratch("root-looks");
+        let locked = dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let looked = root_looks_at(&locked.join("inner").join("deeper"));
+        let missing = root_looks_at(&dir.join("not-there"));
+        // a unit hides a path root cannot look at where the install lives
+        // behind that folder, which the plan's missing row asks runuser for,
+        // and nothing of the kind where it does not
+        let at = |install: PathBuf| {
+            let mut plan = deployment();
+            plan.dir = install.clone();
+            plan.source = Some(install.join("source"));
+            hides_from_root(&plan)
+        };
+        let behind = at(locked.join("nils"));
+        let open = at(dir.join("open"));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            looked,
+            RootLook::Refused {
+                folder: locked.clone()
+            }
+        );
+        assert_eq!(missing, RootLook::Seen, "the line forgives a missing path");
+        assert!(behind, "the install behind a folder root may not search");
+        assert!(
+            !open,
+            "an install root can look at, or that is not there yet"
+        );
+
+        // runuser is root's, so an account asked by anyone else says no word,
+        // and that is never read as closed
+        assert_eq!(account_reaches("nobody", Path::new("/")), None);
+    }
+
+    #[test]
+    fn the_paths_a_unit_hides_are_not_looked_at_without_the_services_of_a_machine() {
+        let never = |path: &Path| -> RootLook { panic!("{} was looked at", path.display()) };
+        let unasked = |account: &str, _: &Path| -> Option<bool> { panic!("{account} was asked") };
+
+        let plain = plan(Runtime::Machine);
+        assert!(plain.system.is_none());
+        assert!(masked(&plain).is_empty());
+        assert_eq!(masks_when(&plain, never, unasked), Masks::default());
+        assert_eq!(masks_here(&plain), Masks::default());
+
+        // nor where no unit is written
+        let mut unwritten = deployment();
+        unwritten.service = false;
+        assert!(masked(&unwritten).is_empty());
+
+        // nor where every part runs as the engine's account, which hides
+        // nothing from itself
+        let mut one_account = deployment();
+        one_account.system = Some(SystemUnits::default());
+        assert!(masked(&one_account).is_empty());
+
+        // an account the desk and the assistant share is asked once for
+        // each path
+        let mut shared = deployment();
+        if let Some(system) = shared.system.as_mut() {
+            system
+                .accounts
+                .insert("assistant".to_string(), "nils-desk".to_string());
+        }
+        assert_eq!(masked(&shared).len(), engine_data(&shared).len());
+
+        // and a plan that leaves a path out writes nothing of it without them
+        let mut closed = plan(Runtime::Machine);
+        closed.closed = vec![("nils".to_string(), PathBuf::from("/data/source"))];
+        let state = state_of(&closed, &[("engine", "binary"), ("desk", "binary")]);
+        for (name, text) in systemd_units(&closed, &state) {
+            assert!(!text.contains("InaccessiblePaths"), "{name}: {text}");
+        }
+        assert!(
+            !plan_rows(&closed).iter().any(|(key, _)| *key == "closed"),
+            "the plan of an install of this account says nothing of it"
+        );
     }
 
     /// The engine's account and binary of a site's install, as a step
@@ -16803,29 +17810,47 @@ mod tests {
     fn runuser_is_missing_at_the_question_where_root_takes_the_registry_as_the_engines_account() {
         let row = "runuser, which setup takes the registry's steps as the engine's account with";
         let machine = SystemUnits::default();
+        let asked = |_: &str| -> bool { panic!("a run that needs no runuser asks nothing") };
         assert_eq!(
-            runuser_missing(Some(&machine), false, || true, || false).as_deref(),
+            runuser_missing(Some(&machine), false, || true, || asked("hides"), || false).as_deref(),
             Some(row),
             "root setting up the services of this machine takes the registry as the engine's account"
         );
         assert_eq!(
-            runuser_missing(Some(&machine), false, || true, || true),
+            runuser_missing(Some(&machine), false, || true, || asked("hides"), || true),
             None,
             "a machine with runuser lacks nothing"
         );
-        let asked = |_: &str| -> bool { panic!("a run that needs no runuser asks nothing") };
         assert_eq!(
-            runuser_missing(Some(&machine), true, || asked("root"), || asked("runuser")),
+            runuser_missing(
+                Some(&machine),
+                true,
+                || asked("root"),
+                || asked("hides"),
+                || asked("runuser")
+            ),
             None,
             "a print changes nothing, so it is not refused for runuser"
         );
         assert_eq!(
-            runuser_missing(None, false, || asked("root"), || asked("runuser")),
+            runuser_missing(
+                None,
+                false,
+                || asked("root"),
+                || asked("hides"),
+                || asked("runuser")
+            ),
             None,
             "an install of an account's own takes its steps as itself"
         );
         assert_eq!(
-            runuser_missing(Some(&machine), false, || false, || asked("runuser")),
+            runuser_missing(
+                Some(&machine),
+                false,
+                || false,
+                || asked("hides"),
+                || asked("runuser")
+            ),
             None,
             "a run that is not root takes no step as another account"
         );
@@ -16838,7 +17863,14 @@ mod tests {
             ..SystemUnits::default()
         };
         assert_eq!(
-            runuser_missing(Some(&engine_as("nils")), false, || true, || false).as_deref(),
+            runuser_missing(
+                Some(&engine_as("nils")),
+                false,
+                || true,
+                || asked("hides"),
+                || false
+            )
+            .as_deref(),
             Some(row)
         );
         assert_eq!(
@@ -16846,11 +17878,27 @@ mod tests {
                 Some(&engine_as("root")),
                 false,
                 || true,
+                || false,
                 || asked("runuser")
             ),
             None,
             "an engine that runs as root takes the registry's steps in this process, and root \
              takes the source steps itself where it cannot act as their account"
+        );
+
+        // A unit that would hide a path root cannot look at leaves it out
+        // only once its account, asked through runuser, is closed out of it,
+        // so an engine that runs as root needs runuser there too.
+        assert_eq!(
+            runuser_missing(Some(&engine_as("root")), false, || true, || true, || false).as_deref(),
+            Some(
+                "runuser, which setup asks a part's account with whether it reaches a path root \
+                 cannot look at"
+            )
+        );
+        assert_eq!(
+            runuser_missing(Some(&engine_as("root")), false, || true, || true, || true),
+            None
         );
 
         // and the plan's own list says it only for a run for real
@@ -20465,6 +21513,134 @@ mod tests {
     }
 
     #[test]
+    fn llama_cpp_keeps_its_cache_under_the_runtime_folder_where_its_unit_cannot_see_a_home() {
+        let plan = deployment();
+        let unit = llama_unit(&plan, Path::new("/srv/nils/llama.cpp/b1"), "127.0.0.1");
+        assert!(unit.contains("ProtectHome=yes\n"), "{unit}");
+        for line in [
+            "Environment=\"LLAMA_CACHE=/srv/nils/kvasir/runtime/cache/llama.cpp\"\n",
+            "Environment=\"HF_HOME=/srv/nils/kvasir/runtime/cache/huggingface\"\n",
+            "Environment=\"HF_HUB_CACHE=/srv/nils/kvasir/runtime/cache/huggingface/hub\"\n",
+        ] {
+            assert!(unit.contains(line), "no {line} in {unit}");
+        }
+        // they are the service's, ahead of the command they are for
+        let service = unit.find("[Service]").unwrap();
+        let cache = unit.find("Environment=").unwrap();
+        let exec = unit.find("ExecStart=").unwrap();
+        assert!(service < cache && cache < exec, "{unit}");
+
+        // every one of them is under the runtime's cache folder, inside a
+        // folder that is handed to the account llama.cpp runs as
+        let folder = plan.runtime_dir().join("cache");
+        let named = llama_cache(&plan);
+        assert_eq!(named.len(), 3, "{named:?}");
+        for (name, path) in &named {
+            assert!(path.starts_with(&folder), "{name}: {}", path.display());
+        }
+        assert!(
+            files_of(&plan)
+                .iter()
+                .any(|(path, account)| folder.starts_with(path) && account == "nils-assistant"),
+            "the cache is not given to llama.cpp's account: {:?}",
+            files_of(&plan)
+        );
+
+        // and --print shows them where it shows the unit
+        if !cfg!(target_os = "macos") {
+            let mut printed = plan.clone();
+            printed.llama = Some(Llama {
+                variant: "ubuntu-x64",
+                loader: true,
+            });
+            let said = commands_text(&printed, &Console::new(true));
+            assert!(said.contains("nils-llama.service"), "{said}");
+            assert!(
+                said.contains(
+                    "    Environment=\"HF_HUB_CACHE=/srv/nils/kvasir/runtime/cache/huggingface/hub\"\n"
+                ),
+                "{said}"
+            );
+        }
+    }
+
+    #[test]
+    fn llama_cpp_keeps_its_cache_where_it_was_wherever_its_unit_sees_a_home() {
+        // this account's own units, outside a home
+        let mut own = plan(Runtime::Machine);
+        own.dir = PathBuf::from("/srv/nils");
+        own.parts.push(Part::Assistant);
+        // the machine's units, for an install that lives in a home
+        let mut at_home = deployment();
+        at_home.dir = PathBuf::from("/home/you/nils");
+        // the machine's units, with the assistant as the engine's account
+        let mut shared = deployment();
+        if let Some(system) = shared.system.as_mut() {
+            system.accounts.remove("assistant");
+        }
+        // llama.cpp beside parts in containers
+        let mut beside = plan(Runtime::Podman);
+        beside.dir = PathBuf::from("/srv/nils");
+        beside.parts.push(Part::Assistant);
+        for (why, plan) in [
+            ("its own units", own),
+            ("under a home", at_home),
+            ("as the engine's account", shared),
+            ("beside containers", beside),
+        ] {
+            let unit = llama_unit(&plan, Path::new("/srv/nils/llama.cpp/b1"), "127.0.0.1");
+            assert!(!unit.contains("ProtectHome"), "{why}: {unit}");
+            assert!(
+                !unit.contains("Environment=") && llama_cache(&plan).is_empty(),
+                "{why}: the models it downloaded before would be fetched again: {unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_with_a_space_stays_one_assignment_in_llama_cpps_environment() {
+        let mut plan = deployment();
+        plan.dir = PathBuf::from("/srv/nils 100%");
+        let unit = llama_unit(&plan, Path::new("/srv/nils/llama.cpp/b1"), "127.0.0.1");
+        assert!(
+            unit.contains(
+                "Environment=\"HF_HOME=/srv/nils 100%%/kvasir/runtime/cache/huggingface\"\n"
+            ),
+            "{unit}"
+        );
+        assert_eq!(
+            unit_environment("A", Path::new("/x \"y\" \\z")),
+            "Environment=\"A=/x \\\"y\\\" \\\\z\"\n",
+            "a quote and a backslash inside the quotes are escaped"
+        );
+    }
+
+    #[test]
+    fn llama_cpps_cache_is_made_only_inside_a_runtime_folder_that_is_there() {
+        let dir = scratch("llama-cache");
+        let runtime = dir.join("kvasir").join("runtime");
+        let cache = llama_cache_in(&runtime);
+        // before Kvasir's folder is there, nothing is made in its place
+        assert!(make_llama_cache(&runtime, &cache).is_ok());
+        assert!(
+            !dir.join("kvasir").exists(),
+            "a folder stands in for Kvasir"
+        );
+
+        std::fs::create_dir_all(&runtime).unwrap();
+        assert!(make_llama_cache(&runtime, &cache).is_ok());
+        for (name, path) in &cache {
+            assert!(path.is_dir(), "{name}: {}", path.display());
+        }
+        // a second run keeps what llama.cpp downloaded into it
+        let model = cache[2].1.join("a-model");
+        std::fs::write(&model, "weights").unwrap();
+        assert!(make_llama_cache(&runtime, &cache).is_ok());
+        assert_eq!(std::fs::read_to_string(&model).unwrap(), "weights");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn kvasir_is_told_where_llama_cpp_is_from_where_kvasir_runs() {
         let dir = scratch("llama-kvasir");
         let mut plan = plan(Runtime::Machine);
@@ -20622,6 +21798,262 @@ mod tests {
             !stages(&plan, false)
                 .iter()
                 .any(|(stage, _)| *stage == Stage::Runtime)
+        );
+    }
+
+    #[test]
+    fn ldd_names_each_library_and_version_a_binary_links_and_this_machine_lacks_once() {
+        // as ldd says it on Debian 13 of the CPU build without libgomp1
+        let said = "\tlinux-vdso.so.1 (0x00007ffd3c1e6000)\n\
+                    \tlibllama-server-impl.so => /srv/nils/llama.cpp/b10964-ubuntu-x64/libllama-server-impl.so (0x00007f0a1c000000)\n\
+                    \tlibgomp.so.1 => not found\n\
+                    \tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f0a1bc00000)\n\
+                    \tlibgomp.so.1 => not found\n\
+                    \t/lib64/ld-linux-x86-64.so.2 (0x00007f0a1c5e8000)\n";
+        assert_eq!(ldd_unlinked(said), vec!["libgomp.so.1"]);
+        // a library here too old for the build, which ldd says on both of
+        // its streams
+        let old = "/srv/nils/llama.cpp/b10964-ubuntu-arm64/llama-server: \
+                   /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found \
+                   (required by /srv/nils/llama.cpp/b10964-ubuntu-arm64/llama-server)\n\
+                   \tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x0000ffff9c000000)\n\
+                   /srv/nils/llama.cpp/b10964-ubuntu-arm64/llama-server: \
+                   /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found \
+                   (required by /srv/nils/llama.cpp/b10964-ubuntu-arm64/llama-server)\n";
+        assert_eq!(ldd_unlinked(old), vec!["libc.so.6 with GLIBC_2.38"]);
+        // a binary that finds everything, and a file that is not one
+        assert!(
+            ldd_unlinked(
+                "\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f0a1b800000)\n\
+                 \t/lib64/ld-linux-x86-64.so.2 (0x00007f0a1c5e8000)\n"
+            )
+            .is_empty()
+        );
+        assert!(ldd_unlinked("\tnot a dynamic executable\n").is_empty());
+    }
+
+    #[test]
+    fn a_library_llama_cpp_links_and_this_machine_lacks_is_a_missing_row_with_its_package() {
+        let nothing = |_: &str| false;
+        let everything = |_: &str| true;
+        let gomp = "libgomp.so.1, which llama.cpp links: install libgomp1 (Debian, Ubuntu)";
+        // before anything is downloaded, the libraries known to be missing
+        // on a Debian or Ubuntu server
+        assert_eq!(llama_lacks("ubuntu-x64", &nothing, None), vec![gomp]);
+        assert_eq!(
+            llama_lacks("ubuntu-vulkan-arm64", &nothing, None),
+            vec![gomp]
+        );
+        assert!(llama_lacks("ubuntu-x64", &everything, None).is_empty());
+        // a build here already has ldd's word too: what the list knows is
+        // said once with its package, and the rest without one
+        let ldd = "\tlibgomp.so.1 => not found\n\tlibssl.so.3 => not found\n";
+        let both = vec![gomp, "libssl.so.3, which llama.cpp links"];
+        assert_eq!(llama_lacks("ubuntu-x64", &nothing, Some(ldd)), both);
+        assert_eq!(llama_lacks("ubuntu-x64", &everything, Some(ldd)), both);
+        // a Mac's build links nothing a Mac lacks
+        assert!(llama_lacks("macos-arm64", &nothing, Some(ldd)).is_empty());
+
+        // the linker's list names a library by its whole name, and the
+        // distributions' folders are looked in where it names none
+        let listed = "1166 libs found in cache `/etc/ld.so.cache'\n\
+                      \tlibgomp.so.10 (libc6,x86-64) => /opt/gcc/lib64/libgomp.so.10\n\
+                      \tlibvulkan.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libvulkan.so.1\n";
+        let nowhere = |_: &Path| false;
+        assert!(library_found("libvulkan.so.1", Some(listed), &nowhere));
+        assert!(
+            !library_found("libgomp.so.1", Some(listed), &nowhere),
+            "libgomp.so.10 is another library"
+        );
+        assert!(!library_found("libgomp.so.1", None, &nowhere));
+        assert!(library_found("libgomp.so.1", None, &|path| {
+            path == Path::new("/usr/lib/aarch64-linux-gnu/libgomp.so.1")
+        }));
+    }
+
+    #[test]
+    fn a_llama_cpp_that_does_not_run_is_said_in_the_loaders_words_not_as_no_device() {
+        let loader = "/srv/nils/llama.cpp/b10964-ubuntu-x64/llama-server: error while loading \
+                      shared libraries: libgomp.so.1: cannot open shared object file: No such \
+                      file or directory";
+        assert_eq!(
+            devices_said(
+                &format!("{loader}\n"),
+                Some("it ended with exit status: 127")
+            ),
+            Err(loader.to_string())
+        );
+        // one that said nothing is said by how it ended
+        assert_eq!(
+            devices_said("", Some("it ended with signal: 4 (SIGILL)")),
+            Err("it ended with signal: 4 (SIGILL)".to_string())
+        );
+        // one that ran lists its devices, or none
+        assert_eq!(
+            devices_said("Available devices:\n  (none)\n", None),
+            Ok(vec![])
+        );
+        assert_eq!(
+            devices_said(
+                "Available devices:\n  Vulkan0: a card (8192 MiB, 8000 MiB free)\n",
+                Some("it ended with exit status: 1")
+            ),
+            Ok(vec![
+                "Vulkan0: a card (8192 MiB, 8000 MiB free)".to_string()
+            ]),
+            "a list said before it ended badly is still a list"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_llama_cpp_that_cannot_start_stops_an_install_and_is_held_back_alone_on_an_update() {
+        let dir = scratch("llama-cannot-start");
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.parts.push(Part::Assistant);
+        plan.llama = Some(Llama {
+            variant: "ubuntu-x64",
+            loader: true,
+        });
+        // A server here that refuses what it is asked and lists nothing: the
+        // shell, which is on every machine and runs nothing when given an
+        // option it does not know.
+        let build = llama_build_dir(&dir, "ubuntu-x64");
+        std::fs::create_dir_all(&build).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", build.join("llama-server")).unwrap();
+        // a machine without libgomp stops on that first, and as plainly
+        let lacks = llama_lacks_here(&plan);
+
+        let console = Console::new(true);
+        console.strict.set(true);
+        let mut state = State::default();
+        let Err(stopped) = install_llama(&plan, &mut state, &console) else {
+            panic!("an install went on past a llama.cpp that cannot start");
+        };
+        let said = if lacks.is_empty() {
+            "llama.cpp b10964 does not run on this machine: "
+        } else {
+            "llama.cpp b10964 cannot start, since this machine lacks "
+        };
+        assert!(stopped.message.starts_with(said), "{}", stopped.message);
+        assert!(
+            !stopped.message.contains("graphics device"),
+            "{}",
+            stopped.message
+        );
+        assert!(
+            !stopped.message.contains("held back"),
+            "an install stops rather than go on without it: {}",
+            stopped.message
+        );
+        assert!(
+            state.parts.contains_key(LLAMA_PART),
+            "the build is on record, so the stopped install can be removed"
+        );
+
+        // an update or a repair says it, and answers that llama.cpp cannot
+        // start, so that it alone is held back
+        console.strict.set(false);
+        assert!(matches!(
+            install_llama(&plan, &mut state, &console),
+            Ok(false)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_llama_cpp_held_back_is_said_in_one_sentence_with_what_the_machine_lacks() {
+        let lacks = llama_lacks("ubuntu-x64", &|_| false, None);
+        assert_eq!(
+            llama_held(llama_lacks_said(&lacks), false),
+            "llama.cpp b10964 cannot start, since this machine lacks libgomp.so.1, which \
+             llama.cpp links: install libgomp1 (Debian, Ubuntu); llama.cpp alone is held back, \
+             its unit stopped and taken out of the boot until nils setup and repair can start \
+             it, and the other services start without it"
+        );
+        // an install stops on the reason alone
+        assert_eq!(
+            llama_held(llama_lacks_said(&lacks), true),
+            "llama.cpp b10964 cannot start, since this machine lacks libgomp.so.1, which \
+             llama.cpp links: install libgomp1 (Debian, Ubuntu)"
+        );
+    }
+
+    #[test]
+    fn every_other_service_starts_where_llama_cpp_alone_is_held_back() {
+        let mut plan = plan(Runtime::Machine);
+        plan.parts.push(Part::Assistant);
+        plan.llama = Some(Llama {
+            variant: "ubuntu-x64",
+            loader: true,
+        });
+        let mut state = state_of(
+            &plan,
+            &[
+                ("engine", "binary"),
+                ("desk", "binary"),
+                ("kvasir", "node"),
+                ("assistant", "node"),
+            ],
+        );
+        state.parts.insert(
+            LLAMA_PART.to_string(),
+            PartState {
+                version: LLAMA_BUILD.to_string(),
+                path: llama_build_dir(&plan.dir, "ubuntu-x64")
+                    .display()
+                    .to_string(),
+                kind: LLAMA_PART.to_string(),
+            },
+        );
+        let names = |state: &State| -> Vec<String> {
+            systemd_units(&plan, state)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        };
+        let all = names(&state);
+        assert!(all.contains(&"nils-llama.service".to_string()), "{all:?}");
+        assert_eq!(names(&services_to_start(&state, true)), all);
+
+        // held back, its unit is stopped and taken out of the boot, on the
+        // manager that runs it, and left where it is for setup to write again
+        assert_eq!(
+            hold_llama_back_calls(true),
+            vec![
+                vec!["systemctl", "stop", "nils-llama"],
+                vec!["systemctl", "disable", "nils-llama"],
+            ]
+        );
+        assert_eq!(
+            hold_llama_back_calls(false),
+            vec![
+                vec!["systemctl", "--user", "stop", "nils-llama"],
+                vec!["systemctl", "--user", "disable", "nils-llama"],
+            ],
+            "llama.cpp beside parts in containers runs under the account's manager"
+        );
+
+        // held back, llama.cpp's unit alone is left out of what is started
+        let held = services_to_start(&state, false);
+        let mut others = all.clone();
+        others.retain(|name| name != "nils-llama.service");
+        assert_eq!(names(&held), others);
+        for unit in [
+            "nils-engine.service",
+            "nils-desk.service",
+            "kvasir.service",
+            "nils-assistant.service",
+        ] {
+            assert!(others.contains(&unit.to_string()), "{unit} in {others:?}");
+        }
+        // podman and docker start llama.cpp from the build on record, which
+        // the held record does not name
+        assert!(!held.parts.contains_key(LLAMA_PART));
+        assert!(
+            state.parts.contains_key(LLAMA_PART),
+            "the record kept still names the build"
         );
     }
 
