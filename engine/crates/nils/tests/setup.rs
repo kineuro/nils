@@ -1387,3 +1387,218 @@ fn a_nils_an_update_started_updates_the_parts_and_not_itself() {
         "it installed itself again:\n{stdout}"
     );
 }
+
+/// A site names the places it has, with the roles and the guarantees they
+/// really have and the directories the engine reads among them, and gets
+/// exactly those. The archives, the rule packs and the request handlers are
+/// the site's to set, and they reach the unit. A second run declares nothing
+/// twice, and an update, which is made from the record alone, reverts none
+/// of it.
+#[test]
+fn a_site_declares_the_places_it_has_and_an_update_reverts_none_of_them() {
+    // a release older than this binary, so that the packs come from it and
+    // the wizard leaves alone the binary it is run from, which the runs
+    // after the first one are run from too
+    let releases = Releases::new("1.0.0-alpha.1");
+    let nils = Installed::new("nils-setup-site");
+    let config = TempDir::new("nils-setup-site-config");
+    let base = TempDir::new("nils-setup-site-base");
+    let dir = base.path().join("nils");
+    let at = |name: &str| base.path().join(name).display().to_string();
+    let (archives, dicom, results, shared, packs) = (
+        at("archives"),
+        at("dicom"),
+        at("results"),
+        at("shared"),
+        at("packs"),
+    );
+    let registry = dir.join("registry").display().to_string();
+    // five places on directories of the site's own, of five roles, two of
+    // them read by the engine although neither is a dataset
+    let declared = [
+        format!("archives={archives},role=backup,snapshots,protected"),
+        format!("registry={registry},role=registry,backup=archives,protected,fast"),
+        format!("source={dicom},role=source,snapshots,protected"),
+        format!("results={results},role=working,fast,read"),
+        format!("shared={shared},role=share,protected,read"),
+    ];
+    let (url, dir_s) = (releases.url(), dir.display().to_string());
+    let run = |more: &[&str]| {
+        let mut args = vec![
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            &dir_s,
+            "--channel",
+            &url,
+            "--pack-dir",
+            &packs,
+            "--workers",
+            "12",
+        ];
+        for place in &declared {
+            args.push("--place");
+            args.push(place);
+        }
+        args.extend_from_slice(more);
+        setup(&nils.path(), config.path(), &args)
+    };
+    let o = run(&["--no-service"]);
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+
+    // asked of this build's own binary, since the one the wizard installed
+    // beside itself is the release's
+    let listed = || {
+        let out = output(
+            Command::new(env!("CARGO_BIN_EXE_nils"))
+                .arg("--registry")
+                .arg(&registry)
+                .args(["place", "list", "--json"]),
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let doc: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("the places did not list: {e}\n{text}"));
+        doc.as_array().cloned().unwrap_or_default()
+    };
+    let places = listed();
+    assert_eq!(places.len(), 5, "{places:#?}");
+    let one = |places: &[serde_json::Value], name: &str| {
+        places
+            .iter()
+            .find(|p| p["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} place in {places:#?}"))
+            .clone()
+    };
+    let works = one(&places, "results");
+    assert_eq!(works["role"], "working", "{works:#?}");
+    assert_eq!(works["guarantees"]["fast"], true, "{works:#?}");
+    assert_eq!(works["guarantees"]["protected"], false, "{works:#?}");
+    let held = one(&places, "registry");
+    assert_eq!(held["guarantees"]["backup"], "archives", "{held:#?}");
+    assert_eq!(held["guarantees"]["protected"], true, "{held:#?}");
+    assert_eq!(one(&places, "shared")["role"], "share");
+    assert_eq!(one(&places, "archives")["role"], "backup");
+    assert!(
+        Path::new(&packs).join("mri").join("pack.toml").is_file(),
+        "the packs went where the site said:\n{}",
+        o.stdout
+    );
+    let state = state_of(config.path());
+    assert!(state.contains("[[site.places]]"), "{state}");
+    assert!(state.contains("workers = 12"), "{state}");
+    assert!(state.contains("role = \"share\""), "{state}");
+
+    // a second run declares the same places, and declares nothing twice
+    let again = run(&["--no-service"]);
+    assert!(again.ok, "{}\n{}", again.stdout, again.stderr);
+    let after = listed();
+    assert_eq!(after.len(), 5, "a rerun declared them again: {after:#?}");
+    assert_eq!(one(&after, "results")["role"], "working");
+    assert_eq!(one(&after, "results")["id"], works["id"]);
+
+    // an update is made from the record alone, and reverts nothing
+    let update = setup(
+        &nils.path(),
+        config.path(),
+        &["--update", "--yes", "--channel", &url],
+    );
+    assert!(update.ok, "{}\n{}", update.stdout, update.stderr);
+    let kept = listed();
+    assert_eq!(kept.len(), 5, "{kept:#?}");
+    assert_eq!(one(&kept, "shared")["role"], "share");
+    let recorded = state_of(config.path());
+    assert!(recorded.contains("[[site.places]]"), "{recorded}");
+    assert!(recorded.contains("workers = 12"), "{recorded}");
+
+    // and the settings reach the unit the install would write
+    let unit = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            &dir_s,
+            "--service",
+            "--print",
+            "--channel",
+            &url,
+        ],
+    );
+    assert!(unit.ok, "{}\n{}", unit.stdout, unit.stderr);
+    unit.says(&format!("--backup-dir {archives}"));
+    unit.says(&format!("--pack-dir {packs}"));
+    unit.says("--workers 12");
+    unit.says(&format!("--ingest-root source={dicom}"));
+    unit.says(&format!("--ingest-root results={results}"));
+    unit.says(&format!("--ingest-root shared={shared}"));
+    assert!(
+        !unit.stdout.contains("--ingest-root archives="),
+        "a place nobody marked is not a directory the engine reads:\n{}",
+        unit.stdout
+    );
+}
+
+/// Places that cannot be the places of this install are refused with the fix
+/// in the same sentence, and nothing is written: no registry, no record.
+#[test]
+fn places_that_cannot_be_declared_stop_the_install_before_it_writes_anything() {
+    let nils = Installed::new("nils-setup-site-refused");
+    let config = TempDir::new("nils-setup-site-refused-config");
+    let base = TempDir::new("nils-setup-site-refused-base");
+    let dir = base.path().join("nils");
+    let dir_s = dir.display().to_string();
+    let registry = format!(
+        "registry={},role=registry,backup=archives",
+        dir.join("registry").display()
+    );
+    let archives = format!(
+        "archives={},role=backup",
+        base.path().join("archives").display()
+    );
+    let refused = |more: &[&str]| {
+        let mut args = vec![
+            "--yes",
+            "--parts",
+            "engine",
+            "--dir",
+            &dir_s,
+            "--no-service",
+        ];
+        args.extend_from_slice(more);
+        let o = setup(&nils.path(), config.path(), &args);
+        assert!(!o.ok, "it went ahead:\n{}", o.stdout);
+        assert!(!dir.exists(), "it made {} anyway", dir.display());
+        assert!(
+            !config.path().join("nils").join("setup.toml").exists(),
+            "it left a record of an install it did not make"
+        );
+        format!("{}{}", o.stdout, o.stderr)
+    };
+    assert!(refused(&["--place", "work=/work,role=vault"]).contains("the roles are"));
+    assert!(
+        refused(&["--place", "work=/work,role=working,quick"]).contains("says nothing about it")
+    );
+    assert!(refused(&["--place", "work=/work,role=working"]).contains("keep no registry"));
+    assert!(refused(&["--place", &registry]).contains("no backup place is named archives"));
+    assert!(
+        refused(&[
+            "--place",
+            &registry,
+            "--place",
+            &archives,
+            "--source",
+            "/data/source"
+        ])
+        .contains("--place NAME=DIR,role=source"),
+        "a directory of DICOM is one of the places, not a flag beside them"
+    );
+    assert!(refused(&["--workers", "0"]).contains("one or more"));
+}

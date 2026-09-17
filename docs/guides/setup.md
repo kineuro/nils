@@ -34,6 +34,30 @@ assistant, `assistant/`, `kvasir/` and `llama.cpp/`. A directory of DICOM the en
 read can be named here; it becomes an ingest root and a `source` place, and
 it is mounted read only in a container. `--dir PATH`, `--source PATH`.
 
+A site that has places of its own names them instead, once each, with the
+role and the guarantees they really have: `--place
+archives=/data/archives,role=backup,snapshots,protected`. After the name and
+the directory come the words that describe it. `role=` is one of source,
+registry, working, export, share, exchange or backup, and it is what binds
+what may be written there. `backup=` names the backup place that backs this
+one up. `snapshots`, `protected` and `fast` are what the site declares about
+the storage behind it. `read` makes it one of the directories the engine
+reads DICOM from, which the desk offers by name and a queued job may name; a
+source place is a dataset and is read whether or not it is marked, and a
+place of any other role is read only where the site marked it, so declaring
+a place never widens what can be browsed. Where any place is named, those
+are the places the install declares, in place of the five above, and
+`--source` is not taken beside them. The place with the `registry` role is
+where this install keeps its registry, and the archives go to a backup place
+that is named: anything else about them is said before a file is written,
+with the fix in the sentence.
+
+`--backup-dir DIR` is where the engine writes its archives, which is
+otherwise the backup place the registry names, or `<dir>/backups` for an
+install that named no places. `--pack-dir DIR` is where the rule packs are
+put and where the engine is told to read them from, and `--workers N` how
+many requests it answers at once.
+
 **4. The registry.** Where a registry already exists, it is left alone.
 Otherwise the wizard asks for a passphrase for the registry's key, twice and
 never echoed, explains in one line what the key is for, and asks whether the
@@ -256,8 +280,9 @@ Podman is kept running by quadlets in `~/.config/containers/systemd/`
 the base directory, the parts with their versions and how each runs, the
 mode, the runtime, the service manager, the ports, the reachability, the
 address a browser opens the desk at where a proxy answers for it (`origin`,
-written only for such an install), the backend, the places declared, and for
-an install whose services are the machine's own the account each part runs as
+written only for such an install), the backend, the places declared, the
+layout a site described (`[site]`, written only where one was), and for an
+install whose services are the machine's own the account each part runs as
 and the capabilities the engine keeps (`[system]`, written only for such an
 install):
 
@@ -298,6 +323,31 @@ capabilities = ["CAP_DAC_OVERRIDE", "CAP_DAC_READ_SEARCH"]
 [system.accounts]
 desk = "nils-desk"
 engine = "nils"
+```
+
+A site that named its own places records them, with the settings beside
+them, so that an update and a repair declare the same places and write the
+same settings:
+
+```toml
+[site]
+pack_dir = "/srv/nils/engine/packs"
+workers = 64
+
+[[site.places]]
+name = "archives"
+role = "backup"
+path = "/data/nils-archives/registry"
+snapshots = true
+protected = true
+
+[[site.places]]
+name = "work"
+role = "working"
+path = "/work"
+protected = true
+fast = true
+read = true
 ```
 
 Run `nils setup` again and it opens with what is installed, where, in what
@@ -347,6 +397,10 @@ key cannot be recovered. `--keep-data` and `--purge` answer it.
 | `--origin URL` | The address a browser opens the desk at, where a proxy of yours answers for it |
 | `--backend sqlite\|postgres`, `--dsn`, `--schema` | Where the registry is kept |
 | `--source PATH` | A directory of DICOM the engine may read |
+| `--place NAME=DIR,role=ROLE,...` | A place this site has, with its role and its guarantees |
+| `--backup-dir DIR` | Where the engine writes its archives |
+| `--pack-dir DIR` | Where the engine reads its rule packs |
+| `--workers N` | How many requests the engine answers at once |
 | `--key-file FILE` | The registry key's passphrase, instead of a prompt |
 | `--service`, `--no-service` | Write and start services, or do not |
 | `--system` | Write the services of this machine, in `/etc/systemd/system`; root's to do |
