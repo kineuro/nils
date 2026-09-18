@@ -538,7 +538,11 @@ lingering setup turned on for the account. A registry an install found
 already there, a schema the record does not name and an account that lingered
 before setup ran are left exactly as they were. Anything that cannot be
 removed is named, with the command that removes it, the rest of the purge
-still runs, and the last sentence says what is left. Keeping your data keeps
+still runs, and the last sentence says what is left. That command carries the
+connection string with its password masked, and where a schema was not
+dropped the registry's `nils.toml` is kept beside the directory that goes, as
+`<dir>.registry.toml`, so the string the command needs is still somewhere you
+can read it. Keeping your data keeps
 those schemas where the registry's data is, and says which they are and in
 which database.
 

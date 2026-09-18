@@ -15776,8 +15776,17 @@ fn outside_the_install(
         .parts
         .get("postgres")
         .is_some_and(|p| p.kind == "podman" || p.kind == "docker");
+    // The password never goes into the command: a terminal, a scrollback and
+    // a log of the run all outlive the file that holds the string, and the
+    // file is kept where a drop was refused, so the sentence can still be
+    // acted on. A connection string in the key and value form is masked
+    // whole by redact_dsn, which is safe and says nothing about the host.
     let command = |schema: &str| match &registry {
-        Some((dsn, _)) => format!("psql \"{dsn}\" -c \"{}\"", drop_schemas_sql(schema)),
+        Some((dsn, _)) => format!(
+            "psql \"{}\" -c \"{}\"",
+            crate::redact_dsn(dsn),
+            drop_schemas_sql(schema)
+        ),
         None => format!(
             "psql \"<the connection string the registry used>\" -c \"{}\"",
             drop_schemas_sql(schema)
@@ -15813,7 +15822,7 @@ fn outside_the_install(
                 _ => None,
             };
             out.push(Outside {
-                key: "database",
+                key: DATABASE_KEY,
                 what: schemas(schema),
                 kept: where_its_data_is(schema),
                 unless: doing.is_none().then(|| {
@@ -15829,7 +15838,7 @@ fn outside_the_install(
         // Postgres and not who made the schemas. A purge that guessed could
         // drop a schema the site made itself, so it names them instead.
         (None, Some(schema)) => out.push(Outside {
-            key: "database",
+            key: DATABASE_KEY,
             what: schemas(schema),
             kept: where_its_data_is(schema),
             unless: Some(
@@ -15855,6 +15864,30 @@ fn outside_the_install(
         });
     }
     out
+}
+
+/// The word the schemas of a registry are shown under, and the one thing a
+/// connection string is needed for.
+const DATABASE_KEY: &str = "database";
+
+/// The registry's own configuration, kept beside the directory a purge
+/// removes, where a schema this install made was not dropped. The command
+/// printed has the password masked, so this file is where the string it
+/// needs still is; without it a purge would leave a person a command they
+/// cannot run. `None` where the registry wrote none, which is where nothing
+/// read it either.
+fn keep_connection_string(dir: &Path) -> Result<Option<PathBuf>, String> {
+    let from = dir.join("registry").join("nils.toml");
+    let Ok(text) = std::fs::read(&from) else {
+        return Ok(None);
+    };
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "nils".to_string());
+    let to = dir.with_file_name(format!("{name}.registry.toml"));
+    write_secret_bytes(&to, &text).map_err(|e| e.message)?;
+    Ok(Some(to))
 }
 
 /// One thing outside the install's directory, removed. What a database or a
@@ -16793,6 +16826,7 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) -> Vec<Stri
     // the lingering setup turned on. Only a purge takes these; an uninstall
     // that keeps the data keeps the registry where it is.
     if leaving == Leaving::Purge {
+        let mut needs_the_string = false;
         for outside in &removal.outside {
             let refused = match outside.doing.as_ref() {
                 Some(doing) => match remove_outside(doing, &removal.dir.join("registry")) {
@@ -16807,6 +16841,25 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) -> Vec<Stri
             say(format!("{} was not removed: {refused}", outside.what));
             say(format!("  remove it with: {}", outside.command));
             left.push(outside.what.clone());
+            needs_the_string |= outside.key == DATABASE_KEY;
+        }
+        // The command above has the password masked, so the file the
+        // registry kept the connection string in stays, beside the directory
+        // that goes, and is named in the same breath.
+        if needs_the_string {
+            match keep_connection_string(&removal.dir) {
+                Ok(Some(path)) => {
+                    say(format!(
+                        "  the connection string it needs is in {}",
+                        path.display()
+                    ));
+                    left.push(format!("the connection string, kept in {}", path.display()));
+                }
+                Ok(None) => {}
+                Err(e) => say(format!(
+                    "  the registry's connection string was not kept: {e}"
+                )),
+            }
         }
     }
 
@@ -18640,6 +18693,77 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_drop_names_the_command_without_the_password_and_keeps_the_string() {
+        let root = scratch("purge-password");
+        // the record names a schema the registry does not answer at, so the
+        // drop is refused with no database asked at all
+        let state = on_postgres(&root, "theirs", Some("ours"));
+        let dir = PathBuf::from(&state.dir);
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            "backend = \"postgres\"\ndsn = \"postgres://nils:s3cret@127.0.0.1/nils\"\n\
+             schema = \"theirs\"\n",
+        )
+        .unwrap();
+
+        let outside = outside_the_install(&state, registry_backend(&dir), false);
+        assert_eq!(outside[0].doing, None, "{outside:?}");
+        assert!(
+            !outside[0].command.contains("s3cret"),
+            "a password never goes into a command printed on a terminal: {}",
+            outside[0].command
+        );
+        assert!(
+            outside[0]
+                .command
+                .contains("postgres://nils:***@127.0.0.1/nils"),
+            "{}",
+            outside[0].command
+        );
+        let removal = gather_removal(&state, None, Leaving::Purge);
+        let text = removal_text(&removal, Leaving::Purge, &Console::new(true));
+        assert!(!text.contains("s3cret"), "{text}");
+
+        // carried out with nothing of this machine's own in it
+        let record = root.join("setup.toml");
+        std::fs::write(&record, "").unwrap();
+        let removal = Removal {
+            units: Vec::new(),
+            unit_files: Vec::new(),
+            state: record,
+            ..removal
+        };
+        let left = carry_out(&removal, Leaving::Purge, &Console::new(true));
+        let kept = root.join("nils.registry.toml");
+        assert!(
+            kept.is_file(),
+            "the file holding the string stays: {left:?}"
+        );
+        assert!(
+            std::fs::read_to_string(&kept)
+                .unwrap()
+                .contains("postgres://nils:s3cret@127.0.0.1/nils"),
+            "with the connection string in it"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&kept).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "only this account may read it"
+            );
+        }
+        assert!(
+            left.iter()
+                .any(|what| what.contains(&kept.display().to_string())),
+            "what is left names it too: {left:?}"
+        );
+        assert!(!dir.exists(), "the directory still goes");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_schema_the_record_does_not_name_is_never_dropped() {
         let root = scratch("purge-other-schema");
 
@@ -18723,7 +18847,16 @@ mod tests {
             keeping.contains("keeps its services running without a login"),
             "{keeping}"
         );
-        // and nothing outside is carried out for anything but a purge
+        // carried out with nothing of this machine's own in it: nothing
+        // outside the directory is touched for anything but a purge
+        let record = root.join("setup.toml");
+        std::fs::write(&record, "").unwrap();
+        let removal = Removal {
+            units: Vec::new(),
+            unit_files: Vec::new(),
+            state: record,
+            ..removal
+        };
         assert!(
             carry_out(&removal, Leaving::KeepData, &console).is_empty(),
             "an uninstall that keeps the data leaves nothing named"
@@ -18820,13 +18953,26 @@ mod tests {
             unfinished: true,
             ..State::default()
         };
-        let removal = gather_removal(&state, None, Leaving::Purge);
+        // carried out with nothing of this machine's own in it
+        let record = home.join("setup.toml");
+        std::fs::write(&record, "").unwrap();
+        let removal = Removal {
+            units: Vec::new(),
+            unit_files: Vec::new(),
+            state: record.clone(),
+            ..gather_removal(&state, None, Leaving::Purge)
+        };
         let console = Console::new(true);
         assert!(
             carry_out(&removal, Leaving::Purge, &console).is_empty(),
             "nothing is left named"
         );
         assert!(!dir.exists(), "the key is gone with the directory");
+        assert!(!record.exists());
+        assert!(
+            !home.join("nils.registry.toml").exists(),
+            "with nothing left outside, no connection string is kept"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 

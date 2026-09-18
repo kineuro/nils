@@ -1342,6 +1342,85 @@ fn a_purge_removes_the_directory_an_install_that_stopped_partway_left() {
     );
 }
 
+/// A purge whose schemas were not dropped prints the command with the
+/// password masked, and keeps the file the connection string is in beside the
+/// directory that goes, so the sentence can be acted on without the password
+/// ever reaching a terminal, a scrollback or a log.
+#[test]
+fn a_purge_that_could_not_drop_a_schema_prints_no_password_and_keeps_the_string() {
+    let nils = Installed::new("nils-setup-purge-password");
+    let config = TempDir::new("nils-setup-purge-password-config");
+    let base = TempDir::new("nils-setup-purge-password-base");
+    let dir = base.path().join("nils");
+    std::fs::create_dir_all(dir.join("registry")).unwrap();
+    // the record names a schema the registry does not answer at, so the drop
+    // is refused with no database asked at all
+    std::fs::write(
+        dir.join("registry").join("nils.toml"),
+        "backend = \"postgres\"\ndsn = \"postgres://nils:s3cret@127.0.0.1/nils\"\n\
+         schema = \"theirs\"\n",
+    )
+    .unwrap();
+    let record = config.path().join("nils");
+    std::fs::create_dir_all(&record).unwrap();
+    std::fs::write(
+        record.join("setup.toml"),
+        format!(
+            "dir = \"{}\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"none\"\n\
+             backend = \"postgres:ours\"\nregistry_made = \"ours\"\n",
+            dir.display()
+        ),
+    )
+    .unwrap();
+
+    let out = output(
+        Command::new(nils.path())
+            .args(["uninstall", "--purge", "--yes"])
+            .env("NILS_NO_TTY", "1")
+            .env("NO_COLOR", "1")
+            .env("XDG_CONFIG_HOME", config.path()),
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{said}");
+    assert!(
+        !said.contains("s3cret"),
+        "the password was printed:\n{said}"
+    );
+    assert!(
+        said.contains("postgres://nils:***@127.0.0.1/nils"),
+        "the command names the database with the password masked:\n{said}"
+    );
+    let kept = base.path().join("nils.registry.toml");
+    assert!(
+        kept.is_file(),
+        "the connection string was not kept:\n{said}"
+    );
+    assert!(
+        std::fs::read_to_string(&kept)
+            .unwrap()
+            .contains("postgres://nils:s3cret@127.0.0.1/nils")
+    );
+    assert!(
+        said.contains(&format!(
+            "the connection string it needs is in {}",
+            kept.display()
+        )),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!(
+            "the connection string, kept in {}",
+            kept.display()
+        )),
+        "the last line names it too:\n{said}"
+    );
+    assert!(!dir.exists(), "the directory still goes:\n{said}");
+}
+
 /// With no record left, a purge removes nothing it cannot say is this
 /// install's, and says which files it found, where they are, and what to do
 /// with them, so nobody is left with a key and no sentence.
