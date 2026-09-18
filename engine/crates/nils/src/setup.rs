@@ -11966,17 +11966,7 @@ fn fetch_llama(plan: &Plan, before_removing: &mut dyn FnMut()) -> Result<(PathBu
     let url = llama_archive(&llama_base(), llama.variant);
     let bytes = crate::supervise::fetch(&url)?;
     unpack_llama(&bytes, want, &dir).map_err(|e| format!("{url}: {e}"))?;
-    let older: Vec<PathBuf> = std::fs::read_dir(plan.dir.join(LLAMA_PART))
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    *path != dir && llama_recorded(&path.display().to_string()).is_some()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let older = older_llama_builds(&plan.dir, &dir);
     if !older.is_empty() {
         before_removing();
     }
@@ -11984,6 +11974,41 @@ fn fetch_llama(plan: &Plan, before_removing: &mut dyn FnMut()) -> Result<(PathBu
         let _ = std::fs::remove_dir_all(&path);
     }
     Ok((dir, true))
+}
+
+/// The llama.cpp builds under an install's own folder that are not the one
+/// `wanted`: what a run removes once it has taken the build it wants. Only a
+/// folder this version knows a build by is among them, so a folder something
+/// else left there is not removed and does not count as a build.
+fn older_llama_builds(dir: &Path, wanted: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir.join(LLAMA_PART))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path != wanted && llama_recorded(&path.display().to_string()).is_some()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a run would remove an older llama.cpp build, which is the one
+/// thing it stops llama.cpp for. The folder answers it without a download:
+/// [`fetch_llama`] takes the build a plan names only where it is not here
+/// already, and removes an older one only once the new one is unpacked
+/// beside it, so a folder that holds the build this plan names, or holds no
+/// other build of this install's, is a run that removes nothing. A download
+/// that cannot be made removes nothing either, which is the one thing this
+/// cannot know; so it can promise a stop a run is spared, and never hides
+/// one a run makes.
+fn llama_build_moves(plan: &Plan) -> bool {
+    let Some(llama) = plan.llama else {
+        return false;
+    };
+    let wanted = llama_build_dir(&plan.dir, llama.variant);
+    !wanted.join("llama-server").is_file() && !older_llama_builds(&plan.dir, &wanted).is_empty()
 }
 
 /// llama.cpp placed for an install or a repair and recorded, with the devices
@@ -13285,12 +13310,14 @@ impl Switch {
 
 /// What a run of setup switches, in the order it switches it: an install
 /// places llama.cpp before Kvasir, which names its build, and a repair takes
-/// only llama.cpp.
-fn switches(run: Run, assistant: bool, llama: bool) -> Vec<Switch> {
+/// only llama.cpp. llama.cpp is a switch only where its build moves, since a
+/// build already here is left where it is and the server keeps running from
+/// it.
+fn switches(run: Run, assistant: bool, llama_moves: bool) -> Vec<Switch> {
     if !assistant {
         return Vec::new();
     }
-    let llama = llama.then_some(Switch::LlamaBuilds);
+    let llama = llama_moves.then_some(Switch::LlamaBuilds);
     match run {
         Run::Place => llama
             .into_iter()
@@ -13448,13 +13475,20 @@ fn stop_said(switch: Switch, units: &[Unit], console: &Console) {
 /// Under `--print`, the units a run would stop, each where it runs and just
 /// before its own files change, with what changes; every one of them starts
 /// again with the rest, by the calls listed beside the units.
+///
+/// llama.cpp is among them only where its build moves, which is the same
+/// question the run asks and [`llama_build_moves`] reads from the folder:
+/// an install whose build is here already removes none and stops nothing, so
+/// listing the stop there promised an interruption that never came. Kvasir
+/// and the assistant are listed whenever a run takes their source, since it
+/// builds them every time.
 fn stops_text(plan: &Plan, run: Run, console: &Console) -> String {
     let mut out = String::new();
     let uid = run_quiet("id", &["-u"])
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     let turns = turns(
-        &switches(run, plan.has(Part::Assistant), plan.llama.is_some()),
+        &switches(run, plan.has(Part::Assistant), llama_build_moves(plan)),
         &planned_units(plan),
         &uid,
     );
@@ -23922,6 +23956,10 @@ mod tests {
             variant: "ubuntu-x64",
             loader: true,
         });
+        // a build of this install's that the one planned would replace, so
+        // the run does stop llama.cpp and the print says so
+        plan.dir = scratch("stops-print");
+        std::fs::create_dir_all(llama_build_dir(&plan.dir, "ubuntu-arm64")).unwrap();
         let said = stops_text(&plan, Run::Place, &console);
         assert!(said.contains("stopped while their files change"), "{said}");
         for line in [
@@ -23939,6 +23977,59 @@ mod tests {
         assert!(!said.contains("stop kvasir"), "{said}");
         plan.parts = vec![Part::Engine, Part::Desk];
         assert_eq!(stops_text(&plan, Run::Place, &console), "");
+    }
+
+    /// The print asks what the run asks: llama.cpp is stopped where an older
+    /// build is removed, and an install whose build is already here removes
+    /// none, so it is promised no interruption it will not have.
+    #[test]
+    fn a_plan_whose_llama_build_does_not_move_lists_no_llama_stop() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let mut console = Console::new(true);
+        console.colour = false;
+        let mut plan = deployment();
+        plan.dir = scratch("llama-moves");
+        plan.llama = Some(Llama {
+            variant: "ubuntu-x64",
+            loader: true,
+        });
+        let llama = "    systemctl stop nils-llama  while the older llama.cpp builds are removed\n";
+
+        // a first install: nothing is here, so nothing is removed
+        assert!(!llama_build_moves(&plan));
+        let said = stops_text(&plan, Run::Place, &console);
+        assert!(!said.contains("nils-llama"), "{said}");
+        assert!(
+            said.contains("stop kvasir"),
+            "the Node parts are built: {said}"
+        );
+        assert_eq!(stops_text(&plan, Run::Repair, &console), "");
+
+        // the build this plan names, here already: the server runs on through
+        let here = llama_build_dir(&plan.dir, "ubuntu-x64");
+        std::fs::create_dir_all(&here).unwrap();
+        std::fs::write(here.join("llama-server"), "binary").unwrap();
+        std::fs::create_dir_all(llama_build_dir(&plan.dir, "ubuntu-arm64")).unwrap();
+        assert!(
+            !llama_build_moves(&plan),
+            "a build that is here is not taken again, whatever sits beside it"
+        );
+        assert!(!stops_text(&plan, Run::Place, &console).contains("nils-llama"));
+
+        // a build this install took before, and the one planned is not here
+        std::fs::remove_dir_all(&here).unwrap();
+        assert!(llama_build_moves(&plan));
+        assert!(stops_text(&plan, Run::Place, &console).contains(llama));
+        assert!(stops_text(&plan, Run::Repair, &console).contains(llama));
+
+        // a folder that is no build of this install's is neither removed nor
+        // a reason to stop anything
+        std::fs::remove_dir_all(llama_build_dir(&plan.dir, "ubuntu-arm64")).unwrap();
+        std::fs::create_dir_all(plan.dir.join(LLAMA_PART).join("notes")).unwrap();
+        assert!(!llama_build_moves(&plan));
+        let _ = std::fs::remove_dir_all(&plan.dir);
     }
 
     /// The privilege is on record, so an update and a repair lay down the

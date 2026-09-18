@@ -1199,19 +1199,21 @@ fn the_plan_names_llama_cpp_beside_the_assistant() {
     let nils = Installed::new("nils-setup-llama");
     let config = TempDir::new("nils-setup-llama-config");
     let base = TempDir::new("nils-setup-llama-base");
-    let o = setup(
-        &nils.path(),
-        config.path(),
-        &[
+    let dir = base.path().join("nils");
+    let printed = |args: &[&str]| {
+        let mut argv = vec![
             "--print",
             "--parts",
             "engine,desk,assistant",
             "--runtime",
             "machine",
             "--dir",
-            base.path().join("nils").to_str().unwrap(),
-        ],
-    );
+            dir.to_str().unwrap(),
+        ];
+        argv.extend_from_slice(args);
+        setup(&nils.path(), config.path(), &argv)
+    };
+    let o = printed(&[]);
     assert!(o.ok, "{}", o.stderr);
     let built = matches!(std::env::consts::OS, "linux" | "macos")
         && matches!(std::env::consts::ARCH, "x86_64" | "aarch64");
@@ -1226,14 +1228,31 @@ fn the_plan_names_llama_cpp_beside_the_assistant() {
         // and the units a run stops while their files change, each just
         // before its own
         o.says("stopped while their files change");
-        o.says("stop nils-llama  while the older llama.cpp builds are removed");
         o.says("stop kvasir  while Kvasir's source is taken and built");
         o.says("stop nils-assistant  while the assistant's source is taken and built");
+        // this install has no llama.cpp build to replace, so the run removes
+        // none and stops llama.cpp not at all
+        assert!(
+            !o.stdout.contains("stop nils-llama"),
+            "a stop no run would make:\n{}",
+            o.stdout
+        );
         assert!(
             !o.stdout.contains("stop nils-supervise"),
             "the supervisor would be stopped:\n{}",
             o.stdout
         );
+        // a build this install took before, which the one planned replaces:
+        // now the run does stop llama.cpp, and the print says so
+        let other = if cfg!(target_os = "macos") {
+            "ubuntu-x64"
+        } else {
+            "macos-arm64"
+        };
+        std::fs::create_dir_all(dir.join("llama.cpp").join(format!("b10964-{other}"))).unwrap();
+        let again = printed(&[]);
+        assert!(again.ok, "{}", again.stderr);
+        again.says("stop nils-llama  while the older llama.cpp builds are removed");
     }
 }
 
