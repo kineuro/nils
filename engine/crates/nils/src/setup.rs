@@ -38,11 +38,10 @@ pub(crate) const DESK_RELEASES: &str = "https://github.com/kineuro/nils-desk/rel
 const ENGINE_IMAGE: &str = "ghcr.io/kineuro/nils";
 const DESK_IMAGE: &str = "ghcr.io/kineuro/nils-desk";
 
-/// This account, as docker wants it written. Podman remaps the user and
-/// `:U` gives the container ownership of what it mounts. Docker does
-/// neither: a container running as the image's own user cannot write a
-/// directory this account owns, and the first thing it tries to write is
-/// the registry's key. So every docker run is told to be this account.
+/// This account, as docker wants it written: a container running as the
+/// image's own user cannot write a directory this account owns, and the
+/// first thing it tries to write is the registry's key, so every docker run
+/// is told to be this account.
 #[cfg(unix)]
 #[allow(
     unsafe_code,
@@ -61,15 +60,105 @@ fn as_this_account() -> String {
     String::new()
 }
 
-/// `--user <this account> ` for a docker run, and nothing where there is no
-/// account to name.
-fn docker_user() -> String {
-    let account = as_this_account();
-    if account.is_empty() {
-        String::new()
-    } else {
-        format!("--user {account} ")
+/// The number of the account running setup, which is the account a registry
+/// it makes belongs to.
+#[cfg(unix)]
+#[allow(unsafe_code, reason = "getuid reads this process and cannot fail")]
+fn this_account_id() -> Option<u32> {
+    // SAFETY: the call takes no pointer, touches no memory, and cannot fail.
+    Some(unsafe { libc::getuid() })
+}
+
+#[cfg(not(unix))]
+fn this_account_id() -> Option<u32> {
+    None
+}
+
+/// Who a registry's own file belongs to, where there is one to ask about.
+#[cfg(unix)]
+fn registry_owner(registry: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(registry.join("nils.toml"))
+        .ok()
+        .map(|meta| meta.uid())
+}
+
+#[cfg(not(unix))]
+fn registry_owner(_registry: &Path) -> Option<u32> {
+    None
+}
+
+/// Why a container install's own registry will not open to it, where that is
+/// because an install made before this version handed the mount to the
+/// container: podman's `:U` chowned the registry into the subordinate range
+/// this account is lent, and the files came back owned by an id with no
+/// account on this machine. The owner is named, and so is the one command
+/// that gives the files back, since setup does not take files from an id it
+/// did not give them to. `None` where the registry is this account's already,
+/// where nothing can be asked, and on a machine install, whose registry no
+/// container ever touched.
+fn handed_to_the_container(
+    runtime: Runtime,
+    owner: Option<u32>,
+    me: Option<u32>,
+    registry: &Path,
+) -> Option<String> {
+    let (owner, me) = (owner?, me?);
+    if runtime != Runtime::Podman || owner == me {
+        return None;
     }
+    Some(format!(
+        "the registry belongs to {owner}, and this account is {me}: an install made before this \
+         version handed the mount to the container, which took the files with it\n  give them \
+         back with podman unshare chown -R 0:0 {}, and run the command again",
+        registry.display()
+    ))
+}
+
+/// The identity a podman container runs as, so that what it writes belongs
+/// to the account that made the install: the container's root, which rootless
+/// podman maps to that account, and which under a podman run by root is root
+/// itself, the account that made the install there. Named outright because
+/// the images run as a user of their own, which podman maps into the
+/// subordinate range this account is lent: files written by that user come
+/// back owned by an id this machine has no account for, and the account that
+/// made the registry could then not open it.
+const IN_THE_POD: &str = "0:0";
+
+/// Who a container of this install runs as, as the words of a run: this
+/// account by its own numbers for docker, which remaps nobody, and the
+/// container's root for podman, which maps this account there. Empty for a
+/// machine install, which runs no container, and where there is no account
+/// to name.
+fn container_user_words(runtime: Runtime) -> Vec<String> {
+    let account = match runtime {
+        Runtime::Podman => IN_THE_POD.to_string(),
+        Runtime::Docker => as_this_account(),
+        Runtime::Machine => String::new(),
+    };
+    if account.is_empty() {
+        Vec::new()
+    } else {
+        vec!["--user".to_string(), account]
+    }
+}
+
+/// The same as one word of a command line, `--user <account> `, and nothing
+/// where there is no account to name.
+fn container_user(runtime: Runtime) -> String {
+    match container_user_words(runtime).as_slice() {
+        [flag, account] => format!("{flag} {account} "),
+        _ => String::new(),
+    }
+}
+
+/// The same identity as a quadlet's own two keys, so a container systemd
+/// starts runs as the account a `podman run` of this install runs as.
+fn quadlet_user() -> String {
+    let (uid, gid) = IN_THE_POD
+        .split_once(':')
+        .unwrap_or((IN_THE_POD, IN_THE_POD));
+    format!("User={uid}\nGroup={gid}\n")
 }
 
 /// The tag a published image carries, for a version. A release names its
@@ -5120,21 +5209,29 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
         plan.registry().display().to_string(),
         plan.backups().display().to_string(),
     );
-    let mut engine =
-        format!("podman run -d --pod nils --name nils-engine -v {registry}:{registry}:U");
+    // Every mount is one of this account's own directories and is mounted as
+    // it stands: the containers run as the account that made them, so nothing
+    // has to be handed over. A mount handed to the container, podman's `:U`,
+    // took the registry with it, and the account that made it could no longer
+    // open it.
+    let mut engine = format!(
+        "podman run -d --pod nils --name nils-engine {}-v {registry}:{registry}",
+        container_user(Runtime::Podman)
+    );
     for (_, path) in plan.read_from() {
         let _ = write!(engine, " -v {0}:{0}:ro", path.display());
     }
     let _ = write!(
         engine,
-        " -v {backups}:{backups}:U {ENGINE_IMAGE}:{} {}",
+        " -v {backups}:{backups} {ENGINE_IMAGE}:{} {}",
         plan.tag(),
         engine_args(plan, &registry, &backups).join(" ")
     );
     out.push(engine);
     if plan.has(Part::Desk) {
         out.push(format!(
-            "podman run -d --pod nils --name nils-desk -v {}:{IN_DESK}:U {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
+            "podman run -d --pod nils --name nils-desk {}-v {}:{IN_DESK} {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
+            container_user(Runtime::Podman),
             plan.desk_dir().display(),
             plan.tag()
         ));
@@ -5166,7 +5263,7 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
     );
     let mut engine = format!(
         "docker run -d --network nils --name nils-engine {}{}-v {registry}:{registry}",
-        docker_user(),
+        container_user(Runtime::Docker),
         if matches!(plan.backend, BackendChoice::Postgres { .. }) {
             "--add-host host.docker.internal:host-gateway "
         } else {
@@ -5186,7 +5283,7 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
     if plan.has(Part::Desk) {
         out.push(format!(
             "docker run -d --network nils --name nils-desk {}-p {publish} --add-host host.docker.internal:host-gateway -v {}:{IN_DESK} {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
-            docker_user(),
+            container_user(Runtime::Docker),
             plan.desk_dir().display(),
             plan.tag()
         ));
@@ -5195,13 +5292,13 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
         let (kvasir, assistant) = (plan.dir.join("kvasir"), plan.dir.join("assistant"));
         out.push(format!(
             "docker run -d --network nils --name nils-kvasir {user}-p 127.0.0.1:{p}:{p} --add-host host.docker.internal:host-gateway -v {k}:{k} -w {k} {NODE_IMAGE} node dist/main.js --config kvasir.json",
-            user = docker_user(),
+            user = container_user(Runtime::Docker),
             p = plan.ports.kvasir,
             k = kvasir.display()
         ));
         out.push(format!(
             "docker run -d --network nils --name nils-assistant {user}--env-file {a}/assistant.env -v {a}:{a} -v {k}:{k}:ro -w {a} {NODE_IMAGE} node {entry}",
-            user = docker_user(),
+            user = container_user(Runtime::Docker),
             a = assistant.display(),
             k = kvasir.display(),
             entry = assistant_entry(&assistant)
@@ -5317,12 +5414,14 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
     engine.push_str("\n[Container]\n");
     let _ = writeln!(engine, "Image={ENGINE_IMAGE}:{}", plan.tag());
     let _ = writeln!(engine, "Pod=nils.pod");
+    engine.push_str(&quadlet_user());
     let (registry, backups) = (
         plan.registry().display().to_string(),
         plan.backups().display().to_string(),
     );
-    let _ = writeln!(engine, "Volume={registry}:{registry}:U");
-    let _ = writeln!(engine, "Volume={backups}:{backups}:U");
+    // as they stand, since the container is the account that owns them
+    let _ = writeln!(engine, "Volume={registry}:{registry}");
+    let _ = writeln!(engine, "Volume={backups}:{backups}");
     for (_, path) in plan.read_from() {
         let _ = writeln!(engine, "Volume={0}:{0}:ro", path.display());
     }
@@ -5337,7 +5436,8 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
         let mut desk = String::from("[Unit]\nDescription=NILS desk\n\n[Container]\n");
         let _ = writeln!(desk, "Image={DESK_IMAGE}:{}", plan.tag());
         let _ = writeln!(desk, "Pod=nils.pod");
-        let _ = writeln!(desk, "Volume={}:{IN_DESK}:U", plan.desk_dir().display());
+        desk.push_str(&quadlet_user());
+        let _ = writeln!(desk, "Volume={}:{IN_DESK}", plan.desk_dir().display());
         let _ = writeln!(desk, "Exec=serve --config {IN_DESK}/nils-desk.toml");
         let _ = write!(desk, "\n[Install]\nWantedBy=default.target\n");
         out.push(("nils-desk.container".to_string(), desk));
@@ -8106,6 +8206,85 @@ fn start_postgres(plan: &Plan, pg: ManagedPostgres, console: &Console) -> Result
     Ok(())
 }
 
+/// What a container install runs to make its registry: the key added, with
+/// its passphrase on the input, and then the registry made on that key, each
+/// the whole command line. `None` for a machine install, which makes the
+/// registry in this process or as the engine's account.
+///
+/// The registry is made inside a container because the image that will run it
+/// is the one that makes it: the connection string a Postgres registry
+/// records is the one the engine dials from inside the pod, and a registry
+/// made out here would record this machine's own.
+///
+/// The container is told to be the account that runs setup, and the registry
+/// is mounted as it stands. Podman maps that account to the container's root,
+/// so the files come back the account's; docker remaps nobody and is given
+/// this account's own numbers. The mount is no longer handed to the container
+/// with podman's `:U`, which chowned the registry into the subordinate range
+/// this account is lent: the files came back owned by an id with no account
+/// on the machine, and the places step, which opens the registry out here,
+/// was refused by its own registry.
+fn registry_container_steps(plan: &Plan) -> Option<Vec<Vec<String>>> {
+    if !plan.runtime.container() {
+        return None;
+    }
+    let engine = plan.runtime.name().to_string();
+    // at the path it has on this machine, as the engine's service mounts it
+    let inside = plan.registry().display().to_string();
+    let mount = format!("{inside}:{inside}");
+    let tag = format!("{ENGINE_IMAGE}:{}", plan.tag());
+    let user = container_user_words(plan.runtime);
+    // Postgres is reached from inside the container, at the address a
+    // container names this machine by, and the registry is made there:
+    // left out, the container made a SQLite registry beside a plan that
+    // said Postgres.
+    let mut network: Vec<String> = Vec::new();
+    let mut backend: Vec<String> = Vec::new();
+    if let BackendChoice::Postgres { dsn, schema } = &plan.backend {
+        backend = vec![
+            "--backend".to_string(),
+            "postgres".to_string(),
+            "--dsn".to_string(),
+            dsn_for(plan.runtime, dsn),
+            "--schema".to_string(),
+            schema.clone(),
+        ];
+        match plan.runtime {
+            Runtime::Docker => {
+                network = vec![
+                    "--add-host".to_string(),
+                    "host.docker.internal:host-gateway".to_string(),
+                ];
+            }
+            Runtime::Podman if plan.host_loopback => {
+                network = vec![
+                    "--network".to_string(),
+                    format!("pasta:--map-host-loopback={HOST_LOOPBACK_IN_POD}"),
+                ];
+            }
+            _ => {}
+        }
+    }
+    let mut key = vec![engine.clone(), "run".to_string(), "--rm".to_string()];
+    key.push("-i".to_string());
+    key.extend(user.iter().cloned());
+    key.extend(["-v".to_string(), mount.clone(), tag.clone()]);
+    key.extend(owned_words(&["--registry", &inside, "key", "add", "nils"]));
+    let mut made = vec![engine, "run".to_string(), "--rm".to_string()];
+    made.extend(user);
+    made.extend(network);
+    made.extend(["-v".to_string(), mount, tag]);
+    made.extend(owned_words(&[
+        "--registry",
+        &inside,
+        "init",
+        "--key",
+        "nils",
+    ]));
+    made.extend(backend);
+    Some(vec![key, made])
+}
+
 /// A key and an empty registry, the two commands the documentation gives,
 /// run here, inside the container that will use them, or as the engine's
 /// account that will.
@@ -8157,63 +8336,11 @@ fn make_registry(
         console.note("the database answered");
     }
 
-    if plan.runtime.container() {
+    if let Some(steps) = registry_container_steps(plan) {
         let engine = plan.runtime.name();
-        // at the path it has on this machine, as the engine's service mounts it
-        let inside = plan.registry().display().to_string();
-        let mount = format!(
-            "{inside}:{inside}{}",
-            if plan.runtime == Runtime::Podman {
-                ":U"
-            } else {
-                ""
-            }
-        );
-        let tag = format!("{ENGINE_IMAGE}:{}", plan.tag());
-        // Docker does not remap the user, so the container has to be told
-        // to be this account or it cannot write the directory it mounts.
-        let account = as_this_account();
-        let user: Vec<String> = if plan.runtime == Runtime::Docker && !account.is_empty() {
-            vec!["--user".to_string(), account]
-        } else {
-            Vec::new()
-        };
-        // Postgres is reached from inside the container, at the address a
-        // container names this machine by, and the registry is made there:
-        // left out, the container made a SQLite registry beside a plan that
-        // said Postgres.
-        let mut network: Vec<String> = Vec::new();
-        let mut backend: Vec<String> = Vec::new();
-        if let BackendChoice::Postgres { dsn, schema } = &plan.backend {
-            backend = vec![
-                "--backend".to_string(),
-                "postgres".to_string(),
-                "--dsn".to_string(),
-                dsn_for(plan.runtime, dsn),
-                "--schema".to_string(),
-                schema.clone(),
-            ];
-            match plan.runtime {
-                Runtime::Docker => {
-                    network = vec![
-                        "--add-host".to_string(),
-                        "host.docker.internal:host-gateway".to_string(),
-                    ];
-                }
-                Runtime::Podman if plan.host_loopback => {
-                    network = vec![
-                        "--network".to_string(),
-                        format!("pasta:--map-host-loopback={HOST_LOOPBACK_IN_POD}"),
-                    ];
-                }
-                _ => {}
-            }
-        }
-        let mut child = Command::new(engine)
-            .args(["run", "--rm", "-i"])
-            .args(&user)
-            .args(["-v", &mount, &tag])
-            .args(["--registry", &inside, "key", "add", "nils"])
+        let (key, init) = (&steps[0], &steps[1]);
+        let mut child = Command::new(&key[0])
+            .args(&key[1..])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -8236,13 +8363,8 @@ fn make_registry(
                 said(&added)
             )));
         }
-        let made = Command::new(engine)
-            .args(["run", "--rm"])
-            .args(&user)
-            .args(&network)
-            .args(["-v", &mount, &tag])
-            .args(["--registry", &inside, "init", "--key", "nils"])
-            .args(&backend)
+        let made = Command::new(&init[0])
+            .args(&init[1..])
             .output()
             .map_err(|e| fail(format!("{engine}: {e}")))?;
         if !made.status.success() {
@@ -8323,8 +8445,16 @@ fn declare_places(
             // read the directory the person named, so each failure here stops
             // the install
             let mut registry = crate::open(home).map_err(|e| {
+                let note = handed_to_the_container(
+                    plan.runtime,
+                    registry_owner(home.dir()),
+                    this_account_id(),
+                    home.dir(),
+                )
+                .map(|why| format!("\n  {why}"))
+                .unwrap_or_default();
                 fail(format!(
-                    "the registry did not open to declare its places: {}",
+                    "the registry did not open to declare its places: {}{note}",
                     e.message
                 ))
             })?;
@@ -9546,21 +9676,14 @@ fn register_desk(
                 .or_else(|| Some(plan.dir.join("bin").join("nils-desk")).filter(|d| d.exists()))
                 .unwrap_or_else(|| PathBuf::from("nils-desk")),
         ),
-        Runtime::Podman => {
-            let mut c = Command::new("podman");
-            c.args(["run", "--rm", "-v"])
-                .arg(format!("{}:{IN_DESK}:U", dir.display()))
-                .arg(format!("{DESK_IMAGE}:{}", plan.tag()));
-            c
-        }
-        Runtime::Docker => {
-            let mut c = Command::new("docker");
-            c.args(["run", "--rm"]);
-            let account = as_this_account();
-            if !account.is_empty() {
-                c.args(["--user", &account]);
-            }
-            c.arg("-v")
+        // The secret this writes is the desk's own to read afterwards, so
+        // the container is the account that owns the folder and the folder
+        // is mounted as it stands, as the registry's step is.
+        runtime @ (Runtime::Podman | Runtime::Docker) => {
+            let mut c = Command::new(runtime.name());
+            c.args(["run", "--rm"])
+                .args(container_user_words(runtime))
+                .arg("-v")
                 .arg(format!("{}:{IN_DESK}", dir.display()))
                 .arg(format!("{DESK_IMAGE}:{}", plan.tag()));
             c
@@ -24208,7 +24331,7 @@ mod tests {
     }
 
     #[test]
-    fn podman_runs_a_pod_and_owns_its_mounts() {
+    fn podman_runs_a_pod_as_the_account_that_made_the_install() {
         let p = plan(Runtime::Podman);
         let commands = podman_commands(&p);
         assert!(commands[0].contains("pod create --name nils -p 127.0.0.1:7200:7200"));
@@ -24217,13 +24340,22 @@ mod tests {
         // at the paths the registry's places record, so a backup finds its place
         let (registry, backups) = (p.registry(), p.dir.join("backups"));
         assert!(
-            engine.contains(&format!("-v {0}:{0}:U", registry.display())),
+            engine.contains(&format!("-v {0}:{0} ", registry.display())),
             "{engine}"
         );
         assert!(
-            engine.contains(&format!("-v {0}:{0}:U", backups.display())),
+            engine.contains(&format!("-v {0}:{0} ", backups.display())),
             "{engine}"
         );
+        // podman maps this account to the container's root, so the engine
+        // reads the registry this account made and leaves it that account's;
+        // a mount handed over with `:U` took it into the subordinate range
+        assert!(
+            !commands.iter().any(|c| c.contains(":U")),
+            "no mount is handed to a container: {commands:?}"
+        );
+        assert!(engine.contains("--user 0:0"), "{engine}");
+        assert!(commands[2].contains("--user 0:0"), "{}", commands[2]);
         assert!(
             engine.contains(&format!(
                 "--registry {} --backup-dir {}",
@@ -24251,11 +24383,10 @@ mod tests {
         assert_eq!(commands[0], "docker network create nils");
         assert!(commands[1].contains("--network nils"), "{}", commands[1]);
         assert!(!commands[1].contains(":U"), "docker owns its own mounts");
-        // Podman remaps the user and `:U` hands the mount over. Docker does
-        // neither, so a container running as the image's own user cannot
-        // write the directory it was given, and the first thing it writes
-        // is the registry's key. Every docker run is told to be this
-        // account instead.
+        // Docker remaps nobody, so a container running as the image's own
+        // user cannot write the directory it was given, and the first thing
+        // it writes is the registry's key. Every docker run is told to be
+        // this account instead, by its own numbers.
         let me = as_this_account();
         assert!(!me.is_empty(), "a unix account is a uid and a gid");
         assert!(
@@ -24275,10 +24406,11 @@ mod tests {
             "both services run as this account:\n{compose}"
         );
         assert!(
-            !podman_commands(&plan(Runtime::Podman))
+            podman_commands(&plan(Runtime::Podman))
                 .iter()
-                .any(|c| c.contains("--user")),
-            "podman remaps on its own and needs no --user"
+                .filter(|c| c.contains(" run "))
+                .all(|c| c.contains("--user 0:0")),
+            "podman names the same account as the container's root"
         );
         assert!(commands[2].contains("-p 127.0.0.1:7200:7200"));
         let compose = docker_compose(&plan(Runtime::Docker));
@@ -24302,7 +24434,176 @@ mod tests {
                 .1
                 .contains("Image=ghcr.io/kineuro/nils:v1.0.0-alpha.2")
         );
-        assert!(files[1].1.contains(":U"), "a rootless mount is owned");
+        // the unit systemd starts runs as the account that made the install,
+        // and mounts the registry as it stands, as the run does
+        assert!(files[1].1.contains("User=0\nGroup=0"), "{}", files[1].1);
+        assert!(files[2].1.contains("User=0\nGroup=0"), "{}", files[2].1);
+        assert!(
+            !files.iter().any(|(_, text)| text.contains(":U")),
+            "no mount is handed to a container: {files:?}"
+        );
+    }
+
+    /// What podman would leave behind, given the words of a run: the account
+    /// the files belong to on this machine afterwards, and the account the
+    /// mounted directory itself belongs to. Rootless podman maps the
+    /// container's root to the account that started it and every other id in
+    /// the container into the subordinate range that account is lent, so a
+    /// container writing as the image's own user leaves files no account on
+    /// the machine owns; `:U` hands the directory to whoever the container
+    /// runs as, before it starts.
+    fn podman_would_leave(
+        words: &[String],
+        account: u32,
+        subordinate: u32,
+        image_user: u32,
+    ) -> (u32, u32) {
+        let in_container = words
+            .windows(2)
+            .find(|pair| pair[0] == "--user")
+            .and_then(|pair| pair[1].split(':').next()?.parse::<u32>().ok())
+            .unwrap_or(image_user);
+        let on_this_machine = if in_container == 0 {
+            account
+        } else {
+            subordinate + in_container - 1
+        };
+        let handed_over = words.iter().any(|word| word.ends_with(":U"));
+        (
+            on_this_machine,
+            if handed_over {
+                on_this_machine
+            } else {
+                account
+            },
+        )
+    }
+
+    #[test]
+    fn a_container_makes_its_registry_as_the_account_that_runs_setup() {
+        let mut p = plan(Runtime::Podman);
+        p.dir = PathBuf::from("/home/one/nils");
+        let steps = registry_container_steps(&p).expect("a podman install makes it in a container");
+        assert_eq!(steps.len(), 2, "the key, then the registry: {steps:?}");
+        let (key, init) = (&steps[0], &steps[1]);
+        assert_eq!(key[0], "podman");
+        assert_eq!(
+            key,
+            &owned_words(&[
+                "podman",
+                "run",
+                "--rm",
+                "-i",
+                "--user",
+                "0:0",
+                "-v",
+                "/home/one/nils/registry:/home/one/nils/registry",
+                "ghcr.io/kineuro/nils:v1.0.0-alpha.2",
+                "--registry",
+                "/home/one/nils/registry",
+                "key",
+                "add",
+                "nils",
+            ])
+        );
+        assert_eq!(
+            init,
+            &owned_words(&[
+                "podman",
+                "run",
+                "--rm",
+                "--user",
+                "0:0",
+                "-v",
+                "/home/one/nils/registry:/home/one/nils/registry",
+                "ghcr.io/kineuro/nils:v1.0.0-alpha.2",
+                "--registry",
+                "/home/one/nils/registry",
+                "init",
+                "--key",
+                "nils",
+            ])
+        );
+
+        // docker remaps nobody, and is told this account's own numbers
+        let mut d = plan(Runtime::Docker);
+        d.dir = PathBuf::from("/home/one/nils");
+        let steps = registry_container_steps(&d).expect("a docker install makes it in a container");
+        for step in &steps {
+            assert!(
+                step.iter()
+                    .all(|word| !word.ends_with(":U") && word != "0:0"),
+                "{step:?}"
+            );
+            if cfg!(unix) {
+                let me = as_this_account();
+                assert!(step.contains(&me), "{step:?}");
+            }
+        }
+
+        // a machine install makes it here, in this process or as the account
+        assert_eq!(registry_container_steps(&plan(Runtime::Machine)), None);
+    }
+
+    #[test]
+    fn the_registry_a_podman_install_makes_is_left_to_that_account() {
+        // the numbers of the install matrix's podman scenario: an account
+        // with a subordinate range of its own, and the engine's image, whose
+        // own user is 1500
+        let (account, subordinate, image_user) = (2000, 100_000, 1500);
+        let mut p = plan(Runtime::Podman);
+        p.dir = PathBuf::from("/home/one/nils");
+        let steps = registry_container_steps(&p).expect("a podman install makes it in a container");
+        for step in &steps {
+            assert_eq!(
+                podman_would_leave(step, account, subordinate, image_user),
+                (account, account),
+                "the account that runs setup owns what the step leaves: {step:?}"
+            );
+        }
+
+        // what it was: the image's own user, on a mount handed to it, left
+        // the registry to an id this machine has no account for
+        let handed_over: Vec<String> = steps[1]
+            .iter()
+            .map(|word| match word.as_str() {
+                w if w.contains(":/home/one/nils/registry") => format!("{w}:U"),
+                w => w.to_string(),
+            })
+            .filter(|word| word != "--user" && word != "0:0")
+            .collect();
+        assert_eq!(
+            podman_would_leave(&handed_over, account, subordinate, image_user),
+            (101_499, 101_499),
+            "{handed_over:?}"
+        );
+    }
+
+    #[test]
+    fn a_registry_an_older_install_left_to_a_remapped_id_is_named() {
+        let registry = PathBuf::from("/home/one/nils/registry");
+        let said = handed_to_the_container(Runtime::Podman, Some(101_499), Some(2000), &registry)
+            .expect("a registry belonging to another id is said");
+        assert!(said.contains("belongs to 101499"), "{said}");
+        assert!(said.contains("this account is 2000"), "{said}");
+        assert!(
+            said.contains("podman unshare chown -R 0:0 /home/one/nils/registry"),
+            "the one command that gives the files back: {said}"
+        );
+        // nothing to say where the registry is this account's already, where
+        // the machine cannot be asked, or where no container ever touched it
+        assert_eq!(
+            handed_to_the_container(Runtime::Podman, Some(2000), Some(2000), &registry),
+            None
+        );
+        assert_eq!(
+            handed_to_the_container(Runtime::Podman, None, Some(2000), &registry),
+            None
+        );
+        assert_eq!(
+            handed_to_the_container(Runtime::Machine, Some(0), Some(2000), &registry),
+            None
+        );
     }
 
     #[test]

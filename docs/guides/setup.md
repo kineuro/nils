@@ -401,12 +401,22 @@ adds the model and mints the key once it is.
 ## Containers
 
 A podman run is one pod named `nils` publishing only the desk's port, with
-the engine and the desk inside it and `:U` on every bind mount so a rootless
-container owns what it reads. A docker run is a network named `nils`, the
-desk publishing the port, and no `:U`. Either way the registry is made by
-the engine itself, running the key and init steps inside a container against
-the mounted volume, and the volumes are `<dir>/registry`, `<dir>/backups`,
+the engine and the desk inside it. A docker run is a network named `nils`
+and the desk publishing the port. Either way the containers run as the
+account that made the install, and every bind mount is mounted as it stands:
+docker remaps nobody and is told that account's own numbers (`--user`),
+while podman maps it to the container's root, which the engine and the desk
+are told to be (`--user 0:0`, `User=0` in a quadlet). So the registry a
+container install makes belongs to the account that made it, and that
+account still opens it afterwards. Either way the registry is made by the
+engine itself, running the key and init steps inside a container against the
+mounted volume, and the volumes are `<dir>/registry`, `<dir>/backups`,
 `<dir>/desk` and any source directory named, that one read only.
+
+An install made before this, whose registry files a handed-over mount (`:U`)
+left owned by a remapped id, is named rather than repaired: setup says which
+id the registry belongs to and that `podman unshare chown -R 0:0
+<dir>/registry` gives the files back.
 
 Podman is kept running by quadlets in `~/.config/containers/systemd/`
 (`nils.pod`, `nils-engine.container`, `nils-desk.container`); docker by a

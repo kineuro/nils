@@ -643,7 +643,12 @@ fn podman_is_one_pod_that_publishes_only_the_desk() {
     assert!(o.ok, "{}", o.stderr);
     o.says("podman pod create --name nils -p 127.0.0.1:7200:7200");
     o.says("--pod nils --name nils-engine");
-    o.says(&format!("-v {0}:{0}:U", dir.join("registry").display()));
+    // The registry is mounted as it stands and the containers are the
+    // account that made the install, which podman maps to the container's
+    // root: a mount handed over with `:U` took the registry into the
+    // subordinate range and the account could no longer open it.
+    o.says(&format!("-v {0}:{0} ", dir.join("registry").display()));
+    o.says("--user 0:0");
     o.says(&format!("-v {0}:{0}:ro", source.display()));
     o.says("ghcr.io/kineuro/nils:v");
     o.says("ghcr.io/kineuro/nils-desk:v");
@@ -654,7 +659,13 @@ fn podman_is_one_pod_that_publishes_only_the_desk() {
     o.says("PublishPort=127.0.0.1:7200:7200");
     o.says("nils-engine.container");
     o.says("Pod=nils.pod");
+    o.says("User=0");
     o.says("nils-desk.container");
+    assert!(
+        !o.stdout.contains(":U"),
+        "a mount was handed to a container:\n{}",
+        o.stdout
+    );
     assert!(!dir.exists(), "--print made {}", dir.display());
 }
 
