@@ -222,6 +222,18 @@ fn model_reach_note(runtime: Runtime, url: &str, pasta: fn() -> bool) -> Option<
 /// machine's loopback named the way a container reaches it. Both forms the
 /// driver takes are read, a URL and `key=value` pairs; anything else is left
 /// as it was.
+/// The same connection string the other way about: the name a container
+/// calls this machine by, back to the loopback a process on the machine
+/// reaches it at. A registry made inside a container keeps the address it
+/// dialled, and an uninstall runs on the machine.
+fn dsn_on_machine(dsn: &str) -> String {
+    let mut out = dsn.to_string();
+    for alias in ["host.containers.internal", "host.docker.internal"] {
+        out = out.replace(alias, "127.0.0.1");
+    }
+    out
+}
+
 fn dsn_for(runtime: Runtime, dsn: &str) -> String {
     let Some(alias) = host_from_container(runtime) else {
         return dsn.to_string();
@@ -3635,6 +3647,21 @@ pub(crate) struct State {
     /// write the same settings rather than the five of a laptop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) site: Option<Site>,
+    /// The Postgres schema this install made the registry in, where it made
+    /// one: the schema itself, and the `<schema>_linkage` beside it.
+    /// Recorded only where this install made the registry, never where it
+    /// found one already there, so that a purge drops the schemas an install
+    /// made and leaves a database the site already had exactly as it was. A
+    /// record written before this was recorded names none, and a purge then
+    /// names the schemas instead of dropping them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) registry_made: Option<String>,
+    /// The account setup turned lingering on for, so that the services of an
+    /// account keep running with nobody logged in. Recorded only where setup
+    /// turned it on, so a purge turns off what this install turned on and
+    /// never what the machine had already.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) linger: Option<String>,
 }
 
 impl State {
@@ -7331,6 +7358,11 @@ fn do_it(
         system: plan.system.clone(),
         helper: plan.helper.clone(),
         site: plan.site.clone(),
+        // what an earlier run of setup made outside this directory is still
+        // this install's to remove, and a run that makes nothing more leaves
+        // the record saying so
+        registry_made: existing.as_ref().and_then(|s| s.registry_made.clone()),
+        linger: existing.as_ref().and_then(|s| s.linger.clone()),
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
@@ -7406,6 +7438,9 @@ fn place(
     let checkpoint = |state: &State| {
         let _ = write_state(state);
     };
+    // Read before anything is placed: an account that lingers already
+    // lingered without NILS, and a purge leaves it as it found it.
+    let lingered_before = whoami().is_some_and(|me| lingers(&me));
     for path in own_dirs(plan) {
         std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
     }
@@ -7503,6 +7538,13 @@ fn place(
             answers.passphrase.as_deref(),
             acting.as_ref(),
         )?;
+        // The schemas this install has just made in a Postgres the site
+        // runs, on record from the moment they exist: they are outside this
+        // directory, and a purge removes only what the record names.
+        if let BackendChoice::Postgres { schema, .. } = &plan.backend {
+            state.registry_made = Some(schema.clone());
+            checkpoint(state);
+        }
     }
     // A Postgres registry is backed up with pg_dump. The engine's image
     // carries it; on the machine it has to be there already.
@@ -7745,6 +7787,19 @@ fn place(
         for line in &assistant {
             run(line)?;
         }
+    }
+
+    // Lingering setup turned on is the one thing an install of an account's
+    // own leaves outside its directory, and is on record so that a purge
+    // turns off what setup turned on and nothing else.
+    if let Some(account) = linger_turned_on(
+        plan.system.is_some(),
+        lingered_before,
+        whoami().is_some_and(|me| lingers(&me)),
+        whoami(),
+    ) {
+        state.linger = Some(account);
+        checkpoint(state);
     }
 
     // The model and the assistant's key come from Kvasir. systemd, podman and
@@ -8439,6 +8494,13 @@ pub(crate) enum RegistryStep {
         #[arg(long, value_name = "NAME")]
         schema: String,
     },
+    /// Drop the schemas setup made, and nothing else: the schema named and
+    /// the `<schema>_linkage` beside it, with the connection string read
+    /// from the input
+    Drop {
+        #[arg(long, value_name = "NAME")]
+        schema: String,
+    },
     /// Make the registry as setup makes it, on the key named nils; on
     /// postgres the connection string is read from the input
     Init {
@@ -8464,6 +8526,12 @@ pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit>
             nils_registry::store::Store::connect_postgres(&dsn, &schema)
                 .map(|_| ())
                 .map_err(|e| fail(with_causes(&e)))
+        }
+        RegistryStep::Drop { schema } => {
+            let dsn = dsn_on_input(std::io::stdin().lock())?;
+            drop_schemas_here(&dsn, &schema).map_err(fail)?;
+            println!("dropped {schema} and {schema}_linkage");
+            Ok(())
         }
         RegistryStep::Init { backend, schema } => {
             let meta = registry_made_here(home, &backend, schema, std::io::stdin().lock())?;
@@ -8549,6 +8617,40 @@ fn registry_made_here(
         .init(&registry_init(&choice))
         .map_err(|e| fail(e.to_string()))?;
     Ok(registry.meta().clone())
+}
+
+/// A name that may stand in a statement as it is: letters, digits and
+/// underscores, not starting with a digit. A schema this binary made is
+/// always one; a record edited by hand may name anything, and what is not
+/// one is named to the person rather than sent to a database.
+fn plain_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The statement that removes a registry setup made in a Postgres the site
+/// runs: the schema it was made in, and the linkage store beside it. Nothing
+/// else in the database is named, so a database holding much else keeps all
+/// of it.
+fn drop_schemas_sql(schema: &str) -> String {
+    format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+    )
+}
+
+/// The registry's schemas dropped by the account running this, through the
+/// engine's own connection rather than a `psql` that may not be on the
+/// machine. What the database refuses comes back as it said it.
+fn drop_schemas_here(dsn: &str, schema: &str) -> Result<(), String> {
+    if !plain_identifier(schema) {
+        return Err(format!("{schema} is not a schema name this drops"));
+    }
+    let mut store = nils_registry::store::Store::connect_postgres(&dsn_on_machine(dsn), schema)
+        .map_err(|e| with_causes(&e))?;
+    store
+        .batch(&drop_schemas_sql(schema))
+        .map_err(|e| with_causes(&e))
 }
 
 /// The registry's source places as the account running this finds them, as
@@ -13380,6 +13482,34 @@ fn whoami() -> Option<String> {
     None
 }
 
+/// Where systemd keeps the accounts that may run services with nobody
+/// logged in.
+const LINGER_DIR: &str = "/var/lib/systemd/linger";
+
+/// Whether an account keeps its services running without a login. Read from
+/// the file systemd keeps rather than from `loginctl`, which answers only
+/// where a user manager can be reached.
+fn lingers(account: &str) -> bool {
+    !account.is_empty() && Path::new(LINGER_DIR).join(account).exists()
+}
+
+/// The account setup turned lingering on for, which is the account's own to
+/// record and a purge's to turn off again. None where the services are the
+/// machine's own, which needs no lingering; none where the account lingered
+/// before setup ran, which is the machine as it was; and none where the call
+/// was refused and the account still does not linger.
+fn linger_turned_on(
+    system: bool,
+    before: bool,
+    after: bool,
+    account: Option<String>,
+) -> Option<String> {
+    (!system && !before && after)
+        .then_some(account)
+        .flatten()
+        .filter(|account| !account.is_empty())
+}
+
 /// One call that hands systemd this account's units: what to run, and
 /// whether an install can go on when it is refused.
 #[derive(Debug)]
@@ -15580,6 +15710,9 @@ struct Removal {
     /// The runtime of a Postgres this setup runs, whose container goes; its
     /// data goes with the base directory, or stays with it.
     postgres: Option<String>,
+    /// What this install made outside its own directory, which a purge
+    /// removes and an uninstall that keeps the data leaves where it is.
+    outside: Vec<Outside>,
 }
 
 /// What an uninstall takes: NILS alone, or NILS and its data.
@@ -15587,6 +15720,186 @@ struct Removal {
 enum Leaving {
     KeepData,
     Purge,
+}
+
+/// One thing an install made outside its own directory: the registry's
+/// schemas in a Postgres the site runs, and the lingering setup turned on. A
+/// purge removes each only where the record says this install made it; what
+/// it cannot remove it names, with the command that would.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Outside {
+    /// The word the plan shows it under.
+    key: &'static str,
+    /// The thing itself, named.
+    what: String,
+    /// What it is where the data stays, in a sentence.
+    kept: String,
+    /// Why a purge does not remove it, where it does not.
+    unless: Option<String>,
+    /// The command that removes it by hand.
+    command: String,
+    /// How a purge removes it, and `None` where it only names it.
+    doing: Option<Doing>,
+}
+
+/// How a purge removes one thing outside the install's directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Doing {
+    /// The registry's schemas dropped over the connection the registry
+    /// kept, as the account the engine runs as where that is not this one.
+    Schemas {
+        dsn: String,
+        schema: String,
+        account: Option<String>,
+    },
+    /// Lingering turned off for the account setup turned it on for.
+    Linger(String),
+}
+
+/// What an install made outside its own directory, from the record alone:
+/// the registry's schemas where the record says this install made them, and
+/// the lingering where it says setup turned it on. A record that names
+/// neither leaves a site's database and a machine's accounts exactly as they
+/// were. `registry` is what the registry's own configuration says, the
+/// connection string and the schema it answers at; the schema dropped is the
+/// one the record names, and only where the registry agrees it is the same.
+fn outside_the_install(
+    state: &State,
+    registry: Option<(String, String)>,
+    root: bool,
+) -> Vec<Outside> {
+    let mut out = Vec::new();
+    // A Postgres this setup runs is the install's own: its data lives under
+    // the base directory and goes with it, so there is no schema of a site's
+    // to drop and none to name.
+    let own_postgres = state
+        .parts
+        .get("postgres")
+        .is_some_and(|p| p.kind == "podman" || p.kind == "docker");
+    let command = |schema: &str| match &registry {
+        Some((dsn, _)) => format!("psql \"{dsn}\" -c \"{}\"", drop_schemas_sql(schema)),
+        None => format!(
+            "psql \"<the connection string the registry used>\" -c \"{}\"",
+            drop_schemas_sql(schema)
+        ),
+    };
+    let schemas = |schema: &str| {
+        format!("the registry's schemas {schema} and {schema}_linkage in a database you run")
+    };
+    let where_its_data_is = |schema: &str| {
+        format!(
+            "the registry's schemas {schema} and {schema}_linkage, in the database you run, \
+             where its data is"
+        )
+    };
+    match (
+        state.registry_made.as_deref().filter(|_| !own_postgres),
+        state
+            .backend
+            .strip_prefix("postgres:")
+            .filter(|_| !own_postgres),
+    ) {
+        (Some(schema), _) => {
+            // The registry's own configuration is asked whether this is the
+            // schema it answers at, so a record edited by hand names a
+            // schema and drops none.
+            let agrees = registry.as_ref().is_some_and(|(_, at)| at == schema);
+            let doing = match (&registry, agrees && plain_identifier(schema)) {
+                (Some((dsn, _)), true) => Some(Doing::Schemas {
+                    dsn: dsn.clone(),
+                    schema: schema.to_string(),
+                    account: registry_account(state.system.as_ref(), root),
+                }),
+                _ => None,
+            };
+            out.push(Outside {
+                key: "database",
+                what: schemas(schema),
+                kept: where_its_data_is(schema),
+                unless: doing.is_none().then(|| {
+                    "the registry did not say which database it kept them in, so no database \
+                     was asked"
+                        .to_string()
+                }),
+                command: command(schema),
+                doing,
+            });
+        }
+        // A record from before this was recorded says the registry is on
+        // Postgres and not who made the schemas. A purge that guessed could
+        // drop a schema the site made itself, so it names them instead.
+        (None, Some(schema)) => out.push(Outside {
+            key: "database",
+            what: schemas(schema),
+            kept: where_its_data_is(schema),
+            unless: Some(
+                "this record does not say that this install made them, and a purge removes only \
+                 what the record says it made"
+                    .to_string(),
+            ),
+            command: command(schema),
+            doing: None,
+        }),
+        (None, None) => {}
+    }
+    if let Some(account) = state.linger.as_deref().filter(|a| !a.is_empty()) {
+        out.push(Outside {
+            key: "lingering",
+            what: format!("the lingering setup turned on for {account}"),
+            kept: format!(
+                "{account} keeps its services running without a login, as setup turned on for it"
+            ),
+            unless: None,
+            command: format!("loginctl disable-linger {account}"),
+            doing: Some(Doing::Linger(account.to_string())),
+        });
+    }
+    out
+}
+
+/// One thing outside the install's directory, removed. What a database or a
+/// login manager refuses comes back as it said it, for the purge to name
+/// with the command that would remove it.
+fn remove_outside(doing: &Doing, registry: &Path) -> Result<(), String> {
+    match doing {
+        Doing::Schemas {
+            dsn,
+            schema,
+            account: None,
+        } => drop_schemas_here(dsn, schema),
+        Doing::Schemas {
+            dsn,
+            schema,
+            account: Some(account),
+        } => {
+            // A Postgres that authenticates peers knows the engine's
+            // account and not root, and the schemas were made as that
+            // account, so they are dropped as it too.
+            let acting = AsAccount {
+                account: account.clone(),
+                binary: running_binary(),
+                registry: registry.to_path_buf(),
+            };
+            let ran = acting.run(
+                &owned_words(&[REGISTRY_STEP, "drop", "--schema", schema]),
+                Some(dsn.as_bytes()),
+            );
+            if ran.ok {
+                Ok(())
+            } else {
+                Err(format!("{} (asked as {account})", ran.why))
+            }
+        }
+        Doing::Linger(account) => {
+            if quietly("loginctl", &["disable-linger", account]) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "loginctl would not turn lingering off for {account}"
+                ))
+            }
+        }
+    }
 }
 
 pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
@@ -15681,7 +15994,7 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     }
 
     println!();
-    carry_out(&removal, leaving, &console);
+    let left = carry_out(&removal, leaving, &console);
     println!();
     println!("{}", console.bold("Removed"));
     match leaving {
@@ -15696,7 +16009,19 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
                 removal.dir.display()
             );
         }
-        Leaving::Purge => println!("  NILS and everything it made are gone from this machine"),
+        // A purge that left something says so here rather than signing off
+        // clean: a purge that says it is done and is not is the one thing
+        // this may never do.
+        Leaving::Purge if left.is_empty() => {
+            println!("  NILS and everything it made are gone from this machine");
+        }
+        Leaving::Purge => {
+            println!(
+                "  NILS is gone from this machine, apart from {}",
+                left.join(" and ")
+            );
+            println!("  each is named above, with the command that removes it");
+        }
     }
     Ok(())
 }
@@ -15890,6 +16215,9 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         llama: None,
         state: state_path(),
         postgres: None,
+        // read while the registry's own configuration is still there, since
+        // a purge removes the directory that holds it
+        outside: outside_the_install(state, registry_backend(&dir), am_root()),
     };
 
     // a Postgres this setup runs, wherever the parts run
@@ -16208,6 +16536,11 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
         for line in data_summary(&removal.dir) {
             let _ = writeln!(out, "  {:<12} {}", "", console.dim(&line));
         }
+        // what this install made outside that directory, which is all a
+        // purge ever touches beyond it
+        for outside in removal.outside.iter().filter(|o| o.doing.is_some()) {
+            row(&mut out, outside.key, outside.what.clone());
+        }
     }
     let _ = writeln!(out, "\n{}", console.bold("Keeping"));
     match leaving {
@@ -16216,8 +16549,27 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
             for line in data_summary(&removal.dir) {
                 let _ = writeln!(out, "  {:<12} {}", "", console.dim(&line));
             }
+            // an uninstall that keeps the data keeps the registry wherever
+            // it is, and says where that is
+            for outside in &removal.outside {
+                row(&mut out, outside.key, outside.kept.clone());
+            }
         }
-        Leaving::Purge => row(&mut out, "nothing", "that this setup made".to_string()),
+        Leaving::Purge => {
+            let named: Vec<&Outside> = removal
+                .outside
+                .iter()
+                .filter(|o| o.doing.is_none())
+                .collect();
+            for outside in &named {
+                let why = outside.unless.clone().unwrap_or_default();
+                row(&mut out, outside.key, format!("{}: {why}", outside.what));
+                let _ = writeln!(out, "  {:<12} {}", "", console.dim(&outside.command));
+            }
+            if named.is_empty() {
+                row(&mut out, "nothing", "that this setup made".to_string());
+            }
+        }
     }
     if let Some(kept) = &removal.packs_kept {
         row(
@@ -16300,11 +16652,14 @@ fn human_size(bytes: u64) -> String {
 }
 
 /// Do what the removal says, in the order that leaves nothing holding a file
-/// open: services, containers, built parts, packs, programs, the record, the
-/// data, and this program last. Every step says what it did; a step that
-/// fails says so and the rest still run.
-fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
+/// open: services, what the install made outside its directory, containers,
+/// built parts, packs, programs, the record, the data, and this program
+/// last. Every step says what it did; a step that fails says so and the rest
+/// still run. What is left behind comes back, so the last sentence of an
+/// uninstall is true.
+fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) -> Vec<String> {
     let say = |text: String| println!("  {text}");
+    let mut left = Vec::new();
 
     // the units on this machine, the supervisor and llama.cpp among them on a
     // docker install too, whose containers go below
@@ -16350,6 +16705,28 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
                 Ok(()) => say(format!("removed {what}, {}", path.display())),
                 Err(e) => say(format!("{} was not removed: {e}", path.display())),
             }
+        }
+    }
+
+    // What this install made outside its own directory, once nothing of it
+    // is running: the registry's schemas in a database the site runs, and
+    // the lingering setup turned on. Only a purge takes these; an uninstall
+    // that keeps the data keeps the registry where it is.
+    if leaving == Leaving::Purge {
+        for outside in &removal.outside {
+            let refused = match outside.doing.as_ref() {
+                Some(doing) => match remove_outside(doing, &removal.dir.join("registry")) {
+                    Ok(()) => {
+                        say(format!("removed {}", outside.what));
+                        continue;
+                    }
+                    Err(why) => why,
+                },
+                None => outside.unless.clone().unwrap_or_default(),
+            };
+            say(format!("{} was not removed: {refused}", outside.what));
+            say(format!("  remove it with: {}", outside.command));
+            left.push(outside.what.clone());
         }
     }
 
@@ -16469,6 +16846,7 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
         }
     }
     let _ = console;
+    left
 }
 
 /// A file or a directory, gone. A rootless podman container owns what it
@@ -18104,6 +18482,215 @@ mod tests {
                 .unwrap_err()
                 .starts_with("nothing answered there")
         );
+    }
+
+    /// A record of an install on a Postgres the site runs, with the
+    /// registry's own configuration beside it.
+    fn on_postgres(root: &Path, schema: &str, made: Option<&str>) -> State {
+        let dir = root.join("nils");
+        std::fs::create_dir_all(dir.join("registry")).unwrap();
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            format!(
+                "backend = \"postgres\"\ndsn = \"postgres://nils@127.0.0.1/nils\"\nschema = \"{schema}\"\n"
+            ),
+        )
+        .unwrap();
+        State {
+            dir: dir.display().to_string(),
+            mode: "off".to_string(),
+            runtime: "machine".to_string(),
+            backend: format!("postgres:{schema}"),
+            registry_made: made.map(str::to_string),
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn a_purge_drops_the_schemas_the_record_says_this_install_made() {
+        let root = scratch("purge-schemas");
+        let state = on_postgres(&root, "nils", Some("nils"));
+        let dir = PathBuf::from(&state.dir);
+
+        let outside = outside_the_install(&state, registry_backend(&dir), false);
+        assert_eq!(outside.len(), 1, "{outside:?}");
+        assert_eq!(
+            outside[0].doing,
+            Some(Doing::Schemas {
+                dsn: "postgres://nils@127.0.0.1/nils".to_string(),
+                schema: "nils".to_string(),
+                account: None,
+            }),
+            "dropped over the connection the registry kept, as this account"
+        );
+        assert_eq!(
+            outside[0].command,
+            "psql \"postgres://nils@127.0.0.1/nils\" -c \"DROP SCHEMA IF EXISTS nils CASCADE; \
+             DROP SCHEMA IF EXISTS nils_linkage CASCADE\"",
+            "the command that would remove it by hand"
+        );
+        let text = removal_text(
+            &gather_removal(&state, None, Leaving::Purge),
+            Leaving::Purge,
+            &Console::new(true),
+        );
+        assert!(
+            text.contains("the registry's schemas nils and nils_linkage in a database you run"),
+            "the plan says the database too: {text}"
+        );
+
+        // Where the services are the machine's own and root is purging, the
+        // schemas are dropped as the account that made them, since a
+        // Postgres that authenticates peers knows that account and not root.
+        let mut of_machine = state.clone();
+        of_machine.system = Some(SystemUnits {
+            capabilities: Vec::new(),
+            accounts: BTreeMap::from([("engine".to_string(), "nils".to_string())]),
+        });
+        let outside = outside_the_install(&of_machine, registry_backend(&dir), true);
+        assert!(
+            matches!(
+                &outside[0].doing,
+                Some(Doing::Schemas { account: Some(account), .. }) if account == "nils"
+            ),
+            "{:?}",
+            outside[0].doing
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_schema_the_record_does_not_name_is_never_dropped() {
+        let root = scratch("purge-other-schema");
+
+        // A record from before an install said which schemas it made: what
+        // is in the database is named, with the command, and dropped by
+        // nobody here.
+        let older = on_postgres(&root, "nils", None);
+        let dir = PathBuf::from(&older.dir);
+        let outside = outside_the_install(&older, registry_backend(&dir), false);
+        assert_eq!(outside.len(), 1, "{outside:?}");
+        assert_eq!(outside[0].doing, None, "an older record drops nothing");
+        assert!(
+            outside[0]
+                .unless
+                .as_deref()
+                .is_some_and(|why| why.contains("does not say that this install made them")),
+            "{:?}",
+            outside[0].unless
+        );
+        assert!(outside[0].command.contains("DROP SCHEMA IF EXISTS nils"));
+
+        // A record naming one schema and a registry answering at another:
+        // the record's is not in that database, so nothing is dropped.
+        let elsewhere = on_postgres(&root, "theirs", Some("ours"));
+        let outside = outside_the_install(&elsewhere, registry_backend(&dir), false);
+        assert_eq!(outside[0].doing, None, "{outside:?}");
+
+        // A name that is not a plain identifier never reaches a database.
+        let odd = on_postgres(&root, "nils\"; drop", Some("nils\"; drop"));
+        let outside = outside_the_install(&odd, registry_backend(&dir), false);
+        assert_eq!(outside[0].doing, None, "{outside:?}");
+        assert!(!plain_identifier("nils\"; drop"));
+        assert!(!plain_identifier("9lives") && !plain_identifier(""));
+        assert!(plain_identifier("nils") && plain_identifier("nils_two"));
+
+        // A registry on SQLite has no schema anywhere, and a Postgres this
+        // setup runs itself goes with the directory.
+        let sqlite = State {
+            backend: "sqlite".to_string(),
+            ..older.clone()
+        };
+        assert!(outside_the_install(&sqlite, None, false).is_empty());
+        let mut own = older.clone();
+        own.registry_made = Some("nils".to_string());
+        own.parts.insert(
+            "postgres".to_string(),
+            PartState {
+                version: "17".to_string(),
+                path: "postgres:17".to_string(),
+                kind: "podman".to_string(),
+            },
+        );
+        assert!(
+            outside_the_install(&own, registry_backend(&dir), false).is_empty(),
+            "a Postgres this setup runs goes with the base directory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_uninstall_that_keeps_the_data_drops_nothing_and_says_where_it_stays() {
+        let root = scratch("keep-data-schemas");
+        let mut state = on_postgres(&root, "nils", Some("nils"));
+        state.linger = Some("nils".to_string());
+        let removal = gather_removal(&state, None, Leaving::KeepData);
+        let console = Console::new(true);
+        let text = removal_text(&removal, Leaving::KeepData, &console);
+        let (removing, keeping) = text.split_once("Keeping").unwrap();
+        assert!(
+            !removing.contains("nils_linkage") && !removing.contains("lingering"),
+            "nothing outside the directory is removed: {removing}"
+        );
+        assert!(
+            keeping.contains(
+                "the registry's schemas nils and nils_linkage, in the database you \
+                 run, where its data is"
+            ),
+            "{keeping}"
+        );
+        assert!(
+            keeping.contains("keeps its services running without a login"),
+            "{keeping}"
+        );
+        // and nothing outside is carried out for anything but a purge
+        assert!(
+            carry_out(&removal, Leaving::KeepData, &console).is_empty(),
+            "an uninstall that keeps the data leaves nothing named"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lingering_is_turned_off_only_where_the_record_says_setup_turned_it_on() {
+        let account = || Some("nils".to_string());
+        assert_eq!(
+            linger_turned_on(false, false, true, account()),
+            account(),
+            "setup turned it on for an account that did not linger"
+        );
+        assert_eq!(
+            linger_turned_on(false, true, true, account()),
+            None,
+            "an account that lingered before setup ran is the machine as it was"
+        );
+        assert_eq!(
+            linger_turned_on(false, false, false, account()),
+            None,
+            "a call that was refused turned nothing on"
+        );
+        assert_eq!(
+            linger_turned_on(true, false, true, account()),
+            None,
+            "the services of a machine ask for no lingering"
+        );
+        assert_eq!(linger_turned_on(false, false, true, None), None);
+
+        let root = scratch("purge-linger");
+        let recorded = State {
+            dir: root.join("nils").display().to_string(),
+            linger: Some("nils".to_string()),
+            ..State::default()
+        };
+        let outside = outside_the_install(&recorded, None, false);
+        assert_eq!(outside.len(), 1, "{outside:?}");
+        assert_eq!(outside[0].doing, Some(Doing::Linger("nils".to_string())));
+        assert_eq!(outside[0].command, "loginctl disable-linger nils");
+        assert!(
+            outside_the_install(&State::default(), None, false).is_empty(),
+            "a record that says setup turned on no lingering turns off none"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

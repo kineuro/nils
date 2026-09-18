@@ -1714,6 +1714,120 @@ fn the_step_that_makes_a_registry_on_postgres_reads_the_connection_string_from_i
     drop();
 }
 
+/// The step a purge drops the registry's schemas through takes the schema it
+/// is given and the linkage store beside it, and leaves every other schema in
+/// the database alone. Runs where a test DSN is set.
+#[test]
+fn the_step_that_drops_a_registrys_schemas_takes_the_one_it_is_given_and_no_other() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres test is skipped");
+        return;
+    };
+    let mine = "nils_setup_drop_mine";
+    let theirs = "nils_setup_drop_theirs";
+    let standing = |schema: &str| -> Vec<String> {
+        let mut store = nils_registry::Store::connect_postgres(&dsn, "public").expect("connect");
+        store
+            .query(
+                &format!(
+                    "SELECT schema_name FROM information_schema.schemata \
+                     WHERE schema_name IN ('{schema}', '{schema}_linkage') ORDER BY schema_name"
+                ),
+                &[],
+            )
+            .expect("the schemas there")
+            .iter()
+            .map(|row| row.text(0).unwrap_or_default().to_string())
+            .collect()
+    };
+    let clear = || {
+        let mut store = nils_registry::Store::connect_postgres(&dsn, "public").expect("connect");
+        for schema in [mine, theirs] {
+            store
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {schema} CASCADE; \
+                     DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+                ))
+                .expect("drop");
+        }
+    };
+    clear();
+    let nils = Installed::new("nils-setup-drop-postgres");
+    let base = TempDir::new("nils-setup-drop-postgres");
+    // two registries in one database: the one this install made, and one the
+    // site already had
+    for (schema, name) in [(mine, "mine"), (theirs, "theirs")] {
+        let registry = base.path().join(name);
+        let at = || {
+            let mut command = Command::new(nils.path());
+            command.arg("--registry").arg(&registry);
+            command
+        };
+        let added = with_input(at().args(["key", "add", "nils"]), "a fixture passphrase\n");
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+        let made = with_input(
+            at().args([
+                "setup-registry",
+                "init",
+                "--backend",
+                "postgres",
+                "--schema",
+                schema,
+            ]),
+            &format!("{dsn}\n"),
+        );
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+    }
+    assert_eq!(
+        standing(mine).len(),
+        2,
+        "the registry and its linkage store"
+    );
+    assert_eq!(standing(theirs).len(), 2);
+
+    let dropped = with_input(
+        Command::new(nils.path()).args(["setup-registry", "drop", "--schema", mine]),
+        &format!("{dsn}\n"),
+    );
+    assert!(
+        dropped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dropped.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&dropped.stdout).contains(&format!("{mine}_linkage")),
+        "it says what it dropped: {}",
+        String::from_utf8_lossy(&dropped.stdout)
+    );
+    assert!(
+        standing(mine).is_empty(),
+        "both schemas of this install are gone"
+    );
+    assert_eq!(
+        standing(theirs).len(),
+        2,
+        "a schema the record does not name is left as it is"
+    );
+    // dropping again is not a failure, so the rest of a purge goes on
+    let again = with_input(
+        Command::new(nils.path()).args(["setup-registry", "drop", "--schema", mine]),
+        &format!("{dsn}\n"),
+    );
+    assert!(again.status.success());
+    clear();
+}
+
 #[test]
 fn update_all_without_a_setup_says_where_it_looked() {
     let nils = Installed::new("nils-setup-update-all");
