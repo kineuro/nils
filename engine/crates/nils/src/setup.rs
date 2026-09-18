@@ -6882,6 +6882,34 @@ fn service_manager_when(runtime: Runtime, session: bool) -> Option<&'static str>
     }
 }
 
+/// What keeps this plan's parts running, in the one form of words the plan's
+/// row, the record and the sign-off all take: the services of this machine,
+/// this account's own, or the runtime's. `None` where nothing keeps them.
+fn kept_by(plan: &Plan) -> Option<&'static str> {
+    plan.service
+        .then(|| service_manager(plan.runtime, plan.system.is_some()))
+        .flatten()
+}
+
+/// How the sign-off says it, from those same words, so that a `--system`
+/// install cannot be planned as the machine's services and signed off as an
+/// account's.
+fn runs_words(kept_by: Option<&str>, runtime: Runtime) -> String {
+    match kept_by {
+        // a container runtime's own name is already in the words: quadlets
+        // are podman's, and the compose file is docker's
+        Some(manager) if runtime.container() => {
+            let manager = manager
+                .strip_prefix(&format!("{} ", runtime.name()))
+                .unwrap_or(manager);
+            format!("in {}, by {manager}, back after a restart", runtime.name())
+        }
+        Some(manager) => format!("as {manager}, back after a restart"),
+        None if runtime.container() => format!("in {}, started by this setup", runtime.name()),
+        None => "started by hand".to_string(),
+    }
+}
+
 /// Why nothing here can keep the parts running, said so that a person can
 /// act on it: on Linux the units want a session of the account that runs
 /// NILS, which is what a machine nobody is logged in to has not got.
@@ -7020,9 +7048,7 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
     rows.push((
         "services",
         if plan.service {
-            service_manager(plan.runtime, plan.system.is_some())
-                .unwrap_or("none")
-                .to_string()
+            kept_by(plan).unwrap_or("none").to_string()
         } else {
             "none; the commands are printed".to_string()
         },
@@ -14711,21 +14737,9 @@ fn card_rows(plan: &Plan) -> Vec<(&'static str, String)> {
             ),
         ));
     }
-    rows.push((
-        "runs",
-        match (plan.service, plan.runtime) {
-            (true, Runtime::Machine) if cfg!(target_os = "macos") => {
-                "as launchd agents, back after a restart"
-            }
-            (true, Runtime::Machine) => "as systemd user units, back after a restart",
-            (true, Runtime::Podman) => "in podman, back after a restart",
-            (true, Runtime::Docker) => "in docker, back after a restart",
-            (false, Runtime::Machine) => "started by hand",
-            (false, Runtime::Podman) => "in podman, started by this setup",
-            (false, Runtime::Docker) => "in docker, started by this setup",
-        }
-        .to_string(),
-    ));
+    // the services this install wrote, named by what wrote them: the plan's
+    // `services` row reads the same words from the same place
+    rows.push(("runs", runs_words(kept_by(plan), plan.runtime)));
     rows.push(("directory", tilde(&plan.dir)));
     rows
 }
@@ -19977,6 +19991,83 @@ mod tests {
         }
         // a quadlet is generated and carries its own [Install] section
         assert_eq!(hand_units_to_systemd(&[], false, false).len(), 2);
+    }
+
+    #[test]
+    fn an_install_signs_off_with_the_services_it_wrote() {
+        assert_eq!(
+            runs_words(Some(SYSTEM_MANAGER), Runtime::Machine),
+            "as systemd system units, back after a restart"
+        );
+        assert_eq!(
+            runs_words(Some("systemd user units"), Runtime::Machine),
+            "as systemd user units, back after a restart"
+        );
+        assert_eq!(
+            runs_words(Some("launchd agents"), Runtime::Machine),
+            "as launchd agents, back after a restart"
+        );
+        assert_eq!(
+            runs_words(Some("podman quadlets"), Runtime::Podman),
+            "in podman, by quadlets, back after a restart",
+            "the runtime is named once"
+        );
+        assert_eq!(
+            runs_words(Some("a compose file"), Runtime::Docker),
+            "in docker, by a compose file, back after a restart"
+        );
+        assert_eq!(runs_words(None, Runtime::Machine), "started by hand");
+        assert_eq!(
+            runs_words(None, Runtime::Docker),
+            "in docker, started by this setup"
+        );
+
+        let row = |rows: Vec<(&'static str, String)>, key: &str| {
+            rows.into_iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, value)| value)
+                .unwrap_or_else(|| panic!("no {key} row"))
+        };
+        // an install asked for the machine's own services plans them and
+        // signs off with them, where this machine has a systemd to take them
+        let mut machine = plan(Runtime::Machine);
+        machine.system = Some(SystemUnits::default());
+        if let Some(manager) = kept_by(&machine) {
+            assert_eq!(manager, SYSTEM_MANAGER);
+            assert_eq!(row(plan_rows(&machine), "services"), SYSTEM_MANAGER);
+            assert_eq!(
+                row(card_rows(&machine), "runs"),
+                "as systemd system units, back after a restart"
+            );
+        }
+
+        // and on every shape the plan's row and the sign-off agree, because
+        // both read the services from the same place
+        for runtime in [Runtime::Machine, Runtime::Podman, Runtime::Docker] {
+            for system in [None, Some(SystemUnits::default())] {
+                let mut p = plan(runtime);
+                p.system = system;
+                let services = row(plan_rows(&p), "services");
+                let runs = row(card_rows(&p), "runs");
+                if services == "none" {
+                    assert!(
+                        !runs.contains("back after a restart"),
+                        "nothing was written, and the sign-off says so: {runs}"
+                    );
+                    continue;
+                }
+                let named = services
+                    .strip_prefix(&format!("{} ", runtime.name()))
+                    .unwrap_or(&services);
+                assert!(runs.contains(named), "{runs} against {services}");
+            }
+        }
+
+        // an install that writes no services says so in both rows
+        let mut by_hand = plan(Runtime::Machine);
+        by_hand.service = false;
+        assert_eq!(kept_by(&by_hand), None);
+        assert_eq!(row(card_rows(&by_hand), "runs"), "started by hand");
     }
 
     #[test]
