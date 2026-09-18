@@ -1199,19 +1199,21 @@ fn the_plan_names_llama_cpp_beside_the_assistant() {
     let nils = Installed::new("nils-setup-llama");
     let config = TempDir::new("nils-setup-llama-config");
     let base = TempDir::new("nils-setup-llama-base");
-    let o = setup(
-        &nils.path(),
-        config.path(),
-        &[
+    let dir = base.path().join("nils");
+    let printed = |args: &[&str]| {
+        let mut argv = vec![
             "--print",
             "--parts",
             "engine,desk,assistant",
             "--runtime",
             "machine",
             "--dir",
-            base.path().join("nils").to_str().unwrap(),
-        ],
-    );
+            dir.to_str().unwrap(),
+        ];
+        argv.extend_from_slice(args);
+        setup(&nils.path(), config.path(), &argv)
+    };
+    let o = printed(&[]);
     assert!(o.ok, "{}", o.stderr);
     let built = matches!(std::env::consts::OS, "linux" | "macos")
         && matches!(std::env::consts::ARCH, "x86_64" | "aarch64");
@@ -1226,14 +1228,31 @@ fn the_plan_names_llama_cpp_beside_the_assistant() {
         // and the units a run stops while their files change, each just
         // before its own
         o.says("stopped while their files change");
-        o.says("stop nils-llama  while the older llama.cpp builds are removed");
         o.says("stop kvasir  while Kvasir's source is taken and built");
         o.says("stop nils-assistant  while the assistant's source is taken and built");
+        // this install has no llama.cpp build to replace, so the run removes
+        // none and stops llama.cpp not at all
+        assert!(
+            !o.stdout.contains("stop nils-llama"),
+            "a stop no run would make:\n{}",
+            o.stdout
+        );
         assert!(
             !o.stdout.contains("stop nils-supervise"),
             "the supervisor would be stopped:\n{}",
             o.stdout
         );
+        // a build this install took before, which the one planned replaces:
+        // now the run does stop llama.cpp, and the print says so
+        let other = if cfg!(target_os = "macos") {
+            "ubuntu-x64"
+        } else {
+            "macos-arm64"
+        };
+        std::fs::create_dir_all(dir.join("llama.cpp").join(format!("b10964-{other}"))).unwrap();
+        let again = printed(&[]);
+        assert!(again.ok, "{}", again.stderr);
+        again.says("stop nils-llama  while the older llama.cpp builds are removed");
     }
 }
 
@@ -2010,6 +2029,122 @@ fn the_step_that_drops_a_registrys_schemas_takes_the_one_it_is_given_and_no_othe
         &format!("{dsn}\n"),
     );
     assert!(again.status.success());
+    clear();
+}
+
+/// A container install makes its registry inside the container, so
+/// `nils.toml` keeps the address a container calls this machine by. The steps
+/// setup takes out here dial the same database by the name this machine has
+/// for it: the places are declared, they are read back, and what the registry
+/// records is left as the engine in the container needs it. Runs where a test
+/// DSN on this machine's loopback is set.
+#[test]
+fn the_steps_on_this_machine_open_a_registry_a_container_made_at_this_machines_address() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres test is skipped");
+        return;
+    };
+    // the same database under the name a container calls this machine by,
+    // which is what a registry made inside one records
+    let Some(as_a_container_names_it) = ["127.0.0.1", "localhost"]
+        .iter()
+        .find(|host| dsn.contains(**host))
+        .map(|host| dsn.replacen(host, "host.containers.internal", 1))
+    else {
+        eprintln!("the test DSN does not name this machine's loopback; the test is skipped");
+        return;
+    };
+    let schema = "nils_setup_container_address";
+    let clear = || {
+        nils_registry::Store::connect_postgres(&dsn, schema)
+            .expect("connect")
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    clear();
+    let nils = Installed::new("nils-setup-container-address");
+    let base = TempDir::new("nils-setup-container-address");
+    let registry = base.path().join("registry");
+    let nils_at = || {
+        let mut command = Command::new(nils.path());
+        command.arg("--registry").arg(&registry);
+        command
+    };
+    let added = with_input(
+        nils_at().args(["key", "add", "nils"]),
+        "a fixture passphrase\n",
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let made = with_input(
+        nils_at().args([
+            "setup-registry",
+            "init",
+            "--backend",
+            "postgres",
+            "--schema",
+            schema,
+        ]),
+        &format!("{dsn}\n"),
+    );
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    // as the registry the container made records it
+    let config = registry.join("nils.toml");
+    std::fs::write(
+        &config,
+        std::fs::read_to_string(&config)
+            .unwrap()
+            .replace(&dsn, &as_a_container_names_it),
+    )
+    .unwrap();
+
+    let source = base.path().join("source");
+    let places = format!(
+        r#"[{{"name":"backups","role":"backup","path":"{}","backup":null,"snapshots":false,"protected":false,"fast":false}},
+           {{"name":"source","role":"source","path":"{}","backup":null,"snapshots":false,"protected":false,"fast":false}}]"#,
+        base.path().join("backups").display(),
+        source.display()
+    );
+    let declared = with_input(nils_at().args(["setup-registry", "declare"]), &places);
+    assert!(
+        declared.status.success(),
+        "the places of a registry made in a container are declared from here: {}",
+        String::from_utf8_lossy(&declared.stderr)
+    );
+    let said = String::from_utf8_lossy(&declared.stdout).to_string();
+    assert!(said.contains("\"backups\""), "{said}");
+    assert!(said.contains("\"source\""), "{said}");
+
+    let read_back = with_input(nils_at().args(["setup-registry", "sources"]), "");
+    assert!(
+        read_back.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read_back.stderr)
+    );
+    let sources = String::from_utf8_lossy(&read_back.stdout).to_string();
+    assert!(
+        sources.contains(&source.display().to_string()),
+        "the source places are read back: {sources}"
+    );
+
+    assert!(
+        std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("host.containers.internal"),
+        "the engine goes on running in the container, so what it records stands"
+    );
     clear();
 }
 

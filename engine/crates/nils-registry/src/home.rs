@@ -154,11 +154,34 @@ fn io_err(path: &Path, error: io::Error) -> HomeError {
 #[derive(Debug, Clone)]
 pub struct Home {
     dir: PathBuf,
+    /// An address to dial instead of the one `nils.toml` records, for a
+    /// caller that knows the two are the same database under two names.
+    dial: Option<String>,
 }
 
 impl Home {
     pub fn new(dir: impl Into<PathBuf>) -> Home {
-        Home { dir: dir.into() }
+        Home {
+            dir: dir.into(),
+            dial: None,
+        }
+    }
+
+    /// The same home, dialling the address given rather than the one
+    /// `nils.toml` records. A registry made inside a container records the
+    /// name a container calls its database by, and a step that runs on the
+    /// machine reaches the same database by another name; what is recorded
+    /// is never written over, since the engine goes on running where it was
+    /// made. `None` leaves the home reading the address as it was recorded.
+    pub fn dialling(mut self, dsn: Option<String>) -> Home {
+        self.dial = dsn;
+        self
+    }
+
+    /// The address this home dials instead of the recorded one, where one
+    /// was given.
+    pub fn dialled(&self) -> Option<&str> {
+        self.dial.as_deref()
     }
 
     /// `--registry`, else `NILS_REGISTRY`, else the working directory.
@@ -220,7 +243,10 @@ impl Home {
         KeyStore::new(self.dir.join(dir))
     }
 
-    fn dsn_of(config: &Config) -> Result<String, HomeError> {
+    fn dsn_of(&self, config: &Config) -> Result<String, HomeError> {
+        if let Some(dial) = &self.dial {
+            return Ok(dial.clone());
+        }
         if let Ok(v) = std::env::var(DSN_ENV)
             && !v.is_empty()
         {
@@ -254,7 +280,7 @@ impl Home {
                 Ok(store)
             }
             Backend::Postgres => {
-                let dsn = Self::dsn_of(config)?;
+                let dsn = self.dsn_of(config)?;
                 let schema = match kind {
                     Kind::Registry => config.schema.clone(),
                     Kind::Linkage => config.linkage_schema(),
@@ -601,7 +627,7 @@ impl Registry {
     /// for a backup); an error on SQLite.
     pub fn dsn(&self) -> Result<String, HomeError> {
         match self.config.backend {
-            Backend::Postgres => Home::dsn_of(&self.config),
+            Backend::Postgres => self.home.dsn_of(&self.config),
             Backend::Sqlite => Err(HomeError::Config(
                 "the registry is on SQLite and has no dsn".into(),
             )),
@@ -617,7 +643,7 @@ impl Registry {
             Backend::Postgres => {
                 let dsn = match dsn {
                     Some(d) => d.to_string(),
-                    None => Home::dsn_of(&self.config)?,
+                    None => self.home.dsn_of(&self.config)?,
                 };
                 let mut store = Store::connect_postgres(&dsn, &self.config.schema)?;
                 store.batch("SET default_transaction_read_only = on")?;

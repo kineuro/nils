@@ -299,12 +299,68 @@ fn model_reach_note(runtime: Runtime, url: &str, pasta: fn() -> bool) -> Option<
     })
 }
 
+/// Where a step that opens the registry runs. A registry records the address
+/// the engine dials from where it was made, so a step that runs somewhere
+/// else has to read that address from where it stands: this is the one thing
+/// that decides which address any step dials, and [`dsn_from`] is the one
+/// place that answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepRuns {
+    /// In setup's own process, or as the engine's account under runuser:
+    /// either way a process on this machine.
+    OnTheMachine,
+    /// Inside a container of this runtime, which calls this machine by an
+    /// alias of its own.
+    InAContainer(Runtime),
+}
+
+/// The address a step dials: the one recorded, read from where the step runs.
+/// This machine's loopback becomes the container's alias for a step in a
+/// container, the alias becomes the loopback for a step out here, and an
+/// address that names neither, a database on another machine, is left exactly
+/// as it was given.
+fn dsn_from(runs: StepRuns, dsn: &str) -> String {
+    match runs {
+        StepRuns::OnTheMachine => dsn_on_machine(dsn),
+        StepRuns::InAContainer(runtime) => dsn_for(runtime, dsn),
+    }
+}
+
+/// The address a step dials instead of the one it was given, where the two
+/// differ. `None` where they are the same, which is every machine install
+/// and every database named the same from both sides: there the step opens
+/// the registry exactly as it always did.
+fn dial_instead(runs: StepRuns, recorded: Option<&str>) -> Option<String> {
+    let recorded = recorded?;
+    let dialled = dsn_from(runs, recorded);
+    (dialled != recorded).then_some(dialled)
+}
+
+/// A registry home as a step on this machine opens it. `nils.toml` keeps the
+/// address the engine dials from where it runs, which for a container
+/// install is the name a container calls this machine by; it is not written
+/// over, since the engine goes on running in the container. The step out
+/// here dials the same database by the name this machine has for it.
+fn home_on_machine(home: &Home) -> Home {
+    let recorded = home.read_config().ok().and_then(|c| c.dsn);
+    home.clone()
+        .dialling(dial_instead(StepRuns::OnTheMachine, recorded.as_deref()))
+}
+
+/// Whether a connection string names this machine, however it is written:
+/// the loopback a step out here dials, or the alias a container dials it by.
+/// A database on another machine names neither.
+fn dsn_names_this_machine(dsn: &str) -> bool {
+    dsn_from(StepRuns::OnTheMachine, dsn) != dsn
+        || dsn_from(StepRuns::InAContainer(Runtime::Podman), dsn) != dsn
+}
+
 /// A connection string the other way about: the name a container calls this
 /// machine by, back to the loopback a process on the machine reaches it at.
 /// A registry made inside a container keeps the address it dialled, and an
 /// uninstall runs on the machine. Only a loopback is ever written over on
 /// the way in, so only the alias is ever written back here, and a database
-/// on another machine is left as it was named.
+/// on another machine is left as it was named. Asked through [`dsn_from`].
 fn dsn_on_machine(dsn: &str) -> String {
     let mut out = dsn.to_string();
     for alias in ["host.containers.internal", "host.docker.internal"] {
@@ -317,7 +373,7 @@ fn dsn_on_machine(dsn: &str) -> String {
 /// runs: on this machine as it was typed, in a container with this
 /// machine's loopback named the way a container reaches it. Both forms the
 /// driver takes are read, a URL and `key=value` pairs; anything else is left
-/// as it was.
+/// as it was. Asked through [`dsn_from`].
 fn dsn_for(runtime: Runtime, dsn: &str) -> String {
     let Some(alias) = host_from_container(runtime) else {
         return dsn.to_string();
@@ -364,7 +420,7 @@ fn dsn_for(runtime: Runtime, dsn: &str) -> String {
 /// Postgres must allow. Nothing when the engine runs on the machine or the
 /// database is somewhere else.
 fn postgres_reach_note(runtime: Runtime, dsn: &str, pasta: fn() -> bool) -> Option<String> {
-    if dsn_for(runtime, dsn) == dsn {
+    if dsn_from(StepRuns::InAContainer(runtime), dsn) == dsn {
         return None;
     }
     Some(match runtime {
@@ -4182,7 +4238,7 @@ fn plan_and_sources(state: &State, channel: Option<&str>) -> (Plan, Option<(Stri
         host_loopback: state.runtime == "podman"
             && (state.parts.contains_key("assistant")
                 || state.parts.contains_key("desk")
-                || registry_dsn(&dir).is_some_and(|d| d.contains("host.containers.internal")))
+                || registry_dsn(&dir).is_some_and(|d| dsn_names_this_machine(&d)))
             && podman_has_pasta(),
         postgres: state
             .parts
@@ -4248,7 +4304,7 @@ fn registry_sources(dir: &Path) -> Option<Vec<(String, PathBuf)>> {
     if !home.exists() {
         return None;
     }
-    let mut store = home.open_as_it_stands().ok()?;
+    let mut store = home_on_machine(&home).open_as_it_stands().ok()?;
     let places = place::active(&mut store).ok()?;
     Some(
         places
@@ -4917,6 +4973,62 @@ fn own_dirs(plan: &Plan) -> Vec<PathBuf> {
         out.push(plan.dir.join("export"));
     }
     out
+}
+
+/// The mode a directory setup makes is made with, where what it holds asks
+/// for one, and `None` where it is made with whatever the mask allows, as
+/// every directory here was before.
+///
+/// The registry alone: it holds the key store, which is 0700, and
+/// `nils.toml`, which is 0600, and on an install with its own Postgres the
+/// database's own directory, so a directory anyone may list says less than
+/// everything in it. The archives, the work in flight and what is exported
+/// are the places an install and the people using it meet, and a site that
+/// declared none of them still reads them by hand, so narrowing them would
+/// take away reach a site has today rather than tidy anything. The desk's
+/// directory keeps its configuration at 0600 already, and its store is the
+/// desk's to make. The mode is set only where setup makes the directory
+/// itself; what it finds it leaves alone, mode and all.
+fn own_dir_mode(path: &Path, registry: &Path) -> Option<u32> {
+    (path == registry).then_some(0o700)
+}
+
+/// The directories an install makes of its own, each made where it is not
+/// there yet and given the mode its contents ask for. A directory that was
+/// already there is left exactly as it is: it is the site's, or an older
+/// install's, and record 30 settled that setup does not change what it
+/// finds. A mode that cannot be set is said rather than stopping an install,
+/// since everything in the directory is written with a mode of its own.
+fn make_own_dirs(plan: &Plan, console: &Console) -> Result<(), Exit> {
+    let registry = plan.registry();
+    for path in own_dirs(plan) {
+        let there = path.is_dir();
+        std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+        if there {
+            continue;
+        }
+        if let Some(mode) = own_dir_mode(&path, &registry)
+            && let Err(e) = narrow_dir(&path, mode)
+        {
+            console.warn(&format!(
+                "{} was left open to this machine, at whatever the mask allows: {e}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A directory made no wider than `mode`, where the platform has modes.
+fn narrow_dir(path: &Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
 }
 
 /// The backup place a site's archives belong in: the one the registry place
@@ -5988,9 +6100,12 @@ fn questions(
                             ),
                         };
                         let refused = console.probe(&key, || match &asking {
-                            None => nils_registry::store::Store::connect_postgres(&dsn, &schema)
-                                .err()
-                                .map(|e| with_causes(&e)),
+                            None => nils_registry::store::Store::connect_postgres(
+                                &dsn_from(StepRuns::OnTheMachine, &dsn),
+                                &schema,
+                            )
+                            .err()
+                            .map(|e| with_causes(&e)),
                             Some(acting) => postgres_refused_as(acting, &dsn, &schema),
                         });
                         let Some(why) = refused else {
@@ -6452,7 +6567,7 @@ fn questions(
     let helper = helper_of(system.as_ref(), service);
 
     let postgres_here = matches!(&backend, BackendChoice::Postgres { dsn, .. }
-        if dsn_for(Runtime::Podman, dsn) != *dsn);
+        if dsn_names_this_machine(dsn));
     // the desk in the pod reaches the supervisor on this host's loopback
     let host_loopback = runtime == Runtime::Podman
         && (parts.contains(&Part::Assistant) || parts.contains(&Part::Desk) || postgres_here)
@@ -6739,9 +6854,7 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         println!("nothing was changed");
         return Ok(());
     }
-    for path in own_dirs(&plan) {
-        std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
-    }
+    make_own_dirs(&plan, console)?;
     let mut stages = Vec::new();
     if plan.postgres.is_some() {
         stages.push((Stage::Postgres, format!("Postgres {POSTGRES_MAJOR}")));
@@ -7620,9 +7733,7 @@ fn place(
     // Read before anything is placed: an account that lingers already
     // lingered without NILS, and a purge leaves it as it found it.
     let lingered_before = whoami().is_some_and(|me| lingers(&me));
-    for path in own_dirs(plan) {
-        std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
-    }
+    make_own_dirs(plan, console)?;
 
     // The engine: the running binary, or an image.
     let me = std::env::current_exe()
@@ -7770,9 +7881,20 @@ fn place(
 
     // The provider, once the desk is on this machine to register itself at
     // an Authentik: what it answers is what the desk, the engine and Kvasir
-    // are told.
+    // are told. Nothing is registered, and no secret written, until setup
+    // knows the desk's configuration can be written, so a refusal below
+    // leaves no registration at a provider setup does not own.
     let registered;
-    let plan = match register_desk(plan, state, answers, console) {
+    let refused = plan
+        .has(Part::Desk)
+        .then(|| {
+            let on_disk = std::fs::read_to_string(plan.desk_config()).ok();
+            desk_config_refusal(plan, on_disk.as_deref())
+        })
+        .flatten();
+    let plan = match settle_provider(plan, answers, refused, || {
+        register_desk(plan, state, answers, console)
+    })? {
         Some(oidc) => {
             registered = Plan {
                 oidc: Some(oidc),
@@ -7784,12 +7906,6 @@ fn place(
     };
     state.oidc = plan.oidc.clone();
     if plan.has(Part::Desk) {
-        if let Some(Provider::Registered {
-            secret: Some(secret),
-        }) = &answers.provider
-        {
-            write_secret(&desk_secret_file(plan), secret)?;
-        }
         if let Err(e) = write_supervisor(plan) {
             console.warn(&format!("the supervisor was not set up: {}", e.message));
         }
@@ -8297,7 +8413,7 @@ fn registry_container_steps(plan: &Plan) -> Option<Vec<Vec<String>>> {
             "--backend".to_string(),
             "postgres".to_string(),
             "--dsn".to_string(),
-            dsn_for(plan.runtime, dsn),
+            dsn_from(StepRuns::InAContainer(plan.runtime), dsn),
             "--schema".to_string(),
             schema.clone(),
         ];
@@ -8373,9 +8489,12 @@ fn make_registry(
         // costs a sentence rather than half a registry: as the account that
         // will connect, where that is not this one.
         let refused = match acting {
-            None => nils_registry::store::Store::connect_postgres(dsn, schema)
-                .err()
-                .map(|e| with_causes(&e)),
+            None => nils_registry::store::Store::connect_postgres(
+                &dsn_from(StepRuns::OnTheMachine, dsn),
+                schema,
+            )
+            .err()
+            .map(|e| with_causes(&e)),
             Some(acting) => postgres_refused_as(acting, dsn, schema)
                 .map(|why| format!("{why} (asked as {})", acting.account)),
         };
@@ -8470,7 +8589,12 @@ fn make_registry(
     home.keys(None)
         .add("nils", bytes)
         .map_err(|e| fail(e.to_string()))?;
-    home.init(&registry_init(&plan.backend))
+    // The connection string goes into `nils.toml` as it was given, and is
+    // dialled from here, which is where this process runs.
+    let init = registry_init(&plan.backend);
+    home.clone()
+        .dialling(dial_instead(StepRuns::OnTheMachine, init.dsn.as_deref()))
+        .init(&init)
         .map_err(|e| fail(e.to_string()))?;
     console.progress(&format!("registry at {}", home.dir().display()));
     Ok(())
@@ -8496,7 +8620,7 @@ fn declare_places(
             // a place asked for and not declared is a registry that does not
             // read the directory the person named, so each failure here stops
             // the install
-            let mut registry = crate::open(home).map_err(|e| {
+            let mut registry = crate::open(&home_on_machine(home)).map_err(|e| {
                 let note = handed_to_the_container(
                     plan.runtime,
                     registry_owner(home.dir()),
@@ -8727,14 +8851,20 @@ pub(crate) enum RegistryStep {
     Declare,
 }
 
-/// One step of the registry's, taken by the account running this.
+/// One step of the registry's, taken by the account running this. Setup runs
+/// every one of them under runuser, so each runs on this machine and dials
+/// the database by the name this machine has for it, whatever address the
+/// registry records for the engine in its container.
 pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit> {
     match step {
         RegistryStep::Connect { schema } => {
             let dsn = dsn_on_input(std::io::stdin().lock())?;
-            nils_registry::store::Store::connect_postgres(&dsn, &schema)
-                .map(|_| ())
-                .map_err(|e| fail(with_causes(&e)))
+            nils_registry::store::Store::connect_postgres(
+                &dsn_from(StepRuns::OnTheMachine, &dsn),
+                &schema,
+            )
+            .map(|_| ())
+            .map_err(|e| fail(with_causes(&e)))
         }
         RegistryStep::Drop { schema } => {
             let dsn = dsn_on_input(std::io::stdin().lock())?;
@@ -8755,13 +8885,13 @@ pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit>
             Ok(())
         }
         RegistryStep::Sources => {
-            println!("{}", sources_here(home)?);
+            println!("{}", sources_here(&home_on_machine(home))?);
             Ok(())
         }
         RegistryStep::Declare => {
             let specs: Vec<PlaceSpec> = serde_json::from_reader(std::io::stdin().lock())
                 .map_err(|e| usage(format!("the places on the input: {e}")))?;
-            let mut registry = crate::open(home).map_err(|e| {
+            let mut registry = crate::open(&home_on_machine(home)).map_err(|e| {
                 fail(format!(
                     "the registry did not open to declare its places: {}",
                     e.message
@@ -8822,8 +8952,11 @@ fn registry_made_here(
             BackendChoice::Postgres { dsn, schema }
         }
     };
+    let init = registry_init(&choice);
     let registry = home
-        .init(&registry_init(&choice))
+        .clone()
+        .dialling(dial_instead(StepRuns::OnTheMachine, init.dsn.as_deref()))
+        .init(&init)
         .map_err(|e| fail(e.to_string()))?;
     Ok(registry.meta().clone())
 }
@@ -8855,8 +8988,11 @@ fn drop_schemas_here(dsn: &str, schema: &str) -> Result<(), String> {
     if !plain_identifier(schema) {
         return Err(format!("{schema} is not a schema name this drops"));
     }
-    let mut store = nils_registry::store::Store::connect_postgres(&dsn_on_machine(dsn), schema)
-        .map_err(|e| with_causes(&e))?;
+    let mut store = nils_registry::store::Store::connect_postgres(
+        &dsn_from(StepRuns::OnTheMachine, dsn),
+        schema,
+    )
+    .map_err(|e| with_causes(&e))?;
     store
         .batch(&drop_schemas_sql(schema))
         .map_err(|e| with_causes(&e))
@@ -9020,33 +9156,15 @@ fn pack_destination(plan: &Plan, me: &Path) -> PathBuf {
 fn write_desk_config(plan: &Plan) -> Result<(), Exit> {
     let path = plan.desk_config();
     let existing = std::fs::read_to_string(&path).ok();
-    let written = desk_config_text(plan);
-    let text = match existing
-        .as_deref()
-        .map(|text| desk_config_merged(text, &written))
-    {
-        None => written,
-        Some(Ok(Some(merged))) => merged,
-        Some(Ok(None)) => return Ok(()),
-        // A file that no longer reads may still say where the people are, and
-        // the configuration written in its place keeps the desk there.
-        Some(Err(())) => existing
-            .as_deref()
-            .and_then(desk_store_line)
-            .and_then(|store| {
-                let named = format!("store = {}\n", toml::Value::String(store));
-                desk_config_merged(&named, &written).ok().flatten()
-            })
-            .unwrap_or(written),
+    let Some(text) = desk_config_to_write(plan, existing.as_deref()) else {
+        return Ok(());
     };
     // The desk starts on whatever store it is named, making an empty one
     // where there is none, and says nothing: a rerun once left a desk with no
     // one in it while its people sat in the store it had been named before.
-    let (desk, container) = (plan.desk_dir(), plan.runtime.container());
-    if let Some(refused) = desk_store_left(
-        desk_store(&desk, container, existing.as_deref()).as_deref(),
-        desk_store(&desk, container, Some(&text)).as_deref(),
-    ) {
+    // The same question is asked before anything is registered; this is the
+    // net, for a store that changed under setup while it worked.
+    if let Some(refused) = desk_config_refusal(plan, existing.as_deref()) {
         return Err(fail(refused));
     }
     if let Some(dir) = path.parent() {
@@ -9054,6 +9172,50 @@ fn write_desk_config(plan: &Plan) -> Result<(), Exit> {
     }
     // it holds the supervisor's token, so only this account reads it
     write_secret_bytes(&path, text.as_bytes())
+}
+
+/// The text `write_desk_config` would put on disk for a plan, given the
+/// configuration that is there: the whole of what setup writes where there is
+/// none, the file on disk with what setup writes set in it where it reads,
+/// and where it no longer reads as TOML the whole again on the store its
+/// lines still name. `None` where everything setup writes already agrees with
+/// the file, and nothing is written at all.
+fn desk_config_to_write(plan: &Plan, existing: Option<&str>) -> Option<String> {
+    let written = desk_config_text(plan);
+    match existing.map(|text| desk_config_merged(text, &written)) {
+        None => Some(written),
+        Some(Ok(Some(merged))) => Some(merged),
+        Some(Ok(None)) => None,
+        // A file that no longer reads may still say where the people are, and
+        // the configuration written in its place keeps the desk there.
+        Some(Err(())) => Some(
+            existing
+                .and_then(desk_store_line)
+                .and_then(|store| {
+                    let named = format!("store = {}\n", toml::Value::String(store));
+                    desk_config_merged(&named, &written).ok().flatten()
+                })
+                .unwrap_or(written),
+        ),
+    }
+}
+
+/// Why the desk's configuration may not be written for a plan, asked of the
+/// file on disk and the text that would replace it. It is a question about
+/// the store alone, and no answer a provider gives names a store: setup
+/// always writes the store beside the configuration, and `desk_paths_kept`
+/// keeps the one the file already names, whatever it is. A registration
+/// settles the `[oidc]` table and nothing else, so this answers the same
+/// before a registration is made as after, which is what lets it be asked
+/// first. Where nothing would be written the store on disk stands, and the
+/// desk stays where it is.
+fn desk_config_refusal(plan: &Plan, existing: Option<&str>) -> Option<String> {
+    let text = desk_config_to_write(plan, existing);
+    let (desk, container) = (plan.desk_dir(), plan.runtime.container());
+    desk_store_left(
+        desk_store(&desk, container, existing).as_deref(),
+        desk_store(&desk, container, text.as_deref().or(existing)).as_deref(),
+    )
 }
 
 /// What setup keeps in the desk's configuration: the keys and the tables it
@@ -9645,6 +9807,39 @@ fn jwks_of(discovery: &serde_json::Value) -> Option<String> {
     discovery["jwks_uri"].as_str().map(str::to_string)
 }
 
+/// The desk's provider, settled before anything is made where setup cannot
+/// take it back. `refused` is what record 30's guard says of the desk's
+/// configuration, asked of the disk before this and not of the provider:
+/// where it refuses, no registration is made and no secret is written, so a
+/// rerun leaves the registration already at the provider, and the secret
+/// beside the configuration that names it, exactly as they were. Where it
+/// passes, the registration is made and a secret a person gave is written,
+/// in the order they always were. A print never reaches here, and registers
+/// nothing.
+fn settle_provider(
+    plan: &Plan,
+    answers: &Answers,
+    refused: Option<String>,
+    register: impl FnOnce() -> Option<OidcPlan>,
+) -> Result<Option<OidcPlan>, Exit> {
+    if let Some(why) = refused {
+        return Err(fail(format!(
+            "{why}. Nothing was registered at a provider and no secret was written. Name that \
+             store in {}, or carry the people into the store it names, and run setup again",
+            plan.desk_config().display()
+        )));
+    }
+    let oidc = register();
+    if plan.has(Part::Desk)
+        && let Some(Provider::Registered {
+            secret: Some(secret),
+        }) = &answers.provider
+    {
+        write_secret(&desk_secret_file(plan), secret)?;
+    }
+    Ok(oidc)
+}
+
 /// The desk registered at an Authentik by the desk's own register command:
 /// the application, its provider and signing key, and the groups bound to
 /// the entitlements, each made where it is not there yet. The client's
@@ -9800,7 +9995,7 @@ fn registered_at(said: &str) -> Option<OidcPlan> {
 }
 
 /// What setup does with the desk's configuration it finds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DeskConfigFate {
     /// there is none, so it is written whole
     New,
@@ -9810,23 +10005,35 @@ enum DeskConfigFate {
     Updated,
     /// it no longer reads as TOML, so it is written whole again
     Replaced,
+    /// the guard refuses it, so it is not written and the run stops there,
+    /// having registered nothing
+    Refused(String),
 }
 
 impl DeskConfigFate {
-    fn words(self) -> &'static str {
+    fn words(&self) -> String {
         match self {
-            DeskConfigFate::New => "will be written",
-            DeskConfigFate::Kept => "kept as it is",
-            DeskConfigFate::Updated => "updated, keeping what was set by hand",
-            DeskConfigFate::Replaced => "written again, since it does not read as TOML",
+            DeskConfigFate::New => "will be written".to_string(),
+            DeskConfigFate::Kept => "kept as it is".to_string(),
+            DeskConfigFate::Updated => "updated, keeping what was set by hand".to_string(),
+            DeskConfigFate::Replaced => "written again, since it does not read as TOML".to_string(),
+            DeskConfigFate::Refused(why) => {
+                format!("will not be written, and nothing will be registered at a provider: {why}")
+            }
         }
     }
 }
 
 /// What `write_desk_config` will do with the file on disk, said in the plan
-/// before anything is changed.
+/// before anything is changed. Where the guard would refuse it, the print
+/// says that rather than a write the run would never make, and says it in a
+/// plan that changes nothing.
 fn desk_config_fate(plan: &Plan) -> DeskConfigFate {
-    match std::fs::read_to_string(plan.desk_config()) {
+    let existing = std::fs::read_to_string(plan.desk_config());
+    if let Some(refused) = desk_config_refusal(plan, existing.as_deref().ok()) {
+        return DeskConfigFate::Refused(refused);
+    }
+    match existing {
         Err(_) => DeskConfigFate::New,
         Ok(existing) => match desk_config_merged(&existing, &desk_config_text(plan)) {
             Ok(None) => DeskConfigFate::Kept,
@@ -11811,17 +12018,7 @@ fn fetch_llama(plan: &Plan, before_removing: &mut dyn FnMut()) -> Result<(PathBu
     let url = llama_archive(&llama_base(), llama.variant);
     let bytes = crate::supervise::fetch(&url)?;
     unpack_llama(&bytes, want, &dir).map_err(|e| format!("{url}: {e}"))?;
-    let older: Vec<PathBuf> = std::fs::read_dir(plan.dir.join(LLAMA_PART))
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    *path != dir && llama_recorded(&path.display().to_string()).is_some()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let older = older_llama_builds(&plan.dir, &dir);
     if !older.is_empty() {
         before_removing();
     }
@@ -11829,6 +12026,41 @@ fn fetch_llama(plan: &Plan, before_removing: &mut dyn FnMut()) -> Result<(PathBu
         let _ = std::fs::remove_dir_all(&path);
     }
     Ok((dir, true))
+}
+
+/// The llama.cpp builds under an install's own folder that are not the one
+/// `wanted`: what a run removes once it has taken the build it wants. Only a
+/// folder this version knows a build by is among them, so a folder something
+/// else left there is not removed and does not count as a build.
+fn older_llama_builds(dir: &Path, wanted: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir.join(LLAMA_PART))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path != wanted && llama_recorded(&path.display().to_string()).is_some()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a run would remove an older llama.cpp build, which is the one
+/// thing it stops llama.cpp for. The folder answers it without a download:
+/// [`fetch_llama`] takes the build a plan names only where it is not here
+/// already, and removes an older one only once the new one is unpacked
+/// beside it, so a folder that holds the build this plan names, or holds no
+/// other build of this install's, is a run that removes nothing. A download
+/// that cannot be made removes nothing either, which is the one thing this
+/// cannot know; so it can promise a stop a run is spared, and never hides
+/// one a run makes.
+fn llama_build_moves(plan: &Plan) -> bool {
+    let Some(llama) = plan.llama else {
+        return false;
+    };
+    let wanted = llama_build_dir(&plan.dir, llama.variant);
+    !wanted.join("llama-server").is_file() && !older_llama_builds(&plan.dir, &wanted).is_empty()
 }
 
 /// llama.cpp placed for an install or a repair and recorded, with the devices
@@ -13130,12 +13362,14 @@ impl Switch {
 
 /// What a run of setup switches, in the order it switches it: an install
 /// places llama.cpp before Kvasir, which names its build, and a repair takes
-/// only llama.cpp.
-fn switches(run: Run, assistant: bool, llama: bool) -> Vec<Switch> {
+/// only llama.cpp. llama.cpp is a switch only where its build moves, since a
+/// build already here is left where it is and the server keeps running from
+/// it.
+fn switches(run: Run, assistant: bool, llama_moves: bool) -> Vec<Switch> {
     if !assistant {
         return Vec::new();
     }
-    let llama = llama.then_some(Switch::LlamaBuilds);
+    let llama = llama_moves.then_some(Switch::LlamaBuilds);
     match run {
         Run::Place => llama
             .into_iter()
@@ -13293,13 +13527,20 @@ fn stop_said(switch: Switch, units: &[Unit], console: &Console) {
 /// Under `--print`, the units a run would stop, each where it runs and just
 /// before its own files change, with what changes; every one of them starts
 /// again with the rest, by the calls listed beside the units.
+///
+/// llama.cpp is among them only where its build moves, which is the same
+/// question the run asks and [`llama_build_moves`] reads from the folder:
+/// an install whose build is here already removes none and stops nothing, so
+/// listing the stop there promised an interruption that never came. Kvasir
+/// and the assistant are listed whenever a run takes their source, since it
+/// builds them every time.
 fn stops_text(plan: &Plan, run: Run, console: &Console) -> String {
     let mut out = String::new();
     let uid = run_quiet("id", &["-u"])
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     let turns = turns(
-        &switches(run, plan.has(Part::Assistant), plan.llama.is_some()),
+        &switches(run, plan.has(Part::Assistant), llama_build_moves(plan)),
         &planned_units(plan),
         &uid,
     );
@@ -16049,7 +16290,7 @@ fn outside_the_install(
     // address at all. The drop and the command a person is handed both name
     // the database as this machine dials it, so the one that is carried out
     // and the one that is printed are the same connection.
-    let registry = registry.map(|(dsn, at)| (dsn_on_machine(&dsn), at));
+    let registry = registry.map(|(dsn, at)| (dsn_from(StepRuns::OnTheMachine, &dsn), at));
     // A Postgres this setup runs is the install's own: its data lives under
     // the base directory and goes with it, so there is no schema of a site's
     // to drop and none to name.
@@ -23767,6 +24008,10 @@ mod tests {
             variant: "ubuntu-x64",
             loader: true,
         });
+        // a build of this install's that the one planned would replace, so
+        // the run does stop llama.cpp and the print says so
+        plan.dir = scratch("stops-print");
+        std::fs::create_dir_all(llama_build_dir(&plan.dir, "ubuntu-arm64")).unwrap();
         let said = stops_text(&plan, Run::Place, &console);
         assert!(said.contains("stopped while their files change"), "{said}");
         for line in [
@@ -23784,6 +24029,59 @@ mod tests {
         assert!(!said.contains("stop kvasir"), "{said}");
         plan.parts = vec![Part::Engine, Part::Desk];
         assert_eq!(stops_text(&plan, Run::Place, &console), "");
+    }
+
+    /// The print asks what the run asks: llama.cpp is stopped where an older
+    /// build is removed, and an install whose build is already here removes
+    /// none, so it is promised no interruption it will not have.
+    #[test]
+    fn a_plan_whose_llama_build_does_not_move_lists_no_llama_stop() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let mut console = Console::new(true);
+        console.colour = false;
+        let mut plan = deployment();
+        plan.dir = scratch("llama-moves");
+        plan.llama = Some(Llama {
+            variant: "ubuntu-x64",
+            loader: true,
+        });
+        let llama = "    systemctl stop nils-llama  while the older llama.cpp builds are removed\n";
+
+        // a first install: nothing is here, so nothing is removed
+        assert!(!llama_build_moves(&plan));
+        let said = stops_text(&plan, Run::Place, &console);
+        assert!(!said.contains("nils-llama"), "{said}");
+        assert!(
+            said.contains("stop kvasir"),
+            "the Node parts are built: {said}"
+        );
+        assert_eq!(stops_text(&plan, Run::Repair, &console), "");
+
+        // the build this plan names, here already: the server runs on through
+        let here = llama_build_dir(&plan.dir, "ubuntu-x64");
+        std::fs::create_dir_all(&here).unwrap();
+        std::fs::write(here.join("llama-server"), "binary").unwrap();
+        std::fs::create_dir_all(llama_build_dir(&plan.dir, "ubuntu-arm64")).unwrap();
+        assert!(
+            !llama_build_moves(&plan),
+            "a build that is here is not taken again, whatever sits beside it"
+        );
+        assert!(!stops_text(&plan, Run::Place, &console).contains("nils-llama"));
+
+        // a build this install took before, and the one planned is not here
+        std::fs::remove_dir_all(&here).unwrap();
+        assert!(llama_build_moves(&plan));
+        assert!(stops_text(&plan, Run::Place, &console).contains(llama));
+        assert!(stops_text(&plan, Run::Repair, &console).contains(llama));
+
+        // a folder that is no build of this install's is neither removed nor
+        // a reason to stop anything
+        std::fs::remove_dir_all(llama_build_dir(&plan.dir, "ubuntu-arm64")).unwrap();
+        std::fs::create_dir_all(plan.dir.join(LLAMA_PART).join("notes")).unwrap();
+        assert!(!llama_build_moves(&plan));
+        let _ = std::fs::remove_dir_all(&plan.dir);
     }
 
     /// The privilege is on record, so an update and a repair lay down the
@@ -24361,10 +24659,176 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn nothing_is_registered_and_no_secret_is_written_where_the_configuration_cannot_be() {
+        let dir = scratch("settle-provider-refused");
+        let desk = dir.join("desk");
+        let people = desk.join("state").join("nils-desk.sqlite");
+        let empty = desk.join("nils-desk.sqlite");
+        desk_store_holding(&people, &["reader"], &[("reader", "Readers")]);
+        desk_store_holding(&empty, &[], &[]);
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Oidc;
+
+        // a rerun: the desk is registered already, and the secret of that
+        // registration sits beside the configuration that names its client
+        let secret_file = desk.join("client-secret");
+        write_secret(&secret_file, "the secret of the registration that is there")
+            .unwrap_or_else(|e| panic!("{}", e.message));
+        let answers = Answers {
+            provider: Some(Provider::Registered {
+                secret: Some("a secret for a registration not yet made".to_string()),
+            }),
+            ..Answers::default()
+        };
+
+        let why = desk_store_left(Some(&people), Some(&empty))
+            .expect("a desk taken from its people to an empty store is refused");
+        let mut asked = false;
+        let stopped = settle_provider(&p, &answers, Some(why.clone()), || {
+            asked = true;
+            None
+        })
+        .expect_err("a configuration that cannot be written registers nothing");
+        assert!(!asked, "no registration is attempted");
+        assert_eq!(
+            std::fs::read_to_string(&secret_file).unwrap(),
+            "the secret of the registration that is there\n",
+            "the secret beside the configuration is left as it was"
+        );
+        // the sentence names what stopped it, that nothing was made anywhere
+        // else, and what to do about it
+        assert!(stopped.message.starts_with(&why), "{}", stopped.message);
+        for said in [
+            "othing was registered at a provider and no secret was written",
+            "run setup again",
+            &p.desk_config().display().to_string(),
+        ] {
+            assert!(stopped.message.contains(said), "{}", stopped.message);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_configuration_that_can_be_written_registers_the_desk_and_writes_the_secret() {
+        let dir = scratch("settle-provider-allowed");
+        let desk = dir.join("desk");
+        let people = desk.join("state").join("nils-desk.sqlite");
+        desk_store_holding(&people, &["reader"], &[("reader", "Readers")]);
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Oidc;
+        let named = people.display().to_string().replace('\\', "\\\\");
+        std::fs::write(
+            p.desk_config(),
+            desk_config_text(&p).replace(
+                "store = \"nils-desk.sqlite\"",
+                &format!("store = \"{named}\""),
+            ),
+        )
+        .unwrap();
+
+        // the question setup asks before it registers anything, of a desk
+        // whose people setup leaves where they are
+        let on_disk = std::fs::read_to_string(p.desk_config()).ok();
+        assert_eq!(
+            desk_config_refusal(&p, on_disk.as_deref()),
+            None,
+            "setup keeps the store the configuration names"
+        );
+        assert_eq!(
+            desk_config_refusal(&p, None),
+            None,
+            "and a machine with no configuration yet has nobody to move"
+        );
+
+        let answers = Answers {
+            provider: Some(Provider::Registered {
+                secret: Some("a secret".to_string()),
+            }),
+            ..Answers::default()
+        };
+        let mut asked = false;
+        let registered = settle_provider(&p, &answers, None, || {
+            asked = true;
+            Some(OidcPlan {
+                issuer: "https://auth.example.org/application/o/nils/".into(),
+                client_id: "abc123".into(),
+                jwks: "https://auth.example.org/application/o/nils/jwks/".into(),
+                roles_claim: "roles".into(),
+                scopes: None,
+            })
+        })
+        .unwrap_or_else(|e| panic!("{}", e.message));
+        assert!(asked, "the registration is made");
+        assert_eq!(
+            registered.map(|o| o.client_id),
+            Some("abc123".to_string()),
+            "and what it answers is carried on"
+        );
+        assert_eq!(
+            std::fs::read_to_string(desk.join("client-secret")).unwrap(),
+            "a secret\n",
+            "the secret goes where the desk reads it"
+        );
+        p.oidc = Some(OidcPlan {
+            issuer: "https://auth.example.org/application/o/nils/".into(),
+            client_id: "abc123".into(),
+            jwks: "https://auth.example.org/application/o/nils/jwks/".into(),
+            roles_claim: "roles".into(),
+            scopes: None,
+        });
+        assert!(write_desk_config(&p).is_ok());
+        let on_disk = std::fs::read_to_string(p.desk_config()).unwrap();
+        assert!(on_disk.contains("client_id = \"abc123\""), "{on_disk}");
+        assert_eq!(
+            desk_store(&desk, false, Some(&on_disk)),
+            Some(people),
+            "and the desk is still on its people"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_print_registers_nothing_and_says_a_configuration_it_would_not_write() {
+        let dir = scratch("print-registers-nothing");
+        let desk = dir.join("desk");
+        let people = desk.join("state").join("nils-desk.sqlite");
+        let empty = desk.join("nils-desk.sqlite");
+        desk_store_holding(&people, &["reader"], &[("reader", "Readers")]);
+        desk_store_holding(&empty, &[], &[]);
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Oidc;
+
+        // what the plan says of the desk's configuration it reads nothing
+        // into being: no registration, no secret, no configuration
+        assert_eq!(desk_config_fate(&p), DeskConfigFate::New);
+        assert!(!p.desk_config().exists(), "a print writes no configuration");
+        assert!(
+            !desk.join("client-secret").exists(),
+            "and no secret beside it"
+        );
+        assert!(
+            !desk.join("authentik-token").exists(),
+            "and hands no provider an API token"
+        );
+
+        // and where the guard would refuse, it says that, rather than a
+        // write the run would never make
+        let why = desk_store_left(Some(&people), Some(&empty))
+            .expect("a desk taken from its people to an empty store is refused");
+        let said = DeskConfigFate::Refused(why.clone()).words();
+        assert!(said.contains(&why), "{said}");
+        assert!(said.contains("nothing will be registered"), "{said}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Setup writes the desk's client secret where the configuration on disk
-    /// says the desk reads it, and only then writes the configuration; the
-    /// guard on the store is asked between the two, with the store the file
-    /// names now and the store the text about to be written names. So the
+    /// says the desk reads it, and writes the configuration after that; the
+    /// guard on the store is asked before both, with the store the file
+    /// names now and the store the text to be written names. So the
     /// paths a run resolves before the write have to be the paths the file
     /// holds after it, on every mode, or setup would put the secret in one
     /// file and have the desk read another.
@@ -25242,6 +25706,97 @@ mod tests {
         );
     }
 
+    /// The registry holds a key store at 0700 and a `nils.toml` at 0600, so
+    /// the directory around them is made 0700 as well. What setup finds is
+    /// the site's, at whatever mode the site keeps it, and a place a site
+    /// declared is not setup's to make or to narrow.
+    #[cfg(unix)]
+    #[test]
+    fn a_registry_directory_setup_makes_is_0700_and_one_that_was_there_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let registry = Path::new("/srv/nils/registry");
+        assert_eq!(own_dir_mode(registry, registry), Some(0o700));
+        for open in [
+            "/srv/nils/desk",
+            "/srv/nils/backups",
+            "/srv/nils/working",
+            "/srv/nils/export",
+        ] {
+            assert_eq!(
+                own_dir_mode(Path::new(open), registry),
+                None,
+                "{open} is made as it always was"
+            );
+        }
+
+        let console = Console::new(true);
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let dir = scratch("own-dirs");
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        // a desk directory an earlier install left behind, at its own mode
+        std::fs::create_dir_all(dir.join("desk")).unwrap();
+        std::fs::set_permissions(dir.join("desk"), std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(make_own_dirs(&plan, &console).is_ok());
+        assert_eq!(mode(&dir.join("registry")), 0o700);
+        assert_eq!(
+            mode(&dir.join("desk")),
+            0o750,
+            "a directory that was there keeps the mode it had"
+        );
+        for made in ["backups", "working", "export"] {
+            assert!(dir.join(made).is_dir(), "{made} is still made");
+        }
+
+        // a registry an install left behind is the site's too
+        let again = scratch("own-dirs-again");
+        std::fs::create_dir_all(again.join("registry")).unwrap();
+        std::fs::set_permissions(
+            again.join("registry"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        plan.dir = again.clone();
+        assert!(make_own_dirs(&plan, &console).is_ok());
+        assert_eq!(
+            mode(&again.join("registry")),
+            0o755,
+            "setup does not change what it finds"
+        );
+
+        // a place a site declared, made and kept by the site
+        let site_dir = scratch("own-dirs-site");
+        let archives = scratch("own-dirs-archives");
+        std::fs::set_permissions(&archives, std::fs::Permissions::from_mode(0o755)).unwrap();
+        plan.dir = site_dir.clone();
+        plan.site = Some(Site {
+            places: places_given(&[
+                format!("archives={},role=backup", archives.display()),
+                format!(
+                    "registry={},role=registry,backup=archives",
+                    site_dir.join("registry").display()
+                ),
+            ])
+            .unwrap(),
+            ..Site::default()
+        });
+        assert_eq!(
+            plan.backups(),
+            archives,
+            "the archives are the site's place"
+        );
+        assert!(make_own_dirs(&plan, &console).is_ok());
+        assert_eq!(mode(&site_dir.join("registry")), 0o700);
+        assert_eq!(
+            mode(&archives),
+            0o755,
+            "a place the site declared is left as the site keeps it"
+        );
+        for gone in [&dir, &again, &site_dir, &archives] {
+            let _ = std::fs::remove_dir_all(gone);
+        }
+    }
+
     #[test]
     fn an_install_that_names_no_places_is_the_install_it_was() {
         let plan = plan(Runtime::Machine);
@@ -25536,6 +26091,108 @@ mod tests {
         assert!(docker.contains("pg_hba.conf"), "{docker}");
         let no_pasta = postgres_reach_note(Runtime::Podman, url, || false).unwrap();
         assert!(no_pasta.contains("pasta"), "{no_pasta}");
+    }
+
+    #[test]
+    fn every_step_dials_the_database_from_where_that_step_runs() {
+        let here = "postgres://nils:secret@127.0.0.1:5432/nils";
+        let in_a_pod = "postgres://nils:secret@host.containers.internal:5432/nils";
+        let in_a_container = "postgres://nils:secret@host.docker.internal:5432/nils";
+        // the address as it was typed on the machine, read from each side
+        assert_eq!(dsn_from(StepRuns::OnTheMachine, here), here);
+        assert_eq!(
+            dsn_from(StepRuns::InAContainer(Runtime::Podman), here),
+            in_a_pod
+        );
+        assert_eq!(
+            dsn_from(StepRuns::InAContainer(Runtime::Docker), here),
+            in_a_container
+        );
+        assert_eq!(
+            dsn_from(StepRuns::InAContainer(Runtime::Machine), here),
+            here
+        );
+        // and the address a container install records, read from each side
+        assert_eq!(dsn_from(StepRuns::OnTheMachine, in_a_pod), here);
+        assert_eq!(dsn_from(StepRuns::OnTheMachine, in_a_container), here);
+        assert_eq!(
+            dsn_from(StepRuns::InAContainer(Runtime::Podman), in_a_pod),
+            in_a_pod
+        );
+        // a database on another machine is named the same from both sides
+        let elsewhere = "postgres://nils@db.example.org/nils";
+        for runs in [
+            StepRuns::OnTheMachine,
+            StepRuns::InAContainer(Runtime::Podman),
+            StepRuns::InAContainer(Runtime::Docker),
+        ] {
+            assert_eq!(dsn_from(runs, elsewhere), elsewhere, "{runs:?}");
+            assert_eq!(dial_instead(runs, Some(elsewhere)), None, "{runs:?}");
+        }
+        // nothing is dialled another way where the recorded address is the
+        // one the step dials, which is every machine install
+        assert_eq!(dial_instead(StepRuns::OnTheMachine, Some(here)), None);
+        assert_eq!(dial_instead(StepRuns::OnTheMachine, None), None);
+        assert_eq!(
+            dial_instead(StepRuns::OnTheMachine, Some(in_a_pod)).as_deref(),
+            Some(here)
+        );
+        assert!(dsn_names_this_machine(here));
+        assert!(dsn_names_this_machine(in_a_pod));
+        assert!(dsn_names_this_machine(in_a_container));
+        assert!(!dsn_names_this_machine(elsewhere));
+    }
+
+    #[test]
+    fn a_step_on_this_machine_opens_a_registry_a_container_made_at_this_machines_address() {
+        let dir = scratch("registry-dialled-from-here");
+        let at = |name: &str, dsn: &str| {
+            let home = Home::new(dir.join(name));
+            std::fs::create_dir_all(home.dir()).unwrap();
+            std::fs::write(
+                home.config_path(),
+                format!("backend = \"postgres\"\ndsn = \"{dsn}\"\nschema = \"nils\"\n"),
+            )
+            .unwrap();
+            home
+        };
+        let pod = at(
+            "made-in-a-pod",
+            "postgres://nils@host.containers.internal:5432/nils",
+        );
+        assert_eq!(
+            home_on_machine(&pod).dialled(),
+            Some("postgres://nils@127.0.0.1:5432/nils"),
+            "a step out here dials the database this machine's way"
+        );
+        assert!(
+            std::fs::read_to_string(pod.config_path())
+                .unwrap()
+                .contains("host.containers.internal"),
+            "what the registry records is not written over"
+        );
+        let machine = at("made-here", "postgres://nils@127.0.0.1:5432/nils");
+        assert_eq!(
+            home_on_machine(&machine).dialled(),
+            None,
+            "a machine install opens its registry exactly as it always did"
+        );
+        let elsewhere = at("elsewhere", "postgres://nils@db.example.org/nils");
+        assert_eq!(
+            home_on_machine(&elsewhere).dialled(),
+            None,
+            "a database on another machine is named the same from both sides"
+        );
+        let sqlite = Home::new(dir.join("sqlite"));
+        std::fs::create_dir_all(sqlite.dir()).unwrap();
+        std::fs::write(sqlite.config_path(), "backend = \"sqlite\"\n").unwrap();
+        assert_eq!(home_on_machine(&sqlite).dialled(), None);
+        assert_eq!(
+            home_on_machine(&Home::new(dir.join("nothing"))).dialled(),
+            None,
+            "a directory that holds no registry yet"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
