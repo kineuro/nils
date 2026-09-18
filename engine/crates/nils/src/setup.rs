@@ -1542,8 +1542,10 @@ fn helper_words(state: &State) -> Vec<Vec<String>> {
 /// it that makes it do anything else. A word it does not know is refused
 /// before anything runs. `reapply` with no other word stays the engine's, as
 /// it was before `reapply all` was one of its words, so a supervisor older
-/// than this helper still asks for what it always asked for.
-fn helper_text(plan: &Plan, state: &State) -> String {
+/// than this helper still asks for what it always asked for. The install
+/// directory and the account come from the record, never from a caller, so
+/// setup, a repair and an update all write the same program.
+fn helper_text(dir: &Path, helper: &Helper, state: &State) -> String {
     let nils = supervisor_binary(state);
     let units = service_units(state);
     let mut arms = String::new();
@@ -1605,15 +1607,9 @@ fn helper_text(plan: &Plan, state: &State) -> String {
          \x20   exit 2\n\
          \x20   ;;\n\
          esac\n",
-        dir = plan.dir.display(),
-        account = plan
-            .helper
-            .as_ref()
-            .map_or(DEFAULT_ACCOUNT, |h| h.account.as_str()),
-        rule = plan
-            .helper
-            .as_ref()
-            .map_or(HELPER_RULE, |h| h.rule.as_str()),
+        dir = dir.display(),
+        account = helper.account,
+        rule = helper.rule,
         every = if parts.is_empty() {
             String::new()
         } else {
@@ -1717,27 +1713,58 @@ fn write_root_file(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> 
     file.write_all(bytes)
 }
 
-/// The helper and its rule put in place: the program first, then the rule,
-/// so there is no moment where a rule names a program that is not there. The
-/// rule is read by visudo before it is moved into place, and where visudo
-/// refuses it nothing is moved and the install stops with what visudo said.
+/// What writing the helper and its rule came to.
+enum HelperWritten {
+    /// Both are the record's.
+    Done,
+    /// The program itself was not written, with why, and the rule was not
+    /// touched at all.
+    NoProgram(String),
+    /// The program is the record's, and the rule beside it is still the one
+    /// that was on this machine: visudo would not read the new one, or it
+    /// could not be moved into place, and nothing of it was left behind.
+    NoRule(String),
+}
+
+/// The helper and its rule written from the record: the program first, then
+/// the rule, so there is no moment where a rule names a program that is not
+/// there. The rule is read by visudo before it is moved into place, and
+/// where visudo refuses it nothing is moved, so an operator is never shut
+/// out of root by a file sudo cannot parse. This is the one place any of it
+/// is written; setup, a repair and an update all come here, and differ only
+/// in what they do when it does not go through.
+fn write_helper(dir: &Path, helper: &Helper, state: &State) -> HelperWritten {
+    let program = Path::new(&helper.path);
+    if let Err(e) = write_root_file(program, helper_text(dir, helper, state).as_bytes(), 0o755) {
+        return HelperWritten::NoProgram(e.to_string());
+    }
+    let rule = Path::new(&helper.rule);
+    match sudoers_prepared(rule, &sudoers_text(helper, state)) {
+        Ok(staged) => match std::fs::rename(&staged, rule) {
+            Ok(()) => HelperWritten::Done,
+            Err(e) => {
+                let _ = std::fs::remove_file(&staged);
+                HelperWritten::NoRule(format!("it could not be moved into place: {e}"))
+            }
+        },
+        Err(why) => HelperWritten::NoRule(why),
+    }
+}
+
+/// The helper and its rule put in place by a setup or a repair, which stop
+/// where either could not be written: an install whose supervisor cannot
+/// restart anything is not an install, and there is nothing yet running on
+/// it to keep going for.
 fn install_helper(plan: &Plan, state: &State, console: &Console) -> Result<(), Exit> {
     let Some(helper) = &plan.helper else {
         return Ok(());
     };
-    let program = Path::new(&helper.path);
-    if let Err(e) = write_root_file(program, helper_text(plan, state).as_bytes(), 0o755) {
-        return console.broken(&format!("{} was not written: {e}", helper.path));
-    }
-    let rule = Path::new(&helper.rule);
-    match sudoers_prepared(rule, &sudoers_text(helper, state)) {
-        Ok(staged) => {
-            if let Err(e) = std::fs::rename(&staged, rule) {
-                let _ = std::fs::remove_file(&staged);
-                return console.broken(&format!("{} was not put in place: {e}", helper.rule));
-            }
+    match write_helper(&plan.dir, helper, state) {
+        HelperWritten::Done => {}
+        HelperWritten::NoProgram(why) => {
+            return console.broken(&format!("{} was not written: {why}", helper.path));
         }
-        Err(why) => {
+        HelperWritten::NoRule(why) => {
             return console.broken(&format!(
                 "{} was not written, and nothing of it was left behind: {why}",
                 helper.rule
@@ -7037,7 +7064,7 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
                     console.bold("  privilege"),
                     console.dim(&helper.path)
                 );
-                for line in helper_text(plan, &state).lines() {
+                for line in helper_text(&plan.dir, helper, &state).lines() {
                     let _ = writeln!(out, "{}", indent(line));
                 }
                 let _ = writeln!(out, "\n  {}", console.bold(&helper.rule));
@@ -14626,6 +14653,85 @@ fn tilde(path: &Path) -> String {
 
 // -------------------------------------------------------------- the update
 
+/// What an update does about the helper, from the record and whether this
+/// process is root. The helper's words are the version's: a version that
+/// gives it a new one, as `reapply all` was, leaves an install that only
+/// ever updates with the helper of the version it was installed with, and
+/// the desk's Parts page can then do nothing until setup is run again by
+/// hand. So an update writes it again, as setup and a repair do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelperOnUpdate {
+    /// The record names no helper, so nothing of the machine's is written:
+    /// an install whose services are an account's own has none, and an
+    /// update is not where one appears.
+    Untouched,
+    /// The record names one and this process is root, so the program and the
+    /// rule are written again from the record.
+    Written,
+    /// The record names one and this process is not root, so neither is
+    /// written and the update goes on without them.
+    NotRoot,
+}
+
+/// The decision itself, which is the record and one fact about this process
+/// and nothing else.
+fn helper_on_update(state: &State, root: bool) -> HelperOnUpdate {
+    match (state.helper.is_some(), root) {
+        (false, _) => HelperOnUpdate::Untouched,
+        (true, true) => HelperOnUpdate::Written,
+        (true, false) => HelperOnUpdate::NotRoot,
+    }
+}
+
+/// What an update says where it may not write the helper. Writing
+/// `/usr/local/sbin` and `/etc/sudoers.d` is root's, and an update that
+/// stopped over it would leave the parts half replaced, so it is a line and
+/// not a refusal. On the install this matters for, the update is root's
+/// anyway: the supervisor asks the helper for `update`, which runs
+/// `nils update --all` as root.
+fn helper_left_as_it_is(helper: &Helper) -> String {
+    format!(
+        "{} was left as it is, since writing it and its rule takes root, and an update run as \
+         root writes both again from the record",
+        helper.path
+    )
+}
+
+/// The helper and its rule written again by an update, on its own lines.
+/// This runs before the services are restarted, since the supervisor that
+/// calls the helper is one of the services started again, and it should come
+/// back to the helper of the version it is: never a new supervisor asking an
+/// old helper for a word that helper does not know.
+fn refresh_helper(state: &State) {
+    match helper_on_update(state, am_root()) {
+        HelperOnUpdate::Untouched => {}
+        HelperOnUpdate::NotRoot => {
+            if let Some(helper) = &state.helper {
+                println!("{}", helper_left_as_it_is(helper));
+            }
+        }
+        HelperOnUpdate::Written => {
+            let Some(helper) = &state.helper else { return };
+            match write_helper(Path::new(&state.dir), helper, state) {
+                HelperWritten::Done => println!(
+                    "{} and {} were written again from the record, so the supervisor has the \
+                     words this version answers to",
+                    helper.path, helper.rule
+                ),
+                HelperWritten::NoProgram(why) => {
+                    println!("{} was left as it is: {why}", helper.path);
+                }
+                HelperWritten::NoRule(why) => println!(
+                    "{} is still the rule this machine had, since the one this version writes was \
+                     refused: {why}; the supervisor may run the words that rule names and no \
+                     others, and nils setup writes it again",
+                    helper.rule
+                ),
+            }
+        }
+    }
+}
+
 /// Whether `nils setup` recorded an install for `nils update --all` to bring
 /// up to date, said before anything is fetched.
 pub(crate) fn setup_recorded() -> Result<(), Exit> {
@@ -14892,6 +14998,11 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
 
     state.at = nils_registry::time::now_iso();
     write_state(&state)?;
+    // The record is the one the parts are at now, and the helper is written
+    // from the record, so it is written here rather than earlier: from the
+    // record as it stands, and before the restart that starts the supervisor
+    // again.
+    refresh_helper(&state);
     Ok(changed)
 }
 
@@ -15408,8 +15519,9 @@ pub(crate) fn reapply_all(state: &State) -> Result<(), Exit> {
 /// install has a helper and this process is not root, and `None` where the
 /// work is this process's own. A helper written before `reapply all` was one
 /// of its words is not asked at all, and what to do is said instead: its rule
-/// was written with it and does not name the line either, and only setup run
-/// as root writes the two again. A helper that could not be read is asked,
+/// was written with it and does not name the line either, and what writes
+/// the two again is an update or setup run as root. A helper that could not
+/// be read is asked,
 /// so what sudo says about it is what the person sees.
 fn reapply_all_call(state: &State, installed: Option<&str>) -> Result<Option<Vec<String>>, String> {
     let Some(argv) = helper_call(state, &["reapply", "all"]) else {
@@ -15418,8 +15530,8 @@ fn reapply_all_call(state: &State, installed: Option<&str>) -> Result<Option<Vec
     if installed.is_some_and(|text| !helper_reapplies_all(text)) {
         return Err(
             "nothing was restarted, since the helper on this machine was written before it could \
-             reapply every part: run nils setup again as root, which writes the helper and its \
-             rule again"
+             reapply every part: update this install, or run nils setup again as root, either of \
+             which writes the helper and its rule again"
                 .to_string(),
         );
     }
@@ -22540,7 +22652,11 @@ mod tests {
         let state = deployed_state(&plan);
         let dir = scratch("helper-refusals");
         let script = dir.join("nils-manage");
-        let text = helper_text(&plan, &state);
+        let text = helper_text(
+            &plan.dir,
+            plan.helper.as_ref().expect("a deployment keeps one"),
+            &state,
+        );
         std::fs::write(&script, &text).unwrap();
 
         for args in [
@@ -22601,7 +22717,11 @@ mod tests {
         let plan = deployment();
         let mut state = deployed_state(&plan);
         state.parts.get_mut("engine").expect("an engine").path = echo.to_string();
-        let text = helper_text(&plan, &state);
+        let text = helper_text(
+            &plan.dir,
+            plan.helper.as_ref().expect("a deployment keeps one"),
+            &state,
+        );
         assert!(
             text.contains(&format!("exec {echo} supervise reapply --part engine\n")),
             "{text}"
@@ -22681,7 +22801,11 @@ mod tests {
         }
         let plan = deployment();
         let state = deployed_state(&plan);
-        let text = helper_text(&plan, &state);
+        let text = helper_text(
+            &plan.dir,
+            plan.helper.as_ref().expect("a deployment keeps one"),
+            &state,
+        );
         let rule = sudoers_text(state.helper.as_ref().unwrap(), &state);
 
         for installed in [Some(text.as_str()), None] {
@@ -22749,7 +22873,11 @@ mod tests {
                      \x20   ;;\n\
                      esac\n";
         assert!(!helper_reapplies_all(older));
-        assert!(helper_reapplies_all(&helper_text(&plan, &state)));
+        assert!(helper_reapplies_all(&helper_text(
+            &plan.dir,
+            plan.helper.as_ref().expect("a deployment keeps one"),
+            &state
+        )));
 
         match reapply_all_call(&state, Some(older)) {
             Ok(asked) => assert!(
@@ -22807,6 +22935,177 @@ mod tests {
             !rule.exists() && !rule.with_extension("new").exists(),
             "a file visudo refused was left behind"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The helper of a record, written into a folder of the test's own, so
+    /// what an update writes can be read without root and without anything
+    /// of this machine's being touched.
+    fn helper_in(dir: &Path) -> Helper {
+        Helper {
+            account: "nils-deploy".to_string(),
+            path: dir.join("nils-manage").display().to_string(),
+            rule: dir.join("nils-manage-rule").display().to_string(),
+        }
+    }
+
+    /// An update writes the helper and its rule again from the record, as
+    /// setup and a repair do, so an install that only ever updates has the
+    /// helper its version expects rather than the one it was installed with.
+    #[test]
+    fn an_update_writes_the_helper_and_the_rule_from_the_record() {
+        if cfg!(target_os = "macos") || visudo_program().is_none() {
+            return;
+        }
+        let plan = deployment();
+        let dir = scratch("update-helper");
+        let helper = helper_in(&dir);
+        let mut state = deployed_state(&plan);
+        state.helper = Some(helper.clone());
+
+        assert_eq!(helper_on_update(&state, true), HelperOnUpdate::Written);
+        assert!(matches!(
+            write_helper(Path::new(&state.dir), &helper, &state),
+            HelperWritten::Done
+        ));
+
+        let text = std::fs::read_to_string(&helper.path).expect("the program");
+        let rule = std::fs::read_to_string(&helper.rule).expect("the rule");
+        // the word a helper written before this version does not have
+        assert!(helper_reapplies_all(&text), "{text}");
+        assert!(
+            rule.contains(&format!("{} reapply all", helper.path)),
+            "{rule}"
+        );
+        // and both come from the record: its directory, its account, its units
+        assert!(
+            text.contains(&format!("install in {}", state.dir)),
+            "{text}"
+        );
+        assert!(text.contains("systemctl restart nils-engine"), "{text}");
+        assert!(
+            rule.contains(&format!("{} ALL=(root)", helper.account)),
+            "{rule}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = |at: &str| std::fs::metadata(at).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&helper.path), 0o755);
+            assert_eq!(
+                mode(&helper.rule),
+                0o440,
+                "a sudoers file is root's to read"
+            );
+        }
+
+        // A rule visudo will not read leaves the machine the rule it has,
+        // rather than a supervisor allowed nothing at all.
+        let refused = sudoers_prepared(Path::new(&helper.rule), "not a sudoers file at all\n")
+            .expect_err("visudo reads it as nothing");
+        assert!(!refused.is_empty(), "it was refused without a reason");
+        assert_eq!(
+            std::fs::read_to_string(&helper.rule).expect("the rule"),
+            rule,
+            "the rule this machine had was replaced by one visudo refused"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An update of an install whose services are an account's own writes
+    /// neither the helper nor a rule: its record names none, and an update
+    /// is not where the privilege of a machine appears.
+    #[test]
+    fn an_update_of_an_install_with_no_helper_writes_neither() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let dir = scratch("update-no-helper");
+        let would_be = helper_in(&dir);
+        let state = State {
+            service: "systemd user units".to_string(),
+            system: None,
+            helper: None,
+            ..deployed_state(&plan)
+        };
+
+        assert_eq!(helper_on_update(&state, true), HelperOnUpdate::Untouched);
+        assert_eq!(helper_on_update(&state, false), HelperOnUpdate::Untouched);
+        refresh_helper(&state);
+        assert!(
+            !Path::new(&would_be.path).exists() && !Path::new(&would_be.rule).exists(),
+            "an install whose services are an account's own was given a helper"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An update that is not root says the helper was left as it is and goes
+    /// on: the parts are replaced by then, and an update stopped over a file
+    /// only root may write would leave the install half moved.
+    #[test]
+    fn an_update_that_is_not_root_says_so_and_carries_on() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let dir = scratch("update-helper-not-root");
+        let helper = helper_in(&dir);
+        let mut state = deployed_state(&plan);
+        state.helper = Some(helper.clone());
+
+        assert_eq!(helper_on_update(&state, false), HelperOnUpdate::NotRoot);
+        let said = helper_left_as_it_is(&helper);
+        assert!(said.contains(&helper.path), "{said}");
+        assert!(said.contains("takes root"), "{said}");
+        assert!(
+            said.contains("an update run as root writes both again"),
+            "it was said without saying what does write it: {said}"
+        );
+
+        // the step answers with nothing at all, so no update can fail on it
+        if !am_root() {
+            refresh_helper(&state);
+            assert!(
+                !Path::new(&helper.path).exists(),
+                "the helper was written by an account that is not root"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The command lines an update gives the rule are the helper's own words
+    /// for that record, one whole line each and not one more: the program and
+    /// the rule are written from the same list, so neither can name something
+    /// the other does not.
+    #[test]
+    fn the_words_the_rule_gains_in_an_update_are_the_helpers_own() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let dir = scratch("update-helper-words");
+        let helper = helper_in(&dir);
+        let mut state = deployed_state(&plan);
+        state.helper = Some(helper.clone());
+
+        let rule = sudoers_text(&helper, &state);
+        let line = rule
+            .lines()
+            .find(|l| !l.starts_with('#'))
+            .expect("one line for the account");
+        let named: Vec<&str> = line
+            .split_once("NOPASSWD: ")
+            .expect("the command lines")
+            .1
+            .split(", ")
+            .collect();
+        let words: Vec<String> = helper_words(&state)
+            .iter()
+            .map(|words| format!("{} {}", helper.path, words.join(" ")))
+            .collect();
+        assert_eq!(named, words.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(!rule.contains('*'), "a wildcard takes anything: {rule}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
