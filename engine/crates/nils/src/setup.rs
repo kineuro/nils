@@ -38,11 +38,10 @@ pub(crate) const DESK_RELEASES: &str = "https://github.com/kineuro/nils-desk/rel
 const ENGINE_IMAGE: &str = "ghcr.io/kineuro/nils";
 const DESK_IMAGE: &str = "ghcr.io/kineuro/nils-desk";
 
-/// This account, as docker wants it written. Podman remaps the user and
-/// `:U` gives the container ownership of what it mounts. Docker does
-/// neither: a container running as the image's own user cannot write a
-/// directory this account owns, and the first thing it tries to write is
-/// the registry's key. So every docker run is told to be this account.
+/// This account, as docker wants it written: a container running as the
+/// image's own user cannot write a directory this account owns, and the
+/// first thing it tries to write is the registry's key, so every docker run
+/// is told to be this account.
 #[cfg(unix)]
 #[allow(
     unsafe_code,
@@ -61,15 +60,98 @@ fn as_this_account() -> String {
     String::new()
 }
 
-/// `--user <this account> ` for a docker run, and nothing where there is no
-/// account to name.
-fn docker_user() -> String {
-    let account = as_this_account();
-    if account.is_empty() {
-        String::new()
-    } else {
-        format!("--user {account} ")
+/// The number of the account running setup, which is the account a registry
+/// it makes belongs to. Asked of the machine with `id`, as whether this
+/// process is root is asked, rather than through the C library.
+fn this_account_id() -> Option<u32> {
+    run_quiet("id", &["-u"])?.trim().parse().ok()
+}
+
+/// Who a registry's own file belongs to, where there is one to ask about.
+#[cfg(unix)]
+fn registry_owner(registry: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(registry.join("nils.toml"))
+        .ok()
+        .map(|meta| meta.uid())
+}
+
+#[cfg(not(unix))]
+fn registry_owner(_registry: &Path) -> Option<u32> {
+    None
+}
+
+/// Why a container install's own registry will not open to it, where that is
+/// because an install made before this version handed the mount to the
+/// container: podman's `:U` chowned the registry into the subordinate range
+/// this account is lent, and the files came back owned by an id with no
+/// account on this machine. The owner is named, and so is the one command
+/// that gives the files back, since setup does not take files from an id it
+/// did not give them to. `None` where the registry is this account's already,
+/// where nothing can be asked, and on a machine install, whose registry no
+/// container ever touched.
+fn handed_to_the_container(
+    runtime: Runtime,
+    owner: Option<u32>,
+    me: Option<u32>,
+    registry: &Path,
+) -> Option<String> {
+    let (owner, me) = (owner?, me?);
+    if runtime != Runtime::Podman || owner == me {
+        return None;
     }
+    Some(format!(
+        "the registry belongs to {owner}, and this account is {me}: an install made before this \
+         version handed the mount to the container, which took the files with it\n  give them \
+         back with podman unshare chown -R 0:0 {}, and run the command again",
+        registry.display()
+    ))
+}
+
+/// The identity a podman container runs as, so that what it writes belongs
+/// to the account that made the install: the container's root, which rootless
+/// podman maps to that account, and which under a podman run by root is root
+/// itself, the account that made the install there. Named outright because
+/// the images run as a user of their own, which podman maps into the
+/// subordinate range this account is lent: files written by that user come
+/// back owned by an id this machine has no account for, and the account that
+/// made the registry could then not open it.
+const IN_THE_POD: &str = "0:0";
+
+/// Who a container of this install runs as, as the words of a run: this
+/// account by its own numbers for docker, which remaps nobody, and the
+/// container's root for podman, which maps this account there. Empty for a
+/// machine install, which runs no container, and where there is no account
+/// to name.
+fn container_user_words(runtime: Runtime) -> Vec<String> {
+    let account = match runtime {
+        Runtime::Podman => IN_THE_POD.to_string(),
+        Runtime::Docker => as_this_account(),
+        Runtime::Machine => String::new(),
+    };
+    if account.is_empty() {
+        Vec::new()
+    } else {
+        vec!["--user".to_string(), account]
+    }
+}
+
+/// The same as one word of a command line, `--user <account> `, and nothing
+/// where there is no account to name.
+fn container_user(runtime: Runtime) -> String {
+    match container_user_words(runtime).as_slice() {
+        [flag, account] => format!("{flag} {account} "),
+        _ => String::new(),
+    }
+}
+
+/// The same identity as a quadlet's own two keys, so a container systemd
+/// starts runs as the account a `podman run` of this install runs as.
+fn quadlet_user() -> String {
+    let (uid, gid) = IN_THE_POD
+        .split_once(':')
+        .unwrap_or((IN_THE_POD, IN_THE_POD));
+    format!("User={uid}\nGroup={gid}\n")
 }
 
 /// The tag a published image carries, for a version. A release names its
@@ -215,6 +297,20 @@ fn model_reach_note(runtime: Runtime, url: &str, pasta: fn() -> bool) -> Option<
              0.0.0.0 or on the bridge's address"
         ),
     })
+}
+
+/// A connection string the other way about: the name a container calls this
+/// machine by, back to the loopback a process on the machine reaches it at.
+/// A registry made inside a container keeps the address it dialled, and an
+/// uninstall runs on the machine. Only a loopback is ever written over on
+/// the way in, so only the alias is ever written back here, and a database
+/// on another machine is left as it was named.
+fn dsn_on_machine(dsn: &str) -> String {
+    let mut out = dsn.to_string();
+    for alias in ["host.containers.internal", "host.docker.internal"] {
+        out = out.replace(alias, "127.0.0.1");
+    }
+    out
 }
 
 /// A Postgres connection string as the engine must use it from where it
@@ -1530,8 +1626,10 @@ fn helper_words(state: &State) -> Vec<Vec<String>> {
 /// it that makes it do anything else. A word it does not know is refused
 /// before anything runs. `reapply` with no other word stays the engine's, as
 /// it was before `reapply all` was one of its words, so a supervisor older
-/// than this helper still asks for what it always asked for.
-fn helper_text(plan: &Plan, state: &State) -> String {
+/// than this helper still asks for what it always asked for. The install
+/// directory and the account come from the record, never from a caller, so
+/// setup, a repair and an update all write the same program.
+fn helper_text(dir: &Path, helper: &Helper, state: &State) -> String {
     let nils = supervisor_binary(state);
     let units = service_units(state);
     let mut arms = String::new();
@@ -1593,15 +1691,9 @@ fn helper_text(plan: &Plan, state: &State) -> String {
          \x20   exit 2\n\
          \x20   ;;\n\
          esac\n",
-        dir = plan.dir.display(),
-        account = plan
-            .helper
-            .as_ref()
-            .map_or(DEFAULT_ACCOUNT, |h| h.account.as_str()),
-        rule = plan
-            .helper
-            .as_ref()
-            .map_or(HELPER_RULE, |h| h.rule.as_str()),
+        dir = dir.display(),
+        account = helper.account,
+        rule = helper.rule,
         every = if parts.is_empty() {
             String::new()
         } else {
@@ -1705,27 +1797,58 @@ fn write_root_file(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> 
     file.write_all(bytes)
 }
 
-/// The helper and its rule put in place: the program first, then the rule,
-/// so there is no moment where a rule names a program that is not there. The
-/// rule is read by visudo before it is moved into place, and where visudo
-/// refuses it nothing is moved and the install stops with what visudo said.
+/// What writing the helper and its rule came to.
+enum HelperWritten {
+    /// Both are the record's.
+    Done,
+    /// The program itself was not written, with why, and the rule was not
+    /// touched at all.
+    NoProgram(String),
+    /// The program is the record's, and the rule beside it is still the one
+    /// that was on this machine: visudo would not read the new one, or it
+    /// could not be moved into place, and nothing of it was left behind.
+    NoRule(String),
+}
+
+/// The helper and its rule written from the record: the program first, then
+/// the rule, so there is no moment where a rule names a program that is not
+/// there. The rule is read by visudo before it is moved into place, and
+/// where visudo refuses it nothing is moved, so an operator is never shut
+/// out of root by a file sudo cannot parse. This is the one place any of it
+/// is written; setup, a repair and an update all come here, and differ only
+/// in what they do when it does not go through.
+fn write_helper(dir: &Path, helper: &Helper, state: &State) -> HelperWritten {
+    let program = Path::new(&helper.path);
+    if let Err(e) = write_root_file(program, helper_text(dir, helper, state).as_bytes(), 0o755) {
+        return HelperWritten::NoProgram(e.to_string());
+    }
+    let rule = Path::new(&helper.rule);
+    match sudoers_prepared(rule, &sudoers_text(helper, state)) {
+        Ok(staged) => match std::fs::rename(&staged, rule) {
+            Ok(()) => HelperWritten::Done,
+            Err(e) => {
+                let _ = std::fs::remove_file(&staged);
+                HelperWritten::NoRule(format!("it could not be moved into place: {e}"))
+            }
+        },
+        Err(why) => HelperWritten::NoRule(why),
+    }
+}
+
+/// The helper and its rule put in place by a setup or a repair, which stop
+/// where either could not be written: an install whose supervisor cannot
+/// restart anything is not an install, and there is nothing yet running on
+/// it to keep going for.
 fn install_helper(plan: &Plan, state: &State, console: &Console) -> Result<(), Exit> {
     let Some(helper) = &plan.helper else {
         return Ok(());
     };
-    let program = Path::new(&helper.path);
-    if let Err(e) = write_root_file(program, helper_text(plan, state).as_bytes(), 0o755) {
-        return console.broken(&format!("{} was not written: {e}", helper.path));
-    }
-    let rule = Path::new(&helper.rule);
-    match sudoers_prepared(rule, &sudoers_text(helper, state)) {
-        Ok(staged) => {
-            if let Err(e) = std::fs::rename(&staged, rule) {
-                let _ = std::fs::remove_file(&staged);
-                return console.broken(&format!("{} was not put in place: {e}", helper.rule));
-            }
+    match write_helper(&plan.dir, helper, state) {
+        HelperWritten::Done => {}
+        HelperWritten::NoProgram(why) => {
+            return console.broken(&format!("{} was not written: {why}", helper.path));
         }
-        Err(why) => {
+        HelperWritten::NoRule(why) => {
             return console.broken(&format!(
                 "{} was not written, and nothing of it was left behind: {why}",
                 helper.rule
@@ -3635,6 +3758,21 @@ pub(crate) struct State {
     /// write the same settings rather than the five of a laptop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) site: Option<Site>,
+    /// The Postgres schema this install made the registry in, where it made
+    /// one: the schema itself, and the `<schema>_linkage` beside it.
+    /// Recorded only where this install made the registry, never where it
+    /// found one already there, so that a purge drops the schemas an install
+    /// made and leaves a database the site already had exactly as it was. A
+    /// record written before this was recorded names none, and a purge then
+    /// names the schemas instead of dropping them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) registry_made: Option<String>,
+    /// The account setup turned lingering on for, so that the services of an
+    /// account keep running with nobody logged in. Recorded only where setup
+    /// turned it on, so a purge turns off what this install turned on and
+    /// never what the machine had already.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) linger: Option<String>,
 }
 
 impl State {
@@ -5066,33 +5204,46 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
         plan.registry().display().to_string(),
         plan.backups().display().to_string(),
     );
-    let mut engine =
-        format!("podman run -d --pod nils --name nils-engine -v {registry}:{registry}:U");
+    // Every mount is one of this account's own directories and is mounted as
+    // it stands: the containers run as the account that made them, so nothing
+    // has to be handed over. A mount handed to the container, podman's `:U`,
+    // took the registry with it, and the account that made it could no longer
+    // open it.
+    let mut engine = format!(
+        "podman run -d --pod nils --name nils-engine {}-v {registry}:{registry}",
+        container_user(Runtime::Podman)
+    );
     for (_, path) in plan.read_from() {
         let _ = write!(engine, " -v {0}:{0}:ro", path.display());
     }
     let _ = write!(
         engine,
-        " -v {backups}:{backups}:U {ENGINE_IMAGE}:{} {}",
+        " -v {backups}:{backups} {ENGINE_IMAGE}:{} {}",
         plan.tag(),
         engine_args(plan, &registry, &backups).join(" ")
     );
     out.push(engine);
     if plan.has(Part::Desk) {
         out.push(format!(
-            "podman run -d --pod nils --name nils-desk -v {}:{IN_DESK}:U {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
+            "podman run -d --pod nils --name nils-desk {}-v {}:{IN_DESK} {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
+            container_user(Runtime::Podman),
             plan.desk_dir().display(),
             plan.tag()
         ));
     }
     if plan.has(Part::Assistant) {
         let (kvasir, assistant) = (plan.dir.join("kvasir"), plan.dir.join("assistant"));
+        // Kvasir and the assistant are the same account as the engine and
+        // the desk: their directories hold Kvasir's models and keys and the
+        // assistant's history, and a container left as the image's own user
+        // writes them as an id this machine has no account for.
+        let user = container_user(Runtime::Podman);
         out.push(format!(
-            "podman run -d --pod nils --name nils-kvasir -v {k}:{k} -w {k} {NODE_IMAGE} node dist/main.js --config kvasir.json",
+            "podman run -d --pod nils --name nils-kvasir {user}-v {k}:{k} -w {k} {NODE_IMAGE} node dist/main.js --config kvasir.json",
             k = kvasir.display()
         ));
         out.push(format!(
-            "podman run -d --pod nils --name nils-assistant --env-file {a}/assistant.env -v {a}:{a} -v {k}:{k}:ro -w {a} {NODE_IMAGE} node {entry}",
+            "podman run -d --pod nils --name nils-assistant {user}--env-file {a}/assistant.env -v {a}:{a} -v {k}:{k}:ro -w {a} {NODE_IMAGE} node {entry}",
             a = assistant.display(),
             k = kvasir.display(),
             entry = assistant_entry(&assistant)
@@ -5112,7 +5263,7 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
     );
     let mut engine = format!(
         "docker run -d --network nils --name nils-engine {}{}-v {registry}:{registry}",
-        docker_user(),
+        container_user(Runtime::Docker),
         if matches!(plan.backend, BackendChoice::Postgres { .. }) {
             "--add-host host.docker.internal:host-gateway "
         } else {
@@ -5132,7 +5283,7 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
     if plan.has(Part::Desk) {
         out.push(format!(
             "docker run -d --network nils --name nils-desk {}-p {publish} --add-host host.docker.internal:host-gateway -v {}:{IN_DESK} {DESK_IMAGE}:{} serve --config {IN_DESK}/nils-desk.toml",
-            docker_user(),
+            container_user(Runtime::Docker),
             plan.desk_dir().display(),
             plan.tag()
         ));
@@ -5141,13 +5292,13 @@ pub(crate) fn docker_commands(plan: &Plan) -> Vec<String> {
         let (kvasir, assistant) = (plan.dir.join("kvasir"), plan.dir.join("assistant"));
         out.push(format!(
             "docker run -d --network nils --name nils-kvasir {user}-p 127.0.0.1:{p}:{p} --add-host host.docker.internal:host-gateway -v {k}:{k} -w {k} {NODE_IMAGE} node dist/main.js --config kvasir.json",
-            user = docker_user(),
+            user = container_user(Runtime::Docker),
             p = plan.ports.kvasir,
             k = kvasir.display()
         ));
         out.push(format!(
             "docker run -d --network nils --name nils-assistant {user}--env-file {a}/assistant.env -v {a}:{a} -v {k}:{k}:ro -w {a} {NODE_IMAGE} node {entry}",
-            user = docker_user(),
+            user = container_user(Runtime::Docker),
             a = assistant.display(),
             k = kvasir.display(),
             entry = assistant_entry(&assistant)
@@ -5263,12 +5414,14 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
     engine.push_str("\n[Container]\n");
     let _ = writeln!(engine, "Image={ENGINE_IMAGE}:{}", plan.tag());
     let _ = writeln!(engine, "Pod=nils.pod");
+    engine.push_str(&quadlet_user());
     let (registry, backups) = (
         plan.registry().display().to_string(),
         plan.backups().display().to_string(),
     );
-    let _ = writeln!(engine, "Volume={registry}:{registry}:U");
-    let _ = writeln!(engine, "Volume={backups}:{backups}:U");
+    // as they stand, since the container is the account that owns them
+    let _ = writeln!(engine, "Volume={registry}:{registry}");
+    let _ = writeln!(engine, "Volume={backups}:{backups}");
     for (_, path) in plan.read_from() {
         let _ = writeln!(engine, "Volume={0}:{0}:ro", path.display());
     }
@@ -5283,7 +5436,8 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
         let mut desk = String::from("[Unit]\nDescription=NILS desk\n\n[Container]\n");
         let _ = writeln!(desk, "Image={DESK_IMAGE}:{}", plan.tag());
         let _ = writeln!(desk, "Pod=nils.pod");
-        let _ = writeln!(desk, "Volume={}:{IN_DESK}:U", plan.desk_dir().display());
+        desk.push_str(&quadlet_user());
+        let _ = writeln!(desk, "Volume={}:{IN_DESK}", plan.desk_dir().display());
         let _ = writeln!(desk, "Exec=serve --config {IN_DESK}/nils-desk.toml");
         let _ = write!(desk, "\n[Install]\nWantedBy=default.target\n");
         out.push(("nils-desk.container".to_string(), desk));
@@ -5291,11 +5445,15 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
     if plan.has(Part::Assistant) {
         let (kvasir, assistant) = (plan.dir.join("kvasir"), plan.dir.join("assistant"));
         let (k, a) = (kvasir.display(), assistant.display());
+        // the same identity as the engine and the desk, so that every
+        // container of this install is the account that made it, whether
+        // systemd starts it or a person runs the commands by hand
+        let user = quadlet_user();
         out.push((
             "nils-kvasir.container".to_string(),
             format!(
                 "[Unit]\nDescription=Kvasir, the model gateway\n\n[Container]\n\
-                 Image={NODE_IMAGE}\nPod=nils.pod\nVolume={k}:{k}\nWorkingDir={k}\n\
+                 Image={NODE_IMAGE}\nPod=nils.pod\n{user}Volume={k}:{k}\nWorkingDir={k}\n\
                  Exec=node dist/main.js --config kvasir.json\n\n[Install]\nWantedBy=default.target\n"
             ),
         ));
@@ -5304,7 +5462,7 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
             format!(
                 "[Unit]\nDescription=NILS assistant\nAfter=nils-kvasir.service nils-engine.service\n\
                  ConditionPathExists={k}/assistant.key\n\n\
-                 [Container]\nImage={NODE_IMAGE}\nPod=nils.pod\nEnvironmentFile={a}/assistant.env\n\
+                 [Container]\nImage={NODE_IMAGE}\nPod=nils.pod\n{user}EnvironmentFile={a}/assistant.env\n\
                  Volume={a}:{a}\nVolume={k}:{k}:ro\nWorkingDir={a}\nExec=node {}\n\n\
                  [Install]\nWantedBy=default.target\n",
                 assistant_entry(&assistant)
@@ -6735,6 +6893,34 @@ fn service_manager_when(runtime: Runtime, session: bool) -> Option<&'static str>
     }
 }
 
+/// What keeps this plan's parts running, in the one form of words the plan's
+/// row, the record and the sign-off all take: the services of this machine,
+/// this account's own, or the runtime's. `None` where nothing keeps them.
+fn kept_by(plan: &Plan) -> Option<&'static str> {
+    plan.service
+        .then(|| service_manager(plan.runtime, plan.system.is_some()))
+        .flatten()
+}
+
+/// How the sign-off says it, from those same words, so that a `--system`
+/// install cannot be planned as the machine's services and signed off as an
+/// account's.
+fn runs_words(kept_by: Option<&str>, runtime: Runtime) -> String {
+    match kept_by {
+        // a container runtime's own name is already in the words: quadlets
+        // are podman's, and the compose file is docker's
+        Some(manager) if runtime.container() => {
+            let manager = manager
+                .strip_prefix(&format!("{} ", runtime.name()))
+                .unwrap_or(manager);
+            format!("in {}, by {manager}, back after a restart", runtime.name())
+        }
+        Some(manager) => format!("as {manager}, back after a restart"),
+        None if runtime.container() => format!("in {}, started by this setup", runtime.name()),
+        None => "started by hand".to_string(),
+    }
+}
+
 /// Why nothing here can keep the parts running, said so that a person can
 /// act on it: on Linux the units want a session of the account that runs
 /// NILS, which is what a machine nobody is logged in to has not got.
@@ -6873,9 +7059,7 @@ fn plan_rows(plan: &Plan) -> Vec<(&'static str, String)> {
     rows.push((
         "services",
         if plan.service {
-            service_manager(plan.runtime, plan.system.is_some())
-                .unwrap_or("none")
-                .to_string()
+            kept_by(plan).unwrap_or("none").to_string()
         } else {
             "none; the commands are printed".to_string()
         },
@@ -7010,7 +7194,7 @@ fn commands_text(plan: &Plan, console: &Console) -> String {
                     console.bold("  privilege"),
                     console.dim(&helper.path)
                 );
-                for line in helper_text(plan, &state).lines() {
+                for line in helper_text(&plan.dir, helper, &state).lines() {
                     let _ = writeln!(out, "{}", indent(line));
                 }
                 let _ = writeln!(out, "\n  {}", console.bold(&helper.rule));
@@ -7280,6 +7464,27 @@ impl Started {
     }
 }
 
+/// The schema and the account an earlier run of setup made outside the
+/// install's directory, for the record this run writes: the install this run
+/// goes on from where there is one, else whatever record is still on disk.
+///
+/// The second is the run that stopped partway. The wizard does not offer
+/// such a record as an install to go on from, so it is not among what this
+/// run was handed; but a run that stopped after it made the registry's
+/// schemas, or after it turned lingering on, made them all the same, and a
+/// run that started again over it would write a record naming neither. A
+/// purge removes only what the record names, and those would have been left
+/// in the site's database and on the machine's account with nothing saying
+/// they were ever NILS's.
+fn made_outside_before(
+    going_on_from: Option<&State>,
+    on_disk: Option<&State>,
+) -> (Option<String>, Option<String>) {
+    going_on_from.or(on_disk).map_or((None, None), |state| {
+        (state.registry_made.clone(), state.linger.clone())
+    })
+}
+
 /// Everything the plan said, in order.
 fn do_it(
     plan: &Plan,
@@ -7289,6 +7494,7 @@ fn do_it(
     only_update: bool,
     answers: &Answers,
 ) -> Result<Vec<Service>, Exit> {
+    let made_outside = made_outside_before(existing.as_ref(), read_state().as_ref());
     let mut state = State {
         dir: plan.dir.display().to_string(),
         mode: plan.mode.name().to_string(),
@@ -7331,6 +7537,11 @@ fn do_it(
         system: plan.system.clone(),
         helper: plan.helper.clone(),
         site: plan.site.clone(),
+        // what an earlier run of setup made outside this directory is still
+        // this install's to remove, and a run that makes nothing more leaves
+        // the record saying so
+        registry_made: made_outside.0,
+        linger: made_outside.1,
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
@@ -7406,6 +7617,9 @@ fn place(
     let checkpoint = |state: &State| {
         let _ = write_state(state);
     };
+    // Read before anything is placed: an account that lingers already
+    // lingered without NILS, and a purge leaves it as it found it.
+    let lingered_before = whoami().is_some_and(|me| lingers(&me));
     for path in own_dirs(plan) {
         std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
     }
@@ -7503,6 +7717,13 @@ fn place(
             answers.passphrase.as_deref(),
             acting.as_ref(),
         )?;
+        // The schemas this install has just made in a Postgres the site
+        // runs, on record from the moment they exist: they are outside this
+        // directory, and a purge removes only what the record names.
+        if let BackendChoice::Postgres { schema, .. } = &plan.backend {
+            state.registry_made = Some(schema.clone());
+            checkpoint(state);
+        }
     }
     // A Postgres registry is backed up with pg_dump. The engine's image
     // carries it; on the machine it has to be there already.
@@ -7745,6 +7966,19 @@ fn place(
         for line in &assistant {
             run(line)?;
         }
+    }
+
+    // Lingering setup turned on is the one thing an install of an account's
+    // own leaves outside its directory, and is on record so that a purge
+    // turns off what setup turned on and nothing else.
+    if let Some(account) = linger_turned_on(
+        plan.system.is_some(),
+        lingered_before,
+        whoami().is_some_and(|me| lingers(&me)),
+        whoami(),
+    ) {
+        state.linger = Some(account);
+        checkpoint(state);
     }
 
     // The model and the assistant's key come from Kvasir. systemd, podman and
@@ -8024,6 +8258,85 @@ fn start_postgres(plan: &Plan, pg: ManagedPostgres, console: &Console) -> Result
     Ok(())
 }
 
+/// What a container install runs to make its registry: the key added, with
+/// its passphrase on the input, and then the registry made on that key, each
+/// the whole command line. `None` for a machine install, which makes the
+/// registry in this process or as the engine's account.
+///
+/// The registry is made inside a container because the image that will run it
+/// is the one that makes it: the connection string a Postgres registry
+/// records is the one the engine dials from inside the pod, and a registry
+/// made out here would record this machine's own.
+///
+/// The container is told to be the account that runs setup, and the registry
+/// is mounted as it stands. Podman maps that account to the container's root,
+/// so the files come back the account's; docker remaps nobody and is given
+/// this account's own numbers. The mount is no longer handed to the container
+/// with podman's `:U`, which chowned the registry into the subordinate range
+/// this account is lent: the files came back owned by an id with no account
+/// on the machine, and the places step, which opens the registry out here,
+/// was refused by its own registry.
+fn registry_container_steps(plan: &Plan) -> Option<Vec<Vec<String>>> {
+    if !plan.runtime.container() {
+        return None;
+    }
+    let engine = plan.runtime.name().to_string();
+    // at the path it has on this machine, as the engine's service mounts it
+    let inside = plan.registry().display().to_string();
+    let mount = format!("{inside}:{inside}");
+    let tag = format!("{ENGINE_IMAGE}:{}", plan.tag());
+    let user = container_user_words(plan.runtime);
+    // Postgres is reached from inside the container, at the address a
+    // container names this machine by, and the registry is made there:
+    // left out, the container made a SQLite registry beside a plan that
+    // said Postgres.
+    let mut network: Vec<String> = Vec::new();
+    let mut backend: Vec<String> = Vec::new();
+    if let BackendChoice::Postgres { dsn, schema } = &plan.backend {
+        backend = vec![
+            "--backend".to_string(),
+            "postgres".to_string(),
+            "--dsn".to_string(),
+            dsn_for(plan.runtime, dsn),
+            "--schema".to_string(),
+            schema.clone(),
+        ];
+        match plan.runtime {
+            Runtime::Docker => {
+                network = vec![
+                    "--add-host".to_string(),
+                    "host.docker.internal:host-gateway".to_string(),
+                ];
+            }
+            Runtime::Podman if plan.host_loopback => {
+                network = vec![
+                    "--network".to_string(),
+                    format!("pasta:--map-host-loopback={HOST_LOOPBACK_IN_POD}"),
+                ];
+            }
+            _ => {}
+        }
+    }
+    let mut key = vec![engine.clone(), "run".to_string(), "--rm".to_string()];
+    key.push("-i".to_string());
+    key.extend(user.iter().cloned());
+    key.extend(["-v".to_string(), mount.clone(), tag.clone()]);
+    key.extend(owned_words(&["--registry", &inside, "key", "add", "nils"]));
+    let mut made = vec![engine, "run".to_string(), "--rm".to_string()];
+    made.extend(user);
+    made.extend(network);
+    made.extend(["-v".to_string(), mount, tag]);
+    made.extend(owned_words(&[
+        "--registry",
+        &inside,
+        "init",
+        "--key",
+        "nils",
+    ]));
+    made.extend(backend);
+    Some(vec![key, made])
+}
+
 /// A key and an empty registry, the two commands the documentation gives,
 /// run here, inside the container that will use them, or as the engine's
 /// account that will.
@@ -8075,63 +8388,11 @@ fn make_registry(
         console.note("the database answered");
     }
 
-    if plan.runtime.container() {
+    if let Some(steps) = registry_container_steps(plan) {
         let engine = plan.runtime.name();
-        // at the path it has on this machine, as the engine's service mounts it
-        let inside = plan.registry().display().to_string();
-        let mount = format!(
-            "{inside}:{inside}{}",
-            if plan.runtime == Runtime::Podman {
-                ":U"
-            } else {
-                ""
-            }
-        );
-        let tag = format!("{ENGINE_IMAGE}:{}", plan.tag());
-        // Docker does not remap the user, so the container has to be told
-        // to be this account or it cannot write the directory it mounts.
-        let account = as_this_account();
-        let user: Vec<String> = if plan.runtime == Runtime::Docker && !account.is_empty() {
-            vec!["--user".to_string(), account]
-        } else {
-            Vec::new()
-        };
-        // Postgres is reached from inside the container, at the address a
-        // container names this machine by, and the registry is made there:
-        // left out, the container made a SQLite registry beside a plan that
-        // said Postgres.
-        let mut network: Vec<String> = Vec::new();
-        let mut backend: Vec<String> = Vec::new();
-        if let BackendChoice::Postgres { dsn, schema } = &plan.backend {
-            backend = vec![
-                "--backend".to_string(),
-                "postgres".to_string(),
-                "--dsn".to_string(),
-                dsn_for(plan.runtime, dsn),
-                "--schema".to_string(),
-                schema.clone(),
-            ];
-            match plan.runtime {
-                Runtime::Docker => {
-                    network = vec![
-                        "--add-host".to_string(),
-                        "host.docker.internal:host-gateway".to_string(),
-                    ];
-                }
-                Runtime::Podman if plan.host_loopback => {
-                    network = vec![
-                        "--network".to_string(),
-                        format!("pasta:--map-host-loopback={HOST_LOOPBACK_IN_POD}"),
-                    ];
-                }
-                _ => {}
-            }
-        }
-        let mut child = Command::new(engine)
-            .args(["run", "--rm", "-i"])
-            .args(&user)
-            .args(["-v", &mount, &tag])
-            .args(["--registry", &inside, "key", "add", "nils"])
+        let (key, init) = (&steps[0], &steps[1]);
+        let mut child = Command::new(&key[0])
+            .args(&key[1..])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -8154,13 +8415,8 @@ fn make_registry(
                 said(&added)
             )));
         }
-        let made = Command::new(engine)
-            .args(["run", "--rm"])
-            .args(&user)
-            .args(&network)
-            .args(["-v", &mount, &tag])
-            .args(["--registry", &inside, "init", "--key", "nils"])
-            .args(&backend)
+        let made = Command::new(&init[0])
+            .args(&init[1..])
             .output()
             .map_err(|e| fail(format!("{engine}: {e}")))?;
         if !made.status.success() {
@@ -8241,8 +8497,16 @@ fn declare_places(
             // read the directory the person named, so each failure here stops
             // the install
             let mut registry = crate::open(home).map_err(|e| {
+                let note = handed_to_the_container(
+                    plan.runtime,
+                    registry_owner(home.dir()),
+                    this_account_id(),
+                    home.dir(),
+                )
+                .map(|why| format!("\n  {why}"))
+                .unwrap_or_default();
                 fail(format!(
-                    "the registry did not open to declare its places: {}",
+                    "the registry did not open to declare its places: {}{note}",
                     e.message
                 ))
             })?;
@@ -8439,6 +8703,13 @@ pub(crate) enum RegistryStep {
         #[arg(long, value_name = "NAME")]
         schema: String,
     },
+    /// Drop the schemas setup made, and nothing else: the schema named and
+    /// the `<schema>_linkage` beside it, with the connection string read
+    /// from the input
+    Drop {
+        #[arg(long, value_name = "NAME")]
+        schema: String,
+    },
     /// Make the registry as setup makes it, on the key named nils; on
     /// postgres the connection string is read from the input
     Init {
@@ -8464,6 +8735,12 @@ pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit>
             nils_registry::store::Store::connect_postgres(&dsn, &schema)
                 .map(|_| ())
                 .map_err(|e| fail(with_causes(&e)))
+        }
+        RegistryStep::Drop { schema } => {
+            let dsn = dsn_on_input(std::io::stdin().lock())?;
+            drop_schemas_here(&dsn, &schema).map_err(fail)?;
+            println!("dropped {schema} and {schema}_linkage");
+            Ok(())
         }
         RegistryStep::Init { backend, schema } => {
             let meta = registry_made_here(home, &backend, schema, std::io::stdin().lock())?;
@@ -8549,6 +8826,40 @@ fn registry_made_here(
         .init(&registry_init(&choice))
         .map_err(|e| fail(e.to_string()))?;
     Ok(registry.meta().clone())
+}
+
+/// A name that may stand in a statement as it is: letters, digits and
+/// underscores, not starting with a digit. A schema this binary made is
+/// always one; a record edited by hand may name anything, and what is not
+/// one is named to the person rather than sent to a database.
+fn plain_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The statement that removes a registry setup made in a Postgres the site
+/// runs: the schema it was made in, and the linkage store beside it. Nothing
+/// else in the database is named, so a database holding much else keeps all
+/// of it.
+fn drop_schemas_sql(schema: &str) -> String {
+    format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+    )
+}
+
+/// The registry's schemas dropped by the account running this, through the
+/// engine's own connection rather than a `psql` that may not be on the
+/// machine. What the database refuses comes back as it said it.
+fn drop_schemas_here(dsn: &str, schema: &str) -> Result<(), String> {
+    if !plain_identifier(schema) {
+        return Err(format!("{schema} is not a schema name this drops"));
+    }
+    let mut store = nils_registry::store::Store::connect_postgres(&dsn_on_machine(dsn), schema)
+        .map_err(|e| with_causes(&e))?;
+    store
+        .batch(&drop_schemas_sql(schema))
+        .map_err(|e| with_causes(&e))
 }
 
 /// The registry's source places as the account running this finds them, as
@@ -9417,21 +9728,14 @@ fn register_desk(
                 .or_else(|| Some(plan.dir.join("bin").join("nils-desk")).filter(|d| d.exists()))
                 .unwrap_or_else(|| PathBuf::from("nils-desk")),
         ),
-        Runtime::Podman => {
-            let mut c = Command::new("podman");
-            c.args(["run", "--rm", "-v"])
-                .arg(format!("{}:{IN_DESK}:U", dir.display()))
-                .arg(format!("{DESK_IMAGE}:{}", plan.tag()));
-            c
-        }
-        Runtime::Docker => {
-            let mut c = Command::new("docker");
-            c.args(["run", "--rm"]);
-            let account = as_this_account();
-            if !account.is_empty() {
-                c.args(["--user", &account]);
-            }
-            c.arg("-v")
+        // The secret this writes is the desk's own to read afterwards, so
+        // the container is the account that owns the folder and the folder
+        // is mounted as it stands, as the registry's step is.
+        runtime @ (Runtime::Podman | Runtime::Docker) => {
+            let mut c = Command::new(runtime.name());
+            c.args(["run", "--rm"])
+                .args(container_user_words(runtime))
+                .arg("-v")
                 .arg(format!("{}:{IN_DESK}", dir.display()))
                 .arg(format!("{DESK_IMAGE}:{}", plan.tag()));
             c
@@ -13380,6 +13684,34 @@ fn whoami() -> Option<String> {
     None
 }
 
+/// Where systemd keeps the accounts that may run services with nobody
+/// logged in.
+const LINGER_DIR: &str = "/var/lib/systemd/linger";
+
+/// Whether an account keeps its services running without a login. Read from
+/// the file systemd keeps rather than from `loginctl`, which answers only
+/// where a user manager can be reached.
+fn lingers(account: &str) -> bool {
+    !account.is_empty() && Path::new(LINGER_DIR).join(account).exists()
+}
+
+/// The account setup turned lingering on for, which is the account's own to
+/// record and a purge's to turn off again. None where the services are the
+/// machine's own, which needs no lingering; none where the account lingered
+/// before setup ran, which is the machine as it was; and none where the call
+/// was refused and the account still does not linger.
+fn linger_turned_on(
+    system: bool,
+    before: bool,
+    after: bool,
+    account: Option<String>,
+) -> Option<String> {
+    (!system && !before && after)
+        .then_some(account)
+        .flatten()
+        .filter(|account| !account.is_empty())
+}
+
 /// One call that hands systemd this account's units: what to run, and
 /// whether an install can go on when it is refused.
 #[derive(Debug)]
@@ -14438,21 +14770,9 @@ fn card_rows(plan: &Plan) -> Vec<(&'static str, String)> {
             ),
         ));
     }
-    rows.push((
-        "runs",
-        match (plan.service, plan.runtime) {
-            (true, Runtime::Machine) if cfg!(target_os = "macos") => {
-                "as launchd agents, back after a restart"
-            }
-            (true, Runtime::Machine) => "as systemd user units, back after a restart",
-            (true, Runtime::Podman) => "in podman, back after a restart",
-            (true, Runtime::Docker) => "in docker, back after a restart",
-            (false, Runtime::Machine) => "started by hand",
-            (false, Runtime::Podman) => "in podman, started by this setup",
-            (false, Runtime::Docker) => "in docker, started by this setup",
-        }
-        .to_string(),
-    ));
+    // the services this install wrote, named by what wrote them: the plan's
+    // `services` row reads the same words from the same place
+    rows.push(("runs", runs_words(kept_by(plan), plan.runtime)));
     rows.push(("directory", tilde(&plan.dir)));
     rows
 }
@@ -14495,6 +14815,85 @@ fn tilde(path: &Path) -> String {
 }
 
 // -------------------------------------------------------------- the update
+
+/// What an update does about the helper, from the record and whether this
+/// process is root. The helper's words are the version's: a version that
+/// gives it a new one, as `reapply all` was, leaves an install that only
+/// ever updates with the helper of the version it was installed with, and
+/// the desk's Parts page can then do nothing until setup is run again by
+/// hand. So an update writes it again, as setup and a repair do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelperOnUpdate {
+    /// The record names no helper, so nothing of the machine's is written:
+    /// an install whose services are an account's own has none, and an
+    /// update is not where one appears.
+    Untouched,
+    /// The record names one and this process is root, so the program and the
+    /// rule are written again from the record.
+    Written,
+    /// The record names one and this process is not root, so neither is
+    /// written and the update goes on without them.
+    NotRoot,
+}
+
+/// The decision itself, which is the record and one fact about this process
+/// and nothing else.
+fn helper_on_update(state: &State, root: bool) -> HelperOnUpdate {
+    match (state.helper.is_some(), root) {
+        (false, _) => HelperOnUpdate::Untouched,
+        (true, true) => HelperOnUpdate::Written,
+        (true, false) => HelperOnUpdate::NotRoot,
+    }
+}
+
+/// What an update says where it may not write the helper. Writing
+/// `/usr/local/sbin` and `/etc/sudoers.d` is root's, and an update that
+/// stopped over it would leave the parts half replaced, so it is a line and
+/// not a refusal. On the install this matters for, the update is root's
+/// anyway: the supervisor asks the helper for `update`, which runs
+/// `nils update --all` as root.
+fn helper_left_as_it_is(helper: &Helper) -> String {
+    format!(
+        "{} was left as it is, since writing it and its rule takes root, and an update run as \
+         root writes both again from the record",
+        helper.path
+    )
+}
+
+/// The helper and its rule written again by an update, on its own lines.
+/// This runs before the services are restarted, since the supervisor that
+/// calls the helper is one of the services started again, and it should come
+/// back to the helper of the version it is: never a new supervisor asking an
+/// old helper for a word that helper does not know.
+fn refresh_helper(state: &State) {
+    match helper_on_update(state, am_root()) {
+        HelperOnUpdate::Untouched => {}
+        HelperOnUpdate::NotRoot => {
+            if let Some(helper) = &state.helper {
+                println!("{}", helper_left_as_it_is(helper));
+            }
+        }
+        HelperOnUpdate::Written => {
+            let Some(helper) = &state.helper else { return };
+            match write_helper(Path::new(&state.dir), helper, state) {
+                HelperWritten::Done => println!(
+                    "{} and {} were written again from the record, so the supervisor has the \
+                     words this version answers to",
+                    helper.path, helper.rule
+                ),
+                HelperWritten::NoProgram(why) => {
+                    println!("{} was left as it is: {why}", helper.path);
+                }
+                HelperWritten::NoRule(why) => println!(
+                    "{} is still the rule this machine had, since the one this version writes was \
+                     refused: {why}; the supervisor may run the words that rule names and no \
+                     others, and nils setup writes it again",
+                    helper.rule
+                ),
+            }
+        }
+    }
+}
 
 /// Whether `nils setup` recorded an install for `nils update --all` to bring
 /// up to date, said before anything is fetched.
@@ -14762,6 +15161,11 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
 
     state.at = nils_registry::time::now_iso();
     write_state(&state)?;
+    // The record is the one the parts are at now, and the helper is written
+    // from the record, so it is written here rather than earlier: from the
+    // record as it stands, and before the restart that starts the supervisor
+    // again.
+    refresh_helper(&state);
     Ok(changed)
 }
 
@@ -15278,8 +15682,9 @@ pub(crate) fn reapply_all(state: &State) -> Result<(), Exit> {
 /// install has a helper and this process is not root, and `None` where the
 /// work is this process's own. A helper written before `reapply all` was one
 /// of its words is not asked at all, and what to do is said instead: its rule
-/// was written with it and does not name the line either, and only setup run
-/// as root writes the two again. A helper that could not be read is asked,
+/// was written with it and does not name the line either, and what writes
+/// the two again is an update or setup run as root. A helper that could not
+/// be read is asked,
 /// so what sudo says about it is what the person sees.
 fn reapply_all_call(state: &State, installed: Option<&str>) -> Result<Option<Vec<String>>, String> {
     let Some(argv) = helper_call(state, &["reapply", "all"]) else {
@@ -15288,8 +15693,8 @@ fn reapply_all_call(state: &State, installed: Option<&str>) -> Result<Option<Vec
     if installed.is_some_and(|text| !helper_reapplies_all(text)) {
         return Err(
             "nothing was restarted, since the helper on this machine was written before it could \
-             reapply every part: run nils setup again as root, which writes the helper and its \
-             rule again"
+             reapply every part: update this install, or run nils setup again as root, either of \
+             which writes the helper and its rule again"
                 .to_string(),
         );
     }
@@ -15580,6 +15985,9 @@ struct Removal {
     /// The runtime of a Postgres this setup runs, whose container goes; its
     /// data goes with the base directory, or stays with it.
     postgres: Option<String>,
+    /// What this install made outside its own directory, which a purge
+    /// removes and an uninstall that keeps the data leaves where it is.
+    outside: Vec<Outside>,
 }
 
 /// What an uninstall takes: NILS alone, or NILS and its data.
@@ -15587,6 +15995,225 @@ struct Removal {
 enum Leaving {
     KeepData,
     Purge,
+}
+
+/// One thing an install made outside its own directory: the registry's
+/// schemas in a Postgres the site runs, and the lingering setup turned on. A
+/// purge removes each only where the record says this install made it; what
+/// it cannot remove it names, with the command that would.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Outside {
+    /// The word the plan shows it under.
+    key: &'static str,
+    /// The thing itself, named.
+    what: String,
+    /// What it is where the data stays, in a sentence.
+    kept: String,
+    /// Why a purge does not remove it, where it does not.
+    unless: Option<String>,
+    /// The command that removes it by hand.
+    command: String,
+    /// How a purge removes it, and `None` where it only names it.
+    doing: Option<Doing>,
+}
+
+/// How a purge removes one thing outside the install's directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Doing {
+    /// The registry's schemas dropped over the connection the registry
+    /// kept, as the account the engine runs as where that is not this one.
+    Schemas {
+        dsn: String,
+        schema: String,
+        account: Option<String>,
+    },
+    /// Lingering turned off for the account setup turned it on for.
+    Linger(String),
+}
+
+/// What an install made outside its own directory, from the record alone:
+/// the registry's schemas where the record says this install made them, and
+/// the lingering where it says setup turned it on. A record that names
+/// neither leaves a site's database and a machine's accounts exactly as they
+/// were. `registry` is what the registry's own configuration says, the
+/// connection string and the schema it answers at; the schema dropped is the
+/// one the record names, and only where the registry agrees it is the same.
+fn outside_the_install(
+    state: &State,
+    registry: Option<(String, String)>,
+    root: bool,
+) -> Vec<Outside> {
+    let mut out = Vec::new();
+    // A container install's registry was made inside the container and kept
+    // the address a container names this machine by, which out here is no
+    // address at all. The drop and the command a person is handed both name
+    // the database as this machine dials it, so the one that is carried out
+    // and the one that is printed are the same connection.
+    let registry = registry.map(|(dsn, at)| (dsn_on_machine(&dsn), at));
+    // A Postgres this setup runs is the install's own: its data lives under
+    // the base directory and goes with it, so there is no schema of a site's
+    // to drop and none to name.
+    let own_postgres = state
+        .parts
+        .get("postgres")
+        .is_some_and(|p| p.kind == "podman" || p.kind == "docker");
+    // The password never goes into the command: a terminal, a scrollback and
+    // a log of the run all outlive the file that holds the string, and the
+    // file is kept where a drop was refused, so the sentence can still be
+    // acted on. A connection string in the key and value form is masked
+    // whole by redact_dsn, which is safe and says nothing about the host.
+    let command = |schema: &str| match &registry {
+        Some((dsn, _)) => format!(
+            "psql \"{}\" -c \"{}\"",
+            crate::redact_dsn(dsn),
+            drop_schemas_sql(schema)
+        ),
+        None => format!(
+            "psql \"<the connection string the registry used>\" -c \"{}\"",
+            drop_schemas_sql(schema)
+        ),
+    };
+    let schemas = |schema: &str| {
+        format!("the registry's schemas {schema} and {schema}_linkage in a database you run")
+    };
+    let where_its_data_is = |schema: &str| {
+        format!(
+            "the registry's schemas {schema} and {schema}_linkage, in the database you run, \
+             where its data is"
+        )
+    };
+    match (
+        state.registry_made.as_deref().filter(|_| !own_postgres),
+        state
+            .backend
+            .strip_prefix("postgres:")
+            .filter(|_| !own_postgres),
+    ) {
+        (Some(schema), _) => {
+            // The registry's own configuration is asked whether this is the
+            // schema it answers at, so a record edited by hand names a
+            // schema and drops none.
+            let agrees = registry.as_ref().is_some_and(|(_, at)| at == schema);
+            let doing = match (&registry, agrees && plain_identifier(schema)) {
+                (Some((dsn, _)), true) => Some(Doing::Schemas {
+                    dsn: dsn.clone(),
+                    schema: schema.to_string(),
+                    account: registry_account(state.system.as_ref(), root),
+                }),
+                _ => None,
+            };
+            out.push(Outside {
+                key: DATABASE_KEY,
+                what: schemas(schema),
+                kept: where_its_data_is(schema),
+                unless: doing.is_none().then(|| {
+                    "the registry did not say which database it kept them in, so no database \
+                     was asked"
+                        .to_string()
+                }),
+                command: command(schema),
+                doing,
+            });
+        }
+        // A record from before this was recorded says the registry is on
+        // Postgres and not who made the schemas. A purge that guessed could
+        // drop a schema the site made itself, so it names them instead.
+        (None, Some(schema)) => out.push(Outside {
+            key: DATABASE_KEY,
+            what: schemas(schema),
+            kept: where_its_data_is(schema),
+            unless: Some(
+                "this record does not say that this install made them, and a purge removes only \
+                 what the record says it made"
+                    .to_string(),
+            ),
+            command: command(schema),
+            doing: None,
+        }),
+        (None, None) => {}
+    }
+    if let Some(account) = state.linger.as_deref().filter(|a| !a.is_empty()) {
+        out.push(Outside {
+            key: "lingering",
+            what: format!("the lingering setup turned on for {account}"),
+            kept: format!(
+                "{account} keeps its services running without a login, as setup turned on for it"
+            ),
+            unless: None,
+            command: format!("loginctl disable-linger {account}"),
+            doing: Some(Doing::Linger(account.to_string())),
+        });
+    }
+    out
+}
+
+/// The word the schemas of a registry are shown under, and the one thing a
+/// connection string is needed for.
+const DATABASE_KEY: &str = "database";
+
+/// The registry's own configuration, kept beside the directory a purge
+/// removes, where a schema this install made was not dropped. The command
+/// printed has the password masked, so this file is where the string it
+/// needs still is; without it a purge would leave a person a command they
+/// cannot run. `None` where the registry wrote none, which is where nothing
+/// read it either.
+fn keep_connection_string(dir: &Path) -> Result<Option<PathBuf>, String> {
+    let from = dir.join("registry").join("nils.toml");
+    let Ok(text) = std::fs::read(&from) else {
+        return Ok(None);
+    };
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "nils".to_string());
+    let to = dir.with_file_name(format!("{name}.registry.toml"));
+    write_secret_bytes(&to, &text).map_err(|e| e.message)?;
+    Ok(Some(to))
+}
+
+/// One thing outside the install's directory, removed. What a database or a
+/// login manager refuses comes back as it said it, for the purge to name
+/// with the command that would remove it.
+fn remove_outside(doing: &Doing, registry: &Path) -> Result<(), String> {
+    match doing {
+        Doing::Schemas {
+            dsn,
+            schema,
+            account: None,
+        } => drop_schemas_here(dsn, schema),
+        Doing::Schemas {
+            dsn,
+            schema,
+            account: Some(account),
+        } => {
+            // A Postgres that authenticates peers knows the engine's
+            // account and not root, and the schemas were made as that
+            // account, so they are dropped as it too.
+            let acting = AsAccount {
+                account: account.clone(),
+                binary: running_binary(),
+                registry: registry.to_path_buf(),
+            };
+            let ran = acting.run(
+                &owned_words(&[REGISTRY_STEP, "drop", "--schema", schema]),
+                Some(dsn.as_bytes()),
+            );
+            if ran.ok {
+                Ok(())
+            } else {
+                Err(format!("{} (asked as {account})", ran.why))
+            }
+        }
+        Doing::Linger(account) => {
+            if quietly("loginctl", &["disable-linger", account]) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "loginctl would not turn lingering off for {account}"
+                ))
+            }
+        }
+    }
 }
 
 pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
@@ -15681,7 +16308,7 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
     }
 
     println!();
-    carry_out(&removal, leaving, &console);
+    let left = carry_out(&removal, leaving, &console);
     println!();
     println!("{}", console.bold("Removed"));
     match leaving {
@@ -15696,7 +16323,19 @@ pub(crate) fn uninstall(args: UninstallArgs) -> Result<(), Exit> {
                 removal.dir.display()
             );
         }
-        Leaving::Purge => println!("  NILS and everything it made are gone from this machine"),
+        // A purge that left something says so here rather than signing off
+        // clean: a purge that says it is done and is not is the one thing
+        // this may never do.
+        Leaving::Purge if left.is_empty() => {
+            println!("  NILS and everything it made are gone from this machine");
+        }
+        Leaving::Purge => {
+            println!(
+                "  NILS is gone from this machine, apart from {}",
+                left.join(" and ")
+            );
+            println!("  each is named above, with the command that removes it");
+        }
     }
     Ok(())
 }
@@ -15734,24 +16373,104 @@ pub(crate) fn leftovers(me: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> 
     out
 }
 
+/// How many of the files in a directory no record names are printed before
+/// the rest are counted.
+const FILES_NAMED: usize = 10;
+
+/// What is in a directory that no setup record names: the files under it,
+/// the registry's key first, since a key on the disk is the one thing nobody
+/// may be left guessing about, and at most `most` of them, with the rest
+/// counted. Nothing here is removed: without a record nothing says the
+/// directory is this install's, so the person is told where it is and what
+/// is in it instead.
+fn files_left_in(dir: &Path, most: usize) -> (Vec<PathBuf>, usize) {
+    fn walk(dir: &Path, depth: usize, into: &mut Vec<PathBuf>) {
+        // a directory that links into itself is walked once and no further
+        if depth == 0 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut here: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        here.sort();
+        for path in here {
+            if path.is_symlink() || !path.is_dir() {
+                into.push(path);
+            } else {
+                walk(&path, depth - 1, into);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(dir, 8, &mut found);
+    let keys = dir.join("registry").join("keys");
+    found.sort_by_key(|path| !path.starts_with(&keys));
+    let more = found.len().saturating_sub(most);
+    found.truncate(most);
+    (found, more)
+}
+
 fn remove_leftovers(args: &UninstallArgs, console: &mut Console) -> Result<(), Exit> {
     let me = std::env::current_exe()
         .ok()
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
     let found = leftovers(me.as_deref(), home_dir().as_deref());
+    // A base directory in the usual place that holds more than the empty
+    // folders a setup makes. No record names it, so it is not removed here;
+    // it is named, with what is in it and what to do with it.
+    let left = home_dir()
+        .map(|home| home.join("nils"))
+        .filter(|dir| dir.is_dir() && !found.contains(dir));
     println!("  no setup is recorded at {}", state_path().display());
-    if found.is_empty() {
+    if found.is_empty() && left.is_none() {
         println!("  and nothing a setup leaves is in the usual places, so nothing was changed");
         return Ok(());
     }
-    println!();
-    println!("{}", console.bold("What an unfinished setup left"));
-    for path in &found {
-        println!("  {}", path.display());
+    if !found.is_empty() {
+        println!();
+        println!("{}", console.bold("What an unfinished setup left"));
+        for path in &found {
+            println!("  {}", path.display());
+        }
+    }
+    if let Some(dir) = &left {
+        println!();
+        println!(
+            "{}",
+            console.bold("What is there and is nobody's to remove here")
+        );
+        println!(
+            "  {}, which holds more than the empty folders a setup makes",
+            dir.display()
+        );
+        let (files, more) = files_left_in(dir, FILES_NAMED);
+        for path in &files {
+            println!("    {}", path.display());
+        }
+        if more > 0 {
+            println!("    and {more} more");
+        }
+        if dir.join("registry").join("keys").is_dir() {
+            println!(
+                "  the registry's key is among them: with it the same subject is given the same \
+                 code again, and without it nobody can"
+            );
+        }
+        println!("  no setup record names this directory, so nothing here says it is NILS's");
+        println!(
+            "  read it, keep what is yours, and remove the rest: rm -rf {}",
+            dir.display()
+        );
     }
     if args.print {
         println!();
         println!("nothing was changed");
+        return Ok(());
+    }
+    if found.is_empty() {
+        println!();
+        println!("  nothing was changed");
         return Ok(());
     }
     let go = args.yes || (console.interactive() && console.yes_no("Remove these?", false));
@@ -15813,10 +16532,16 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Whether a directory may be removed whole. It must be absolute, must not
-/// be the root, the home directory or anything above it, and must look like
-/// what an install made. A state file edited by hand, or a --dir given as
-/// the home directory, should cost a refusal and not a home directory.
+/// Whether a directory a setup record names may be removed whole. It must be
+/// absolute, must not be the root, and must not be the home directory or
+/// anything above it: a record edited by hand, or a `--dir` given as the home
+/// directory, should cost a refusal and not a home directory.
+///
+/// What the directory holds is not asked. The record is what says the
+/// directory is this install's, and an install that stopped before it made a
+/// registry or a desk leaves a directory that looks like nothing and holds
+/// the registry's key: refusing that left the key on the disk after a purge
+/// that said it was done, which is the worse of the two.
 fn safe_to_purge(dir: &Path, home: Option<&Path>) -> Result<(), String> {
     if !dir.is_absolute() {
         return Err("it is not an absolute path".to_string());
@@ -15828,12 +16553,6 @@ fn safe_to_purge(dir: &Path, home: Option<&Path>) -> Result<(), String> {
         && home.starts_with(dir)
     {
         return Err("it is the home directory, or holds it".to_string());
-    }
-    let made_here = dir.join("registry").join("nils.toml").exists()
-        || dir.join("desk").join("nils-desk.toml").exists()
-        || only_empty_setup_dirs(dir);
-    if !made_here {
-        return Err("it holds neither a registry nor a desk that an install made".to_string());
     }
     Ok(())
 }
@@ -15890,6 +16609,9 @@ fn gather_removal(state: &State, me: Option<PathBuf>, leaving: Leaving) -> Remov
         llama: None,
         state: state_path(),
         postgres: None,
+        // read while the registry's own configuration is still there, since
+        // a purge removes the directory that holds it
+        outside: outside_the_install(state, registry_backend(&dir), am_root()),
     };
 
     // a Postgres this setup runs, wherever the parts run
@@ -16208,6 +16930,11 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
         for line in data_summary(&removal.dir) {
             let _ = writeln!(out, "  {:<12} {}", "", console.dim(&line));
         }
+        // what this install made outside that directory, which is all a
+        // purge ever touches beyond it
+        for outside in removal.outside.iter().filter(|o| o.doing.is_some()) {
+            row(&mut out, outside.key, outside.what.clone());
+        }
     }
     let _ = writeln!(out, "\n{}", console.bold("Keeping"));
     match leaving {
@@ -16216,8 +16943,27 @@ fn removal_text(removal: &Removal, leaving: Leaving, console: &Console) -> Strin
             for line in data_summary(&removal.dir) {
                 let _ = writeln!(out, "  {:<12} {}", "", console.dim(&line));
             }
+            // an uninstall that keeps the data keeps the registry wherever
+            // it is, and says where that is
+            for outside in &removal.outside {
+                row(&mut out, outside.key, outside.kept.clone());
+            }
         }
-        Leaving::Purge => row(&mut out, "nothing", "that this setup made".to_string()),
+        Leaving::Purge => {
+            let named: Vec<&Outside> = removal
+                .outside
+                .iter()
+                .filter(|o| o.doing.is_none())
+                .collect();
+            for outside in &named {
+                let why = outside.unless.clone().unwrap_or_default();
+                row(&mut out, outside.key, format!("{}: {why}", outside.what));
+                let _ = writeln!(out, "  {:<12} {}", "", console.dim(&outside.command));
+            }
+            if named.is_empty() {
+                row(&mut out, "nothing", "that this setup made".to_string());
+            }
+        }
     }
     if let Some(kept) = &removal.packs_kept {
         row(
@@ -16300,11 +17046,14 @@ fn human_size(bytes: u64) -> String {
 }
 
 /// Do what the removal says, in the order that leaves nothing holding a file
-/// open: services, containers, built parts, packs, programs, the record, the
-/// data, and this program last. Every step says what it did; a step that
-/// fails says so and the rest still run.
-fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
+/// open: services, what the install made outside its directory, containers,
+/// built parts, packs, programs, the record, the data, and this program
+/// last. Every step says what it did; a step that fails says so and the rest
+/// still run. What is left behind comes back, so the last sentence of an
+/// uninstall is true.
+fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) -> Vec<String> {
     let say = |text: String| println!("  {text}");
+    let mut left = Vec::new();
 
     // the units on this machine, the supervisor and llama.cpp among them on a
     // docker install too, whose containers go below
@@ -16349,6 +17098,48 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
             match std::fs::remove_file(path) {
                 Ok(()) => say(format!("removed {what}, {}", path.display())),
                 Err(e) => say(format!("{} was not removed: {e}", path.display())),
+            }
+        }
+    }
+
+    // What this install made outside its own directory, once nothing of it
+    // is running: the registry's schemas in a database the site runs, and
+    // the lingering setup turned on. Only a purge takes these; an uninstall
+    // that keeps the data keeps the registry where it is.
+    if leaving == Leaving::Purge {
+        let mut needs_the_string = false;
+        for outside in &removal.outside {
+            let refused = match outside.doing.as_ref() {
+                Some(doing) => match remove_outside(doing, &removal.dir.join("registry")) {
+                    Ok(()) => {
+                        say(format!("removed {}", outside.what));
+                        continue;
+                    }
+                    Err(why) => why,
+                },
+                None => outside.unless.clone().unwrap_or_default(),
+            };
+            say(format!("{} was not removed: {refused}", outside.what));
+            say(format!("  remove it with: {}", outside.command));
+            left.push(outside.what.clone());
+            needs_the_string |= outside.key == DATABASE_KEY;
+        }
+        // The command above has the password masked, so the file the
+        // registry kept the connection string in stays, beside the directory
+        // that goes, and is named in the same breath.
+        if needs_the_string {
+            match keep_connection_string(&removal.dir) {
+                Ok(Some(path)) => {
+                    say(format!(
+                        "  the connection string it needs is in {}",
+                        path.display()
+                    ));
+                    left.push(format!("the connection string, kept in {}", path.display()));
+                }
+                Ok(None) => {}
+                Err(e) => say(format!(
+                    "  the registry's connection string was not kept: {e}"
+                )),
             }
         }
     }
@@ -16469,6 +17260,7 @@ fn carry_out(removal: &Removal, leaving: Leaving, console: &Console) {
         }
     }
     let _ = console;
+    left
 }
 
 /// A file or a directory, gone. A rootless podman container owns what it
@@ -18106,8 +18898,436 @@ mod tests {
         );
     }
 
+    /// A record of an install on a Postgres the site runs, with the
+    /// registry's own configuration beside it.
+    fn on_postgres(root: &Path, schema: &str, made: Option<&str>) -> State {
+        let dir = root.join("nils");
+        std::fs::create_dir_all(dir.join("registry")).unwrap();
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            format!(
+                "backend = \"postgres\"\ndsn = \"postgres://nils@127.0.0.1/nils\"\nschema = \"{schema}\"\n"
+            ),
+        )
+        .unwrap();
+        State {
+            dir: dir.display().to_string(),
+            mode: "off".to_string(),
+            runtime: "machine".to_string(),
+            backend: format!("postgres:{schema}"),
+            registry_made: made.map(str::to_string),
+            ..State::default()
+        }
+    }
+
+    /// A container install's registry was made inside the container, so the
+    /// address it kept is the one a container names this machine by. The
+    /// purge runs out here: it drops the schemas over this machine's own
+    /// loopback, and the command it prints where it cannot is one a person
+    /// can run where they are standing.
     #[test]
-    fn removing_everything_refuses_what_an_install_did_not_make() {
+    fn a_container_installs_purge_reaches_the_database_from_this_machine() {
+        let root = scratch("purge-in-a-container");
+        let mut state = on_postgres(&root, "nils", Some("nils"));
+        state.runtime = "podman".to_string();
+        let dir = PathBuf::from(&state.dir);
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            "backend = \"postgres\"\ndsn = \"postgres://nils:s3cret@host.containers.internal/nils\"\n\
+             schema = \"nils\"\n",
+        )
+        .unwrap();
+
+        let outside = outside_the_install(&state, registry_backend(&dir), false);
+        assert_eq!(
+            outside[0].doing,
+            Some(Doing::Schemas {
+                dsn: "postgres://nils:s3cret@127.0.0.1/nils".to_string(),
+                schema: "nils".to_string(),
+                account: None,
+            }),
+            "dropped at the address this machine has for the database"
+        );
+        assert!(
+            outside[0].command.contains("127.0.0.1")
+                && !outside[0].command.contains("host.containers.internal"),
+            "the command is one a person can run out here: {}",
+            outside[0].command
+        );
+        assert!(
+            !outside[0].command.contains("s3cret"),
+            "{}",
+            outside[0].command
+        );
+
+        // and a docker install the same, at the name docker gives this machine
+        let mut of_docker = state.clone();
+        of_docker.runtime = "docker".to_string();
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            "backend = \"postgres\"\ndsn = \"host=host.docker.internal user=nils dbname=nils\"\n\
+             schema = \"nils\"\n",
+        )
+        .unwrap();
+        let outside = outside_the_install(&of_docker, registry_backend(&dir), false);
+        assert!(
+            matches!(
+                &outside[0].doing,
+                Some(Doing::Schemas { dsn, .. }) if dsn == "host=127.0.0.1 user=nils dbname=nils"
+            ),
+            "{:?}",
+            outside[0].doing
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The fields a purge reads are the record's own, and the record is read
+    /// and written whole: an update, which rewrites it, keeps them, and a
+    /// record written before they existed still loads and names nothing.
+    #[test]
+    fn the_record_carries_what_an_install_made_outside_its_directory() {
+        let mut state = State {
+            dir: "/home/x/nils".to_string(),
+            mode: "off".to_string(),
+            runtime: "machine".to_string(),
+            service: SYSTEM_MANAGER.to_string(),
+            backend: "postgres:nils".to_string(),
+            registry_made: Some("nils".to_string()),
+            linger: Some("nils".to_string()),
+            system: Some(SystemUnits {
+                capabilities: Vec::new(),
+                accounts: BTreeMap::from([("engine".to_string(), "nils".to_string())]),
+            }),
+            helper: Some(Helper {
+                account: "nils".to_string(),
+                path: "/usr/local/sbin/nils-helper".to_string(),
+                rule: "/etc/sudoers.d/nils".to_string(),
+            }),
+            ..State::default()
+        };
+        state.parts.insert(
+            "engine".to_string(),
+            PartState {
+                version: "1.0.0-alpha.2".to_string(),
+                path: "/usr/local/bin/nils".to_string(),
+                kind: "binary".to_string(),
+            },
+        );
+        let text = toml::to_string(&state).unwrap();
+        let read: State = toml::from_str(&text).unwrap();
+        assert_eq!(read.registry_made.as_deref(), Some("nils"));
+        assert_eq!(read.linger.as_deref(), Some("nils"));
+        // and the reads beside them still see what they always did
+        assert!(read.helper.is_some(), "{text}");
+        assert_eq!(
+            read.system.as_ref().map(|s| s.account("engine")),
+            Some("nils")
+        );
+        assert_eq!(read.parts["engine"].kind, "binary");
+
+        // A record from before these were written names neither, and a purge
+        // then names the schemas rather than dropping them.
+        let older: State = toml::from_str(
+            "dir = \"/home/x/nils\"\nmode = \"off\"\nruntime = \"machine\"\n\
+             service = \"none\"\nbackend = \"postgres:nils\"\n",
+        )
+        .unwrap();
+        assert_eq!(older.registry_made, None);
+        assert_eq!(older.linger, None);
+        let outside = outside_the_install(&older, None, false);
+        assert_eq!(outside.len(), 1);
+        assert_eq!(outside[0].doing, None, "nothing is dropped on a guess");
+
+        // A run that stopped partway is not an install to go on from, but
+        // what it made outside the directory is still this install's.
+        let unfinished = State {
+            unfinished: true,
+            registry_made: Some("nils".to_string()),
+            linger: Some("nils".to_string()),
+            ..State::default()
+        };
+        assert_eq!(
+            made_outside_before(None, Some(&unfinished)),
+            (Some("nils".to_string()), Some("nils".to_string())),
+            "the record left on disk is read where there is no install to go on from"
+        );
+        assert_eq!(made_outside_before(None, None), (None, None));
+        assert_eq!(
+            made_outside_before(Some(&State::default()), Some(&unfinished)),
+            (None, None),
+            "the install this run goes on from is the record it writes from"
+        );
+    }
+
+    #[test]
+    fn a_purge_drops_the_schemas_the_record_says_this_install_made() {
+        let root = scratch("purge-schemas");
+        let state = on_postgres(&root, "nils", Some("nils"));
+        let dir = PathBuf::from(&state.dir);
+
+        let outside = outside_the_install(&state, registry_backend(&dir), false);
+        assert_eq!(outside.len(), 1, "{outside:?}");
+        assert_eq!(
+            outside[0].doing,
+            Some(Doing::Schemas {
+                dsn: "postgres://nils@127.0.0.1/nils".to_string(),
+                schema: "nils".to_string(),
+                account: None,
+            }),
+            "dropped over the connection the registry kept, as this account"
+        );
+        assert_eq!(
+            outside[0].command,
+            "psql \"postgres://nils@127.0.0.1/nils\" -c \"DROP SCHEMA IF EXISTS nils CASCADE; \
+             DROP SCHEMA IF EXISTS nils_linkage CASCADE\"",
+            "the command that would remove it by hand"
+        );
+        let text = removal_text(
+            &gather_removal(&state, None, Leaving::Purge),
+            Leaving::Purge,
+            &Console::new(true),
+        );
+        assert!(
+            text.contains("the registry's schemas nils and nils_linkage in a database you run"),
+            "the plan says the database too: {text}"
+        );
+
+        // Where the services are the machine's own and root is purging, the
+        // schemas are dropped as the account that made them, since a
+        // Postgres that authenticates peers knows that account and not root.
+        let mut of_machine = state.clone();
+        of_machine.system = Some(SystemUnits {
+            capabilities: Vec::new(),
+            accounts: BTreeMap::from([("engine".to_string(), "nils".to_string())]),
+        });
+        let outside = outside_the_install(&of_machine, registry_backend(&dir), true);
+        assert!(
+            matches!(
+                &outside[0].doing,
+                Some(Doing::Schemas { account: Some(account), .. }) if account == "nils"
+            ),
+            "{:?}",
+            outside[0].doing
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_refused_drop_names_the_command_without_the_password_and_keeps_the_string() {
+        let root = scratch("purge-password");
+        // the record names a schema the registry does not answer at, so the
+        // drop is refused with no database asked at all
+        let state = on_postgres(&root, "theirs", Some("ours"));
+        let dir = PathBuf::from(&state.dir);
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            "backend = \"postgres\"\ndsn = \"postgres://nils:s3cret@127.0.0.1/nils\"\n\
+             schema = \"theirs\"\n",
+        )
+        .unwrap();
+
+        let outside = outside_the_install(&state, registry_backend(&dir), false);
+        assert_eq!(outside[0].doing, None, "{outside:?}");
+        assert!(
+            !outside[0].command.contains("s3cret"),
+            "a password never goes into a command printed on a terminal: {}",
+            outside[0].command
+        );
+        assert!(
+            outside[0]
+                .command
+                .contains("postgres://nils:***@127.0.0.1/nils"),
+            "{}",
+            outside[0].command
+        );
+        let removal = gather_removal(&state, None, Leaving::Purge);
+        let text = removal_text(&removal, Leaving::Purge, &Console::new(true));
+        assert!(!text.contains("s3cret"), "{text}");
+
+        // carried out with nothing of this machine's own in it
+        let record = root.join("setup.toml");
+        std::fs::write(&record, "").unwrap();
+        let removal = Removal {
+            units: Vec::new(),
+            unit_files: Vec::new(),
+            state: record,
+            ..removal
+        };
+        let left = carry_out(&removal, Leaving::Purge, &Console::new(true));
+        let kept = root.join("nils.registry.toml");
+        assert!(
+            kept.is_file(),
+            "the file holding the string stays: {left:?}"
+        );
+        assert!(
+            std::fs::read_to_string(&kept)
+                .unwrap()
+                .contains("postgres://nils:s3cret@127.0.0.1/nils"),
+            "with the connection string in it"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&kept).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "only this account may read it"
+            );
+        }
+        assert!(
+            left.iter()
+                .any(|what| what.contains(&kept.display().to_string())),
+            "what is left names it too: {left:?}"
+        );
+        assert!(!dir.exists(), "the directory still goes");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_schema_the_record_does_not_name_is_never_dropped() {
+        let root = scratch("purge-other-schema");
+
+        // A record from before an install said which schemas it made: what
+        // is in the database is named, with the command, and dropped by
+        // nobody here.
+        let older = on_postgres(&root, "nils", None);
+        let dir = PathBuf::from(&older.dir);
+        let outside = outside_the_install(&older, registry_backend(&dir), false);
+        assert_eq!(outside.len(), 1, "{outside:?}");
+        assert_eq!(outside[0].doing, None, "an older record drops nothing");
+        assert!(
+            outside[0]
+                .unless
+                .as_deref()
+                .is_some_and(|why| why.contains("does not say that this install made them")),
+            "{:?}",
+            outside[0].unless
+        );
+        assert!(outside[0].command.contains("DROP SCHEMA IF EXISTS nils"));
+
+        // A record naming one schema and a registry answering at another:
+        // the record's is not in that database, so nothing is dropped.
+        let elsewhere = on_postgres(&root, "theirs", Some("ours"));
+        let outside = outside_the_install(&elsewhere, registry_backend(&dir), false);
+        assert_eq!(outside[0].doing, None, "{outside:?}");
+
+        // A name that is not a plain identifier never reaches a database.
+        let odd = on_postgres(&root, "nils\"; drop", Some("nils\"; drop"));
+        let outside = outside_the_install(&odd, registry_backend(&dir), false);
+        assert_eq!(outside[0].doing, None, "{outside:?}");
+        assert!(!plain_identifier("nils\"; drop"));
+        assert!(!plain_identifier("9lives") && !plain_identifier(""));
+        assert!(plain_identifier("nils") && plain_identifier("nils_two"));
+
+        // A registry on SQLite has no schema anywhere, and a Postgres this
+        // setup runs itself goes with the directory.
+        let sqlite = State {
+            backend: "sqlite".to_string(),
+            ..older.clone()
+        };
+        assert!(outside_the_install(&sqlite, None, false).is_empty());
+        let mut own = older.clone();
+        own.registry_made = Some("nils".to_string());
+        own.parts.insert(
+            "postgres".to_string(),
+            PartState {
+                version: "17".to_string(),
+                path: "postgres:17".to_string(),
+                kind: "podman".to_string(),
+            },
+        );
+        assert!(
+            outside_the_install(&own, registry_backend(&dir), false).is_empty(),
+            "a Postgres this setup runs goes with the base directory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_uninstall_that_keeps_the_data_drops_nothing_and_says_where_it_stays() {
+        let root = scratch("keep-data-schemas");
+        let mut state = on_postgres(&root, "nils", Some("nils"));
+        state.linger = Some("nils".to_string());
+        let removal = gather_removal(&state, None, Leaving::KeepData);
+        let console = Console::new(true);
+        let text = removal_text(&removal, Leaving::KeepData, &console);
+        let (removing, keeping) = text.split_once("Keeping").unwrap();
+        assert!(
+            !removing.contains("nils_linkage") && !removing.contains("lingering"),
+            "nothing outside the directory is removed: {removing}"
+        );
+        assert!(
+            keeping.contains(
+                "the registry's schemas nils and nils_linkage, in the database you \
+                 run, where its data is"
+            ),
+            "{keeping}"
+        );
+        assert!(
+            keeping.contains("keeps its services running without a login"),
+            "{keeping}"
+        );
+        // carried out with nothing of this machine's own in it: nothing
+        // outside the directory is touched for anything but a purge
+        let record = root.join("setup.toml");
+        std::fs::write(&record, "").unwrap();
+        let removal = Removal {
+            units: Vec::new(),
+            unit_files: Vec::new(),
+            state: record,
+            ..removal
+        };
+        assert!(
+            carry_out(&removal, Leaving::KeepData, &console).is_empty(),
+            "an uninstall that keeps the data leaves nothing named"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lingering_is_turned_off_only_where_the_record_says_setup_turned_it_on() {
+        let account = || Some("nils".to_string());
+        assert_eq!(
+            linger_turned_on(false, false, true, account()),
+            account(),
+            "setup turned it on for an account that did not linger"
+        );
+        assert_eq!(
+            linger_turned_on(false, true, true, account()),
+            None,
+            "an account that lingered before setup ran is the machine as it was"
+        );
+        assert_eq!(
+            linger_turned_on(false, false, false, account()),
+            None,
+            "a call that was refused turned nothing on"
+        );
+        assert_eq!(
+            linger_turned_on(true, false, true, account()),
+            None,
+            "the services of a machine ask for no lingering"
+        );
+        assert_eq!(linger_turned_on(false, false, true, None), None);
+
+        let root = scratch("purge-linger");
+        let recorded = State {
+            dir: root.join("nils").display().to_string(),
+            linger: Some("nils".to_string()),
+            ..State::default()
+        };
+        let outside = outside_the_install(&recorded, None, false);
+        assert_eq!(outside.len(), 1, "{outside:?}");
+        assert_eq!(outside[0].doing, Some(Doing::Linger("nils".to_string())));
+        assert_eq!(outside[0].command, "loginctl disable-linger nils");
+        assert!(
+            outside_the_install(&State::default(), None, false).is_empty(),
+            "a record that says setup turned on no lingering turns off none"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn removing_everything_refuses_the_root_and_the_home_directory() {
         let home = scratch("purge-home");
         let made = home.join("nils");
         std::fs::create_dir_all(made.join("registry")).unwrap();
@@ -18125,12 +19345,100 @@ mod tests {
             why(Path::new("/"))
         );
         assert!(why(Path::new("nils")).contains("absolute"));
-        let stranger = home.join("photos");
-        std::fs::create_dir_all(&stranger).unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_directory_an_install_left_behind_is_purged_where_the_record_names_it() {
+        let home = scratch("purge-half-made");
+        // what an install that stopped at the registry leaves: the key, and
+        // neither a registry nor a desk beside it
+        let dir = home.join("nils");
+        std::fs::create_dir_all(dir.join("registry").join("keys")).unwrap();
+        std::fs::write(dir.join("registry").join("keys").join("nils"), "a key").unwrap();
+        std::fs::create_dir_all(dir.join("desk")).unwrap();
         assert!(
-            why(&stranger).contains("neither a registry nor a desk"),
-            "a directory named in a hand edited record, holding someone's photos"
+            !only_empty_setup_dirs(&dir),
+            "it looks like no install at all"
         );
+        assert!(
+            safe_to_purge(&dir, Some(&home)).is_ok(),
+            "the record is what says it is this install's, not what is in it"
+        );
+
+        let state = State {
+            dir: dir.display().to_string(),
+            mode: "off".to_string(),
+            runtime: "machine".to_string(),
+            unfinished: true,
+            ..State::default()
+        };
+        // carried out with nothing of this machine's own in it
+        let record = home.join("setup.toml");
+        std::fs::write(&record, "").unwrap();
+        let removal = Removal {
+            units: Vec::new(),
+            unit_files: Vec::new(),
+            state: record.clone(),
+            ..gather_removal(&state, None, Leaving::Purge)
+        };
+        let console = Console::new(true);
+        assert!(
+            carry_out(&removal, Leaving::Purge, &console).is_empty(),
+            "nothing is left named"
+        );
+        assert!(!dir.exists(), "the key is gone with the directory");
+        assert!(!record.exists());
+        assert!(
+            !home.join("nils.registry.toml").exists(),
+            "with nothing left outside, no connection string is kept"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn with_no_record_the_files_an_install_left_are_named_where_they_are() {
+        let home = scratch("leftovers-named");
+        let dir = home.join("nils");
+        std::fs::create_dir_all(dir.join("registry").join("keys")).unwrap();
+        std::fs::write(dir.join("registry").join("keys").join("nils"), "a key").unwrap();
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            "backend = \"sqlite\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("working")).unwrap();
+        for n in 0..4 {
+            std::fs::write(dir.join("working").join(format!("{n}.dcm")), "x").unwrap();
+        }
+
+        let (named, more) = files_left_in(&dir, FILES_NAMED);
+        assert_eq!(
+            named.first(),
+            Some(&dir.join("registry").join("keys").join("nils")),
+            "the registry's key first: {named:?}"
+        );
+        assert!(
+            named.contains(&dir.join("working").join("0.dcm")),
+            "{named:?}"
+        );
+        assert_eq!(more, 0, "six files, and ten are named");
+
+        let (few, more) = files_left_in(&dir, 2);
+        assert_eq!(few.len(), 2);
+        assert_eq!(more, 4, "the rest are counted");
+        assert_eq!(
+            files_left_in(&home.join("absent"), FILES_NAMED),
+            (Vec::new(), 0)
+        );
+
+        // and a directory holding only the empty folders a setup makes is
+        // removable rather than named, as it always was
+        let empty = home.join("empty");
+        for sub in ["registry", "desk", "working"] {
+            std::fs::create_dir_all(empty.join(sub)).unwrap();
+        }
+        assert!(only_empty_setup_dirs(&empty));
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -18861,6 +20169,122 @@ mod tests {
         }
         // a quadlet is generated and carries its own [Install] section
         assert_eq!(hand_units_to_systemd(&[], false, false).len(), 2);
+    }
+
+    /// The sign-off of a container install names one arrangement for the
+    /// whole of it, kept by the quadlets: so every container the quadlets
+    /// start is the same account that made the install, and so is every
+    /// container the commands start where a person runs them by hand.
+    #[test]
+    fn every_container_of_a_podman_install_is_the_account_that_made_it() {
+        let mut plan = plan(Runtime::Podman);
+        plan.parts = vec![Part::Engine, Part::Desk, Part::Assistant];
+        assert_eq!(
+            runs_words(kept_by(&plan), Runtime::Podman),
+            if service_manager(Runtime::Podman, false).is_some() {
+                "in podman, by quadlets, back after a restart".to_string()
+            } else {
+                "in podman, started by this setup".to_string()
+            },
+            "one arrangement for the whole install"
+        );
+
+        for (name, body) in quadlets(&plan) {
+            if !name.ends_with(".container") {
+                continue;
+            }
+            assert!(
+                body.contains("User=0\nGroup=0\n"),
+                "{name} runs as the image's own user, and the rest do not:\n{body}"
+            );
+            assert!(!body.contains(":U"), "{name} hands a mount over:\n{body}");
+        }
+        for command in podman_commands(&plan) {
+            if !command.contains("podman run") {
+                continue;
+            }
+            assert!(
+                command.contains("--user 0:0"),
+                "the commands and the quadlets are the same install: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_install_signs_off_with_the_services_it_wrote() {
+        assert_eq!(
+            runs_words(Some(SYSTEM_MANAGER), Runtime::Machine),
+            "as systemd system units, back after a restart"
+        );
+        assert_eq!(
+            runs_words(Some("systemd user units"), Runtime::Machine),
+            "as systemd user units, back after a restart"
+        );
+        assert_eq!(
+            runs_words(Some("launchd agents"), Runtime::Machine),
+            "as launchd agents, back after a restart"
+        );
+        assert_eq!(
+            runs_words(Some("podman quadlets"), Runtime::Podman),
+            "in podman, by quadlets, back after a restart",
+            "the runtime is named once"
+        );
+        assert_eq!(
+            runs_words(Some("a compose file"), Runtime::Docker),
+            "in docker, by a compose file, back after a restart"
+        );
+        assert_eq!(runs_words(None, Runtime::Machine), "started by hand");
+        assert_eq!(
+            runs_words(None, Runtime::Docker),
+            "in docker, started by this setup"
+        );
+
+        let row = |rows: Vec<(&'static str, String)>, key: &str| {
+            rows.into_iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, value)| value)
+                .unwrap_or_else(|| panic!("no {key} row"))
+        };
+        // an install asked for the machine's own services plans them and
+        // signs off with them, where this machine has a systemd to take them
+        let mut machine = plan(Runtime::Machine);
+        machine.system = Some(SystemUnits::default());
+        if let Some(manager) = kept_by(&machine) {
+            assert_eq!(manager, SYSTEM_MANAGER);
+            assert_eq!(row(plan_rows(&machine), "services"), SYSTEM_MANAGER);
+            assert_eq!(
+                row(card_rows(&machine), "runs"),
+                "as systemd system units, back after a restart"
+            );
+        }
+
+        // and on every shape the plan's row and the sign-off agree, because
+        // both read the services from the same place
+        for runtime in [Runtime::Machine, Runtime::Podman, Runtime::Docker] {
+            for system in [None, Some(SystemUnits::default())] {
+                let mut p = plan(runtime);
+                p.system = system;
+                let services = row(plan_rows(&p), "services");
+                let runs = row(card_rows(&p), "runs");
+                if services == "none" {
+                    assert!(
+                        !runs.contains("back after a restart"),
+                        "nothing was written, and the sign-off says so: {runs}"
+                    );
+                    continue;
+                }
+                let named = services
+                    .strip_prefix(&format!("{} ", runtime.name()))
+                    .unwrap_or(&services);
+                assert!(runs.contains(named), "{runs} against {services}");
+            }
+        }
+
+        // an install that writes no services says so in both rows
+        let mut by_hand = plan(Runtime::Machine);
+        by_hand.service = false;
+        assert_eq!(kept_by(&by_hand), None);
+        assert_eq!(row(card_rows(&by_hand), "runs"), "started by hand");
     }
 
     #[test]
@@ -21652,7 +23076,11 @@ mod tests {
         let state = deployed_state(&plan);
         let dir = scratch("helper-refusals");
         let script = dir.join("nils-manage");
-        let text = helper_text(&plan, &state);
+        let text = helper_text(
+            &plan.dir,
+            plan.helper.as_ref().expect("a deployment keeps one"),
+            &state,
+        );
         std::fs::write(&script, &text).unwrap();
 
         for args in [
@@ -21713,7 +23141,11 @@ mod tests {
         let plan = deployment();
         let mut state = deployed_state(&plan);
         state.parts.get_mut("engine").expect("an engine").path = echo.to_string();
-        let text = helper_text(&plan, &state);
+        let text = helper_text(
+            &plan.dir,
+            plan.helper.as_ref().expect("a deployment keeps one"),
+            &state,
+        );
         assert!(
             text.contains(&format!("exec {echo} supervise reapply --part engine\n")),
             "{text}"
@@ -21793,7 +23225,11 @@ mod tests {
         }
         let plan = deployment();
         let state = deployed_state(&plan);
-        let text = helper_text(&plan, &state);
+        let text = helper_text(
+            &plan.dir,
+            plan.helper.as_ref().expect("a deployment keeps one"),
+            &state,
+        );
         let rule = sudoers_text(state.helper.as_ref().unwrap(), &state);
 
         for installed in [Some(text.as_str()), None] {
@@ -21861,7 +23297,11 @@ mod tests {
                      \x20   ;;\n\
                      esac\n";
         assert!(!helper_reapplies_all(older));
-        assert!(helper_reapplies_all(&helper_text(&plan, &state)));
+        assert!(helper_reapplies_all(&helper_text(
+            &plan.dir,
+            plan.helper.as_ref().expect("a deployment keeps one"),
+            &state
+        )));
 
         match reapply_all_call(&state, Some(older)) {
             Ok(asked) => assert!(
@@ -21919,6 +23359,177 @@ mod tests {
             !rule.exists() && !rule.with_extension("new").exists(),
             "a file visudo refused was left behind"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The helper of a record, written into a folder of the test's own, so
+    /// what an update writes can be read without root and without anything
+    /// of this machine's being touched.
+    fn helper_in(dir: &Path) -> Helper {
+        Helper {
+            account: "nils-deploy".to_string(),
+            path: dir.join("nils-manage").display().to_string(),
+            rule: dir.join("nils-manage-rule").display().to_string(),
+        }
+    }
+
+    /// An update writes the helper and its rule again from the record, as
+    /// setup and a repair do, so an install that only ever updates has the
+    /// helper its version expects rather than the one it was installed with.
+    #[test]
+    fn an_update_writes_the_helper_and_the_rule_from_the_record() {
+        if cfg!(target_os = "macos") || visudo_program().is_none() {
+            return;
+        }
+        let plan = deployment();
+        let dir = scratch("update-helper");
+        let helper = helper_in(&dir);
+        let mut state = deployed_state(&plan);
+        state.helper = Some(helper.clone());
+
+        assert_eq!(helper_on_update(&state, true), HelperOnUpdate::Written);
+        assert!(matches!(
+            write_helper(Path::new(&state.dir), &helper, &state),
+            HelperWritten::Done
+        ));
+
+        let text = std::fs::read_to_string(&helper.path).expect("the program");
+        let rule = std::fs::read_to_string(&helper.rule).expect("the rule");
+        // the word a helper written before this version does not have
+        assert!(helper_reapplies_all(&text), "{text}");
+        assert!(
+            rule.contains(&format!("{} reapply all", helper.path)),
+            "{rule}"
+        );
+        // and both come from the record: its directory, its account, its units
+        assert!(
+            text.contains(&format!("install in {}", state.dir)),
+            "{text}"
+        );
+        assert!(text.contains("systemctl restart nils-engine"), "{text}");
+        assert!(
+            rule.contains(&format!("{} ALL=(root)", helper.account)),
+            "{rule}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = |at: &str| std::fs::metadata(at).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&helper.path), 0o755);
+            assert_eq!(
+                mode(&helper.rule),
+                0o440,
+                "a sudoers file is root's to read"
+            );
+        }
+
+        // A rule visudo will not read leaves the machine the rule it has,
+        // rather than a supervisor allowed nothing at all.
+        let refused = sudoers_prepared(Path::new(&helper.rule), "not a sudoers file at all\n")
+            .expect_err("visudo reads it as nothing");
+        assert!(!refused.is_empty(), "it was refused without a reason");
+        assert_eq!(
+            std::fs::read_to_string(&helper.rule).expect("the rule"),
+            rule,
+            "the rule this machine had was replaced by one visudo refused"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An update of an install whose services are an account's own writes
+    /// neither the helper nor a rule: its record names none, and an update
+    /// is not where the privilege of a machine appears.
+    #[test]
+    fn an_update_of_an_install_with_no_helper_writes_neither() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let dir = scratch("update-no-helper");
+        let would_be = helper_in(&dir);
+        let state = State {
+            service: "systemd user units".to_string(),
+            system: None,
+            helper: None,
+            ..deployed_state(&plan)
+        };
+
+        assert_eq!(helper_on_update(&state, true), HelperOnUpdate::Untouched);
+        assert_eq!(helper_on_update(&state, false), HelperOnUpdate::Untouched);
+        refresh_helper(&state);
+        assert!(
+            !Path::new(&would_be.path).exists() && !Path::new(&would_be.rule).exists(),
+            "an install whose services are an account's own was given a helper"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An update that is not root says the helper was left as it is and goes
+    /// on: the parts are replaced by then, and an update stopped over a file
+    /// only root may write would leave the install half moved.
+    #[test]
+    fn an_update_that_is_not_root_says_so_and_carries_on() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let dir = scratch("update-helper-not-root");
+        let helper = helper_in(&dir);
+        let mut state = deployed_state(&plan);
+        state.helper = Some(helper.clone());
+
+        assert_eq!(helper_on_update(&state, false), HelperOnUpdate::NotRoot);
+        let said = helper_left_as_it_is(&helper);
+        assert!(said.contains(&helper.path), "{said}");
+        assert!(said.contains("takes root"), "{said}");
+        assert!(
+            said.contains("an update run as root writes both again"),
+            "it was said without saying what does write it: {said}"
+        );
+
+        // the step answers with nothing at all, so no update can fail on it
+        if !am_root() {
+            refresh_helper(&state);
+            assert!(
+                !Path::new(&helper.path).exists(),
+                "the helper was written by an account that is not root"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The command lines an update gives the rule are the helper's own words
+    /// for that record, one whole line each and not one more: the program and
+    /// the rule are written from the same list, so neither can name something
+    /// the other does not.
+    #[test]
+    fn the_words_the_rule_gains_in_an_update_are_the_helpers_own() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let plan = deployment();
+        let dir = scratch("update-helper-words");
+        let helper = helper_in(&dir);
+        let mut state = deployed_state(&plan);
+        state.helper = Some(helper.clone());
+
+        let rule = sudoers_text(&helper, &state);
+        let line = rule
+            .lines()
+            .find(|l| !l.starts_with('#'))
+            .expect("one line for the account");
+        let named: Vec<&str> = line
+            .split_once("NOPASSWD: ")
+            .expect("the command lines")
+            .1
+            .split(", ")
+            .collect();
+        let words: Vec<String> = helper_words(&state)
+            .iter()
+            .map(|words| format!("{} {}", helper.path, words.join(" ")))
+            .collect();
+        assert_eq!(named, words.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(!rule.contains('*'), "a wildcard takes anything: {rule}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -23021,7 +24632,7 @@ mod tests {
     }
 
     #[test]
-    fn podman_runs_a_pod_and_owns_its_mounts() {
+    fn podman_runs_a_pod_as_the_account_that_made_the_install() {
         let p = plan(Runtime::Podman);
         let commands = podman_commands(&p);
         assert!(commands[0].contains("pod create --name nils -p 127.0.0.1:7200:7200"));
@@ -23030,13 +24641,22 @@ mod tests {
         // at the paths the registry's places record, so a backup finds its place
         let (registry, backups) = (p.registry(), p.dir.join("backups"));
         assert!(
-            engine.contains(&format!("-v {0}:{0}:U", registry.display())),
+            engine.contains(&format!("-v {0}:{0} ", registry.display())),
             "{engine}"
         );
         assert!(
-            engine.contains(&format!("-v {0}:{0}:U", backups.display())),
+            engine.contains(&format!("-v {0}:{0} ", backups.display())),
             "{engine}"
         );
+        // podman maps this account to the container's root, so the engine
+        // reads the registry this account made and leaves it that account's;
+        // a mount handed over with `:U` took it into the subordinate range
+        assert!(
+            !commands.iter().any(|c| c.contains(":U")),
+            "no mount is handed to a container: {commands:?}"
+        );
+        assert!(engine.contains("--user 0:0"), "{engine}");
+        assert!(commands[2].contains("--user 0:0"), "{}", commands[2]);
         assert!(
             engine.contains(&format!(
                 "--registry {} --backup-dir {}",
@@ -23064,11 +24684,10 @@ mod tests {
         assert_eq!(commands[0], "docker network create nils");
         assert!(commands[1].contains("--network nils"), "{}", commands[1]);
         assert!(!commands[1].contains(":U"), "docker owns its own mounts");
-        // Podman remaps the user and `:U` hands the mount over. Docker does
-        // neither, so a container running as the image's own user cannot
-        // write the directory it was given, and the first thing it writes
-        // is the registry's key. Every docker run is told to be this
-        // account instead.
+        // Docker remaps nobody, so a container running as the image's own
+        // user cannot write the directory it was given, and the first thing
+        // it writes is the registry's key. Every docker run is told to be
+        // this account instead, by its own numbers.
         let me = as_this_account();
         assert!(!me.is_empty(), "a unix account is a uid and a gid");
         assert!(
@@ -23088,10 +24707,11 @@ mod tests {
             "both services run as this account:\n{compose}"
         );
         assert!(
-            !podman_commands(&plan(Runtime::Podman))
+            podman_commands(&plan(Runtime::Podman))
                 .iter()
-                .any(|c| c.contains("--user")),
-            "podman remaps on its own and needs no --user"
+                .filter(|c| c.contains(" run "))
+                .all(|c| c.contains("--user 0:0")),
+            "podman names the same account as the container's root"
         );
         assert!(commands[2].contains("-p 127.0.0.1:7200:7200"));
         let compose = docker_compose(&plan(Runtime::Docker));
@@ -23115,7 +24735,176 @@ mod tests {
                 .1
                 .contains("Image=ghcr.io/kineuro/nils:v1.0.0-alpha.2")
         );
-        assert!(files[1].1.contains(":U"), "a rootless mount is owned");
+        // the unit systemd starts runs as the account that made the install,
+        // and mounts the registry as it stands, as the run does
+        assert!(files[1].1.contains("User=0\nGroup=0"), "{}", files[1].1);
+        assert!(files[2].1.contains("User=0\nGroup=0"), "{}", files[2].1);
+        assert!(
+            !files.iter().any(|(_, text)| text.contains(":U")),
+            "no mount is handed to a container: {files:?}"
+        );
+    }
+
+    /// What podman would leave behind, given the words of a run: the account
+    /// the files belong to on this machine afterwards, and the account the
+    /// mounted directory itself belongs to. Rootless podman maps the
+    /// container's root to the account that started it and every other id in
+    /// the container into the subordinate range that account is lent, so a
+    /// container writing as the image's own user leaves files no account on
+    /// the machine owns; `:U` hands the directory to whoever the container
+    /// runs as, before it starts.
+    fn podman_would_leave(
+        words: &[String],
+        account: u32,
+        subordinate: u32,
+        image_user: u32,
+    ) -> (u32, u32) {
+        let in_container = words
+            .windows(2)
+            .find(|pair| pair[0] == "--user")
+            .and_then(|pair| pair[1].split(':').next()?.parse::<u32>().ok())
+            .unwrap_or(image_user);
+        let on_this_machine = if in_container == 0 {
+            account
+        } else {
+            subordinate + in_container - 1
+        };
+        let handed_over = words.iter().any(|word| word.ends_with(":U"));
+        (
+            on_this_machine,
+            if handed_over {
+                on_this_machine
+            } else {
+                account
+            },
+        )
+    }
+
+    #[test]
+    fn a_container_makes_its_registry_as_the_account_that_runs_setup() {
+        let mut p = plan(Runtime::Podman);
+        p.dir = PathBuf::from("/home/one/nils");
+        let steps = registry_container_steps(&p).expect("a podman install makes it in a container");
+        assert_eq!(steps.len(), 2, "the key, then the registry: {steps:?}");
+        let (key, init) = (&steps[0], &steps[1]);
+        assert_eq!(key[0], "podman");
+        assert_eq!(
+            key,
+            &owned_words(&[
+                "podman",
+                "run",
+                "--rm",
+                "-i",
+                "--user",
+                "0:0",
+                "-v",
+                "/home/one/nils/registry:/home/one/nils/registry",
+                "ghcr.io/kineuro/nils:v1.0.0-alpha.2",
+                "--registry",
+                "/home/one/nils/registry",
+                "key",
+                "add",
+                "nils",
+            ])
+        );
+        assert_eq!(
+            init,
+            &owned_words(&[
+                "podman",
+                "run",
+                "--rm",
+                "--user",
+                "0:0",
+                "-v",
+                "/home/one/nils/registry:/home/one/nils/registry",
+                "ghcr.io/kineuro/nils:v1.0.0-alpha.2",
+                "--registry",
+                "/home/one/nils/registry",
+                "init",
+                "--key",
+                "nils",
+            ])
+        );
+
+        // docker remaps nobody, and is told this account's own numbers
+        let mut d = plan(Runtime::Docker);
+        d.dir = PathBuf::from("/home/one/nils");
+        let steps = registry_container_steps(&d).expect("a docker install makes it in a container");
+        for step in &steps {
+            assert!(
+                step.iter()
+                    .all(|word| !word.ends_with(":U") && word != "0:0"),
+                "{step:?}"
+            );
+            if cfg!(unix) {
+                let me = as_this_account();
+                assert!(step.contains(&me), "{step:?}");
+            }
+        }
+
+        // a machine install makes it here, in this process or as the account
+        assert_eq!(registry_container_steps(&plan(Runtime::Machine)), None);
+    }
+
+    #[test]
+    fn the_registry_a_podman_install_makes_is_left_to_that_account() {
+        // the numbers of the install matrix's podman scenario: an account
+        // with a subordinate range of its own, and the engine's image, whose
+        // own user is 1500
+        let (account, subordinate, image_user) = (2000, 100_000, 1500);
+        let mut p = plan(Runtime::Podman);
+        p.dir = PathBuf::from("/home/one/nils");
+        let steps = registry_container_steps(&p).expect("a podman install makes it in a container");
+        for step in &steps {
+            assert_eq!(
+                podman_would_leave(step, account, subordinate, image_user),
+                (account, account),
+                "the account that runs setup owns what the step leaves: {step:?}"
+            );
+        }
+
+        // what it was: the image's own user, on a mount handed to it, left
+        // the registry to an id this machine has no account for
+        let handed_over: Vec<String> = steps[1]
+            .iter()
+            .map(|word| match word.as_str() {
+                w if w.contains(":/home/one/nils/registry") => format!("{w}:U"),
+                w => w.to_string(),
+            })
+            .filter(|word| word != "--user" && word != "0:0")
+            .collect();
+        assert_eq!(
+            podman_would_leave(&handed_over, account, subordinate, image_user),
+            (101_499, 101_499),
+            "{handed_over:?}"
+        );
+    }
+
+    #[test]
+    fn a_registry_an_older_install_left_to_a_remapped_id_is_named() {
+        let registry = PathBuf::from("/home/one/nils/registry");
+        let said = handed_to_the_container(Runtime::Podman, Some(101_499), Some(2000), &registry)
+            .expect("a registry belonging to another id is said");
+        assert!(said.contains("belongs to 101499"), "{said}");
+        assert!(said.contains("this account is 2000"), "{said}");
+        assert!(
+            said.contains("podman unshare chown -R 0:0 /home/one/nils/registry"),
+            "the one command that gives the files back: {said}"
+        );
+        // nothing to say where the registry is this account's already, where
+        // the machine cannot be asked, or where no container ever touched it
+        assert_eq!(
+            handed_to_the_container(Runtime::Podman, Some(2000), Some(2000), &registry),
+            None
+        );
+        assert_eq!(
+            handed_to_the_container(Runtime::Podman, None, Some(2000), &registry),
+            None
+        );
+        assert_eq!(
+            handed_to_the_container(Runtime::Machine, Some(0), Some(2000), &registry),
+            None
+        );
     }
 
     #[test]

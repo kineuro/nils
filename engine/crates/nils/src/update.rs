@@ -172,9 +172,35 @@ fn asset(base: &str, version: &str, file: &str) -> String {
     format!("{base}/download/v{version}/{file}")
 }
 
-/// The version the newest release names, from the one line `VERSION` file
-/// it publishes beside its binaries.
+/// The version the newest release names.
+///
+/// A repository whose releases are all pre-releases, which is every release
+/// before 1.0.0, has no `latest`: GitHub's own skips a pre-release, so
+/// `latest/download/VERSION` answers 404 every time and the answer is only
+/// ever in the listing. So the listing is asked first, which is one request
+/// instead of two and, when the API refuses, a refusal that can be told from
+/// a file that is not there.
+///
+/// A channel that is not GitHub has no listing and keeps its plain `VERSION`
+/// file beside its binaries, read exactly as before; so does a GitHub
+/// repository whose listing names no release, which is what a repository
+/// that does publish a latest release looks like to the API when the
+/// listing cannot be had.
 pub(crate) fn newest_version(base: &str) -> Result<String, Exit> {
+    if let Some(repo) = github_repo(base) {
+        match newest_tag(repo) {
+            Ok(Some(version)) => return Ok(version),
+            // A refusal is said as a refusal, and never as the 404 of the
+            // other URL, which is what the file below would answer with.
+            Err(refused) => return Err(fail(refused)),
+            Ok(None) => {}
+        }
+    }
+    version_file(base)
+}
+
+/// The version the one line `VERSION` file of the newest release names.
+fn version_file(base: &str) -> Result<String, Exit> {
     let url = format!("{base}/latest/download/VERSION");
     match fetch(&url) {
         Ok(bytes) => {
@@ -184,23 +210,164 @@ pub(crate) fn newest_version(base: &str) -> Result<String, Exit> {
             }
             Ok(text.trim_start_matches('v').to_string())
         }
-        // GitHub's own `latest` skips a pre-release, and a pre-release is all
-        // there is before 1.0.0, so ask the API for the newest tag instead.
-        Err(e) => newest_tag(base).ok_or_else(|| fail(format!("no release to update to: {e}"))),
+        Err(e) => Err(fail(format!("no release to update to: {e}"))),
     }
 }
 
-/// The newest tag of a GitHub repository, pre-release or not, from the API.
-/// `None` for a channel that is not GitHub, whose own `VERSION` is the answer.
-fn newest_tag(base: &str) -> Option<String> {
-    let repo = base
-        .strip_prefix("https://github.com/")?
-        .strip_suffix("/releases")?;
-    let body = fetch(&format!(
-        "https://api.github.com/repos/{repo}/releases?per_page=30"
-    ))
-    .ok()?;
-    newest_of(&String::from_utf8_lossy(&body))
+/// The `owner/name` of a base that is a GitHub repository's releases, and
+/// `None` for a channel of a deployment's own.
+fn github_repo(base: &str) -> Option<&str> {
+    base.strip_prefix("https://github.com/")?
+        .strip_suffix("/releases")
+}
+
+/// The newest tag of a GitHub repository, pre-release or not, from the API:
+/// `Ok(None)` where the listing names no release and the `VERSION` file is
+/// the answer, `Err` where the API refused, in words that say so.
+///
+/// The request carries no credential. The engine reads none for GitHub from
+/// anywhere, and the limit this runs into is the one for an address without
+/// a token.
+fn newest_tag(repo: &str) -> Result<Option<String>, String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=30");
+    // A request that never arrived is not a refusal: the file is asked next,
+    // and its own words are what a person is told.
+    let Ok(answer) = ask(&url) else {
+        return Ok(None);
+    };
+    newest_answered(&url, &answer)
+}
+
+/// What one answer from the releases API means: the newest version it names,
+/// nothing, or a refusal in the words to report.
+fn newest_answered(url: &str, answer: &Answer) -> Result<Option<String>, String> {
+    if answer.refused() {
+        return Err(answer.refusal(url));
+    }
+    Ok(newest_of(&answer.body))
+}
+
+/// One answer from GitHub's API, kept whole: a refusal is told from a
+/// listing by the status and the headers, which [`fetch`] throws away.
+#[derive(Default)]
+struct Answer {
+    status: u16,
+    body: String,
+    /// `x-ratelimit-limit`: how many requests an hour this address has.
+    limit: Option<String>,
+    /// `x-ratelimit-remaining`: how many of them are left.
+    remaining: Option<String>,
+    /// `x-ratelimit-reset`: when the hour begins again, in seconds since
+    /// the epoch.
+    reset: Option<String>,
+    /// `retry-after`: the seconds to wait, which a secondary limit sends
+    /// instead.
+    retry_after: Option<String>,
+}
+
+impl Answer {
+    /// Whether the API refused rather than answered: the two statuses it
+    /// refuses with.
+    fn refused(&self) -> bool {
+        matches!(self.status, 403 | 429)
+    }
+
+    /// Whether the refusal is the rate limit, by the headers it comes with
+    /// or the sentence GitHub sends.
+    fn rate_limited(&self) -> bool {
+        self.remaining.as_deref() == Some("0")
+            || self.retry_after.is_some()
+            || self.message().is_some_and(|m| {
+                let m = m.to_lowercase();
+                m.contains("rate limit") || m.contains("too many requests")
+            })
+    }
+
+    /// The sentence a refusal's body holds, where it holds one.
+    fn message(&self) -> Option<String> {
+        let body: serde_json::Value = serde_json::from_str(&self.body).ok()?;
+        Some(body["message"].as_str()?.trim().to_string())
+    }
+
+    /// When the requests come back, said as a person reads a clock: the
+    /// hour's own end where the headers give it, else the wait a secondary
+    /// limit asks for.
+    fn comes_back(&self) -> Option<String> {
+        if let Some(at) = self.reset.as_ref().and_then(|s| s.trim().parse().ok())
+            && let Ok(when) = jiff::Timestamp::from_second(at)
+        {
+            return Some(format!("at {} UTC", when.strftime("%Y-%m-%d %H:%M")));
+        }
+        let seconds: i64 = self.retry_after.as_ref()?.trim().parse().ok()?;
+        Some(format!("in {seconds} seconds"))
+    }
+
+    /// The refusal as it is reported: the limit that was reached and when it
+    /// resets, never the URL that always answers 404. A refusal for another
+    /// reason keeps GitHub's own words.
+    fn refusal(&self, url: &str) -> String {
+        let mut said = format!(
+            "the release listing was refused: {url}: http status {}",
+            self.status
+        );
+        if !self.rate_limited() {
+            if let Some(message) = self.message() {
+                said.push_str(&format!(": {message}"));
+            }
+            return said;
+        }
+        match &self.limit {
+            Some(limit) => said.push_str(&format!(
+                ": GitHub allows {limit} requests an hour from one address and this hour's are used"
+            )),
+            None => said
+                .push_str(": GitHub's limit of requests an hour from one address has been reached"),
+        }
+        match self.comes_back() {
+            Some(when) => said.push_str(&format!(", and they come back {when}")),
+            None => said.push_str(", and it says nothing of when they come back"),
+        }
+        said
+    }
+}
+
+/// Ask the API for one URL, keeping the status and the headers a refusal is
+/// read from. [`fetch`] keeps neither, so a 403 that says how long the wait
+/// is would come back as a line about a status and nothing else.
+fn ask(url: &str) -> Result<Answer, String> {
+    let response = ureq::get(url)
+        .header("accept", "application/vnd.github+json")
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .map_err(|e| format!("{url}: {e}"))?;
+    let status = response.status().as_u16();
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim().to_string())
+    };
+    let (limit, remaining, reset, retry_after) = (
+        header("x-ratelimit-limit"),
+        header("x-ratelimit-remaining"),
+        header("x-ratelimit-reset"),
+        header("retry-after"),
+    );
+    let body = response
+        .into_body()
+        .read_to_string()
+        .map_err(|e| format!("{url}: {e}"))?;
+    Ok(Answer {
+        status,
+        body,
+        limit,
+        remaining,
+        reset,
+        retry_after,
+    })
 }
 
 /// The highest version among the releases a listing names, drafts left out.
@@ -545,6 +712,98 @@ mod tests {
         assert_eq!(newest_of(released).as_deref(), Some("1.0.0"));
         assert_eq!(newest_of("[]"), None);
         assert_eq!(newest_of("not json"), None);
+    }
+
+    #[test]
+    fn a_lookup_the_api_refuses_says_it_was_refused_and_when_the_requests_come_back() {
+        let url = "https://api.github.com/repos/kineuro/nils/releases?per_page=30";
+        // 2026-09-18 09:20 UTC, as the header gives it: seconds since the epoch
+        let refused = Answer {
+            status: 403,
+            body: r#"{"message": "API rate limit exceeded for this address."}"#.to_string(),
+            limit: Some("60".to_string()),
+            remaining: Some("0".to_string()),
+            reset: Some("1789723200".to_string()),
+            ..Answer::default()
+        };
+        let said = newest_answered(url, &refused).unwrap_err();
+        assert!(said.contains("refused"), "{said}");
+        assert!(said.contains("60 requests an hour"), "{said}");
+        assert!(said.contains("at 2026-09-18 09:20 UTC"), "{said}");
+        assert!(
+            !said.contains("latest/download/VERSION") && !said.contains("404"),
+            "the URL that always answers 404 is not the reason: {said}"
+        );
+
+        // a secondary limit sends the wait instead of the hour's end
+        let secondary = Answer {
+            status: 429,
+            body: r#"{"message": "You have exceeded a secondary rate limit."}"#.to_string(),
+            retry_after: Some("60".to_string()),
+            ..Answer::default()
+        };
+        let said = newest_answered(url, &secondary).unwrap_err();
+        assert!(said.contains("in 60 seconds"), "{said}");
+
+        // a refusal for another reason keeps GitHub's own words
+        let other = Answer {
+            status: 403,
+            body: r#"{"message": "Resource not accessible"}"#.to_string(),
+            ..Answer::default()
+        };
+        let said = newest_answered(url, &other).unwrap_err();
+        assert!(
+            said.ends_with("http status 403: Resource not accessible"),
+            "{said}"
+        );
+
+        // and an answer is still read as the listing it is
+        let listing = Answer {
+            status: 200,
+            body: r#"[{"tag_name": "v1.0.0-alpha.35", "draft": false}]"#.to_string(),
+            ..Answer::default()
+        };
+        assert_eq!(
+            newest_answered(url, &listing).unwrap().as_deref(),
+            Some("1.0.0-alpha.35")
+        );
+    }
+
+    #[test]
+    fn a_channel_that_is_not_github_reads_the_version_file_it_publishes() {
+        let root = std::env::temp_dir().join(format!("nils-channel-{}", std::process::id()));
+        let dir = root.join("latest").join("download");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("VERSION"), "v1.0.0-alpha.7\n").unwrap();
+        let base = format!("file://{}", root.display());
+        assert_eq!(github_repo(&base), None, "a channel of its own has no API");
+        assert_eq!(newest_version(&base).ok().as_deref(), Some("1.0.0-alpha.7"));
+
+        std::fs::write(dir.join("VERSION"), "1.0.0\nand more\n").unwrap();
+        let Err(stopped) = newest_version(&base) else {
+            panic!("two lines are not a version")
+        };
+        assert!(
+            stopped.message.contains("a version on one line"),
+            "{}",
+            stopped.message
+        );
+
+        std::fs::remove_file(dir.join("VERSION")).unwrap();
+        let Err(stopped) = newest_version(&base) else {
+            panic!("there is no VERSION file to read")
+        };
+        assert!(
+            stopped.message.starts_with("no release to update to"),
+            "{}",
+            stopped.message
+        );
+        assert_eq!(
+            github_repo("https://github.com/kineuro/nils/releases"),
+            Some("kineuro/nils"),
+            "a GitHub base is asked of the listing first"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
