@@ -299,12 +299,68 @@ fn model_reach_note(runtime: Runtime, url: &str, pasta: fn() -> bool) -> Option<
     })
 }
 
+/// Where a step that opens the registry runs. A registry records the address
+/// the engine dials from where it was made, so a step that runs somewhere
+/// else has to read that address from where it stands: this is the one thing
+/// that decides which address any step dials, and [`dsn_from`] is the one
+/// place that answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepRuns {
+    /// In setup's own process, or as the engine's account under runuser:
+    /// either way a process on this machine.
+    OnTheMachine,
+    /// Inside a container of this runtime, which calls this machine by an
+    /// alias of its own.
+    InAContainer(Runtime),
+}
+
+/// The address a step dials: the one recorded, read from where the step runs.
+/// This machine's loopback becomes the container's alias for a step in a
+/// container, the alias becomes the loopback for a step out here, and an
+/// address that names neither, a database on another machine, is left exactly
+/// as it was given.
+fn dsn_from(runs: StepRuns, dsn: &str) -> String {
+    match runs {
+        StepRuns::OnTheMachine => dsn_on_machine(dsn),
+        StepRuns::InAContainer(runtime) => dsn_for(runtime, dsn),
+    }
+}
+
+/// The address a step dials instead of the one it was given, where the two
+/// differ. `None` where they are the same, which is every machine install
+/// and every database named the same from both sides: there the step opens
+/// the registry exactly as it always did.
+fn dial_instead(runs: StepRuns, recorded: Option<&str>) -> Option<String> {
+    let recorded = recorded?;
+    let dialled = dsn_from(runs, recorded);
+    (dialled != recorded).then_some(dialled)
+}
+
+/// A registry home as a step on this machine opens it. `nils.toml` keeps the
+/// address the engine dials from where it runs, which for a container
+/// install is the name a container calls this machine by; it is not written
+/// over, since the engine goes on running in the container. The step out
+/// here dials the same database by the name this machine has for it.
+fn home_on_machine(home: &Home) -> Home {
+    let recorded = home.read_config().ok().and_then(|c| c.dsn);
+    home.clone()
+        .dialling(dial_instead(StepRuns::OnTheMachine, recorded.as_deref()))
+}
+
+/// Whether a connection string names this machine, however it is written:
+/// the loopback a step out here dials, or the alias a container dials it by.
+/// A database on another machine names neither.
+fn dsn_names_this_machine(dsn: &str) -> bool {
+    dsn_from(StepRuns::OnTheMachine, dsn) != dsn
+        || dsn_from(StepRuns::InAContainer(Runtime::Podman), dsn) != dsn
+}
+
 /// A connection string the other way about: the name a container calls this
 /// machine by, back to the loopback a process on the machine reaches it at.
 /// A registry made inside a container keeps the address it dialled, and an
 /// uninstall runs on the machine. Only a loopback is ever written over on
 /// the way in, so only the alias is ever written back here, and a database
-/// on another machine is left as it was named.
+/// on another machine is left as it was named. Asked through [`dsn_from`].
 fn dsn_on_machine(dsn: &str) -> String {
     let mut out = dsn.to_string();
     for alias in ["host.containers.internal", "host.docker.internal"] {
@@ -317,7 +373,7 @@ fn dsn_on_machine(dsn: &str) -> String {
 /// runs: on this machine as it was typed, in a container with this
 /// machine's loopback named the way a container reaches it. Both forms the
 /// driver takes are read, a URL and `key=value` pairs; anything else is left
-/// as it was.
+/// as it was. Asked through [`dsn_from`].
 fn dsn_for(runtime: Runtime, dsn: &str) -> String {
     let Some(alias) = host_from_container(runtime) else {
         return dsn.to_string();
@@ -364,7 +420,7 @@ fn dsn_for(runtime: Runtime, dsn: &str) -> String {
 /// Postgres must allow. Nothing when the engine runs on the machine or the
 /// database is somewhere else.
 fn postgres_reach_note(runtime: Runtime, dsn: &str, pasta: fn() -> bool) -> Option<String> {
-    if dsn_for(runtime, dsn) == dsn {
+    if dsn_from(StepRuns::InAContainer(runtime), dsn) == dsn {
         return None;
     }
     Some(match runtime {
@@ -4182,7 +4238,7 @@ fn plan_and_sources(state: &State, channel: Option<&str>) -> (Plan, Option<(Stri
         host_loopback: state.runtime == "podman"
             && (state.parts.contains_key("assistant")
                 || state.parts.contains_key("desk")
-                || registry_dsn(&dir).is_some_and(|d| d.contains("host.containers.internal")))
+                || registry_dsn(&dir).is_some_and(|d| dsn_names_this_machine(&d)))
             && podman_has_pasta(),
         postgres: state
             .parts
@@ -4248,7 +4304,7 @@ fn registry_sources(dir: &Path) -> Option<Vec<(String, PathBuf)>> {
     if !home.exists() {
         return None;
     }
-    let mut store = home.open_as_it_stands().ok()?;
+    let mut store = home_on_machine(&home).open_as_it_stands().ok()?;
     let places = place::active(&mut store).ok()?;
     Some(
         places
@@ -5988,9 +6044,12 @@ fn questions(
                             ),
                         };
                         let refused = console.probe(&key, || match &asking {
-                            None => nils_registry::store::Store::connect_postgres(&dsn, &schema)
-                                .err()
-                                .map(|e| with_causes(&e)),
+                            None => nils_registry::store::Store::connect_postgres(
+                                &dsn_from(StepRuns::OnTheMachine, &dsn),
+                                &schema,
+                            )
+                            .err()
+                            .map(|e| with_causes(&e)),
                             Some(acting) => postgres_refused_as(acting, &dsn, &schema),
                         });
                         let Some(why) = refused else {
@@ -6452,7 +6511,7 @@ fn questions(
     let helper = helper_of(system.as_ref(), service);
 
     let postgres_here = matches!(&backend, BackendChoice::Postgres { dsn, .. }
-        if dsn_for(Runtime::Podman, dsn) != *dsn);
+        if dsn_names_this_machine(dsn));
     // the desk in the pod reaches the supervisor on this host's loopback
     let host_loopback = runtime == Runtime::Podman
         && (parts.contains(&Part::Assistant) || parts.contains(&Part::Desk) || postgres_here)
@@ -8297,7 +8356,7 @@ fn registry_container_steps(plan: &Plan) -> Option<Vec<Vec<String>>> {
             "--backend".to_string(),
             "postgres".to_string(),
             "--dsn".to_string(),
-            dsn_for(plan.runtime, dsn),
+            dsn_from(StepRuns::InAContainer(plan.runtime), dsn),
             "--schema".to_string(),
             schema.clone(),
         ];
@@ -8373,9 +8432,12 @@ fn make_registry(
         // costs a sentence rather than half a registry: as the account that
         // will connect, where that is not this one.
         let refused = match acting {
-            None => nils_registry::store::Store::connect_postgres(dsn, schema)
-                .err()
-                .map(|e| with_causes(&e)),
+            None => nils_registry::store::Store::connect_postgres(
+                &dsn_from(StepRuns::OnTheMachine, dsn),
+                schema,
+            )
+            .err()
+            .map(|e| with_causes(&e)),
             Some(acting) => postgres_refused_as(acting, dsn, schema)
                 .map(|why| format!("{why} (asked as {})", acting.account)),
         };
@@ -8470,7 +8532,12 @@ fn make_registry(
     home.keys(None)
         .add("nils", bytes)
         .map_err(|e| fail(e.to_string()))?;
-    home.init(&registry_init(&plan.backend))
+    // The connection string goes into `nils.toml` as it was given, and is
+    // dialled from here, which is where this process runs.
+    let init = registry_init(&plan.backend);
+    home.clone()
+        .dialling(dial_instead(StepRuns::OnTheMachine, init.dsn.as_deref()))
+        .init(&init)
         .map_err(|e| fail(e.to_string()))?;
     console.progress(&format!("registry at {}", home.dir().display()));
     Ok(())
@@ -8496,7 +8563,7 @@ fn declare_places(
             // a place asked for and not declared is a registry that does not
             // read the directory the person named, so each failure here stops
             // the install
-            let mut registry = crate::open(home).map_err(|e| {
+            let mut registry = crate::open(&home_on_machine(home)).map_err(|e| {
                 let note = handed_to_the_container(
                     plan.runtime,
                     registry_owner(home.dir()),
@@ -8727,14 +8794,20 @@ pub(crate) enum RegistryStep {
     Declare,
 }
 
-/// One step of the registry's, taken by the account running this.
+/// One step of the registry's, taken by the account running this. Setup runs
+/// every one of them under runuser, so each runs on this machine and dials
+/// the database by the name this machine has for it, whatever address the
+/// registry records for the engine in its container.
 pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit> {
     match step {
         RegistryStep::Connect { schema } => {
             let dsn = dsn_on_input(std::io::stdin().lock())?;
-            nils_registry::store::Store::connect_postgres(&dsn, &schema)
-                .map(|_| ())
-                .map_err(|e| fail(with_causes(&e)))
+            nils_registry::store::Store::connect_postgres(
+                &dsn_from(StepRuns::OnTheMachine, &dsn),
+                &schema,
+            )
+            .map(|_| ())
+            .map_err(|e| fail(with_causes(&e)))
         }
         RegistryStep::Drop { schema } => {
             let dsn = dsn_on_input(std::io::stdin().lock())?;
@@ -8755,13 +8828,13 @@ pub(crate) fn registry_step(home: &Home, step: RegistryStep) -> Result<(), Exit>
             Ok(())
         }
         RegistryStep::Sources => {
-            println!("{}", sources_here(home)?);
+            println!("{}", sources_here(&home_on_machine(home))?);
             Ok(())
         }
         RegistryStep::Declare => {
             let specs: Vec<PlaceSpec> = serde_json::from_reader(std::io::stdin().lock())
                 .map_err(|e| usage(format!("the places on the input: {e}")))?;
-            let mut registry = crate::open(home).map_err(|e| {
+            let mut registry = crate::open(&home_on_machine(home)).map_err(|e| {
                 fail(format!(
                     "the registry did not open to declare its places: {}",
                     e.message
@@ -8822,8 +8895,11 @@ fn registry_made_here(
             BackendChoice::Postgres { dsn, schema }
         }
     };
+    let init = registry_init(&choice);
     let registry = home
-        .init(&registry_init(&choice))
+        .clone()
+        .dialling(dial_instead(StepRuns::OnTheMachine, init.dsn.as_deref()))
+        .init(&init)
         .map_err(|e| fail(e.to_string()))?;
     Ok(registry.meta().clone())
 }
@@ -8855,8 +8931,11 @@ fn drop_schemas_here(dsn: &str, schema: &str) -> Result<(), String> {
     if !plain_identifier(schema) {
         return Err(format!("{schema} is not a schema name this drops"));
     }
-    let mut store = nils_registry::store::Store::connect_postgres(&dsn_on_machine(dsn), schema)
-        .map_err(|e| with_causes(&e))?;
+    let mut store = nils_registry::store::Store::connect_postgres(
+        &dsn_from(StepRuns::OnTheMachine, dsn),
+        schema,
+    )
+    .map_err(|e| with_causes(&e))?;
     store
         .batch(&drop_schemas_sql(schema))
         .map_err(|e| with_causes(&e))
@@ -16049,7 +16128,7 @@ fn outside_the_install(
     // address at all. The drop and the command a person is handed both name
     // the database as this machine dials it, so the one that is carried out
     // and the one that is printed are the same connection.
-    let registry = registry.map(|(dsn, at)| (dsn_on_machine(&dsn), at));
+    let registry = registry.map(|(dsn, at)| (dsn_from(StepRuns::OnTheMachine, &dsn), at));
     // A Postgres this setup runs is the install's own: its data lives under
     // the base directory and goes with it, so there is no schema of a site's
     // to drop and none to name.
@@ -25536,6 +25615,108 @@ mod tests {
         assert!(docker.contains("pg_hba.conf"), "{docker}");
         let no_pasta = postgres_reach_note(Runtime::Podman, url, || false).unwrap();
         assert!(no_pasta.contains("pasta"), "{no_pasta}");
+    }
+
+    #[test]
+    fn every_step_dials_the_database_from_where_that_step_runs() {
+        let here = "postgres://nils:secret@127.0.0.1:5432/nils";
+        let in_a_pod = "postgres://nils:secret@host.containers.internal:5432/nils";
+        let in_a_container = "postgres://nils:secret@host.docker.internal:5432/nils";
+        // the address as it was typed on the machine, read from each side
+        assert_eq!(dsn_from(StepRuns::OnTheMachine, here), here);
+        assert_eq!(
+            dsn_from(StepRuns::InAContainer(Runtime::Podman), here),
+            in_a_pod
+        );
+        assert_eq!(
+            dsn_from(StepRuns::InAContainer(Runtime::Docker), here),
+            in_a_container
+        );
+        assert_eq!(
+            dsn_from(StepRuns::InAContainer(Runtime::Machine), here),
+            here
+        );
+        // and the address a container install records, read from each side
+        assert_eq!(dsn_from(StepRuns::OnTheMachine, in_a_pod), here);
+        assert_eq!(dsn_from(StepRuns::OnTheMachine, in_a_container), here);
+        assert_eq!(
+            dsn_from(StepRuns::InAContainer(Runtime::Podman), in_a_pod),
+            in_a_pod
+        );
+        // a database on another machine is named the same from both sides
+        let elsewhere = "postgres://nils@db.example.org/nils";
+        for runs in [
+            StepRuns::OnTheMachine,
+            StepRuns::InAContainer(Runtime::Podman),
+            StepRuns::InAContainer(Runtime::Docker),
+        ] {
+            assert_eq!(dsn_from(runs, elsewhere), elsewhere, "{runs:?}");
+            assert_eq!(dial_instead(runs, Some(elsewhere)), None, "{runs:?}");
+        }
+        // nothing is dialled another way where the recorded address is the
+        // one the step dials, which is every machine install
+        assert_eq!(dial_instead(StepRuns::OnTheMachine, Some(here)), None);
+        assert_eq!(dial_instead(StepRuns::OnTheMachine, None), None);
+        assert_eq!(
+            dial_instead(StepRuns::OnTheMachine, Some(in_a_pod)).as_deref(),
+            Some(here)
+        );
+        assert!(dsn_names_this_machine(here));
+        assert!(dsn_names_this_machine(in_a_pod));
+        assert!(dsn_names_this_machine(in_a_container));
+        assert!(!dsn_names_this_machine(elsewhere));
+    }
+
+    #[test]
+    fn a_step_on_this_machine_opens_a_registry_a_container_made_at_this_machines_address() {
+        let dir = scratch("registry-dialled-from-here");
+        let at = |name: &str, dsn: &str| {
+            let home = Home::new(dir.join(name));
+            std::fs::create_dir_all(home.dir()).unwrap();
+            std::fs::write(
+                home.config_path(),
+                format!("backend = \"postgres\"\ndsn = \"{dsn}\"\nschema = \"nils\"\n"),
+            )
+            .unwrap();
+            home
+        };
+        let pod = at(
+            "made-in-a-pod",
+            "postgres://nils@host.containers.internal:5432/nils",
+        );
+        assert_eq!(
+            home_on_machine(&pod).dialled(),
+            Some("postgres://nils@127.0.0.1:5432/nils"),
+            "a step out here dials the database this machine's way"
+        );
+        assert!(
+            std::fs::read_to_string(pod.config_path())
+                .unwrap()
+                .contains("host.containers.internal"),
+            "what the registry records is not written over"
+        );
+        let machine = at("made-here", "postgres://nils@127.0.0.1:5432/nils");
+        assert_eq!(
+            home_on_machine(&machine).dialled(),
+            None,
+            "a machine install opens its registry exactly as it always did"
+        );
+        let elsewhere = at("elsewhere", "postgres://nils@db.example.org/nils");
+        assert_eq!(
+            home_on_machine(&elsewhere).dialled(),
+            None,
+            "a database on another machine is named the same from both sides"
+        );
+        let sqlite = Home::new(dir.join("sqlite"));
+        std::fs::create_dir_all(sqlite.dir()).unwrap();
+        std::fs::write(sqlite.config_path(), "backend = \"sqlite\"\n").unwrap();
+        assert_eq!(home_on_machine(&sqlite).dialled(), None);
+        assert_eq!(
+            home_on_machine(&Home::new(dir.join("nothing"))).dialled(),
+            None,
+            "a directory that holds no registry yet"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
