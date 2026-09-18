@@ -4975,6 +4975,62 @@ fn own_dirs(plan: &Plan) -> Vec<PathBuf> {
     out
 }
 
+/// The mode a directory setup makes is made with, where what it holds asks
+/// for one, and `None` where it is made with whatever the mask allows, as
+/// every directory here was before.
+///
+/// The registry alone: it holds the key store, which is 0700, and
+/// `nils.toml`, which is 0600, and on an install with its own Postgres the
+/// database's own directory, so a directory anyone may list says less than
+/// everything in it. The archives, the work in flight and what is exported
+/// are the places an install and the people using it meet, and a site that
+/// declared none of them still reads them by hand, so narrowing them would
+/// take away reach a site has today rather than tidy anything. The desk's
+/// directory keeps its configuration at 0600 already, and its store is the
+/// desk's to make. The mode is set only where setup makes the directory
+/// itself; what it finds it leaves alone, mode and all.
+fn own_dir_mode(path: &Path, registry: &Path) -> Option<u32> {
+    (path == registry).then_some(0o700)
+}
+
+/// The directories an install makes of its own, each made where it is not
+/// there yet and given the mode its contents ask for. A directory that was
+/// already there is left exactly as it is: it is the site's, or an older
+/// install's, and record 30 settled that setup does not change what it
+/// finds. A mode that cannot be set is said rather than stopping an install,
+/// since everything in the directory is written with a mode of its own.
+fn make_own_dirs(plan: &Plan, console: &Console) -> Result<(), Exit> {
+    let registry = plan.registry();
+    for path in own_dirs(plan) {
+        let there = path.is_dir();
+        std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+        if there {
+            continue;
+        }
+        if let Some(mode) = own_dir_mode(&path, &registry)
+            && let Err(e) = narrow_dir(&path, mode)
+        {
+            console.warn(&format!(
+                "{} was left open to this machine, at whatever the mask allows: {e}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A directory made no wider than `mode`, where the platform has modes.
+fn narrow_dir(path: &Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
+}
+
 /// The backup place a site's archives belong in: the one the registry place
 /// names, else the first backup place of all.
 fn backup_place(places: &[PlaceDecl]) -> Option<&PlaceDecl> {
@@ -6798,9 +6854,7 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         println!("nothing was changed");
         return Ok(());
     }
-    for path in own_dirs(&plan) {
-        std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
-    }
+    make_own_dirs(&plan, console)?;
     let mut stages = Vec::new();
     if plan.postgres.is_some() {
         stages.push((Stage::Postgres, format!("Postgres {POSTGRES_MAJOR}")));
@@ -7679,9 +7733,7 @@ fn place(
     // Read before anything is placed: an account that lingers already
     // lingered without NILS, and a purge leaves it as it found it.
     let lingered_before = whoami().is_some_and(|me| lingers(&me));
-    for path in own_dirs(plan) {
-        std::fs::create_dir_all(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
-    }
+    make_own_dirs(plan, console)?;
 
     // The engine: the running binary, or an image.
     let me = std::env::current_exe()
@@ -25652,6 +25704,97 @@ mod tests {
             !files.iter().any(|(p, _)| p.starts_with("/data")),
             "a site's own filesystems are not an installer's to hand to an account: {files:?}"
         );
+    }
+
+    /// The registry holds a key store at 0700 and a `nils.toml` at 0600, so
+    /// the directory around them is made 0700 as well. What setup finds is
+    /// the site's, at whatever mode the site keeps it, and a place a site
+    /// declared is not setup's to make or to narrow.
+    #[cfg(unix)]
+    #[test]
+    fn a_registry_directory_setup_makes_is_0700_and_one_that_was_there_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let registry = Path::new("/srv/nils/registry");
+        assert_eq!(own_dir_mode(registry, registry), Some(0o700));
+        for open in [
+            "/srv/nils/desk",
+            "/srv/nils/backups",
+            "/srv/nils/working",
+            "/srv/nils/export",
+        ] {
+            assert_eq!(
+                own_dir_mode(Path::new(open), registry),
+                None,
+                "{open} is made as it always was"
+            );
+        }
+
+        let console = Console::new(true);
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let dir = scratch("own-dirs");
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        // a desk directory an earlier install left behind, at its own mode
+        std::fs::create_dir_all(dir.join("desk")).unwrap();
+        std::fs::set_permissions(dir.join("desk"), std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(make_own_dirs(&plan, &console).is_ok());
+        assert_eq!(mode(&dir.join("registry")), 0o700);
+        assert_eq!(
+            mode(&dir.join("desk")),
+            0o750,
+            "a directory that was there keeps the mode it had"
+        );
+        for made in ["backups", "working", "export"] {
+            assert!(dir.join(made).is_dir(), "{made} is still made");
+        }
+
+        // a registry an install left behind is the site's too
+        let again = scratch("own-dirs-again");
+        std::fs::create_dir_all(again.join("registry")).unwrap();
+        std::fs::set_permissions(
+            again.join("registry"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        plan.dir = again.clone();
+        assert!(make_own_dirs(&plan, &console).is_ok());
+        assert_eq!(
+            mode(&again.join("registry")),
+            0o755,
+            "setup does not change what it finds"
+        );
+
+        // a place a site declared, made and kept by the site
+        let site_dir = scratch("own-dirs-site");
+        let archives = scratch("own-dirs-archives");
+        std::fs::set_permissions(&archives, std::fs::Permissions::from_mode(0o755)).unwrap();
+        plan.dir = site_dir.clone();
+        plan.site = Some(Site {
+            places: places_given(&[
+                format!("archives={},role=backup", archives.display()),
+                format!(
+                    "registry={},role=registry,backup=archives",
+                    site_dir.join("registry").display()
+                ),
+            ])
+            .unwrap(),
+            ..Site::default()
+        });
+        assert_eq!(
+            plan.backups(),
+            archives,
+            "the archives are the site's place"
+        );
+        assert!(make_own_dirs(&plan, &console).is_ok());
+        assert_eq!(mode(&site_dir.join("registry")), 0o700);
+        assert_eq!(
+            mode(&archives),
+            0o755,
+            "a place the site declared is left as the site keeps it"
+        );
+        for gone in [&dir, &again, &site_dir, &archives] {
+            let _ = std::fs::remove_dir_all(gone);
+        }
     }
 
     #[test]
