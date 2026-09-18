@@ -7829,9 +7829,20 @@ fn place(
 
     // The provider, once the desk is on this machine to register itself at
     // an Authentik: what it answers is what the desk, the engine and Kvasir
-    // are told.
+    // are told. Nothing is registered, and no secret written, until setup
+    // knows the desk's configuration can be written, so a refusal below
+    // leaves no registration at a provider setup does not own.
     let registered;
-    let plan = match register_desk(plan, state, answers, console) {
+    let refused = plan
+        .has(Part::Desk)
+        .then(|| {
+            let on_disk = std::fs::read_to_string(plan.desk_config()).ok();
+            desk_config_refusal(plan, on_disk.as_deref())
+        })
+        .flatten();
+    let plan = match settle_provider(plan, answers, refused, || {
+        register_desk(plan, state, answers, console)
+    })? {
         Some(oidc) => {
             registered = Plan {
                 oidc: Some(oidc),
@@ -7843,12 +7854,6 @@ fn place(
     };
     state.oidc = plan.oidc.clone();
     if plan.has(Part::Desk) {
-        if let Some(Provider::Registered {
-            secret: Some(secret),
-        }) = &answers.provider
-        {
-            write_secret(&desk_secret_file(plan), secret)?;
-        }
         if let Err(e) = write_supervisor(plan) {
             console.warn(&format!("the supervisor was not set up: {}", e.message));
         }
@@ -9099,33 +9104,15 @@ fn pack_destination(plan: &Plan, me: &Path) -> PathBuf {
 fn write_desk_config(plan: &Plan) -> Result<(), Exit> {
     let path = plan.desk_config();
     let existing = std::fs::read_to_string(&path).ok();
-    let written = desk_config_text(plan);
-    let text = match existing
-        .as_deref()
-        .map(|text| desk_config_merged(text, &written))
-    {
-        None => written,
-        Some(Ok(Some(merged))) => merged,
-        Some(Ok(None)) => return Ok(()),
-        // A file that no longer reads may still say where the people are, and
-        // the configuration written in its place keeps the desk there.
-        Some(Err(())) => existing
-            .as_deref()
-            .and_then(desk_store_line)
-            .and_then(|store| {
-                let named = format!("store = {}\n", toml::Value::String(store));
-                desk_config_merged(&named, &written).ok().flatten()
-            })
-            .unwrap_or(written),
+    let Some(text) = desk_config_to_write(plan, existing.as_deref()) else {
+        return Ok(());
     };
     // The desk starts on whatever store it is named, making an empty one
     // where there is none, and says nothing: a rerun once left a desk with no
     // one in it while its people sat in the store it had been named before.
-    let (desk, container) = (plan.desk_dir(), plan.runtime.container());
-    if let Some(refused) = desk_store_left(
-        desk_store(&desk, container, existing.as_deref()).as_deref(),
-        desk_store(&desk, container, Some(&text)).as_deref(),
-    ) {
+    // The same question is asked before anything is registered; this is the
+    // net, for a store that changed under setup while it worked.
+    if let Some(refused) = desk_config_refusal(plan, existing.as_deref()) {
         return Err(fail(refused));
     }
     if let Some(dir) = path.parent() {
@@ -9133,6 +9120,50 @@ fn write_desk_config(plan: &Plan) -> Result<(), Exit> {
     }
     // it holds the supervisor's token, so only this account reads it
     write_secret_bytes(&path, text.as_bytes())
+}
+
+/// The text `write_desk_config` would put on disk for a plan, given the
+/// configuration that is there: the whole of what setup writes where there is
+/// none, the file on disk with what setup writes set in it where it reads,
+/// and where it no longer reads as TOML the whole again on the store its
+/// lines still name. `None` where everything setup writes already agrees with
+/// the file, and nothing is written at all.
+fn desk_config_to_write(plan: &Plan, existing: Option<&str>) -> Option<String> {
+    let written = desk_config_text(plan);
+    match existing.map(|text| desk_config_merged(text, &written)) {
+        None => Some(written),
+        Some(Ok(Some(merged))) => Some(merged),
+        Some(Ok(None)) => None,
+        // A file that no longer reads may still say where the people are, and
+        // the configuration written in its place keeps the desk there.
+        Some(Err(())) => Some(
+            existing
+                .and_then(desk_store_line)
+                .and_then(|store| {
+                    let named = format!("store = {}\n", toml::Value::String(store));
+                    desk_config_merged(&named, &written).ok().flatten()
+                })
+                .unwrap_or(written),
+        ),
+    }
+}
+
+/// Why the desk's configuration may not be written for a plan, asked of the
+/// file on disk and the text that would replace it. It is a question about
+/// the store alone, and no answer a provider gives names a store: setup
+/// always writes the store beside the configuration, and `desk_paths_kept`
+/// keeps the one the file already names, whatever it is. A registration
+/// settles the `[oidc]` table and nothing else, so this answers the same
+/// before a registration is made as after, which is what lets it be asked
+/// first. Where nothing would be written the store on disk stands, and the
+/// desk stays where it is.
+fn desk_config_refusal(plan: &Plan, existing: Option<&str>) -> Option<String> {
+    let text = desk_config_to_write(plan, existing);
+    let (desk, container) = (plan.desk_dir(), plan.runtime.container());
+    desk_store_left(
+        desk_store(&desk, container, existing).as_deref(),
+        desk_store(&desk, container, text.as_deref().or(existing)).as_deref(),
+    )
 }
 
 /// What setup keeps in the desk's configuration: the keys and the tables it
@@ -9724,6 +9755,39 @@ fn jwks_of(discovery: &serde_json::Value) -> Option<String> {
     discovery["jwks_uri"].as_str().map(str::to_string)
 }
 
+/// The desk's provider, settled before anything is made where setup cannot
+/// take it back. `refused` is what record 30's guard says of the desk's
+/// configuration, asked of the disk before this and not of the provider:
+/// where it refuses, no registration is made and no secret is written, so a
+/// rerun leaves the registration already at the provider, and the secret
+/// beside the configuration that names it, exactly as they were. Where it
+/// passes, the registration is made and a secret a person gave is written,
+/// in the order they always were. A print never reaches here, and registers
+/// nothing.
+fn settle_provider(
+    plan: &Plan,
+    answers: &Answers,
+    refused: Option<String>,
+    register: impl FnOnce() -> Option<OidcPlan>,
+) -> Result<Option<OidcPlan>, Exit> {
+    if let Some(why) = refused {
+        return Err(fail(format!(
+            "{why}. Nothing was registered at a provider and no secret was written. Name that \
+             store in {}, or carry the people into the store it names, and run setup again",
+            plan.desk_config().display()
+        )));
+    }
+    let oidc = register();
+    if plan.has(Part::Desk)
+        && let Some(Provider::Registered {
+            secret: Some(secret),
+        }) = &answers.provider
+    {
+        write_secret(&desk_secret_file(plan), secret)?;
+    }
+    Ok(oidc)
+}
+
 /// The desk registered at an Authentik by the desk's own register command:
 /// the application, its provider and signing key, and the groups bound to
 /// the entitlements, each made where it is not there yet. The client's
@@ -9879,7 +9943,7 @@ fn registered_at(said: &str) -> Option<OidcPlan> {
 }
 
 /// What setup does with the desk's configuration it finds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DeskConfigFate {
     /// there is none, so it is written whole
     New,
@@ -9889,23 +9953,35 @@ enum DeskConfigFate {
     Updated,
     /// it no longer reads as TOML, so it is written whole again
     Replaced,
+    /// the guard refuses it, so it is not written and the run stops there,
+    /// having registered nothing
+    Refused(String),
 }
 
 impl DeskConfigFate {
-    fn words(self) -> &'static str {
+    fn words(&self) -> String {
         match self {
-            DeskConfigFate::New => "will be written",
-            DeskConfigFate::Kept => "kept as it is",
-            DeskConfigFate::Updated => "updated, keeping what was set by hand",
-            DeskConfigFate::Replaced => "written again, since it does not read as TOML",
+            DeskConfigFate::New => "will be written".to_string(),
+            DeskConfigFate::Kept => "kept as it is".to_string(),
+            DeskConfigFate::Updated => "updated, keeping what was set by hand".to_string(),
+            DeskConfigFate::Replaced => "written again, since it does not read as TOML".to_string(),
+            DeskConfigFate::Refused(why) => {
+                format!("will not be written, and nothing will be registered at a provider: {why}")
+            }
         }
     }
 }
 
 /// What `write_desk_config` will do with the file on disk, said in the plan
-/// before anything is changed.
+/// before anything is changed. Where the guard would refuse it, the print
+/// says that rather than a write the run would never make, and says it in a
+/// plan that changes nothing.
 fn desk_config_fate(plan: &Plan) -> DeskConfigFate {
-    match std::fs::read_to_string(plan.desk_config()) {
+    let existing = std::fs::read_to_string(plan.desk_config());
+    if let Some(refused) = desk_config_refusal(plan, existing.as_deref().ok()) {
+        return DeskConfigFate::Refused(refused);
+    }
+    match existing {
         Err(_) => DeskConfigFate::New,
         Ok(existing) => match desk_config_merged(&existing, &desk_config_text(plan)) {
             Ok(None) => DeskConfigFate::Kept,
@@ -24440,10 +24516,176 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn nothing_is_registered_and_no_secret_is_written_where_the_configuration_cannot_be() {
+        let dir = scratch("settle-provider-refused");
+        let desk = dir.join("desk");
+        let people = desk.join("state").join("nils-desk.sqlite");
+        let empty = desk.join("nils-desk.sqlite");
+        desk_store_holding(&people, &["reader"], &[("reader", "Readers")]);
+        desk_store_holding(&empty, &[], &[]);
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Oidc;
+
+        // a rerun: the desk is registered already, and the secret of that
+        // registration sits beside the configuration that names its client
+        let secret_file = desk.join("client-secret");
+        write_secret(&secret_file, "the secret of the registration that is there")
+            .unwrap_or_else(|e| panic!("{}", e.message));
+        let answers = Answers {
+            provider: Some(Provider::Registered {
+                secret: Some("a secret for a registration not yet made".to_string()),
+            }),
+            ..Answers::default()
+        };
+
+        let why = desk_store_left(Some(&people), Some(&empty))
+            .expect("a desk taken from its people to an empty store is refused");
+        let mut asked = false;
+        let stopped = settle_provider(&p, &answers, Some(why.clone()), || {
+            asked = true;
+            None
+        })
+        .expect_err("a configuration that cannot be written registers nothing");
+        assert!(!asked, "no registration is attempted");
+        assert_eq!(
+            std::fs::read_to_string(&secret_file).unwrap(),
+            "the secret of the registration that is there\n",
+            "the secret beside the configuration is left as it was"
+        );
+        // the sentence names what stopped it, that nothing was made anywhere
+        // else, and what to do about it
+        assert!(stopped.message.starts_with(&why), "{}", stopped.message);
+        for said in [
+            "othing was registered at a provider and no secret was written",
+            "run setup again",
+            &p.desk_config().display().to_string(),
+        ] {
+            assert!(stopped.message.contains(said), "{}", stopped.message);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_configuration_that_can_be_written_registers_the_desk_and_writes_the_secret() {
+        let dir = scratch("settle-provider-allowed");
+        let desk = dir.join("desk");
+        let people = desk.join("state").join("nils-desk.sqlite");
+        desk_store_holding(&people, &["reader"], &[("reader", "Readers")]);
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Oidc;
+        let named = people.display().to_string().replace('\\', "\\\\");
+        std::fs::write(
+            p.desk_config(),
+            desk_config_text(&p).replace(
+                "store = \"nils-desk.sqlite\"",
+                &format!("store = \"{named}\""),
+            ),
+        )
+        .unwrap();
+
+        // the question setup asks before it registers anything, of a desk
+        // whose people setup leaves where they are
+        let on_disk = std::fs::read_to_string(p.desk_config()).ok();
+        assert_eq!(
+            desk_config_refusal(&p, on_disk.as_deref()),
+            None,
+            "setup keeps the store the configuration names"
+        );
+        assert_eq!(
+            desk_config_refusal(&p, None),
+            None,
+            "and a machine with no configuration yet has nobody to move"
+        );
+
+        let answers = Answers {
+            provider: Some(Provider::Registered {
+                secret: Some("a secret".to_string()),
+            }),
+            ..Answers::default()
+        };
+        let mut asked = false;
+        let registered = settle_provider(&p, &answers, None, || {
+            asked = true;
+            Some(OidcPlan {
+                issuer: "https://auth.example.org/application/o/nils/".into(),
+                client_id: "abc123".into(),
+                jwks: "https://auth.example.org/application/o/nils/jwks/".into(),
+                roles_claim: "roles".into(),
+                scopes: None,
+            })
+        })
+        .unwrap_or_else(|e| panic!("{}", e.message));
+        assert!(asked, "the registration is made");
+        assert_eq!(
+            registered.map(|o| o.client_id),
+            Some("abc123".to_string()),
+            "and what it answers is carried on"
+        );
+        assert_eq!(
+            std::fs::read_to_string(desk.join("client-secret")).unwrap(),
+            "a secret\n",
+            "the secret goes where the desk reads it"
+        );
+        p.oidc = Some(OidcPlan {
+            issuer: "https://auth.example.org/application/o/nils/".into(),
+            client_id: "abc123".into(),
+            jwks: "https://auth.example.org/application/o/nils/jwks/".into(),
+            roles_claim: "roles".into(),
+            scopes: None,
+        });
+        assert!(write_desk_config(&p).is_ok());
+        let on_disk = std::fs::read_to_string(p.desk_config()).unwrap();
+        assert!(on_disk.contains("client_id = \"abc123\""), "{on_disk}");
+        assert_eq!(
+            desk_store(&desk, false, Some(&on_disk)),
+            Some(people),
+            "and the desk is still on its people"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_print_registers_nothing_and_says_a_configuration_it_would_not_write() {
+        let dir = scratch("print-registers-nothing");
+        let desk = dir.join("desk");
+        let people = desk.join("state").join("nils-desk.sqlite");
+        let empty = desk.join("nils-desk.sqlite");
+        desk_store_holding(&people, &["reader"], &[("reader", "Readers")]);
+        desk_store_holding(&empty, &[], &[]);
+        let mut p = plan(Runtime::Machine);
+        p.dir = dir.clone();
+        p.mode = Mode::Oidc;
+
+        // what the plan says of the desk's configuration it reads nothing
+        // into being: no registration, no secret, no configuration
+        assert_eq!(desk_config_fate(&p), DeskConfigFate::New);
+        assert!(!p.desk_config().exists(), "a print writes no configuration");
+        assert!(
+            !desk.join("client-secret").exists(),
+            "and no secret beside it"
+        );
+        assert!(
+            !desk.join("authentik-token").exists(),
+            "and hands no provider an API token"
+        );
+
+        // and where the guard would refuse, it says that, rather than a
+        // write the run would never make
+        let why = desk_store_left(Some(&people), Some(&empty))
+            .expect("a desk taken from its people to an empty store is refused");
+        let said = DeskConfigFate::Refused(why.clone()).words();
+        assert!(said.contains(&why), "{said}");
+        assert!(said.contains("nothing will be registered"), "{said}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Setup writes the desk's client secret where the configuration on disk
-    /// says the desk reads it, and only then writes the configuration; the
-    /// guard on the store is asked between the two, with the store the file
-    /// names now and the store the text about to be written names. So the
+    /// says the desk reads it, and writes the configuration after that; the
+    /// guard on the store is asked before both, with the store the file
+    /// names now and the store the text to be written names. So the
     /// paths a run resolves before the write have to be the paths the file
     /// holds after it, on every mode, or setup would put the secret in one
     /// file and have the desk read another.
