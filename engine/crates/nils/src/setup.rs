@@ -61,17 +61,10 @@ fn as_this_account() -> String {
 }
 
 /// The number of the account running setup, which is the account a registry
-/// it makes belongs to.
-#[cfg(unix)]
-#[allow(unsafe_code, reason = "getuid reads this process and cannot fail")]
+/// it makes belongs to. Asked of the machine with `id`, as whether this
+/// process is root is asked, rather than through the C library.
 fn this_account_id() -> Option<u32> {
-    // SAFETY: the call takes no pointer, touches no memory, and cannot fail.
-    Some(unsafe { libc::getuid() })
-}
-
-#[cfg(not(unix))]
-fn this_account_id() -> Option<u32> {
-    None
+    run_quiet("id", &["-u"])?.trim().parse().ok()
 }
 
 /// Who a registry's own file belongs to, where there is one to ask about.
