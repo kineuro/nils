@@ -555,6 +555,12 @@ mod tests {
         assert!(newer("1.0.0-alpha.2", "1.0.0-alpha.1"));
         assert!(newer("1.0.0-alpha.10", "1.0.0-alpha.2"));
         assert!(newer("1.0.0-beta.1", "1.0.0-alpha.9"));
+        // a build made between two releases, as a development channel serves
+        // it: after the release it is built from, before the next one
+        assert!(newer("1.0.0-alpha.35.dev.1", "1.0.0-alpha.35"));
+        assert!(newer("1.0.0-alpha.35.dev.2", "1.0.0-alpha.35.dev.1"));
+        assert!(newer("1.0.0-alpha.36", "1.0.0-alpha.35.dev.9"));
+        assert!(!newer("1.0.0-alpha.35", "1.0.0-alpha.35.dev.1"));
         assert!(newer("v1.0.1", "1.0.0"), "a leading v is not a version");
         assert!(!newer("1.0.0", "1.0.0"));
         assert!(!newer("1.0.0-alpha.1", "1.0.0"));
