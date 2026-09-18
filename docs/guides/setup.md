@@ -529,6 +529,25 @@ registry and its key, the backups, the desk's people and the assistant's
 history. Everything removes the base directory as well, and the registry's
 key cannot be recovered. `--keep-data` and `--purge` answer it.
 
+A purge removes the directory the setup record names, whatever is in it, so
+an install that stopped before it made a registry leaves no key on the disk.
+It also removes what the install made outside that directory, and only what
+the record says this install made: the registry's schemas in a Postgres you
+run, the one it was made in and the `<schema>_linkage` beside it, and the
+lingering setup turned on for the account. A registry an install found
+already there, a schema the record does not name and an account that lingered
+before setup ran are left exactly as they were. Anything that cannot be
+removed is named, with the command that removes it, the rest of the purge
+still runs, and the last sentence says what is left. Keeping your data keeps
+those schemas where the registry's data is, and says which they are and in
+which database.
+
+With no setup record left, an uninstall removes only what a setup leaves in
+the usual places, and names what it found in the base directory instead: the
+files, the registry's key first, where they are, and the command that removes
+them. Nothing there is removed, since without a record nothing says the
+directory is NILS's.
+
 ## The flags
 
 | | |

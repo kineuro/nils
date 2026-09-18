@@ -16059,24 +16059,104 @@ pub(crate) fn leftovers(me: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> 
     out
 }
 
+/// How many of the files in a directory no record names are printed before
+/// the rest are counted.
+const FILES_NAMED: usize = 10;
+
+/// What is in a directory that no setup record names: the files under it,
+/// the registry's key first, since a key on the disk is the one thing nobody
+/// may be left guessing about, and at most `most` of them, with the rest
+/// counted. Nothing here is removed: without a record nothing says the
+/// directory is this install's, so the person is told where it is and what
+/// is in it instead.
+fn files_left_in(dir: &Path, most: usize) -> (Vec<PathBuf>, usize) {
+    fn walk(dir: &Path, depth: usize, into: &mut Vec<PathBuf>) {
+        // a directory that links into itself is walked once and no further
+        if depth == 0 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut here: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        here.sort();
+        for path in here {
+            if path.is_symlink() || !path.is_dir() {
+                into.push(path);
+            } else {
+                walk(&path, depth - 1, into);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(dir, 8, &mut found);
+    let keys = dir.join("registry").join("keys");
+    found.sort_by_key(|path| !path.starts_with(&keys));
+    let more = found.len().saturating_sub(most);
+    found.truncate(most);
+    (found, more)
+}
+
 fn remove_leftovers(args: &UninstallArgs, console: &mut Console) -> Result<(), Exit> {
     let me = std::env::current_exe()
         .ok()
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
     let found = leftovers(me.as_deref(), home_dir().as_deref());
+    // A base directory in the usual place that holds more than the empty
+    // folders a setup makes. No record names it, so it is not removed here;
+    // it is named, with what is in it and what to do with it.
+    let left = home_dir()
+        .map(|home| home.join("nils"))
+        .filter(|dir| dir.is_dir() && !found.contains(dir));
     println!("  no setup is recorded at {}", state_path().display());
-    if found.is_empty() {
+    if found.is_empty() && left.is_none() {
         println!("  and nothing a setup leaves is in the usual places, so nothing was changed");
         return Ok(());
     }
-    println!();
-    println!("{}", console.bold("What an unfinished setup left"));
-    for path in &found {
-        println!("  {}", path.display());
+    if !found.is_empty() {
+        println!();
+        println!("{}", console.bold("What an unfinished setup left"));
+        for path in &found {
+            println!("  {}", path.display());
+        }
+    }
+    if let Some(dir) = &left {
+        println!();
+        println!(
+            "{}",
+            console.bold("What is there and is nobody's to remove here")
+        );
+        println!(
+            "  {}, which holds more than the empty folders a setup makes",
+            dir.display()
+        );
+        let (files, more) = files_left_in(dir, FILES_NAMED);
+        for path in &files {
+            println!("    {}", path.display());
+        }
+        if more > 0 {
+            println!("    and {more} more");
+        }
+        if dir.join("registry").join("keys").is_dir() {
+            println!(
+                "  the registry's key is among them: with it the same subject is given the same \
+                 code again, and without it nobody can"
+            );
+        }
+        println!("  no setup record names this directory, so nothing here says it is NILS's");
+        println!(
+            "  read it, keep what is yours, and remove the rest: rm -rf {}",
+            dir.display()
+        );
     }
     if args.print {
         println!();
         println!("nothing was changed");
+        return Ok(());
+    }
+    if found.is_empty() {
+        println!();
+        println!("  nothing was changed");
         return Ok(());
     }
     let go = args.yes || (console.interactive() && console.yes_no("Remove these?", false));
@@ -16138,10 +16218,16 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Whether a directory may be removed whole. It must be absolute, must not
-/// be the root, the home directory or anything above it, and must look like
-/// what an install made. A state file edited by hand, or a --dir given as
-/// the home directory, should cost a refusal and not a home directory.
+/// Whether a directory a setup record names may be removed whole. It must be
+/// absolute, must not be the root, and must not be the home directory or
+/// anything above it: a record edited by hand, or a `--dir` given as the home
+/// directory, should cost a refusal and not a home directory.
+///
+/// What the directory holds is not asked. The record is what says the
+/// directory is this install's, and an install that stopped before it made a
+/// registry or a desk leaves a directory that looks like nothing and holds
+/// the registry's key: refusing that left the key on the disk after a purge
+/// that said it was done, which is the worse of the two.
 fn safe_to_purge(dir: &Path, home: Option<&Path>) -> Result<(), String> {
     if !dir.is_absolute() {
         return Err("it is not an absolute path".to_string());
@@ -16153,12 +16239,6 @@ fn safe_to_purge(dir: &Path, home: Option<&Path>) -> Result<(), String> {
         && home.starts_with(dir)
     {
         return Err("it is the home directory, or holds it".to_string());
-    }
-    let made_here = dir.join("registry").join("nils.toml").exists()
-        || dir.join("desk").join("nils-desk.toml").exists()
-        || only_empty_setup_dirs(dir);
-    if !made_here {
-        return Err("it holds neither a registry nor a desk that an install made".to_string());
     }
     Ok(())
 }
@@ -18694,7 +18774,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_everything_refuses_what_an_install_did_not_make() {
+    fn removing_everything_refuses_the_root_and_the_home_directory() {
         let home = scratch("purge-home");
         let made = home.join("nils");
         std::fs::create_dir_all(made.join("registry")).unwrap();
@@ -18712,12 +18792,87 @@ mod tests {
             why(Path::new("/"))
         );
         assert!(why(Path::new("nils")).contains("absolute"));
-        let stranger = home.join("photos");
-        std::fs::create_dir_all(&stranger).unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_directory_an_install_left_behind_is_purged_where_the_record_names_it() {
+        let home = scratch("purge-half-made");
+        // what an install that stopped at the registry leaves: the key, and
+        // neither a registry nor a desk beside it
+        let dir = home.join("nils");
+        std::fs::create_dir_all(dir.join("registry").join("keys")).unwrap();
+        std::fs::write(dir.join("registry").join("keys").join("nils"), "a key").unwrap();
+        std::fs::create_dir_all(dir.join("desk")).unwrap();
         assert!(
-            why(&stranger).contains("neither a registry nor a desk"),
-            "a directory named in a hand edited record, holding someone's photos"
+            !only_empty_setup_dirs(&dir),
+            "it looks like no install at all"
         );
+        assert!(
+            safe_to_purge(&dir, Some(&home)).is_ok(),
+            "the record is what says it is this install's, not what is in it"
+        );
+
+        let state = State {
+            dir: dir.display().to_string(),
+            mode: "off".to_string(),
+            runtime: "machine".to_string(),
+            unfinished: true,
+            ..State::default()
+        };
+        let removal = gather_removal(&state, None, Leaving::Purge);
+        let console = Console::new(true);
+        assert!(
+            carry_out(&removal, Leaving::Purge, &console).is_empty(),
+            "nothing is left named"
+        );
+        assert!(!dir.exists(), "the key is gone with the directory");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn with_no_record_the_files_an_install_left_are_named_where_they_are() {
+        let home = scratch("leftovers-named");
+        let dir = home.join("nils");
+        std::fs::create_dir_all(dir.join("registry").join("keys")).unwrap();
+        std::fs::write(dir.join("registry").join("keys").join("nils"), "a key").unwrap();
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            "backend = \"sqlite\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("working")).unwrap();
+        for n in 0..4 {
+            std::fs::write(dir.join("working").join(format!("{n}.dcm")), "x").unwrap();
+        }
+
+        let (named, more) = files_left_in(&dir, FILES_NAMED);
+        assert_eq!(
+            named.first(),
+            Some(&dir.join("registry").join("keys").join("nils")),
+            "the registry's key first: {named:?}"
+        );
+        assert!(
+            named.contains(&dir.join("working").join("0.dcm")),
+            "{named:?}"
+        );
+        assert_eq!(more, 0, "six files, and ten are named");
+
+        let (few, more) = files_left_in(&dir, 2);
+        assert_eq!(few.len(), 2);
+        assert_eq!(more, 4, "the rest are counted");
+        assert_eq!(
+            files_left_in(&home.join("absent"), FILES_NAMED),
+            (Vec::new(), 0)
+        );
+
+        // and a directory holding only the empty folders a setup makes is
+        // removable rather than named, as it always was
+        let empty = home.join("empty");
+        for sub in ["registry", "desk", "working"] {
+            std::fs::create_dir_all(empty.join(sub)).unwrap();
+        }
+        assert!(only_empty_setup_dirs(&empty));
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -1296,6 +1296,101 @@ fn an_uninstall_takes_kvasirs_state_and_keeps_the_data() {
     assert!(!record.join("setup.toml").exists());
 }
 
+/// A purge removes the directory a setup record names, whatever is in it. An
+/// install that stopped at the registry leaves a directory holding the
+/// registry's key and neither a registry nor a desk, and refusing that left
+/// the key on the disk after a purge that said it was done.
+#[test]
+fn a_purge_removes_the_directory_an_install_that_stopped_partway_left() {
+    let nils = Installed::new("nils-setup-purge-half-made");
+    let config = TempDir::new("nils-setup-purge-half-made-config");
+    let base = TempDir::new("nils-setup-purge-half-made-base");
+    let dir = base.path().join("nils");
+    std::fs::create_dir_all(dir.join("registry").join("keys")).unwrap();
+    std::fs::write(dir.join("registry").join("keys").join("nils"), "a key").unwrap();
+    std::fs::create_dir_all(dir.join("desk")).unwrap();
+    let record = config.path().join("nils");
+    std::fs::create_dir_all(&record).unwrap();
+    std::fs::write(
+        record.join("setup.toml"),
+        format!(
+            "dir = \"{}\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"none\"\n\
+             unfinished = true\n",
+            dir.display()
+        ),
+    )
+    .unwrap();
+
+    let out = output(
+        Command::new(nils.path())
+            .args(["uninstall", "--purge", "--yes"])
+            .env("NILS_NO_TTY", "1")
+            .env("NO_COLOR", "1")
+            .env("XDG_CONFIG_HOME", config.path()),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!dir.exists(), "the registry's key stayed:\n{stdout}");
+    assert!(!record.join("setup.toml").exists(), "{stdout}");
+    assert!(
+        stdout.contains("NILS and everything it made are gone from this machine"),
+        "{stdout}"
+    );
+}
+
+/// With no record left, a purge removes nothing it cannot say is this
+/// install's, and says which files it found, where they are, and what to do
+/// with them, so nobody is left with a key and no sentence.
+#[test]
+fn with_no_record_a_purge_names_the_files_it_found_and_removes_none_of_them() {
+    let nils = Installed::new("nils-setup-purge-no-record");
+    let config = TempDir::new("nils-setup-purge-no-record-config");
+    let home = TempDir::new("nils-setup-purge-no-record-home");
+    let dir = home.path().join("nils");
+    let key = dir.join("registry").join("keys").join("nils");
+    std::fs::create_dir_all(dir.join("registry").join("keys")).unwrap();
+    std::fs::write(&key, "a key").unwrap();
+    std::fs::create_dir_all(dir.join("working")).unwrap();
+    std::fs::write(dir.join("working").join("one.dcm"), "x").unwrap();
+
+    let out = output(
+        Command::new(nils.path())
+            .args(["uninstall", "--purge", "--yes"])
+            .env("NILS_NO_TTY", "1")
+            .env("NO_COLOR", "1")
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", config.path()),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("no setup is recorded"), "{stdout}");
+    assert!(
+        stdout.contains(&key.display().to_string()),
+        "the key is named where it is: {stdout}"
+    );
+    assert!(
+        stdout.contains(&dir.join("working").join("one.dcm").display().to_string()),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("the registry's key is among them"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("rm -rf {}", dir.display())),
+        "what to do with them: {stdout}"
+    );
+    assert!(key.is_file(), "nothing here was removed:\n{stdout}");
+}
+
 /// An uninstall takes away the privilege the install was given: the rule
 /// naming what may be run as root, and the program it named, the rule first.
 #[test]
