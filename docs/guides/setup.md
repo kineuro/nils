@@ -405,8 +405,8 @@ the engine and the desk inside it. A docker run is a network named `nils`
 and the desk publishing the port. Either way the containers run as the
 account that made the install, and every bind mount is mounted as it stands:
 docker remaps nobody and is told that account's own numbers (`--user`),
-while podman maps it to the container's root, which the engine and the desk
-are told to be (`--user 0:0`, `User=0` in a quadlet). So the registry a
+while podman maps it to the container's root, which every container of the
+install is told to be (`--user 0:0`, `User=0` in a quadlet). So the registry a
 container install makes belongs to the account that made it, and that
 account still opens it afterwards. Either way the registry is made by the
 engine itself, running the key and init steps inside a container against the

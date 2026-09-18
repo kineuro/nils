@@ -299,15 +299,12 @@ fn model_reach_note(runtime: Runtime, url: &str, pasta: fn() -> bool) -> Option<
     })
 }
 
-/// A Postgres connection string as the engine must use it from where it
-/// runs: on this machine as it was typed, in a container with this
-/// machine's loopback named the way a container reaches it. Both forms the
-/// driver takes are read, a URL and `key=value` pairs; anything else is left
-/// as it was.
-/// The same connection string the other way about: the name a container
-/// calls this machine by, back to the loopback a process on the machine
-/// reaches it at. A registry made inside a container keeps the address it
-/// dialled, and an uninstall runs on the machine.
+/// A connection string the other way about: the name a container calls this
+/// machine by, back to the loopback a process on the machine reaches it at.
+/// A registry made inside a container keeps the address it dialled, and an
+/// uninstall runs on the machine. Only a loopback is ever written over on
+/// the way in, so only the alias is ever written back here, and a database
+/// on another machine is left as it was named.
 fn dsn_on_machine(dsn: &str) -> String {
     let mut out = dsn.to_string();
     for alias in ["host.containers.internal", "host.docker.internal"] {
@@ -316,6 +313,11 @@ fn dsn_on_machine(dsn: &str) -> String {
     out
 }
 
+/// A Postgres connection string as the engine must use it from where it
+/// runs: on this machine as it was typed, in a container with this
+/// machine's loopback named the way a container reaches it. Both forms the
+/// driver takes are read, a URL and `key=value` pairs; anything else is left
+/// as it was.
 fn dsn_for(runtime: Runtime, dsn: &str) -> String {
     let Some(alias) = host_from_container(runtime) else {
         return dsn.to_string();
@@ -5231,12 +5233,17 @@ pub(crate) fn podman_commands(plan: &Plan) -> Vec<String> {
     }
     if plan.has(Part::Assistant) {
         let (kvasir, assistant) = (plan.dir.join("kvasir"), plan.dir.join("assistant"));
+        // Kvasir and the assistant are the same account as the engine and
+        // the desk: their directories hold Kvasir's models and keys and the
+        // assistant's history, and a container left as the image's own user
+        // writes them as an id this machine has no account for.
+        let user = container_user(Runtime::Podman);
         out.push(format!(
-            "podman run -d --pod nils --name nils-kvasir -v {k}:{k} -w {k} {NODE_IMAGE} node dist/main.js --config kvasir.json",
+            "podman run -d --pod nils --name nils-kvasir {user}-v {k}:{k} -w {k} {NODE_IMAGE} node dist/main.js --config kvasir.json",
             k = kvasir.display()
         ));
         out.push(format!(
-            "podman run -d --pod nils --name nils-assistant --env-file {a}/assistant.env -v {a}:{a} -v {k}:{k}:ro -w {a} {NODE_IMAGE} node {entry}",
+            "podman run -d --pod nils --name nils-assistant {user}--env-file {a}/assistant.env -v {a}:{a} -v {k}:{k}:ro -w {a} {NODE_IMAGE} node {entry}",
             a = assistant.display(),
             k = kvasir.display(),
             entry = assistant_entry(&assistant)
@@ -5438,11 +5445,15 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
     if plan.has(Part::Assistant) {
         let (kvasir, assistant) = (plan.dir.join("kvasir"), plan.dir.join("assistant"));
         let (k, a) = (kvasir.display(), assistant.display());
+        // the same identity as the engine and the desk, so that every
+        // container of this install is the account that made it, whether
+        // systemd starts it or a person runs the commands by hand
+        let user = quadlet_user();
         out.push((
             "nils-kvasir.container".to_string(),
             format!(
                 "[Unit]\nDescription=Kvasir, the model gateway\n\n[Container]\n\
-                 Image={NODE_IMAGE}\nPod=nils.pod\nVolume={k}:{k}\nWorkingDir={k}\n\
+                 Image={NODE_IMAGE}\nPod=nils.pod\n{user}Volume={k}:{k}\nWorkingDir={k}\n\
                  Exec=node dist/main.js --config kvasir.json\n\n[Install]\nWantedBy=default.target\n"
             ),
         ));
@@ -5451,7 +5462,7 @@ pub(crate) fn quadlets(plan: &Plan) -> Vec<(String, String)> {
             format!(
                 "[Unit]\nDescription=NILS assistant\nAfter=nils-kvasir.service nils-engine.service\n\
                  ConditionPathExists={k}/assistant.key\n\n\
-                 [Container]\nImage={NODE_IMAGE}\nPod=nils.pod\nEnvironmentFile={a}/assistant.env\n\
+                 [Container]\nImage={NODE_IMAGE}\nPod=nils.pod\n{user}EnvironmentFile={a}/assistant.env\n\
                  Volume={a}:{a}\nVolume={k}:{k}:ro\nWorkingDir={a}\nExec=node {}\n\n\
                  [Install]\nWantedBy=default.target\n",
                 assistant_entry(&assistant)
@@ -7453,6 +7464,27 @@ impl Started {
     }
 }
 
+/// The schema and the account an earlier run of setup made outside the
+/// install's directory, for the record this run writes: the install this run
+/// goes on from where there is one, else whatever record is still on disk.
+///
+/// The second is the run that stopped partway. The wizard does not offer
+/// such a record as an install to go on from, so it is not among what this
+/// run was handed; but a run that stopped after it made the registry's
+/// schemas, or after it turned lingering on, made them all the same, and a
+/// run that started again over it would write a record naming neither. A
+/// purge removes only what the record names, and those would have been left
+/// in the site's database and on the machine's account with nothing saying
+/// they were ever NILS's.
+fn made_outside_before(
+    going_on_from: Option<&State>,
+    on_disk: Option<&State>,
+) -> (Option<String>, Option<String>) {
+    going_on_from.or(on_disk).map_or((None, None), |state| {
+        (state.registry_made.clone(), state.linger.clone())
+    })
+}
+
 /// Everything the plan said, in order.
 fn do_it(
     plan: &Plan,
@@ -7462,6 +7494,7 @@ fn do_it(
     only_update: bool,
     answers: &Answers,
 ) -> Result<Vec<Service>, Exit> {
+    let made_outside = made_outside_before(existing.as_ref(), read_state().as_ref());
     let mut state = State {
         dir: plan.dir.display().to_string(),
         mode: plan.mode.name().to_string(),
@@ -7507,8 +7540,8 @@ fn do_it(
         // what an earlier run of setup made outside this directory is still
         // this install's to remove, and a run that makes nothing more leaves
         // the record saying so
-        registry_made: existing.as_ref().and_then(|s| s.registry_made.clone()),
-        linger: existing.as_ref().and_then(|s| s.linger.clone()),
+        registry_made: made_outside.0,
+        linger: made_outside.1,
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
@@ -16011,6 +16044,12 @@ fn outside_the_install(
     root: bool,
 ) -> Vec<Outside> {
     let mut out = Vec::new();
+    // A container install's registry was made inside the container and kept
+    // the address a container names this machine by, which out here is no
+    // address at all. The drop and the command a person is handed both name
+    // the database as this machine dials it, so the one that is carried out
+    // and the one that is printed are the same connection.
+    let registry = registry.map(|(dsn, at)| (dsn_on_machine(&dsn), at));
     // A Postgres this setup runs is the install's own: its data lives under
     // the base directory and goes with it, so there is no schema of a site's
     // to drop and none to name.
@@ -18881,6 +18920,145 @@ mod tests {
         }
     }
 
+    /// A container install's registry was made inside the container, so the
+    /// address it kept is the one a container names this machine by. The
+    /// purge runs out here: it drops the schemas over this machine's own
+    /// loopback, and the command it prints where it cannot is one a person
+    /// can run where they are standing.
+    #[test]
+    fn a_container_installs_purge_reaches_the_database_from_this_machine() {
+        let root = scratch("purge-in-a-container");
+        let mut state = on_postgres(&root, "nils", Some("nils"));
+        state.runtime = "podman".to_string();
+        let dir = PathBuf::from(&state.dir);
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            "backend = \"postgres\"\ndsn = \"postgres://nils:s3cret@host.containers.internal/nils\"\n\
+             schema = \"nils\"\n",
+        )
+        .unwrap();
+
+        let outside = outside_the_install(&state, registry_backend(&dir), false);
+        assert_eq!(
+            outside[0].doing,
+            Some(Doing::Schemas {
+                dsn: "postgres://nils:s3cret@127.0.0.1/nils".to_string(),
+                schema: "nils".to_string(),
+                account: None,
+            }),
+            "dropped at the address this machine has for the database"
+        );
+        assert!(
+            outside[0].command.contains("127.0.0.1")
+                && !outside[0].command.contains("host.containers.internal"),
+            "the command is one a person can run out here: {}",
+            outside[0].command
+        );
+        assert!(
+            !outside[0].command.contains("s3cret"),
+            "{}",
+            outside[0].command
+        );
+
+        // and a docker install the same, at the name docker gives this machine
+        let mut of_docker = state.clone();
+        of_docker.runtime = "docker".to_string();
+        std::fs::write(
+            dir.join("registry").join("nils.toml"),
+            "backend = \"postgres\"\ndsn = \"host=host.docker.internal user=nils dbname=nils\"\n\
+             schema = \"nils\"\n",
+        )
+        .unwrap();
+        let outside = outside_the_install(&of_docker, registry_backend(&dir), false);
+        assert!(
+            matches!(
+                &outside[0].doing,
+                Some(Doing::Schemas { dsn, .. }) if dsn == "host=127.0.0.1 user=nils dbname=nils"
+            ),
+            "{:?}",
+            outside[0].doing
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The fields a purge reads are the record's own, and the record is read
+    /// and written whole: an update, which rewrites it, keeps them, and a
+    /// record written before they existed still loads and names nothing.
+    #[test]
+    fn the_record_carries_what_an_install_made_outside_its_directory() {
+        let mut state = State {
+            dir: "/home/x/nils".to_string(),
+            mode: "off".to_string(),
+            runtime: "machine".to_string(),
+            service: SYSTEM_MANAGER.to_string(),
+            backend: "postgres:nils".to_string(),
+            registry_made: Some("nils".to_string()),
+            linger: Some("nils".to_string()),
+            system: Some(SystemUnits {
+                capabilities: Vec::new(),
+                accounts: BTreeMap::from([("engine".to_string(), "nils".to_string())]),
+            }),
+            helper: Some(Helper {
+                account: "nils".to_string(),
+                path: "/usr/local/sbin/nils-helper".to_string(),
+                rule: "/etc/sudoers.d/nils".to_string(),
+            }),
+            ..State::default()
+        };
+        state.parts.insert(
+            "engine".to_string(),
+            PartState {
+                version: "1.0.0-alpha.2".to_string(),
+                path: "/usr/local/bin/nils".to_string(),
+                kind: "binary".to_string(),
+            },
+        );
+        let text = toml::to_string(&state).unwrap();
+        let read: State = toml::from_str(&text).unwrap();
+        assert_eq!(read.registry_made.as_deref(), Some("nils"));
+        assert_eq!(read.linger.as_deref(), Some("nils"));
+        // and the reads beside them still see what they always did
+        assert!(read.helper.is_some(), "{text}");
+        assert_eq!(
+            read.system.as_ref().map(|s| s.account("engine")),
+            Some("nils")
+        );
+        assert_eq!(read.parts["engine"].kind, "binary");
+
+        // A record from before these were written names neither, and a purge
+        // then names the schemas rather than dropping them.
+        let older: State = toml::from_str(
+            "dir = \"/home/x/nils\"\nmode = \"off\"\nruntime = \"machine\"\n\
+             service = \"none\"\nbackend = \"postgres:nils\"\n",
+        )
+        .unwrap();
+        assert_eq!(older.registry_made, None);
+        assert_eq!(older.linger, None);
+        let outside = outside_the_install(&older, None, false);
+        assert_eq!(outside.len(), 1);
+        assert_eq!(outside[0].doing, None, "nothing is dropped on a guess");
+
+        // A run that stopped partway is not an install to go on from, but
+        // what it made outside the directory is still this install's.
+        let unfinished = State {
+            unfinished: true,
+            registry_made: Some("nils".to_string()),
+            linger: Some("nils".to_string()),
+            ..State::default()
+        };
+        assert_eq!(
+            made_outside_before(None, Some(&unfinished)),
+            (Some("nils".to_string()), Some("nils".to_string())),
+            "the record left on disk is read where there is no install to go on from"
+        );
+        assert_eq!(made_outside_before(None, None), (None, None));
+        assert_eq!(
+            made_outside_before(Some(&State::default()), Some(&unfinished)),
+            (None, None),
+            "the install this run goes on from is the record it writes from"
+        );
+    }
+
     #[test]
     fn a_purge_drops_the_schemas_the_record_says_this_install_made() {
         let root = scratch("purge-schemas");
@@ -19991,6 +20169,45 @@ mod tests {
         }
         // a quadlet is generated and carries its own [Install] section
         assert_eq!(hand_units_to_systemd(&[], false, false).len(), 2);
+    }
+
+    /// The sign-off of a container install names one arrangement for the
+    /// whole of it, kept by the quadlets: so every container the quadlets
+    /// start is the same account that made the install, and so is every
+    /// container the commands start where a person runs them by hand.
+    #[test]
+    fn every_container_of_a_podman_install_is_the_account_that_made_it() {
+        let mut plan = plan(Runtime::Podman);
+        plan.parts = vec![Part::Engine, Part::Desk, Part::Assistant];
+        assert_eq!(
+            runs_words(kept_by(&plan), Runtime::Podman),
+            if service_manager(Runtime::Podman, false).is_some() {
+                "in podman, by quadlets, back after a restart".to_string()
+            } else {
+                "in podman, started by this setup".to_string()
+            },
+            "one arrangement for the whole install"
+        );
+
+        for (name, body) in quadlets(&plan) {
+            if !name.ends_with(".container") {
+                continue;
+            }
+            assert!(
+                body.contains("User=0\nGroup=0\n"),
+                "{name} runs as the image's own user, and the rest do not:\n{body}"
+            );
+            assert!(!body.contains(":U"), "{name} hands a mount over:\n{body}");
+        }
+        for command in podman_commands(&plan) {
+            if !command.contains("podman run") {
+                continue;
+            }
+            assert!(
+                command.contains("--user 0:0"),
+                "the commands and the quadlets are the same install: {command}"
+            );
+        }
     }
 
     #[test]
