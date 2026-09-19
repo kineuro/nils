@@ -788,6 +788,60 @@ fn run(
                 }
             }
 
+            // Wave 2 §8.2, and record 35 finding 6: the evidence disagreed,
+            // and that reaches the stack it belongs to. The evaluator
+            // records a conflict wherever a rule would have stored something
+            // else on an axis another rule had closed; those are counted per
+            // batch as a fact about the pack (Wave 4c §6.6), and the count
+            // stays, but a person reading one stack cannot see a tally. One
+            // item per stack and pair of answers: the same rules disagreeing
+            // the same way twice on one stack is one disagreement, and
+            // grouping collapses the same disagreement across stacks into
+            // one question about the pack.
+            if !verdict.silent {
+                let mut said: std::collections::BTreeSet<(&str, &str, &str)> =
+                    std::collections::BTreeSet::new();
+                for d in verdict
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.kind == "axis_conflict")
+                {
+                    if !said.insert((d.axis.as_str(), d.by_value.as_str(), d.value.as_str())) {
+                        continue;
+                    }
+                    reviews.push(vec![
+                        Param::from(format!("{}:conflict", d.axis)),
+                        Param::from("stack"),
+                        Param::from(serde_json::json!({"stack_id": stack_id}).to_string()),
+                        Param::from(
+                            serde_json::json!({
+                                "axis": d.axis,
+                                // what the stack says, and what the rule
+                                // that was pre-empted would have said
+                                "value": d.by_value,
+                                "other": d.value,
+                                "decided_by": {
+                                    "rule_set": d.by_rule_set,
+                                    "rule": d.by_rule,
+                                    "matched": d.by_matched,
+                                },
+                                "over": {
+                                    "rule_set": d.rule_set,
+                                    "rule": d.rule,
+                                    "matched": d.matched,
+                                },
+                                "pack": pack.id(),
+                            })
+                            .to_string(),
+                        ),
+                        Param::from("open"),
+                        Param::from(now.as_str()),
+                        Param::Int(job_id),
+                    ]);
+                    raised += 1;
+                }
+            }
+
             // A decision on an axis the rules said nothing about. Without
             // this it is silently dropped, because the loop above walks the
             // verdict and an axis with no hits and no default produces none.

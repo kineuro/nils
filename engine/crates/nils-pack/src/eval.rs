@@ -360,6 +360,48 @@ impl Evaluated<'_> {
                     self.decided.borrow_mut()[sets.axis].extend(just_set);
                 }
                 if !set.collect {
+                    // A later rule of this same set that would have stored
+                    // something else is a disagreement about the answer and
+                    // not only a keyword that went uncited: the set stops at
+                    // its first firing rule, so nothing else records that
+                    // the other rule would have fired at all. v0's brain
+                    // beside a spine is this case, and it is what a person
+                    // reviewing the stack has to see.
+                    //
+                    // Only where both rules read the stack's own text, and
+                    // cited different words in it. An ordered set puts the
+                    // specific rule before the general one and both are true
+                    // of the same evidence, so a later rule firing on the
+                    // same flags is the order doing its work: an MPRAGE is a
+                    // spoiled gradient echo, and asking about that is v0's
+                    // queue. Two different words in one text pointing at two
+                    // different answers is the archive disagreeing with
+                    // itself.
+                    if fired.source == "text" {
+                        for later in &set.rules[ri + 1..] {
+                            let Some(also) = self.fire(later) else {
+                                continue;
+                            };
+                            if also.source != "text"
+                                || also.matched.eq_ignore_ascii_case(&fired.matched)
+                            {
+                                continue;
+                            }
+                            for sets in &later.sets {
+                                if closed[sets.axis] && decided_by[sets.axis].is_some() {
+                                    self.conflict(
+                                        &mut verdict,
+                                        set,
+                                        later,
+                                        &also,
+                                        sets,
+                                        &derived,
+                                        &decided_by,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     // Wave 4c §6.6: what else would have matched on this
                     // stack, in this rule and in the rest of the set, and
                     // was never cited because this rule won. A keyword

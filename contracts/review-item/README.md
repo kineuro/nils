@@ -23,7 +23,7 @@ the contract; adding or removing a property of the item is.
 | 1 | [`v1/review-item.schema.json`](v1/review-item.schema.json) | Wave 1 (the table); written down in Wave 4a |
 | 2 | [`v2/review-item.schema.json`](v2/review-item.schema.json) | Wave 4a slice 13, 2026-09-06: `scope` gains `group`, `status` gains `accepted`, `rejected`, `superseded` and `staged`, and the item gains `members`, `group_key` and `accepted_by` |
 | 3 | [`v3/review-item.schema.json`](v3/review-item.schema.json) | Wave 4c slice A2, 2026-09-09: `decision` gains `actor_detail`, the actor object of the suite contract (who acted for the principal: kind, name, model, version, conversation, ceiling; `absent` as its own value) |
-| 4 | [`v4/review-item.schema.json`](v4/review-item.schema.json) | Wave 4c slice A6, 2026-09-09: `scope` gains `overlay`, the review item beside a proposed overlay (Wave 4c §6.6); the four classifier diagnostics are `diagnostic` rows by kind, not items, so no kind is added |
+| 4 | [`v4/review-item.schema.json`](v4/review-item.schema.json) | Wave 4c slice A6, 2026-09-09: `scope` gains `overlay`, the review item beside a proposed overlay (Wave 4c §6.6); the four classifier diagnostics are `diagnostic` rows by kind, not items, so no kind is added. Amended on 2026-09-19 by record 35 slice S6, which adds the `conflict` reason to the kinds the pattern admits: a kind is not a change to this contract, and the pattern had to be told |
 
 ## The kinds so far
 
@@ -39,6 +39,7 @@ declares.
 | `ingest.quarantine` | batch | the digest, one per batch and class of refused file |
 | `<axis>:low_confidence` | stack | the classifier, below the pack's threshold for that axis |
 | `<axis>:missing` | stack | the classifier, for an axis the pack says is always expected |
+| `<axis>:conflict` | stack | the classifier, when one rule decided the axis and another would have decided it otherwise; `evidence` is `{axis, value, other, decided_by, over, pack}`, the answer the stack carries and the answer it was decided over, each with the rule set, the rule and what it cited, and the group is one question per pair of answers |
 | `<axis>:decision` | stack | the classifier, when a person's decision disagrees with the rule |
 | `<axis>:vote` | stack | a pass, when its answer is weak or the pack asks for every touched stack |
 | `release.burned_in`, `release.unjudged` | stack | the release, for a stack it held back: `release.burned_in` where the file says the pixels carry text, `release.unjudged` where the file will not say and the release was asked to hold on that with `--on-unknown hold`, which is not the default. One item per stack, whatever its status, so a re-release of the same selection files none of them again; what recurs is the count in the release's report and row |

@@ -142,7 +142,7 @@ fn a_later_set_that_disagrees_is_a_conflict_and_both_are_recorded() {
     let conflict = v
         .diagnostics
         .iter()
-        .find(|d| d.kind == "axis_conflict")
+        .find(|d| d.kind == "axis_conflict" && d.rule == "gamma")
         .expect("gamma reached kind after first closed it");
     assert_eq!(conflict.axis, "kind");
     assert_eq!(
@@ -157,8 +157,26 @@ fn a_later_set_that_disagrees_is_a_conflict_and_both_are_recorded() {
     );
     assert_eq!(conflict.by_value, "a");
     assert_eq!(conflict.by_matched, "alpha");
-    // beta would have fired in the same set and never ran: its keyword is
-    // shadowed by alpha.
+    // beta would have fired in the same set, after the set stopped at
+    // alpha, and would have stored the other value: that is a disagreement
+    // about the answer, recorded against the rule that won.
+    let within = v
+        .diagnostics
+        .iter()
+        .find(|d| d.kind == "axis_conflict" && d.rule == "beta")
+        .expect("beta would have said b where alpha said a");
+    assert_eq!(
+        (within.rule_set.as_str(), within.value.as_str()),
+        ("first", "b")
+    );
+    assert_eq!(within.matched, "beta");
+    assert_eq!(
+        (within.by_rule.as_str(), within.by_value.as_str()),
+        ("alpha", "a")
+    );
+
+    // and beta's keyword is a shadowed keyword too, which is the other
+    // question: a keyword shadowed everywhere is one that can never match.
     let shadowed: Vec<_> = v
         .diagnostics
         .iter()

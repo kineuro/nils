@@ -20,7 +20,7 @@
     "kind": {
       "type": "string",
       "description": "What was found: `<area>.<what>` for an engine stage, `<axis>:<reason>` for the classifier.",
-      "pattern": "^([a-z_]+\\.[a-z_]+|[a-z_]+:(low_confidence|missing|decision|vote))$"
+      "pattern": "^([a-z_]+\\.[a-z_]+|[a-z_]+:(low_confidence|missing|conflict|decision|vote))$"
     },
     "scope": {
       "type": "string",

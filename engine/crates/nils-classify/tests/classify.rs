@@ -1337,3 +1337,123 @@ fn every_threshold_reads_the_value_on_it_as_its_own_words_do() {
     };
     assert!(tilted.oblique());
 }
+
+/// Wave 2 §8.2 and record 35 finding 6: evidence that disagreed reaches the
+/// stack it belongs to. Candidate D's case, as the corpus holds it: a spine
+/// whose text also names the brain. The spine rule is ordered first and
+/// decides, the set stops there, and nothing used to record that the brain
+/// rule would have fired: the run raised 719 conflicts and kept every one of
+/// them in a per-batch tally.
+#[test]
+fn a_conflict_reaches_the_stack_and_the_tally_keeps_counting() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = one_stack(
+            "sag t1 cervical cerebral",
+            &[
+                (tags::BODY_PART_EXAMINED, VR::CS, "SPINE"),
+                (tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+                (tags::REPETITION_TIME, VR::DS, "600"),
+                (tags::ECHO_TIME, VR::DS, "12"),
+            ],
+        );
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+
+        // the answer is the one the order gives, unchanged
+        assert_eq!(
+            axis_of(&mut reg, "body_part"),
+            ("spine".to_string(), 0.65, "keywords".to_string()),
+            "{name}"
+        );
+
+        // and a person reading the stack sees that it was contested
+        let items = rows(
+            &mut reg,
+            "SELECT id, scope, COALESCE(group_key, ''), COALESCE(members, 0) \
+             FROM {review_item} WHERE kind = 'body_part:conflict'",
+        );
+        assert_eq!(items.len(), 1, "{name}");
+        let id = items[0].int(0).unwrap();
+        let item = nils_registry::review::item(reg.store(), id)
+            .unwrap()
+            .expect("the item is there");
+        let evidence = item.evidence;
+        assert_eq!(evidence["axis"], "body_part", "{name}: {evidence}");
+        assert_eq!(evidence["value"], "spine", "{name}: {evidence}");
+        assert_eq!(evidence["other"], "brain", "{name}: {evidence}");
+        assert_eq!(
+            evidence["decided_by"]["rule"], "spine",
+            "{name}: {evidence}"
+        );
+        assert_eq!(evidence["over"]["rule"], "brain", "{name}: {evidence}");
+        assert!(
+            !evidence["over"]["matched"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "{name}: the item names what the pre-empted rule cited: {evidence}"
+        );
+        // one question per pair of answers, with the stack as its member
+        assert_eq!(items[0].text(1).unwrap(), "group", "{name}");
+        assert_eq!(
+            items[0].text(2).unwrap(),
+            "body_part:conflict|spine over brain|",
+            "{name}"
+        );
+        assert_eq!(items[0].int(3).unwrap(), 1, "{name}");
+        assert_eq!(
+            one(&mut reg, "SELECT COUNT(*) FROM {review_member}"),
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_member} m JOIN {review_item} i ON i.id = m.item_id \
+                 WHERE i.kind = 'body_part:conflict'"
+            ),
+            "{name}: the conflict's member is the stack"
+        );
+
+        // and the tally that already counted it keeps counting it
+        assert!(
+            one(
+                &mut reg,
+                "SELECT CAST(SUM(count) AS BIGINT) FROM {diagnostic} WHERE kind = 'axis_conflict' AND scope = 'batch'"
+            ) >= 1,
+            "{name}"
+        );
+    }
+}
+
+/// A stack the pack has ruled out is asked nothing, a conflict among the
+/// rest included: the silence of §8.2 is what keeps a queue readable, and a
+/// new kind of item must not walk around it.
+#[test]
+fn a_conflict_on_a_stack_the_pack_rules_out_is_not_a_question() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        // A secondary capture: the pack excludes it as not an image.
+        let dir = one_stack(
+            "sag t1 cervical cerebral screenshot",
+            &[
+                (tags::BODY_PART_EXAMINED, VR::CS, "SPINE"),
+                (tags::IMAGE_TYPE, VR::CS, "DERIVED\\SECONDARY\\SCREEN SAVE"),
+                (tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+            ],
+        );
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        assert_eq!(report.silent, 1, "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE kind LIKE '%:conflict'"
+            ),
+            0,
+            "{name}"
+        );
+    }
+}

@@ -110,6 +110,14 @@ pub fn group_run(store: &mut Store, job_id: i64) -> Result<Grouped, Error> {
             .map(str::to_string)
             .or_else(|| evidence["decision"].as_str().map(str::to_string))
             .unwrap_or_default();
+        // A disagreement is named by both answers: a body part decided as
+        // spine over a brain is not the same question as one decided as
+        // spine over a neck, and a group that mixed them would ask one
+        // question about two rules.
+        let value = match evidence["other"].as_str() {
+            Some(other) => format!("{value} over {other}"),
+            None => value,
+        };
         let tier = evidence["tier"].as_str().unwrap_or("").to_string();
         groups
             .entry((kind, value, tier))
