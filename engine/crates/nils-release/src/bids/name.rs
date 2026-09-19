@@ -43,10 +43,7 @@ pub struct Facts<'a> {
     pub technique: Option<&'a str>,
     pub modifiers: Vec<&'a str>,
     pub base: Option<&'a str>,
-    pub body_part: Option<&'a str>,
     pub provenance: Option<&'a str>,
-    pub orientation: Option<&'a str>,
-    pub acquisition_type: Option<&'a str>,
     pub post_contrast: bool,
     /// What the subject was doing, which only a person can say (§9.2).
     pub task: Option<&'a str>,
@@ -54,6 +51,16 @@ pub struct Facts<'a> {
     pub echo: Option<i64>,
     /// The phase encoding direction, as `AP`, `PA`, `LR` or `RL`.
     pub pe_direction: Option<&'a str>,
+    /// Everything the stack says, by the name the pack knows it under: the
+    /// axis or the field, to its values as identities.
+    ///
+    /// The whole of it, and not a list this module was written knowing.
+    /// `acq-` carries what no entity takes, the pack declares what that is,
+    /// and a pack that gives itself an axis can put it in a name without the
+    /// engine learning the axis first. Before record 37 S6 the list lived
+    /// here, and the quality axis, which says what a file claims is wrong
+    /// with its own image, could not reach a filename at all.
+    pub axes: BTreeMap<&'a str, Vec<&'a str>>,
 }
 
 /// A name the standard admits.
@@ -64,6 +71,11 @@ pub struct Name {
     /// Entity key to value, **in the schema's order**, which is the order a
     /// filename spells them.
     pub entities: Vec<(&'static str, String)>,
+    /// The entities the schema refuses this suffix, whose facts went into
+    /// `acq-` instead (§9.2, record 37 S6). Never dropped and never silent:
+    /// the run counts them by entity, so a tree says how often the standard
+    /// had no slot for something the archive states.
+    pub refused: Vec<&'static str>,
 }
 
 /// Why a stack has no BIDS name.
@@ -123,7 +135,17 @@ impl Why {
     }
 }
 
+/// An entity a stack would take, its value, and the axis values it was read
+/// from, which is what a refusal needs to know whether `acq-` says it already.
+type Wanted<'a> = (&'a str, String, Vec<(&'a str, &'a str)>);
+
 /// Build the name, or say why there is none.
+///
+/// Every fact the stack states reaches the name or is said to have been
+/// refused. An entity the schema does not give this suffix is **not dropped**,
+/// which is what this did before record 37 S6: its fact is spelled into
+/// `acq-`, which is free-form, unless the label carries it already, and either
+/// way the entity is named in `refused` so the run can count it.
 pub fn build(facts: &Facts, map: &Mapping) -> Result<Name, Why> {
     let named = map.suffix(
         &facts.constructs,
@@ -149,44 +171,86 @@ pub fn build(facts: &Facts, map: &Mapping) -> Result<Name, Why> {
     let group = schema::group_of(&datatype, &named.suffix)
         .ok_or_else(|| Why::NotInSchema(datatype.clone(), named.suffix.clone()))?;
 
-    let mut have: BTreeMap<&'static str, String> = BTreeMap::new();
-    let mut set = |key: &str, value: String| {
-        if let Some(e) = schema::entity(key)
-            && group.allowed.contains(&e.key)
-        {
-            have.insert(e.key, value);
-        }
-        // An entity the group does not admit is dropped rather than written:
-        // `part` on a scanner-derived ADC is not a BIDS name. Dropping can
-        // make two stacks share a name, which is what `run` is for.
-    };
-
+    // What the stack would say in an entity, each with the axis value it came
+    // from, which is how a refusal knows whether `acq-` says it already.
+    let mut want: Vec<Wanted> = Vec::new();
     // What the suffix itself fixes. First, because an `INV1` is an MP2RAGE's
     // first inversion and saying so is part of saying what it is.
     for (key, value) in &named.entities {
-        set(key, value.clone());
+        want.push((key.as_str(), value.clone(), Vec::new()));
     }
     if let Some(task) = facts.task {
-        set("task", task.to_string());
-    }
-    let acq = acq_label(facts, map);
-    if !acq.is_empty() {
-        set("acquisition", acq);
+        want.push(("task", task.to_string(), Vec::new()));
     }
     if facts.post_contrast && !map.ceagent.is_empty() {
-        set("ceagent", map.ceagent.clone());
+        want.push((
+            "ceagent",
+            map.ceagent.clone(),
+            vec![("post_contrast", "given")],
+        ));
+    }
+    // §9.2 with record 37 S6: what made the image out of the acquisition. The
+    // scanner's pipeline and the reformats and projections both, because both
+    // are reconstructions and `rec-` is where the standard puts them.
+    if let Some((from, label)) = map.reconstruction_of(facts.provenance, &facts.constructs) {
+        let source = from
+            .iter()
+            .map(|v| match facts.provenance == Some(*v) {
+                true => ("provenance", *v),
+                false => ("construct", *v),
+            })
+            .collect();
+        want.push(("reconstruction", label, source));
     }
     if let Some(dir) = facts.pe_direction {
-        set("direction", dir.to_string());
+        want.push(("direction", dir.to_string(), Vec::new()));
     }
     if let Some(echo) = facts.echo.filter(|e| *e > 0) {
-        set("echo", echo.to_string());
+        want.push(("echo", echo.to_string(), Vec::new()));
     }
-    if let Some(mt) = map.mtransfer_of(&facts.modifiers) {
-        set("mtransfer", mt.to_string());
+    if let Some((from, mt)) = map.mtransfer_of(&facts.modifiers) {
+        want.push(("mtransfer", mt.to_string(), vec![("modifier", from)]));
     }
-    if let Some(part) = map.part_of(&facts.constructs) {
-        set("part", part.to_string());
+    if let Some((from, part)) = map.part_of(&facts.constructs) {
+        want.push(("part", part.to_string(), vec![("construct", from)]));
+    }
+
+    let mut have: BTreeMap<&'static str, String> = BTreeMap::new();
+    let mut refused: Vec<&'static str> = Vec::new();
+    // The tokens a refused entity contributes to `acq-`, with the entity's
+    // position in the grammar, so that they are joined in the standard's own
+    // order rather than in the order this function happened to ask.
+    let mut spelled: Vec<(usize, String)> = Vec::new();
+    for (key, value, from) in want {
+        let Some(e) = schema::entity(key) else {
+            continue;
+        };
+        if group.allowed.contains(&e.key) || group.required.contains(&e.key) {
+            have.insert(e.key, value);
+            continue;
+        }
+        // The schema gives this suffix no such entity: `ce` on a diffusion
+        // image, `part` on a susceptibility map, `mt` on anything this pack
+        // names. Dropping it, which is what happened before, loses a fact and
+        // makes two stacks share a name; so it is spelled into `acq-`
+        // instead, unless the label carries the same fact already.
+        refused.push(e.key);
+        if !from.is_empty() && from.iter().all(|(axis, v)| map.acq_carries(axis, v)) {
+            continue;
+        }
+        let at = schema::ENTITIES.iter().position(|x| x.key == e.key);
+        spelled.push((at.unwrap_or(usize::MAX), token(e.name, &value)));
+    }
+    spelled.sort();
+    let mut acq = acq_label(facts, map);
+    for (_, token) in spelled {
+        acq.push_str(&token);
+    }
+    if !acq.is_empty()
+        && let Some(e) = schema::entity("acquisition")
+        && group.allowed.contains(&e.key)
+    {
+        have.insert(e.key, acq);
     }
 
     // `func` requires `task`, and the reason is worth its own answer: the
@@ -223,7 +287,29 @@ pub fn build(facts: &Facts, map: &Mapping) -> Result<Name, Why> {
             .copied()
             .ok_or(Why::NoSuffix)?,
         entities,
+        refused,
     })
+}
+
+/// A fact the schema refuses an entity for, as an `acq-` token.
+///
+/// The entity's own word and its value, each with a capital, so that a reader
+/// of `acq-BrainAx2DDWIEPICeContrast` can see which entity the standard would
+/// not take: `ce-contrast` refused reads `CeContrast`, `part-mag` reads
+/// `PartMag`, `echo-2` reads `Echo2`. A BIDS label is `[0-9a-zA-Z+]+`, so
+/// anything else is dropped from the token rather than spelled.
+fn token(name: &str, value: &str) -> String {
+    let capital = |text: &str| -> String {
+        let mut chars = text.chars();
+        match chars.next() {
+            Some(c) => c.to_uppercase().chain(chars).collect(),
+            None => String::new(),
+        }
+    };
+    format!("{}{}", capital(name), capital(value))
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '+')
+        .collect()
 }
 
 impl Name {
@@ -284,25 +370,24 @@ impl Name {
 
 /// Everything that describes the acquisition and is not a suffix or an entity,
 /// joined into one label in the pack's declared order.
+///
+/// **The pack says what a name carries.** This reads the axis the pack names
+/// off what the stack says, whatever that axis is, so a pack that gives itself
+/// one can put it in a name and the engine needs no release to learn it. An
+/// axis the stack is silent on contributes nothing, and a value with no token
+/// contributes nothing, which is how `ND` and `RawRecon` stay out of every
+/// filename.
 fn acq_label(facts: &Facts, map: &Mapping) -> String {
     let mut out = String::new();
     for group in &map.acq {
-        let values: Vec<&str> = match group.from.as_str() {
-            "body_part" => facts.body_part.into_iter().collect(),
-            "orientation" => facts.orientation.into_iter().collect(),
-            "acquisition_type" => facts.acquisition_type.into_iter().collect(),
-            "technique" => facts.technique.into_iter().collect(),
-            "modifier" => facts.modifiers.clone(),
-            "construct" => facts.constructs.clone(),
-            "provenance" => facts.provenance.into_iter().collect(),
-            // A field the engine does not supply contributes nothing rather
-            // than silently becoming an empty token.
-            _ => Vec::new(),
-        };
-        for v in values {
-            if let Some(token) = group.tokens.get(v) {
-                out.push_str(token);
-            }
+        for value in facts
+            .axes
+            .get(group.from.as_str())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| group.tokens.get(*v))
+        {
+            out.push_str(value);
         }
     }
     out
@@ -344,26 +429,37 @@ mod tests {
         m.part.insert("Magnitude".into(), "mag".into());
         m.part.insert("Phase".into(), "phase".into());
         m.mtransfer.insert("MT".into(), "on".into());
+        m.reconstruction
+            .insert("DTIRecon".into(), "DTIRecon".into());
+        m.reconstruction.insert("MIP".into(), "MIP".into());
         m.ceagent = "contrast".into();
         m.acq = vec![
-            Tokens {
-                from: "body_part".into(),
-                tokens: [("spine".to_string(), "Spine".to_string())].into(),
-            },
-            Tokens {
-                from: "technique".into(),
-                tokens: [
-                    ("MPRAGE".to_string(), "MPRAGE".to_string()),
-                    ("ME-GRE".to_string(), "MEGRE".to_string()),
-                ]
-                .into(),
-            },
-            Tokens {
-                from: "modifier".into(),
-                tokens: [("FatSat".to_string(), "FatSat".to_string())].into(),
-            },
+            group("body_part", &[("spine", "Spine")]),
+            group("technique", &[("MPRAGE", "MPRAGE"), ("ME-GRE", "MEGRE")]),
+            group("modifier", &[("FatSat", "FatSat"), ("MT", "MT")]),
+            group("quality", &[("Distorted", "Distorted")]),
         ];
         m
+    }
+
+    /// One `acq-` group, as a pack declares it.
+    fn group(from: &str, tokens: &[(&str, &str)]) -> Tokens {
+        Tokens {
+            from: from.to_string(),
+            tokens: tokens
+                .iter()
+                .map(|(v, t)| (v.to_string(), t.to_string()))
+                .collect(),
+        }
+    }
+
+    /// What a stack says, by axis, which is what `acq-` is built from.
+    fn axes<'a>(said: &[(&'a str, &'a str)]) -> BTreeMap<&'a str, Vec<&'a str>> {
+        let mut out: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (axis, value) in said {
+            out.entry(axis).or_default().push(value);
+        }
+        out
     }
 
     fn t1w() -> Facts<'static> {
@@ -389,22 +485,36 @@ mod tests {
             intent: Some("anat"),
             base: Some("T1w"),
             technique: Some("MPRAGE"),
-            body_part: Some("spine"),
             modifiers: vec!["FatSat", "MT"],
             constructs: vec!["Magnitude"],
             post_contrast: true,
             echo: Some(2),
+            axes: axes(&[
+                ("body_part", "spine"),
+                ("technique", "MPRAGE"),
+                ("modifier", "FatSat"),
+                ("modifier", "MT"),
+                ("construct", "Magnitude"),
+            ]),
             ..Facts::default()
         };
         let n = build(&facts, &mapping()).unwrap();
         assert_eq!(
             n.stem("x", "1"),
-            "sub-x_ses-1_acq-SpineMPRAGEFatSat_ce-contrast_echo-2_part-mag_T1w"
+            "sub-x_ses-1_acq-SpineMPRAGEFatSatMT_ce-contrast_echo-2_part-mag_T1w"
         );
         // And `mt-` is not there, though the stack says `MT`: the schema gives
         // `mt` only to `MTR`, `MTS` and `MPM`, each computed from more than one
         // image. That is the same fact as `MTw` having no BIDS name at all.
+        // The fact is not lost with it: the pack puts `MT` in `acq-`, the name
+        // says so, and the refusal is counted rather than passed over.
         assert!(!n.stem("x", "1").contains("mt-"));
+        assert!(n.stem("x", "1").contains("acq-SpineMPRAGEFatSatMT"));
+        // And the `MT` in the label is the pack's own token and not a second
+        // spelling of the refusal: a fact already in the name is not said
+        // twice to say it was refused.
+        assert!(!n.stem("x", "1").contains("MtOn"));
+        assert_eq!(n.refused, vec!["mtransfer"]);
     }
 
     #[test]
@@ -416,6 +526,7 @@ mod tests {
             intent: Some("anat"),
             technique: Some("ME-GRE"),
             base: Some("T2starw"),
+            axes: axes(&[("technique", "ME-GRE")]),
             ..Facts::default()
         };
         assert_eq!(
@@ -451,25 +562,32 @@ mod tests {
     }
 
     #[test]
-    fn an_entity_the_group_does_not_admit_is_dropped_rather_than_written() {
+    fn an_entity_the_group_does_not_admit_is_spelled_and_not_dropped() {
         // The schema gives `dwi`'s scanner derivatives no `part`, so a
-        // magnitude ADC map is an ADC map and not an invalid name. Two stacks
-        // that lose what told them apart are what `run` is for.
+        // magnitude ADC map cannot say `part-mag` and be a BIDS name. It used
+        // to drop the fact, which makes two stacks share a name and calls the
+        // second a repeat of the first; record 37 S6 spells it into `acq-`,
+        // which is free-form, and names the entity that was refused.
         let facts = Facts {
             intent: Some("dwi"),
             constructs: vec!["ADC", "Magnitude"],
             base: Some("DWI"),
+            axes: axes(&[("construct", "ADC"), ("construct", "Magnitude")]),
             ..Facts::default()
         };
         let n = build(&facts, &mapping()).unwrap();
-        assert_eq!(n.stem("x", "1"), "sub-x_ses-1_ADC");
+        assert_eq!(n.stem("x", "1"), "sub-x_ses-1_acq-PartMag_ADC");
         assert_eq!(n.datatype, "dwi");
+        assert_eq!(n.refused, vec!["part"]);
     }
 
     #[test]
-    fn a_direction_reaches_a_dwi_and_not_an_anat() {
+    fn a_direction_reaches_a_dwi_as_an_entity_and_an_anat_as_a_token() {
         // `dir` is optional on `dwi` and absent from every `anat` group, so
-        // the same fact lands in one name and not the other.
+        // the same fact lands in one name as the entity the standard has for
+        // it and in the other as an `acq-` token, which is the only place
+        // left that can hold it (record 37 S6). Not in neither, which is
+        // what dropping it used to mean.
         let dwi = Facts {
             intent: Some("dwi"),
             base: Some("DWI"),
@@ -484,10 +602,9 @@ mod tests {
             pe_direction: Some("AP"),
             ..t1w()
         };
-        assert_eq!(
-            build(&anat, &mapping()).unwrap().stem("x", "1"),
-            "sub-x_ses-1_T1w"
-        );
+        let n = build(&anat, &mapping()).unwrap();
+        assert_eq!(n.stem("x", "1"), "sub-x_ses-1_acq-DirAP_T1w");
+        assert_eq!(n.refused, vec!["direction"]);
     }
 
     #[test]
@@ -547,6 +664,53 @@ mod tests {
         };
         let n = build(&facts, &mapping()).unwrap().with_run(3).unwrap();
         assert_eq!(n.stem("x", "1"), "sub-x_ses-1_run-3_echo-1_T1w");
+    }
+
+    #[test]
+    fn a_reconstruction_leaves_acq_for_the_entity_the_standard_has() {
+        // Record 37 S6. The scanner's pipeline and the reformats are
+        // reconstructions of an acquisition, `rec-` is allowed on every suffix
+        // this pack writes, and moving them there separated no pair less over
+        // 836 stacks while taking the longest tail off the label.
+        let facts = Facts {
+            intent: Some("anat"),
+            base: Some("T1w"),
+            technique: Some("MPRAGE"),
+            provenance: Some("DTIRecon"),
+            constructs: vec!["MIP"],
+            axes: axes(&[
+                ("technique", "MPRAGE"),
+                ("provenance", "DTIRecon"),
+                ("construct", "MIP"),
+            ]),
+            ..Facts::default()
+        };
+        let n = build(&facts, &mapping()).unwrap();
+        assert_eq!(
+            n.stem("x", "1"),
+            "sub-x_ses-1_acq-MPRAGE_rec-DTIReconMIP_T1w"
+        );
+        assert!(n.refused.is_empty());
+    }
+
+    #[test]
+    fn an_axis_the_engine_never_heard_of_reaches_a_name_because_the_pack_says_so() {
+        // Record 37 S6, and the reason the list is not here any more: S5 gave
+        // the pack a quality axis, and no release could write it because the
+        // axes `acq-` may read were spelled into this module. Two stacks that
+        // agree on everything and disagree on whether the image is whole are
+        // not interchangeable, and now the name says which is which.
+        let facts = Facts {
+            intent: Some("anat"),
+            base: Some("T1w"),
+            technique: Some("MPRAGE"),
+            axes: axes(&[("technique", "MPRAGE"), ("quality", "Distorted")]),
+            ..Facts::default()
+        };
+        assert_eq!(
+            build(&facts, &mapping()).unwrap().stem("x", "1"),
+            "sub-x_ses-1_acq-MPRAGEDistorted_T1w"
+        );
     }
 
     #[test]

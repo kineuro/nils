@@ -101,9 +101,35 @@ entities:
     Phase: phase
     Real: real
     Imaginary: imag
-  # Magnetisation transfer, on the stacks that say so.
+  # Magnetisation transfer, on the stacks that say so. BIDS gives `mt-` only
+  # to `MTR`, `MTS` and `MPM`, each computed from more than one image, so on
+  # every suffix this pack writes the entity is refused and the fact stays in
+  # `acq-`, where the `MT` modifier token already puts it.
   mtransfer:
     MT: 'on'
+  # What made the image out of the acquisition, which BIDS spells `rec-` and
+  # allows on every suffix group this pack writes. Two axes feed it: the
+  # scanner pipeline that signed the image, and the construct that says what
+  # was done to it. Measured over 836 stacks of the 2026-09-19 study, moving
+  # these out of `acq-` separates no pair less than before and takes the
+  # longest single tail off the label.
+  reconstruction:
+    provenance:
+      SyMRI: SyMRI
+      EPIMix: EPIMix
+      STAGE: STAGE
+      SWIRecon: SWIRecon
+      DTIRecon: DTIRecon
+      PerfusionRecon: PerfusionRecon
+      ASLRecon: ASLRecon
+      BOLDRecon: BOLDRecon
+    construct:
+      MIP: MIP
+      MinIP: MinIP
+      MPR: MPR
+      UniformDenoised: Denoised
+      Filtered: Filtered
+      ORIG: ORIG
   # The contrast agent's label. BIDS wants the agent's name and the archive
   # does not carry one a filename may spell: `ContrastBolusAgent` is free text
   # in a dozen spellings and two languages. So the label is declared here, and
@@ -200,10 +226,11 @@ acq:
       BrightBlood: BrightBlood
       MoCo: MoCo
   - from: construct
-    # Deliberately not tokens here: `ND` and the four complex parts. The first
-    # says only that a vendor's distortion correction was off, which every
-    # other stack of the series also says; the other four are the `part`
-    # entity and would say it twice.
+    # Deliberately not tokens here: `ND`, the four complex parts and the six
+    # reconstruction kinds. The first says only that a vendor's distortion
+    # correction was off, which every other stack of the series also says; the
+    # complex parts are the `part` entity and the reconstruction kinds are
+    # `rec-`, and either would say it twice.
     tokens:
       MD: MD
       CBF: CBF
@@ -220,26 +247,17 @@ acq:
       SyntheticFLAIR: SynFLAIR
       SyntheticPDw: SynPDw
       MyelinMap: MyelinMap
-      MIP: MIP
-      MinIP: MinIP
-      MPR: MPR
       SWI: SWI
-      UniformDenoised: Denoised
-      Filtered: Filtered
-      ORIG: ORIG
-  - from: provenance
-    # `RawRecon` is not a token: it is the axis's default, so it holds on
-    # every stack nothing else claimed and would be in every filename saying
-    # nothing. The same argument as `ND`.
+  - from: quality
+    # What the file says is wrong with its own image. It belongs in the name
+    # because two stacks that agree on everything else and disagree here are
+    # not interchangeable: the survey found `NAVAIL` separating 93 colliding
+    # names and `DISTORTED` 15. BIDS has no entity for it, so `acq-` is its
+    # only home, in both names.
     tokens:
-      SyMRI: SyMRI
-      EPIMix: EPIMix
-      STAGE: STAGE
-      SWIRecon: SWIRecon
-      DTIRecon: DTIRecon
-      PerfusionRecon: PerfusionRecon
-      ASLRecon: ASLRecon
-      BOLDRecon: BOLDRecon
+      Distorted: Distorted
+      InputUnavailable: NoInput
+      Encrypted: Encrypted
 
 # What counts as a vendor's synthetic contrast, for the placement choice of
 # section 9.3: an image the scanner computed from a multi-parameter

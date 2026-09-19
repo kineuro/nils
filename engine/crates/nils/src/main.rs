@@ -8170,6 +8170,15 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             println!("      {n:>10}   {why}");
         }
     }
+    // Record 37 S6: the entities the standard would not give the suffix that
+    // wanted them. The fact is in `acq-` instead of being lost, and a number
+    // here is a place BIDS has no slot for something the archive states.
+    if !report.refused_entities.is_empty() {
+        println!("  said in acq- instead, the standard having no slot on that suffix");
+        for (entity, n) in &report.refused_entities {
+            println!("      {n:>10}   stacks whose {entity} the suffix would not take");
+        }
+    }
     // Record 35 finding 1: a subject the session layer derived no session for
     // is refused rather than written under a ses- no scheme produced, and it
     // is named, because a number alone leaves nobody anything to look at.

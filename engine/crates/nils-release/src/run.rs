@@ -148,6 +148,11 @@ pub struct Report {
     pub session_naming: Option<String>,
     /// Which layout was written, and for BIDS what it chose (§9.3).
     pub layout: String,
+    /// Entities the schema refuses the suffix that wanted them, by entity,
+    /// counted over the stacks that wanted them (record 37 S6). The fact is
+    /// in `acq-` instead of being dropped, and this is the release saying how
+    /// often the standard had no slot for something the archive states.
+    pub refused_entities: BTreeMap<String, i64>,
     pub placements: BTreeMap<String, String>,
     /// The converter that was found, if one was needed (§9.6).
     pub converter: Option<String>,
@@ -577,6 +582,13 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // under.
     let with_a_study = subjects_with_a_study(registry.store())?;
     let named = places(registry.store(), &by_study, settings.pack)?;
+    // §9.4 with record 37 S6: where in the body, for the sidecar, by stack.
+    // The name carries it too, because two files must not overwrite each
+    // other; this is the slot the standard keeps the fact in.
+    let body_parts: HashMap<i64, String> = named
+        .iter()
+        .filter_map(|(stack, p)| p.body_part.clone().map(|b| (*stack, b)))
+        .collect();
     // The dataset this is a version of, and the version before it, read before
     // anything is written.
     let dataset = dataset_of(registry.store(), settings.name, settings.root)?;
@@ -832,6 +844,19 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                     })
                     .or_insert((subject, day, offset));
             }
+            // Record 37 S6. An entity the schema refuses this suffix put its
+            // fact in `acq-` instead of losing it, and the release says how
+            // often: a number here is a place the standard has no slot for
+            // something the archive states, which is the evidence a pack
+            // extension or a specification issue is argued from.
+            if let Some(name) = placed.and_then(|p| p.bids.as_ref().ok()) {
+                for key in &name.refused {
+                    *report
+                        .refused_entities
+                        .entry((*key).to_string())
+                        .or_insert(0) += 1;
+                }
+            }
             stacks_planned += 1;
             planned.push(vec![
                 Param::Int(report.release_id),
@@ -1020,7 +1045,13 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                         let dir = job.place.dir.clone();
                         write_dicom(job, &plan, settings.root, &dir)
                     }
-                    Layout::Bids => write_bids(job, &plan, settings, &mut report),
+                    Layout::Bids => write_bids(
+                        job,
+                        &plan,
+                        settings,
+                        &mut report,
+                        body_parts.get(&job.stack).map(String::as_str),
+                    ),
                 };
                 let mut wrote: Vec<Wrote> = Vec::new();
                 for w in written {
@@ -2724,6 +2755,29 @@ fn write_one(instance: &Instance, plan: &Plan, root: &Path, dir: &str) -> Result
     })
 }
 
+/// Add one field to the sidecar the converter wrote, if it wrote one.
+///
+/// Never a failure: a stack whose sidecar cannot be read or is not an object
+/// is a stack with an image and a converter that did something unexpected, and
+/// refusing the whole release over a metadata field would be the wrong answer
+/// to it. The field is added after the conversion and before the digest, so a
+/// tree's own state covers it and a re-run sees no change.
+fn add_to_sidecar(path: &Path, key: &str, value: &str) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let Some(fields) = doc.as_object_mut() else {
+        return;
+    };
+    fields.insert(key.to_string(), serde_json::Value::from(value));
+    if let Ok(out) = serde_json::to_string_pretty(&doc) {
+        std::fs::write(path, format!("{out}\n")).ok();
+    }
+}
+
 /// One stack, as DICOM in a directory of its own: the descriptive layout and
 /// `sourcedata/` both.
 fn write_dicom(job: &Job, plan: &Plan, root: &Path, dir: &str) -> Vec<Result<Written, String>> {
@@ -2746,6 +2800,7 @@ fn write_bids(
     plan: &Plan,
     settings: &Settings,
     report: &mut Report,
+    body_part: Option<&str>,
 ) -> Vec<Result<Written, String>> {
     let root = settings.root;
     let staging = root.join(".nils-convert").join(job.stack.to_string());
@@ -2791,6 +2846,14 @@ fn write_bids(
     match made {
         Ok(made) => {
             std::fs::remove_dir_all(&staging).ok();
+            // §9.2 with record 37 S6: where in the body, in the slot the
+            // standard keeps it in. `dcm2niix` writes the sidecar from the
+            // headers and the headers say `BodyPartExamined` in whatever the
+            // vendor wrote; this is the pack's own answer, the one the axis
+            // decided and the one `acq-` spells.
+            if let Some(part) = body_part {
+                add_to_sidecar(&into.join(format!("{stem}.json")), "BodyPart", part);
+            }
             let mut out = refused;
             let mut first = true;
             for file in made.files {
@@ -3175,7 +3238,7 @@ fn places(
     // that two runs of one version assign the same `run-` numbers.
     type Ordered = Vec<(i64, i64, i64, String)>;
     let mut bids_buckets: BTreeMap<(i64, String, &'static str), Ordered> = BTreeMap::new();
-    let mut extra: HashMap<i64, (bool, Option<String>)> = HashMap::new();
+    let mut extra: HashMap<i64, (bool, Option<String>, Option<String>)> = HashMap::new();
 
     for r in &rows {
         let stack = r.int(0)?;
@@ -3241,16 +3304,37 @@ fn places(
         let base = get("base").and_then(|v| id_of("base", v));
         let body_part = get("body_part").and_then(|v| id_of("body_part", v));
         let provenance = get("provenance").and_then(|v| id_of("provenance", v));
+        // Record 37 S6: everything the stack says, by the name the pack knows
+        // it under, so that what a name carries is the pack's to declare. An
+        // axis this module never heard of reaches a filename the moment the
+        // pack gives it a token, which is how the quality axis of S5 does.
+        let mut said: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (axis, stored) in a {
+            let ids = ids_of(axis, Some(stored.as_str()));
+            if !ids.is_empty() {
+                said.insert(axis.clone(), ids);
+            }
+        }
+        // And the two the fingerprint measures rather than a rule deciding.
+        for (field, value) in [
+            ("orientation", r.opt_text(6)?),
+            ("acquisition_type", r.opt_text(9)?),
+        ] {
+            if let Some(v) = value.filter(|v| !v.is_empty()) {
+                said.insert(field.to_string(), vec![v.to_string()]);
+            }
+        }
         let facts = crate::bids::name::Facts {
             intent: get("directory_type"),
             constructs: constructs.iter().map(String::as_str).collect(),
             technique: technique.as_deref(),
             modifiers: modifiers.iter().map(String::as_str).collect(),
             base: base.as_deref(),
-            body_part: body_part.as_deref(),
             provenance: provenance.as_deref(),
-            orientation: r.opt_text(6)?,
-            acquisition_type: r.opt_text(9)?,
+            axes: said
+                .iter()
+                .map(|(axis, values)| (axis.as_str(), values.iter().map(String::as_str).collect()))
+                .collect(),
             post_contrast: contrast,
             // The one fact no rule sets: a person answers it per study (§9.2).
             task: get("task"),
@@ -3268,7 +3352,14 @@ fn places(
             provenance.as_deref(),
             &constructs.iter().map(String::as_str).collect::<Vec<_>>(),
         );
-        extra.insert(stack, (synthetic, get("disposition").map(str::to_string)));
+        extra.insert(
+            stack,
+            (
+                synthetic,
+                get("disposition").map(str::to_string),
+                body_part.clone(),
+            ),
+        );
         if let Ok(n) = &built {
             bids_buckets
                 .entry((subject, label.clone(), n.datatype))
@@ -3326,7 +3417,8 @@ fn places(
     for bucket in buckets.values_mut() {
         name::disambiguate(bucket);
         for n in bucket.iter() {
-            let (synthetic, disposition) = extra.remove(&n.stack).unwrap_or((false, None));
+            let (synthetic, disposition, body_part) =
+                extra.remove(&n.stack).unwrap_or((false, None, None));
             out.insert(
                 n.stack,
                 Placed {
@@ -3336,6 +3428,7 @@ fn places(
                         .unwrap_or(Err(crate::bids::name::Why::NoSuffix)),
                     synthetic,
                     disposition,
+                    body_part,
                 },
             );
         }
@@ -3355,6 +3448,11 @@ struct Placed {
     /// A vendor's synthetic contrast, which §9.3 lets a release place.
     synthetic: bool,
     disposition: Option<String>,
+    /// Where in the body, as the pack's axis states it. It is in `acq-`
+    /// because names must be unique, and it is here because the standard
+    /// keeps the fact in the sidecar, as `BodyPart`, and that is where a
+    /// reader looks it up (record 37 S6).
+    body_part: Option<String>,
 }
 
 /// `EchoNumbers` may carry several values; the first is this stack's.

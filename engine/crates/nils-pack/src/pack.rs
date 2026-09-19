@@ -1012,6 +1012,23 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
                 into_map.insert(value.clone(), f.blame(yaml::text(label, &at))?);
             }
         }
+        // `rec` is the one entity two axes feed: a scanner's pipeline says it
+        // in the provenance and a reformat says it in the construct, and both
+        // are reconstructions of an acquisition (record 37 S6).
+        if let Some(v) = em.get("reconstruction") {
+            let at = "bids.entities.reconstruction";
+            for (source, axis) in [("provenance", "provenance"), ("construct", "construct")] {
+                let Some(v) = f.blame(yaml::obj(v, at))?.get(source) else {
+                    continue;
+                };
+                let at = format!("{at}.{source}");
+                for (value, label) in f.blame(yaml::obj(v, &at))? {
+                    check(axis, value, &at)?;
+                    into.reconstruction
+                        .insert(value.clone(), f.blame(yaml::text(label, &at))?);
+                }
+            }
+        }
         if let Some(v) = em.get("ceagent") {
             into.ceagent = f.blame(yaml::text(v, "bids.entities.ceagent"))?;
         }
@@ -1028,6 +1045,23 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
             let at = format!("bids.acq[{i}]");
             let im = f.blame(yaml::obj(item, &at))?;
             let from = f.blame(yaml::text(yaml::get(im, "from", &at)?, &at))?;
+            // The engine reads `from` against what a stack says rather than
+            // against a list of axes it was written knowing, so a pack that
+            // gives itself an axis can name with it. The price is that a
+            // misspelled `from` would contribute nothing and say nothing, so
+            // it is refused here instead (record 37 S6).
+            if !axes.iter().any(|a| a.name == from) && !crate::bids::FIELDS.contains(&from.as_str())
+            {
+                return Err(Error::at(
+                    format!("{at}.from"),
+                    format!(
+                        "{from} is neither an axis of this pack nor one of the stack's own \
+                         fields ({})",
+                        crate::bids::FIELDS.join(", ")
+                    ),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
             let mut tokens = BTreeMap::new();
             let at = format!("{at}.tokens");
             for (value, token) in f.blame(yaml::obj(yaml::get(im, "tokens", &at)?, &at))? {

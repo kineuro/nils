@@ -733,3 +733,99 @@ fn a_sensitive_kind_is_refused_by_name_and_left_out_by_default() {
     let e = run::run(&mut reg, &settings).unwrap_err().to_string();
     assert!(e.contains("names no observation kind"), "{e}");
 }
+
+/// Put one value of one axis on every stack, as a person deciding would.
+fn decide(reg: &mut Registry, axis: &str, value: &str) {
+    let store = reg.store();
+    let table = store.qualified("classification_axis");
+    store
+        .execute(&format!("DELETE FROM {table} WHERE axis = '{axis}'"), &[])
+        .unwrap();
+    store
+        .execute(
+            &format!(
+                "INSERT INTO {table} (stack_id, axis, value, confidence, tier) \
+                 SELECT id, '{axis}', '{value}', 1.0, 'decided' FROM {}",
+                store.qualified("stack")
+            ),
+            &[],
+        )
+        .unwrap();
+}
+
+#[test]
+fn the_body_part_is_in_the_name_and_in_the_sidecar() {
+    // Record 37 S6. The two are not in conflict and the study says why:
+    // `BodyPart` is where a reader looks the fact up, and `acq-` is what stops
+    // a brain and a spine acquisition of one session overwriting each other,
+    // which is 22 pairs of an archive.
+    let Some(converter) = converter() else { return };
+    let source = tree();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    decide(&mut reg, "body_part", "spine");
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    run::run(
+        &mut reg,
+        &settings(
+            out.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        ),
+    )
+    .unwrap();
+
+    let sidecars: Vec<String> = files_under(out.path())
+        .into_iter()
+        .filter(|f| f.ends_with(".json") && f.starts_with("sub-"))
+        .collect();
+    assert!(!sidecars.is_empty(), "the converter writes a sidecar");
+    for file in &sidecars {
+        assert!(file.contains("acq-Spine"), "the name says it too: {file}");
+        let text = std::fs::read_to_string(out.path().join(file)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["BodyPart"], serde_json::Value::from("spine"), "{file}");
+    }
+}
+
+#[test]
+fn an_axis_the_pack_declares_reaches_a_name_without_the_engine_learning_it() {
+    // Record 37 S6, and the fault it fixes: the axes `acq-` could read were
+    // hard-coded, so the quality axis of S5, which says what a file claims is
+    // wrong with its own image, could not reach a filename at all. Two stacks
+    // that agree on everything and disagree on whether the image is whole are
+    // not interchangeable.
+    let Some(converter) = converter() else { return };
+    let source = tree();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    decide(&mut reg, "quality", "Distorted");
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    run::run(
+        &mut reg,
+        &settings(
+            out.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        ),
+    )
+    .unwrap();
+
+    let names: Vec<String> = files_under(out.path())
+        .into_iter()
+        .filter(|f| f.starts_with("sub-") && f.ends_with(".nii.gz"))
+        .collect();
+    assert!(!names.is_empty());
+    assert!(
+        names.iter().all(|n| n.contains("Distorted")),
+        "the pack declared it and the name carries it: {names:?}"
+    );
+}

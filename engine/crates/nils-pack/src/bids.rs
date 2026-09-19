@@ -18,6 +18,15 @@
 
 use std::collections::BTreeMap;
 
+/// The stack's own fields a name may be built from beside the pack's axes.
+///
+/// Two, and both because the fingerprint measures them rather than a rule
+/// deciding them: the plane the slices lie in, and whether the acquisition was
+/// two- or three-dimensional. Everything else a name carries is an axis, and
+/// an axis is the pack's to declare, which is why the engine keeps no list of
+/// those (record 37 S6).
+pub const FIELDS: &[&str] = &["orientation", "acquisition_type"];
+
 /// What one of our values says a file is called.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Named {
@@ -36,7 +45,10 @@ pub struct Named {
 /// One group of `acq-` tokens, from one field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tokens {
-    /// The axis or fingerprint field the value comes from.
+    /// The axis or fingerprint field the value comes from. **Any** of them:
+    /// the engine looks the name up in what the stack says rather than in a
+    /// list of its own, so a pack that gives itself an axis can put it in a
+    /// name without the engine learning the axis first (record 37 S6).
     pub from: String,
     pub tokens: BTreeMap<String, String>,
 }
@@ -56,6 +68,12 @@ pub struct Mapping {
     pub part: BTreeMap<String, String>,
     /// Modifier to the `mt` entity's label.
     pub mtransfer: BTreeMap<String, String>,
+    /// Provenance or construct to the `rec` entity's label. Both, because a
+    /// reconstruction is a reconstruction whether the scanner's pipeline
+    /// signed it or the construct says what it did: an MPR, a MIP and a
+    /// denoised uniform image are reconstructions of an acquisition rather
+    /// than acquisitions (record 37 S6).
+    pub reconstruction: BTreeMap<String, String>,
     /// The contrast agent's label, which the archive does not carry in a form
     /// a filename may spell.
     pub ceagent: String,
@@ -111,20 +129,52 @@ impl Mapping {
         base.and_then(|b| self.from_base.get(b))
     }
 
-    /// The `part` label a stack's constructs give it, if any.
-    pub fn part_of(&self, constructs: &[&str]) -> Option<&str> {
+    /// The `part` label a stack's constructs give it, and the construct it
+    /// came from, which is what a refused entity is spelled from (§9.2).
+    pub fn part_of<'a>(&'a self, constructs: &[&'a str]) -> Option<(&'a str, &'a str)> {
         constructs
             .iter()
-            .find_map(|c| self.part.get(*c))
-            .map(String::as_str)
+            .find_map(|c| self.part.get(*c).map(|l| (*c, l.as_str())))
     }
 
-    /// The `mt` label a stack's modifiers give it, if any.
-    pub fn mtransfer_of(&self, modifiers: &[&str]) -> Option<&str> {
+    /// The `mt` label a stack's modifiers give it, and the modifier it came
+    /// from.
+    pub fn mtransfer_of<'a>(&'a self, modifiers: &[&'a str]) -> Option<(&'a str, &'a str)> {
         modifiers
             .iter()
-            .find_map(|m| self.mtransfer.get(*m))
-            .map(String::as_str)
+            .find_map(|m| self.mtransfer.get(*m).map(|l| (*m, l.as_str())))
+    }
+
+    /// The `rec` label a stack's provenance and constructs give it, with the
+    /// values it was built from.
+    ///
+    /// The provenance first and then the constructs in the order the stack
+    /// states them, joined, because a denoised uniform image of a synthetic
+    /// acquisition is both and a label that dropped one of them would be a
+    /// fact lost to make a shorter name.
+    pub fn reconstruction_of<'a>(
+        &'a self,
+        provenance: Option<&'a str>,
+        constructs: &[&'a str],
+    ) -> Option<(Vec<&'a str>, String)> {
+        let mut from: Vec<&str> = Vec::new();
+        let mut label = String::new();
+        for value in provenance.into_iter().chain(constructs.iter().copied()) {
+            if let Some(token) = self.reconstruction.get(value) {
+                from.push(value);
+                label.push_str(token);
+            }
+        }
+        (!from.is_empty()).then_some((from, label))
+    }
+
+    /// Whether the `acq-` label already carries this value of this axis,
+    /// which decides whether an entity the schema refuses has to be spelled
+    /// into the label or is in it already (record 37 S6).
+    pub fn acq_carries(&self, axis: &str, value: &str) -> bool {
+        self.acq
+            .iter()
+            .any(|g| g.from == axis && g.tokens.contains_key(value))
     }
 
     /// Whether a stack is a vendor's synthetic contrast (§9.3).
@@ -236,9 +286,28 @@ mod tests {
 
     #[test]
     fn an_entity_comes_from_the_value_that_means_it() {
+        // The value it came from as well as the label, because a name says
+        // the fact in `acq-` where the schema refuses the entity, and it
+        // cannot ask the pack whether it has said it already without knowing
+        // which value that was (record 37 S6).
         let m = mapping();
-        assert_eq!(m.part_of(&["ND", "Magnitude"]), Some("mag"));
+        assert_eq!(m.part_of(&["ND", "Magnitude"]), Some(("Magnitude", "mag")));
         assert_eq!(m.part_of(&["ND"]), None);
-        assert_eq!(m.mtransfer_of(&["FatSat", "MT"]), Some("on"));
+        assert_eq!(m.mtransfer_of(&["FatSat", "MT"]), Some(("MT", "on")));
+    }
+
+    #[test]
+    fn a_reconstruction_is_the_pipeline_and_the_reformat_together() {
+        // Record 37 S6: `rec-` is the one entity two axes feed, and a stack
+        // that is both a synthetic acquisition and a projection of one says
+        // so in one label rather than losing half of it to a shorter name.
+        let mut m = mapping();
+        m.reconstruction.insert("SyMRI".into(), "SyMRI".into());
+        m.reconstruction.insert("MIP".into(), "MIP".into());
+        assert_eq!(
+            m.reconstruction_of(Some("SyMRI"), &["MIP", "Magnitude"]),
+            Some((vec!["SyMRI", "MIP"], "SyMRIMIP".to_string()))
+        );
+        assert_eq!(m.reconstruction_of(Some("RawRecon"), &["Magnitude"]), None);
     }
 }

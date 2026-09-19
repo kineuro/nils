@@ -940,7 +940,19 @@ archive:
 | `construct` T1map, T2map, PDmap, R1map, QSM | the `anat` parametric suffixes, `Chimap` for QSM |
 | multi-echo GRE, multi-echo SE | `MEGRE`, `MESE`, with `echo-` required |
 | `post_contrast` | `ce-` |
-| the rest of `technique`, `modifier`, `construct` | `acq-`, under a declared vocabulary |
+| `provenance` SyMRI, EPIMix, STAGE, SWIRecon, DTIRecon | `rec-`, which every suffix group here admits |
+| `construct` MPR, MIP, MinIP, Denoised, Filtered, ORIG | `rec-` as well: a reformat is a reconstruction of an acquisition and not one |
+| `dwi_pe_direction` | `dir-` |
+| `modifier` MT | `mt-` where the suffix takes one, which none of ours does; so `acq-` |
+| `body_part` | `acq-`, because names must be unique, **and** the sidecar's `BodyPart`, because that is where the standard keeps the fact |
+| `quality` Distorted, InputUnavailable, Encrypted | no entity: `acq-` |
+| the rest of `technique`, `modifier`, `construct`, the orientation and the acquisition type | `acq-`, under a declared vocabulary |
+
+Where each of those belongs was measured rather than argued
+(`studies/2026-09-19-bids-naming/`): over 836 named stacks, moving the
+provenance and the reconstruction kinds to `rec-` separates no pair less than
+before, the orientation is the axis that earns its place most, and the body
+part separates 22 pairs that no other axis does.
 
 Entity rules come from the schema: `part` takes only `mag|phase|real|imag`, `mt`
 only `on|off`, `echo`, `flip`, `inv` and `run` are indices, and a suffix that
@@ -949,8 +961,18 @@ turns v0's second export bug from a cosmetic complaint into a validator error,
 which is the right place to catch it.
 
 Three rules follow from the same place. **An entity the group does not admit is
-dropped rather than written**, because a name the standard does not admit is
-worse than a name that says less. **Two stacks that then share a name are told
+not written**, because a name the standard does not admit is worse than a name
+that says less; and since record 37 S6 the fact behind it is **not dropped
+either**. It is spelled into `acq-`, which is free-form, as the entity's own
+word and its value: a post-contrast diffusion image, which the `dwi` groups
+give no `ce-`, reads `acq-...CeContrast`. Where `acq-` carries the fact already
+the label is left alone, which is what happens to `mt-`: BIDS gives it only to
+`MTR`, `MTS` and `MPM`, and the `MT` modifier is an `acq-` token in this pack.
+Either way the release counts the refusal by entity, so a tree says how often
+the standard had no slot for something the archive states. Measured over the
+same 836 stacks, this is 15 contrasts, 4 echoes, 3 parts and 3 magnetisation
+transfers, and it closes 9 of the pairs that were sharing one name.
+**Two stacks that then share a name are told
 apart by `run-`**, which is the standard's own answer and the only one; it is
 assigned over the session as the registry holds it, not over the selection, for
 the same reason §9.1's disambiguation is. And **`echo-` is written only where the
@@ -961,6 +983,14 @@ in every filename and says nothing.
 **spelled out rather than derived**: a BIDS label is `[0-9a-zA-Z+]+`, and any
 rule that strips the other characters makes `ME-GRE` and `MEGRE` the same token,
 which is two acquisitions in one filename.
+
+**The pack says which axes those are, and the engine reads them off the stack
+by name.** Before record 37 S6 the list was in the engine, so the quality axis
+the pack had just given itself could not reach a filename at all; now a pack
+that declares an axis and gives its values tokens has named with it, and a
+`from` that names neither an axis nor one of the two fields the stack measures
+itself, the orientation and the acquisition type, is refused when the pack
+loads.
 
 **`func` requires `task`, and no stack has one.** Of 1,173 functional stacks,
 ten carry anything resting-like in their text and none says "task". They are

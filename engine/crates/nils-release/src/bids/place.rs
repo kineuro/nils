@@ -200,6 +200,7 @@ mod tests {
             datatype: "anat",
             suffix: "T1w",
             entities: Vec::new(),
+            refused: Vec::new(),
         })
     }
 
