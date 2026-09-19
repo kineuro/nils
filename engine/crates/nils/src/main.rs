@@ -8148,6 +8148,19 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             println!("      {n:>10}   {why}");
         }
     }
+    // Record 35 finding 1: a subject the session layer derived no session for
+    // is refused rather than written under a ses- no scheme produced, and it
+    // is named, because a number alone leaves nobody anything to look at.
+    if !report.without_a_session.is_empty() {
+        println!(
+            "  no session       {:>12}   subject(s) that own series and no study, so they are \
+             on no timeline and were refused; identity.no_study says why",
+            report.without_a_session.len()
+        );
+        for (code, n) in &report.without_a_session {
+            println!("      {n:>10}   stacks of {code}");
+        }
+    }
     // §9.3. Less than half of a clinical archive has a BIDS name, and where
     // the rest went is the thing a reader of the tree has to be told.
     if !report.routes.is_empty() && report.layout == "bids" {

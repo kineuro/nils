@@ -32,6 +32,10 @@ serde_json.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+# The ask, so that one test can put the two counts of a selection side by
+# side: what `nils select` reaches and what an ask over it holds.
+nils-ask.workspace = true
+nils-catalog.workspace = true
 nils-classify.workspace = true
 nils-digest.workspace = true
 dicom-core.workspace = true

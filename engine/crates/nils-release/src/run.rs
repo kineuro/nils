@@ -146,6 +146,13 @@ pub struct Report {
     pub placements: BTreeMap<String, String>,
     /// The converter that was found, if one was needed (§9.6).
     pub converter: Option<String>,
+    /// Subjects the release would not write, by code, with how many stacks
+    /// each was refused (record 35 finding 1): they own series and no study
+    /// of their own, so the session layer puts them on no timeline and makes
+    /// them no session, and no `ses-` name describes them. The release will
+    /// not invent one. `identity.no_study` is the open question that says
+    /// the same thing about the same subjects.
+    pub without_a_session: BTreeMap<String, i64>,
     /// Stacks by the route of §9.3 they took.
     pub routes: BTreeMap<String, i64>,
     /// And, for the ones that went nowhere, why. Never a silent drop.
@@ -557,6 +564,13 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         nils_session::Anchors::resolve(registry, scheme, BTreeMap::new()).map_err(session_err)?;
     nils_session::ensure(registry, scheme, &anchors, None, false).map_err(session_err)?;
     let by_study = nils_session::labels_by_study(registry.store(), scheme).map_err(session_err)?;
+    // Record 35 finding 1: the subjects that own a study of their own, which
+    // is the session layer's own test. A subject that owns none owns series
+    // and no study, is on no timeline, gets no session, and is the open
+    // question `identity.no_study`; the release refuses it rather than
+    // borrowing the sessions of whoever owns the study its series were filed
+    // under.
+    let with_a_study = subjects_with_a_study(registry.store())?;
     let named = places(registry.store(), &by_study, settings.pack)?;
     // The dataset this is a version of, and the version before it, read before
     // anything is written.
@@ -661,7 +675,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         if mine.is_empty() {
             continue;
         }
-        let labels = session_labels(&mine, &by_study);
+        let labels = session_labels(&mine, &by_study, subject);
         // one offset per subject, drawn once and kept, when any policy in
         // play shifts; applied to the stacks whose policy does
         let offset = match any_shift {
@@ -681,6 +695,29 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             let under = policies.of_root(&instances[0].root);
             policy_of.insert(stack, under);
             let policy = &policies.all[under];
+            // Record 35 finding 1. Identity is asked before pixels, because a
+            // stack whose subject the engine cannot place is not a stack this
+            // release can describe at all. A subject on no timeline owns series
+            // and no study of its own; the session layer makes it no session
+            // and files `identity.no_study`, and the release says the same
+            // thing rather than writing it under a `ses-` no scheme produced.
+            // Never a silent drop: the stack is recorded in `release_absent`
+            // and the subject is named in the report.
+            if !with_a_study.contains(&subject) {
+                report.left_out += 1;
+                *report.without_a_session.entry(code.clone()).or_insert(0) += 1;
+                absent.push((
+                    stack,
+                    "no_session".to_string(),
+                    "the subject owns series and no study, so it is on no timeline and no \
+                     ses- name describes it; identity.no_study says so"
+                        .to_string(),
+                ));
+                continue;
+            }
+            // A study of a subject that does have sessions and is on none of
+            // them is a study with no date: it borrows nobody's session, and
+            // `unknown` says what it is.
             let label = labels
                 .get(&study)
                 .cloned()
@@ -2587,17 +2624,46 @@ fn study_days(store: &mut Store) -> Result<HashMap<i64, Day>, Error> {
 }
 
 /// The session label of each of a subject's studies, from the cache.
+///
+/// **Of this subject's own sessions.** A series carries the subject its files
+/// named and a study carries the subject its own files named, and the two
+/// disagree wherever an archive re-linked a series: the series is one
+/// person's and the study is another's. Reading the label off the study alone
+/// borrows a session from whoever owns the study, which is how record 35's
+/// re-run found a subject the session layer disowns written under two `ses-`
+/// names no scheme had produced for it. A study that names no session of
+/// this subject names none here.
 fn session_labels(
     mine: &[Instance],
     by_study: &HashMap<i64, nils_session::Labelled>,
+    subject: i64,
 ) -> HashMap<i64, String> {
     let mut out = HashMap::new();
     for i in mine {
-        if let Some(l) = by_study.get(&i.study) {
+        if let Some(l) = by_study.get(&i.study).filter(|l| l.subject_id == subject) {
             out.entry(i.study).or_insert_with(|| l.name());
         }
     }
     out
+}
+
+/// The subjects that own a study of their own (record 35 finding 1).
+///
+/// The session layer's own test, asked here so that the release and the
+/// session layer refuse the same subjects: a subject that owns series and no
+/// study is on no timeline, has no session under any scheme, and is the open
+/// question `identity.no_study`. Read whole, because it is one row per
+/// subject and the plan is walked one subject at a time.
+fn subjects_with_a_study(store: &mut Store) -> Result<std::collections::HashSet<i64>, Error> {
+    let sql = format!(
+        "SELECT DISTINCT subject_id FROM {}",
+        store.qualified("study")
+    );
+    let mut out = std::collections::HashSet::new();
+    for r in store.query(&sql, &[])? {
+        out.insert(r.int(0)?);
+    }
+    Ok(out)
 }
 
 fn session_err(e: nils_session::Error) -> Error {
@@ -3148,6 +3214,11 @@ fn places(
         };
         let subject = r.int(1)?;
         let study = r.int(2)?;
+        // The label of a session of this stack's own subject, never of
+        // whoever owns its study (record 35 finding 1). Where there is none
+        // this is a bucket key and not a directory: the planner either
+        // refuses the stack, when its subject owns no study, or writes the
+        // same `unknown`, when the study carries no date.
         let label = labels
             .get(&subject)
             .and_then(|m| m.get(&study))

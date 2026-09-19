@@ -1893,3 +1893,243 @@ fn the_release_row_says_what_it_removed_and_what_it_could_not_judge() {
         "patient,trial,provider,institution,times,ids"
     );
 }
+
+// ------------------------------------------- record 35 finding 1: identity
+//
+// A series carries the subject its own files named; a study carries the
+// subject the study's files named. An archive that re-linked a series leaves
+// the two disagreeing, and then a subject owns series and no study at all.
+// The session layer refuses to build a session for such a subject and files
+// `identity.no_study`. The release used to read the label off the study
+// anyway, which borrowed a session from whoever owned the study, and wrote a
+// disowned subject into `ses-` directories no scheme produced.
+
+/// Give the second study's series to a subject of its own, which is the shape
+/// the re-run found: a subject with series and no study. Answers its code.
+fn disown_a_series(reg: &mut Registry) -> String {
+    use nils_registry::schema::table;
+    use nils_registry::store::{Insert, Param};
+    let store = reg.store();
+    let code = "orphaned";
+    let orphan = store
+        .insert(
+            &Insert::new(table("subject"), &["code", "created_at"]).returning(&["id"]),
+            &[vec![Param::from(code), Param::from("2026-09-19T00:00:00Z")]],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    // The later of the two studies, so the earlier one still makes a session
+    // for the subject that keeps it.
+    let sql = format!(
+        "SELECT se.id FROM {} se JOIN {} st ON st.id = se.study_id ORDER BY st.id DESC",
+        store.qualified("series"),
+        store.qualified("study")
+    );
+    let series = store.query(&sql, &[]).unwrap()[0].int(0).unwrap();
+    store
+        .execute(
+            &format!(
+                "UPDATE {} SET subject_id = {orphan} WHERE id = {series}",
+                store.qualified("series")
+            ),
+            &[],
+        )
+        .unwrap();
+    code.to_string()
+}
+
+/// Every `sub-*/ses-*` pair a tree holds, once, in order.
+fn session_dirs(root: &Path) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = files_under(root)
+        .iter()
+        .filter_map(|p| {
+            let parts: Vec<String> = p
+                .strip_prefix(root)
+                .ok()?
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            let subject = parts.iter().find(|c| c.starts_with("sub-"))?;
+            let session = parts.iter().find(|c| c.starts_with("ses-"))?;
+            Some((subject.clone(), session.clone()))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Every `sub-*/ses-*` pair the scheme produced, from the cache.
+fn derived_sessions(reg: &mut Registry, scheme: &SessionScheme) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = nils_session::sessions_of(reg.store(), scheme, None)
+        .unwrap()
+        .iter()
+        .map(|c| (format!("sub-{}", c.code), format!("ses-{}", c.name())))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[test]
+fn a_subject_with_series_and_no_study_is_not_written_into_a_tree_as_a_session() {
+    let source = tree();
+    let home_dir = TempDir::new("disowned-home");
+    let out = TempDir::new("disowned-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let code = disown_a_series(&mut reg);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+
+    // The session layer says the subject is on no timeline.
+    let anchors =
+        nils_session::Anchors::resolve(&mut reg, &scheme, std::collections::BTreeMap::new())
+            .unwrap();
+    let rebuilt = nils_session::ensure(&mut reg, &scheme, &anchors, None, true).unwrap();
+    assert_eq!(rebuilt.without_a_study, 1, "{rebuilt:?}");
+    let sessions = nils_session::sessions_of(reg.store(), &scheme, Some(&code)).unwrap();
+    assert!(sessions.is_empty(), "{sessions:?}");
+
+    // And the release says the same thing rather than inventing a session:
+    // the subject is refused, named, and counted as left out.
+    assert_eq!(report.without_a_session.get(&code), Some(&1), "{report:?}");
+    assert_eq!(report.left_out, 1, "{report:?}");
+    assert_eq!(report.subjects, 1, "{report:?}");
+    assert_eq!(report.stacks, 1, "{report:?}");
+    let written: Vec<String> = files_under(out.path())
+        .iter()
+        .map(|p| p.strip_prefix(out.path()).unwrap().display().to_string())
+        .collect();
+    assert!(
+        written.iter().all(|p| !p.contains(&code)),
+        "the disowned subject is in the tree: {written:?}"
+    );
+    assert!(
+        written.iter().all(|p| !p.contains("ses-unknown")),
+        "a session nobody derived: {written:?}"
+    );
+
+    // Never a silent drop: the row says which stack and why.
+    let store = reg.store();
+    let sql = format!(
+        "SELECT kind, why FROM {} WHERE release_id = {}",
+        store.qualified("release_absent"),
+        report.release_id
+    );
+    let rows = store.query(&sql, &[]).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text(0).unwrap(), "no_session");
+    assert!(
+        rows[0]
+            .text(1)
+            .unwrap()
+            .contains("owns series and no study"),
+        "{}",
+        rows[0].text(1).unwrap()
+    );
+}
+
+#[test]
+fn the_trees_session_directories_are_exactly_the_sessions_the_scheme_produced() {
+    for disowned in [false, true] {
+        let source = tree();
+        let home_dir = TempDir::new("dirs-home");
+        let out = TempDir::new("dirs-out");
+        let (_home, mut reg) = registry(&home_dir, &source);
+        if disowned {
+            disown_a_series(&mut reg);
+        }
+        let policy = Policy::default();
+        let scheme = SessionScheme::default();
+        run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+
+        let written = session_dirs(out.path());
+        let derived = derived_sessions(&mut reg, &scheme);
+        // The scheme produces two sessions of the one subject that owns a
+        // study either way: a series that changed hands is still filed under
+        // the study that declared it, so the timeline does not move.
+        assert_eq!(derived.len(), 2, "disowned {disowned}: {derived:?}");
+        // Every directory in the tree is one of them, and under the subject
+        // whose session it is. A release writes no session of its own.
+        for pair in &written {
+            assert!(
+                derived.contains(pair),
+                "disowned {disowned}: {pair:?} is in no scheme, of {derived:?}"
+            );
+        }
+        match disowned {
+            // Nothing refused, so the tree holds all of them.
+            false => assert_eq!(written, derived, "{written:?}"),
+            // The disowned subject's stack is refused, so its study's session
+            // has nothing to write and the other one stands alone.
+            true => assert_eq!(written.len(), 1, "{written:?}"),
+        }
+    }
+}
+
+#[test]
+fn the_ask_and_select_agree_on_how_many_subjects_a_selection_holds() {
+    for disowned in [false, true] {
+        let source = tree();
+        let home_dir = TempDir::new("agree-home");
+        let (_home, mut reg) = registry(&home_dir, &source);
+        if disowned {
+            disown_a_series(&mut reg);
+        }
+        // The fingerprints carry the subject, so they are built after the
+        // series changed hands, as a digest of that archive would have.
+        classified(&mut reg, &source);
+
+        // What the selection reaches, which is what `nils select` prints.
+        let reached = run::preview(reg.store(), &Selection::default())
+            .unwrap()
+            .subjects;
+        assert_eq!(reached, if disowned { 2 } else { 1 }, "{disowned}");
+
+        // And what an ask over every stack holds.
+        let catalog = nils_catalog::Catalog::build(&mut reg, pack()).unwrap();
+        let text = serde_json::json!({
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "count"}
+        })
+        .to_string();
+        let prepared = nils_ask::prepare(
+            nils_ask::parse(&text).unwrap(),
+            &catalog,
+            &nils_ask::validate::Scope::default(),
+        )
+        .unwrap();
+        let store = reg.store();
+        let ctx = nils_ask::compile::Context {
+            names: &catalog,
+            dialect: store.dialect(),
+            schema: store.schema().map(str::to_string),
+            window_days: 0,
+            scheme_digest: SessionScheme::default().digest(),
+            after: None,
+            limit: None,
+        };
+        let compiled =
+            nils_ask::compile::compile(&prepared.ask, &prepared.validated, &ctx).unwrap();
+        let answer = nils_ask::exec::run(
+            store,
+            &compiled,
+            nils_ask::exec::Bounds {
+                timeout_ms: 20_000,
+                max_rows: 5_000,
+                max_bytes: 4 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        assert_eq!(answer.columns, vec!["rows", "subjects"]);
+        assert_eq!(
+            answer.rows[0].int(1).unwrap(),
+            reached,
+            "disowned {disowned}: an ask and a selection count one archive"
+        );
+    }
+}
