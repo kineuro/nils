@@ -24,10 +24,24 @@ from:
   - text_series_comments
   - text_image_comments
 
-# No `raw_removals`, no `token_removals` and no replacements: every step that
-# is a fact about text rather than a claim about MRI runs anyway. Lower
-# casing, the fold of everything outside `a-z0-9_` to a space, the tokenizing
-# and the de-duplication are steps 4 to 7, so `BRAIN,HEAD` arrives as
-# `brain head` and the damaged `MR hj?rna` as `mr hj rna`, which is how the
-# keyword lists spell their accented words.
+# No `raw_removals` and no `token_removals`: every step that is a fact about
+# text rather than a claim about MRI runs anyway. Lower casing, the fold of
+# everything outside `a-z0-9_` to a space, the tokenizing and the
+# de-duplication are steps 4 to 7, so `BRAIN,HEAD` arrives as `brain head`
+# and the damaged `MR hj?rna` as `mr hj rna`, which is how the keyword lists
+# spell their accented words.
 token_removals: []
+
+# One replacement, for the reason `normalize.yml` gives for its own: an
+# ambiguous short token is expanded so that a keyword can be matched as a
+# plain substring without hitting the inside of another word. A keyword is a
+# substring anywhere in the text, which is what `cerv` and `lumb` are there
+# for, and three letters is short enough to be inside an ordinary word.
+# `cou` is the French for neck and never won a stack on the archive: it was
+# found behind the spine rule on 6 stacks and behind the brain-and-neck rule
+# on 35, which is a fragment of a longer word and not a French study. It did
+# decide those 35, because it is the neck half of the brain-and-neck rule as
+# well, and that rule runs ahead of the one that can name a neck. So the
+# word is spelled as a word here and is not a keyword anywhere.
+token_replacements:
+  'cou': 'neck'

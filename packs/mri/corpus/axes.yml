@@ -161,6 +161,36 @@ cases:
     axes:
       body_part: brain-neck
 
+  - name: a neck stated on its own is a neck
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'NECK'
+      text_series_description: 'ax t2 tse'
+    axes:
+      body_part: neck
+
+  # Record 35, the re-run: `cou` is three letters and was matched as a plain
+  # substring, so it fired inside longer words, and because it is the neck
+  # half of the brain-and-neck rule as well, an ordinary brain series with
+  # such a word in it came out as a neck beside a brain. The rule that can
+  # name a neck sits behind that one, so it was reached by nothing: the
+  # French word is a word now, and a fragment decides neither rule.
+  - name: a word that merely contains a neck term is not a neck
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'BRAIN,HEAD'
+      text_series_description: 'ax t2 acoustic'
+    axes:
+      body_part: brain
+
+  - name: a neck named in French is still a neck
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'COU'
+      text_series_description: 'ax t2 tse'
+    axes:
+      body_part: neck
+
   - name: a body part whose accented letter came through damaged still decides
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'

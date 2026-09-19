@@ -9,6 +9,16 @@
 # boilerplate (`normalize-anatomy.yml`). A stack whose `BodyPartExamined`
 # says BRAIN or HEAD said what it is, and the rule reads it before anything
 # removes it.
+#
+# Order is precedence and a rule is reached only where the ones before it
+# do not fire, so a rule ahead of another must be the narrower of the two.
+# `brain_neck` is narrower than `neck` by construction: it asks for a neck
+# word and a brain word where `neck` asks for the neck word alone. That
+# holds only while both read the same neck words, which is why the French
+# `cou` is not one of them: three letters matched as a plain substring hit
+# the inside of ordinary words, and every stack they hit carried a brain
+# word too, so a fragment fired the broader rule and the narrower one was
+# never reached. `normalize-anatomy.yml` spells that word as a word.
 
 rule_set: body_part
 decides: [body_part]
@@ -27,13 +37,13 @@ rules:
 
   brain_neck:
     clauses:
-      - {when: {all: [{text: anatomy_text, any_substring: ['neck', 'nacke', 'hals', 'nakke', 'nek', 'cou']}, {text: anatomy_text, any_substring: ['fmri', 'bold', 'resting state', 'rs-fmri', 'task-fmri', 'rest-fmri', 'rsfmri', 'rfmri', 'hippocampus', 'amygdala', 'thalamus', 'putamen', 'caudate', 'cortex', 'cortical', 'subcortical', 'white matter', 'gray matter', 'grey matter', 'corpus callosum', 'cerebral', 'cerebellum', 'cerebellar', 'frontal', 'parietal', 'temporal', 'occipital', 'brainstem', 'midbrain', 'pons', 'brain', 'head', 'neuro', 'hcp', 'adni', 'abcd', 'hj rna', 'hjarna', 'huvud', 'kopf', 'gehirn', 'hirn', 'sch del', 'schadel', 'cerveau', 'encephale', 'cr ne', 'crane', 'hersenen', 'hoofd']}]}, cite: 'a neck and a brain', source: text, tier: keywords}
+      - {when: {all: [{text: anatomy_text, any_substring: ['neck', 'nacke', 'hals', 'nakke', 'nek']}, {text: anatomy_text, any_substring: ['fmri', 'bold', 'resting state', 'rs-fmri', 'task-fmri', 'rest-fmri', 'rsfmri', 'rfmri', 'hippocampus', 'amygdala', 'thalamus', 'putamen', 'caudate', 'cortex', 'cortical', 'subcortical', 'white matter', 'gray matter', 'grey matter', 'corpus callosum', 'cerebral', 'cerebellum', 'cerebellar', 'frontal', 'parietal', 'temporal', 'occipital', 'brainstem', 'midbrain', 'pons', 'brain', 'head', 'neuro', 'hcp', 'adni', 'abcd', 'hj rna', 'hjarna', 'huvud', 'kopf', 'gehirn', 'hirn', 'sch del', 'schadel', 'cerveau', 'encephale', 'cr ne', 'crane', 'hersenen', 'hoofd']}]}, cite: 'a neck and a brain', source: text, tier: keywords}
     set: {body_part: brain-neck}
     confidence: 0.65
 
   neck:
     clauses:
-      - {field: anatomy_text, keywords: ['neck', 'nacke', 'hals', 'nakke', 'nek', 'cou'], tier: keywords}
+      - {field: anatomy_text, keywords: ['neck', 'nacke', 'hals', 'nakke', 'nek'], tier: keywords}
     set: {body_part: neck}
     confidence: 0.65
 

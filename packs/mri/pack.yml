@@ -9,7 +9,7 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 0.1.4
+version: 0.1.5
 contract: 4
 modality: MR
 

@@ -15,7 +15,7 @@ fn the_mri_pack_loads_and_its_corpus_holds() {
         Err(e) => panic!("the MRI pack does not load:\n{e}"),
     };
     assert_eq!(pack.name, "mri");
-    assert_eq!(pack.id(), "mri@0.1.4");
+    assert_eq!(pack.id(), "mri@0.1.5");
     assert_eq!(pack.modality, "MR");
     assert_eq!(
         pack.parsers.len(),
