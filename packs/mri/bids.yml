@@ -138,6 +138,11 @@ entities:
 
 # Everything else that describes the acquisition, joined into `acq-`.
 #
+# A group with no `modes` is in both names. A group that says
+# `modes: [informative]` is in the informative name only, because in a BIDS
+# name the standard has an entity for it and a name that said it twice would
+# be a name arguing with itself (record 37 S7).
+#
 # A BIDS label is `[0-9a-zA-Z+]+`, so a token is spelled here rather than
 # derived by stripping characters out of a value: `ME-GRE` and `MEGRE` are the
 # same token under any such rule, and two different acquisitions that collide
@@ -230,7 +235,8 @@ acq:
     # reconstruction kinds. The first says only that a vendor's distortion
     # correction was off, which every other stack of the series also says; the
     # complex parts are the `part` entity and the reconstruction kinds are
-    # `rec-`, and either would say it twice.
+    # `rec-`, and either would say it twice. The last two are below, in the
+    # informative name, where there are no entities to say it once.
     tokens:
       MD: MD
       CBF: CBF
@@ -258,6 +264,41 @@ acq:
       Distorted: Distorted
       InputUnavailable: NoInput
       Encrypted: Encrypted
+  - from: construct
+    modes: [informative]
+    # The complex part and the reconstruction kinds, which the BIDS name
+    # carries as `part-` and `rec-`.
+    tokens:
+      Magnitude: Mag
+      Phase: Phase
+      Real: Real
+      Imaginary: Imag
+      MIP: MIP
+      MinIP: MinIP
+      MPR: MPR
+      UniformDenoised: Denoised
+      Filtered: Filtered
+      ORIG: ORIG
+  - from: post_contrast
+    modes: [informative]
+    # `ce-` in the BIDS name; section 9.1 spells it `_CE` and this is the
+    # same fact in the same place as the rest of them.
+    tokens:
+      given: CE
+  - from: provenance
+    modes: [informative]
+    # `rec-` in the BIDS name. `RawRecon` is not a token: it is the axis's
+    # default, so it holds on every stack nothing else claimed and would be in
+    # every filename saying nothing. The same argument as `ND`.
+    tokens:
+      SyMRI: SyMRI
+      EPIMix: EPIMix
+      STAGE: STAGE
+      SWIRecon: SWIRecon
+      DTIRecon: DTIRecon
+      PerfusionRecon: PerfusionRecon
+      ASLRecon: ASLRecon
+      BOLDRecon: BOLDRecon
 
 # What counts as a vendor's synthetic contrast, for the placement choice of
 # section 9.3: an image the scanner computed from a multi-parameter

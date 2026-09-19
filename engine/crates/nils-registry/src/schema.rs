@@ -1143,6 +1143,11 @@ fn build_registry() -> Vec<Table> {
                 // not say where it put its localizers is a tree whose absence
                 // of localizers means nothing.
                 req("layout", Type::Text),
+                // Record 37 S7: which naming mode the names were built under,
+                // the standard's entities or every axis the pack declares. A
+                // tree that did not say would be a tree whose names cannot be
+                // reproduced, since the same registry writes two of them.
+                col("naming", Type::Text),
                 req("placements", Type::Json),
                 // The converter it found, recorded because a tree should say
                 // which converter made it (§9.6).

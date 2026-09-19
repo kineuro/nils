@@ -50,7 +50,19 @@ pub struct Tokens {
     /// list of its own, so a pack that gives itself an axis can put it in a
     /// name without the engine learning the axis first (record 37 S6).
     pub from: String,
+    /// Which naming modes this group is in. Empty is both, which is the
+    /// ordinary case; a group the standard has an entity for is declared
+    /// `[informative]`, so the BIDS name says it once and the informative
+    /// name says it at all (record 37 S7).
+    pub modes: Vec<String>,
     pub tokens: BTreeMap<String, String>,
+}
+
+impl Tokens {
+    /// Whether this group is in a mode, by the mode's own word.
+    pub fn in_mode(&self, mode: &str) -> bool {
+        self.modes.is_empty() || self.modes.iter().any(|m| m == mode)
+    }
 }
 
 /// The whole mapping.
@@ -168,13 +180,13 @@ impl Mapping {
         (!from.is_empty()).then_some((from, label))
     }
 
-    /// Whether the `acq-` label already carries this value of this axis,
-    /// which decides whether an entity the schema refuses has to be spelled
-    /// into the label or is in it already (record 37 S6).
-    pub fn acq_carries(&self, axis: &str, value: &str) -> bool {
+    /// Whether the `acq-` label of a mode already carries this value of this
+    /// axis, which decides whether an entity the schema refuses has to be
+    /// spelled into the label or is in it already (record 37 S6).
+    pub fn acq_carries(&self, mode: &str, axis: &str, value: &str) -> bool {
         self.acq
             .iter()
-            .any(|g| g.from == axis && g.tokens.contains_key(value))
+            .any(|g| g.in_mode(mode) && g.from == axis && g.tokens.contains_key(value))
     }
 
     /// Whether a stack is a vendor's synthetic contrast (§9.3).
@@ -309,5 +321,23 @@ mod tests {
             Some((vec!["SyMRI", "MIP"], "SyMRIMIP".to_string()))
         );
         assert_eq!(m.reconstruction_of(Some("RawRecon"), &["Magnitude"]), None);
+    }
+
+    #[test]
+    fn a_group_of_tokens_is_in_both_names_unless_it_says_otherwise() {
+        // Record 37 S7: the pack says which naming mode a group is in, and
+        // the ordinary case, an axis BIDS has no entity for, is both.
+        let both = Tokens {
+            from: "orientation".into(),
+            modes: Vec::new(),
+            tokens: BTreeMap::new(),
+        };
+        assert!(both.in_mode("bids") && both.in_mode("informative"));
+        let only = Tokens {
+            from: "provenance".into(),
+            modes: vec!["informative".into()],
+            tokens: BTreeMap::new(),
+        };
+        assert!(!only.in_mode("bids") && only.in_mode("informative"));
     }
 }

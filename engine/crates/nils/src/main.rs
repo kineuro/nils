@@ -353,6 +353,12 @@ struct ReleaseArgs {
     /// which names what the standard admits and routes the rest (§9)
     #[arg(long, default_value = "descriptive", value_name = "descriptive|bids")]
     layout: String,
+    /// What a name carries: what the standard's entities admit, with the rest
+    /// in acq-, or every axis the pack declares, for a tree a person reads.
+    /// The default is bids in the BIDS layout, and informative in the
+    /// descriptive one, which has no entities to carry anything (record 37)
+    #[arg(long, value_name = "bids|informative")]
+    naming: Option<String>,
     /// Where a localizer goes in a BIDS tree. BIDS has no word for one, and
     /// 22 percent of a clinical archive is one (§9.3)
     #[arg(
@@ -7929,6 +7935,27 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             args.layout
         ))
     })?;
+    // Record 37 S7: what a name carries. Unasked, it follows the layout,
+    // because a descriptive tree has no entities and a BIDS tree is written
+    // for a validator first; asked for, it is the release's own answer and is
+    // recorded on the row, so a re-run writes the same names.
+    let naming = match &args.naming {
+        None => match layout {
+            run::Layout::Bids => nils_release::name::Naming::Bids,
+            run::Layout::Descriptive => nils_release::name::Naming::Informative,
+        },
+        Some(text) => {
+            let asked = nils_release::name::Naming::parse(text)
+                .ok_or_else(|| usage(format!("--naming is bids or informative, not {text}")))?;
+            if asked == nils_release::name::Naming::Bids && layout == run::Layout::Descriptive {
+                return Err(usage(
+                    "--naming bids needs --layout bids: the descriptive tree has no \
+                     entities, so its names carry every axis whatever this says",
+                ));
+            }
+            asked
+        }
+    };
     let places = nils_release::bids::place::Options {
         localizers: nils_release::bids::place::Localizers::parse(&args.localizers).ok_or_else(
             || {
@@ -8033,6 +8060,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         key: &key,
         pack: &pack,
         layout,
+        naming,
         places,
         converter: converter.as_ref(),
         compress: !args.no_compress,
@@ -8057,6 +8085,14 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         report.name, report.version, report.layout, report.policy
     );
     println!("  into             {}", report.root);
+    // Record 37 S7: what the names carry, which the row records too.
+    println!(
+        "  names            {}",
+        match report.naming.as_str() {
+            "informative" => "informative: every axis the pack declares",
+            _ => "bids: the standard's entities, and the rest in acq-",
+        }
+    );
     // record 26 section 13: what each dataset's files left under
     for p in &report.policies {
         println!(
@@ -8322,7 +8358,7 @@ fn releases_doc(
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
-         {policies}, {scheme}, session_naming, categories FROM {}{wheres} \
+         {policies}, {scheme}, session_naming, categories, naming FROM {}{wheres} \
          ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
@@ -8378,6 +8414,11 @@ fn releases_doc(
                     .split(',')
                     .filter(|name| !name.is_empty())
                     .collect::<Vec<&str>>(),
+                // Record 37 S7: what its names carried. Null on a version
+                // written before there were two modes, which is honest: it
+                // was written when there was one and calling it either now
+                // would be a claim nobody made.
+                "naming": r.opt_text(22)?,
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;

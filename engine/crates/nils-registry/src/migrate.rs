@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 47;
+pub const SCHEMA_VERSION: i64 = 48;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,7 +242,21 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 47,
         apply: a_stack_says_which_coil_received_it,
     },
+    Migration {
+        version: 48,
+        apply: a_release_says_which_naming_mode_it_wrote,
+    },
 ];
+
+/// Record 37 S7: which naming mode a release's names were built under. A row
+/// from before says nothing, which is right: it was written when there was
+/// one mode, and calling it either now would be a claim nobody made.
+fn a_release_says_which_naming_mode_it_wrote(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "release", &["naming"])
+}
 
 /// Record 37 S3: the receive coil, which a series is already split on. A
 /// registry from before gains the column empty and fills it on the next

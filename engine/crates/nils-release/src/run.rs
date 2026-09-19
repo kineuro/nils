@@ -148,6 +148,8 @@ pub struct Report {
     pub session_naming: Option<String>,
     /// Which layout was written, and for BIDS what it chose (§9.3).
     pub layout: String,
+    /// Which naming mode it was written under (record 37 S7).
+    pub naming: String,
     /// Entities the schema refuses the suffix that wanted them, by entity,
     /// counted over the stacks that wanted them (record 37 S6). The fact is
     /// in `acq-` instead of being dropped, and this is the release saying how
@@ -274,6 +276,10 @@ pub struct Settings<'a> {
     pub pack: &'a nils_pack::pack::Pack,
     /// Which layout to write (§9).
     pub layout: Layout,
+    /// What a name carries: what the standard's entities admit, or every axis
+    /// the pack declares (record 37 S7). Recorded on the release row, so a
+    /// re-run of that release writes the same names.
+    pub naming: crate::name::Naming,
     /// The placements the release chose, for the two BIDS has no answer for
     /// (§9.3).
     pub places: crate::bids::place::Options,
@@ -581,7 +587,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // borrowing the sessions of whoever owns the study its series were filed
     // under.
     let with_a_study = subjects_with_a_study(registry.store())?;
-    let named = places(registry.store(), &by_study, settings.pack)?;
+    let named = places(registry.store(), &by_study, settings.pack, settings.naming)?;
     // §9.4 with record 37 S6: where in the body, for the sidecar, by stack.
     // The name carries it too, because two files must not overwrite each
     // other; this is the slot the standard keeps the fact in.
@@ -609,6 +615,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let mut report = Report {
         name: settings.name.to_string(),
         layout: settings.layout.name().to_string(),
+        naming: settings.naming.name().to_string(),
         placements,
         converter: settings.converter.map(|c| c.describe()),
         version: version.clone(),
@@ -3054,6 +3061,7 @@ fn open_row(
                 "categories",
                 "session_scheme",
                 "layout",
+                "naming",
                 "placements",
                 "converter",
                 "pack",
@@ -3086,6 +3094,7 @@ fn open_row(
             Param::from(categories.join(",")),
             Param::from(serde_json::to_string(scheme).unwrap_or_else(|_| "{}".to_string())),
             Param::from(settings.layout.name()),
+            Param::from(settings.naming.name()),
             Param::from(serde_json::json!(placements).to_string()),
             match settings.converter {
                 Some(c) => Param::from(c.describe()),
@@ -3191,6 +3200,7 @@ fn places(
     store: &mut Store,
     by_study: &HashMap<i64, nils_session::Labelled>,
     pack: &nils_pack::pack::Pack,
+    naming: crate::name::Naming,
 ) -> Result<HashMap<i64, Placed>, Error> {
     let axes = axis_values(store)?;
     let t = table("stack_fingerprint");
@@ -3347,7 +3357,7 @@ fn places(
             },
             pe_direction: r.opt_text(10)?,
         };
-        let built = crate::bids::name::build(&facts, &pack.bids);
+        let built = crate::bids::name::build(&facts, &pack.bids, naming);
         let synthetic = pack.bids.is_synthetic(
             provenance.as_deref(),
             &constructs.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -3929,6 +3939,7 @@ mod tests {
             key: b"k",
             pack: &pack,
             layout: Layout::Bids,
+            naming: crate::name::Naming::Bids,
             places: crate::bids::place::Options::default(),
             converter: None,
             compress: true,

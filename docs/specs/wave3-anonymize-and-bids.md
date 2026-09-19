@@ -890,10 +890,17 @@ first: "derive the suffix from per-stack fields that are always populated,
 echo number**, which cannot disagree with itself: v0's counter numbers by
 arrival, so its `magnitude_1` and `phase_1` need not be the same echo.
 
-Disambiguation runs in three passes, weakest last: the echo or inversion
-suffix, then a `_1`, `_2` counter in a fixed order, then nothing, because a
-name that needs more than that is a name the grammar cannot make and quietly
-numbering it hides that. A stack the registry never classified is not renamed
+Disambiguation runs in three passes, weakest last: the echo suffix, then the
+inversion time, then a `_1`, `_2` counter in a fixed order, then nothing,
+because a name that needs more than that is a name the grammar cannot make and
+quietly numbering it hides that. **The echo pass is per stack** (record 37 S7).
+It used to be all or nothing, so one stack of a bucket without an echo number
+dropped the suffix for the whole bucket and everybody fell to a counter: over
+836 stacks that is 78 buckets and 453 stacks under `_1`, `_2`, of which 6,997
+pairs differ in nothing but their echo number. Naming each stack from its own
+measured echo leaves 448 such pairs instead of 7,451, and the stacks with no
+echo number are told apart by the passes after it rather than taking the
+bucket down with them. A stack the registry never classified is not renamed
 into something readable: it lands as `misc/stack-00000123`, which says what it
 is.
 
@@ -991,6 +998,19 @@ that declares an axis and gives its values tokens has named with it, and a
 `from` that names neither an axis nor one of the two fields the stack measures
 itself, the orientation and the acquisition type, is refused when the pack
 loads.
+
+**Two naming modes, and a release says which it wrote** (record 37 S7).
+`--naming bids`, the default, carries what the standard's entities carry, with
+what they have no entity for in `acq-`; it is what a validator reads and what a
+tool joins on. `--naming informative` carries every axis the pack declares,
+including the ones an entity already says, for a tree a person reads rather
+than a tool: in the BIDS layout that is a longer `acq-` label, which is still a
+legal BIDS label because `acq-` is free-form, and in the descriptive layout it
+is §9.1's grammar, which has no entities to carry anything. Unasked, the mode
+follows the layout. A pack declares which mode each group of `acq-` tokens is
+in, `modes: [informative]` for the ones the standard has an entity for, and the
+mode is written on the release row, so a re-run of a release writes the names
+that release wrote.
 
 **`func` requires `task`, and no stack has one.** Of 1,173 functional stacks,
 ten carry anything resting-like in their text and none says "task". They are

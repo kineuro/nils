@@ -150,6 +150,7 @@ fn settings<'a>(
         key: KEY,
         pack: pack(),
         layout: Layout::Bids,
+        naming: nils_release::name::Naming::Bids,
         places,
         converter,
         compress: true,
@@ -827,5 +828,68 @@ fn an_axis_the_pack_declares_reaches_a_name_without_the_engine_learning_it() {
     assert!(
         names.iter().all(|n| n.contains("Distorted")),
         "the pack declared it and the name carries it: {names:?}"
+    );
+}
+
+#[test]
+fn the_informative_mode_says_what_the_entities_say_and_the_bids_one_does_not() {
+    // Record 37 S7. One question asked of every name: BIDS mode puts the
+    // contrast in `ce-` and nowhere else, because a name that said it twice
+    // would be a name arguing with itself; informative mode puts every axis
+    // in the label as well, for a tree read by people rather than tools.
+    let Some(converter) = converter() else { return };
+    let source = tree();
+    let home_dir = TempDir::new("bids-home");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    // The axis stores the label and the name is built from the identity.
+    decide(&mut reg, "post_contrast", "1");
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+
+    let plain = TempDir::new("bids-out");
+    run::run(
+        &mut reg,
+        &settings(
+            plain.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        ),
+    )
+    .unwrap();
+    let told = TempDir::new("bids-told");
+    let mut s = settings(
+        told.path(),
+        &policy,
+        &scheme,
+        Options::default(),
+        Some(&converter),
+    );
+    s.name = "a cohort read by people";
+    s.naming = nils_release::name::Naming::Informative;
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.naming, "informative");
+
+    let named = |root: &Path| -> Vec<String> {
+        files_under(root)
+            .into_iter()
+            .filter(|f| f.starts_with("sub-") && f.ends_with(".nii.gz"))
+            .collect()
+    };
+    let bids = named(plain.path());
+    let informative = named(told.path());
+    assert!(!bids.is_empty() && bids.len() == informative.len());
+    assert!(
+        bids.iter().all(|n| n.contains("_ce-contrast_")),
+        "the entity carries it in both: {bids:?}"
+    );
+    assert!(
+        bids.iter().all(|n| !n.contains("CE_ce-contrast")),
+        "and only the entity, in BIDS mode: {bids:?}"
+    );
+    assert!(
+        informative.iter().all(|n| n.contains("CE_ce-contrast")),
+        "the label says it too, in informative mode: {informative:?}"
     );
 }

@@ -1062,6 +1062,20 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
                 )
                 .in_file(&f.path, Some(&f.source)));
             }
+            let mut modes = Vec::new();
+            if let Some(v) = im.get("modes") {
+                let at = format!("{at}.modes");
+                for mode in f.blame(yaml::texts(v, &at))? {
+                    if mode != "bids" && mode != "informative" {
+                        return Err(Error::at(
+                            &at,
+                            format!("{mode} is not a naming mode: bids or informative"),
+                        )
+                        .in_file(&f.path, Some(&f.source)));
+                    }
+                    modes.push(mode);
+                }
+            }
             let mut tokens = BTreeMap::new();
             let at = format!("{at}.tokens");
             for (value, token) in f.blame(yaml::obj(yaml::get(im, "tokens", &at)?, &at))? {
@@ -1080,7 +1094,11 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
                 }
                 tokens.insert(value.clone(), token);
             }
-            into.acq.push(crate::bids::Tokens { from, tokens });
+            into.acq.push(crate::bids::Tokens {
+                from,
+                modes,
+                tokens,
+            });
         }
     }
     if let Some(v) = top.get("synthetic") {
