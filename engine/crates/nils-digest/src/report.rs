@@ -15,6 +15,7 @@ use nils_dicom::{Diagnostic, DiagnosticKind, Extracted, QuarantineClass, Refusal
 use serde::{Deserialize, Serialize};
 
 use crate::cancel::Cancelled;
+use crate::stack::FileStack;
 use crate::walk::SkipReason;
 
 /// How many distinct samples a diagnostic kind keeps.
@@ -45,6 +46,11 @@ pub struct Counts {
     subjects: HashSet<u64>,
     /// Stacks as `(series, key)` pairs (§8).
     stacks: HashSet<u64>,
+    /// Frames read, one per classic instance and one per frame of an
+    /// enhanced multi-frame object (record 37, S8).
+    frames: u64,
+    /// Files whose frames made more than one stack.
+    multi_stack_files: u64,
     modalities: BTreeMap<String, u64>,
     sop_classes: BTreeMap<String, u64>,
     transfer_syntaxes: BTreeMap<String, u64>,
@@ -91,13 +97,14 @@ fn hash_of(text: &str) -> u64 {
 
 impl Counts {
     /// A file the reader accepted, filed under `value` of `id_type` (§7.3)
-    /// and in the stack of `stack_key` within its series (§8).
+    /// and in the stacks `stacks` of its series (§8): one, unless the frames
+    /// of an enhanced object state more (record 37, S8).
     pub fn accepted(
         &mut self,
         x: &Extracted,
         id_type: &str,
         value: &str,
-        stack_key: &str,
+        stacks: &[FileStack],
         bytes: u64,
     ) {
         self.seen += 1;
@@ -107,8 +114,14 @@ impl Counts {
         self.series.insert(hash_of(&x.series_uid));
         self.subjects
             .insert(hash_of(&format!("{id_type}\0{value}")));
-        self.stacks
-            .insert(hash_of(&format!("{}\0{stack_key}", x.series_uid)));
+        for s in stacks {
+            self.stacks
+                .insert(hash_of(&format!("{}\0{}", x.series_uid, s.signature.key)));
+        }
+        self.frames += u64::from(x.frames.count.max(1));
+        if stacks.len() > 1 {
+            self.multi_stack_files += 1;
+        }
         *self.modalities.entry(x.modality.clone()).or_default() += 1;
         *self.sop_classes.entry(x.sop_class.clone()).or_default() += 1;
         *self
@@ -225,6 +238,8 @@ impl Counts {
         self.special += other.special;
         self.walk_errors += other.walk_errors;
         self.bytes += other.bytes;
+        self.frames += other.frames;
+        self.multi_stack_files += other.multi_stack_files;
         for (k, v) in other.quarantine {
             *self.quarantine.entry(k).or_default() += v;
         }
@@ -399,6 +414,10 @@ pub struct Written {
     pub studies_created: u64,
     pub series_created: u64,
     pub stacks_created: u64,
+    /// Record 37 S8: rows written saying which frames of an instance are in
+    /// which stack, for the files whose frames made more than one.
+    #[serde(default)]
+    pub frame_groups: u64,
 }
 
 /// Record 26 §8: what feeding the dataset's cohort did. Every subject the
@@ -443,6 +462,13 @@ pub struct Report {
     /// Distinct `(series, stack key)` pairs among the parsed files (§8).
     #[serde(default)]
     pub stacks: u64,
+    /// Frames read (record 37, S8): one per classic instance, one per frame
+    /// of an enhanced multi-frame object.
+    #[serde(default)]
+    pub frames: u64,
+    /// Files whose frames held more than one stack.
+    #[serde(default)]
+    pub multi_stack_files: u64,
     pub modalities: Vec<Keyed>,
     pub sop_classes: Vec<SopClassCount>,
     pub transfer_syntaxes: Vec<Keyed>,
@@ -508,6 +534,8 @@ impl Report {
             series: counts.series.len() as u64,
             subjects: counts.subjects.len() as u64,
             stacks: counts.stacks.len() as u64,
+            frames: counts.frames,
+            multi_stack_files: counts.multi_stack_files,
             modalities: keyed(&counts.modalities),
             sop_classes,
             transfer_syntaxes: keyed(&counts.transfer_syntaxes),
@@ -664,11 +692,15 @@ impl fmt::Display for Report {
             )?;
             writeln!(
                 f,
-                "  created          subjects {}   studies {}   series {}   stacks {}",
+                "  created          subjects {}   studies {}   series {}   stacks {}{}",
                 thousands(w.subjects_created),
                 thousands(w.studies_created),
                 thousands(w.series_created),
                 thousands(w.stacks_created),
+                match w.frame_groups {
+                    0 => String::new(),
+                    n => format!("   frame groups {}", thousands(n)),
+                },
             )?;
             writeln!(
                 f,
@@ -715,6 +747,14 @@ impl fmt::Display for Report {
             thousands(self.stacks),
             thousands(self.subjects)
         )?;
+        if self.frames > self.parsed {
+            writeln!(
+                f,
+                "  frames {}   over more than one stack   {} file(s)",
+                thousands(self.frames),
+                thousands(self.multi_stack_files),
+            )?;
+        }
         keyed_line(f, "modality", &self.modalities)?;
         if !self.sop_classes.is_empty() {
             write!(f, "  {:<17}", "sop class")?;

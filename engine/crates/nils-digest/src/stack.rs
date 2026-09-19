@@ -98,8 +98,14 @@ pub fn key_of(canonical: &str) -> String {
 }
 
 fn canonical_with(x: &Extracted, class: Class) -> String {
-    let v = |column: &str| x.value(Level::Stack, column);
-    let values: [Cow<'_, str>; 14] = [
+    canonical_of(|column| x.value(Level::Stack, column), class)
+}
+
+/// The canonical string of anything that has the stack-level columns: a file,
+/// or one group of the frames of an enhanced object (record 37, S8). A frame
+/// contributes exactly what an instance contributes.
+fn canonical_of<'a>(v: impl Fn(&str) -> Option<&'a Value>, class: Class) -> String {
+    let values: [Cow<'a, str>; 14] = [
         rounded(v("echo_time"), 2),
         rounded(v("inversion_time"), 1),
         as_read(v("echo_numbers")),
@@ -131,10 +137,111 @@ fn canonical_with(x: &Extracted, class: Class) -> String {
 }
 
 fn iop(x: &Extracted) -> Option<&str> {
-    match x.value(Level::Stack, "image_orientation_patient") {
+    text_of(x.value(Level::Stack, "image_orientation_patient"))
+}
+
+fn text_of(v: Option<&Value>) -> Option<&str> {
+    match v {
         Some(Value::Text(s)) => Some(s.as_str()),
         _ => None,
     }
+}
+
+/// One stack a file holds: its signature and which of the file's frames are
+/// in it (record 37, S8). A classic instance holds one, and names no frames.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileStack {
+    pub signature: Signature,
+    /// The frames of the file in this stack, counting from one, as ascending
+    /// inclusive ranges. Empty when every frame of the file is in this one
+    /// stack, which is every file but a split enhanced object.
+    pub ranges: Vec<(u32, u32)>,
+    /// How many frames of the file are in this stack; one for a classic
+    /// instance.
+    pub frames: u32,
+    /// The stack-level values of the frames in this stack, in catalogue
+    /// order, when they are a group's and not the file's own. The stack row
+    /// is written from these, so a second stack says what its frames said.
+    pub values: Option<Vec<Option<Value>>>,
+}
+
+impl FileStack {
+    /// The frames as a list a person can read: `1-4,9,12-20`; empty when the
+    /// stack holds the whole file.
+    pub fn list(&self) -> String {
+        let mut out = String::new();
+        for (i, (a, b)) in self.ranges.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            if a == b {
+                out.push_str(&a.to_string());
+            } else {
+                out.push_str(&format!("{a}-{b}"));
+            }
+        }
+        out
+    }
+
+    /// The first frame of the file in this stack, counting from one.
+    pub fn first_frame(&self) -> u32 {
+        self.ranges.first().map(|(a, _)| *a).unwrap_or(1)
+    }
+}
+
+/// The stacks one file holds (record 37, S8): one, as before, unless the
+/// frames of an enhanced multi-frame object state more than one, in which
+/// case each group of frames that agrees on the fourteen values is a stack of
+/// its own. The first is always the file's own signature, the one an instance
+/// is filed under.
+pub fn stacks_of(x: &Extracted) -> Vec<FileStack> {
+    if x.frames.groups.len() < 2 {
+        return vec![FileStack {
+            signature: Signature::of(x),
+            ranges: Vec::new(),
+            frames: x.frames.count.max(1),
+            values: None,
+        }];
+    }
+    let mut out: Vec<FileStack> = Vec::new();
+    for g in &x.frames.groups {
+        let orientation = orientation(text_of(g.value("image_orientation_patient")));
+        let signature = Signature {
+            key: key_of(&canonical_of(|c| g.value(c), orientation.class)),
+            orientation,
+        };
+        match out.iter_mut().find(|s| s.signature.key == signature.key) {
+            Some(s) => {
+                s.ranges.extend(g.ranges.iter().copied());
+                s.frames += g.count;
+            }
+            None => out.push(FileStack {
+                signature,
+                ranges: g.ranges.clone(),
+                frames: g.count,
+                values: Some(g.values.clone()),
+            }),
+        }
+    }
+    // groups that differ in the raw values may still round to one signature:
+    // then the file is one stack again, and names no frames
+    if out.len() == 1 {
+        out[0].ranges.clear();
+        out[0].values = None;
+        return out;
+    }
+    for s in &mut out {
+        s.ranges.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(s.ranges.len());
+        for (a, b) in s.ranges.drain(..) {
+            match merged.last_mut() {
+                Some(last) if last.1 + 1 >= a => last.1 = last.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        s.ranges = merged;
+    }
+    out
 }
 
 /// A number rounded to `decimals` the way Python's `round` does it: half to

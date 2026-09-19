@@ -647,6 +647,26 @@ fn build_registry() -> Vec<Table> {
         .unique(&["sop_instance_uid"])
         .index(&["series_id"])
         .index(&["stack_id"]),
+        // Record 37 S8: which frames of an enhanced multi-frame instance are
+        // in which stack. One row per stack of a file whose frames held more
+        // than one; a file whose frames are all in one stack has none, since
+        // its instance row already names that stack.
+        Table::new(
+            "instance_frame",
+            vec![
+                col("id", Type::Id),
+                req("instance_id", Type::Int),
+                req("stack_id", Type::Int),
+                // How many frames of the instance are in the stack.
+                req("n_frames", Type::Int),
+                req("first_frame", Type::Int),
+                // The frames, counting from one, as ranges: `1-4,9,12-20`.
+                req("frames", Type::Text),
+                req("first_batch_id", Type::Int),
+            ],
+        )
+        .unique(&["instance_id", "stack_id"])
+        .index(&["stack_id"]),
         // The fingerprint of Wave 2 (`docs/specs/wave2-fingerprint-and-classify.md`,
         // §4.2): the join a classifier would otherwise do per stack, materialized
         // and typed. It holds what is true of the file; what is true of MRI is in

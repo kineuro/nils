@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 48;
+pub const SCHEMA_VERSION: i64 = 49;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +246,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 48,
         apply: a_release_says_which_naming_mode_it_wrote,
     },
+    Migration {
+        version: 49,
+        apply: an_instance_may_hold_frames_of_more_than_one_stack,
+    },
 ];
 
 /// Record 37 S7: which naming mode a release's names were built under. A row
@@ -447,6 +451,20 @@ fn a_release_says_how_many_stacks_it_could_not_judge(
         return Ok(());
     }
     add_columns(store, "release", &["burned_in", "unjudged"])
+}
+
+/// Record 37 S8: an enhanced multi-frame instance whose frames hold more than
+/// one stack says which frames are in which. A registry digested before this
+/// gains the table empty, and stays short of those stacks until the tree is
+/// digested again: nothing in a row can say what was never read.
+fn an_instance_may_hold_frames_of_more_than_one_stack(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["instance_frame"])
 }
 
 /// Wave 4b §11.3 and §11.4: the case folded companions of the fingerprint's

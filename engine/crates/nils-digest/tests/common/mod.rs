@@ -139,6 +139,7 @@ pub fn rows_sql(reg: &mut Registry, sql: &str) -> String {
     let mut text = sql.to_string();
     for t in [
         "source_file",
+        "instance_frame",
         "instance",
         "series_mr",
         "series_ct",
@@ -212,6 +213,23 @@ pub fn ct(study: &str, series: &str, sop: &str, patient: &str, extra: &[synth::E
     let mut e = with_patient(synth::minimal_ct(study, series, sop), patient);
     e.extend(extra.iter().cloned());
     synth::part10(&MetaFields::ct(sop), &e, true)
+}
+
+/// Record 37 S8: an Enhanced MR object whose per-frame groups are given one
+/// list of functional groups per frame.
+pub fn enhanced(
+    study: &str,
+    series: &str,
+    sop: &str,
+    patient: &str,
+    shared: Vec<synth::Elem>,
+    per_frame: Vec<Vec<synth::Elem>>,
+) -> Vec<u8> {
+    let e = with_patient(
+        synth::enhanced_mr(study, series, sop, shared, per_frame),
+        patient,
+    );
+    synth::part10(&synth::enhanced_meta(sop), &e, true)
 }
 
 pub fn pet(study: &str, series: &str, sop: &str, patient: &str) -> Vec<u8> {

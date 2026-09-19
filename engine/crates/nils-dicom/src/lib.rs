@@ -20,6 +20,7 @@ pub mod charset;
 pub mod csa;
 pub mod diagnostic;
 pub mod extract;
+pub mod frames;
 pub mod private;
 pub mod read;
 pub mod refusal;
@@ -34,6 +35,7 @@ pub use extract::{
     Extracted, Identity, IdentityFields, UnknownKeyword, charset_of, extract, extract_header,
     extract_with, identity_values, tag_of,
 };
+pub use frames::{FrameGroup, Frames};
 pub use read::{Form, Framed, Header, ParseKind, ReadFailure, read, read_framed};
 pub use refusal::{QuarantineClass, Refusal};
 pub use value::{Converter, Value};
