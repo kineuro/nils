@@ -291,7 +291,7 @@ struct ReleaseArgs {
     #[arg(long, value_name = "OID")]
     uid_root: Option<String>,
     /// Which categories of element to remove; all of them by default
-    #[arg(long, value_name = "patient,trial,provider,institution,times")]
+    #[arg(long, value_name = "patient,trial,provider,institution,times,ids")]
     categories: Option<String>,
     /// What to do with a stack whose file says nothing about text in its
     /// pixels. Holding is the default, because a release is a thing that leaves
@@ -7891,7 +7891,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             for name in text.split(',').map(str::trim).filter(|n| !n.is_empty()) {
                 out.push(tags::Category::parse(name).ok_or_else(|| {
                     usage(format!(
-                        "{name} is not a category: patient, trial, provider, institution, times"
+                        "{name} is not a category: patient, trial, provider, institution, times, ids"
                     ))
                 })?);
             }

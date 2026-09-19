@@ -266,6 +266,23 @@ mod tests {
     use crate::uid::Root;
     use dicom_object::FileMetaTableBuilder;
 
+    /// Every category, as a plan borrows them. Held against
+    /// [`Category::every`] below, so a category added to one and not the
+    /// other is a failure rather than a test that quietly stops applying it.
+    const ALL: &[Category] = &[
+        Category::Patient,
+        Category::Trial,
+        Category::Provider,
+        Category::Institution,
+        Category::Times,
+        Category::Ids,
+    ];
+
+    #[test]
+    fn these_tests_apply_every_category() {
+        assert_eq!(ALL, Category::every().as_slice());
+    }
+
     fn object(pairs: &[(Tag, VR, &str)]) -> DefaultDicomObject {
         let mut ds = InMemDicomObject::new_empty();
         for (tag, vr, value) in pairs {
@@ -284,13 +301,7 @@ mod tests {
         Plan {
             policy,
             private: &[],
-            categories: &[
-                Category::Patient,
-                Category::Trial,
-                Category::Provider,
-                Category::Institution,
-                Category::Times,
-            ],
+            categories: ALL,
             code: "a1b2c3d4",
             offset: Offset(offset),
             remap,
@@ -551,6 +562,41 @@ mod tests {
             done.changes
                 .contains_key(&("(0018,1000)".to_string(), "removed"))
         );
+    }
+
+    #[test]
+    fn the_numbers_the_hospital_put_on_the_examination_go_and_are_counted() {
+        // Record 35, finding 1: an accession number is the hospital's own
+        // identifier for that examination, so whoever holds it and can reach
+        // the hospital's systems undoes everything else the release did. It
+        // was in no category, and the change list therefore never mentioned
+        // it either.
+        let mut o = object(&[
+            (tags::PATIENT_ID, VR::LO, "x"),
+            (tags::ACCESSION_NUMBER, VR::SH, "A00000001"),
+            (tags::DEVICE_SERIAL_NUMBER, VR::LO, "SN00000001"),
+            (tags::STUDY_ID, VR::SH, "S0001"),
+            (tags::ADMISSION_ID, VR::LO, "V0001"),
+        ]);
+        let policy = Policy::default();
+        let done = apply(&mut o, &plan(&policy, None, 0));
+        for tag in [
+            tags::ACCESSION_NUMBER,
+            tags::DEVICE_SERIAL_NUMBER,
+            tags::STUDY_ID,
+            tags::ADMISSION_ID,
+        ] {
+            assert_eq!(text(&o, tag), None, "{tag:?}");
+        }
+        // And the run says so, so a reader sees the element was handled
+        // rather than absent by luck.
+        for named in ["(0008,0050)", "(0018,1000)", "(0020,0010)", "(0038,0010)"] {
+            assert!(
+                done.changes.contains_key(&(named.to_string(), "removed")),
+                "{named} is not in {:?}",
+                done.changes
+            );
+        }
     }
 
     #[test]

@@ -682,6 +682,27 @@ the safe set is the one nobody had to think about. Two elements are never
 removed whatever a category says, the SOP class and instance UID, because
 without them the file is not a DICOM object; they are remapped rather than kept.
 
+A **sixth category, `ids` (47)**, is the one thing carrying v0 tag for tag could
+not give us: the direct identifiers v0's own list never named. Record 35,
+finding 1 found `AccessionNumber` and `DeviceSerialNumber` in none of the five,
+so a release wrote both through verbatim and its change list said nothing about
+either. An accession number is the hospital's own identifier for that
+examination, and whoever holds one and can reach the hospital's systems undoes
+everything else the release did. The category is measured against PS3.15 Annex E
+and holds the examination and order numbers, the machine and the stations it was
+run from, the free text where a name or an accession gets typed, and the few
+names, issuers and places the patient and provider categories missed. It is
+**considered rather than complete**: descriptions the pack classifies on are
+kept on purpose, dates stay under §8.3 and UIDs under §8.2, since two policies
+on one element is how one of them is forgotten.
+
+Beside the categories the engine holds one list of its own: **what may never
+survive a release**, the direct identifiers across every category that holds
+one, written out rather than derived from the categories, and checked against
+the files a release actually wrote. A list built from what the code removes can
+only ever agree with the code, which is how the accession number was written
+through for as long as it was.
+
 One thing is **added** where v0 subtracts. v0 removes the birth date and
 computes nothing from it, so an age that was derivable from the archive is not
 derivable from its output. Here the age is computed first, written as

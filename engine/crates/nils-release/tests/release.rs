@@ -1510,3 +1510,187 @@ fn walkdir_like(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     out
 }
+
+/// Every direct identifier of `tags::NEVER_LEAVES`, with the VR it is written
+/// under. The two lists are held against each other below, because a fixture
+/// that quietly stopped writing one would prove the release removed it.
+const IDENTIFIERS: &[((u16, u16), VR)] = &[
+    ((0x0008, 0x0050), VR::SH),
+    ((0x0008, 0x0080), VR::LO),
+    ((0x0008, 0x0081), VR::ST),
+    ((0x0008, 0x0090), VR::PN),
+    ((0x0008, 0x1010), VR::SH),
+    ((0x0008, 0x1050), VR::PN),
+    ((0x0008, 0x1070), VR::PN),
+    ((0x0010, 0x0010), VR::PN),
+    ((0x0010, 0x0030), VR::DA),
+    ((0x0010, 0x1000), VR::LO),
+    ((0x0010, 0x1001), VR::PN),
+    ((0x0010, 0x1005), VR::PN),
+    ((0x0010, 0x1040), VR::LO),
+    ((0x0010, 0x2154), VR::SH),
+    ((0x0010, 0x4000), VR::LT),
+    ((0x0012, 0x0040), VR::LO),
+    ((0x0018, 0x1000), VR::LO),
+    ((0x0020, 0x0010), VR::SH),
+    ((0x0032, 0x1032), VR::PN),
+    ((0x0038, 0x0010), VR::LO),
+    ((0x0038, 0x0300), VR::LO),
+    ((0x0038, 0x0400), VR::LO),
+    ((0x0040, 0x0242), VR::SH),
+    ((0x0040, 0x2008), VR::PN),
+    ((0x0040, 0x2010), VR::SH),
+    ((0x0040, 0x2016), VR::LO),
+    ((0x0040, 0x2017), VR::LO),
+    ((0x0040, 0xA123), VR::PN),
+];
+
+/// What each is written with: a marker of its own, so that a value found in
+/// the output says which element it came from, and none of them is a word
+/// any other part of the file uses. Nothing here is from an archive.
+fn identifier_value(i: usize, vr: VR) -> String {
+    match vr {
+        // A date has to parse. Its category removes it outright, before the
+        // date policy of §8.3 ever reads the file, so it is checked by its
+        // absence rather than by its bytes.
+        VR::DA => "19800101".to_string(),
+        _ => format!("NOTLEAVING{i:02}"),
+    }
+}
+
+fn identifiers() -> Vec<(dicom_core::Tag, VR, String)> {
+    IDENTIFIERS
+        .iter()
+        .enumerate()
+        .map(|(i, ((g, e), vr))| (dicom_core::Tag(*g, *e), *vr, identifier_value(i, *vr)))
+        .collect()
+}
+
+/// Two studies of one person, each file carrying every direct identifier.
+fn tree_of_identifiers() -> TempDir {
+    let dir = TempDir::new("release-identifiers");
+    for (n, day) in [("A", "20220115"), ("B", "20220715")] {
+        let study = format!("{n}.1");
+        let series = format!("{n}.1.1");
+        let sop = format!("{n}.1.1.1");
+        let mut e = synth::minimal_mr(&study, &series, &sop);
+        e.extend([
+            synth::text(tags::PATIENT_ID, VR::LO, "a-code-of-some-length"),
+            synth::text(tags::STUDY_DATE, VR::DA, day),
+            synth::text(tags::SERIES_DESCRIPTION, VR::LO, "sag T1 mprage"),
+            synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "3D"),
+            synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+            synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+        ]);
+        e.extend(
+            identifiers()
+                .into_iter()
+                .map(|(tag, vr, value)| synth::text(tag, vr, &value)),
+        );
+        dir.file(
+            &format!("{n}/1"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    dir
+}
+
+/// Record 35, S1: a release removes every direct identifier and can prove it.
+///
+/// This is the test that would have caught finding 1. The accession number
+/// and the device serial number were in none of the removal categories, so a
+/// release wrote both through verbatim on every file it had ever written, and
+/// its change list never mentioned either: nothing in the output said the
+/// elements existed, so nobody reading a report could tell. The list of what
+/// may never survive is written out in the crate rather than derived from the
+/// categories, this fixture is held against that list, and each element is
+/// looked for in the release's own output.
+#[test]
+fn no_direct_identifier_survives_a_release_and_the_report_names_each() {
+    // The fixture and the list say the same thing, or the proof is about
+    // whatever the fixture happened to write.
+    let mut carried: Vec<dicom_core::Tag> = identifiers().iter().map(|(t, _, _)| *t).collect();
+    let mut listed: Vec<dicom_core::Tag> = categories::NEVER_LEAVES
+        .iter()
+        .map(|(g, e)| dicom_core::Tag(*g, *e))
+        .collect();
+    carried.sort_unstable();
+    listed.sort_unstable();
+    assert_eq!(carried, listed, "the fixture and the list have drifted");
+
+    let source = tree_of_identifiers();
+    // And the files really carry them: an element the fixture never wrote is
+    // an element the release cannot be shown to have removed.
+    for path in files_under(source.path()) {
+        let object = dicom_object::open_file(&path).unwrap();
+        for (tag, _, _) in identifiers() {
+            assert!(
+                object.element_opt(tag).ok().flatten().is_some(),
+                "({:04X},{:04X}) is not in the file the release is asked to clean",
+                tag.group(),
+                tag.element()
+            );
+        }
+    }
+
+    let home_dir = TempDir::new("identifiers-home");
+    let out = TempDir::new("identifiers-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(report.files, 2);
+
+    let written = files_under(out.path());
+    assert_eq!(written.len(), 2);
+    for path in &written {
+        let object = dicom_object::open_file(path).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        for (tag, vr, value) in identifiers() {
+            assert!(
+                object.element_opt(tag).ok().flatten().is_none(),
+                "({:04X},{:04X}) survived the release, in {}",
+                tag.group(),
+                tag.element(),
+                path.display()
+            );
+            if vr == VR::DA {
+                continue;
+            }
+            assert!(
+                bytes.windows(value.len()).all(|w| w != value.as_bytes()),
+                "the value of ({:04X},{:04X}) is still in the bytes of {}",
+                tag.group(),
+                tag.element(),
+                path.display()
+            );
+        }
+    }
+
+    // And the report names each of them, so a reader sees the element was
+    // handled rather than absent by luck. Two files, so twice each.
+    for (tag, _, _) in identifiers() {
+        let named = format!("({:04X},{:04X}) removed", tag.group(), tag.element());
+        assert_eq!(
+            report.changes.get(&named),
+            Some(&2),
+            "{named} is not in the change list: {:?}",
+            report.changes
+        );
+    }
+
+    // The row says which categories were applied, the one that holds the
+    // accession number among them: "de-identified" is not a property a file
+    // carries without saying under what rule.
+    let store = reg.store();
+    let sql = format!(
+        "SELECT categories FROM {} ORDER BY id DESC",
+        store.qualified("release")
+    );
+    let stored = store.query(&sql, &[]).unwrap();
+    let applied = stored[0].text(0).unwrap().to_string();
+    assert_eq!(
+        applied, "patient,trial,provider,institution,times,ids",
+        "the release did not record what it applied"
+    );
+}
