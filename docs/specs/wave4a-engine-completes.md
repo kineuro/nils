@@ -794,8 +794,13 @@ per-stack axis questions it raised (they carry the run's `job_id` now)
 collapse into one `review_item` of scope `group` per (kind, value, tier),
 `members` counted and `group_key` naming the three, with a `review_member`
 row per stack holding the evidence the question was raised on; the run's
-report says `review_items` (the members) and `review_groups` (the queue a
-person reads). A re-classification supersedes the open grouped questions
+report says `review_items` (the members), `review_stacks` (the distinct
+stacks those members stand on) and `review_groups` (the queue a person
+reads). The three are counts of three different things, so the only one the
+report holds against the stacks it classified is `review_stacks`: record 35
+found the line dividing the items by the stacks and calling the answer a
+share of the stacks, which read 99.3 per cent where two thirds of the
+archive had raised something. A re-classification supersedes the open grouped questions
 its stacks belonged to and asks again as new items (C15). **Bulk
 decisions:** `nils review apply <item> --value V | --nothing` on a grouped
 item writes one `decision` row of scope `group` whose `ref` is the item,

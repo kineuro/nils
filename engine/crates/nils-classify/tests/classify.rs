@@ -1513,3 +1513,95 @@ fn a_clause_with_a_zero_guard_and_a_threshold_answers_on_neither_when_the_guard_
         assert_eq!(report.at_threshold.get("base"), None, "{name}");
     }
 }
+
+/// The words of one line of the report, with its padding taken out, so that
+/// a test says what a person reads and not how wide the column is.
+fn line(text: &str, label: &str) -> String {
+    text.lines()
+        .find(|l| l.trim_start().starts_with(label))
+        .unwrap_or_else(|| panic!("no line beginning {label} in:\n{text}"))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Record 35, regression 3: the line held a count of items against a count
+/// of stacks and called the ratio a share of the stacks, so a run that
+/// raised 830 items on 546 of 836 stacks printed "99.3% of the stacks".
+/// Each number now counts what its own sentence names.
+#[test]
+fn the_line_counts_stacks_as_stacks_and_items_as_items() {
+    let mut report = nils_classify::Classified::new(7, 3, "mri@0.1.3".to_string());
+    report.read = 836;
+    report.written = 836;
+    report.review_stacks = 546;
+    report.review_items = 830;
+    report.review_groups = 58;
+    let printed = report.to_string();
+    assert_eq!(
+        line(&printed, "stacks to review"),
+        "stacks to review 546 65.3% of the 836 classified",
+        "{printed}"
+    );
+    assert_eq!(
+        line(&printed, "review items"),
+        "review items 830 on those stacks, as 58 question(s)",
+        "{printed}"
+    );
+    // and never the items over the stacks, which is what 99.3 per cent was
+    assert!(!printed.contains("99.3%"), "{printed}");
+}
+
+/// Record 35, regression 3, from the registry: one stack answering weakly on
+/// several axes raises one item per axis, and is one stack in the line.
+#[test]
+fn a_stack_carrying_two_items_is_one_stack_in_the_line() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let mut reg = prepare(&lab, &dir);
+        // Every answer below certainty is a question, so the one stack of
+        // this tree raises one for each axis the pack answered.
+        let settings = nils_classify::job::Settings {
+            review_below: Some(1.0),
+            ..Default::default()
+        };
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert_eq!(report.written, 1, "{name}");
+        assert!(
+            report.review_items >= 2,
+            "{name}: {} item(s)",
+            report.review_items
+        );
+        assert_eq!(
+            report.review_stacks, 1,
+            "{name}: one stack, whatever it asked"
+        );
+        // and the count is the registry's own: the distinct stacks the
+        // members of this run's questions stand on
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(DISTINCT stack_id) FROM {review_member}"
+            ),
+            1,
+            "{name}"
+        );
+        let printed = report.to_string();
+        assert_eq!(
+            line(&printed, "stacks to review"),
+            "stacks to review 1 100.0% of the 1 classified",
+            "{name}: {printed}"
+        );
+        assert_eq!(
+            line(&printed, "review items"),
+            format!(
+                "review items {} on those stacks, as {} question(s)",
+                report.review_items, report.review_groups
+            ),
+            "{name}: {printed}"
+        );
+    }
+}

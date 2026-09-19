@@ -102,8 +102,15 @@ pub struct Classified {
     /// reach is a number here rather than a review item per stack.
     pub by_tier: std::collections::BTreeMap<String, i64>,
     /// The number that matters: a pack that flags everything has failed even
-    /// if it agrees with v0 (§8.2).
+    /// if it agrees with v0 (§8.2). A count of items, not of stacks: one
+    /// stack can raise a conflict and a weak answer and is two items here.
     pub review_items: i64,
+    /// The distinct stacks those items stand on (record 35). This is the
+    /// only one of the three that may be held against the stacks the run
+    /// classified, and it is what the share in the report is worked out
+    /// from.
+    #[serde(default)]
+    pub review_stacks: i64,
     /// Wave 4a §10.2: the items those questions collapsed into, one per
     /// (kind, value, tier). This is the length of the queue a person reads.
     pub review_groups: i64,
@@ -143,6 +150,7 @@ impl Classified {
             passes: Vec::new(),
             by_tier: std::collections::BTreeMap::new(),
             review_items: 0,
+            review_stacks: 0,
             review_groups: 0,
             at_threshold: std::collections::BTreeMap::new(),
             diagnostics: std::collections::BTreeMap::new(),
@@ -168,11 +176,16 @@ impl Classified {
     }
 
     /// What share of the classified stacks raised something for a person.
+    ///
+    /// Record 35: stacks over stacks. The share used to be the items over
+    /// the stacks, which counted a stack twice for asking two questions and
+    /// then read the answer as a share of stacks, so a run that asked about
+    /// two thirds of the archive reported nearly all of it.
     pub fn review_share(&self) -> f64 {
         if self.written == 0 {
             return 0.0;
         }
-        self.review_items as f64 / self.written as f64
+        self.review_stacks as f64 / self.written as f64
     }
 }
 
@@ -200,12 +213,22 @@ impl fmt::Display for Classified {
                 self.silent
             )?;
         }
+        // Record 35: three numbers, each against what it is a count of. The
+        // stacks are a share of the stacks classified; the items are what
+        // those stacks raised, which is more than one on a stack that both
+        // disagrees with itself and answers weakly; the questions are the
+        // length of the queue a person opens.
         writeln!(
             f,
-            "  review items     {:>12}   {:.1}% of the stacks, as {} question(s)",
-            self.review_items,
+            "  stacks to review {:>12}   {:.1}% of the {} classified",
+            self.review_stacks,
             100.0 * self.review_share(),
-            self.review_groups
+            self.written
+        )?;
+        writeln!(
+            f,
+            "  review items     {:>12}   on those stacks, as {} question(s)",
+            self.review_items, self.review_groups
         )?;
         if self.on_the_threshold() > 0 {
             let mut on: Vec<(&String, &i64)> = self.at_threshold.iter().collect();

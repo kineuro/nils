@@ -71,6 +71,10 @@ pub struct Grouped {
     pub items: i64,
     /// Members under them, which is the per-stack questions there were.
     pub members: i64,
+    /// The distinct stacks those members stand on. One stack can carry
+    /// several questions, so this is never the membership count and is the
+    /// only one of the three that can be held against a count of stacks.
+    pub stacks: i64,
 }
 
 /// Collapse the open per-stack axis questions a run raised into one item
@@ -127,6 +131,7 @@ pub fn group_run(store: &mut Store, job_id: i64) -> Result<Grouped, Error> {
     }
     let now = now_iso();
     let mut out = Grouped::default();
+    let mut on: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     for ((kind, value, tier), (first, members)) in groups {
         let key = format!("{kind}|{value}|{tier}");
         let mut evidence = first;
@@ -195,7 +200,9 @@ pub fn group_run(store: &mut Store, job_id: i64) -> Result<Grouped, Error> {
         }
         out.items += 1;
         out.members += members.len() as i64;
+        on.extend(members.iter().map(|(_, stack, _)| *stack));
     }
+    out.stacks = on.len() as i64;
     Ok(out)
 }
 

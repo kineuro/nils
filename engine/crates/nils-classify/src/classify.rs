@@ -551,7 +551,13 @@ pub fn classify(
     // Wave 4a §10.2: one question about a rule is one item with n members.
     if let Ok(report) = &mut result {
         match nils_registry::review::group_run(registry.store(), job_id) {
-            Ok(grouped) => report.review_groups = grouped.items,
+            Ok(grouped) => {
+                report.review_groups = grouped.items;
+                // Record 35: the stacks the items stand on, counted where
+                // the members are, because the run's own tally counts items
+                // and a stack can raise several.
+                report.review_stacks = grouped.stacks;
+            }
             Err(e) => {
                 result = Err(Error::Store(nils_registry::store::Error::Message(
                     e.to_string(),
