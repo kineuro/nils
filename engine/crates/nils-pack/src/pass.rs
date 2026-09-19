@@ -41,6 +41,13 @@ pub struct KeyDim {
     /// Python rounds a half to even and Rust rounds it away from zero, which
     /// puts a TR of exactly 50 ms in a different bin. The mode is the pack's.
     pub half_even: bool,
+    /// Whether a zero on this dimension is a measurement or a scanner saying
+    /// it has nothing to say. Declared by the pack, because which of its
+    /// numbers can legitimately be zero is a claim about the modality and
+    /// not about binning: an echo time of zero is no echo time, a stack
+    /// offset of zero is an offset. A dimension that says so bins a zero as
+    /// a hole, and a hole matches only a hole.
+    pub zero_absent: bool,
 }
 
 /// The last resort for inversion recovery, whose TI ranges widely by vendor
@@ -226,6 +233,10 @@ pub fn key_of(v: &Vote, values: &[Option<f64>]) -> Key {
     for (i, d) in v.dims.iter().enumerate().take(5) {
         k[i] = match values.get(i).copied().flatten() {
             None => None,
+            // A zero the pack says is not a measurement bins as a hole, so a
+            // stack whose scanner wrote 0.0 is not a neighbour of every
+            // stack whose value rounds to the same bin.
+            Some(x) if d.zero_absent && x == 0.0 => None,
             Some(x) => {
                 if let Some(step) = d.round {
                     let q = x / step;

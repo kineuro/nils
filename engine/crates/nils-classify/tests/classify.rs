@@ -1602,6 +1602,125 @@ fn a_stack_carrying_two_items_is_one_stack_in_the_line() {
                 report.review_items, report.review_groups
             ),
             "{name}: {printed}"
+/// The flow study as the archive holds it: the series the split broke into
+/// one-image stacks, and beside it the same protocol's series it did not,
+/// whose echo time is a measurement and which the rules therefore judge.
+/// Those judged stacks are what the vote reads as neighbours.
+fn flow_with_neighbours() -> TempDir {
+    let dir = TempDir::new("classify-flow-pool");
+    let image = |series: &str, echo: Option<u32>, instance: u32, te: &str, file: &str| {
+        let sop = format!("A.{series}.{}.{instance}", echo.unwrap_or(0));
+        let mut e = synth::minimal_mr("A", &format!("A.{series}"), &sop);
+        e.push(elem(tags::PATIENT_ID, VR::LO, "P1"));
+        e.extend([
+            elem(tags::SERIES_DESCRIPTION, VR::LO, "ax flow"),
+            elem(tags::SCANNING_SEQUENCE, VR::CS, "GR"),
+            elem(tags::SEQUENCE_NAME, VR::SH, "*pc2d1"),
+            elem(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+            elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+            elem(tags::ECHO_TIME, VR::DS, te),
+            elem(tags::REPETITION_TIME, VR::DS, "30.0"),
+            elem(tags::FLIP_ANGLE, VR::DS, "15"),
+        ]);
+        if let Some(n) = echo {
+            e.push(elem(tags::ECHO_NUMBERS, VR::IS, &n.to_string()));
+        }
+        dir.file(file, &synth::part10(&MetaFields::mr(&sop), &e, true));
+    };
+    // The study's fragments: one image each, and no echo time.
+    for echo in 1..=6 {
+        image("1", Some(echo), 1, "0.0", &format!("split/{echo}"));
+    }
+    // The same protocol's whole series, with an echo time that was measured.
+    for series in ["2", "3"] {
+        for instance in 1..=4 {
+            image(
+                series,
+                None,
+                instance,
+                "3.0",
+                &format!("whole/{series}-{instance}"),
+            );
+        }
+    }
+    dir
+}
+
+/// Record 35, the re-run: S4 guarded the base windows against an echo time
+/// of zero, and candidate J's fragments came out T1w all the same, because
+/// the vote reads the same number through its key. A zero bins with the
+/// short echo times of gradient-echo anatomy, and the neighbours the vote
+/// found were the flow study's own whole series. A zero is a hole now, so
+/// the fragments are named by nothing and stay the question the split
+/// raised about them.
+#[test]
+fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = flow_with_neighbours();
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+
+        // The six fragments are the stacks holding one image, and they have
+        // no echo time to speak of.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {stack_fingerprint} WHERE n_instances = 1 AND echo_time = 0"
+            ),
+            6,
+            "{name}"
+        );
+        // Nothing wrote a base on any of them: not a rule, whose window the
+        // guard closes, and not the pass, whose bin no longer holds them.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_axis} a JOIN {stack_fingerprint} f \
+                 ON f.stack_id = a.stack_id WHERE a.axis = 'base' AND f.n_instances = 1"
+            ),
+            0,
+            "{name}: a flow fragment is not an anatomical T1w"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_evidence} WHERE axis = 'base' AND pass IS NOT NULL"
+            ),
+            0,
+            "{name}: and the vote answered none of them"
+        );
+        // What the study does say about them is unchanged: the technique is
+        // the flow sequence, and the split is one question with six members.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_axis} a JOIN {stack_fingerprint} f \
+                 ON f.stack_id = a.stack_id \
+                 WHERE a.axis = 'technique' AND a.value = 'PC' AND f.n_instances = 1"
+            ),
+            6,
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT members FROM {review_item} WHERE kind = 'split:one_image_per_stack'"
+            ),
+            6,
+            "{name}"
+        );
+        // And the whole series, whose echo time is a measurement, is judged
+        // by the window as before: the guard silences a zero, not a number.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_evidence} WHERE rule = 'physics:gre_t1w'"
+            ),
+            2,
+            "{name}"
         );
     }
 }

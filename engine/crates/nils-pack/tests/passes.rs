@@ -161,3 +161,47 @@ fn the_same_reference_gives_the_same_answer_twice() {
         assert_eq!(a.outcome.matches, b.outcome.matches);
     }
 }
+
+/// Record 35, the re-run's second reading of candidate J: the windows in
+/// `rules/base.yml` were guarded against an echo time of zero and the vote's
+/// key was not, so the same zero went on deciding a base by the other route.
+/// A phase-contrast study writes 0.0, which binned with the short echo times
+/// of gradient-echo anatomy and voted 288 of 297 one-image fragments T1w.
+/// A zero on that dimension is a hole now, and a hole matches only a hole.
+#[test]
+fn a_zero_echo_time_is_not_a_short_one_to_the_vote_either() {
+    let pack = mri();
+    let pass = &pack.passes[0];
+    let vote = pass.vote().expect("the physics vote");
+
+    let mut rows: Vec<(Stack, &str, &str, &str)> = Vec::new();
+    // Twenty short gradient echoes that a rule called a T1w,
+    for _ in 0..20 {
+        rows.push((stack(30.0, 3.0, "GR"), "T1w", "FLASH", "anat"));
+    }
+    // one fragment of a flow study, whose scanner wrote no echo time,
+    rows.push((stack(30.0, 0.0, "GR"), "", "PC", "misc"));
+    // and one whose echo time is a measurement, so the bin still works.
+    rows.push((stack(30.0, 3.0, "GR"), "", "PC", "misc"));
+
+    let c = corpus(&pack, &rows);
+    let (answers, _, _) = run_vote(&pack, pass, vote, &c, false);
+    let said = |at: usize| -> (String, Vec<String>) {
+        let a = answers.iter().find(|a| a.at == at).expect("a target");
+        (
+            a.outcome.method.clone(),
+            a.writes.iter().map(|(_, v)| v.clone()).collect(),
+        )
+    };
+    let (method, writes) = said(20);
+    assert_eq!(method, "no_match", "a zero echo time has no neighbours");
+    assert!(writes.is_empty(), "so the vote says nothing about it");
+    let (method, writes) = said(21);
+    assert_eq!(method, "exact_bin", "a measured one still votes");
+    assert_eq!(
+        writes,
+        vec!["T1w", "FLASH"],
+        "and is answered by its own bin, the technique it already has \
+         being dropped where the pass writes it back"
+    );
+}

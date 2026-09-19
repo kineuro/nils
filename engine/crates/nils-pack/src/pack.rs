@@ -2957,6 +2957,20 @@ fn load_vote(
                 }
             },
         };
+        let zero_absent = match s.get("zero") {
+            None => false,
+            Some(z) => match f.blame(yaml::text(z, &path))?.as_str() {
+                "absent" => true,
+                "a_value" => false,
+                other => {
+                    return Err(Error::at(
+                        format!("{path}.zero"),
+                        format!("absent or a_value, not {other}"),
+                    )
+                    .in_file(&f.path, Some(&f.source)));
+                }
+            },
+        };
         dims.push(KeyDim {
             name: n.clone(),
             field,
@@ -2969,6 +2983,7 @@ fn load_vote(
                 .map(|x| f.blame(yaml::number(x, &path)))
                 .transpose()?,
             half_even,
+            zero_absent,
         });
     }
     if dims.is_empty() || dims.len() > 5 {
