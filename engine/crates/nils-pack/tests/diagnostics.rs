@@ -276,3 +276,118 @@ cases:
         "load still refuses"
     );
 }
+
+/// Record 35, the seam between S2 and S6: a pack with two normalizations of
+/// one description, and a rule set whose rules do not all read the same one.
+fn two_text_pack() -> Dir {
+    let d = Dir::new();
+    d.file(
+        "pack.yml",
+        "\
+pack: t
+version: 1.0.0
+contract: 1
+modality: MR
+parsers: [parsers.yml]
+flags: [flags.yml]
+normalize: [plain.yml, whole.yml]
+axes: [axes/kind.yml]
+rules: [rules/only.yml]
+order: [only]
+buckets:
+  agents: [gd]
+",
+    )
+    .file(
+        "parsers.yml",
+        "\
+parsers:
+  contrast:
+    field: text_contrast
+    case: lower
+    tokenize: {split: '\\s+'}
+    predicates:
+      has_agent: {any_token: {bucket: agents}}
+",
+    )
+    .file("flags.yml", "flags:\n  has_agent: contrast.has_agent\n")
+    // The text that drops `beta` as boilerplate, and the text that keeps
+    // every word: S2's `search_text` and `anatomy_text` in miniature.
+    .file(
+        "plain.yml",
+        "normalize: search_text\nfrom: [text_series_description]\ntoken_removals: ['beta']\n",
+    )
+    .file(
+        "whole.yml",
+        "normalize: anatomy_text\nfrom: [text_series_description]\ntoken_removals: []\n",
+    )
+    .file(
+        "axes/kind.yml",
+        "axis: kind\nkind: single\nvalues: {a: {}, b: {}}\n",
+    )
+    .file(
+        "rules/only.yml",
+        "\
+rule_set: only
+decides: [kind]
+tiers: {keywords: 0.85}
+order: [alpha, beta, delta]
+rules:
+  alpha:
+    clauses: [{keywords: [alpha], tier: keywords, field: search_text}]
+    set: {kind: a}
+  beta:
+    clauses: [{keywords: [beta], tier: keywords, field: anatomy_text}]
+    set: {kind: b}
+  delta:
+    clauses: [{keywords: [delta], tier: keywords, field: search_text}]
+    set: {kind: b}
+",
+    )
+    .file(
+        "corpus/cases.yml",
+        "\
+cases:
+  - name: alpha is a
+    stack: {text_series_description: 'alpha'}
+    axes: {kind: a}
+",
+    );
+    d
+}
+
+#[test]
+fn a_conflict_is_recorded_against_the_text_the_rule_read() {
+    let d = two_text_pack();
+    let pack = nils_pack::load(d.path(), None).unwrap();
+
+    // `beta` is in the description, but the text alpha read does not hold
+    // it: the normalizer dropped it. Two readings of one description
+    // disagreeing is not the archive disagreeing with itself, and a
+    // conflict here would cite a word the deciding rule never saw.
+    let v = verdict(&pack, "alpha beta");
+    assert_eq!(v.stored("kind"), "a");
+    assert!(
+        !kinds(&v).contains(&"axis_conflict"),
+        "across two texts, no conflict: {:?}",
+        v.diagnostics
+    );
+
+    // The same set, the same winning rule, and a later rule that read the
+    // text alpha read: that is one text saying two things, and it is asked.
+    let v = verdict(&pack, "alpha delta");
+    assert_eq!(v.stored("kind"), "a");
+    let c = v
+        .diagnostics
+        .iter()
+        .find(|d| d.kind == "axis_conflict")
+        .expect("delta read search_text, as alpha did");
+    assert_eq!(
+        (c.rule.as_str(), c.matched.as_str(), c.value.as_str()),
+        ("delta", "delta", "b")
+    );
+    assert_eq!(
+        (c.by_rule.as_str(), c.by_matched.as_str()),
+        ("alpha", "alpha")
+    );
+}

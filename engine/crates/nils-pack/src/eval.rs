@@ -220,6 +220,11 @@ struct Fired {
     confidence: f64,
     source: String,
     matched: String,
+    /// The text `matched` was found in, where the clause read exactly one.
+    /// A pack normalizes its fingerprint more than once (`search_text` drops
+    /// the boilerplate, `anatomy_text` keeps it), so a citation without the
+    /// text it came from cannot be compared with another rule's.
+    text: Option<usize>,
 }
 
 impl Evaluated<'_> {
@@ -330,6 +335,7 @@ impl Evaluated<'_> {
                                 confidence: rule.confidence.unwrap_or(fired.confidence),
                                 source: fired.source.clone(),
                                 matched: fired.matched.clone(),
+                                text: fired.text,
                             },
                             set.name.clone(),
                             rule.id.clone(),
@@ -377,12 +383,22 @@ impl Evaluated<'_> {
                     // queue. Two different words in one text pointing at two
                     // different answers is the archive disagreeing with
                     // itself.
-                    if fired.source == "text" {
+                    //
+                    // The same text, and not merely text: record 35 slice S2
+                    // gave the MRI pack a second normalization, so a rule
+                    // may read `anatomy_text` where the rule before it read
+                    // `search_text`. A word the one keeps and the other
+                    // drops is not the archive contradicting itself, it is
+                    // two readings of one description, and a conflict
+                    // recorded across them would cite a word the winning
+                    // rule never saw.
+                    if fired.source == "text" && fired.text.is_some() {
                         for later in &set.rules[ri + 1..] {
                             let Some(also) = self.fire(later) else {
                                 continue;
                             };
                             if also.source != "text"
+                                || also.text != fired.text
                                 || also.matched.eq_ignore_ascii_case(&fired.matched)
                             {
                                 continue;
@@ -681,6 +697,7 @@ impl Evaluated<'_> {
                             confidence: *confidence,
                             source: "flags".into(),
                             matched: name.clone(),
+                            text: None,
                         });
                     }
                 }
@@ -702,6 +719,7 @@ impl Evaluated<'_> {
                             confidence: *confidence,
                             source: "text".into(),
                             matched: kw.clone(),
+                            text: Some(*field),
                         });
                     }
                 }
@@ -717,6 +735,7 @@ impl Evaluated<'_> {
                             confidence: *confidence,
                             source: "flags".into(),
                             matched: names[i].clone(),
+                            text: None,
                         });
                     }
                 }
@@ -732,6 +751,7 @@ impl Evaluated<'_> {
                             confidence: *confidence,
                             source: "flags".into(),
                             matched: names.join("+"),
+                            text: None,
                         });
                     }
                 }
@@ -748,6 +768,7 @@ impl Evaluated<'_> {
                             confidence: *confidence,
                             source: source.clone(),
                             matched: cite.clone(),
+                            text: expr.one_text(),
                         });
                     }
                 }

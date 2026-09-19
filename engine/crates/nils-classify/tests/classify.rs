@@ -1457,3 +1457,59 @@ fn a_conflict_on_a_stack_the_pack_rules_out_is_not_a_question() {
         );
     }
 }
+
+/// Record 35, the seam between S4 and S5: one clause carries both.
+///
+/// `physics:gre_t1w` is a window on a small echo time, so S4 gave it a
+/// `gt: 0` guard, and it writes 0.70, which is exactly the threshold S5
+/// made read as strictly below. The two meet on one clause: the guard
+/// decides whether the clause fires at all, and only then does the boundary
+/// decide whether the answer is a question. A zero echo time must therefore
+/// produce no answer on the boundary rather than a confident one, and no
+/// count against the threshold either.
+#[test]
+fn a_clause_with_a_zero_guard_and_a_threshold_answers_on_neither_when_the_guard_fails() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    assert_eq!(pack.review.below("base"), 0.70);
+    for lab in labs() {
+        let name = lab.name;
+        // The same stack as the test above, with the one number the scanner
+        // wrote as zero. Everything else that could make it a T1w is absent.
+        let dir = one_stack(
+            "ax gre",
+            &[
+                (tags::SCANNING_SEQUENCE, VR::CS, "GR"),
+                (tags::REPETITION_TIME, VR::DS, "250"),
+                (tags::ECHO_TIME, VR::DS, "0.0"),
+                (tags::MR_ACQUISITION_TYPE, VR::CS, "2D"),
+            ],
+        );
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+
+        // The guard held: the window never fired, so no evidence stands on
+        // it and nothing was written at the confidence it would have used.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_evidence} WHERE rule = 'physics:gre_t1w'"
+            ),
+            0,
+            "{name}: a zero echo time is not a very short one"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_axis} WHERE axis = 'base' AND confidence = 0.7"
+            ),
+            0,
+            "{name}"
+        );
+        // And the boundary counted nothing, because there is no answer for
+        // it to sit on: a clause whose guard failed is silence, not a
+        // confident answer that happens to be on the threshold.
+        assert_eq!(report.at_threshold.get("base"), None, "{name}");
+    }
+}

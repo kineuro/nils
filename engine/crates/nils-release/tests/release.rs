@@ -1841,3 +1841,55 @@ fn no_direct_identifier_survives_a_release_and_the_report_names_each() {
         "the release did not record what it applied"
     );
 }
+
+/// Record 35, the seam between S1 and S3: one release writes both answers.
+///
+/// S1 gave the release a sixth category and made the row say which categories
+/// it applied; S3 gave the same row the two counts and the report the line
+/// that reads them. They are written by different statements, the insert and
+/// the close, and a release that reported one and lost the other would be
+/// telling half of what it did. The fixture has no burned-in tag at all, so
+/// both stacks are unjudged and every direct identifier is in the file.
+#[test]
+fn the_release_row_says_what_it_removed_and_what_it_could_not_judge() {
+    let source = tree_of_identifiers();
+    let home_dir = TempDir::new("seam-home");
+    let out = TempDir::new("seam-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+
+    // S3: nothing said either way about the pixels, so both were written and
+    // counted, and the report carries the setting that reads the count.
+    assert_eq!((report.burned_in, report.unjudged), (0, 2));
+    assert_eq!(report.on_unknown, "write");
+    assert_eq!(report.files, 2);
+
+    // S1: and the same run removed the accession number and named it.
+    for tag in [
+        dicom_core::Tag(0x0008, 0x0050),
+        dicom_core::Tag(0x0018, 0x1000),
+    ] {
+        let named = format!("({:04X},{:04X}) removed", tag.group(), tag.element());
+        assert_eq!(report.changes.get(&named), Some(&2), "{named}");
+    }
+
+    // One row, carrying both: the counts the close wrote and the categories
+    // the insert wrote, with `ids` among them.
+    assert_eq!(
+        row_counts(&mut reg, report.release_id),
+        (0, 2, "write".into())
+    );
+    let store = reg.store();
+    let sql = format!(
+        "SELECT categories FROM {} WHERE id = {}",
+        store.qualified("release"),
+        report.release_id
+    );
+    let rows = store.query(&sql, &[]).unwrap();
+    assert_eq!(
+        rows[0].text(0).unwrap(),
+        "patient,trial,provider,institution,times,ids"
+    );
+}

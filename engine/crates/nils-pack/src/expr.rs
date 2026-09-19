@@ -243,6 +243,38 @@ impl Expr {
         }
     }
 
+    /// The one text this expression reads, if it reads exactly one. A rule
+    /// that cites a text has to say which text, because a pack may normalize
+    /// the same fingerprint more than once and a word dropped from one is
+    /// kept in another: `search_text` and `anatomy_text` are two readings of
+    /// one description, and a keyword found in one was never in the other.
+    /// `None` where the expression reads none, or more than one, and nothing
+    /// may then claim the two rules read the same words.
+    pub fn one_text(&self) -> Option<usize> {
+        let mut out = Vec::new();
+        self.text_fields(&mut out);
+        out.sort_unstable();
+        out.dedup();
+        match out.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
+    }
+
+    /// Every text this expression opens, with repeats.
+    fn text_fields(&self, out: &mut Vec<usize>) {
+        match self {
+            Expr::Text { field, inner, .. } => {
+                out.push(*field);
+                inner.text_fields(out);
+            }
+            Expr::Any(es) | Expr::All(es) => es.iter().for_each(|e| e.text_fields(out)),
+            Expr::Not(e) => e.text_fields(out),
+            Expr::InParser { inner, .. } => inner.text_fields(out),
+            _ => {}
+        }
+    }
+
     /// Evaluate. `subj` is the subject in scope, if any. A subject atom with
     /// no subject is false, and the loader is what stops that from happening.
     pub fn eval<C: Ctx + ?Sized>(&self, subj: Option<&Subject<'_>>, c: &C) -> bool {
