@@ -5821,6 +5821,17 @@ fn session_rebuild(home: &Home, args: SessionRebuildArgs) -> Result<(), Exit> {
         done.picks_withdrawn,
         done.items
     );
+    // Record 35 finding 7: what no timeline could take, named rather than
+    // made into a session with nothing in it.
+    if done.empty_studies > 0 || done.without_a_study > 0 {
+        println!(
+            "  {} {} hold no series and made no session; {} {} own series and no study",
+            done.empty_studies,
+            counted("studies", done.empty_studies as u64),
+            done.without_a_study,
+            counted("subjects", done.without_a_study as u64),
+        );
+    }
     Ok(())
 }
 

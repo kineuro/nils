@@ -407,3 +407,250 @@ fn an_event_anchored_scheme_labels_the_same_rows_for_every_reader() {
         );
     }
 }
+
+/// Record 35 finding 7: the two shapes identity ends in that no session can
+/// hold. A study row whose series were all filed under another study became
+/// a session with nothing in it, carrying the same labels as a real one; a
+/// subject that owns series and no study got no session at all and appeared
+/// in no ask, with nothing anywhere saying so.
+#[test]
+fn a_study_with_nothing_in_it_makes_no_session_and_is_said() {
+    for mut l in labs() {
+        let name = l.name;
+        let scheme = Scheme {
+            window_days: 14,
+            ..Scheme::default()
+        };
+        let anchors = Anchors::default();
+        let before = ensure(&mut l.registry, &scheme, &anchors, None, false).unwrap();
+        assert_eq!(before.empty_studies, 0, "{name}");
+        assert_eq!(before.without_a_study, 0, "{name}");
+
+        // a subject of the synthetic registry keeps a study row with no
+        // series, as the digest leaves one when its series name another
+        // study
+        let subject = {
+            let store = l.registry.store();
+            let sql = format!(
+                "SELECT id, code FROM {} ORDER BY id",
+                store.qualified("subject")
+            );
+            let r = store.query(&sql, &[]).unwrap();
+            (r[0].int(0).unwrap(), r[0].text(1).unwrap().to_string())
+        };
+        let study = l
+            .registry
+            .store()
+            .insert(
+                &Insert::new(
+                    table("study"),
+                    &[
+                        "study_instance_uid",
+                        "subject_id",
+                        "study_date",
+                        "first_batch_id",
+                    ],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from("1.2.826.0.1.3680043.10.999.1"),
+                    Param::Int(subject.0),
+                    Param::from("2024-03-04"),
+                    Param::Int(1),
+                ]],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+
+        let done = ensure(&mut l.registry, &scheme, &anchors, None, true).unwrap();
+        assert_eq!(done.empty_studies, 1, "{name}");
+        assert_eq!(done.without_a_study, 0, "{name}");
+
+        // no session was made from it
+        let sessions = sessions_of(l.registry.store(), &scheme, None).unwrap();
+        assert!(
+            sessions.iter().all(|c| !c.studies.contains(&study)),
+            "{name}: a session made from nothing"
+        );
+        assert!(
+            sessions.iter().all(|c| !c.studies.is_empty()),
+            "{name}: every session holds a study"
+        );
+
+        // and the row is said, once, with what it is
+        let items = open_items(&mut l.registry, "identity.empty_study");
+        assert_eq!(items.len(), 1, "{name}: {items:?}");
+        assert_eq!(items[0].0, "study", "{name}");
+        assert_eq!(items[0].1["study_id"], study, "{name}");
+        assert_eq!(items[0].1["code"], subject.1, "{name}");
+        assert_eq!(items[0].2["series"], 0, "{name}");
+
+        // a second rebuild says it again and does not ask twice
+        ensure(&mut l.registry, &scheme, &anchors, None, true).unwrap();
+        assert_eq!(
+            open_items(&mut l.registry, "identity.empty_study").len(),
+            1,
+            "{name}"
+        );
+
+        // and when the row is whole again the question closes itself
+        l.registry
+            .store()
+            .insert(
+                &Insert::new(
+                    table("series"),
+                    &[
+                        "series_instance_uid",
+                        "study_id",
+                        "subject_id",
+                        "modality",
+                        "n_instances",
+                        "n_stacks",
+                        "first_batch_id",
+                    ],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from("1.2.826.0.1.3680043.10.999.1.1"),
+                    Param::Int(study),
+                    Param::Int(subject.0),
+                    Param::from("MR"),
+                    Param::Int(4),
+                    Param::Int(1),
+                    Param::Int(1),
+                ]],
+            )
+            .unwrap();
+        let after = ensure(&mut l.registry, &scheme, &anchors, None, true).unwrap();
+        assert_eq!(after.empty_studies, 0, "{name}");
+        assert!(
+            open_items(&mut l.registry, "identity.empty_study").is_empty(),
+            "{name}"
+        );
+        let sessions = sessions_of(l.registry.store(), &scheme, None).unwrap();
+        assert!(
+            sessions.iter().any(|c| c.studies.contains(&study)),
+            "{name}: a study that holds something is on the timeline"
+        );
+    }
+}
+
+/// The other half: a subject that owns series and no study of its own.
+#[test]
+fn a_subject_with_series_and_no_study_is_named_rather_than_invisible() {
+    for mut l in labs() {
+        let name = l.name;
+        let scheme = Scheme {
+            window_days: 14,
+            ..Scheme::default()
+        };
+        let anchors = Anchors::default();
+        ensure(&mut l.registry, &scheme, &anchors, None, false).unwrap();
+
+        // a series whose files named a patient their study does not
+        let (study, code) = {
+            let store = l.registry.store();
+            let sql = format!(
+                "SELECT st.id, su.code FROM {} st JOIN {} su ON su.id = st.subject_id ORDER BY st.id",
+                store.qualified("study"),
+                store.qualified("subject")
+            );
+            let r = store.query(&sql, &[]).unwrap();
+            (r[0].int(0).unwrap(), r[0].text(1).unwrap().to_string())
+        };
+        let other = l
+            .registry
+            .store()
+            .insert(
+                &Insert::new(table("subject"), &["code", "created_at"]).returning(&["id"]),
+                &[vec![
+                    Param::from("sub-orphan"),
+                    Param::from("2026-09-19T00:00:00Z"),
+                ]],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        l.registry
+            .store()
+            .insert(
+                &Insert::new(
+                    table("series"),
+                    &[
+                        "series_instance_uid",
+                        "study_id",
+                        "subject_id",
+                        "modality",
+                        "n_instances",
+                        "n_stacks",
+                        "first_batch_id",
+                    ],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::from("1.2.826.0.1.3680043.10.999.2.1"),
+                    Param::Int(study),
+                    Param::Int(other),
+                    Param::from("MR"),
+                    Param::Int(476),
+                    Param::Int(15),
+                    Param::Int(1),
+                ]],
+            )
+            .unwrap();
+
+        let done = ensure(&mut l.registry, &scheme, &anchors, None, true).unwrap();
+        assert_eq!(done.without_a_study, 1, "{name}");
+        // it still has no session, because it is on no timeline, and now
+        // something says so
+        let sessions = sessions_of(l.registry.store(), &scheme, None).unwrap();
+        assert!(
+            sessions.iter().all(|c| c.subject_id != other),
+            "{name}: a subject with no study has no session"
+        );
+        assert_ne!(code, "sub-orphan", "{name}");
+        let items = open_items(&mut l.registry, "identity.no_study");
+        assert_eq!(items.len(), 1, "{name}: {items:?}");
+        assert_eq!(items[0].0, "subject", "{name}");
+        assert_eq!(items[0].1["subject_id"], other, "{name}");
+        assert_eq!(items[0].2["series"], 1, "{name}");
+        assert_eq!(items[0].2["instances"], 476, "{name}");
+        // asked once, however often a rebuild runs
+        ensure(&mut l.registry, &scheme, &anchors, None, true).unwrap();
+        assert_eq!(
+            open_items(&mut l.registry, "identity.no_study").len(),
+            1,
+            "{name}"
+        );
+    }
+}
+
+/// The open items of a kind: scope, reference and evidence.
+fn open_items(
+    registry: &mut Registry,
+    kind: &str,
+) -> Vec<(String, serde_json::Value, serde_json::Value)> {
+    let store = registry.store();
+    let d = store.dialect();
+    let t = table("review_item");
+    let sql = format!(
+        "SELECT scope, {}, {} FROM {} WHERE kind = {} AND status = 'open' ORDER BY id",
+        d.text_of(t.column("ref").unwrap()),
+        d.text_of(t.column("evidence").unwrap()),
+        store.qualified("review_item"),
+        d.param(1, Type::Text)
+    );
+    store
+        .query(&sql, &[Param::from(kind)])
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r.text(0).unwrap().to_string(),
+                serde_json::from_str(r.opt_text(1).unwrap().unwrap_or("{}")).unwrap(),
+                serde_json::from_str(r.opt_text(2).unwrap().unwrap_or("{}")).unwrap(),
+            )
+        })
+        .collect()
+}

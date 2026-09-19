@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use nils_registry::clinical;
 use nils_registry::day::Day;
+use nils_registry::review;
 use nils_registry::schema::{Type, table};
 use nils_registry::session::{self, Anchor, Scheme, Session, Study};
 use nils_registry::store::Error as StoreError;
@@ -201,6 +202,13 @@ pub struct Rebuilt {
     pub picks_rekeyed: usize,
     pub picks_withdrawn: usize,
     pub items: usize,
+    /// Study rows that hold no series, so no session was made from them,
+    /// and each of which is an open question (§7, record 35 finding 7).
+    #[serde(default)]
+    pub empty_studies: usize,
+    /// Subjects that own series and no study, so they are on no timeline.
+    #[serde(default)]
+    pub without_a_study: usize,
 }
 
 struct Point {
@@ -209,9 +217,19 @@ struct Point {
     study: Study,
 }
 
-/// Every dated study, whole timeline per subject, with the source's own
-/// label when the scheme reads one. A study whose date the vote could not
-/// settle is left out: it is not a point on a timeline.
+/// Every dated study that holds something, whole timeline per subject, with
+/// the source's own label when the scheme reads one. A study whose date the
+/// vote could not settle is left out: it is not a point on a timeline.
+///
+/// A study row with no series is left out too. A session is the occasion a
+/// subject came in, and a study that holds no series is not one: the row
+/// survives where the series that declared it were filed under another
+/// study, and a session made from it carries no series, no stacks and the
+/// same labels as a real one. The row itself stays, because it is a fact in
+/// a file; `ensure` says it is there and empty. The branch that reads the
+/// source's own label always asked for a series, by joining through one, so
+/// the two ways of reading a timeline used to disagree about which studies
+/// are on it.
 fn points(store: &mut Store, scheme: &Scheme, only: Option<&str>) -> Result<Vec<Point>, Error> {
     let d = store.dialect();
     let (study_t, subject_t) = (store.qualified("study"), store.qualified("subject"));
@@ -256,7 +274,9 @@ fn points(store: &mut Store, scheme: &Scheme, only: Option<&str>) -> Result<Vec<
             "SELECT su.id, su.code, st.id, COALESCE({filled}, {dated}), st.has_original_primary, CAST(NULL AS TEXT) \
              FROM {study_t} st JOIN {subject_t} su ON su.id = st.subject_id \
              WHERE COALESCE({filled}, {dated}) IS NOT NULL{where_subject} \
-             ORDER BY su.id, 4, st.id"
+             AND EXISTS (SELECT 1 FROM {series} se WHERE se.study_id = st.id) \
+             ORDER BY su.id, 4, st.id",
+            series = store.qualified("series"),
         )
     };
     let mut out = Vec::new();
@@ -405,6 +425,15 @@ pub fn ensure(
             let fresh = stored(store, *subject, window)?;
             out.relabelled += relabel(store, &ids, &fresh, &resolved, &digest)?;
         }
+        // What the timeline could not take, said rather than dropped. Over
+        // the whole registry, whichever subject was asked for: an empty row
+        // and a subject off every timeline are facts about the registry, and
+        // a run that named them only while rebuilding their own subject
+        // would never name the subject that has no session to rebuild.
+        let (empty, orphans) = structural(store, &now)?;
+        out.empty_studies = empty;
+        out.without_a_study = orphans;
+        out.items += empty + orphans;
         Ok(())
     })();
     match result {
@@ -417,6 +446,77 @@ pub fn ensure(
             Err(e)
         }
     }
+}
+
+/// The two shapes identity can end in that no session can hold, said as
+/// review items: a study row with no series, which used to become a session
+/// with nothing in it, and a subject that owns series and no study, which
+/// gets no session at all and appears in no ask. Both are re-derived from
+/// the tags by every digest, so neither is repaired here: the rows are what
+/// the files said, and a run that quietly rewrote them would be deciding
+/// which patient identifier of a study is the right one. What a run does
+/// decide is that neither becomes a session.
+///
+/// One open item per study and per subject, brought up to date by a later
+/// run and closed as soon as the row is whole again. Answers how many of
+/// each there are.
+fn structural(store: &mut Store, now: &str) -> Result<(usize, usize), Error> {
+    let d = store.dialect();
+    let st = table("study");
+    let filled = d.text_of_qualified(Some("st"), st.column("date_filled").expect("date_filled"));
+    let dated = d.text_of_qualified(Some("st"), st.column("study_date").expect("study_date"));
+    let sql = format!(
+        "SELECT st.id, su.id, su.code, COALESCE({filled}, {dated}) \
+         FROM {study} st JOIN {subject} su ON su.id = st.subject_id \
+         WHERE su.merged_into IS NULL \
+         AND NOT EXISTS (SELECT 1 FROM {series} se WHERE se.study_id = st.id) \
+         ORDER BY st.id",
+        study = store.qualified("study"),
+        subject = store.qualified("subject"),
+        series = store.qualified("series"),
+    );
+    let rows = store.query(&sql, &[])?;
+    let mut empty = Vec::new();
+    for r in &rows {
+        empty.push((
+            r.int(0)?,
+            r.int(1)?,
+            r.text(2)?.to_string(),
+            r.opt_text(3)?.map(str::to_string),
+        ));
+    }
+    let sql = format!(
+        "SELECT su.id, su.code, COUNT(se.id), CAST(COALESCE(SUM(se.n_instances), 0) AS BIGINT) \
+         FROM {subject} su JOIN {series} se ON se.subject_id = su.id \
+         WHERE su.merged_into IS NULL \
+         AND NOT EXISTS (SELECT 1 FROM {study} st WHERE st.subject_id = su.id) \
+         GROUP BY su.id, su.code ORDER BY su.id",
+        study = store.qualified("study"),
+        subject = store.qualified("subject"),
+        series = store.qualified("series"),
+    );
+    let rows = store.query(&sql, &[])?;
+    let mut orphans = Vec::new();
+    for r in &rows {
+        orphans.push((r.int(0)?, r.text(1)?.to_string(), r.int(2)?, r.int(3)?));
+    }
+
+    let mut keys = Vec::with_capacity(empty.len());
+    for (study, subject, code, day) in &empty {
+        review::raise_empty_study(store, *study, *subject, code, day.as_deref(), now)?;
+        keys.push(review::empty_study_key(*study));
+    }
+    let said = serde_json::json!({"by": "session rebuild", "why": "the study holds series again"});
+    review::close_resolved(store, review::EMPTY_STUDY_KIND, &keys, "session", &said)?;
+
+    let mut keys = Vec::with_capacity(orphans.len());
+    for (subject, code, series, instances) in &orphans {
+        review::raise_no_study(store, *subject, code, *series, *instances, now)?;
+        keys.push(review::no_study_key(*subject));
+    }
+    let said = serde_json::json!({"by": "session rebuild", "why": "the subject has a study"});
+    review::close_resolved(store, review::NO_STUDY_KIND, &keys, "session", &said)?;
+    Ok((empty.len(), orphans.len()))
 }
 
 /// Identity: match the resolver's sessions against the stored ones by the
