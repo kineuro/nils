@@ -37,5 +37,8 @@ pub use extract::{
 };
 pub use frames::{FrameGroup, Frames};
 pub use read::{Form, Framed, Header, ParseKind, ReadFailure, read, read_framed};
-pub use refusal::{QuarantineClass, Refusal};
+pub use refusal::{
+    QuarantineClass, Refusal, refused_sop_class_name, set_aside_kind, sop_class_kind,
+    sop_class_label,
+};
 pub use value::{Converter, Value};

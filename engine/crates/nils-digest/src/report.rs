@@ -11,6 +11,7 @@ use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use nils_dicom::extract::sop_class_name;
+use nils_dicom::refusal::{set_aside_kind, sop_class_kind, sop_class_label};
 use nils_dicom::{Diagnostic, DiagnosticKind, Extracted, QuarantineClass, Refusal};
 use serde::{Deserialize, Serialize};
 
@@ -314,6 +315,50 @@ fn breakdown_key(r: &Refusal) -> Option<String> {
     }
 }
 
+/// What a run set aside, by kind (record 37, S9). Every quarantined file is
+/// in exactly one kind: the SOP classes by their family, the rest by what the
+/// class itself means.
+fn set_aside(counts: &Counts) -> Vec<SetAside> {
+    let mut kinds: BTreeMap<&'static str, (u64, BTreeMap<String, u64>)> = BTreeMap::new();
+    for &class in &QuarantineClass::ALL {
+        let total = counts.class(class);
+        if total == 0 {
+            continue;
+        }
+        let breakdown = counts.breakdown.get(&class);
+        if class == QuarantineClass::UnsupportedSopClass {
+            // one kind per family, the classes inside it named
+            let mut named = 0;
+            for (uid, n) in breakdown.into_iter().flatten() {
+                let entry = kinds.entry(sop_class_kind(uid)).or_default();
+                entry.0 += n;
+                *entry.1.entry(sop_class_label(uid)).or_default() += n;
+                named += n;
+            }
+            // a file whose refusal carried no UID cannot be named further
+            if total > named {
+                kinds.entry("a class with no UID").or_default().0 += total - named;
+            }
+            continue;
+        }
+        let entry = kinds.entry(set_aside_kind(class, None)).or_default();
+        entry.0 += total;
+        for (key, n) in breakdown.into_iter().flatten() {
+            *entry.1.entry(key.clone()).or_default() += n;
+        }
+    }
+    let mut out: Vec<SetAside> = kinds
+        .into_iter()
+        .map(|(kind, (count, classes))| SetAside {
+            kind: kind.to_string(),
+            count,
+            classes: keyed(&classes),
+        })
+        .collect();
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(&b.kind)));
+    out
+}
+
 /// A count keyed by a text.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Keyed {
@@ -339,6 +384,52 @@ pub struct ClassCount {
     pub class: String,
     pub count: u64,
     pub breakdown: Vec<Keyed>,
+}
+
+impl ClassCount {
+    /// The kinds of object this class set aside, with their counts
+    /// (record 37, S9): the families of the SOP classes it refused, or the
+    /// one kind the class itself means. What the review item carries as its
+    /// evidence, so a queue says what was left behind and not only how much.
+    pub fn kinds(&self) -> Vec<Keyed> {
+        let class = QuarantineClass::ALL
+            .iter()
+            .copied()
+            .find(|c| c.name() == self.class);
+        let Some(class) = class else {
+            return Vec::new();
+        };
+        if class != QuarantineClass::UnsupportedSopClass {
+            return vec![Keyed {
+                key: set_aside_kind(class, None).to_string(),
+                count: self.count,
+            }];
+        }
+        let mut kinds: BTreeMap<String, u64> = BTreeMap::new();
+        let mut named = 0;
+        for k in &self.breakdown {
+            *kinds.entry(sop_class_kind(&k.key).to_string()).or_default() += k.count;
+            named += k.count;
+        }
+        if self.count > named {
+            *kinds.entry("a class with no UID".to_string()).or_default() += self.count - named;
+        }
+        keyed(&kinds)
+    }
+}
+
+/// One kind of object a run set aside, with the classes inside it
+/// (record 37, S9): what the archive held and NILS did not take.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetAside {
+    /// The family in words: `secondary capture`, `presentation state`, `not
+    /// DICOM`.
+    pub kind: String,
+    pub count: u64,
+    /// What the kind was made of: the standard's name for each SOP class
+    /// where NILS knows it, else the UID; for the other quarantine classes,
+    /// the class's own breakdown (a modality code, a reader's error kind).
+    pub classes: Vec<Keyed>,
 }
 
 /// One SOP class in the report.
@@ -469,6 +560,9 @@ pub struct Report {
     /// Files whose frames held more than one stack.
     #[serde(default)]
     pub multi_stack_files: u64,
+    /// Record 37 S9: what was set aside, by kind and count.
+    #[serde(default)]
+    pub set_aside: Vec<SetAside>,
     pub modalities: Vec<Keyed>,
     pub sop_classes: Vec<SopClassCount>,
     pub transfer_syntaxes: Vec<Keyed>,
@@ -530,6 +624,7 @@ impl Report {
                     breakdown: counts.breakdown.get(&class).map(keyed).unwrap_or_default(),
                 })
                 .collect(),
+            set_aside: set_aside(counts),
             studies: counts.studies.len() as u64,
             series: counts.series.len() as u64,
             subjects: counts.subjects.len() as u64,
@@ -736,6 +831,23 @@ impl fmt::Display for Report {
                 }
             }
             writeln!(f)?;
+        }
+
+        if !self.set_aside.is_empty() {
+            writeln!(f, "set aside")?;
+            for k in &self.set_aside {
+                write!(f, "  {:<24} {:>9}", k.kind, thousands(k.count))?;
+                if !k.classes.is_empty() {
+                    f.write_str("   ")?;
+                    for (i, c) in k.classes.iter().enumerate() {
+                        if i > 0 {
+                            f.write_str(", ")?;
+                        }
+                        write!(f, "{} {}", c.key, thousands(c.count))?;
+                    }
+                }
+                writeln!(f)?;
+            }
         }
 
         writeln!(f, "content")?;

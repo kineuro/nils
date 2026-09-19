@@ -414,12 +414,39 @@ spike's harness counted exactly these, and the dry run of slice 2 over the nmosd
 corpus refused the same 134 files (124 `not_dicom`, 10 `missing_uid`). The other
 three are the batch's knobs at work.
 
+Since record 37 S9 each quarantined file also carries a **kind**, which is
+what the file held in words: the family of its SOP class where the class is
+the reason (`secondary capture`, `presentation state`, `structured report`,
+`key object selection`, `registration`, `fiducials`, `segmentation`, `raw
+data`, `encapsulated document`, `waveform`, `parametric map`, `another image
+class`, `another standard class`, `a private class`), and what the class
+itself means otherwise (`not DICOM`, `unreadable`, `a broken header`, `no
+identifier`, `no modality`, `another modality`). The kind is derived from the
+UID the refusal already recorded, so nothing new is read and no new column is
+needed on `source_file`.
+
 Each class is a listed output: `nils quarantine list [--batch <id>] [--class <c>]`
 prints paths, and the batch's report carries the counts. One review item of kind
 `ingest.quarantine` per batch and class groups the rows (D7, C5: one item, N
 members), with the count as evidence and no path in the item body; a human or an
 agent decides "accepted" (these are sidecars, this is not our data) or "retry" and
 the decision is a row, not a deletion.
+
+Settled while saying what was set aside (record 37, S9): the kinds are
+reported in three places, because three readers ask the question. The digest's
+report gains a `set aside` block, one line per kind with its count and the
+classes inside it named as the standard names them (`structured report 129
+Enhanced SR 120, Basic Text SR 6, Comprehensive SR 3`); it is in the printed
+report and in the JSON of `ingest_batch.counts`, so a batch says forever what
+it set aside. The `ingest.quarantine` review item of each class carries the
+same kinds in its evidence beside the count, so a queue reads as "1,677 files:
+secondary capture 822, presentation state 574, structured report 129" rather
+than a number. And `nils quarantine list` prints the kind beside the class per
+file, with a `set aside` summary line above the paths and a `kinds` array in
+`--json`, so the per-file answer and the per-batch one agree. The registry
+needs nothing new: `source_file.reason` and `source_file.detail` already hold
+the class and the UID, and the kind is a reading of them, which is why an old
+registry answers the question too.
 
 Settled while building custody (slice 6): `nils quarantine list` prints each
 refused path joined to its root, with the batch, the class and the detail,

@@ -588,7 +588,14 @@ fn finish(
             .filter(|c| c.count > 0)
             .map(|c| {
                 let reference = serde_json::json!({ "batch_id": run.batch_id, "class": c.class });
-                let evidence = serde_json::json!({ "count": c.count });
+                // record 37 S9: what was set aside, by kind, so a reader of
+                // the queue knows what the archive held and NILS did not take
+                let kinds: Vec<serde_json::Value> = c
+                    .kinds()
+                    .iter()
+                    .map(|k| serde_json::json!({ "kind": k.key, "count": k.count }))
+                    .collect();
+                let evidence = serde_json::json!({ "count": c.count, "kinds": kinds });
                 vec![
                     Param::from(QUARANTINE_KIND),
                     Param::from("batch"),

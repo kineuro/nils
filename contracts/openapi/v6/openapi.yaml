@@ -543,13 +543,13 @@ paths:
   /api/quarantine:
     get:
       summary: The quarantined files by batch and class (Wave 4c section 6.5)
-      description: "Since version 5 `cohort` narrows to the batches that fed the cohort (record 26 section 10): the batches its digest intervals name and every batch of a source whose dataset feeds it, since a quarantined file is about no subject."
+      description: "Since version 5 `cohort` narrows to the batches that fed the cohort (record 26 section 10): the batches its digest intervals name and every batch of a source whose dataset feeds it, since a quarantined file is about no subject. Since record 37 S9 each file carries a `kind`, what it held in words (secondary capture, presentation state, structured report, raw data, registration, encapsulated document, not DICOM, a broken header and the rest), read off the class and the UID already recorded, and `kinds` counts the listed files by it."
       parameters:
         - {name: batch, in: query, schema: {type: integer}}
         - {name: class, in: query, schema: {type: string}}
         - {name: cohort, in: query, schema: {type: string}, description: A cohort's name}
       responses:
-        "200": {description: "{count, files}"}
+        "200": {description: "{count, kinds[{kind, count}], files[{batch_id, class, kind, path, detail, seen_at}]}"}
         "404": {description: No cohort so named}
   /api/cohorts:
     get:

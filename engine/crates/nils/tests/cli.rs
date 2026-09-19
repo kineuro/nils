@@ -1106,8 +1106,12 @@ fn custody_quarantine_review_and_purge_go_round() {
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("   1 file(s)"), "{text}");
+    // record 37 S9: the kind says what was set aside, beside the class
+    assert!(text.contains("  set aside   not DICOM 1"), "{text}");
     assert!(
-        text.contains(&format!("      1  not_dicom      {notes}")),
+        text.contains(&format!(
+            "      1  not_dicom      not DICOM              {notes}"
+        )),
         "{text}"
     );
     let out = run(&["quarantine", "list", "--batch", "1", "--class", "not_dicom"]);
@@ -1127,6 +1131,11 @@ fn custody_quarantine_review_and_purge_go_round() {
     assert_eq!(doc["files"][0]["batch_id"], 1);
     assert_eq!(doc["files"][0]["class"], "not_dicom");
     assert_eq!(doc["files"][0]["path"], notes);
+    assert_eq!(doc["files"][0]["kind"], "not DICOM");
+    assert_eq!(
+        doc["kinds"][0],
+        serde_json::json!({"kind": "not DICOM", "count": 1})
+    );
     assert!(doc["files"][0]["seen_at"].as_str().unwrap().ends_with('Z'));
 
     // one review item groups the class, with the count and no path
@@ -1159,6 +1168,10 @@ fn custody_quarantine_review_and_purge_go_round() {
     assert_eq!(doc["items"][0]["ref"]["batch_id"], 1);
     assert_eq!(doc["items"][0]["ref"]["class"], "not_dicom");
     assert_eq!(doc["items"][0]["evidence"]["count"], 1);
+    assert_eq!(
+        doc["items"][0]["evidence"]["kinds"][0],
+        serde_json::json!({"kind": "not DICOM", "count": 1})
+    );
     assert!(doc["items"][0]["decided_at"].is_null());
     let out = run(&["review", "show", "1"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -1168,10 +1181,15 @@ fn custody_quarantine_review_and_purge_go_round() {
         "{text}"
     );
     assert!(
-        text.contains("  about      batch 1, class not_dicom, 1 file(s)\n"),
+        text.contains("  about      batch 1, class not_dicom, 1 file(s): not DICOM 1\n"),
         "{text}"
     );
-    assert!(text.contains("  evidence   {\"count\":1}\n"), "{text}");
+    assert!(
+        text.contains(
+            "  evidence   {\"count\":1,\"kinds\":[{\"kind\":\"not DICOM\",\"count\":1}]}\n"
+        ),
+        "{text}"
+    );
     assert!(!text.contains("decided"), "{text}");
     let out = run(&["review", "show", "1", "--json"]);
     assert_eq!(json(&out)["id"], 1);

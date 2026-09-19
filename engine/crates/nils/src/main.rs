@@ -4280,8 +4280,19 @@ fn quarantine_command(home: &Home, command: QuarantineCommand) -> Result<(), Exi
         batch.map(|b| format!("   batch {b}")).unwrap_or_default(),
         class.map(|c| format!("   class {c}")).unwrap_or_default()
     );
+    // record 37 S9: what was set aside, by kind, before the paths
+    if let Some(kinds) = doc["kinds"].as_array().filter(|k| !k.is_empty()) {
+        println!(
+            "  set aside   {}",
+            kinds
+                .iter()
+                .map(|k| format!("{} {}", s(&k["kind"]), k["count"]))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     if !files.is_empty() {
-        println!("  {:>5}  {:<14} path", "batch", "class");
+        println!("  {:>5}  {:<14} {:<22} path", "batch", "class", "kind");
     }
     for f in &files {
         let detail = match f["detail"].as_str() {
@@ -4289,9 +4300,10 @@ fn quarantine_command(home: &Home, command: QuarantineCommand) -> Result<(), Exi
             _ => String::new(),
         };
         println!(
-            "  {:>5}  {:<14} {}{detail}",
+            "  {:>5}  {:<14} {:<22} {}{detail}",
             n_i64(&f["batch_id"]),
             s(&f["class"]),
+            f["kind"].as_str().unwrap_or("-"),
             s(&f["path"])
         );
     }
@@ -4638,10 +4650,22 @@ fn about(item: &serde_json::Value) -> String {
     let e = &item["evidence"];
     match s(&item["kind"]) {
         "ingest.quarantine" => format!(
-            "batch {}, class {}, {} file(s)",
+            "batch {}, class {}, {} file(s){}",
             r["batch_id"],
             s(&r["class"]),
-            e["count"]
+            e["count"],
+            // record 37 S9: what those files held, by kind
+            match e["kinds"].as_array() {
+                Some(kinds) if !kinds.is_empty() => format!(
+                    ": {}",
+                    kinds
+                        .iter()
+                        .map(|k| format!("{} {}", s(&k["kind"]), k["count"]))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ => String::new(),
+            }
         ),
         "identity.collision" => format!(
             "subject {} under {} ({}), batch {}",
@@ -9028,16 +9052,44 @@ pub(crate) fn quarantine_doc(
         .iter()
         .map(|r| {
             let path = PathBuf::from(r.text(2)?).join(r.text(3)?);
+            let class = r.opt_text(1)?.unwrap_or("-");
+            let detail = r.opt_text(4)?;
             Ok(serde_json::json!({
                 "batch_id": r.opt_int(0)?,
-                "class": r.opt_text(1)?.unwrap_or("-"),
+                "class": class,
                 "path": path.display().to_string(),
-                "detail": r.opt_text(4)?,
+                "detail": detail,
+                // record 37 S9: what the file held, in words
+                "kind": kind_of(class, detail),
                 "seen_at": r.opt_text(5)?,
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
-    Ok(serde_json::json!({ "count": files.len(), "files": files }))
+    // record 37 S9: the kinds the listed files hold, so a reader sees what was
+    // set aside without counting lines
+    let mut kinds: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for f in &files {
+        if let Some(k) = f["kind"].as_str() {
+            *kinds.entry(k.to_string()).or_default() += 1;
+        }
+    }
+    let mut by_kind: Vec<serde_json::Value> = kinds
+        .iter()
+        .map(|(k, n)| serde_json::json!({ "kind": k, "count": n }))
+        .collect();
+    by_kind.sort_by_key(|k| std::cmp::Reverse(k["count"].as_u64().unwrap_or(0)));
+    Ok(serde_json::json!({ "count": files.len(), "kinds": by_kind, "files": files }))
+}
+
+/// What a quarantined file held, in words (record 37, S9): the SOP class's
+/// family where the class is `unsupported_sop_class`, else what the class
+/// itself means.
+fn kind_of(class: &str, detail: Option<&str>) -> Option<&'static str> {
+    nils_dicom::QuarantineClass::ALL
+        .iter()
+        .copied()
+        .find(|c| c.name() == class)
+        .map(|c| nils_dicom::set_aside_kind(c, detail))
 }
 
 fn backup_command(home: &Home, args: BackupArgs) -> Result<(), Exit> {

@@ -942,7 +942,15 @@ fn a_batch_files_one_review_item_per_quarantine_class() {
         assert_eq!(reference["batch_id"], 1, "{name}");
         assert_eq!(reference["class"], "not_dicom", "{name}");
         let evidence: serde_json::Value = serde_json::from_str(items[0].text(4).unwrap()).unwrap();
-        assert_eq!(evidence, serde_json::json!({ "count": 1 }), "{name}");
+        // record 37 S9: the evidence says what was set aside, by kind
+        assert_eq!(
+            evidence,
+            serde_json::json!({
+                "count": 1,
+                "kinds": [{ "kind": "not DICOM", "count": 1 }],
+            }),
+            "{name}"
+        );
 
         // a run that keeps the quarantine files nothing new
         digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
