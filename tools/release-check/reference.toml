@@ -29,6 +29,14 @@ names = [
   "ses-20220715/misc/Ax_T1w_2D_GRE_ND_e2",
 ]
 
+# Amended 2026-09-19, record 35. Eight names gained a body part: the classifier
+# could not read the word BRAIN in front of it, because the normalizer stripped
+# that token before the body-part rule saw the text, so those stacks had no body
+# part at all and the label left it out. Each difference was checked by hand to
+# be one token inserted into `acq-` and nothing else. The body part stays in the
+# label because names must be unique: an archive-wide measurement found it is
+# what separates 22 otherwise identical pairs, and BIDS also carries it in the
+# sidecar as `BodyPart`.
 [bids]
 # The subject code is masked for the same reason. Six things are being
 # asserted here at once, and each is worth naming:
@@ -53,14 +61,14 @@ names = [
 files = [
   "derivatives/nils/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-AxSWI3DGREMagnitude.nii.gz",
   "sourcedata/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
-  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax2DIRTSEFLAIR_FLAIR.nii.gz",
-  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax3DMPRAGE_run-1_T1w.nii.gz",
-  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-Ax3DMPRAGE_run-2_T1w.nii.gz",
-  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-Ax2DDWIEPIDTIRecon_ADC.nii.gz",
-  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-Ax2DDWIEPI_trace.nii.gz",
-  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax2DGRE_echo-1_T1w.nii.gz",
-  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax2DGRE_echo-2_T1w.nii.gz",
-  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-Ax3DMPRAGE_ce-contrast_T1w.nii.gz",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx2DIRTSEFLAIR_FLAIR.nii.gz",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DMPRAGE_run-1_T1w.nii.gz",
+  "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DMPRAGE_run-2_T1w.nii.gz",
+  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-BrainAx2DDWIEPIDTIRecon_ADC.nii.gz",
+  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-BrainAx2DDWIEPI_trace.nii.gz",
+  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-BrainAx2DGRE_echo-1_T1w.nii.gz",
+  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-BrainAx2DGRE_echo-2_T1w.nii.gz",
+  "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-BrainAx3DMPRAGE_ce-contrast_T1w.nii.gz",
 ]
 
 [private]
