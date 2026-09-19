@@ -10,7 +10,16 @@
 use nils_registry::schema::{Table, Type, table};
 use nils_registry::store::{Error, Param, Row, Store};
 
-use crate::{derived, dwi, fold};
+use crate::{coverage, derived, dwi, fold};
+
+/// Which derivation writes a row, bumped whenever the fingerprint learns a
+/// fact an older build did not write. A row carrying an earlier revision is
+/// stale however many instances its stack still has, so a registry written
+/// before the fact existed derives itself again on the next run rather than
+/// carrying a hole nobody asked for.
+///
+/// 1: record 37, S1. The coverage and the acquisition matrix.
+pub const REVISION: i64 = 1;
 
 /// The stack's own columns, in the order the select reads them.
 const STACK: &[&str] = &[
@@ -83,6 +92,9 @@ const MR: &[&str] = &[
     "echo_numbers",
     "dwi_siemens_pe_dir_positive",
     "dwi_ge_n_directions",
+    // Record 37 S1: the rest of the geometry. The matrix is the only one of
+    // the four the survey names that the fingerprint did not already hold.
+    "acquisition_matrix",
 ];
 
 const STUDY: &[&str] = &["manufacturer", "manufacturer_model_name", "station_name"];
@@ -149,6 +161,11 @@ pub const WRITTEN: &[&str] = &[
     "fov_x",
     "fov_y",
     "aspect_ratio",
+    "n_slices",
+    "slice_span_mm",
+    "coverage_source",
+    "acquisition_matrix",
+    "fingerprint_revision",
     "manufacturer",
     "manufacturer_model_name",
     "station_name",
@@ -272,13 +289,34 @@ pub fn select_diffusion(store: &Store) -> String {
     )
 }
 
+/// The distinct slice position of every image of the stacks in the window
+/// (record 37, S1).
+///
+/// `DISTINCT` is what keeps this small, as it does for the diffusion values:
+/// a stack of a thousand images sits on as many positions as it has slices,
+/// so a dynamic series contributes its slices and not its images. An image
+/// that carries no position contributes nothing, and a stack whose images all
+/// carry none has no row here at all.
+pub fn select_positions(store: &Store) -> String {
+    format!(
+        "SELECT DISTINCT stack_id, slice_location FROM {} \
+         WHERE stack_id > {} AND stack_id <= {} AND slice_location IS NOT NULL \
+         ORDER BY stack_id",
+        store.qualified("instance"),
+        store.dialect().param(1, Type::Int),
+        store.dialect().param(2, Type::Int),
+    )
+}
+
 /// The stack ids in the window that already have a fingerprint agreeing with
-/// the stack's instance count. A stack that gained instances since is stale
-/// and is derived again.
+/// the stack's instance count, written by this derivation. A stack that
+/// gained instances since is stale and is derived again, and so is a row a
+/// build that knew fewer facts wrote ([`REVISION`]).
 pub fn select_fresh(store: &Store) -> String {
     format!(
         "SELECT f.stack_id FROM {} f JOIN {} st ON st.id = f.stack_id \
-         WHERE f.stack_id > {} AND f.stack_id <= {} AND f.n_instances = st.n_instances",
+         WHERE f.stack_id > {} AND f.stack_id <= {} AND f.n_instances = st.n_instances \
+           AND f.fingerprint_revision = {REVISION}",
         store.qualified("stack_fingerprint"),
         store.qualified("stack"),
         store.dialect().param(1, Type::Int),
@@ -362,6 +400,7 @@ pub fn derive(
     first: &First,
     split_reason: Option<&str>,
     images: &[dwi::Image],
+    cover: &coverage::Coverage,
     job_id: i64,
     epoch: i64,
 ) -> Result<Vec<Param>, Error> {
@@ -508,6 +547,13 @@ pub fn derive(
         num(fov_x),
         num(fov_y),
         num(aspect),
+        // Record 37 S1. The count is of positions and not of images, and the
+        // source says which of those two sentences is the true one here.
+        int(cover.n_slices),
+        num(cover.span_mm),
+        opt(Some(cover.source.name().to_string())),
+        opt(text(r, E + 13)?), // acquisition_matrix
+        Param::Int(REVISION),
         opt(text(r, M)?),     // manufacturer
         opt(text(r, M + 1)?), // manufacturer_model_name
         opt(text(r, M + 2)?), // station_name

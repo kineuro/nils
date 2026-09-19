@@ -23,6 +23,12 @@ pub const PHYSICS: &[&str] = &[
     "pixel_spacing_row",
     "pixel_spacing_col",
     "number_of_averages",
+    // Record 37 S1: what the stack covers. A level may compare the slice
+    // count to the slice and the extent to a step of its own choosing, which
+    // is where the tolerance between two stacks belongs: in pack data, not in
+    // a constant in here.
+    "n_slices",
+    "slice_span_mm",
 ];
 
 /// A field every level may name beside the axes and the physics.

@@ -34,6 +34,10 @@ pub const FIELDS: &[&str] = &[
     // disposition of §7 is decided from them.
     "field_strength_normalized",
     "dwi_directions",
+    // Record 37 S1: what the stack covers, counted from the positions its
+    // images sit on rather than from how many images there are.
+    "n_slices",
+    "slice_span_mm",
     // text
     "modality",
     "manufacturer",
@@ -70,10 +74,12 @@ pub const FIELDS: &[&str] = &[
     "dwi_pe_direction_source",
     "dwi_directions_source",
     "field_strength_unit",
+    "coverage_source",
+    "acquisition_matrix",
 ];
 
 /// Where the text half begins.
-pub const FIRST_TEXT: usize = 19;
+pub const FIRST_TEXT: usize = 21;
 
 pub fn field_index(name: &str) -> Option<usize> {
     FIELDS.iter().position(|f| *f == name)

@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 45;
+pub const SCHEMA_VERSION: i64 = 46;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,7 +234,32 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 45,
         apply: a_release_says_how_many_stacks_it_could_not_judge,
     },
+    Migration {
+        version: 46,
+        apply: a_stack_says_what_it_covers,
+    },
 ];
+
+/// Record 37 S1: the coverage facts, and the revision that says which
+/// derivation wrote a fingerprint row. A registry from before gains five
+/// columns, all empty; the next `nils fingerprint` sees a revision that is
+/// not the current one and derives every stack again, without `--force`.
+fn a_stack_says_what_it_covers(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "stack_fingerprint",
+        &[
+            "n_slices",
+            "slice_span_mm",
+            "coverage_source",
+            "acquisition_matrix",
+            "fingerprint_revision",
+        ],
+    )
+}
 
 /// Record 26 §3, §4 and §14: a batch says which step it is, `digest` or
 /// `pseudonymize`, every batch from before being a digest; a subject says

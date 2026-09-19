@@ -728,6 +728,25 @@ fn build_registry() -> Vec<Table> {
                 col("fov_x", Type::Double),
                 col("fov_y", Type::Double),
                 col("aspect_ratio", Type::Double),
+                // Record 37 S1: what the stack covers. Rows, columns, the
+                // spacings and the thickness say what one slice looks like;
+                // nothing said how many slices there were nor how far they
+                // reached, and on a real archive the slice count is the
+                // commonest single difference between two stacks that
+                // otherwise share everything. `coverage_source` says which
+                // evidence answered, so an unmeasured coverage reads as
+                // unmeasured rather than as zero. The acquisition matrix is
+                // the rest of the geometry, read from the series.
+                col("n_slices", Type::Int),
+                col("slice_span_mm", Type::Double),
+                col("coverage_source", Type::Text),
+                col("acquisition_matrix", Type::Text),
+                // Which derivation wrote the row. The fingerprint is a cache
+                // of the registry's own columns, so a build that learned a
+                // new fact has to rewrite what an older one left: a row
+                // whose revision is not the current one is stale however
+                // many instances its stack still has.
+                col("fingerprint_revision", Type::Int),
                 // provenance
                 col("manufacturer", Type::Text),
                 col("manufacturer_model_name", Type::Text),

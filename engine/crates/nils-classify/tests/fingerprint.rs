@@ -350,6 +350,143 @@ fn the_run_is_a_job_the_registry_records() {
     }
 }
 
+/// `AcquisitionMatrix` is four unsigned shorts, so it is written as bytes.
+fn matrix(spec: &str) -> synth::Elem {
+    let mut bytes = Vec::with_capacity(8);
+    for part in spec.split('\\') {
+        bytes.extend_from_slice(&part.parse::<u16>().expect("a matrix value").to_le_bytes());
+    }
+    synth::bytes(tags::ACQUISITION_MATRIX, VR::US, bytes)
+}
+
+/// Record 37 S1: a stack of three prescribed slices, imaged four times, one
+/// of the four at a position a hair off the slice it repeats.
+fn covered_tree() -> TempDir {
+    let dir = TempDir::new("coverage");
+    let base = [
+        elem(tags::SERIES_DESCRIPTION, VR::LO, "ax t1"),
+        elem(tags::REPETITION_TIME, VR::DS, "500"),
+        elem(tags::ECHO_TIME, VR::DS, "10"),
+        elem(tags::SLICE_THICKNESS, VR::DS, "5"),
+        matrix("0\\256\\192\\0"),
+        synth::num(tags::ROWS, VR::US, 256.0),
+        synth::num(tags::COLUMNS, VR::US, 256.0),
+        elem(tags::PIXEL_SPACING, VR::DS, "1\\1"),
+    ];
+    for (i, at) in ["-5", "0", "5", "0.000001"].iter().enumerate() {
+        let mut e = base.to_vec();
+        e.push(elem(tags::SLICE_LOCATION, VR::DS, at));
+        dir.file(
+            &format!("c/{i}"),
+            &mr("A", "A.1", &format!("A.1.{i}"), "P1", &e),
+        );
+    }
+    dir
+}
+
+#[test]
+fn a_stack_covers_the_positions_its_slices_sit_on_and_not_its_images() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = covered_tree();
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap();
+        run(&mut reg, &Settings::default(), &Cancel::new()).unwrap();
+
+        assert_eq!(
+            one(&mut reg, "SELECT n_instances FROM {stack_fingerprint}"),
+            4,
+            "{name}: four images"
+        );
+        assert_eq!(
+            one(&mut reg, "SELECT n_slices FROM {stack_fingerprint}"),
+            3,
+            "{name}: three positions, the repeat within tolerance of one of them"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT CAST(slice_span_mm AS INTEGER) FROM {stack_fingerprint}"
+            ),
+            10,
+            "{name}: from the lowest slice to the highest"
+        );
+        assert_eq!(
+            text_at(&mut reg, "SELECT coverage_source FROM {stack_fingerprint}").as_deref(),
+            Some("slice_location"),
+            "{name}"
+        );
+        assert_eq!(
+            text_at(
+                &mut reg,
+                "SELECT acquisition_matrix FROM {stack_fingerprint}"
+            )
+            .as_deref(),
+            Some("0\\256\\192\\0"),
+            "{name}: the rest of the geometry comes across as read"
+        );
+    }
+}
+
+#[test]
+fn a_stack_whose_images_carry_no_position_says_the_coverage_is_unmeasured() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap();
+        run(&mut reg, &Settings::default(), &Cancel::new()).unwrap();
+
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {stack_fingerprint} \
+                 WHERE n_slices IS NULL AND slice_span_mm IS NULL"
+            ),
+            1,
+            "{name}: a hole, not a zero"
+        );
+        assert_eq!(
+            text_at(&mut reg, "SELECT coverage_source FROM {stack_fingerprint}").as_deref(),
+            Some("none"),
+            "{name}: and the row says why"
+        );
+    }
+}
+
+#[test]
+fn a_row_an_earlier_derivation_wrote_is_derived_again() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = covered_tree();
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap();
+        run(&mut reg, &Settings::default(), &Cancel::new()).unwrap();
+
+        // what a registry written before this wave holds: the row, with no
+        // revision on it and nothing the new columns were filled from
+        let table = reg.store().qualified("stack_fingerprint");
+        reg.store()
+            .batch(&format!(
+                "UPDATE {table} SET fingerprint_revision = NULL, n_slices = NULL, \
+                 slice_span_mm = NULL, coverage_source = NULL"
+            ))
+            .unwrap();
+
+        let again = run(&mut reg, &Settings::default(), &Cancel::new()).unwrap();
+        assert_eq!(again.skipped, 0, "{name}: an older row is not fresh");
+        assert_eq!(
+            again.written, 1,
+            "{name}: and nobody had to ask for --force"
+        );
+        assert_eq!(
+            one(&mut reg, "SELECT n_slices FROM {stack_fingerprint}"),
+            3,
+            "{name}: the coverage is there afterwards"
+        );
+    }
+}
+
 #[test]
 fn a_split_series_says_why_it_split() {
     for lab in labs() {

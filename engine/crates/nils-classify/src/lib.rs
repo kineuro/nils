@@ -10,6 +10,7 @@
 //! deciding that `ir` means inversion recovery is not, and it lives in a pack.
 
 pub mod classify;
+pub mod coverage;
 pub mod derived;
 pub mod diagnostics;
 pub mod dwi;
