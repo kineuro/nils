@@ -663,8 +663,18 @@ fn a_dataset_that_declares_moved_dates_numbers_its_sessions_rather_than_refusing
 /// A tree whose files say something about their own pixels, and carry two
 /// private blocks: one the allowlist names and one it does not.
 fn tree_with(burned: Option<&str>) -> TempDir {
+    tree_saying(burned, None)
+}
+
+/// The same, with an image type of the test's own, for the stacks whose
+/// pixels are a photograph of a screen and say so there rather than in
+/// `BurnedInAnnotation`.
+fn tree_saying(burned: Option<&str>, image_type: Option<&str>) -> TempDir {
     let dir = TempDir::new("release-pixels");
     let mut e = synth::minimal_mr("A", "A.1", "A.1.1");
+    if let Some(v) = image_type {
+        e.push(synth::text(tags::IMAGE_TYPE, VR::CS, v));
+    }
     e.extend([
         synth::text(tags::PATIENT_ID, VR::LO, "19800101-1234"),
         synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
@@ -699,11 +709,108 @@ fn allowed() -> Vec<nils_pack::private::Allowed> {
     }]
 }
 
+/// The review items a release filed, by kind, in the order they were filed.
+fn release_items(reg: &mut Registry) -> Vec<String> {
+    let store = reg.store();
+    let sql = format!(
+        "SELECT kind FROM {} WHERE kind LIKE 'release.%' ORDER BY id",
+        store.qualified("review_item")
+    );
+    store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect()
+}
+
+/// What the release's own row says it held and could not judge, and under
+/// which setting.
+fn row_counts(reg: &mut Registry, release: i64) -> (i64, i64, String) {
+    let store = reg.store();
+    let policy = nils_registry::schema::table("release")
+        .column("policy")
+        .expect("release.policy is a column");
+    let sql = format!(
+        "SELECT burned_in, unjudged, {} FROM {} WHERE id = {}",
+        store.dialect().text_of(policy),
+        store.qualified("release"),
+        release
+    );
+    let rows = store.query(&sql, &[]).unwrap();
+    let policy: serde_json::Value = serde_json::from_str(rows[0].text(2).unwrap()).unwrap();
+    (
+        rows[0].int(0).unwrap(),
+        rows[0].int(1).unwrap(),
+        policy["on_unknown"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
 #[test]
-fn a_stack_the_file_will_not_judge_is_held_and_asked_about() {
-    // "No tag" is not "no text". An archive where most stacks are unjudgeable
-    // is a fact a release should confront rather than average away, and the
-    // engine does not look at pixels to settle it.
+fn a_stack_the_file_will_not_judge_is_released_and_counted() {
+    // §8.4 as ratified: where the tag is absent the release says how many
+    // stacks it could not judge. It does not keep them: the tag is absent on
+    // most of the series of a real archive, so a default that held on it held
+    // three quarters of what was selected and most subjects released nothing.
+    let source = tree_with(None);
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(out.path(), &policy, &scheme);
+    let report = run::run(&mut reg, &s).unwrap();
+
+    assert_eq!(report.unjudged, 1, "counted");
+    assert_eq!(report.burned_in, 0);
+    assert_eq!(report.stacks, 1, "and written");
+    assert!(!files_under(out.path()).is_empty());
+    // Nobody is asked about a stack nothing is being done to.
+    assert!(release_items(&mut reg).is_empty());
+}
+
+#[test]
+fn the_report_and_the_release_row_carry_the_count_it_could_not_judge() {
+    // One number, in the report a person reads and in the row the tree's own
+    // record keeps, beside the setting that says what was done with them.
+    let source = tree_with(None);
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(out.path(), &policy, &scheme);
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.unjudged, 1);
+    assert_eq!(report.on_unknown, "write");
+    assert_eq!(
+        row_counts(&mut reg, report.release_id),
+        (0, 1, "write".into())
+    );
+
+    // And under the strict setting the same number reads the other way, which
+    // is why the row says which was asked for.
+    let out = TempDir::new("release-out");
+    let mut s = settings(out.path(), &policy, &scheme);
+    s.on_unknown = nils_release::burned::OnUnknown::Hold;
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.on_unknown, "hold");
+    assert_eq!(
+        row_counts(&mut reg, report.release_id),
+        (0, 1, "hold".into())
+    );
+}
+
+#[test]
+fn the_strict_setting_still_holds_every_stack_the_file_will_not_judge() {
+    // A site that will not let an unjudged stack leave before somebody has
+    // looked at it asks for that, and gets exactly what the default gave
+    // before: nothing written, and a question per held stack.
     let source = tree_with(None);
     let home_dir = TempDir::new("release-home");
     let out = TempDir::new("release-out");
@@ -719,20 +826,7 @@ fn a_stack_the_file_will_not_judge_is_held_and_asked_about() {
     assert_eq!(report.unjudged, 1);
     assert_eq!(report.burned_in, 0);
     assert!(files_under(out.path()).is_empty());
-
-    // And a person was asked, so the release can be run again once answered.
-    let store = reg.store();
-    let rows = store
-        .query(
-            &format!(
-                "SELECT kind FROM {} WHERE kind LIKE 'release.%'",
-                store.qualified("review_item")
-            ),
-            &[],
-        )
-        .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].text(0).unwrap(), "release.unjudged");
+    assert_eq!(release_items(&mut reg), ["release.unjudged"]);
 }
 
 #[test]
@@ -744,12 +838,65 @@ fn a_stack_the_file_says_carries_text_is_never_written() {
 
     let policy = Policy::default();
     let scheme = SessionScheme::default();
-    let mut s = settings(out.path(), &policy, &scheme);
-    // Even told to write what it cannot judge: this one it can judge.
-    s.on_unknown = nils_release::burned::OnUnknown::Write;
+    // The default, which writes what it cannot judge: this one it can judge.
+    let s = settings(out.path(), &policy, &scheme);
     let report = run::run(&mut reg, &s).unwrap();
     assert_eq!(report.burned_in, 1);
+    assert_eq!(report.unjudged, 0);
     assert_eq!(report.files, 0);
+    assert_eq!(release_items(&mut reg), ["release.burned_in"]);
+    assert_eq!(
+        row_counts(&mut reg, report.release_id),
+        (1, 0, "write".into())
+    );
+}
+
+#[test]
+fn a_stack_whose_image_type_says_screenshot_is_held_whatever_the_tag_says() {
+    // A photograph of a screen is a photograph of a screen, and firmware that
+    // writes the token frequently writes `BurnedInAnnotation NO` by rote.
+    let source = tree_saying(Some("NO"), Some("DERIVED\\SECONDARY\\SCREENSHOT"));
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(out.path(), &policy, &scheme);
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.burned_in, 1);
+    assert_eq!(report.unjudged, 0);
+    assert_eq!(report.files, 0);
+    assert!(files_under(out.path()).is_empty());
+    assert_eq!(release_items(&mut reg), ["release.burned_in"]);
+}
+
+#[test]
+fn a_held_stack_is_asked_about_once_and_not_again_on_the_next_release() {
+    // A release is re-run whenever anything upstream of it changes, and the
+    // file says the same thing every time: two releases of one selection once
+    // filed two queues of identical questions. What recurs is the count.
+    let source = tree_with(Some("YES"));
+    let home_dir = TempDir::new("release-home");
+    let first = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(first.path(), &policy, &scheme);
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.burned_in, 1);
+    assert_eq!(release_items(&mut reg), ["release.burned_in"]);
+
+    let second = TempDir::new("release-out");
+    let s = settings(second.path(), &policy, &scheme);
+    let again = run::run(&mut reg, &s).unwrap();
+    assert_eq!(again.burned_in, 1, "the count is filed again");
+    assert_eq!(
+        release_items(&mut reg),
+        ["release.burned_in"],
+        "the question is not"
+    );
 }
 
 #[test]

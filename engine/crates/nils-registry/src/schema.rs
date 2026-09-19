@@ -1150,6 +1150,14 @@ fn build_registry() -> Vec<Table> {
                 // this the row says what happened and never why. Null on a
                 // run whose scheme stood, which is nearly every one.
                 col("session_naming", Type::Text),
+                // §8.4: stacks whose file said their pixels carry text, which
+                // this release held, and stacks whose file would not say,
+                // which it counted. The second is the number the spec asks a
+                // release for by name, and `policy.on_unknown` beside it says
+                // whether those stacks were written or held. Null on a run
+                // that never closed and on a row written before this.
+                col("burned_in", Type::Int),
+                col("unjudged", Type::Int),
             ],
         )
         .index(&["name"]),

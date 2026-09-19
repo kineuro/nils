@@ -127,9 +127,15 @@ pub struct Report {
     pub changes: BTreeMap<String, i64>,
     /// Stacks held back because the file says their pixels carry text, and
     /// stacks the file said nothing about (§8.4). The second number is the one
-    /// worth reading: "no tag" is not "no text".
+    /// the spec asks for by name: "no tag" is not "no text", so a release says
+    /// how many stacks it could not judge whether it wrote them, which is the
+    /// default, or held them, which `--on-unknown hold` asks for.
     pub burned_in: i64,
     pub unjudged: i64,
+    /// What was done with those: `write` or `hold`, so the number above can be
+    /// read. Under `hold` they are held and are not in the tree; under the
+    /// default they are written and counted.
+    pub on_unknown: String,
     /// Why the tree's sessions are numbered rather than labelled the way the
     /// run's scheme asked: §4.3 with record 26 §13, a dataset whose files
     /// leave with their dates moved under a scheme that labels by the date.
@@ -580,6 +586,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         policy: policies.describe(),
         policies: policies.as_json(),
         session_naming,
+        on_unknown: settings.on_unknown.name().to_string(),
         ..Report::default()
     };
     // one remapping for the run, hung from the run's root, handed to the
@@ -691,9 +698,13 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                 continue;
             }
             // §8.4. The engine does not look at pixels; it reads what the file
-            // says about them, and holds what the file will not say. A held
-            // stack is simply not in this version, so one an earlier version
-            // wrote is removed from the tree rather than left in it.
+            // says about them. What the file says is burned in is held, and a
+            // held stack is simply not in this version, so one an earlier
+            // version wrote is removed from the tree rather than left in it.
+            // What the file will not say either way is counted, every run,
+            // whether it is written or held, because the number is what the
+            // spec asks a release for and it is a fact about the archive and
+            // not about the setting.
             match pixels
                 .get(&stack)
                 .copied()
@@ -704,14 +715,14 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                     report.burned_in += 1;
                     continue;
                 }
-                crate::burned::Verdict::Unknown
-                    if settings.on_unknown == crate::burned::OnUnknown::Hold =>
-                {
-                    held.insert(stack);
+                crate::burned::Verdict::Unknown => {
                     report.unjudged += 1;
-                    continue;
+                    if settings.on_unknown == crate::burned::OnUnknown::Hold {
+                        held.insert(stack);
+                        continue;
+                    }
                 }
-                _ => {}
+                crate::burned::Verdict::Clean => {}
             }
             let placed = named.get(&stack);
             // §9.1. A stack with no name is one nothing classified, which is a
@@ -2885,6 +2896,11 @@ fn open_row(
     // dataset's files left under
     let mut policy = settings.policy.as_json();
     policy["from"] = serde_json::Value::from(settings.policy_from.name());
+    // §8.4: what the run did with a stack it could not judge, beside the count
+    // of them in `unjudged`. Without it the count cannot be read: the same
+    // number means written and counted under the default and held under
+    // `--on-unknown hold`.
+    policy["on_unknown"] = serde_json::Value::from(settings.on_unknown.name());
     let written = store.insert(
         &Insert::new(
             table("release"),
@@ -2963,7 +2979,7 @@ fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
     let d = store.dialect();
     let sql = format!(
         "UPDATE {} SET finished_at = {}, files = {}, subjects = {}, unchanged = {}, moved = {}, \
-         rewritten = {}, added = {}, removed = {} WHERE id = {}",
+         rewritten = {}, added = {}, removed = {}, burned_in = {}, unjudged = {} WHERE id = {}",
         store.qualified("release"),
         d.param(1, Type::Timestamp),
         d.param(2, Type::Int),
@@ -2974,6 +2990,8 @@ fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
         d.param(7, Type::Int),
         d.param(8, Type::Int),
         d.param(9, Type::Int),
+        d.param(10, Type::Int),
+        d.param(11, Type::Int),
     );
     store.execute(
         &sql,
@@ -2986,6 +3004,12 @@ fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
             Param::Int(report.rewritten),
             Param::Int(report.added),
             Param::Int(report.removed),
+            // §8.4: what the file said about the pixels, as two numbers the
+            // row keeps, so a tree's own record says how many stacks the
+            // release could not judge and `policy.on_unknown` says what it
+            // did with them.
+            Param::Int(report.burned_in),
+            Param::Int(report.unjudged),
             Param::Int(report.release_id),
         ],
     )?;
@@ -3385,8 +3409,51 @@ fn write_changes(store: &mut Store, report: &Report) -> Result<(), Error> {
     }
 }
 
+/// The held stacks somebody has already been asked about, by any release.
+///
+/// The `ref` of an item is JSON, which the two backends spell apart in SQL, so
+/// the rows are read and the stack is taken out of them here: there are at most
+/// as many of them as there are stacks a release has ever held.
+fn already_asked(
+    store: &mut Store,
+    held: &std::collections::HashSet<i64>,
+) -> Result<std::collections::HashSet<i64>, Error> {
+    let reference = table("review_item")
+        .column("ref")
+        .expect("review_item.ref is a column");
+    let sql = format!(
+        "SELECT {} FROM {} WHERE kind IN ('release.{}', 'release.{}')",
+        store.dialect().text_of(reference),
+        store.qualified("review_item"),
+        crate::burned::Verdict::Burned.name(),
+        crate::burned::Verdict::Unknown.name(),
+    );
+    let mut asked = std::collections::HashSet::new();
+    for r in store.query(&sql, &[])? {
+        let Some(text) = r.opt_text(0)? else { continue };
+        let stack = serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|v| v["stack_id"].as_i64());
+        if let Some(stack) = stack
+            && held.contains(&stack)
+        {
+            asked.insert(stack);
+        }
+    }
+    Ok(asked)
+}
+
 /// One question per held stack, so a person can answer it and the release can
 /// be run again.
+///
+/// **Once per stack, not once per release.** A release is re-run whenever
+/// anything upstream of it changes (§8.6), and a stack whose file says what it
+/// said last time raises the same question with the same answer: two releases
+/// of one selection filed the same question twice, and at an archive's size
+/// that is a queue nobody can read. So a stack that already carries an item of
+/// this kind, answered or not, is not asked about again; what recurs is the
+/// number in the report and in the release's own row, which is where a fact
+/// about the whole run belongs.
 fn raise_review(
     store: &mut Store,
     report: &Report,
@@ -3394,8 +3461,16 @@ fn raise_review(
     pixels: &HashMap<i64, crate::burned::Verdict>,
 ) -> Result<(), Error> {
     let now = now_iso();
-    let mut ids: Vec<i64> = held.iter().copied().collect();
+    let asked = already_asked(store, held)?;
+    let mut ids: Vec<i64> = held
+        .iter()
+        .copied()
+        .filter(|s| !asked.contains(s))
+        .collect();
     ids.sort_unstable();
+    if ids.is_empty() {
+        return Ok(());
+    }
     let rows: Vec<Vec<Param>> = ids
         .iter()
         .map(|stack| {

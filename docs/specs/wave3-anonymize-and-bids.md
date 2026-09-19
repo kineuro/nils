@@ -659,12 +659,28 @@ block is emptied goes with it; one that still reserves a kept element stays, or
 a reader cannot tell whose the kept element is.
 
 **"No tag" is not "no text".** The third answer is the point of the check. A
-stack the file says is burned in is not written, one it says is clean is
-written, and one whose `BurnedInAnnotation` is absent is neither: it is held and
-raises a review item, and `--on-unknown write` is the deliberate answer for an
-archive somebody has already looked at. An archive where most stacks are
-unjudgeable is a fact a release should have to confront rather than one it can
-average away, and reading absent as clean is exactly how a screenshot leaves.
+stack the file says is burned in is not written and raises a review item, one it
+says is clean is written, and one whose `BurnedInAnnotation` is absent is
+neither: it is written and **counted**, and the release says how many stacks it
+could not judge, in its report and in its own row. Reading absent as clean is
+exactly how a screenshot leaves, so absent is never read as clean; it is read as
+a number a release has to print. `--on-unknown hold` is the deliberate answer
+for a site that will not let an unjudged stack leave before somebody has looked
+at it, and it holds every one of them.
+
+**The strict answer cannot be the default.** The tag is absent on most of the
+series of a real archive, so holding on it holds three quarters of what a
+selection reaches and most subjects release nothing at all. An archive where
+most stacks are unjudgeable is a fact a release should have to confront, and the
+way it confronts it is the count: a check that stops every release is one a site
+switches off rather than one it reads.
+
+**A held stack raises its review item once, not once per release.** A release is
+re-run whenever anything upstream of it changes (§8.6), and the file says the
+same thing every time, so a question per held stack per release is the same
+question filed again: two releases of one selection file two queues of identical
+rows. What recurs is the count in the report and in the release row, which is
+where a fact about a whole run belongs.
 
 The judgement reads the stack and its series and not the fingerprint, so a
 release after a digest alone judges as well as one after a fingerprint. A check

@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 44;
+pub const SCHEMA_VERSION: i64 = 45;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +230,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 44,
         apply: an_original_is_proved_by_its_own_digest,
     },
+    Migration {
+        version: 45,
+        apply: a_release_says_how_many_stacks_it_could_not_judge,
+    },
 ];
 
 /// Record 26 §3, §4 and §14: a batch says which step it is, `digest` or
@@ -374,6 +378,21 @@ fn an_original_is_proved_by_its_own_digest(store: &mut Store, kind: Kind) -> Res
         return Ok(());
     }
     add_columns(store, "pseudonym_file", &["original_digest"])
+}
+
+/// §8.4 with record 35, finding 3: a release's own row says how many stacks it
+/// held because the file said their pixels carry text, and how many it could
+/// not judge either way. A row written before this says neither, and no
+/// reading of the tree supplies them after the fact: they stay null until that
+/// dataset is released again.
+fn a_release_says_how_many_stacks_it_could_not_judge(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "release", &["burned_in", "unjudged"])
 }
 
 /// Wave 4b §11.3 and §11.4: the case folded companions of the fingerprint's

@@ -8,11 +8,18 @@
 //! not judge rather than pretending it judged them.
 //!
 //! Three answers, and the third is the point. A stack the file says is burned
-//! in is not written. A stack the file says is clean is written. A stack whose
-//! `BurnedInAnnotation` is absent is neither: it raises a review item and is
-//! held, because "no tag" is not "no text", and an archive where 90 percent of
-//! the stacks are unjudgeable is a fact a release should have to confront
-//! rather than one it can average away.
+//! in is not written, and it raises a review item. A stack the file says is
+//! clean is written. A stack whose `BurnedInAnnotation` is absent is neither:
+//! it is written and **counted**, and the release says how many stacks it
+//! could not judge, because "no tag" is not "no text" and a number a release
+//! has to print is how an archive full of unjudgeable stacks gets confronted.
+//!
+//! Holding on an absent tag is what a site asks for with `--on-unknown hold`,
+//! not what it gets by default. The tag is absent on most of the series of a
+//! real archive, so a default that held on it held three quarters of what was
+//! selected, wrote nothing at all for most of the subjects, and filed a
+//! question per held stack on every release: a check nobody can run is not a
+//! check, and a release nobody can make is not a policy.
 //!
 //! v0 has no such check at any level.
 
@@ -40,15 +47,19 @@ impl Verdict {
 }
 
 /// What a release does with a stack it cannot judge.
+///
+/// Either way the stack is counted and the count is reported and recorded, so
+/// the row says both how many could not be judged and what was done with them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OnUnknown {
-    /// Hold it and raise a review item. The default, because a release is a
-    /// thing that leaves.
+    /// Write it and count it. The default (§8.4): what the file will not say
+    /// is a number the release has to print, not a stack it keeps.
     #[default]
-    Hold,
-    /// Write it. A real answer for an archive a person has already looked at,
-    /// and one the release records so the tree says which was chosen.
     Write,
+    /// Hold it and raise a review item, one per stack and once. The strict
+    /// setting, for a site that will not let an unjudged stack leave until a
+    /// person has looked at it.
+    Hold,
 }
 
 impl OnUnknown {
@@ -118,9 +129,8 @@ mod tests {
 
     #[test]
     fn no_tag_is_not_the_same_as_no_text() {
-        // The point of the third answer. An archive where most stacks are
-        // unjudgeable is a fact a release should confront rather than average
-        // away, and "absent" read as "clean" is how a screenshot leaves.
+        // The third answer stays a third answer: what the release does with it
+        // is a setting, and what it never does is call it clean.
         assert_eq!(judge(None, None, None), Verdict::Unknown);
         assert_eq!(judge(Some(""), None, None), Verdict::Unknown);
         assert_eq!(judge(Some("MAYBE"), None, None), Verdict::Unknown);
@@ -171,8 +181,12 @@ mod tests {
     }
 
     #[test]
-    fn holding_is_the_default_because_a_release_is_a_thing_that_leaves() {
-        assert_eq!(OnUnknown::default(), OnUnknown::Hold);
+    fn counting_what_cannot_be_judged_is_the_default_and_holding_is_the_setting() {
+        // §8.4: where the tag is absent the release says how many stacks it
+        // could not judge. A site that wants the stack held as well asks.
+        assert_eq!(OnUnknown::default(), OnUnknown::Write);
+        assert_eq!(OnUnknown::default().name(), "write");
+        assert_eq!(OnUnknown::parse("hold"), Some(OnUnknown::Hold));
         assert_eq!(OnUnknown::parse("write"), Some(OnUnknown::Write));
         assert_eq!(OnUnknown::parse("nonsense"), None);
     }

@@ -41,7 +41,7 @@ declares.
 | `<axis>:missing` | stack | the classifier, for an axis the pack says is always expected |
 | `<axis>:decision` | stack | the classifier, when a person's decision disagrees with the rule |
 | `<axis>:vote` | stack | a pass, when its answer is weak or the pack asks for every touched stack |
-| `release.burned_in`, `release.unjudged` | stack | the release, for a stack it held back |
+| `release.burned_in`, `release.unjudged` | stack | the release, for a stack it held back: `release.burned_in` where the file says the pixels carry text, `release.unjudged` where the file will not say and the release was asked to hold on that with `--on-unknown hold`, which is not the default. One item per stack, whatever its status, so a re-release of the same selection files none of them again; what recurs is the count in the release's report and row |
 | `release.no_task` | study | the release, for a functional series with no task to name |
 
 A test keeps the item the CLI prints on this schema.

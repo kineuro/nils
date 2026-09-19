@@ -294,8 +294,13 @@ struct ReleaseArgs {
     #[arg(long, value_name = "patient,trial,provider,institution,times,ids")]
     categories: Option<String>,
     /// What to do with a stack whose file says nothing about text in its
-    /// pixels. Holding is the default, because a release is a thing that leaves
-    #[arg(long = "on-unknown", default_value = "hold", value_name = "hold|write")]
+    /// pixels. Writing it is the default, and either way the release says how
+    /// many stacks it could not judge
+    #[arg(
+        long = "on-unknown",
+        default_value = "write",
+        value_name = "write|hold"
+    )]
     on_unknown: String,
     /// Only these subjects, by code
     #[arg(long, value_name = "CODE")]
@@ -7901,7 +7906,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
 
     let on_unknown = nils_release::burned::OnUnknown::parse(&args.on_unknown).ok_or_else(|| {
         usage(format!(
-            "--on-unknown is hold or write, not {}",
+            "--on-unknown is write or hold, not {}",
             args.on_unknown
         ))
     })?;
@@ -8103,23 +8108,27 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         }
         println!("      {:>10}   files written", report.written);
     }
-    // §8.4. The second number is the one worth reading: "no tag" is not "no
-    // text", and an archive where most stacks are unjudgeable is a fact a
-    // release should have to confront rather than average away.
-    if report.burned_in > 0 || report.unjudged > 0 {
+    // §8.4. The first number is what was held; the second is what the file
+    // would not say either way, which the release counts whether it wrote it
+    // or held it, because "no tag" is not "no text" and an archive full of
+    // stacks nobody can judge is a fact a release should have to print.
+    if report.burned_in > 0 {
         println!("  held back");
-        if report.burned_in > 0 {
-            println!(
-                "      {:>10}   stacks the file says carry text in their pixels",
-                report.burned_in
-            );
-        }
-        if report.unjudged > 0 {
-            println!(
-                "      {:>10}   stacks the file will not say either way, each a review item",
-                report.unjudged
-            );
-        }
+        println!(
+            "      {:>10}   stacks the file says carry text in their pixels, each a review item",
+            report.burned_in
+        );
+    }
+    if report.unjudged > 0 {
+        println!("  could not judge");
+        println!(
+            "      {:>10}   stacks the file will not say either way, {}",
+            report.unjudged,
+            match report.on_unknown.as_str() {
+                "hold" => "held back and each a review item, as --on-unknown hold asked",
+                _ => "written; --on-unknown hold holds them instead",
+            }
+        );
     }
     if !report.refused.is_empty() {
         println!("  not written");
