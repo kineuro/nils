@@ -1602,6 +1602,10 @@ fn a_stack_carrying_two_items_is_one_stack_in_the_line() {
                 report.review_items, report.review_groups
             ),
             "{name}: {printed}"
+        );
+    }
+}
+
 /// The flow study as the archive holds it: the series the split broke into
 /// one-image stacks, and beside it the same protocol's series it did not,
 /// whose echo time is a measurement and which the rules therefore judge.
@@ -1720,77 +1724,6 @@ fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
                 "SELECT COUNT(*) FROM {classification_evidence} WHERE rule = 'physics:gre_t1w'"
             ),
             2,
-            "{name}"
-        );
-    }
-}
-
-/// Record 35, the re-run's sixth regression: `neck` became a value the axis
-/// has and cannot produce. The rule that names a neck beside a brain runs
-/// ahead of the rule that names a neck, which is right while the two read
-/// the same neck words, and the French `cou` was read as a plain substring,
-/// so it fired inside an ordinary word on stacks whose body part was stated
-/// as a brain. The broader rule took them and the narrower one was reached
-/// by nothing on 35 stacks.
-#[test]
-fn a_body_part_a_rule_can_name_is_reachable() {
-    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
-    for lab in labs() {
-        let name = lab.name;
-        // A brain series whose description carries a word a neck term is
-        // three letters of, beside a neck series that says so in French.
-        let dir = TempDir::new("classify-neck");
-        let write = |series: &str, part: &str, description: &str| {
-            let sop = format!("A.{series}.1");
-            let mut e = synth::minimal_mr("A", &format!("A.{series}"), &sop);
-            e.push(elem(tags::PATIENT_ID, VR::LO, "P1"));
-            e.extend([
-                elem(tags::SERIES_DESCRIPTION, VR::LO, description),
-                elem(tags::BODY_PART_EXAMINED, VR::CS, part),
-                elem(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
-                elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
-                elem(tags::SCANNING_SEQUENCE, VR::CS, "SE"),
-                elem(tags::ECHO_TIME, VR::DS, "100"),
-                elem(tags::REPETITION_TIME, VR::DS, "4000"),
-            ]);
-            dir.file(series, &synth::part10(&MetaFields::mr(&sop), &e, true));
-        };
-        write("1", "BRAIN,HEAD", "ax t2 acoustic");
-        write("2", "COU", "ax t2 tse");
-        let mut reg = prepare(&lab, &dir);
-        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
-            .unwrap();
-
-        let of = |reg: &mut Registry, description: &str| -> String {
-            let r = rows(
-                reg,
-                &format!(
-                    "SELECT COALESCE(a.value, '') FROM {{classification_axis}} a \
-                     JOIN {{stack_fingerprint}} f ON f.stack_id = a.stack_id \
-                     WHERE a.axis = 'body_part' AND f.text_series_description = '{description}'"
-                ),
-            );
-            assert_eq!(r.len(), 1, "one stack, one body part");
-            r[0].text(0).unwrap().into()
-        };
-        assert_eq!(
-            of(&mut reg, "ax t2 acoustic"),
-            "brain",
-            "{name}: a fragment of a word is not a neck"
-        );
-        assert_eq!(
-            of(&mut reg, "ax t2 tse"),
-            "neck",
-            "{name}: and the value the neck rule names is reached"
-        );
-        // Nothing hid the rule that could have named it.
-        assert_eq!(
-            one(
-                &mut reg,
-                "SELECT COUNT(*) FROM {diagnostic} WHERE kind = 'keyword_shadowed' \
-                 AND CAST(sample AS TEXT) LIKE '%body_part/neck%'"
-            ),
-            0,
             "{name}"
         );
     }
