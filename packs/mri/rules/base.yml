@@ -225,7 +225,7 @@ rules:
 
   'flair:short_te':
     clauses:
-      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {field: echo_time, lt: 40}]}, cite: 'echo time under 40 ms', source: physics, tier: physics}
+      - {when: {all: [{any: [is_flair, {text: search_text, substring: flair}]}, {field: echo_time, gt: 0}, {field: echo_time, lt: 40}]}, cite: 'a measured echo time under 40 ms', source: physics, tier: physics}
     set: {base: 'T1w'}
     confidence: 0.85
 
@@ -245,7 +245,7 @@ rules:
   # Tier 4. A PD and T2 dual echo: the echo time says which echo this is.
   'dual_echo:pd':
     clauses:
-      - {when: {all: [{text: search_text, any_substring: ['pd', 'proton density', 'proton-density']}, {text: search_text, any_substring: ['t2']}, {field: echo_time, lt: 40}]}, cite: 'PD echo', source: physics, tier: physics}
+      - {when: {all: [{text: search_text, any_substring: ['pd', 'proton density', 'proton-density']}, {text: search_text, any_substring: ['t2']}, {field: echo_time, gt: 0}, {field: echo_time, lt: 40}]}, cite: 'PD echo', source: physics, tier: physics}
     set: {base: 'PDw'}
     confidence: 0.85
 
@@ -310,10 +310,19 @@ rules:
   # and guards the spin-echo and gradient-echo windows with `not has_epi`: an
   # echo-planar readout has its own timing and these windows do not describe
   # it. The comparisons are v0's, strict at both ends.
+  #
+  # Every window whose evidence is that a time is *small* also asks that the
+  # time is a measurement at all. An echo time of zero is not a short echo
+  # time: no readout has one, and a scanner that writes 0.0 is saying it has
+  # nothing to say, which is what a flow study writes. An absent value
+  # already fails a comparison; a zero one did not, and on a real archive
+  # that turned one phase-contrast study into 297 anatomical T1w stacks at
+  # 0.70, which is exactly the confidence that asks nobody. The same guard
+  # is on the flair and dual-echo windows above and on the EPIMix route.
 
   'physics:ir_stir_like':
     clauses:
-      - {when: {all: [has_ir, {field: inversion_time, lt: 300}]}, cite: 'inversion time under 300 ms', source: physics, tier: physics}
+      - {when: {all: [has_ir, {field: inversion_time, gt: 0}, {field: inversion_time, lt: 300}]}, cite: 'an inversion time under 300 ms', source: physics, tier: physics}
     set: {base: 'T2w'}
     confidence: 0.75
     why: 'a short inversion time suppresses fat, which is a STIR and reads as T2-weighted'
@@ -326,7 +335,7 @@ rules:
 
   'physics:se_t1w':
     clauses:
-      - {when: {all: [has_se, {not: has_epi}, {field: repetition_time, lt: 1000}, {field: echo_time, lt: 30}]}, cite: 'a short repetition and echo time', source: physics, tier: physics}
+      - {when: {all: [has_se, {not: has_epi}, {field: repetition_time, gt: 0}, {field: repetition_time, lt: 1000}, {field: echo_time, gt: 0}, {field: echo_time, lt: 30}]}, cite: 'a short repetition and echo time', source: physics, tier: physics}
     set: {base: 'T1w'}
     confidence: 0.7
 
@@ -338,13 +347,13 @@ rules:
 
   'physics:se_pdw':
     clauses:
-      - {when: {all: [has_se, {not: has_epi}, {field: repetition_time, gt: 2000}, {field: echo_time, lt: 30}]}, cite: 'a long repetition and a short echo time', source: physics, tier: physics}
+      - {when: {all: [has_se, {not: has_epi}, {field: repetition_time, gt: 2000}, {field: echo_time, gt: 0}, {field: echo_time, lt: 30}]}, cite: 'a long repetition and a short echo time', source: physics, tier: physics}
     set: {base: 'PDw'}
     confidence: 0.65
 
   'physics:gre_t1w':
     clauses:
-      - {when: {all: [has_gre, {not: has_epi}, {field: echo_time, lt: 10}]}, cite: 'a very short echo time', source: physics, tier: physics}
+      - {when: {all: [has_gre, {not: has_epi}, {field: echo_time, gt: 0}, {field: echo_time, lt: 10}]}, cite: 'a very short echo time', source: physics, tier: physics}
     set: {base: 'T1w'}
     confidence: 0.7
 

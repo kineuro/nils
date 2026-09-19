@@ -93,6 +93,7 @@ fn rows(reg: &mut Registry, sql: &str) -> Vec<Row> {
         "classification",
         "stack_fingerprint",
         "review_item",
+        "review_member",
         "decision",
         "stack",
         "diagnostic",
@@ -992,5 +993,114 @@ cases:
             "{name}: {by_origin}"
         );
         assert!(nils_classify::scope::Scope::parse("nonsense").is_err());
+    }
+}
+
+/// A phase-contrast study, as the archive writes one: a series whose echo
+/// number varies per image, so every stack holds one image, and an echo time
+/// of 0.0, which is the scanner saying it has nothing to say (record 35, S4).
+/// Beside it, the same split over a series whose stacks hold two images each,
+/// which is what an ordinary multi-echo acquisition looks like.
+fn flow_tree() -> TempDir {
+    let dir = TempDir::new("classify-flow");
+    let write = |series: &str, echo: u32, instance: &str, file: &str| {
+        let sop = format!("A.{series}.{echo}.{instance}");
+        let mut e = synth::minimal_mr("A", &format!("A.{series}"), &sop);
+        e.push(elem(tags::PATIENT_ID, VR::LO, "P1"));
+        e.extend([
+            elem(tags::SERIES_DESCRIPTION, VR::LO, "ax flow"),
+            elem(tags::SCANNING_SEQUENCE, VR::CS, "GR"),
+            elem(tags::SEQUENCE_NAME, VR::SH, "*pc2d1"),
+            elem(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+            elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+            elem(tags::ECHO_TIME, VR::DS, "0.0"),
+            elem(tags::REPETITION_TIME, VR::DS, "30.0"),
+            elem(tags::ECHO_NUMBERS, VR::IS, &echo.to_string()),
+        ]);
+        dir.file(file, &synth::part10(&MetaFields::mr(&sop), &e, true));
+    };
+    for echo in 1..=6 {
+        write("1", echo, "1", &format!("one/{echo}"));
+        write("2", echo, "1", &format!("two/{echo}-1"));
+        write("2", echo, "2", &format!("two/{echo}-2"));
+    }
+    dir
+}
+
+#[test]
+fn a_split_that_leaves_one_image_in_every_stack_is_a_question() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = flow_tree();
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+
+        // The split fired on both series, and the reason is the echo number.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {stack_fingerprint} WHERE split_reason = 'multi_echo'"
+            ),
+            12,
+            "{name}"
+        );
+        // The echo time is a zero the file carries, not an absence.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {stack_fingerprint} WHERE echo_time = 0"
+            ),
+            12,
+            "{name}"
+        );
+
+        // One question, with the six stacks of the series the split left
+        // holding one image as its members, and none of the six whose stacks
+        // hold two.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE kind = 'split:one_image_per_stack'"
+            ),
+            1,
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT members FROM {review_item} WHERE scope = 'group' AND kind = 'split:one_image_per_stack'"
+            ),
+            6,
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_member} m JOIN {stack_fingerprint} f ON f.stack_id = m.stack_id WHERE f.n_instances = 1"
+            ),
+            6,
+            "{name}: the members are the stacks holding one image"
+        );
+
+        // And a zero echo time decided nothing: not one of the twelve is
+        // called an anatomical T1w on the strength of it.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_axis} WHERE axis = 'base'"
+            ),
+            0,
+            "{name}: a zero echo time is not a short one"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_evidence} WHERE rule = 'physics:gre_t1w'"
+            ),
+            0,
+            "{name}"
+        );
     }
 }

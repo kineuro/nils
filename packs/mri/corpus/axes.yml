@@ -181,3 +181,42 @@ cases:
     axes:
       technique: MPRAGE
       body_part: brain
+
+  # --- a physics value is evidence only where there is one (record 35, S4).
+  # Every window whose evidence is that a time is small asks first that the
+  # time was measured: an echo time of 0.0 is what a flow study writes, and
+  # reading it as a very short one made 297 phase-contrast stacks anatomical.
+
+  - name: a gradient echo whose echo time is zero is not a T1w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      text_series_description: 'ax flow'
+      text_sequence_name: '*fl2d1'
+      echo_time: 0
+      repetition_time: 30
+    axes:
+      base: ''
+
+  - name: a gradient echo with a measured short echo time is a T1w, as it was
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      text_series_description: 'ax flow'
+      text_sequence_name: '*fl2d1'
+      echo_time: 4
+      repetition_time: 30
+    axes:
+      base: 'T1w'
+
+  - name: an inversion time of zero is not a short one
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      text_series_description: 'ax study'
+      text_sequence_name: '*tir2d1_15'
+      inversion_time: 0
+      echo_time: 15
+      repetition_time: 1500
+    axes:
+      base: ''

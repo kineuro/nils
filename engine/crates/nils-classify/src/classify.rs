@@ -27,6 +27,33 @@ use crate::job::Error;
 /// How many stacks a window holds.
 pub const WINDOW: usize = 4_096;
 
+/// From how many stacks a series split into single images is a question
+/// rather than an acquisition (record 35, S4).
+///
+/// A split that gives each echo, each inversion or each phase its own stack
+/// gives each of them the images that echo holds. A split that leaves one
+/// image in a stack is saying the key it split on varies per image, which is
+/// what a single-slice acquisition looks like and also what a wrong key looks
+/// like; below this the two cannot be told apart and the pack is left alone.
+/// Above it, on a real archive, it was one phase-contrast study becoming 297
+/// stacks of one image each, and nothing said so.
+const SPLIT_SINGLETONS: f64 = 4.0;
+
+/// The split this stack came out of, where the split left it holding one
+/// image and made many such stacks: the reason, and how many stacks the
+/// series has.
+fn split_singleton(stack: &Stack) -> Option<(String, f64, f64)> {
+    let at = |name: &str| nils_pack::stack::field_index(name).expect("a field the pack declares");
+    let reason = stack.text(at("split_reason"));
+    if reason.is_empty() {
+        return None;
+    }
+    let stacks = stack.num(at("stacks_in_series"))?;
+    let instances = stack.num(at("n_instances"))?;
+    (instances <= 1.0 && stacks >= SPLIT_SINGLETONS)
+        .then(|| (reason.to_string(), stacks, instances))
+}
+
 /// The fingerprint columns a pack is fed, in the order the select reads them.
 /// The pack names a field; this is where a name becomes a column.
 /// The field a pack names, and the fingerprint column it is read from.
@@ -629,6 +656,39 @@ fn run(
             let verdict = Evaluated::with_private(pack, &stack, private).classify();
             tallies.note(batch_of(r, with_ids), &verdict);
             let mut raised = 0i64;
+
+            // A split that makes one image per stack, over and over, is the
+            // split key failing and not an acquisition (record 35, S4). It
+            // reaches nobody through the axes: every axis is answered, with
+            // the evidence of a stack that holds one image, so the run reads
+            // as a success. The question is about the series rather than the
+            // axis, and it is raised once per stack with the split's reason
+            // as its value, which is what collapses them into one item per
+            // reason. A stack the pack has ruled out is still nobody's
+            // question.
+            if !verdict.silent
+                && let Some((reason, stacks, instances)) = split_singleton(&stack)
+            {
+                reviews.push(vec![
+                    Param::from("split:one_image_per_stack"),
+                    Param::from("stack"),
+                    Param::from(serde_json::json!({"stack_id": stack_id}).to_string()),
+                    Param::from(
+                        serde_json::json!({
+                            "value": reason,
+                            "tier": "split",
+                            "stacks_in_series": stacks,
+                            "n_instances": instances,
+                            "pack": pack.id(),
+                        })
+                        .to_string(),
+                    ),
+                    Param::from("open"),
+                    Param::from(now.as_str()),
+                    Param::Int(job_id),
+                ]);
+                raised += 1;
+            }
 
             for a in &verdict.axes {
                 let mut value = a.stored();
