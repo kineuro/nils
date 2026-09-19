@@ -648,6 +648,17 @@ impl<'a> Builder<'a> {
             Grain::Stack => {
                 let window = self.p(Param::Int(self.ctx.window_days), Type::Int);
                 let digest = self.p(Param::from(self.ctx.scheme_digest.as_str()), Type::Text);
+                // §4.4 rule 10 and §14.2: a stack the pack ruled out is not a
+                // stack any set sees, and a document cannot switch it off.
+                // Describe prints this predicate, so the query has to carry
+                // it or the two disagree by exactly the excluded stacks.
+                let axis = self.p(Param::from("disposition"), Type::Text);
+                let ruled_out = self.p(Param::from("excluded"), Type::Text);
+                let not_excluded = format!(
+                    "NOT EXISTS (SELECT 1 FROM {} dax WHERE dax.stack_id = st.id \
+                     AND dax.axis = {axis} AND dax.value = {ruled_out})",
+                    q(self, "classification_axis")
+                );
                 Base {
                     from: format!(
                         "{} st JOIN {} se ON se.id = st.series_id JOIN {} sy ON sy.id = se.study_id \
@@ -674,7 +685,7 @@ impl<'a> Builder<'a> {
                     study_k: Some("sy.id".into()),
                     series_k: Some("se.id".into()),
                     stack_k: Some("st.id".into()),
-                    standing: Vec::new(),
+                    standing: vec![not_excluded],
                 }
             }
             Grain::Instance => {
