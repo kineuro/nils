@@ -195,7 +195,7 @@ fn main() {
                     .then_some("missing")
             } else {
                 let c = found.map(|a| a.confidence).unwrap_or(0.0);
-                (c > 0.0 && c < pack.review.below(&axis.name)).then_some("low_confidence")
+                (c > 0.0 && pack.review.asks_about(&axis.name, c)).then_some("low_confidence")
             };
             if let Some(kind) = kind {
                 *queue.entry(format!("{}:{kind}", axis.name)).or_default() += 1;

@@ -89,6 +89,9 @@ decide:
 
 emit:
   evidence: always
+  # Strictly below, as the axis thresholds are (pack.yml, review): a vote
+  # that comes out at exactly 0.7 is this pass's answer and is not asked
+  # about; the run counts how many did.
   review_item_below: 0.7
   review_all_touched: false
 

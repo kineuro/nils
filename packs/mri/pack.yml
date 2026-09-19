@@ -126,6 +126,14 @@ fields:
 # anything was in doubt, and a queue that long is read by nobody. These are the
 # numbers that decide what is worth a person's time, and they are the pack's
 # because what counts as a weak answer is knowledge about MRI.
+#
+# Each number is read as strictly below: an axis written at exactly the
+# confidence named here is an answer, not a question. Both numbers below are
+# set at a confidence a rule always writes, so each takes its whole
+# population out of the queue by that boundary. That is the intent, and it is
+# not silence: a run counts the answers that sit on their threshold and says
+# so, so the queue's size and the boundary that produced it are read
+# together.
 review:
   low_confidence:
     # Measured over the whole live corpus, and set from the measurement. The
@@ -139,9 +147,10 @@ review:
     default: 0.70
     # Body part is decided at one confidence whatever the text said (0.65,
     # v0's number), so any threshold above it asks about every stack and
-    # tells nobody anything. What is worth asking about is the last resort:
-    # a spine inferred from a tall narrow sagittal field of view with the
-    # text silent, at 0.60.
+    # tells nobody anything, and this one, being read as strictly below,
+    # asks about none of them. What is worth asking about is the last
+    # resort: a spine inferred from a tall narrow sagittal field of view
+    # with the text silent, at 0.60.
     body_part: 0.65
   # An axis with no value at all is a question only where a value is always
   # expected. A modifier or a construct is legitimately absent on most

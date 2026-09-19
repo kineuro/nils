@@ -1104,3 +1104,236 @@ fn a_split_that_leaves_one_image_in_every_stack_is_a_question() {
         );
     }
 }
+
+/// One stack of one series, built from the elements a case needs, so that a
+/// threshold can be met exactly rather than described.
+fn one_stack(description: &str, extra: &[(dicom_core::Tag, VR, &str)]) -> TempDir {
+    let dir = TempDir::new("classify");
+    let mut e = synth::minimal_mr("A", "A.1", "A.1.1");
+    e.push(elem(tags::PATIENT_ID, VR::LO, "P1"));
+    e.extend([
+        elem(tags::SERIES_DESCRIPTION, VR::LO, description),
+        elem(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+        elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+    ]);
+    for (tag, vr, value) in extra {
+        e.push(elem(*tag, *vr, value));
+    }
+    dir.file("s/1", &synth::part10(&MetaFields::mr("A.1.1"), &e, true));
+    dir
+}
+
+/// The axis as it was written, with the confidence and the tier.
+fn axis_of(reg: &mut Registry, axis: &str) -> (String, f64, String) {
+    let r = rows(
+        reg,
+        &format!(
+            "SELECT COALESCE(value, ''), confidence, tier FROM {{classification_axis}} WHERE axis = '{axis}'"
+        ),
+    );
+    assert_eq!(r.len(), 1, "one stack, one row for {axis}");
+    (
+        r[0].text(0).unwrap().into(),
+        r[0].double(1).unwrap(),
+        r[0].text(2).unwrap().into(),
+    )
+}
+
+/// Open questions of a kind, whether they are still per stack or have been
+/// collapsed into the group a person reads.
+fn asked(reg: &mut Registry, kind: &str) -> i64 {
+    one(
+        reg,
+        &format!("SELECT COUNT(*) FROM {{review_item}} WHERE kind = '{kind}'"),
+    )
+}
+
+/// Wave 2 §8.2: a threshold is read as strictly below, so an answer written
+/// at exactly the confidence the threshold names is an answer. The MRI
+/// pack's body-part number is the case that matters: the keyword tier writes
+/// 0.65 and the threshold is 0.65, so the whole axis stands on its boundary.
+#[test]
+fn a_body_part_exactly_on_its_threshold_is_not_a_question_and_is_counted() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    assert_eq!(pack.review.below("body_part"), 0.65);
+    for lab in labs() {
+        let name = lab.name;
+        let dir = one_stack(
+            "sag t1 spine",
+            &[
+                (tags::BODY_PART_EXAMINED, VR::CS, "SPINE"),
+                (tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+                (tags::REPETITION_TIME, VR::DS, "600"),
+                (tags::ECHO_TIME, VR::DS, "12"),
+            ],
+        );
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        assert_eq!(
+            axis_of(&mut reg, "body_part"),
+            ("spine".to_string(), 0.65, "keywords".to_string()),
+            "{name}"
+        );
+        assert_eq!(
+            asked(&mut reg, "body_part:low_confidence"),
+            0,
+            "{name}: 0.65 is not below 0.65"
+        );
+        // and the run says how many answers stand on their threshold
+        assert_eq!(report.at_threshold.get("body_part"), Some(&1), "{name}");
+        assert!(report.on_the_threshold() >= 1, "{name}");
+
+        // The same stack, asked about one hundredth higher: now it is below.
+        let settings = nils_classify::job::Settings {
+            review_below: Some(0.66),
+            ..Default::default()
+        };
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert_eq!(
+            asked(&mut reg, "body_part:low_confidence"),
+            1,
+            "{name}: 0.65 is below 0.66"
+        );
+        assert_eq!(report.at_threshold.get("body_part"), None, "{name}");
+    }
+}
+
+/// The other half of the same boundary, on the axis the corpus run found 354
+/// of: base from the physics tier, written at exactly 0.70 against a default
+/// threshold of 0.70.
+#[test]
+fn a_base_from_physics_exactly_on_its_threshold_is_an_answer() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    assert_eq!(pack.review.below("base"), 0.70);
+    for lab in labs() {
+        let name = lab.name;
+        // A gradient echo with a very short echo time and no keyword.
+        let dir = one_stack(
+            "ax gre",
+            &[
+                (tags::SCANNING_SEQUENCE, VR::CS, "GR"),
+                (tags::REPETITION_TIME, VR::DS, "250"),
+                (tags::ECHO_TIME, VR::DS, "4.6"),
+                (tags::MR_ACQUISITION_TYPE, VR::CS, "2D"),
+            ],
+        );
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        assert_eq!(
+            axis_of(&mut reg, "base"),
+            ("T1w".to_string(), 0.70, "physics".to_string()),
+            "{name}"
+        );
+        assert_eq!(
+            asked(&mut reg, "base:low_confidence"),
+            0,
+            "{name}: 0.70 is not below 0.70"
+        );
+        assert_eq!(report.at_threshold.get("base"), Some(&1), "{name}");
+    }
+}
+
+/// And the rule on the same axis that writes one hundredth less is a
+/// question, so the boundary is the only thing between them.
+#[test]
+fn a_base_one_hundredth_below_its_threshold_is_a_question() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        // A spin echo with a long repetition and a short echo time: PDw at
+        // 0.65, which is the population the corpus run asked about.
+        let dir = one_stack(
+            "ax se",
+            &[
+                (tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+                (tags::REPETITION_TIME, VR::DS, "3000"),
+                (tags::ECHO_TIME, VR::DS, "12"),
+                (tags::MR_ACQUISITION_TYPE, VR::CS, "2D"),
+            ],
+        );
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        assert_eq!(
+            axis_of(&mut reg, "base"),
+            ("PDw".to_string(), 0.65, "physics".to_string()),
+            "{name}"
+        );
+        assert_eq!(
+            asked(&mut reg, "base:low_confidence"),
+            1,
+            "{name}: 0.65 is below 0.70"
+        );
+        assert_eq!(report.at_threshold.get("base"), None, "{name}");
+    }
+}
+
+/// Every threshold of this kind in the engine, at the value itself. Each
+/// line is the sentence the threshold is written with, so a comparison that
+/// drifts from its words fails here.
+#[test]
+fn every_threshold_reads_the_value_on_it_as_its_own_words_do() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+
+    // review.low_confidence, per axis: below, so exactly on it is not weak.
+    for axis in ["body_part", "base", "technique"] {
+        let below = pack.review.below(axis);
+        assert!(!pack.review.asks_about(axis, below), "{axis} on {below}");
+        assert!(pack.review.asks_about(axis, below - 0.01), "{axis}");
+        assert!(!pack.review.asks_about(axis, below + 0.01), "{axis}");
+        // and arithmetic that lands on the threshold the long way round is
+        // still on it
+        assert!(
+            !pack
+                .review
+                .asks_about(axis, (below / 3.0) + (below / 3.0) + (below / 3.0)),
+            "{axis}: a rounding error is not a doubt"
+        );
+    }
+
+    // A pass's emit.review_item_below: the same sentence.
+    let vote = pack
+        .passes
+        .iter()
+        .find(|p| p.name == "physics_vote")
+        .expect("the MRI pack declares physics_vote");
+    let below = vote.emit.review_below;
+    assert_eq!(below, 0.7);
+    assert!(!nils_pack::weaker_than(below, below));
+    assert!(nils_pack::at_threshold(below, below));
+    assert!(nils_pack::weaker_than(below - 0.01, below));
+
+    // A pick's borders: `within` takes the value itself, `below` does not.
+    let model = pack
+        .picks
+        .iter()
+        .find(|m| m.name == "main")
+        .expect("the MRI pack declares the main pick");
+    assert!(model.borders.runner_up_within <= model.borders.runner_up_within);
+    let (_, floor) = model
+        .borders
+        .rare_within
+        .clone()
+        .expect("the main pick declares rare_within");
+    assert!(!nils_pack::weaker_than(floor, floor), "exactly a tenth");
+    assert!(nils_pack::weaker_than(floor - 0.01, floor));
+
+    // And the digest's own: a plane at exactly the oblique confidence is
+    // not oblique.
+    let straight = nils_digest::stack::Orientation {
+        class: nils_digest::stack::Class::Axial,
+        confidence: nils_digest::stack::OBLIQUE_BELOW,
+    };
+    assert!(!straight.oblique());
+    let tilted = nils_digest::stack::Orientation {
+        class: nils_digest::stack::Class::Axial,
+        confidence: nils_digest::stack::OBLIQUE_BELOW - 0.01,
+    };
+    assert!(tilted.oblique());
+}

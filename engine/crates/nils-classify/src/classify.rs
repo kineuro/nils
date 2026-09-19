@@ -752,8 +752,18 @@ fn run(
                     && if missing {
                         pack.review.asks_when_missing(&a.axis)
                     } else {
-                        a.confidence > 0.0 && a.confidence < below
+                        a.confidence > 0.0 && nils_pack::weaker_than(a.confidence, below)
                     };
+                // The population the threshold decides by its boundary: an
+                // answer written at exactly the confidence the threshold
+                // names is not below it, so it is never asked about. Not a
+                // question, and not silence either: a number in the report,
+                // because a threshold set at the confidence a rule always
+                // writes drains a whole axis out of the queue and nothing
+                // else in a run says so.
+                if !verdict.silent && !missing && nils_pack::at_threshold(a.confidence, below) {
+                    *report.at_threshold.entry(a.axis.clone()).or_insert(0) += 1;
+                }
                 if ask {
                     let kind = if missing { "missing" } else { "low_confidence" };
                     reviews.push(vec![

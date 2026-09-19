@@ -1903,7 +1903,8 @@ struct ClassifyArgs {
     /// Only stacks of this modality
     #[arg(long, value_name = "MR|CT|PT|...")]
     modality: Option<String>,
-    /// Ask about every axis below this confidence, whatever the pack declares
+    /// Ask about every axis strictly below this confidence, whatever the pack
+    /// declares; an axis exactly on it is an answer
     #[arg(long, value_name = "0..1")]
     review_below: Option<f64>,
     /// Stacks per window, one transaction each

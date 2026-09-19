@@ -107,6 +107,14 @@ pub struct Classified {
     /// Wave 4a §10.2: the items those questions collapsed into, one per
     /// (kind, value, tier). This is the length of the queue a person reads.
     pub review_groups: i64,
+    /// Per axis, the answers written at exactly that axis's own review
+    /// threshold (§8.2). A threshold is read as strictly below, so these are
+    /// answers and not questions, and a threshold set at the confidence a
+    /// rule always writes takes a whole axis out of the queue by its
+    /// boundary. That is a fact about the pack, so it is a number in the
+    /// report rather than a review item per stack.
+    #[serde(default)]
+    pub at_threshold: std::collections::BTreeMap<String, i64>,
     /// Wave 4c §6.6: what the evaluator noticed and did not act on, by
     /// kind, over every batch: `axis_conflict`, `axis_unresolved`,
     /// `keyword_shadowed` (keywords that can never match) and
@@ -136,6 +144,7 @@ impl Classified {
             by_tier: std::collections::BTreeMap::new(),
             review_items: 0,
             review_groups: 0,
+            at_threshold: std::collections::BTreeMap::new(),
             diagnostics: std::collections::BTreeMap::new(),
             seconds: 0.0,
             peak_rss: None,
@@ -148,6 +157,14 @@ impl Classified {
             return 0.0;
         }
         self.read as f64 / self.seconds
+    }
+
+    /// Every answer that sits exactly on its own review threshold, over
+    /// every axis and every pass: the population one hundredth from being a
+    /// question and never asked about.
+    pub fn on_the_threshold(&self) -> i64 {
+        self.at_threshold.values().sum::<i64>()
+            + self.passes.iter().map(|p| p.at_threshold).sum::<i64>()
     }
 
     /// What share of the classified stacks raised something for a person.
@@ -190,6 +207,21 @@ impl fmt::Display for Classified {
             100.0 * self.review_share(),
             self.review_groups
         )?;
+        if self.on_the_threshold() > 0 {
+            let mut on: Vec<(&String, &i64)> = self.at_threshold.iter().collect();
+            on.sort_by_key(|(axis, n)| (-**n, (*axis).clone()));
+            let line: Vec<String> = on.iter().map(|(axis, n)| format!("{axis} {n}")).collect();
+            writeln!(
+                f,
+                "  on the threshold  {:>11}   answers at exactly the confidence their threshold names{}",
+                self.on_the_threshold(),
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n    {}", line.join(", "))
+                }
+            )?;
+        }
         let mut weakest: Vec<(&String, &i64)> = self
             .by_tier
             .iter()

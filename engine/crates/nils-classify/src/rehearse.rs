@@ -36,7 +36,7 @@ fn asks(
     if value.is_empty() {
         pack.review.asks_when_missing(axis)
     } else {
-        confidence > 0.0 && confidence < below
+        confidence > 0.0 && nils_pack::weaker_than(confidence, below)
     }
 }
 
