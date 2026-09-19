@@ -180,6 +180,14 @@ pub struct Report {
     pub shared_names: i64,
     pub repeats: i64,
     pub not_repeats: i64,
+    /// Record 37, S4: stacks whose name is told from its neighbour's by the
+    /// protocol text and by nothing else, counted by the DICOM keyword that
+    /// answered. **A name that rests on free text is weaker than one that
+    /// rests on a measurement**, and a person should be able to see that it
+    /// did: the `acq-` label carries a `Text` mark, this says how many and on
+    /// which element, and a review item per group says which stacks. No
+    /// protocol text is here, nor anywhere else a release writes.
+    pub named_by_text: BTreeMap<String, i64>,
     /// Stacks by the route of §9.3 they took.
     pub routes: BTreeMap<String, i64>,
     /// And, for the ones that went nowhere, why. Never a silent drop.
@@ -602,8 +610,11 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // borrowing the sessions of whoever owns the study its series were filed
     // under.
     let with_a_study = subjects_with_a_study(registry.store())?;
-    let (named, shared) =
-        places(registry.store(), &by_study, settings.pack, settings.naming)?;
+    let Placements {
+        by_stack: named,
+        shared,
+        by_text,
+    } = places(registry.store(), &by_study, settings.pack, settings.naming)?;
     // §9.4 with record 37 S6: where in the body, for the sidecar, by stack.
     // The name carries it too, because two files must not overwrite each
     // other; this is the slot the standard keeps the fact in.
@@ -660,6 +671,16 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         not_repeats: match settings.layout {
             Layout::Bids => shared.refused,
             Layout::Descriptive => 0,
+        },
+        // Record 37, S4. The BIDS names are worked out for every release, but
+        // only a BIDS tree is written under them, so only a BIDS tree has a
+        // weakness to admit to here.
+        named_by_text: match settings.layout {
+            Layout::Bids => by_text.iter().fold(BTreeMap::new(), |mut m, s| {
+                *m.entry(s.field.to_string()).or_insert(0) += s.stacks.len() as i64;
+                m
+            }),
+            Layout::Descriptive => BTreeMap::new(),
         },
         ..Report::default()
     };
@@ -1252,6 +1273,12 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // occasion and not of a stack, and one answer settles every functional
     // stack of it.
     ask_about_tasks(registry.store(), &report, &absent, settings)?;
+    // Record 37, S4. A name that rests on free text is weaker than one that
+    // rests on a measurement, and this is where a person is told so about the
+    // particular stacks it happened to.
+    if settings.layout == Layout::Bids {
+        ask_about_text(registry.store(), &report, &by_text)?;
+    }
     forget_plan(registry.store(), report.release_id)?;
     close_row(registry.store(), &report)?;
     report.seconds = started.elapsed().as_secs_f64();
@@ -1737,6 +1764,7 @@ fn write_dataset(
                 repeats: report.repeats,
                 refused: report.not_repeats,
             },
+            &report.named_by_text,
         ),
     )?;
 
@@ -1879,6 +1907,92 @@ fn ask_about_tasks(
         &["kind", "scope", "ref", "evidence", "status", "created_at"],
         &rows,
     )
+}
+
+/// One review item per group of stacks the protocol text alone told apart
+/// (record 37, S4).
+///
+/// **Not a refusal.** These stacks are named, and their names are unique and
+/// valid; what the item carries is the reason, because the reason is weaker
+/// than the reasons under every other name in the tree. A person who opens it
+/// sees which element answered and which stacks took a mark, and can say the
+/// two really are two things, or that the site types a different protocol name
+/// for one acquisition and the pair should have been a repeat.
+///
+/// **Once per group, not once per release**, for the reason [`raise_review`]
+/// gives: a release is re-run whenever anything upstream changes, and the same
+/// question filed again every time is a queue nobody reads.
+///
+/// The evidence holds the DICOM keyword, the stacks and the marks. **It holds
+/// no protocol text.** The whole point of the mark is that the text stays in
+/// the registry, and a review queue is read by more people than a registry is.
+fn ask_about_text(store: &mut Store, report: &Report, by_text: &[Separated]) -> Result<(), Error> {
+    if by_text.is_empty() {
+        return Ok(());
+    }
+    let asked = already_asked_about_text(store)?;
+    let now = now_iso();
+    let rows: Vec<Vec<Param>> = by_text
+        .iter()
+        .filter(|s| s.stacks.first().is_some_and(|first| !asked.contains(first)))
+        .map(|s| {
+            vec![
+                Param::from("release.named_by_text"),
+                Param::from("stack"),
+                // The group's lowest stack, because the question is about the
+                // group and a `ref` names one thing.
+                Param::from(
+                    serde_json::json!({ "stack_id": s.stacks.first().copied().unwrap_or(0) })
+                        .to_string(),
+                ),
+                Param::from(
+                    serde_json::json!({
+                        "release": report.release_id,
+                        "element": s.field,
+                        "stacks": s.stacks,
+                        "marks": s.marks,
+                        "why": "these stacks agree on every fact the engine holds and differ \
+                                only in their protocol text, so the text is what tells them \
+                                apart and the acq- label carries a mark of it rather than a \
+                                run- index; a name that rests on free text is weaker than one \
+                                that rests on a measurement",
+                    })
+                    .to_string(),
+                ),
+                Param::from("open"),
+                Param::from(now.as_str()),
+            ]
+        })
+        .collect();
+    write_rows(
+        store,
+        "review_item",
+        &["kind", "scope", "ref", "evidence", "status", "created_at"],
+        &rows,
+    )
+}
+
+/// The groups already asked about, by the stack their item names.
+fn already_asked_about_text(store: &mut Store) -> Result<std::collections::HashSet<i64>, Error> {
+    let reference = table("review_item")
+        .column("ref")
+        .expect("review_item.ref is a column");
+    let sql = format!(
+        "SELECT {} FROM {} WHERE kind = 'release.named_by_text'",
+        store.dialect().text_of(reference),
+        store.qualified("review_item"),
+    );
+    let mut asked = std::collections::HashSet::new();
+    for r in store.query(&sql, &[])? {
+        let Some(text) = r.opt_text(0)? else { continue };
+        if let Some(stack) = serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|v| v["stack_id"].as_i64())
+        {
+            asked.insert(stack);
+        }
+    }
+    Ok(asked)
 }
 
 /// Where a stack's files go, given the route it took (§9.3).
@@ -3247,7 +3361,7 @@ fn places(
     by_study: &HashMap<i64, nils_session::Labelled>,
     pack: &nils_pack::pack::Pack,
     naming: crate::name::Naming,
-) -> Result<(HashMap<i64, Placed>, Shared), Error> {
+) -> Result<Placements, Error> {
     let axes = axis_values(store)?;
     let t = table("stack_fingerprint");
     let d = store.dialect();
@@ -3306,8 +3420,7 @@ fn places(
         HashMap::new();
     // Ordered by series, then by the stack's index in it, then by its id, so
     // that two runs of one version assign the same `run-` numbers.
-    type Ordered = Vec<(i64, i64, i64, String)>;
-    let mut bids_buckets: BTreeMap<(i64, String, &'static str), Ordered> = BTreeMap::new();
+    let mut bids_buckets: BidsBuckets = BTreeMap::new();
     let mut extra: HashMap<i64, (bool, Option<String>, Option<String>)> = HashMap::new();
     // Record 37 S2: what the repeat test reads of each stack, kept for the
     // stacks that turn out to collide, which is the only place it is asked.
@@ -3493,6 +3606,14 @@ fn places(
             });
     }
 
+    // Record 37, S4, and **before** `run-` is considered at all. Where two
+    // stacks want one name and everything NILS holds about them agrees, the
+    // protocol text is the only thing left, and it names them apart instead
+    // of one of them being written down as a repeat of the other. Last among
+    // the facts, and so first among the answers: a group the text does not
+    // separate falls through to the rule below exactly as it did before.
+    let by_text = separate_by_text(store, &axes, &mut bids, &mut bids_buckets)?;
+
     // Record 37 S2. Where two stacks of one subject, session and datatype
     // build one name, `run-` is written only when they are measurably one
     // acquisition done twice (`bids::repeat`). Where they are not, no name is
@@ -3614,7 +3735,20 @@ fn places(
             );
         }
     }
-    Ok((out, shared))
+    Ok(Placements {
+        by_stack: out,
+        shared,
+        by_text,
+    })
+}
+
+/// What [`places`] worked out for a run: where every stack goes, what the
+/// collision test of record 37 S2 found, and the groups record 37 S4 had to
+/// tell apart by their protocol text.
+struct Placements {
+    by_stack: HashMap<i64, Placed>,
+    shared: Shared,
+    by_text: Vec<Separated>,
 }
 
 /// What the collision test of record 37 S2 found, for the report and the
@@ -3650,6 +3784,122 @@ struct SharedGroup {
     differs: Vec<String>,
     /// The same thing as a sentence, which is what a person reads.
     why: String,
+}
+
+/// The stacks of one subject, session and datatype, ordered by series, then by
+/// the stack's index in it, then by its id, each with the stem it wants. The
+/// order is fixed so that two runs of one version assign the same names.
+type Ordered = Vec<(i64, i64, i64, String)>;
+
+/// Those, by the directory a name has to be unique in.
+type BidsBuckets = BTreeMap<(i64, String, &'static str), Ordered>;
+
+/// One group of stacks that wanted one name and whose protocol text is all
+/// that separates them (record 37, S4).
+///
+/// The field is a DICOM keyword, which names an element and nobody, and the
+/// stacks are registry ids. **No protocol text is in here**, because this is
+/// carried into the report and into a review item.
+#[derive(Debug, Clone)]
+struct Separated {
+    field: &'static str,
+    stacks: Vec<i64>,
+    /// The mark each of those stacks took, in the same order: a digest of the
+    /// text and never the text, so a person can find the files in the tree
+    /// without the queue carrying what a console recorded.
+    marks: Vec<String>,
+}
+
+/// Name apart the groups that only their protocol text separates, and say
+/// which groups those were (record 37, S4).
+///
+/// The order this keeps is the point of the slice. It is asked about a group
+/// only once that group has been given every name the axes, the identities
+/// and the entities can give it, and [`protocol::separates`] then refuses to
+/// answer unless everything else the fingerprint holds agrees as well. So the
+/// text can separate only what nothing else does.
+///
+/// **All or nothing per group.** Either every member takes its mark or none
+/// does: half a partition would be a tree naming two of three stacks apart
+/// and leaving the third as a repeat of whichever it landed beside, which is
+/// a claim nobody could read back. A group that cannot be named apart, because
+/// its suffix admits no `acq-`, falls through untouched to the `run-` rule.
+fn separate_by_text(
+    store: &mut Store,
+    axes: &HashMap<i64, BTreeMap<String, String>>,
+    bids: &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
+    buckets: &mut BidsBuckets,
+) -> Result<Vec<Separated>, Error> {
+    use crate::bids::protocol;
+
+    // The stacks that want one name, which are the only ones this question is
+    // about.
+    let mut wanted: Vec<i64> = Vec::new();
+    for bucket in buckets.values() {
+        let mut counts: BTreeMap<&String, i64> = BTreeMap::new();
+        for (_, _, _, stem) in bucket.iter() {
+            *counts.entry(stem).or_insert(0) += 1;
+        }
+        for (_, _, stack, stem) in bucket.iter() {
+            if counts.get(stem).copied().unwrap_or(0) > 1 {
+                wanted.push(*stack);
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    wanted.sort_unstable();
+    let stacks = protocol::read(store, axes, &wanted)?;
+
+    let mut out: Vec<Separated> = Vec::new();
+    for bucket in buckets.values_mut() {
+        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (i, (_, _, _, stem)) in bucket.iter().enumerate() {
+            groups.entry(stem.clone()).or_default().push(i);
+        }
+        for members in groups.values() {
+            if members.len() < 2 {
+                continue;
+            }
+            let facts: Option<Vec<&protocol::Stack>> =
+                members.iter().map(|i| stacks.get(&bucket[*i].2)).collect();
+            let Some(facts) = facts else { continue };
+            let Some(separation) = protocol::separates(&facts) else {
+                continue;
+            };
+            let named: Option<Vec<crate::bids::name::Name>> = members
+                .iter()
+                .zip(&separation.marks)
+                .map(|(i, mark)| {
+                    bids.get(&bucket[*i].2)
+                        .and_then(|b| b.as_ref().ok())
+                        .and_then(|n| n.with_text(mark))
+                })
+                .collect();
+            let Some(named) = named else { continue };
+            for (i, name) in members.iter().zip(named) {
+                let stack = bucket[*i].2;
+                // The stem is what the `run-` rule below counts collisions
+                // with, so it moves with the name or the two would disagree.
+                bucket[*i].3 = name.stem("s", "s");
+                bids.insert(stack, Ok(name));
+            }
+            let mut pairs: Vec<(i64, String)> = members
+                .iter()
+                .zip(&separation.marks)
+                .map(|(i, mark)| (bucket[*i].2, mark.clone()))
+                .collect();
+            pairs.sort();
+            out.push(Separated {
+                field: separation.field.keyword(),
+                stacks: pairs.iter().map(|(stack, _)| *stack).collect(),
+                marks: pairs.into_iter().map(|(_, mark)| mark).collect(),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.stacks.cmp(&b.stacks));
+    Ok(out)
 }
 
 /// Where one stack goes, in both layouts (§9).

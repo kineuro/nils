@@ -8304,6 +8304,18 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         for (why, n) in &report.unconvertible {
             println!("      {n:>10}   written as DICOM instead: {why}");
         }
+        // Record 37, S4. A name earned by a measurement and a name earned by
+        // a line somebody typed at a console are not worth the same, and the
+        // report is where the difference is said out loud.
+        if !report.named_by_text.is_empty() {
+            println!("  named by text alone");
+            for (element, n) in &report.named_by_text {
+                println!(
+                    "      {n:>10}   stacks a neighbour agrees with on every fact held, told \
+                     apart by {element}; each group is an open review item"
+                );
+            }
+        }
         // Wave 4a §7.4: what the clinical layer put in the tree, counted.
         for (what, n) in &report.clinical {
             println!("      {n:>10}   clinical: {what}");
