@@ -178,6 +178,16 @@ pub fn route(
     if disposition == Some("working_scan") {
         return Route::SourceData;
     }
+    // Record 37 S2, before anything else a name could be: a stack refused
+    // because its BIDS name would cover more than one acquisition is not a
+    // stack BIDS has no word for. Its informative name is unique, and
+    // `sourcedata/` is where a release keeps what it holds and will not claim
+    // to have named. Ahead of the synthetic and derived choices because the
+    // reason outranks them: a derivative whose name means two things is no
+    // more nameable in `derivatives/` than in the raw tree.
+    if matches!(named, Err(Why::Shared { .. })) {
+        return Route::SourceData;
+    }
     if synthetic && options.synthetic == Synthetic::Derivatives {
         return Route::Derivatives;
     }
@@ -258,6 +268,41 @@ mod tests {
         assert_eq!(
             route(Some("acquisition"), false, &unnamed(), Options::default()),
             Route::Nowhere(Why::NoSuffix)
+        );
+    }
+
+    #[test]
+    fn a_name_that_would_mean_two_acquisitions_goes_to_sourcedata() {
+        // Record 37 S2. Not nowhere, because the stack is not one BIDS has no
+        // word for: the word is taken. Its informative name under
+        // `sourcedata/` is unique, and a review item says what differs.
+        let shared = Err(Why::Shared {
+            others: 1,
+            differs: "the echo time".to_string(),
+        });
+        for disposition in [
+            Some("acquisition"),
+            Some("reformat"),
+            Some("scanner_derived"),
+        ] {
+            assert_eq!(
+                route(disposition, false, &shared, Options::default()),
+                Route::SourceData,
+                "{disposition:?}"
+            );
+        }
+        let purist = Options {
+            synthetic: Synthetic::Derivatives,
+            ..Options::default()
+        };
+        assert_eq!(
+            route(Some("scanner_derived"), true, &shared, purist),
+            Route::SourceData
+        );
+        // and a localizer is still whatever the release said it is
+        assert_eq!(
+            route(Some("scout"), false, &shared, Options::default()),
+            Route::SourceData
         );
     }
 

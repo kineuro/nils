@@ -101,6 +101,14 @@ pub enum Why {
     Missing(&'static str, String),
     /// `func` requires `task`, and no rule can invent one (§9.2).
     NoTask,
+    /// Record 37 S2. Two or more stacks of one subject, session and datatype
+    /// built this same name, and they are not one acquisition done twice, so
+    /// there is no honest name here: `run-` would claim a rescan that never
+    /// happened, and a counter of ours would claim nothing at all while
+    /// looking exactly like one. `differs` is what
+    /// [`super::repeat::one_acquisition`] found between them, which is also
+    /// the evidence a pack extension would need.
+    Shared { others: usize, differs: String },
 }
 
 impl std::fmt::Display for Why {
@@ -117,6 +125,11 @@ impl std::fmt::Display for Why {
             Why::NoTask => {
                 f.write_str("func requires task and nobody has said what the subject was doing")
             }
+            Why::Shared { others, differs } => write!(
+                f,
+                "it would share one BIDS name with {others} other stack(s) of this session: \
+                 {differs}"
+            ),
         }
     }
 }
@@ -131,6 +144,7 @@ impl Why {
             Why::NotInSchema(_, _) => "not_in_schema",
             Why::Missing(_, _) => "missing_entity",
             Why::NoTask => "no_task",
+            Why::Shared { .. } => "shared_name",
         }
     }
 }
@@ -341,12 +355,18 @@ impl Name {
         }
     }
 
-    /// Add `run-<n>`, which is the standard's answer to two acquisitions that
-    /// are otherwise the same thing.
+    /// Add `run-<n>`, which is the standard's word for one acquisition made
+    /// again.
+    ///
+    /// Only the caller may decide that: record 37 S2 measures whether two
+    /// stacks really are one acquisition twice
+    /// ([`super::repeat::one_acquisition`]), and this writes the entity once
+    /// that is settled. Two stacks that merely want one filename are not a
+    /// repeat, and 67 per cent of the indices a counter wrote were that.
     ///
     /// It fails when the group does not admit `run`, which is how a caller
-    /// learns that two stacks it cannot tell apart cannot be told apart in a
-    /// BIDS name either.
+    /// learns that even a true repeat cannot be said in a BIDS name here, and
+    /// that the second stack would otherwise rewrite the first.
     pub fn with_run(&self, n: i64) -> Option<Name> {
         let group = schema::group_of(self.datatype, self.suffix)?;
         if !group.allowed.contains(&"run") {

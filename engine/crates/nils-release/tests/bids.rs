@@ -893,3 +893,213 @@ fn the_informative_mode_says_what_the_entities_say_and_the_bids_one_does_not() {
         "the label says it too, in informative mode: {informative:?}"
     );
 }
+
+/// One session with two names more than one stack wants (record 37, S2).
+///
+/// Two MPRAGE series that agree on everything a fingerprint holds, which is a
+/// site that scanned one protocol twice; and two FLAIR series that agree on
+/// every axis and differ in what they cover, which is the commonest residual
+/// in the archive. Both pairs build one BIDS name each. Nothing here is read
+/// from a corpus: the shapes are the ones the 2026-09-19 studies described.
+fn colliding() -> TempDir {
+    let dir = TempDir::new("bids-collide");
+    let series = [
+        ("1", "t1_mprage_sag", "T1 MPRAGE", "3D", 4),
+        ("2", "t1_mprage_sag", "T1 MPRAGE", "3D", 4),
+        ("3", "t2_flair_tra", "T2 FLAIR", "2D", 4),
+        ("4", "t2_flair_tra", "T2 FLAIR", "2D", 6),
+    ];
+    for (n, description, protocol, acquisition, slices) in series {
+        for slice in 1..=slices {
+            let sop = format!("1.2.3.{n}.{slice}");
+            let mut e = synth::minimal_mr("1.2.3.0", &format!("1.2.3.{n}.0"), &sop);
+            e.extend([
+                synth::text(tags::PATIENT_ID, VR::LO, "19800101-1234"),
+                synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
+                synth::text(tags::SERIES_TIME, VR::TM, "031415"),
+                synth::text(tags::SERIES_DESCRIPTION, VR::LO, description),
+                synth::text(tags::PROTOCOL_NAME, VR::LO, protocol),
+                synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, acquisition),
+                synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+                synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+                synth::text(tags::BODY_PART_EXAMINED, VR::CS, "BRAIN"),
+                synth::text(tags::BURNED_IN_ANNOTATION, VR::CS, "NO"),
+                synth::text(tags::SERIES_NUMBER, VR::IS, n),
+                synth::text(tags::ECHO_TIME, VR::DS, "3"),
+                synth::text(tags::REPETITION_TIME, VR::DS, "2000"),
+                synth::text(tags::FLIP_ANGLE, VR::DS, "9"),
+                synth::us(tags::ROWS, 16),
+                synth::us(tags::COLUMNS, 16),
+                synth::us(tags::BITS_ALLOCATED, 16),
+                synth::us(tags::BITS_STORED, 12),
+                synth::us(tags::HIGH_BIT, 11),
+                synth::us(tags::PIXEL_REPRESENTATION, 0),
+                synth::us(tags::SAMPLES_PER_PIXEL, 1),
+                synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME2"),
+                synth::text(tags::PIXEL_SPACING, VR::DS, "1.0\\1.0"),
+                synth::text(tags::SLICE_THICKNESS, VR::DS, "1.0"),
+                synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, "1\\0\\0\\0\\1\\0"),
+                synth::text(
+                    tags::IMAGE_POSITION_PATIENT,
+                    VR::DS,
+                    &format!("0\\0\\{slice}"),
+                ),
+                // S1 reads the coverage from here, so the fixture says where
+                // its slices are the way a scanner does.
+                synth::text(tags::SLICE_LOCATION, VR::DS, &slice.to_string()),
+                synth::text(tags::INSTANCE_NUMBER, VR::IS, &slice.to_string()),
+                synth::bytes(tags::PIXEL_DATA, VR::OW, vec![0x40u8; 16 * 16 * 2]),
+            ]);
+            dir.file(
+                &format!("{n}/{slice}"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
+    }
+    dir
+}
+
+#[test]
+fn a_site_that_scanned_one_protocol_twice_still_gets_run_indices() {
+    // Record 37 S2. The case `run-` exists for is not lost by the test that
+    // stops it being written everywhere: two series that agree on every fact
+    // the fingerprint holds are one acquisition made again, and that is what
+    // the entity says.
+    let Some(converter) = converter() else { return };
+    let source = colliding();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let report = run::run(
+        &mut reg,
+        &settings(
+            out.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        ),
+    )
+    .unwrap();
+
+    let written = files_under(out.path());
+    // The image itself, not its sidecar, which carries the same stem.
+    let runs: Vec<&String> = written
+        .iter()
+        .filter(|f| f.contains("_run-") && f.ends_with(".nii.gz"))
+        .collect();
+    assert_eq!(runs.len(), 2, "{written:?}");
+    assert!(
+        runs.iter()
+            .all(|f| f.contains("MPRAGE") && f.ends_with("_T1w.nii.gz")),
+        "{runs:?}"
+    );
+    assert!(runs.iter().any(|f| f.contains("_run-1_")), "{runs:?}");
+    assert!(runs.iter().any(|f| f.contains("_run-2_")), "{runs:?}");
+    assert_eq!(report.repeats, 2, "{report:?}");
+}
+
+#[test]
+fn two_acquisitions_that_want_one_name_are_refused_and_a_person_is_asked() {
+    // Record 37 S2. The pair differs in what it covers and in nothing a BIDS
+    // name can say, so no name is written: a `run-2` there would claim a
+    // rescan that never happened, and a validator would pass it. The stacks
+    // are in `sourcedata/` under the informative names of §9.1, which are
+    // unique, and the question says what differs.
+    let Some(converter) = converter() else { return };
+    let source = colliding();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let report = run::run(
+        &mut reg,
+        &settings(
+            out.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        ),
+    )
+    .unwrap();
+
+    // Two names were shared, one by a repeat and one by two acquisitions.
+    assert_eq!(report.shared_names, 2, "{report:?}");
+    assert_eq!(report.repeats, 2, "{report:?}");
+    assert_eq!(report.not_repeats, 2, "{report:?}");
+
+    let written = files_under(out.path());
+    // No FLAIR in the raw tree, under a `run-` or under anything else ...
+    assert!(
+        !written
+            .iter()
+            .any(|f| f.contains("FLAIR") && !f.starts_with("sourcedata/")),
+        "{written:?}"
+    );
+    // ... and both of them under `sourcedata/`, as DICOM, told apart by the
+    // informative names, which are unique.
+    let source_side: Vec<&String> = written
+        .iter()
+        .filter(|f| f.starts_with("sourcedata/") && f.contains("FLAIR"))
+        .collect();
+    assert_eq!(source_side.len(), 10, "{written:?}");
+    let places: std::collections::BTreeSet<&str> = source_side
+        .iter()
+        .filter_map(|f| f.rsplit_once('/').map(|(dir, _)| dir))
+        .collect();
+    assert_eq!(places.len(), 2, "{source_side:?}");
+
+    // And the question, with what differs in it.
+    let asked = |reg: &mut Registry| -> Vec<(serde_json::Value, serde_json::Value)> {
+        let store = reg.store();
+        let sql = format!(
+            "SELECT ref, evidence FROM {} WHERE kind = 'release.shared_name'",
+            store.qualified("review_item"),
+        );
+        store
+            .query(&sql, &[])
+            .unwrap()
+            .iter()
+            .map(|r| {
+                let of = |i: usize| {
+                    serde_json::from_str(r.opt_text(i).unwrap().unwrap_or_default())
+                        .unwrap_or(serde_json::Value::Null)
+                };
+                (of(0), of(1))
+            })
+            .collect()
+    };
+    let items = asked(&mut reg);
+    assert_eq!(items.len(), 1, "one question, and one only");
+    let (reference, evidence) = &items[0];
+    assert_eq!(evidence["stacks"], 2);
+    assert_eq!(evidence["placed"], "sourcedata");
+    assert_eq!(evidence["differs"], serde_json::json!(["what it covers"]));
+    assert_eq!(
+        reference["stack_ids"].as_array().map(Vec::len),
+        Some(2),
+        "the item names both stacks"
+    );
+
+    // And a re-run does not file it again: a release is re-run whenever
+    // anything upstream changes, and stacks that say what they said last time
+    // raise the same question with the same answer. What recurs is the number
+    // in the report.
+    let again = run::run(
+        &mut reg,
+        &settings(
+            out.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        ),
+    )
+    .unwrap();
+    assert_eq!(again.not_repeats, 2, "{again:?}");
+    assert_eq!(asked(&mut reg).len(), 1, "the question is filed once");
+}

@@ -58,6 +58,16 @@ impl Source {
             Source::Unmeasured => "none",
         }
     }
+
+    /// The name read back, for a reader of the row rather than its writer. A
+    /// word this never wrote reads as unmeasured, which is what a row from an
+    /// older derivation is.
+    pub fn parse(text: &str) -> Source {
+        match text {
+            "slice_location" => Source::SliceLocation,
+            _ => Source::Unmeasured,
+        }
+    }
 }
 
 /// A stack's coverage along the slice axis.

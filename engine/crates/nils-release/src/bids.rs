@@ -12,4 +12,5 @@ pub mod convert;
 pub mod dataset;
 pub mod name;
 pub mod place;
+pub mod repeat;
 pub mod schema;

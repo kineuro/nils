@@ -4688,6 +4688,16 @@ fn about(item: &serde_json::Value) -> String {
             s(&e["shape"]),
             s(&e["place"])
         ),
+        // Record 37 S2: a BIDS name more than one acquisition wanted. What a
+        // person is asked is which of them it belongs to, or whether the pack
+        // needs an axis for what differs.
+        "release.shared_name" => format!(
+            "{} stack(s) would share one {} name and are not repeats of one another: {}; they \
+             are in sourcedata/ under their informative names",
+            e["stacks"],
+            s(&e["suffix"]),
+            s(&e["why"])
+        ),
         _ if s(&item["scope"]) == "group" => format!(
             "{} stack(s): {} = {} ({})",
             item["members"],
@@ -8270,6 +8280,26 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         }
         for (why, n) in &report.nowhere {
             println!("      {n:>10}   nowhere: {why}");
+        }
+        // Record 37 S2. A `run-` index is a claim that one acquisition was
+        // made twice, and the three numbers behind every one of them are
+        // printed because the failure they replace was silent: a counter
+        // looks the same whether it is true or invented.
+        if report.shared_names > 0 {
+            println!("  one name, more than one stack");
+            println!(
+                "      {:>10}   name(s) two or more stacks of one session and datatype built",
+                report.shared_names
+            );
+            println!(
+                "      {:>10}   stack(s) measurably one acquisition made again, told apart by run-",
+                report.repeats
+            );
+            println!(
+                "      {:>10}   stack(s) that are not: no BIDS name, in sourcedata/ under their \
+                 informative names, each a review item",
+                report.not_repeats
+            );
         }
         for (why, n) in &report.unconvertible {
             println!("      {n:>10}   written as DICOM instead: {why}");

@@ -165,6 +165,21 @@ pub struct Report {
     /// not invent one. `identity.no_study` is the open question that says
     /// the same thing about the same subjects.
     pub without_a_session: BTreeMap<String, i64>,
+    /// Record 37 S2, the three numbers behind every `run-` index the tree
+    /// carries: how many BIDS names two or more stacks of one subject,
+    /// session and datatype built; how many of those stacks are one
+    /// acquisition measured again, which is what `run-` says; and how many
+    /// are not, and were refused the name and written to `sourcedata/` under
+    /// their informative ones instead, each with a question against it.
+    ///
+    /// Said out loud because the failure it replaces was silent: a counter
+    /// writes `run-2` whether or not there was a second run, and two thirds
+    /// of the indices measured over record 34's corpus were the second case.
+    /// Zero everywhere but a BIDS run, which is the only layout that spells
+    /// a `run-`.
+    pub shared_names: i64,
+    pub repeats: i64,
+    pub not_repeats: i64,
     /// Stacks by the route of §9.3 they took.
     pub routes: BTreeMap<String, i64>,
     /// And, for the ones that went nowhere, why. Never a silent drop.
@@ -587,7 +602,8 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // borrowing the sessions of whoever owns the study its series were filed
     // under.
     let with_a_study = subjects_with_a_study(registry.store())?;
-    let named = places(registry.store(), &by_study, settings.pack, settings.naming)?;
+    let (named, shared) =
+        places(registry.store(), &by_study, settings.pack, settings.naming)?;
     // §9.4 with record 37 S6: where in the body, for the sidecar, by stack.
     // The name carries it too, because two files must not overwrite each
     // other; this is the slot the standard keeps the fact in.
@@ -630,6 +646,21 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             .collect(),
         session_naming,
         on_unknown: settings.on_unknown.name().to_string(),
+        // Record 37 S2. Only a BIDS run spells a `run-`, so only a BIDS run
+        // reports on one: the descriptive layout names every stack and needs
+        // no index at all.
+        shared_names: match settings.layout {
+            Layout::Bids => shared.names,
+            Layout::Descriptive => 0,
+        },
+        repeats: match settings.layout {
+            Layout::Bids => shared.repeats,
+            Layout::Descriptive => 0,
+        },
+        not_repeats: match settings.layout {
+            Layout::Bids => shared.refused,
+            Layout::Descriptive => 0,
+        },
         ..Report::default()
     };
     // one remapping for the run, hung from the run's root, handed to the
@@ -1211,6 +1242,11 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     if !held.is_empty() {
         raise_review(registry.store(), &report, &held, &pixels)?;
     }
+    // Record 37 S2. A refusal on its own would be blunt; the question is what
+    // carries it, and it is also where the missing axis gets named.
+    if settings.layout == Layout::Bids && !shared.groups.is_empty() {
+        raise_shared(registry.store(), &report, &shared.groups)?;
+    }
     // §9.2. `func` requires `task` and no rule can invent one, so a person is
     // asked, **per study**: what the subject was doing is a property of the
     // occasion and not of a stack, and one answer settles every functional
@@ -1691,7 +1727,17 @@ fn write_dataset(
     )?;
     std::fs::write(
         root.join("README"),
-        dataset::readme(settings.name, &made_by, &report.routes, &report.nowhere),
+        dataset::readme(
+            settings.name,
+            &made_by,
+            &report.routes,
+            &report.nowhere,
+            crate::bids::dataset::Repeats {
+                names: report.shared_names,
+                repeats: report.repeats,
+                refused: report.not_repeats,
+            },
+        ),
     )?;
 
     // One row per subject the release wrote, and nothing about them that the
@@ -3201,7 +3247,7 @@ fn places(
     by_study: &HashMap<i64, nils_session::Labelled>,
     pack: &nils_pack::pack::Pack,
     naming: crate::name::Naming,
-) -> Result<HashMap<i64, Placed>, Error> {
+) -> Result<(HashMap<i64, Placed>, Shared), Error> {
     let axes = axis_values(store)?;
     let t = table("stack_fingerprint");
     let d = store.dialect();
@@ -3217,13 +3263,27 @@ fn places(
     let sql = format!(
         "SELECT f.stack_id, f.subject_id, f.study_id, f.series_id, f.stacks_in_series, \
                 f.stack_index, {}, {}, {}, {}, {}, \
-                f.inversion_time, f.dwi_b_value, f.dwi_directions \
+                f.inversion_time, f.dwi_b_value, f.dwi_directions, \
+                {}, {}, f.n_slices, f.slice_span_mm, f.echo_time, f.repetition_time, \
+                f.flip_angle, f.echo_train_length, f.number_of_averages, \
+                f.slice_thickness, f.spacing_between_slices, {}, f.rows, f.columns, \
+                {}, {}, {}, {} \
          FROM {} f ORDER BY f.stack_id",
         text("orientation"),
         text("split_reason"),
         text("echo_numbers"),
         text("mr_acquisition_type"),
         text("dwi_pe_direction"),
+        // Record 37 S2: what the repeat test reads. The protocol name in the
+        // folded and lower-cased spelling, because the test compares it and
+        // never writes it, and the two backends fold the same way there.
+        text("text_protocol_name_ci"),
+        text("receive_coil_name"),
+        text("acquisition_matrix"),
+        text("scan_options"),
+        text("scanning_sequence"),
+        text("sequence_variant"),
+        text("coverage_source"),
         store.qualified("stack_fingerprint"),
     );
 
@@ -3249,6 +3309,9 @@ fn places(
     type Ordered = Vec<(i64, i64, i64, String)>;
     let mut bids_buckets: BTreeMap<(i64, String, &'static str), Ordered> = BTreeMap::new();
     let mut extra: HashMap<i64, (bool, Option<String>, Option<String>)> = HashMap::new();
+    // Record 37 S2: what the repeat test reads of each stack, kept for the
+    // stacks that turn out to collide, which is the only place it is asked.
+    let mut acquisitions: HashMap<i64, crate::bids::repeat::Acquisition> = HashMap::new();
 
     for r in &rows {
         let stack = r.int(0)?;
@@ -3370,6 +3433,42 @@ fn places(
                 body_part.clone(),
             ),
         );
+        // Record 37 S2. Every axis the pack decided, not only the ones a name
+        // spells: the point of the test is to ask whether two stacks are one
+        // acquisition, and an axis that does not reach a filename still says
+        // they are two things.
+        acquisitions.insert(
+            stack,
+            crate::bids::repeat::Acquisition {
+                series: r.int(3)?,
+                axes: a.clone(),
+                coverage: nils_classify::coverage::Coverage {
+                    n_slices: r.opt_int(16)?,
+                    span_mm: r.opt_double(17)?,
+                    source: match r.opt_text(31)? {
+                        Some(t) => nils_classify::coverage::Source::parse(t),
+                        None => nils_classify::coverage::Source::Unmeasured,
+                    },
+                },
+                coil: r.opt_text(15)?.map(str::to_string),
+                protocol: r.opt_text(14)?.map(str::to_string),
+                echo_time: r.opt_double(18)?,
+                repetition_time: r.opt_double(19)?,
+                inversion_time: r.opt_double(11)?,
+                flip_angle: r.opt_double(20)?,
+                b_value: r.opt_double(12)?,
+                averages: r.opt_double(22)?,
+                slice_thickness: r.opt_double(23)?,
+                slice_spacing: r.opt_double(24)?,
+                echo_train_length: r.opt_int(21)?,
+                matrix: r.opt_text(25)?.map(str::to_string),
+                rows: r.opt_int(26)?,
+                columns: r.opt_int(27)?,
+                scan_options: r.opt_text(28)?.map(str::to_string),
+                scanning_sequence: r.opt_text(29)?.map(str::to_string),
+                sequence_variant: r.opt_text(30)?.map(str::to_string),
+            },
+        );
         if let Ok(n) = &built {
             bids_buckets
                 .entry((subject, label.clone(), n.datatype))
@@ -3394,31 +3493,103 @@ fn places(
             });
     }
 
-    // Two acquisitions that are otherwise the same thing are what `run-` is
-    // for, and the standard has no other answer. In a fixed order, so that two
-    // runs of one version agree: by series, then by the stack's index in it,
-    // then by its id.
+    // Record 37 S2. Where two stacks of one subject, session and datatype
+    // build one name, `run-` is written only when they are measurably one
+    // acquisition done twice (`bids::repeat`). Where they are not, no name is
+    // written at all: the stack is refused with what differs, `§9.3` routes it
+    // to `sourcedata/` under its informative name, and a person is asked.
+    //
+    // What this replaces is a counter, and the counter is why: of the 403
+    // stacks that took a `run-` index over record 34's corpus, 270 sat in a
+    // name that covered more than one acquisition. A `run-2` that is really a
+    // different echo time is a claim no validator can catch.
+    //
+    // In a fixed order, so that two runs of one version agree: by series, then
+    // by the stack's index in it, then by its id.
+    let mut shared = Shared::default();
     for bucket in bids_buckets.values_mut() {
         bucket.sort();
-        let mut counts: BTreeMap<&String, i64> = BTreeMap::new();
-        for (_, _, _, stem) in bucket.iter() {
-            *counts.entry(stem).or_insert(0) += 1;
-        }
-        let mut seen: BTreeMap<String, i64> = BTreeMap::new();
+        let mut groups: BTreeMap<&String, Vec<i64>> = BTreeMap::new();
         for (_, _, stack, stem) in bucket.iter() {
-            if counts.get(stem).copied().unwrap_or(0) < 2 {
-                continue;
-            }
-            let n = seen.entry(stem.clone()).or_insert(0);
-            *n += 1;
-            // A group the standard gives no `run` to is one where two stacks
-            // cannot be told apart in a BIDS name either. Left as it is, which
-            // makes the second a rewrite of the first and is caught by the
-            // collision check rather than hidden by a counter.
-            if let Some(name) = bids.get(stack).and_then(|b| b.as_ref().ok())
-                && let Some(with) = name.with_run(*n)
-            {
-                bids.insert(*stack, Ok(with));
+            groups.entry(stem).or_default().push(*stack);
+        }
+        for (_, group) in groups.iter().filter(|(_, g)| g.len() > 1) {
+            shared.names += 1;
+            let members: Vec<&crate::bids::repeat::Acquisition> =
+                group.iter().filter_map(|s| acquisitions.get(s)).collect();
+            // A stack with no fingerprint row is one nothing can be measured
+            // about, and a claim nothing was measured for is not one to make.
+            let measurable = members.len() == group.len();
+            let differs = match measurable {
+                true => crate::bids::repeat::one_acquisition(&members),
+                false => vec!["one of them has no fingerprint".to_string()],
+            };
+            // A group the standard gives no `run` to has no answer even when
+            // it is a true repeat: the second stack would rewrite the first,
+            // silently, which is the bug this slice exists to stop.
+            let admits_run = group.iter().all(|stack| {
+                bids.get(stack)
+                    .and_then(|b| b.as_ref().ok())
+                    .is_some_and(|n| n.with_run(1).is_some())
+            });
+            let refuse = if !measurable {
+                Some(
+                    "one of them has no fingerprint, so nothing about them can be compared"
+                        .to_string(),
+                )
+            } else if !differs.is_empty() {
+                let mut said = differs.clone();
+                let last = said.pop().unwrap_or_default();
+                Some(format!(
+                    "they are not repeats of one another: {}",
+                    match said.is_empty() {
+                        true => format!("{last} differs"),
+                        false => format!("{} and {last} differ", said.join(", ")),
+                    }
+                ))
+            } else if !admits_run {
+                Some(format!(
+                    "they are one acquisition measured {} times, and BIDS gives this suffix no \
+                     run entity, so one of them would rewrite the other",
+                    group.len()
+                ))
+            } else {
+                None
+            };
+            match refuse {
+                None => {
+                    shared.repeats += group.len() as i64;
+                    for (n, stack) in group.iter().enumerate() {
+                        if let Some(name) = bids.get(stack).and_then(|b| b.as_ref().ok())
+                            && let Some(with) = name.with_run(n as i64 + 1)
+                        {
+                            bids.insert(*stack, Ok(with));
+                        }
+                    }
+                }
+                Some(why) => {
+                    shared.refused += group.len() as i64;
+                    let suffix = group
+                        .iter()
+                        .find_map(|s| bids.get(s).and_then(|b| b.as_ref().ok()))
+                        .map(|n| n.suffix)
+                        .unwrap_or("");
+                    shared.groups.push(SharedGroup {
+                        stacks: group.clone(),
+                        suffix: suffix.to_string(),
+                        differs: differs.clone(),
+                        why: why.clone(),
+                    });
+                    for stack in group {
+                        bids.insert(
+                            *stack,
+                            Err(crate::bids::name::Why::Shared {
+                                others: group.len() - 1,
+                                differs: why.clone(),
+                            }),
+                        );
+                    }
+                }
             }
         }
     }
@@ -3443,7 +3614,42 @@ fn places(
             );
         }
     }
-    Ok(out)
+    Ok((out, shared))
+}
+
+/// What the collision test of record 37 S2 found, for the report and the
+/// review queue.
+///
+/// Counted because a silent change here is what caused the problem: a run
+/// index looks exactly the same whether it is true or invented, so a release
+/// that issues one says how many it issued, against how many names were
+/// shared, and how many stacks it would not name at all.
+#[derive(Debug, Default)]
+struct Shared {
+    /// BIDS names that two or more stacks of one subject, session and
+    /// datatype built.
+    names: i64,
+    /// Stacks under those names that are one acquisition measured again, and
+    /// took a `run-` index.
+    repeats: i64,
+    /// Stacks that are not, refused the name and routed to `sourcedata/`.
+    refused: i64,
+    /// One per refused group, for the questions.
+    groups: Vec<SharedGroup>,
+}
+
+/// A name more than one acquisition wanted.
+#[derive(Debug)]
+struct SharedGroup {
+    stacks: Vec<i64>,
+    suffix: String,
+    /// What the test found between them, field by field, which is also the
+    /// evidence a pack extension would need: "these four differ in their
+    /// velocity encoding, which the pack has no axis for" arrives from the
+    /// data rather than from a chair.
+    differs: Vec<String>,
+    /// The same thing as a sentence, which is what a person reads.
+    why: String,
 }
 
 /// Where one stack goes, in both layouts (§9).
@@ -3684,6 +3890,94 @@ fn raise_review(
             ]
         })
         .collect();
+    store.begin()?;
+    let result = store.insert(
+        &Insert::new(
+            table("review_item"),
+            &["kind", "scope", "ref", "evidence", "status", "created_at"],
+        ),
+        &rows,
+    );
+    match result {
+        Ok(_) => {
+            store.commit()?;
+            Ok(())
+        }
+        Err(e) => {
+            store.rollback().ok();
+            Err(Error::Store(e))
+        }
+    }
+}
+
+/// One question per name that more than one acquisition wanted (record 37
+/// S2).
+///
+/// The item names every stack under the name, the suffix they wanted, and
+/// what the repeat test found between them, because a refusal a person cannot
+/// act on is only a hole. It is also the evidence a pack extension needs:
+/// "these four differ in a velocity encoding, which the pack has no axis for"
+/// arrives from the data rather than from a chair, and the list of fields is
+/// exactly that sentence.
+///
+/// **Once per group, not once per release**, on the same argument as
+/// [`raise_review`]: a release is re-run whenever anything upstream changes,
+/// and stacks whose files say what they said last time raise the same
+/// question with the same answer. A group already asked about, answered or
+/// not, is not asked about again; what recurs is the number in the report.
+fn raise_shared(store: &mut Store, report: &Report, groups: &[SharedGroup]) -> Result<(), Error> {
+    let now = now_iso();
+    let reference = table("review_item")
+        .column("ref")
+        .expect("review_item.ref is a column");
+    let sql = format!(
+        "SELECT {} FROM {} WHERE kind = 'release.shared_name'",
+        store.dialect().text_of(reference),
+        store.qualified("review_item"),
+    );
+    let mut asked: std::collections::HashSet<Vec<i64>> = std::collections::HashSet::new();
+    for r in store.query(&sql, &[])? {
+        let Some(text) = r.opt_text(0)? else { continue };
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text)
+            && let Some(stacks) = v["stack_ids"].as_array()
+        {
+            asked.insert(
+                stacks
+                    .iter()
+                    .filter_map(serde_json::Value::as_i64)
+                    .collect(),
+            );
+        }
+    }
+    let rows: Vec<Vec<Param>> = groups
+        .iter()
+        .filter(|g| !asked.contains(&g.stacks))
+        .map(|g| {
+            vec![
+                Param::from("release.shared_name"),
+                Param::from("stacks"),
+                Param::from(
+                    serde_json::json!({"stack_ids": g.stacks, "suffix": g.suffix}).to_string(),
+                ),
+                Param::from(
+                    serde_json::json!({
+                        "release": report.release_id,
+                        "stacks": g.stacks.len(),
+                        "suffix": g.suffix,
+                        "differs": g.differs,
+                        "why": g.why,
+                        "placed": "sourcedata",
+                    })
+                    .to_string(),
+                ),
+                Param::from("open"),
+                Param::from(now.as_str()),
+            ]
+        })
+        .collect();
+    if rows.is_empty() {
+        return Ok(());
+    }
     store.begin()?;
     let result = store.insert(
         &Insert::new(
