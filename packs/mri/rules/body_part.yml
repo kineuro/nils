@@ -3,6 +3,12 @@
 # The precedence v0 applies once it knows which categories the text
 # mentions: a spine wins outright, a neck beside a brain is both, and
 # otherwise the neck comes before the brain.
+#
+# Every clause here reads `anatomy_text` and not `search_text`: the words
+# this axis is made of are the words the other normalizer drops as
+# boilerplate (`normalize-anatomy.yml`). A stack whose `BodyPartExamined`
+# says BRAIN or HEAD said what it is, and the rule reads it before anything
+# removes it.
 
 rule_set: body_part
 decides: [body_part]
@@ -14,26 +20,26 @@ rules:
 
   spine:
     clauses:
-      - {keywords: ['spine', 'spinal', 'spinal cord', 'cervical', 'cerv', 'thoracic', 'thor ', 'lumbar', 'lumb', 'c-spine', 't-spine', 'l-spine', 'vertebral', 'vertebra', 'cord', 'medulla', 'rygg', 'ryggm rg', 'halsrygg', 'br strygg', 'brostrygg', 'l ndrygg', 'lumbalrygg', 'totalcolumna', 'columna', 'sag cc', 'th col', 'wirbel', 'hws', 'bws', 'lws', 'wirbels ule', 'rachis', 'cervicale', 'dorsale', 'lombaire', 'moelle', 'wervelkolom', 'ruggengraat', 'myelit', 'myelopathy', 'syringomyelia'], tier: keywords}
+      - {field: anatomy_text, keywords: ['spine', 'spinal', 'spinal cord', 'cervical', 'cerv', 'thoracic', 'thor ', 'lumbar', 'lumb', 'c-spine', 't-spine', 'l-spine', 'vertebral', 'vertebra', 'cord', 'medulla', 'rygg', 'ryggm rg', 'halsrygg', 'br strygg', 'brostrygg', 'l ndrygg', 'lumbalrygg', 'totalcolumna', 'columna', 'sag cc', 'th col', 'wirbel', 'hws', 'bws', 'lws', 'wirbels ule', 'rachis', 'cervicale', 'dorsale', 'lombaire', 'moelle', 'wervelkolom', 'ruggengraat', 'myelit', 'myelopathy', 'syringomyelia'], tier: keywords}
     set: {body_part: spine}
     confidence: 0.65
     why: 'a spine mentioned at all decides it, even beside a brain'
 
   brain_neck:
     clauses:
-      - {when: {all: [{text: search_text, any_substring: ['neck', 'nacke', 'hals', 'nakke', 'nek', 'cou']}, {text: search_text, any_substring: ['fmri', 'bold', 'resting state', 'rs-fmri', 'task-fmri', 'rest-fmri', 'rsfmri', 'rfmri', 'hippocampus', 'amygdala', 'thalamus', 'putamen', 'caudate', 'cortex', 'cortical', 'subcortical', 'white matter', 'gray matter', 'grey matter', 'corpus callosum', 'cerebral', 'cerebellum', 'cerebellar', 'frontal', 'parietal', 'temporal', 'occipital', 'brainstem', 'midbrain', 'pons', 'brain', 'head', 'neuro', 'hcp', 'adni', 'abcd', 'hj rna', 'hjarna', 'huvud', 'kopf', 'gehirn', 'hirn', 'sch del', 'schadel', 'cerveau', 'encephale', 'cr ne', 'crane', 'hersenen', 'hoofd']}]}, cite: 'a neck and a brain', source: text, tier: keywords}
+      - {when: {all: [{text: anatomy_text, any_substring: ['neck', 'nacke', 'hals', 'nakke', 'nek', 'cou']}, {text: anatomy_text, any_substring: ['fmri', 'bold', 'resting state', 'rs-fmri', 'task-fmri', 'rest-fmri', 'rsfmri', 'rfmri', 'hippocampus', 'amygdala', 'thalamus', 'putamen', 'caudate', 'cortex', 'cortical', 'subcortical', 'white matter', 'gray matter', 'grey matter', 'corpus callosum', 'cerebral', 'cerebellum', 'cerebellar', 'frontal', 'parietal', 'temporal', 'occipital', 'brainstem', 'midbrain', 'pons', 'brain', 'head', 'neuro', 'hcp', 'adni', 'abcd', 'hj rna', 'hjarna', 'huvud', 'kopf', 'gehirn', 'hirn', 'sch del', 'schadel', 'cerveau', 'encephale', 'cr ne', 'crane', 'hersenen', 'hoofd']}]}, cite: 'a neck and a brain', source: text, tier: keywords}
     set: {body_part: brain-neck}
     confidence: 0.65
 
   neck:
     clauses:
-      - {keywords: ['neck', 'nacke', 'hals', 'nakke', 'nek', 'cou'], tier: keywords}
+      - {field: anatomy_text, keywords: ['neck', 'nacke', 'hals', 'nakke', 'nek', 'cou'], tier: keywords}
     set: {body_part: neck}
     confidence: 0.65
 
   brain:
     clauses:
-      - {keywords: ['fmri', 'bold', 'resting state', 'rs-fmri', 'task-fmri', 'rest-fmri', 'rsfmri', 'rfmri', 'hippocampus', 'amygdala', 'thalamus', 'putamen', 'caudate', 'cortex', 'cortical', 'subcortical', 'white matter', 'gray matter', 'grey matter', 'corpus callosum', 'cerebral', 'cerebellum', 'cerebellar', 'frontal', 'parietal', 'temporal', 'occipital', 'brainstem', 'midbrain', 'pons', 'brain', 'head', 'neuro', 'hcp', 'adni', 'abcd', 'hj rna', 'hjarna', 'huvud', 'kopf', 'gehirn', 'hirn', 'sch del', 'schadel', 'cerveau', 'encephale', 'cr ne', 'crane', 'hersenen', 'hoofd'], tier: keywords}
+      - {field: anatomy_text, keywords: ['fmri', 'bold', 'resting state', 'rs-fmri', 'task-fmri', 'rest-fmri', 'rsfmri', 'rfmri', 'hippocampus', 'amygdala', 'thalamus', 'putamen', 'caudate', 'cortex', 'cortical', 'subcortical', 'white matter', 'gray matter', 'grey matter', 'corpus callosum', 'cerebral', 'cerebellum', 'cerebellar', 'frontal', 'parietal', 'temporal', 'occipital', 'brainstem', 'midbrain', 'pons', 'brain', 'head', 'neuro', 'hcp', 'adni', 'abcd', 'hj rna', 'hjarna', 'huvud', 'kopf', 'gehirn', 'hirn', 'sch del', 'schadel', 'cerveau', 'encephale', 'cr ne', 'crane', 'hersenen', 'hoofd'], tier: keywords}
     set: {body_part: brain}
     confidence: 0.65
 

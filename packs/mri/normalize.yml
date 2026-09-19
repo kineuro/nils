@@ -27,7 +27,13 @@ characters:
   to_space: ['/', '\', '(', ')', '[', ']', ',', ';', ':', '^', '=']
   remove: ['''', '"']
 
-# Boilerplate that means nothing, dropped after de-duplication.
+# Boilerplate that means nothing to the axes this text is searched by,
+# dropped after de-duplication. `brain` and `head` are here because a
+# description that says brain says nothing about which sequence it is, and
+# because dropping a word puts its neighbours next to each other, where a
+# two-word keyword can match. They mean everything to the body-part axis,
+# which is why that axis reads `anatomy_text` instead (normalize-anatomy.yml)
+# rather than this list being shortened for it.
 token_removals: ['RÖR PÅ DXSIN SE PÄRM', 'EPILEPSI', 'eplipsi', 'hjärtsekvens', 'Startsekvens', 'ENCEPHALIT', 'swift', 'brain', 'BRAIN', 'HEAD', 'head', 'Direkt', 'direct', 'direkt', 'MESEMS', 'SistaTestet', 'faser']
 
 # Ambiguous short tokens expanded so a keyword can be matched as a plain

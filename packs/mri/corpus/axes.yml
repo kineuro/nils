@@ -105,10 +105,11 @@ cases:
     axes:
       construct: ND
 
-  # The word that decided this one in the gate: the normalizer drops `brain`
+  # The word that decided this one in the gate: `search_text` drops `brain`
   # and `head` as boilerplate, which is right for telling techniques apart,
   # so what says brain here is the Swedish for it, with the non-ASCII folded
-  # to a space exactly as the keyword list spells it.
+  # to a space exactly as the keyword list spells it. The body-part axis no
+  # longer depends on that accident; the cases below are why.
   - name: a description in Swedish says which body part it is
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
@@ -117,4 +118,66 @@ cases:
       echo_time: 100
       repetition_time: 4000
     axes:
+      body_part: brain
+
+  # --- the body part the file states (record 35, S2). The body-part rules
+  # read `anatomy_text`, which drops nothing, so a stack whose
+  # `BodyPartExamined` says so in English gets a body part even where the
+  # description says nothing about anatomy at all.
+
+  - name: a stated body part of BRAIN,HEAD is a brain, whatever the description says
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'BRAIN,HEAD'
+      text_series_description: 'ax t2 tse'
+      text_sequence_name: '*tse2d1_15'
+      scanning_sequence: 'SE'
+      echo_time: 100
+      repetition_time: 4000
+    axes:
+      body_part: brain
+
+  - name: a stated body part of HEAD alone is a brain
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'HEAD'
+      text_series_description: 'sag 3d t1'
+    axes:
+      body_part: brain
+
+  - name: a spine and a neck stated together are a spine, as they always were
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'SPINE,NECK'
+      text_series_description: 'sag t2 tse'
+    axes:
+      body_part: spine
+
+  - name: a neck stated beside a brain is both
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'BRAIN,NECK'
+      text_series_description: 'cor t1 tse'
+    axes:
+      body_part: brain-neck
+
+  - name: a body part whose accented letter came through damaged still decides
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'MR hj?rna'
+      text_series_description: 'ax t2 tse'
+    axes:
+      body_part: brain
+
+  - name: the boilerplate is still boilerplate to the axes it was written for
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      text_body_part: 'BRAIN,HEAD'
+      text_series_description: 'sag brain T1 mprage'
+      text_sequence_name: '*tfl3d1_16'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+    axes:
+      technique: MPRAGE
       body_part: brain

@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The anatomy text: the same six fields, folded and tokenized the same way,
+# with nothing dropped as boilerplate (spec section 6.4).
+#
+# `search_text` removes `brain` and `head` as noise, which is right for the
+# axes that tell techniques and constructs apart: a series description that
+# says brain says nothing about which sequence it is, and dropping it puts
+# the words around it next to each other, where a two-word keyword can match.
+# It is not right for the axis whose whole question is which body part this
+# is, and on a corpus where `BodyPartExamined` says `BRAIN,HEAD` on 636
+# stacks it is the difference between a body part and none.
+#
+# So the removals stay where they earn their keep and the body-part rules
+# read this instead: what a normalizer strips for one purpose does not
+# decide another.
+
+normalize: anatomy_text
+from:
+  - text_series_description
+  - text_protocol_name
+  - text_sequence_name
+  - text_body_part
+  - text_series_comments
+  - text_image_comments
+
+# No `raw_removals`, no `token_removals` and no replacements: every step that
+# is a fact about text rather than a claim about MRI runs anyway. Lower
+# casing, the fold of everything outside `a-z0-9_` to a space, the tokenizing
+# and the de-duplication are steps 4 to 7, so `BRAIN,HEAD` arrives as
+# `brain head` and the damaged `MR hj?rna` as `mr hj rna`, which is how the
+# keyword lists spell their accented words.
+token_removals: []
