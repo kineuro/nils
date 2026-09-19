@@ -487,6 +487,59 @@ fn a_row_an_earlier_derivation_wrote_is_derived_again() {
     }
 }
 
+/// Record 37 S3: a series split over two coils, and one stack whose files
+/// never name a coil at all, which is about half of a legacy archive.
+#[test]
+fn a_stack_records_the_coil_it_was_split_on() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("coil");
+        let base = [
+            elem(tags::SERIES_DESCRIPTION, VR::LO, "ax t2"),
+            elem(tags::REPETITION_TIME, VR::DS, "4000"),
+            elem(tags::ECHO_TIME, VR::DS, "90"),
+            synth::num(tags::ROWS, VR::US, 256.0),
+            synth::num(tags::COLUMNS, VR::US, 256.0),
+            elem(tags::PIXEL_SPACING, VR::DS, "1\\1"),
+        ];
+        let mut head = base.to_vec();
+        head.push(elem(tags::RECEIVE_COIL_NAME, VR::SH, "HEAD"));
+        let mut body = base.to_vec();
+        body.push(elem(tags::RECEIVE_COIL_NAME, VR::SH, "BODY"));
+        dir.file("k/1", &mr("A", "A.1", "A.1.1", "P1", &head));
+        dir.file("k/2", &mr("A", "A.1", "A.1.2", "P1", &body));
+        dir.file("k/3", &mr("A", "A.2", "A.2.1", "P1", &base));
+
+        let mut reg = lab.open();
+        digest(&settings(&dir), &mut reg).unwrap();
+        run(&mut reg, &Settings::default(), &Cancel::new()).unwrap();
+
+        let mut found: Vec<(Option<String>, Option<String>)> = rows(
+            &mut reg,
+            "SELECT receive_coil_name, split_reason FROM {stack_fingerprint}",
+        )
+        .iter()
+        .map(|r| {
+            (
+                r.opt_text(0).unwrap().map(str::to_string),
+                r.opt_text(1).unwrap().map(str::to_string),
+            )
+        })
+        .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                (None, None),
+                (Some("BODY".into()), Some("multi_coil".into())),
+                (Some("HEAD".into()), Some("multi_coil".into())),
+            ],
+            "{name}: each stack carries the coil it was split on, and a stack \
+             whose files name none carries none"
+        );
+    }
+}
+
 #[test]
 fn a_split_series_says_why_it_split() {
     for lab in labs() {

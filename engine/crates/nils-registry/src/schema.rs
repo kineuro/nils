@@ -741,6 +741,14 @@ fn build_registry() -> Vec<Table> {
                 col("slice_span_mm", Type::Double),
                 col("coverage_source", Type::Text),
                 col("acquisition_matrix", Type::Text),
+                // Record 37 S3: which coil received the signal. A series is
+                // already split into one stack per coil, so the digest reads
+                // the value, uses it to decide that these are two stacks, and
+                // then keeps it nowhere a classifier or a name can reach: the
+                // engine manufactured a difference it could not say. From the
+                // stack's own row and never the series', because the series
+                // holds one of the coils its stacks were split over.
+                col("receive_coil_name", Type::Text),
                 // Which derivation wrote the row. The fingerprint is a cache
                 // of the registry's own columns, so a build that learned a
                 // new fact has to rewrite what an older one left: a row

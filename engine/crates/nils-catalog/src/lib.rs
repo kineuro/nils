@@ -772,6 +772,16 @@ fn fixed_fields() -> Vec<Field> {
         ),
         f(
             "stack",
+            "receive_coil_name",
+            "text",
+            Technical,
+            false,
+            true,
+            "fingerprint",
+            "the coil that received the signal, as the file names it; absent on about half the stacks of a legacy archive",
+        ),
+        f(
+            "stack",
             "mr_acquisition_type",
             "text",
             Technical,

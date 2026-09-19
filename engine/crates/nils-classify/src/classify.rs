@@ -121,6 +121,7 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("field_strength_unit", "field_strength_unit"),
     ("coverage_source", "coverage_source"),
     ("acquisition_matrix", "acquisition_matrix"),
+    ("receive_coil_name", "receive_coil_name"),
 ];
 
 /// The select that reads one window of fingerprints, ordered by stack. With

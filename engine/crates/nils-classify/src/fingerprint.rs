@@ -19,7 +19,8 @@ use crate::{coverage, derived, dwi, fold};
 /// carrying a hole nobody asked for.
 ///
 /// 1: record 37, S1. The coverage and the acquisition matrix.
-pub const REVISION: i64 = 1;
+/// 2: record 37, S3. The receive coil.
+pub const REVISION: i64 = 2;
 
 /// The stack's own columns, in the order the select reads them.
 const STACK: &[&str] = &[
@@ -39,6 +40,9 @@ const STACK: &[&str] = &[
     "flip_angle",
     "echo_train_length",
     "echo_numbers",
+    // Record 37 S3: the coil the stack was split on, read from the stack's
+    // own row, which is the only row that holds this stack's coil.
+    "receive_coil_name",
 ];
 
 /// The series' columns. `series_comments` is always null (v0 named a keyword
@@ -165,6 +169,7 @@ pub const WRITTEN: &[&str] = &[
     "slice_span_mm",
     "coverage_source",
     "acquisition_matrix",
+    "receive_coil_name",
     "fingerprint_revision",
     "manufacturer",
     "manufacturer_model_name",
@@ -553,6 +558,7 @@ pub fn derive(
         num(cover.span_mm),
         opt(Some(cover.source.name().to_string())),
         opt(text(r, E + 13)?), // acquisition_matrix
+        opt(text(r, 16)?),     // receive_coil_name
         Param::Int(REVISION),
         opt(text(r, M)?),     // manufacturer
         opt(text(r, M + 1)?), // manufacturer_model_name

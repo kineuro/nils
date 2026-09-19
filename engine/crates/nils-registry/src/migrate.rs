@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 46;
+pub const SCHEMA_VERSION: i64 = 47;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,7 +238,22 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 46,
         apply: a_stack_says_what_it_covers,
     },
+    Migration {
+        version: 47,
+        apply: a_stack_says_which_coil_received_it,
+    },
 ];
+
+/// Record 37 S3: the receive coil, which a series is already split on. A
+/// registry from before gains the column empty and fills it on the next
+/// `nils fingerprint`, which derives every stack again because the
+/// derivation's revision moved with it.
+fn a_stack_says_which_coil_received_it(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "stack_fingerprint", &["receive_coil_name"])
+}
 
 /// Record 37 S1: the coverage facts, and the revision that says which
 /// derivation wrote a fingerprint row. A registry from before gains five

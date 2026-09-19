@@ -76,6 +76,8 @@ pub const FIELDS: &[&str] = &[
     "field_strength_unit",
     "coverage_source",
     "acquisition_matrix",
+    // Record 37 S3: the coil a series was already split on.
+    "receive_coil_name",
 ];
 
 /// Where the text half begins.
