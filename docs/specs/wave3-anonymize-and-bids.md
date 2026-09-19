@@ -692,6 +692,14 @@ category table is a menu rather than a policy: a deployment picks from it, and
 nothing in the output says which pick was made. "De-identified" is not a
 property a file can carry without saying under what rule.
 
+Declaring is not printing. Record 35's re-run found the names on the release
+row and in nothing a person reads, so the report said which tags moved and
+never under what rule they moved. The report **names the categories it
+applied**, in the order they were given, and where fewer than all of them
+were applied it names the rest too: what a release left in is the half of
+that sentence an operator has to see. `/api/releases` and
+`nils release --history --json` answer with the same names, off the row.
+
 The four categories that survive from v0 are carried tag for tag: patient (34),
 trial (23), provider (38), institution (5). The default is all of them, because
 the safe set is the one nobody had to think about. Two elements are never

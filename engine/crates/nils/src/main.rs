@@ -8067,6 +8067,28 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             p["from"].as_str().unwrap_or_default()
         );
     }
+    // Record 35: under what rule the file was de-identified. The row has
+    // recorded the categories since they existed and nothing a person reads
+    // printed them, so the report said which tags moved and never why.
+    println!(
+        "  categories       {}",
+        if report.categories.is_empty() {
+            "none; no element was removed by category".to_string()
+        } else {
+            report.categories.join(", ")
+        }
+    );
+    let left: Vec<&str> = tags::Category::every()
+        .into_iter()
+        .map(tags::Category::name)
+        .filter(|name| !report.categories.iter().any(|c| c == name))
+        .collect();
+    if !left.is_empty() {
+        println!(
+            "  not removed      {}; those elements leave the file unchanged",
+            left.join(", ")
+        );
+    }
     // section 4.3: the sessions were numbered because a dataset's dates moved
     if let Some(why) = &report.session_naming {
         println!("  sessions         {why}");
@@ -8291,7 +8313,7 @@ fn releases_doc(
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
-         {policies}, {scheme}, session_naming FROM {}{wheres} \
+         {policies}, {scheme}, session_naming, categories FROM {}{wheres} \
          ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
@@ -8339,6 +8361,14 @@ fn releases_doc(
                 "sessions": sessions.get(&id).copied(),
                 "session_scheme": json(r.opt_text(19)?),
                 "session_naming": r.opt_text(20)?,
+                // Record 35: the categories of element the version removed,
+                // which is the rule its files were de-identified under.
+                "categories": r
+                    .opt_text(21)?
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|name| !name.is_empty())
+                    .collect::<Vec<&str>>(),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;

@@ -102,6 +102,11 @@ pub struct Report {
     pub previous: Option<String>,
     pub root: String,
     pub policy: String,
+    /// Record 35: the categories of element this run removed, by name, in
+    /// the order they were given. "De-identified" is not a property a file
+    /// carries without saying under what rule, and the change list says
+    /// only which tags moved: the rule they moved under is this.
+    pub categories: Vec<String>,
     /// Record 26 §13: the leaving policy applied to each dataset's files,
     /// `[{dataset, dates, uids, from}]`, `dataset` null for the files under
     /// no dataset.
@@ -599,6 +604,11 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         root: settings.root.display().to_string(),
         policy: policies.describe(),
         policies: policies.as_json(),
+        categories: settings
+            .categories
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect(),
         session_naming,
         on_unknown: settings.on_unknown.name().to_string(),
         ..Report::default()
