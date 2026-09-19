@@ -250,3 +250,130 @@ cases:
       repetition_time: 1500
     axes:
       base: ''
+
+  # --- the identities ImageType states (record 37, slice S5). Every stack
+  # below is invented; what is real is the token and the verdict the
+  # 2026-09-19 survey gave it.
+
+  - name: a composed image is not the stations it was stitched from
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\NORM\COMPOSED'
+      text_series_description: 'sag T2 spine'
+    axes:
+      construct: Composed
+
+  - name: the short spellings of composed say the same thing
+    stack:
+      image_type: 'DERIVED\PRIMARY\M\COMP_SP'
+      text_series_description: 'sag T2 spine'
+    axes:
+      construct: Composed
+
+  - name: the echo-combined image is told from the echoes it combined
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\MEAN'
+      text_series_description: 'ax me gre'
+    axes:
+      construct: EchoCombined
+
+  - name: an echo-combined susceptibility image says so through its route
+    stack:
+      image_type: 'DERIVED\PRIMARY\SWI\MEAN'
+      text_series_description: 'ax swi'
+    axes:
+      provenance: SWIRecon
+      construct: EchoCombined,SWI
+
+  - name: a quantitative map says which quantity it is of, and only that one
+    stack:
+      image_type: 'DERIVED\PRIMARY\QMAP\T1'
+      text_series_description: 'qmap'
+    axes:
+      construct: T1map
+
+  - name: the T2 map of the same acquisition is a T2 map and not both
+    stack:
+      image_type: 'DERIVED\PRIMARY\QMAP\T2'
+      text_series_description: 'qmap'
+    axes:
+      construct: T2map
+
+  - name: a map that names no quantity is still a map
+    stack:
+      image_type: 'DERIVED\PRIMARY\QMAP'
+      text_series_description: 'qmap'
+    axes:
+      construct: Qmap
+
+  - name: a flip angle map is a B1 map, which is what BIDS calls it too
+    stack:
+      image_type: 'DERIVED\PRIMARY\FLIP ANGLE MAP'
+      text_series_description: 'b1 calibration'
+    axes:
+      construct: B1map
+
+  - name: a t test map is not an image of the person
+    stack:
+      image_type: 'DERIVED\PRIMARY\TTEST'
+      text_series_description: 'ax perfusion'
+    axes:
+      construct: TTestMap
+
+  - name: the projection spellings with no predicate are projections
+    stack:
+      image_type: 'DERIVED\PRIMARY\MINIMUM'
+      text_series_description: 'cor venogram'
+    axes:
+      construct: MinIP
+
+  - name: a maximum projection spelled out, and one spelled short
+    stack:
+      image_type: 'DERIVED\PRIMARY\HD MIP'
+      text_series_description: 'cor angio'
+    axes:
+      construct: MIP
+
+  - name: a truncated projection value is still a projection
+    stack:
+      image_type: 'DERIVED\PRIMARY\PROJECTION IMAG'
+      text_series_description: 'cor angio'
+    flags:
+      is_projection: true
+    axes:
+      provenance: ProjectionDerived
+
+  - name: the metal artefact technique is a technique, and its composite an image
+    stack:
+      image_type: 'DERIVED\PRIMARY\MAVRIC_COMPOSITE'
+      text_series_description: 'cor hip'
+    axes:
+      technique: MAVRIC
+      construct: Composed
+
+  - name: a derived image made without one of its inputs says so
+    stack:
+      image_type: 'DERIVED\PRIMARY\SWI\NAVAIL'
+      text_series_description: 'ax swi'
+    axes:
+      quality: InputUnavailable
+
+  - name: an image the vendor did not distortion correct says so
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DISTORTED'
+      text_series_description: 'ax t2'
+    axes:
+      quality: Distorted
+
+  - name: and a sound image says nothing on that axis
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      text_series_description: 'ax t2'
+    axes:
+      quality: ''
+
+  - name: the Dixon part was always on the construct axis, whichever part it is
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D\OPP_PHASE'
+      text_series_description: 'ax vibe'
+    axes:
+      construct: OutPhase

@@ -168,3 +168,15 @@ cases:
     axes:
       disposition: scout
       role: ''
+
+  # --- record 37, slice S5: pixels nobody can read
+
+  - name: an encrypted image is not converted, and is not excluded either
+    stack:
+      image_type: 'DERIVED\PRIMARY\ENCRYPTED'
+      text_series_description: 'ax t1'
+      image_role: derived
+    axes:
+      quality: Encrypted
+      convertible: 'no'
+      disposition: acquisition

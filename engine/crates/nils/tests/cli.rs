@@ -1585,7 +1585,7 @@ fn pack_validate_says_what_is_wrong_and_where() {
     assert!(out.status.success(), "{}", stderr(&out));
     let said = stdout(&out);
     assert!(said.contains("mri@"), "{said}");
-    assert!(said.contains("220 predicates"), "{said}");
+    assert!(said.contains("222 predicates"), "{said}");
     assert!(said.contains("cases"), "{said}");
 
     // a pack that is wrong is refused, by file, line and path
@@ -1645,7 +1645,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@0.1.5"),
+            .any(|p| p["pack"] == "mri@0.2.0"),
         "{listed}"
     );
 

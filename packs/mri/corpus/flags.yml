@@ -105,8 +105,10 @@ cases:
     flags:
       has_water: true
       has_dixon: true
-      is_dixon_water: true
       has_fat: false
+    axes:
+      construct: Water
+      modifier: Dixon
 
   - name: the SWI processed flag reaches past the named predicates for SW_M_FFE
     stack:

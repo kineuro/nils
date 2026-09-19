@@ -39,6 +39,7 @@ order:
   - R1map
   - R2map
   - PDmap
+  - Qmap
   - SyntheticT1w
   - SyntheticT2w
   - SyntheticFLAIR
@@ -48,6 +49,9 @@ order:
   - MIP
   - MinIP
   - MPR
+  - Composed
+  - EchoCombined
+  - TTestMap
   - B0map
   - B1map
   - Magnitude
@@ -154,7 +158,16 @@ values:
       - opp phase
     detection:
       exclusive: has_out_phase
+  # The quantitative maps are one exclusion group, and a map that says
+  # which quantity it is of beats one that says only that it is a map. Before
+  # this the group did not exist and `combination: [is_qmap]` stood under
+  # both T1map and T2map, so every stack whose image type said `QMAP` came
+  # out as a T1 map *and* a T2 map whichever it was. The pack has parsed
+  # `QMAP T1`, `QMAP T2` and `QMAP PD` apart since it was written and read
+  # none of the three.
   T1map:
+    group: QUANT_MAP
+    priority: 1
     keywords:
       - t1 map
       - t1map
@@ -162,8 +175,10 @@ values:
       - t1 mapping
     detection:
       exclusive: has_t1_map
-      combination: [is_qmap]
+      combination: [has_qmap_t1]
   T2map:
+    group: QUANT_MAP
+    priority: 2
     keywords:
       - t2 map
       - t2map
@@ -171,24 +186,40 @@ values:
       - t2 mapping
     detection:
       exclusive: has_t2_map
-      combination: [is_qmap]
+      combination: [has_qmap_t2]
   R1map:
+    group: QUANT_MAP
+    priority: 3
     keywords:
       - r1 map
       - r1map
     detection:
       exclusive: has_r1
   R2map:
+    group: QUANT_MAP
+    priority: 4
     keywords:
       - r2 map
       - r2map
     detection:
       exclusive: has_r2
   PDmap:
+    group: QUANT_MAP
+    priority: 5
     keywords:
       - pd map
       - pdmap
       - proton density map
+    detection:
+      exclusive: has_pd_map
+      combination: [has_qmap_pd]
+  # A file that says it is a quantitative map and not of what. Last of the
+  # group, so it is what is left when no quantity was named.
+  Qmap:
+    group: QUANT_MAP
+    priority: 99
+    detection:
+      combination: [is_qmap]
   SyntheticT1w:
     keywords:
       - synthetic t1
@@ -228,6 +259,8 @@ values:
       - qsm
       - susceptibility map
       - chi map
+    detection:
+      exclusive: has_qsm
   MIP:
     keywords:
       - mip
@@ -254,12 +287,40 @@ values:
       - b0map
       - field map
       - fieldmap
+    detection:
+      exclusive: has_b0_map
+  # `FLIP ANGLE MAP` reaches this through `has_b1_map`: a flip angle map is
+  # a B1 map in degrees, and BIDS gives the two one suffix.
   B1map:
     keywords:
       - b1 map
       - b1map
       - b1+
       - b1-
+    detection:
+      exclusive: has_b1_map
+  # One image built out of several, which is the largest single
+  # discriminator in the archive: `COMPOSED` and the `COMP_*` spellings tell
+  # 2,525 colliding names apart, and until now the pack parsed them into a
+  # flag nothing read. A whole-spine composed image and the station images it
+  # was stitched from agree on every other axis there is.
+  Composed:
+    detection:
+      exclusive: is_composite
+  # The image the scanner writes beside the echoes it combined, `MEAN` in the
+  # image type, always a series of its own. It agrees with its per-echo
+  # siblings on every axis the pack has and often carries no echo number at
+  # all, so without this nothing separates them: 308 colliding names, 931
+  # stacks.
+  EchoCombined:
+    detection:
+      exclusive: is_mean
+  # A statistic over a series rather than an image of the person. Its
+  # disposition and its exclusion are not changed here; what changes is that
+  # it no longer wears the name of the images it was computed from.
+  TTestMap:
+    detection:
+      exclusive: is_ttest
   Magnitude:
     keywords:
       - magnitude image

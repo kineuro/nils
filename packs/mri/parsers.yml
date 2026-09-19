@@ -75,7 +75,10 @@ parsers:
                              {substring: 'R2*'}, {substring: 'R2 STAR'}]}
       has_t0:         {token: T0}
       has_k2:         {token: K2}
-      has_b1_map:     {any: [{any_token: [B1MAP, B1_MAP, 'B1+']}, {substring: 'B1 MAP'}]}
+      # A flip angle map is a B1 map measured in degrees, which is what
+      # BIDS calls `TB1map` as well.
+      has_b1_map:     {any: [{any_token: [B1MAP, B1_MAP, 'B1+']}, {substring: 'B1 MAP'},
+                             {substring: 'FLIP ANGLE MAP'}]}
       has_b0_map:     {any: [{any_token: [B0MAP, B0_MAP, FIELDMAP]},
                              {substring: 'B0 MAP'}, {substring: 'FIELD MAP'}]}
       has_fat_fraction: {any: [{any_token: [FF, FATFRACTION, FAT_FRACTION, PDFF]},
@@ -135,14 +138,24 @@ parsers:
       is_mean:        {token: MEAN}
       is_sum:         {token: MSUM}
       is_composite:   {any_token: [MULTIECHOCOMBINED, COMP_AD, COMP_SP, COMP_AN,
-                                   COMP_MIP, COMPOSED, COMPOSITE]}
+                                   COMP_AD_N, COMP_MIP, COMPOSED, COMPOSITE,
+                                   MAVRIC_COMPOSITE]}
       is_mpr:         {any_token: [MPR, REFORMATTED]}
       is_mpr_thick:   {any: [{substring: 'MPR THICK'}, {substring: 'CSA MPR THICK'}]}
 
       # --- projection ---
-      is_mip:        {any: [{any_token: [MIP, MIP_COR, MIP_SAG, MIP_TRA]}, {substring: 'CSA MIP'}]}
-      is_minip:      {any: [{any_token: [MINIP, MNIP]}, {substring: 'MIN IP'}]}
-      is_projection: {substring: 'PROJECTION IMAGE'}
+      # The spellings the archive holds and v0 never had a predicate for
+      # (the 2026-09-19 survey, section 1.2): `MAX_IP` and `MIPT` are a
+      # maximum projection written short, `HD MIP` is one vendor's high
+      # definition of it, `MINIMUM` is a minimum projection spelled out.
+      is_mip:        {any: [{any_token: [MIP, MIP_COR, MIP_SAG, MIP_TRA, MAX_IP, MIPT]},
+                            {substring: 'CSA MIP'}, {substring: 'HD MIP'}]}
+      is_minip:      {any: [{any_token: [MINIP, MNIP, MINIMUM]}, {substring: 'MIN IP'}]}
+      # 326 stacks carry the value truncated to `PROJECTION IMAG`, so the
+      # test is written against the part that survives the truncation.
+      # `COLLAPSE` and `PJN` are a projection through a volume under two more
+      # vendors' names.
+      is_projection: {any: [{substring: 'PROJECTION IMAG'}, {any_token: [COLLAPSE, PJN]}]}
       is_vascular:   {token: VASCULAR}
       is_scroll:     {token: SCROLL}
       is_mip_thin:   {substring: 'CSA MIP THIN'}
@@ -184,6 +197,12 @@ parsers:
 
       # --- QA / other ---
       is_qa:         {any_token: [CTH, COV, STDDEV_COR, STDDEV_SAG, STDDEV_TRA]}
+      # A t test map is a statistic over a series, not an image of the
+      # person: 357 stacks, and the thing that tells 209 colliding names
+      # apart.
+      has_ttest:     {token: TTEST}
+      # Pixels nobody downstream can read.
+      is_encrypted:  {token: ENCRYPTED}
       is_screenshot: {any_token: [SCREENSHOT, PASTED]}
       is_posdisp:    {token: POSDISP}
       is_gsp:        {token: GSP}

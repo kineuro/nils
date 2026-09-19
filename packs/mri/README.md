@@ -11,8 +11,8 @@ second wave (C11, `spikes/pack/`), and it is data: no code, no escape hatch.
 | file | what it holds |
 |---|---|
 | `pack.yml` | identity (name, semantic version, contract, modality) and the buckets a site may amend |
-| `parsers.yml` | five parsers and their 220 predicates, one DICOM string in, named booleans out |
-| `flags.yml` | v0's 138 unified flags, and the seven booleans it keeps as methods on its classification context |
+| `parsers.yml` | five parsers and their 222 predicates, one DICOM string in, named booleans out |
+| `flags.yml` | v0's 138 unified flags, the seven booleans it keeps as methods on its classification context, and what record 37 added |
 | `corpus/` | what this pack's author says it does; the engine will not load the pack unless every case holds |
 
 The parser and flag layers were checked against v0's own code over the whole

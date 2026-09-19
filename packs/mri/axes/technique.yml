@@ -33,6 +33,7 @@ order:
   - GRE-EPI
   - MRF
   - MDME
+  - MAVRIC
   - '3D-TSE'
   - SS-TSE
   - IR-TSE
@@ -159,6 +160,18 @@ values:
       - magic
     detection:
       exclusive: is_mdme
+  # The metal artefact technique, stated in the image type and parsed into a
+  # flag nothing read. It is a spin echo readout at a set of offset centre
+  # frequencies, so it is a technique and not a construct; the composite
+  # image it also writes says so on the construct axis instead. Ahead of the
+  # TSE values because it is the narrower claim and they would take it first.
+  MAVRIC:
+    family: SE
+    keywords:
+      - mavric
+      - mavric sl
+    detection:
+      exclusive: is_mavric
   '3D-TSE':
     label: SPACE
     family: SE
