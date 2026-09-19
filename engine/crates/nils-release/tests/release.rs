@@ -663,8 +663,18 @@ fn a_dataset_that_declares_moved_dates_numbers_its_sessions_rather_than_refusing
 /// A tree whose files say something about their own pixels, and carry two
 /// private blocks: one the allowlist names and one it does not.
 fn tree_with(burned: Option<&str>) -> TempDir {
+    tree_saying(burned, None)
+}
+
+/// The same, with an image type of the test's own, for the stacks whose
+/// pixels are a photograph of a screen and say so there rather than in
+/// `BurnedInAnnotation`.
+fn tree_saying(burned: Option<&str>, image_type: Option<&str>) -> TempDir {
     let dir = TempDir::new("release-pixels");
     let mut e = synth::minimal_mr("A", "A.1", "A.1.1");
+    if let Some(v) = image_type {
+        e.push(synth::text(tags::IMAGE_TYPE, VR::CS, v));
+    }
     e.extend([
         synth::text(tags::PATIENT_ID, VR::LO, "19800101-1234"),
         synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
@@ -699,11 +709,108 @@ fn allowed() -> Vec<nils_pack::private::Allowed> {
     }]
 }
 
+/// The review items a release filed, by kind, in the order they were filed.
+fn release_items(reg: &mut Registry) -> Vec<String> {
+    let store = reg.store();
+    let sql = format!(
+        "SELECT kind FROM {} WHERE kind LIKE 'release.%' ORDER BY id",
+        store.qualified("review_item")
+    );
+    store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect()
+}
+
+/// What the release's own row says it held and could not judge, and under
+/// which setting.
+fn row_counts(reg: &mut Registry, release: i64) -> (i64, i64, String) {
+    let store = reg.store();
+    let policy = nils_registry::schema::table("release")
+        .column("policy")
+        .expect("release.policy is a column");
+    let sql = format!(
+        "SELECT burned_in, unjudged, {} FROM {} WHERE id = {}",
+        store.dialect().text_of(policy),
+        store.qualified("release"),
+        release
+    );
+    let rows = store.query(&sql, &[]).unwrap();
+    let policy: serde_json::Value = serde_json::from_str(rows[0].text(2).unwrap()).unwrap();
+    (
+        rows[0].int(0).unwrap(),
+        rows[0].int(1).unwrap(),
+        policy["on_unknown"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
 #[test]
-fn a_stack_the_file_will_not_judge_is_held_and_asked_about() {
-    // "No tag" is not "no text". An archive where most stacks are unjudgeable
-    // is a fact a release should confront rather than average away, and the
-    // engine does not look at pixels to settle it.
+fn a_stack_the_file_will_not_judge_is_released_and_counted() {
+    // §8.4 as ratified: where the tag is absent the release says how many
+    // stacks it could not judge. It does not keep them: the tag is absent on
+    // most of the series of a real archive, so a default that held on it held
+    // three quarters of what was selected and most subjects released nothing.
+    let source = tree_with(None);
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(out.path(), &policy, &scheme);
+    let report = run::run(&mut reg, &s).unwrap();
+
+    assert_eq!(report.unjudged, 1, "counted");
+    assert_eq!(report.burned_in, 0);
+    assert_eq!(report.stacks, 1, "and written");
+    assert!(!files_under(out.path()).is_empty());
+    // Nobody is asked about a stack nothing is being done to.
+    assert!(release_items(&mut reg).is_empty());
+}
+
+#[test]
+fn the_report_and_the_release_row_carry_the_count_it_could_not_judge() {
+    // One number, in the report a person reads and in the row the tree's own
+    // record keeps, beside the setting that says what was done with them.
+    let source = tree_with(None);
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(out.path(), &policy, &scheme);
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.unjudged, 1);
+    assert_eq!(report.on_unknown, "write");
+    assert_eq!(
+        row_counts(&mut reg, report.release_id),
+        (0, 1, "write".into())
+    );
+
+    // And under the strict setting the same number reads the other way, which
+    // is why the row says which was asked for.
+    let out = TempDir::new("release-out");
+    let mut s = settings(out.path(), &policy, &scheme);
+    s.on_unknown = nils_release::burned::OnUnknown::Hold;
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.on_unknown, "hold");
+    assert_eq!(
+        row_counts(&mut reg, report.release_id),
+        (0, 1, "hold".into())
+    );
+}
+
+#[test]
+fn the_strict_setting_still_holds_every_stack_the_file_will_not_judge() {
+    // A site that will not let an unjudged stack leave before somebody has
+    // looked at it asks for that, and gets exactly what the default gave
+    // before: nothing written, and a question per held stack.
     let source = tree_with(None);
     let home_dir = TempDir::new("release-home");
     let out = TempDir::new("release-out");
@@ -719,20 +826,7 @@ fn a_stack_the_file_will_not_judge_is_held_and_asked_about() {
     assert_eq!(report.unjudged, 1);
     assert_eq!(report.burned_in, 0);
     assert!(files_under(out.path()).is_empty());
-
-    // And a person was asked, so the release can be run again once answered.
-    let store = reg.store();
-    let rows = store
-        .query(
-            &format!(
-                "SELECT kind FROM {} WHERE kind LIKE 'release.%'",
-                store.qualified("review_item")
-            ),
-            &[],
-        )
-        .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].text(0).unwrap(), "release.unjudged");
+    assert_eq!(release_items(&mut reg), ["release.unjudged"]);
 }
 
 #[test]
@@ -744,12 +838,65 @@ fn a_stack_the_file_says_carries_text_is_never_written() {
 
     let policy = Policy::default();
     let scheme = SessionScheme::default();
-    let mut s = settings(out.path(), &policy, &scheme);
-    // Even told to write what it cannot judge: this one it can judge.
-    s.on_unknown = nils_release::burned::OnUnknown::Write;
+    // The default, which writes what it cannot judge: this one it can judge.
+    let s = settings(out.path(), &policy, &scheme);
     let report = run::run(&mut reg, &s).unwrap();
     assert_eq!(report.burned_in, 1);
+    assert_eq!(report.unjudged, 0);
     assert_eq!(report.files, 0);
+    assert_eq!(release_items(&mut reg), ["release.burned_in"]);
+    assert_eq!(
+        row_counts(&mut reg, report.release_id),
+        (1, 0, "write".into())
+    );
+}
+
+#[test]
+fn a_stack_whose_image_type_says_screenshot_is_held_whatever_the_tag_says() {
+    // A photograph of a screen is a photograph of a screen, and firmware that
+    // writes the token frequently writes `BurnedInAnnotation NO` by rote.
+    let source = tree_saying(Some("NO"), Some("DERIVED\\SECONDARY\\SCREENSHOT"));
+    let home_dir = TempDir::new("release-home");
+    let out = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(out.path(), &policy, &scheme);
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.burned_in, 1);
+    assert_eq!(report.unjudged, 0);
+    assert_eq!(report.files, 0);
+    assert!(files_under(out.path()).is_empty());
+    assert_eq!(release_items(&mut reg), ["release.burned_in"]);
+}
+
+#[test]
+fn a_held_stack_is_asked_about_once_and_not_again_on_the_next_release() {
+    // A release is re-run whenever anything upstream of it changes, and the
+    // file says the same thing every time: two releases of one selection once
+    // filed two queues of identical questions. What recurs is the count.
+    let source = tree_with(Some("YES"));
+    let home_dir = TempDir::new("release-home");
+    let first = TempDir::new("release-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(first.path(), &policy, &scheme);
+    let report = run::run(&mut reg, &s).unwrap();
+    assert_eq!(report.burned_in, 1);
+    assert_eq!(release_items(&mut reg), ["release.burned_in"]);
+
+    let second = TempDir::new("release-out");
+    let s = settings(second.path(), &policy, &scheme);
+    let again = run::run(&mut reg, &s).unwrap();
+    assert_eq!(again.burned_in, 1, "the count is filed again");
+    assert_eq!(
+        release_items(&mut reg),
+        ["release.burned_in"],
+        "the question is not"
+    );
 }
 
 #[test]
@@ -1509,4 +1656,480 @@ fn walkdir_like(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+/// Every direct identifier of `tags::NEVER_LEAVES`, with the VR it is written
+/// under. The two lists are held against each other below, because a fixture
+/// that quietly stopped writing one would prove the release removed it.
+const IDENTIFIERS: &[((u16, u16), VR)] = &[
+    ((0x0008, 0x0050), VR::SH),
+    ((0x0008, 0x0080), VR::LO),
+    ((0x0008, 0x0081), VR::ST),
+    ((0x0008, 0x0090), VR::PN),
+    ((0x0008, 0x1010), VR::SH),
+    ((0x0008, 0x1050), VR::PN),
+    ((0x0008, 0x1070), VR::PN),
+    ((0x0010, 0x0010), VR::PN),
+    ((0x0010, 0x0030), VR::DA),
+    ((0x0010, 0x1000), VR::LO),
+    ((0x0010, 0x1001), VR::PN),
+    ((0x0010, 0x1005), VR::PN),
+    ((0x0010, 0x1040), VR::LO),
+    ((0x0010, 0x2154), VR::SH),
+    ((0x0010, 0x4000), VR::LT),
+    ((0x0012, 0x0040), VR::LO),
+    ((0x0018, 0x1000), VR::LO),
+    ((0x0020, 0x0010), VR::SH),
+    ((0x0032, 0x1032), VR::PN),
+    ((0x0038, 0x0010), VR::LO),
+    ((0x0038, 0x0300), VR::LO),
+    ((0x0038, 0x0400), VR::LO),
+    ((0x0040, 0x0242), VR::SH),
+    ((0x0040, 0x2008), VR::PN),
+    ((0x0040, 0x2010), VR::SH),
+    ((0x0040, 0x2016), VR::LO),
+    ((0x0040, 0x2017), VR::LO),
+    ((0x0040, 0xA123), VR::PN),
+];
+
+/// What each is written with: a marker of its own, so that a value found in
+/// the output says which element it came from, and none of them is a word
+/// any other part of the file uses. Nothing here is from an archive.
+fn identifier_value(i: usize, vr: VR) -> String {
+    match vr {
+        // A date has to parse. Its category removes it outright, before the
+        // date policy of §8.3 ever reads the file, so it is checked by its
+        // absence rather than by its bytes.
+        VR::DA => "19800101".to_string(),
+        _ => format!("NOTLEAVING{i:02}"),
+    }
+}
+
+fn identifiers() -> Vec<(dicom_core::Tag, VR, String)> {
+    IDENTIFIERS
+        .iter()
+        .enumerate()
+        .map(|(i, ((g, e), vr))| (dicom_core::Tag(*g, *e), *vr, identifier_value(i, *vr)))
+        .collect()
+}
+
+/// Two studies of one person, each file carrying every direct identifier.
+fn tree_of_identifiers() -> TempDir {
+    let dir = TempDir::new("release-identifiers");
+    for (n, day) in [("A", "20220115"), ("B", "20220715")] {
+        let study = format!("{n}.1");
+        let series = format!("{n}.1.1");
+        let sop = format!("{n}.1.1.1");
+        let mut e = synth::minimal_mr(&study, &series, &sop);
+        e.extend([
+            synth::text(tags::PATIENT_ID, VR::LO, "a-code-of-some-length"),
+            synth::text(tags::STUDY_DATE, VR::DA, day),
+            synth::text(tags::SERIES_DESCRIPTION, VR::LO, "sag T1 mprage"),
+            synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "3D"),
+            synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+            synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+        ]);
+        e.extend(
+            identifiers()
+                .into_iter()
+                .map(|(tag, vr, value)| synth::text(tag, vr, &value)),
+        );
+        dir.file(
+            &format!("{n}/1"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    dir
+}
+
+/// Record 35, S1: a release removes every direct identifier and can prove it.
+///
+/// This is the test that would have caught finding 1. The accession number
+/// and the device serial number were in none of the removal categories, so a
+/// release wrote both through verbatim on every file it had ever written, and
+/// its change list never mentioned either: nothing in the output said the
+/// elements existed, so nobody reading a report could tell. The list of what
+/// may never survive is written out in the crate rather than derived from the
+/// categories, this fixture is held against that list, and each element is
+/// looked for in the release's own output.
+#[test]
+fn no_direct_identifier_survives_a_release_and_the_report_names_each() {
+    // The fixture and the list say the same thing, or the proof is about
+    // whatever the fixture happened to write.
+    let mut carried: Vec<dicom_core::Tag> = identifiers().iter().map(|(t, _, _)| *t).collect();
+    let mut listed: Vec<dicom_core::Tag> = categories::NEVER_LEAVES
+        .iter()
+        .map(|(g, e)| dicom_core::Tag(*g, *e))
+        .collect();
+    carried.sort_unstable();
+    listed.sort_unstable();
+    assert_eq!(carried, listed, "the fixture and the list have drifted");
+
+    let source = tree_of_identifiers();
+    // And the files really carry them: an element the fixture never wrote is
+    // an element the release cannot be shown to have removed.
+    for path in files_under(source.path()) {
+        let object = dicom_object::open_file(&path).unwrap();
+        for (tag, _, _) in identifiers() {
+            assert!(
+                object.element_opt(tag).ok().flatten().is_some(),
+                "({:04X},{:04X}) is not in the file the release is asked to clean",
+                tag.group(),
+                tag.element()
+            );
+        }
+    }
+
+    let home_dir = TempDir::new("identifiers-home");
+    let out = TempDir::new("identifiers-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(report.files, 2);
+
+    let written = files_under(out.path());
+    assert_eq!(written.len(), 2);
+    for path in &written {
+        let object = dicom_object::open_file(path).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        for (tag, vr, value) in identifiers() {
+            assert!(
+                object.element_opt(tag).ok().flatten().is_none(),
+                "({:04X},{:04X}) survived the release, in {}",
+                tag.group(),
+                tag.element(),
+                path.display()
+            );
+            if vr == VR::DA {
+                continue;
+            }
+            assert!(
+                bytes.windows(value.len()).all(|w| w != value.as_bytes()),
+                "the value of ({:04X},{:04X}) is still in the bytes of {}",
+                tag.group(),
+                tag.element(),
+                path.display()
+            );
+        }
+    }
+
+    // And the report names each of them, so a reader sees the element was
+    // handled rather than absent by luck. Two files, so twice each.
+    for (tag, _, _) in identifiers() {
+        let named = format!("({:04X},{:04X}) removed", tag.group(), tag.element());
+        assert_eq!(
+            report.changes.get(&named),
+            Some(&2),
+            "{named} is not in the change list: {:?}",
+            report.changes
+        );
+    }
+
+    // The row says which categories were applied, the one that holds the
+    // accession number among them: "de-identified" is not a property a file
+    // carries without saying under what rule.
+    let store = reg.store();
+    let sql = format!(
+        "SELECT categories FROM {} ORDER BY id DESC",
+        store.qualified("release")
+    );
+    let stored = store.query(&sql, &[]).unwrap();
+    let applied = stored[0].text(0).unwrap().to_string();
+    assert_eq!(
+        applied, "patient,trial,provider,institution,times,ids",
+        "the release did not record what it applied"
+    );
+}
+
+/// Record 35, the seam between S1 and S3: one release writes both answers.
+///
+/// S1 gave the release a sixth category and made the row say which categories
+/// it applied; S3 gave the same row the two counts and the report the line
+/// that reads them. They are written by different statements, the insert and
+/// the close, and a release that reported one and lost the other would be
+/// telling half of what it did. The fixture has no burned-in tag at all, so
+/// both stacks are unjudged and every direct identifier is in the file.
+#[test]
+fn the_release_row_says_what_it_removed_and_what_it_could_not_judge() {
+    let source = tree_of_identifiers();
+    let home_dir = TempDir::new("seam-home");
+    let out = TempDir::new("seam-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+
+    // S3: nothing said either way about the pixels, so both were written and
+    // counted, and the report carries the setting that reads the count.
+    assert_eq!((report.burned_in, report.unjudged), (0, 2));
+    assert_eq!(report.on_unknown, "write");
+    assert_eq!(report.files, 2);
+
+    // S1: and the same run removed the accession number and named it.
+    for tag in [
+        dicom_core::Tag(0x0008, 0x0050),
+        dicom_core::Tag(0x0018, 0x1000),
+    ] {
+        let named = format!("({:04X},{:04X}) removed", tag.group(), tag.element());
+        assert_eq!(report.changes.get(&named), Some(&2), "{named}");
+    }
+
+    // One row, carrying both: the counts the close wrote and the categories
+    // the insert wrote, with `ids` among them.
+    assert_eq!(
+        row_counts(&mut reg, report.release_id),
+        (0, 2, "write".into())
+    );
+    let store = reg.store();
+    let sql = format!(
+        "SELECT categories FROM {} WHERE id = {}",
+        store.qualified("release"),
+        report.release_id
+    );
+    let rows = store.query(&sql, &[]).unwrap();
+    assert_eq!(
+        rows[0].text(0).unwrap(),
+        "patient,trial,provider,institution,times,ids"
+    );
+}
+
+// ------------------------------------------- record 35 finding 1: identity
+//
+// A series carries the subject its own files named; a study carries the
+// subject the study's files named. An archive that re-linked a series leaves
+// the two disagreeing, and then a subject owns series and no study at all.
+// The session layer refuses to build a session for such a subject and files
+// `identity.no_study`. The release used to read the label off the study
+// anyway, which borrowed a session from whoever owned the study, and wrote a
+// disowned subject into `ses-` directories no scheme produced.
+
+/// Give the second study's series to a subject of its own, which is the shape
+/// the re-run found: a subject with series and no study. Answers its code.
+fn disown_a_series(reg: &mut Registry) -> String {
+    use nils_registry::schema::table;
+    use nils_registry::store::{Insert, Param};
+    let store = reg.store();
+    let code = "orphaned";
+    let orphan = store
+        .insert(
+            &Insert::new(table("subject"), &["code", "created_at"]).returning(&["id"]),
+            &[vec![Param::from(code), Param::from("2026-09-19T00:00:00Z")]],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    // The later of the two studies, so the earlier one still makes a session
+    // for the subject that keeps it.
+    let sql = format!(
+        "SELECT se.id FROM {} se JOIN {} st ON st.id = se.study_id ORDER BY st.id DESC",
+        store.qualified("series"),
+        store.qualified("study")
+    );
+    let series = store.query(&sql, &[]).unwrap()[0].int(0).unwrap();
+    store
+        .execute(
+            &format!(
+                "UPDATE {} SET subject_id = {orphan} WHERE id = {series}",
+                store.qualified("series")
+            ),
+            &[],
+        )
+        .unwrap();
+    code.to_string()
+}
+
+/// Every `sub-*/ses-*` pair a tree holds, once, in order.
+fn session_dirs(root: &Path) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = files_under(root)
+        .iter()
+        .filter_map(|p| {
+            let parts: Vec<String> = p
+                .strip_prefix(root)
+                .ok()?
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            let subject = parts.iter().find(|c| c.starts_with("sub-"))?;
+            let session = parts.iter().find(|c| c.starts_with("ses-"))?;
+            Some((subject.clone(), session.clone()))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Every `sub-*/ses-*` pair the scheme produced, from the cache.
+fn derived_sessions(reg: &mut Registry, scheme: &SessionScheme) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = nils_session::sessions_of(reg.store(), scheme, None)
+        .unwrap()
+        .iter()
+        .map(|c| (format!("sub-{}", c.code), format!("ses-{}", c.name())))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[test]
+fn a_subject_with_series_and_no_study_is_not_written_into_a_tree_as_a_session() {
+    let source = tree();
+    let home_dir = TempDir::new("disowned-home");
+    let out = TempDir::new("disowned-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let code = disown_a_series(&mut reg);
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+
+    // The session layer says the subject is on no timeline.
+    let anchors =
+        nils_session::Anchors::resolve(&mut reg, &scheme, std::collections::BTreeMap::new())
+            .unwrap();
+    let rebuilt = nils_session::ensure(&mut reg, &scheme, &anchors, None, true).unwrap();
+    assert_eq!(rebuilt.without_a_study, 1, "{rebuilt:?}");
+    let sessions = nils_session::sessions_of(reg.store(), &scheme, Some(&code)).unwrap();
+    assert!(sessions.is_empty(), "{sessions:?}");
+
+    // And the release says the same thing rather than inventing a session:
+    // the subject is refused, named, and counted as left out.
+    assert_eq!(report.without_a_session.get(&code), Some(&1), "{report:?}");
+    assert_eq!(report.left_out, 1, "{report:?}");
+    assert_eq!(report.subjects, 1, "{report:?}");
+    assert_eq!(report.stacks, 1, "{report:?}");
+    let written: Vec<String> = files_under(out.path())
+        .iter()
+        .map(|p| p.strip_prefix(out.path()).unwrap().display().to_string())
+        .collect();
+    assert!(
+        written.iter().all(|p| !p.contains(&code)),
+        "the disowned subject is in the tree: {written:?}"
+    );
+    assert!(
+        written.iter().all(|p| !p.contains("ses-unknown")),
+        "a session nobody derived: {written:?}"
+    );
+
+    // Never a silent drop: the row says which stack and why.
+    let store = reg.store();
+    let sql = format!(
+        "SELECT kind, why FROM {} WHERE release_id = {}",
+        store.qualified("release_absent"),
+        report.release_id
+    );
+    let rows = store.query(&sql, &[]).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text(0).unwrap(), "no_session");
+    assert!(
+        rows[0]
+            .text(1)
+            .unwrap()
+            .contains("owns series and no study"),
+        "{}",
+        rows[0].text(1).unwrap()
+    );
+}
+
+#[test]
+fn the_trees_session_directories_are_exactly_the_sessions_the_scheme_produced() {
+    for disowned in [false, true] {
+        let source = tree();
+        let home_dir = TempDir::new("dirs-home");
+        let out = TempDir::new("dirs-out");
+        let (_home, mut reg) = registry(&home_dir, &source);
+        if disowned {
+            disown_a_series(&mut reg);
+        }
+        let policy = Policy::default();
+        let scheme = SessionScheme::default();
+        run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+
+        let written = session_dirs(out.path());
+        let derived = derived_sessions(&mut reg, &scheme);
+        // The scheme produces two sessions of the one subject that owns a
+        // study either way: a series that changed hands is still filed under
+        // the study that declared it, so the timeline does not move.
+        assert_eq!(derived.len(), 2, "disowned {disowned}: {derived:?}");
+        // Every directory in the tree is one of them, and under the subject
+        // whose session it is. A release writes no session of its own.
+        for pair in &written {
+            assert!(
+                derived.contains(pair),
+                "disowned {disowned}: {pair:?} is in no scheme, of {derived:?}"
+            );
+        }
+        match disowned {
+            // Nothing refused, so the tree holds all of them.
+            false => assert_eq!(written, derived, "{written:?}"),
+            // The disowned subject's stack is refused, so its study's session
+            // has nothing to write and the other one stands alone.
+            true => assert_eq!(written.len(), 1, "{written:?}"),
+        }
+    }
+}
+
+#[test]
+fn the_ask_and_select_agree_on_how_many_subjects_a_selection_holds() {
+    for disowned in [false, true] {
+        let source = tree();
+        let home_dir = TempDir::new("agree-home");
+        let (_home, mut reg) = registry(&home_dir, &source);
+        if disowned {
+            disown_a_series(&mut reg);
+        }
+        // The fingerprints carry the subject, so they are built after the
+        // series changed hands, as a digest of that archive would have.
+        classified(&mut reg, &source);
+
+        // What the selection reaches, which is what `nils select` prints.
+        let reached = run::preview(reg.store(), &Selection::default())
+            .unwrap()
+            .subjects;
+        assert_eq!(reached, if disowned { 2 } else { 1 }, "{disowned}");
+
+        // And what an ask over every stack holds.
+        let catalog = nils_catalog::Catalog::build(&mut reg, pack()).unwrap();
+        let text = serde_json::json!({
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "count"}
+        })
+        .to_string();
+        let prepared = nils_ask::prepare(
+            nils_ask::parse(&text).unwrap(),
+            &catalog,
+            &nils_ask::validate::Scope::default(),
+        )
+        .unwrap();
+        let store = reg.store();
+        let ctx = nils_ask::compile::Context {
+            names: &catalog,
+            dialect: store.dialect(),
+            schema: store.schema().map(str::to_string),
+            window_days: 0,
+            scheme_digest: SessionScheme::default().digest(),
+            after: None,
+            limit: None,
+        };
+        let compiled =
+            nils_ask::compile::compile(&prepared.ask, &prepared.validated, &ctx).unwrap();
+        let answer = nils_ask::exec::run(
+            store,
+            &compiled,
+            nils_ask::exec::Bounds {
+                timeout_ms: 20_000,
+                max_rows: 5_000,
+                max_bytes: 4 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        assert_eq!(answer.columns, vec!["rows", "subjects"]);
+        assert_eq!(
+            answer.rows[0].int(1).unwrap(),
+            reached,
+            "disowned {disowned}: an ask and a selection count one archive"
+        );
+    }
 }

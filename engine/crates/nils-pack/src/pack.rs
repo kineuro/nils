@@ -154,6 +154,36 @@ pub struct Pack {
     pub review: Review,
 }
 
+/// How near a confidence has to be to a threshold to be on it.
+///
+/// A confidence is a number a pack wrote, or an average of numbers a pack
+/// wrote, so the distance between two different ones is hundredths; anything
+/// closer than this is the same number arrived at by two routes. Without it
+/// a tier of 0.7 and a threshold of 0.7 would answer differently depending
+/// on which arithmetic produced the tier, which is the one thing a stated
+/// boundary must not do.
+pub const THRESHOLD_TOLERANCE: f64 = 1e-9;
+
+/// Whether `confidence` is **strictly below** `threshold`, as every
+/// threshold this engine states in words is read (§8.2).
+///
+/// A value that sits exactly on the threshold is not below it, so it is an
+/// answer and not a question: `below 0.65` and 0.65 is the rule's own
+/// answer. The rounding tolerance is what makes "exactly" mean what a reader
+/// means by it.
+pub fn weaker_than(confidence: f64, threshold: f64) -> bool {
+    confidence < threshold - THRESHOLD_TOLERANCE
+}
+
+/// Whether `confidence` sits exactly on `threshold`, within the rounding
+/// tolerance: the population that is not asked about and is one hundredth
+/// from being asked about. Counted rather than asked (§8.2), because a
+/// threshold set at the confidence a rule always writes decides a whole
+/// axis by its boundary, and that is a fact about the pack worth printing.
+pub fn at_threshold(confidence: f64, threshold: f64) -> bool {
+    (confidence - threshold).abs() <= THRESHOLD_TOLERANCE
+}
+
 /// The pack's emission thresholds for review items.
 ///
 /// v0 asks a person about 84 percent of its stacks, mostly because a keyword
@@ -163,7 +193,9 @@ pub struct Pack {
 /// the queue it produced.
 #[derive(Debug, Clone, Default)]
 pub struct Review {
-    /// An axis resolved below this confidence is asked about.
+    /// An axis resolved strictly below this confidence is asked about. An
+    /// axis resolved exactly on it is not: the threshold is a floor the
+    /// answers stand on, and the run counts how many of them do.
     pub low_confidence: f64,
     /// Per-axis overrides of it.
     pub per_axis: BTreeMap<String, f64>,
@@ -176,9 +208,15 @@ pub struct Review {
 }
 
 impl Review {
-    /// The confidence below which this axis is asked about.
+    /// The confidence strictly below which this axis is asked about.
     pub fn below(&self, axis: &str) -> f64 {
         *self.per_axis.get(axis).unwrap_or(&self.low_confidence)
+    }
+
+    /// Whether an answer of this confidence on this axis is weak enough to
+    /// ask a person about. Exactly on the threshold is not.
+    pub fn asks_about(&self, axis: &str, confidence: f64) -> bool {
+        weaker_than(confidence, self.below(axis))
     }
 
     /// Whether an axis with no value at all is a question for a person.
@@ -2919,6 +2957,20 @@ fn load_vote(
                 }
             },
         };
+        let zero_absent = match s.get("zero") {
+            None => false,
+            Some(z) => match f.blame(yaml::text(z, &path))?.as_str() {
+                "absent" => true,
+                "a_value" => false,
+                other => {
+                    return Err(Error::at(
+                        format!("{path}.zero"),
+                        format!("absent or a_value, not {other}"),
+                    )
+                    .in_file(&f.path, Some(&f.source)));
+                }
+            },
+        };
         dims.push(KeyDim {
             name: n.clone(),
             field,
@@ -2931,6 +2983,7 @@ fn load_vote(
                 .map(|x| f.blame(yaml::number(x, &path)))
                 .transpose()?,
             half_even,
+            zero_absent,
         });
     }
     if dims.is_empty() || dims.len() > 5 {

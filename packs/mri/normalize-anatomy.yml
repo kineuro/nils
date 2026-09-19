@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The anatomy text: the same six fields, folded and tokenized the same way,
+# with nothing dropped as boilerplate (spec section 6.4).
+#
+# `search_text` removes `brain` and `head` as noise, which is right for the
+# axes that tell techniques and constructs apart: a series description that
+# says brain says nothing about which sequence it is, and dropping it puts
+# the words around it next to each other, where a two-word keyword can match.
+# It is not right for the axis whose whole question is which body part this
+# is, and on a corpus where `BodyPartExamined` says `BRAIN,HEAD` on 636
+# stacks it is the difference between a body part and none.
+#
+# So the removals stay where they earn their keep and the body-part rules
+# read this instead: what a normalizer strips for one purpose does not
+# decide another.
+
+normalize: anatomy_text
+from:
+  - text_series_description
+  - text_protocol_name
+  - text_sequence_name
+  - text_body_part
+  - text_series_comments
+  - text_image_comments
+
+# No `raw_removals` and no `token_removals`: every step that is a fact about
+# text rather than a claim about MRI runs anyway. Lower casing, the fold of
+# everything outside `a-z0-9_` to a space, the tokenizing and the
+# de-duplication are steps 4 to 7, so `BRAIN,HEAD` arrives as `brain head`
+# and the damaged `MR hj?rna` as `mr hj rna`, which is how the keyword lists
+# spell their accented words.
+token_removals: []
+
+# One replacement, for the reason `normalize.yml` gives for its own: an
+# ambiguous short token is expanded so that a keyword can be matched as a
+# plain substring without hitting the inside of another word. A keyword is a
+# substring anywhere in the text, which is what `cerv` and `lumb` are there
+# for, and three letters is short enough to be inside an ordinary word.
+# `cou` is the French for neck and never won a stack on the archive: it was
+# found behind the spine rule on 6 stacks and behind the brain-and-neck rule
+# on 35, which is a fragment of a longer word and not a French study. It did
+# decide those 35, because it is the neck half of the brain-and-neck rule as
+# well, and that rule runs ahead of the one that can name a neck. So the
+# word is spelled as a word here and is not a keyword anywhere.
+token_replacements:
+  'cou': 'neck'

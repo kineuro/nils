@@ -38,6 +38,10 @@ pub struct Ran {
     pub targets: i64,
     pub decided: i64,
     pub review_items: i64,
+    /// Answers written at exactly the pass's own review threshold, which are
+    /// not below it and so are never asked about (§8.2).
+    #[serde(default)]
+    pub at_threshold: i64,
     /// How each answer was reached, and how the silent ones stayed silent.
     pub by_method: std::collections::BTreeMap<String, i64>,
 }
@@ -236,7 +240,14 @@ fn run_one(
                     Param::from(pass.reference.scope.as_str()),
                 ]);
             }
-            if confidence < pass.emit.review_below || pass.emit.review_all_touched {
+            // As the axis thresholds are read (§8.2): strictly below asks,
+            // exactly on the threshold answers and is counted.
+            if nils_pack::at_threshold(confidence, pass.emit.review_below) {
+                ran.at_threshold += 1;
+            }
+            if nils_pack::weaker_than(confidence, pass.emit.review_below)
+                || pass.emit.review_all_touched
+            {
                 reviews.push(vec![
                     Param::from(format!("{name}:vote")),
                     Param::from("stack"),

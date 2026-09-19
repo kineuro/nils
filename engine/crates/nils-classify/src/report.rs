@@ -102,11 +102,26 @@ pub struct Classified {
     /// reach is a number here rather than a review item per stack.
     pub by_tier: std::collections::BTreeMap<String, i64>,
     /// The number that matters: a pack that flags everything has failed even
-    /// if it agrees with v0 (§8.2).
+    /// if it agrees with v0 (§8.2). A count of items, not of stacks: one
+    /// stack can raise a conflict and a weak answer and is two items here.
     pub review_items: i64,
+    /// The distinct stacks those items stand on (record 35). This is the
+    /// only one of the three that may be held against the stacks the run
+    /// classified, and it is what the share in the report is worked out
+    /// from.
+    #[serde(default)]
+    pub review_stacks: i64,
     /// Wave 4a §10.2: the items those questions collapsed into, one per
     /// (kind, value, tier). This is the length of the queue a person reads.
     pub review_groups: i64,
+    /// Per axis, the answers written at exactly that axis's own review
+    /// threshold (§8.2). A threshold is read as strictly below, so these are
+    /// answers and not questions, and a threshold set at the confidence a
+    /// rule always writes takes a whole axis out of the queue by its
+    /// boundary. That is a fact about the pack, so it is a number in the
+    /// report rather than a review item per stack.
+    #[serde(default)]
+    pub at_threshold: std::collections::BTreeMap<String, i64>,
     /// Wave 4c §6.6: what the evaluator noticed and did not act on, by
     /// kind, over every batch: `axis_conflict`, `axis_unresolved`,
     /// `keyword_shadowed` (keywords that can never match) and
@@ -135,7 +150,9 @@ impl Classified {
             passes: Vec::new(),
             by_tier: std::collections::BTreeMap::new(),
             review_items: 0,
+            review_stacks: 0,
             review_groups: 0,
+            at_threshold: std::collections::BTreeMap::new(),
             diagnostics: std::collections::BTreeMap::new(),
             seconds: 0.0,
             peak_rss: None,
@@ -150,12 +167,25 @@ impl Classified {
         self.read as f64 / self.seconds
     }
 
+    /// Every answer that sits exactly on its own review threshold, over
+    /// every axis and every pass: the population one hundredth from being a
+    /// question and never asked about.
+    pub fn on_the_threshold(&self) -> i64 {
+        self.at_threshold.values().sum::<i64>()
+            + self.passes.iter().map(|p| p.at_threshold).sum::<i64>()
+    }
+
     /// What share of the classified stacks raised something for a person.
+    ///
+    /// Record 35: stacks over stacks. The share used to be the items over
+    /// the stacks, which counted a stack twice for asking two questions and
+    /// then read the answer as a share of stacks, so a run that asked about
+    /// two thirds of the archive reported nearly all of it.
     pub fn review_share(&self) -> f64 {
         if self.written == 0 {
             return 0.0;
         }
-        self.review_items as f64 / self.written as f64
+        self.review_stacks as f64 / self.written as f64
     }
 }
 
@@ -183,13 +213,38 @@ impl fmt::Display for Classified {
                 self.silent
             )?;
         }
+        // Record 35: three numbers, each against what it is a count of. The
+        // stacks are a share of the stacks classified; the items are what
+        // those stacks raised, which is more than one on a stack that both
+        // disagrees with itself and answers weakly; the questions are the
+        // length of the queue a person opens.
         writeln!(
             f,
-            "  review items     {:>12}   {:.1}% of the stacks, as {} question(s)",
-            self.review_items,
+            "  stacks to review {:>12}   {:.1}% of the {} classified",
+            self.review_stacks,
             100.0 * self.review_share(),
-            self.review_groups
+            self.written
         )?;
+        writeln!(
+            f,
+            "  review items     {:>12}   on those stacks, as {} question(s)",
+            self.review_items, self.review_groups
+        )?;
+        if self.on_the_threshold() > 0 {
+            let mut on: Vec<(&String, &i64)> = self.at_threshold.iter().collect();
+            on.sort_by_key(|(axis, n)| (-**n, (*axis).clone()));
+            let line: Vec<String> = on.iter().map(|(axis, n)| format!("{axis} {n}")).collect();
+            writeln!(
+                f,
+                "  on the threshold  {:>11}   answers at exactly the confidence their threshold names{}",
+                self.on_the_threshold(),
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n    {}", line.join(", "))
+                }
+            )?;
+        }
         let mut weakest: Vec<(&String, &i64)> = self
             .by_tier
             .iter()

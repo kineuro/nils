@@ -1645,7 +1645,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@0.1.1"),
+            .any(|p| p["pack"] == "mri@0.1.5"),
         "{listed}"
     );
 
@@ -1941,6 +1941,113 @@ fn a_release_is_versioned_and_a_re_run_writes_nothing() {
     assert!(text.contains("a-dataset"), "{text}");
     assert!(text.contains("stacks new"), "{text}");
     assert!(text.contains("stacks left alone"), "{text}");
+}
+
+/// Record 35: a release says under what rule its files were de-identified,
+/// and not only which tags moved. The categories have been on the release
+/// row since the sixth of them was added, and were printed nowhere, so a
+/// person reading a release could not tell a run that removed the direct
+/// identifiers from one that left them in.
+#[test]
+fn the_release_report_names_every_category_it_applied() {
+    let home = home();
+    let dir = tree();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let done = nils()
+        .args(registry)
+        .args(["digest", "--name", "first"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", stderr(&done));
+
+    let every = TempDir::new("cli-categories-every");
+    let all = nils()
+        .args(registry)
+        .args([
+            "release",
+            "--name",
+            "every-category",
+            "--on-unknown",
+            "write",
+            "--pack-dir",
+            packs.to_str().unwrap(),
+            "--out",
+        ])
+        .arg(every.path())
+        .output()
+        .unwrap();
+    assert!(all.status.success(), "{}", stderr(&all));
+    let text = stdout(&all);
+    assert!(
+        text.contains("categories       patient, trial, provider, institution, times, ids"),
+        "{text}"
+    );
+    for name in [
+        "patient",
+        "trial",
+        "provider",
+        "institution",
+        "times",
+        "ids",
+    ] {
+        assert!(text.contains(name), "{text}: {name} is not named");
+    }
+    // The default applies all of them, so there is nothing to warn about.
+    assert!(!text.contains("not removed"), "{text}");
+
+    // And a release that applies fewer names the ones it did not, because
+    // the elements those hold leave the file as they were found.
+    let some = TempDir::new("cli-categories-some");
+    let fewer = nils()
+        .args(registry)
+        .args([
+            "release",
+            "--name",
+            "some-categories",
+            "--categories",
+            "patient,ids",
+            "--on-unknown",
+            "write",
+            "--pack-dir",
+            packs.to_str().unwrap(),
+            "--out",
+        ])
+        .arg(some.path())
+        .output()
+        .unwrap();
+    assert!(fewer.status.success(), "{}", stderr(&fewer));
+    let text = stdout(&fewer);
+    assert!(text.contains("categories       patient, ids"), "{text}");
+    assert!(
+        text.contains(
+            "not removed      trial, provider, institution, times; \
+             those elements leave the file unchanged"
+        ),
+        "{text}"
+    );
+
+    // The same names by machine, out of the row itself, so the report and
+    // the door cannot say different things about one release.
+    let history = nils()
+        .args(registry)
+        .args([
+            "release",
+            "--history",
+            "--name",
+            "some-categories",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(history.status.success(), "{}", stderr(&history));
+    let doc: serde_json::Value = serde_json::from_str(&stdout(&history)).unwrap();
+    assert_eq!(
+        doc["releases"][0]["categories"],
+        serde_json::json!(["patient", "ids"]),
+        "{doc}"
+    );
 }
 
 /// Two studies of one person six months apart, so that a release has two

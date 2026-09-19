@@ -176,10 +176,14 @@ penalty:
   by_value: {EPIMix: 0.5}
 
 borders:
-  # v0's `runner_up_within_pct`. Under this the order between the top two is
-  # noise, and the answer says so instead of the first row quietly winning.
+  # v0's `runner_up_within_pct`. At or under this the order between the top
+  # two is noise, and the answer says so instead of the first row quietly
+  # winning. `within` includes the number itself, which is the one threshold
+  # here that does.
   runner_up_within: 0.05
   # v0's `rare_technique_share`: the pick is the best of what is here and
   # unlike what the rest of the population did, which usually means the
-  # protocol changed or the session is missing its real one.
+  # protocol changed or the session is missing its real one. `below` is
+  # strictly below: a technique held by exactly a tenth of the population is
+  # not rare.
   rare_within: {of: technique, share_below: 0.10}

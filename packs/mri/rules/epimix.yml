@@ -155,7 +155,7 @@ rules:
 
   ti_short_t1_flair:
     clauses:
-      - {when: {all: [{field: inversion_time, ge: 500}, {field: inversion_time, le: 750}, {field: echo_time, lt: 40}]}, cite: 'a short inversion time', source: physics, tier: physics}
+      - {when: {all: [{field: inversion_time, ge: 500}, {field: inversion_time, le: 750}, {field: echo_time, gt: 0}, {field: echo_time, lt: 40}]}, cite: 'a short inversion time', source: physics, tier: physics}
     set: {base: 'T1w', modifier: [FLAIR], technique: 'SE-EPI', directory_type: anat}
     confidence: 0.8
 

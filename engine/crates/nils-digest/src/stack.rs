@@ -18,7 +18,9 @@ use nils_dicom::{Extracted, Level, Value};
 
 use crate::batch::canonical_value;
 
-/// A confidence under this counts an `orientation_oblique` diagnostic.
+/// A confidence strictly below this counts an `orientation_oblique`
+/// diagnostic. A plane at exactly this confidence is not oblique, which is
+/// what the name says and what every other threshold in the engine does.
 pub const OBLIQUE_BELOW: f64 = 0.9;
 
 /// The class of an image plane, by the dominant axis of its normal.

@@ -27,6 +27,33 @@ use crate::job::Error;
 /// How many stacks a window holds.
 pub const WINDOW: usize = 4_096;
 
+/// From how many stacks a series split into single images is a question
+/// rather than an acquisition (record 35, S4).
+///
+/// A split that gives each echo, each inversion or each phase its own stack
+/// gives each of them the images that echo holds. A split that leaves one
+/// image in a stack is saying the key it split on varies per image, which is
+/// what a single-slice acquisition looks like and also what a wrong key looks
+/// like; below this the two cannot be told apart and the pack is left alone.
+/// Above it, on a real archive, it was one phase-contrast study becoming 297
+/// stacks of one image each, and nothing said so.
+const SPLIT_SINGLETONS: f64 = 4.0;
+
+/// The split this stack came out of, where the split left it holding one
+/// image and made many such stacks: the reason, and how many stacks the
+/// series has.
+fn split_singleton(stack: &Stack) -> Option<(String, f64, f64)> {
+    let at = |name: &str| nils_pack::stack::field_index(name).expect("a field the pack declares");
+    let reason = stack.text(at("split_reason"));
+    if reason.is_empty() {
+        return None;
+    }
+    let stacks = stack.num(at("stacks_in_series"))?;
+    let instances = stack.num(at("n_instances"))?;
+    (instances <= 1.0 && stacks >= SPLIT_SINGLETONS)
+        .then(|| (reason.to_string(), stacks, instances))
+}
+
 /// The fingerprint columns a pack is fed, in the order the select reads them.
 /// The pack names a field; this is where a name becomes a column.
 /// The field a pack names, and the fingerprint column it is read from.
@@ -524,7 +551,13 @@ pub fn classify(
     // Wave 4a §10.2: one question about a rule is one item with n members.
     if let Ok(report) = &mut result {
         match nils_registry::review::group_run(registry.store(), job_id) {
-            Ok(grouped) => report.review_groups = grouped.items,
+            Ok(grouped) => {
+                report.review_groups = grouped.items;
+                // Record 35: the stacks the items stand on, counted where
+                // the members are, because the run's own tally counts items
+                // and a stack can raise several.
+                report.review_stacks = grouped.stacks;
+            }
             Err(e) => {
                 result = Err(Error::Store(nils_registry::store::Error::Message(
                     e.to_string(),
@@ -630,6 +663,39 @@ fn run(
             tallies.note(batch_of(r, with_ids), &verdict);
             let mut raised = 0i64;
 
+            // A split that makes one image per stack, over and over, is the
+            // split key failing and not an acquisition (record 35, S4). It
+            // reaches nobody through the axes: every axis is answered, with
+            // the evidence of a stack that holds one image, so the run reads
+            // as a success. The question is about the series rather than the
+            // axis, and it is raised once per stack with the split's reason
+            // as its value, which is what collapses them into one item per
+            // reason. A stack the pack has ruled out is still nobody's
+            // question.
+            if !verdict.silent
+                && let Some((reason, stacks, instances)) = split_singleton(&stack)
+            {
+                reviews.push(vec![
+                    Param::from("split:one_image_per_stack"),
+                    Param::from("stack"),
+                    Param::from(serde_json::json!({"stack_id": stack_id}).to_string()),
+                    Param::from(
+                        serde_json::json!({
+                            "value": reason,
+                            "tier": "split",
+                            "stacks_in_series": stacks,
+                            "n_instances": instances,
+                            "pack": pack.id(),
+                        })
+                        .to_string(),
+                    ),
+                    Param::from("open"),
+                    Param::from(now.as_str()),
+                    Param::Int(job_id),
+                ]);
+                raised += 1;
+            }
+
             for a in &verdict.axes {
                 let mut value = a.stored();
                 let mut tier = a.tier.clone();
@@ -692,8 +758,18 @@ fn run(
                     && if missing {
                         pack.review.asks_when_missing(&a.axis)
                     } else {
-                        a.confidence > 0.0 && a.confidence < below
+                        a.confidence > 0.0 && nils_pack::weaker_than(a.confidence, below)
                     };
+                // The population the threshold decides by its boundary: an
+                // answer written at exactly the confidence the threshold
+                // names is not below it, so it is never asked about. Not a
+                // question, and not silence either: a number in the report,
+                // because a threshold set at the confidence a rule always
+                // writes drains a whole axis out of the queue and nothing
+                // else in a run says so.
+                if !verdict.silent && !missing && nils_pack::at_threshold(a.confidence, below) {
+                    *report.at_threshold.entry(a.axis.clone()).or_insert(0) += 1;
+                }
                 if ask {
                     let kind = if missing { "missing" } else { "low_confidence" };
                     reviews.push(vec![
@@ -707,6 +783,60 @@ fn run(
                                 "confidence": a.confidence,
                                 "tier": a.tier,
                                 "below": below,
+                            })
+                            .to_string(),
+                        ),
+                        Param::from("open"),
+                        Param::from(now.as_str()),
+                        Param::Int(job_id),
+                    ]);
+                    raised += 1;
+                }
+            }
+
+            // Wave 2 §8.2, and record 35 finding 6: the evidence disagreed,
+            // and that reaches the stack it belongs to. The evaluator
+            // records a conflict wherever a rule would have stored something
+            // else on an axis another rule had closed; those are counted per
+            // batch as a fact about the pack (Wave 4c §6.6), and the count
+            // stays, but a person reading one stack cannot see a tally. One
+            // item per stack and pair of answers: the same rules disagreeing
+            // the same way twice on one stack is one disagreement, and
+            // grouping collapses the same disagreement across stacks into
+            // one question about the pack.
+            if !verdict.silent {
+                let mut said: std::collections::BTreeSet<(&str, &str, &str)> =
+                    std::collections::BTreeSet::new();
+                for d in verdict
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.kind == "axis_conflict")
+                {
+                    if !said.insert((d.axis.as_str(), d.by_value.as_str(), d.value.as_str())) {
+                        continue;
+                    }
+                    reviews.push(vec![
+                        Param::from(format!("{}:conflict", d.axis)),
+                        Param::from("stack"),
+                        Param::from(serde_json::json!({"stack_id": stack_id}).to_string()),
+                        Param::from(
+                            serde_json::json!({
+                                "axis": d.axis,
+                                // what the stack says, and what the rule
+                                // that was pre-empted would have said
+                                "value": d.by_value,
+                                "other": d.value,
+                                "decided_by": {
+                                    "rule_set": d.by_rule_set,
+                                    "rule": d.by_rule,
+                                    "matched": d.by_matched,
+                                },
+                                "over": {
+                                    "rule_set": d.rule_set,
+                                    "rule": d.rule,
+                                    "matched": d.matched,
+                                },
+                                "pack": pack.id(),
                             })
                             .to_string(),
                         ),

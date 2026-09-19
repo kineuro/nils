@@ -648,13 +648,33 @@ impl<'a> Builder<'a> {
             Grain::Stack => {
                 let window = self.p(Param::Int(self.ctx.window_days), Type::Int);
                 let digest = self.p(Param::from(self.ctx.scheme_digest.as_str()), Type::Text);
+                // §4.4 rule 10 and §14.2: a stack the pack ruled out is not a
+                // stack any set sees, and a document cannot switch it off.
+                // Describe prints this predicate, so the query has to carry
+                // it or the two disagree by exactly the excluded stacks.
+                let axis = self.p(Param::from("disposition"), Type::Text);
+                let ruled_out = self.p(Param::from("excluded"), Type::Text);
+                let not_excluded = format!(
+                    "NOT EXISTS (SELECT 1 FROM {} dax WHERE dax.stack_id = st.id \
+                     AND dax.axis = {axis} AND dax.value = {ruled_out})",
+                    q(self, "classification_axis")
+                );
                 Base {
+                    // Record 35 finding 1: whose stack this is comes off the
+                    // **series**, which carries the subject the stack's own
+                    // files named, and not off the study, which carries
+                    // whoever the study's files named. The two differ wherever
+                    // an archive re-linked a series, and reading the study
+                    // folded one subject's stacks into another's: an ask saw
+                    // 38 subjects where a selection reached 39. The session
+                    // follows the same rule, so a stack is never rolled up
+                    // under a session of somebody else.
                     from: format!(
                         "{} st JOIN {} se ON se.id = st.series_id JOIN {} sy ON sy.id = se.study_id \
-                         JOIN {} su ON su.id = sy.subject_id JOIN {} f ON f.stack_id = st.id \
+                         JOIN {} su ON su.id = se.subject_id JOIN {} f ON f.stack_id = st.id \
                          LEFT JOIN {} smr ON smr.series_id = se.id \
                          LEFT JOIN {} scs ON scs.study_id = sy.id AND scs.window_days = {window} \
-                         LEFT JOIN {} sc ON sc.id = scs.session_id \
+                         LEFT JOIN {} sc ON sc.id = scs.session_id AND sc.subject_id = se.subject_id \
                          LEFT JOIN {} sl ON sl.session_id = sc.id AND sl.scheme_digest = {digest}",
                         q(self, "stack"),
                         q(self, "series"),
@@ -670,22 +690,23 @@ impl<'a> Builder<'a> {
                     subj: Some("su.id".into()),
                     day: Some("COALESCE(sy.date_filled, sy.study_date)".into()),
                     prec: None,
-                    session_k: Some("scs.session_id".into()),
+                    session_k: Some("sc.id".into()),
                     study_k: Some("sy.id".into()),
                     series_k: Some("se.id".into()),
                     stack_k: Some("st.id".into()),
-                    standing: Vec::new(),
+                    standing: vec![not_excluded],
                 }
             }
             Grain::Instance => {
                 let window = self.p(Param::Int(self.ctx.window_days), Type::Int);
                 let digest = self.p(Param::from(self.ctx.scheme_digest.as_str()), Type::Text);
                 Base {
+                    // The same rule as the stack grain, for the same reason.
                     from: format!(
                         "{} i JOIN {} se ON se.id = i.series_id JOIN {} sy ON sy.id = se.study_id \
-                         JOIN {} su ON su.id = sy.subject_id \
+                         JOIN {} su ON su.id = se.subject_id \
                          LEFT JOIN {} scs ON scs.study_id = sy.id AND scs.window_days = {window} \
-                         LEFT JOIN {} sc ON sc.id = scs.session_id \
+                         LEFT JOIN {} sc ON sc.id = scs.session_id AND sc.subject_id = se.subject_id \
                          LEFT JOIN {} sl ON sl.session_id = sc.id AND sl.scheme_digest = {digest}",
                         q(self, "instance"),
                         q(self, "series"),
@@ -699,7 +720,7 @@ impl<'a> Builder<'a> {
                     subj: Some("su.id".into()),
                     day: Some("COALESCE(sy.date_filled, sy.study_date)".into()),
                     prec: None,
-                    session_k: Some("scs.session_id".into()),
+                    session_k: Some("sc.id".into()),
                     study_k: Some("sy.id".into()),
                     series_k: Some("se.id".into()),
                     stack_k: Some("i.stack_id".into()),
@@ -1073,9 +1094,7 @@ impl<'a> Builder<'a> {
                     "a.k = cm.cohort_id".to_string()
                 }
                 (Grain::Subject, _) => "a.k = su.id".to_string(),
-                (Grain::Session, Grain::Stack | Grain::Instance) => {
-                    "a.k = scs.session_id".to_string()
-                }
+                (Grain::Session, Grain::Stack | Grain::Instance) => "a.k = sc.id".to_string(),
                 (Grain::Stack, Grain::Instance) => "a.k = i.stack_id".to_string(),
                 (g, h) => {
                     return Err(err(

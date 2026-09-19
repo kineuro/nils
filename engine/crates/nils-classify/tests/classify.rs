@@ -93,6 +93,7 @@ fn rows(reg: &mut Registry, sql: &str) -> Vec<Row> {
         "classification",
         "stack_fingerprint",
         "review_item",
+        "review_member",
         "decision",
         "stack",
         "diagnostic",
@@ -992,5 +993,738 @@ cases:
             "{name}: {by_origin}"
         );
         assert!(nils_classify::scope::Scope::parse("nonsense").is_err());
+    }
+}
+
+/// A phase-contrast study, as the archive writes one: a series whose echo
+/// number varies per image, so every stack holds one image, and an echo time
+/// of 0.0, which is the scanner saying it has nothing to say (record 35, S4).
+/// Beside it, the same split over a series whose stacks hold two images each,
+/// which is what an ordinary multi-echo acquisition looks like.
+fn flow_tree() -> TempDir {
+    let dir = TempDir::new("classify-flow");
+    let write = |series: &str, echo: u32, instance: &str, file: &str| {
+        let sop = format!("A.{series}.{echo}.{instance}");
+        let mut e = synth::minimal_mr("A", &format!("A.{series}"), &sop);
+        e.push(elem(tags::PATIENT_ID, VR::LO, "P1"));
+        e.extend([
+            elem(tags::SERIES_DESCRIPTION, VR::LO, "ax flow"),
+            elem(tags::SCANNING_SEQUENCE, VR::CS, "GR"),
+            elem(tags::SEQUENCE_NAME, VR::SH, "*pc2d1"),
+            elem(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+            elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+            elem(tags::ECHO_TIME, VR::DS, "0.0"),
+            elem(tags::REPETITION_TIME, VR::DS, "30.0"),
+            elem(tags::ECHO_NUMBERS, VR::IS, &echo.to_string()),
+        ]);
+        dir.file(file, &synth::part10(&MetaFields::mr(&sop), &e, true));
+    };
+    for echo in 1..=6 {
+        write("1", echo, "1", &format!("one/{echo}"));
+        write("2", echo, "1", &format!("two/{echo}-1"));
+        write("2", echo, "2", &format!("two/{echo}-2"));
+    }
+    dir
+}
+
+#[test]
+fn a_split_that_leaves_one_image_in_every_stack_is_a_question() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = flow_tree();
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+
+        // The split fired on both series, and the reason is the echo number.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {stack_fingerprint} WHERE split_reason = 'multi_echo'"
+            ),
+            12,
+            "{name}"
+        );
+        // The echo time is a zero the file carries, not an absence.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {stack_fingerprint} WHERE echo_time = 0"
+            ),
+            12,
+            "{name}"
+        );
+
+        // One question, with the six stacks of the series the split left
+        // holding one image as its members, and none of the six whose stacks
+        // hold two.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE kind = 'split:one_image_per_stack'"
+            ),
+            1,
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT members FROM {review_item} WHERE scope = 'group' AND kind = 'split:one_image_per_stack'"
+            ),
+            6,
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_member} m JOIN {stack_fingerprint} f ON f.stack_id = m.stack_id WHERE f.n_instances = 1"
+            ),
+            6,
+            "{name}: the members are the stacks holding one image"
+        );
+
+        // And a zero echo time decided nothing: not one of the twelve is
+        // called an anatomical T1w on the strength of it.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_axis} WHERE axis = 'base'"
+            ),
+            0,
+            "{name}: a zero echo time is not a short one"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_evidence} WHERE rule = 'physics:gre_t1w'"
+            ),
+            0,
+            "{name}"
+        );
+    }
+}
+
+/// One stack of one series, built from the elements a case needs, so that a
+/// threshold can be met exactly rather than described.
+fn one_stack(description: &str, extra: &[(dicom_core::Tag, VR, &str)]) -> TempDir {
+    let dir = TempDir::new("classify");
+    let mut e = synth::minimal_mr("A", "A.1", "A.1.1");
+    e.push(elem(tags::PATIENT_ID, VR::LO, "P1"));
+    e.extend([
+        elem(tags::SERIES_DESCRIPTION, VR::LO, description),
+        elem(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+        elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+    ]);
+    for (tag, vr, value) in extra {
+        e.push(elem(*tag, *vr, value));
+    }
+    dir.file("s/1", &synth::part10(&MetaFields::mr("A.1.1"), &e, true));
+    dir
+}
+
+/// The axis as it was written, with the confidence and the tier.
+fn axis_of(reg: &mut Registry, axis: &str) -> (String, f64, String) {
+    let r = rows(
+        reg,
+        &format!(
+            "SELECT COALESCE(value, ''), confidence, tier FROM {{classification_axis}} WHERE axis = '{axis}'"
+        ),
+    );
+    assert_eq!(r.len(), 1, "one stack, one row for {axis}");
+    (
+        r[0].text(0).unwrap().into(),
+        r[0].double(1).unwrap(),
+        r[0].text(2).unwrap().into(),
+    )
+}
+
+/// Open questions of a kind, whether they are still per stack or have been
+/// collapsed into the group a person reads.
+fn asked(reg: &mut Registry, kind: &str) -> i64 {
+    one(
+        reg,
+        &format!("SELECT COUNT(*) FROM {{review_item}} WHERE kind = '{kind}'"),
+    )
+}
+
+/// Wave 2 §8.2: a threshold is read as strictly below, so an answer written
+/// at exactly the confidence the threshold names is an answer. The MRI
+/// pack's body-part number is the case that matters: the keyword tier writes
+/// 0.65 and the threshold is 0.65, so the whole axis stands on its boundary.
+#[test]
+fn a_body_part_exactly_on_its_threshold_is_not_a_question_and_is_counted() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    assert_eq!(pack.review.below("body_part"), 0.65);
+    for lab in labs() {
+        let name = lab.name;
+        let dir = one_stack(
+            "sag t1 spine",
+            &[
+                (tags::BODY_PART_EXAMINED, VR::CS, "SPINE"),
+                (tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+                (tags::REPETITION_TIME, VR::DS, "600"),
+                (tags::ECHO_TIME, VR::DS, "12"),
+            ],
+        );
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        assert_eq!(
+            axis_of(&mut reg, "body_part"),
+            ("spine".to_string(), 0.65, "keywords".to_string()),
+            "{name}"
+        );
+        assert_eq!(
+            asked(&mut reg, "body_part:low_confidence"),
+            0,
+            "{name}: 0.65 is not below 0.65"
+        );
+        // and the run says how many answers stand on their threshold
+        assert_eq!(report.at_threshold.get("body_part"), Some(&1), "{name}");
+        assert!(report.on_the_threshold() >= 1, "{name}");
+
+        // The same stack, asked about one hundredth higher: now it is below.
+        let settings = nils_classify::job::Settings {
+            review_below: Some(0.66),
+            ..Default::default()
+        };
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert_eq!(
+            asked(&mut reg, "body_part:low_confidence"),
+            1,
+            "{name}: 0.65 is below 0.66"
+        );
+        assert_eq!(report.at_threshold.get("body_part"), None, "{name}");
+    }
+}
+
+/// The other half of the same boundary, on the axis the corpus run found 354
+/// of: base from the physics tier, written at exactly 0.70 against a default
+/// threshold of 0.70.
+#[test]
+fn a_base_from_physics_exactly_on_its_threshold_is_an_answer() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    assert_eq!(pack.review.below("base"), 0.70);
+    for lab in labs() {
+        let name = lab.name;
+        // A gradient echo with a very short echo time and no keyword.
+        let dir = one_stack(
+            "ax gre",
+            &[
+                (tags::SCANNING_SEQUENCE, VR::CS, "GR"),
+                (tags::REPETITION_TIME, VR::DS, "250"),
+                (tags::ECHO_TIME, VR::DS, "4.6"),
+                (tags::MR_ACQUISITION_TYPE, VR::CS, "2D"),
+            ],
+        );
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        assert_eq!(
+            axis_of(&mut reg, "base"),
+            ("T1w".to_string(), 0.70, "physics".to_string()),
+            "{name}"
+        );
+        assert_eq!(
+            asked(&mut reg, "base:low_confidence"),
+            0,
+            "{name}: 0.70 is not below 0.70"
+        );
+        assert_eq!(report.at_threshold.get("base"), Some(&1), "{name}");
+    }
+}
+
+/// And the rule on the same axis that writes one hundredth less is a
+/// question, so the boundary is the only thing between them.
+#[test]
+fn a_base_one_hundredth_below_its_threshold_is_a_question() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        // A spin echo with a long repetition and a short echo time: PDw at
+        // 0.65, which is the population the corpus run asked about.
+        let dir = one_stack(
+            "ax se",
+            &[
+                (tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+                (tags::REPETITION_TIME, VR::DS, "3000"),
+                (tags::ECHO_TIME, VR::DS, "12"),
+                (tags::MR_ACQUISITION_TYPE, VR::CS, "2D"),
+            ],
+        );
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        assert_eq!(
+            axis_of(&mut reg, "base"),
+            ("PDw".to_string(), 0.65, "physics".to_string()),
+            "{name}"
+        );
+        assert_eq!(
+            asked(&mut reg, "base:low_confidence"),
+            1,
+            "{name}: 0.65 is below 0.70"
+        );
+        assert_eq!(report.at_threshold.get("base"), None, "{name}");
+    }
+}
+
+/// Every threshold of this kind in the engine, at the value itself. Each
+/// line is the sentence the threshold is written with, so a comparison that
+/// drifts from its words fails here.
+#[test]
+fn every_threshold_reads_the_value_on_it_as_its_own_words_do() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+
+    // review.low_confidence, per axis: below, so exactly on it is not weak.
+    for axis in ["body_part", "base", "technique"] {
+        let below = pack.review.below(axis);
+        assert!(!pack.review.asks_about(axis, below), "{axis} on {below}");
+        assert!(pack.review.asks_about(axis, below - 0.01), "{axis}");
+        assert!(!pack.review.asks_about(axis, below + 0.01), "{axis}");
+        // and arithmetic that lands on the threshold the long way round is
+        // still on it
+        assert!(
+            !pack
+                .review
+                .asks_about(axis, (below / 3.0) + (below / 3.0) + (below / 3.0)),
+            "{axis}: a rounding error is not a doubt"
+        );
+    }
+
+    // A pass's emit.review_item_below: the same sentence.
+    let vote = pack
+        .passes
+        .iter()
+        .find(|p| p.name == "physics_vote")
+        .expect("the MRI pack declares physics_vote");
+    let below = vote.emit.review_below;
+    assert_eq!(below, 0.7);
+    assert!(!nils_pack::weaker_than(below, below));
+    assert!(nils_pack::at_threshold(below, below));
+    assert!(nils_pack::weaker_than(below - 0.01, below));
+
+    // A pick's borders: `within` takes the value itself, `below` does not.
+    let model = pack
+        .picks
+        .iter()
+        .find(|m| m.name == "main")
+        .expect("the MRI pack declares the main pick");
+    assert!(model.borders.runner_up_within <= model.borders.runner_up_within);
+    let (_, floor) = model
+        .borders
+        .rare_within
+        .clone()
+        .expect("the main pick declares rare_within");
+    assert!(!nils_pack::weaker_than(floor, floor), "exactly a tenth");
+    assert!(nils_pack::weaker_than(floor - 0.01, floor));
+
+    // And the digest's own: a plane at exactly the oblique confidence is
+    // not oblique.
+    let straight = nils_digest::stack::Orientation {
+        class: nils_digest::stack::Class::Axial,
+        confidence: nils_digest::stack::OBLIQUE_BELOW,
+    };
+    assert!(!straight.oblique());
+    let tilted = nils_digest::stack::Orientation {
+        class: nils_digest::stack::Class::Axial,
+        confidence: nils_digest::stack::OBLIQUE_BELOW - 0.01,
+    };
+    assert!(tilted.oblique());
+}
+
+/// Wave 2 §8.2 and record 35 finding 6: evidence that disagreed reaches the
+/// stack it belongs to. Candidate D's case, as the corpus holds it: a spine
+/// whose text also names the brain. The spine rule is ordered first and
+/// decides, the set stops there, and nothing used to record that the brain
+/// rule would have fired: the run raised 719 conflicts and kept every one of
+/// them in a per-batch tally.
+#[test]
+fn a_conflict_reaches_the_stack_and_the_tally_keeps_counting() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = one_stack(
+            "sag t1 cervical cerebral",
+            &[
+                (tags::BODY_PART_EXAMINED, VR::CS, "SPINE"),
+                (tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+                (tags::REPETITION_TIME, VR::DS, "600"),
+                (tags::ECHO_TIME, VR::DS, "12"),
+            ],
+        );
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+
+        // the answer is the one the order gives, unchanged
+        assert_eq!(
+            axis_of(&mut reg, "body_part"),
+            ("spine".to_string(), 0.65, "keywords".to_string()),
+            "{name}"
+        );
+
+        // and a person reading the stack sees that it was contested
+        let items = rows(
+            &mut reg,
+            "SELECT id, scope, COALESCE(group_key, ''), COALESCE(members, 0) \
+             FROM {review_item} WHERE kind = 'body_part:conflict'",
+        );
+        assert_eq!(items.len(), 1, "{name}");
+        let id = items[0].int(0).unwrap();
+        let item = nils_registry::review::item(reg.store(), id)
+            .unwrap()
+            .expect("the item is there");
+        let evidence = item.evidence;
+        assert_eq!(evidence["axis"], "body_part", "{name}: {evidence}");
+        assert_eq!(evidence["value"], "spine", "{name}: {evidence}");
+        assert_eq!(evidence["other"], "brain", "{name}: {evidence}");
+        assert_eq!(
+            evidence["decided_by"]["rule"], "spine",
+            "{name}: {evidence}"
+        );
+        assert_eq!(evidence["over"]["rule"], "brain", "{name}: {evidence}");
+        assert!(
+            !evidence["over"]["matched"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "{name}: the item names what the pre-empted rule cited: {evidence}"
+        );
+        // one question per pair of answers, with the stack as its member
+        assert_eq!(items[0].text(1).unwrap(), "group", "{name}");
+        assert_eq!(
+            items[0].text(2).unwrap(),
+            "body_part:conflict|spine over brain|",
+            "{name}"
+        );
+        assert_eq!(items[0].int(3).unwrap(), 1, "{name}");
+        assert_eq!(
+            one(&mut reg, "SELECT COUNT(*) FROM {review_member}"),
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_member} m JOIN {review_item} i ON i.id = m.item_id \
+                 WHERE i.kind = 'body_part:conflict'"
+            ),
+            "{name}: the conflict's member is the stack"
+        );
+
+        // and the tally that already counted it keeps counting it
+        assert!(
+            one(
+                &mut reg,
+                "SELECT CAST(SUM(count) AS BIGINT) FROM {diagnostic} WHERE kind = 'axis_conflict' AND scope = 'batch'"
+            ) >= 1,
+            "{name}"
+        );
+    }
+}
+
+/// A stack the pack has ruled out is asked nothing, a conflict among the
+/// rest included: the silence of §8.2 is what keeps a queue readable, and a
+/// new kind of item must not walk around it.
+#[test]
+fn a_conflict_on_a_stack_the_pack_rules_out_is_not_a_question() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        // A secondary capture: the pack excludes it as not an image.
+        let dir = one_stack(
+            "sag t1 cervical cerebral screenshot",
+            &[
+                (tags::BODY_PART_EXAMINED, VR::CS, "SPINE"),
+                (tags::IMAGE_TYPE, VR::CS, "DERIVED\\SECONDARY\\SCREEN SAVE"),
+                (tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+            ],
+        );
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+        assert_eq!(report.silent, 1, "{name}");
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {review_item} WHERE kind LIKE '%:conflict'"
+            ),
+            0,
+            "{name}"
+        );
+    }
+}
+
+/// Record 35, the seam between S4 and S5: one clause carries both.
+///
+/// `physics:gre_t1w` is a window on a small echo time, so S4 gave it a
+/// `gt: 0` guard, and it writes 0.70, which is exactly the threshold S5
+/// made read as strictly below. The two meet on one clause: the guard
+/// decides whether the clause fires at all, and only then does the boundary
+/// decide whether the answer is a question. A zero echo time must therefore
+/// produce no answer on the boundary rather than a confident one, and no
+/// count against the threshold either.
+#[test]
+fn a_clause_with_a_zero_guard_and_a_threshold_answers_on_neither_when_the_guard_fails() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    assert_eq!(pack.review.below("base"), 0.70);
+    for lab in labs() {
+        let name = lab.name;
+        // The same stack as the test above, with the one number the scanner
+        // wrote as zero. Everything else that could make it a T1w is absent.
+        let dir = one_stack(
+            "ax gre",
+            &[
+                (tags::SCANNING_SEQUENCE, VR::CS, "GR"),
+                (tags::REPETITION_TIME, VR::DS, "250"),
+                (tags::ECHO_TIME, VR::DS, "0.0"),
+                (tags::MR_ACQUISITION_TYPE, VR::CS, "2D"),
+            ],
+        );
+        let mut reg = prepare(&lab, &dir);
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+                .unwrap();
+
+        // The guard held: the window never fired, so no evidence stands on
+        // it and nothing was written at the confidence it would have used.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_evidence} WHERE rule = 'physics:gre_t1w'"
+            ),
+            0,
+            "{name}: a zero echo time is not a very short one"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_axis} WHERE axis = 'base' AND confidence = 0.7"
+            ),
+            0,
+            "{name}"
+        );
+        // And the boundary counted nothing, because there is no answer for
+        // it to sit on: a clause whose guard failed is silence, not a
+        // confident answer that happens to be on the threshold.
+        assert_eq!(report.at_threshold.get("base"), None, "{name}");
+    }
+}
+
+/// The words of one line of the report, with its padding taken out, so that
+/// a test says what a person reads and not how wide the column is.
+fn line(text: &str, label: &str) -> String {
+    text.lines()
+        .find(|l| l.trim_start().starts_with(label))
+        .unwrap_or_else(|| panic!("no line beginning {label} in:\n{text}"))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Record 35, regression 3: the line held a count of items against a count
+/// of stacks and called the ratio a share of the stacks, so a run that
+/// raised 830 items on 546 of 836 stacks printed "99.3% of the stacks".
+/// Each number now counts what its own sentence names.
+#[test]
+fn the_line_counts_stacks_as_stacks_and_items_as_items() {
+    let mut report = nils_classify::Classified::new(7, 3, "mri@0.1.3".to_string());
+    report.read = 836;
+    report.written = 836;
+    report.review_stacks = 546;
+    report.review_items = 830;
+    report.review_groups = 58;
+    let printed = report.to_string();
+    assert_eq!(
+        line(&printed, "stacks to review"),
+        "stacks to review 546 65.3% of the 836 classified",
+        "{printed}"
+    );
+    assert_eq!(
+        line(&printed, "review items"),
+        "review items 830 on those stacks, as 58 question(s)",
+        "{printed}"
+    );
+    // and never the items over the stacks, which is what 99.3 per cent was
+    assert!(!printed.contains("99.3%"), "{printed}");
+}
+
+/// Record 35, regression 3, from the registry: one stack answering weakly on
+/// several axes raises one item per axis, and is one stack in the line.
+#[test]
+fn a_stack_carrying_two_items_is_one_stack_in_the_line() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let mut reg = prepare(&lab, &dir);
+        // Every answer below certainty is a question, so the one stack of
+        // this tree raises one for each axis the pack answered.
+        let settings = nils_classify::job::Settings {
+            review_below: Some(1.0),
+            ..Default::default()
+        };
+        let report =
+            nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        assert_eq!(report.written, 1, "{name}");
+        assert!(
+            report.review_items >= 2,
+            "{name}: {} item(s)",
+            report.review_items
+        );
+        assert_eq!(
+            report.review_stacks, 1,
+            "{name}: one stack, whatever it asked"
+        );
+        // and the count is the registry's own: the distinct stacks the
+        // members of this run's questions stand on
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(DISTINCT stack_id) FROM {review_member}"
+            ),
+            1,
+            "{name}"
+        );
+        let printed = report.to_string();
+        assert_eq!(
+            line(&printed, "stacks to review"),
+            "stacks to review 1 100.0% of the 1 classified",
+            "{name}: {printed}"
+        );
+        assert_eq!(
+            line(&printed, "review items"),
+            format!(
+                "review items {} on those stacks, as {} question(s)",
+                report.review_items, report.review_groups
+            ),
+            "{name}: {printed}"
+        );
+    }
+}
+
+/// The flow study as the archive holds it: the series the split broke into
+/// one-image stacks, and beside it the same protocol's series it did not,
+/// whose echo time is a measurement and which the rules therefore judge.
+/// Those judged stacks are what the vote reads as neighbours.
+fn flow_with_neighbours() -> TempDir {
+    let dir = TempDir::new("classify-flow-pool");
+    let image = |series: &str, echo: Option<u32>, instance: u32, te: &str, file: &str| {
+        let sop = format!("A.{series}.{}.{instance}", echo.unwrap_or(0));
+        let mut e = synth::minimal_mr("A", &format!("A.{series}"), &sop);
+        e.push(elem(tags::PATIENT_ID, VR::LO, "P1"));
+        e.extend([
+            elem(tags::SERIES_DESCRIPTION, VR::LO, "ax flow"),
+            elem(tags::SCANNING_SEQUENCE, VR::CS, "GR"),
+            elem(tags::SEQUENCE_NAME, VR::SH, "*pc2d1"),
+            elem(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+            elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+            elem(tags::ECHO_TIME, VR::DS, te),
+            elem(tags::REPETITION_TIME, VR::DS, "30.0"),
+            elem(tags::FLIP_ANGLE, VR::DS, "15"),
+        ]);
+        if let Some(n) = echo {
+            e.push(elem(tags::ECHO_NUMBERS, VR::IS, &n.to_string()));
+        }
+        dir.file(file, &synth::part10(&MetaFields::mr(&sop), &e, true));
+    };
+    // The study's fragments: one image each, and no echo time.
+    for echo in 1..=6 {
+        image("1", Some(echo), 1, "0.0", &format!("split/{echo}"));
+    }
+    // The same protocol's whole series, with an echo time that was measured.
+    for series in ["2", "3"] {
+        for instance in 1..=4 {
+            image(
+                series,
+                None,
+                instance,
+                "3.0",
+                &format!("whole/{series}-{instance}"),
+            );
+        }
+    }
+    dir
+}
+
+/// Record 35, the re-run: S4 guarded the base windows against an echo time
+/// of zero, and candidate J's fragments came out T1w all the same, because
+/// the vote reads the same number through its key. A zero bins with the
+/// short echo times of gradient-echo anatomy, and the neighbours the vote
+/// found were the flow study's own whole series. A zero is a hole now, so
+/// the fragments are named by nothing and stay the question the split
+/// raised about them.
+#[test]
+fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = flow_with_neighbours();
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+
+        // The six fragments are the stacks holding one image, and they have
+        // no echo time to speak of.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {stack_fingerprint} WHERE n_instances = 1 AND echo_time = 0"
+            ),
+            6,
+            "{name}"
+        );
+        // Nothing wrote a base on any of them: not a rule, whose window the
+        // guard closes, and not the pass, whose bin no longer holds them.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_axis} a JOIN {stack_fingerprint} f \
+                 ON f.stack_id = a.stack_id WHERE a.axis = 'base' AND f.n_instances = 1"
+            ),
+            0,
+            "{name}: a flow fragment is not an anatomical T1w"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_evidence} WHERE axis = 'base' AND pass IS NOT NULL"
+            ),
+            0,
+            "{name}: and the vote answered none of them"
+        );
+        // What the study does say about them is unchanged: the technique is
+        // the flow sequence, and the split is one question with six members.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_axis} a JOIN {stack_fingerprint} f \
+                 ON f.stack_id = a.stack_id \
+                 WHERE a.axis = 'technique' AND a.value = 'PC' AND f.n_instances = 1"
+            ),
+            6,
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT members FROM {review_item} WHERE kind = 'split:one_image_per_stack'"
+            ),
+            6,
+            "{name}"
+        );
+        // And the whole series, whose echo time is a measurement, is judged
+        // by the window as before: the guard silences a zero, not a number.
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {classification_evidence} WHERE rule = 'physics:gre_t1w'"
+            ),
+            2,
+            "{name}"
+        );
     }
 }

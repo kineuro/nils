@@ -71,6 +71,10 @@ pub struct Grouped {
     pub items: i64,
     /// Members under them, which is the per-stack questions there were.
     pub members: i64,
+    /// The distinct stacks those members stand on. One stack can carry
+    /// several questions, so this is never the membership count and is the
+    /// only one of the three that can be held against a count of stacks.
+    pub stacks: i64,
 }
 
 /// Collapse the open per-stack axis questions a run raised into one item
@@ -110,6 +114,14 @@ pub fn group_run(store: &mut Store, job_id: i64) -> Result<Grouped, Error> {
             .map(str::to_string)
             .or_else(|| evidence["decision"].as_str().map(str::to_string))
             .unwrap_or_default();
+        // A disagreement is named by both answers: a body part decided as
+        // spine over a brain is not the same question as one decided as
+        // spine over a neck, and a group that mixed them would ask one
+        // question about two rules.
+        let value = match evidence["other"].as_str() {
+            Some(other) => format!("{value} over {other}"),
+            None => value,
+        };
         let tier = evidence["tier"].as_str().unwrap_or("").to_string();
         groups
             .entry((kind, value, tier))
@@ -119,6 +131,7 @@ pub fn group_run(store: &mut Store, job_id: i64) -> Result<Grouped, Error> {
     }
     let now = now_iso();
     let mut out = Grouped::default();
+    let mut on: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     for ((kind, value, tier), (first, members)) in groups {
         let key = format!("{kind}|{value}|{tier}");
         let mut evidence = first;
@@ -187,7 +200,9 @@ pub fn group_run(store: &mut Store, job_id: i64) -> Result<Grouped, Error> {
         }
         out.items += 1;
         out.members += members.len() as i64;
+        on.extend(members.iter().map(|(_, stack, _)| *stack));
     }
+    out.stacks = on.len() as i64;
     Ok(out)
 }
 
@@ -1170,6 +1185,131 @@ pub fn close_provisional(
             Param::from(provisional_key(subject_id)),
         ],
     )
+}
+
+/// A study row that holds no series. The row is a fact in a file, so it
+/// stays; what stops is the session made from it, and this says that the
+/// row is there and empty. v0 kept an ingest-conflict table and v1 kept the
+/// conflict itself, in silence: this is the silence ending.
+pub const EMPTY_STUDY_KIND: &str = "identity.empty_study";
+
+/// A subject that owns series and no study of its own, so it is on no
+/// timeline: it gets no session, no `sub-` path and appears in no ask. It
+/// happens where the files of one series name a patient their study does
+/// not, which the digest counts as `series_multi_study` and nothing else
+/// says.
+pub const NO_STUDY_KIND: &str = "identity.no_study";
+
+/// What groups the open `identity.empty_study` item of a study.
+pub fn empty_study_key(study_id: i64) -> String {
+    format!("study:{study_id}")
+}
+
+/// What groups the open `identity.no_study` item of a subject.
+pub fn no_study_key(subject_id: i64) -> String {
+    format!("subject:{subject_id}")
+}
+
+/// One open `identity.empty_study` item per study, brought up to date by a
+/// later run. `ref` is `{study_id, subject_id, code}` and the evidence says
+/// the day the study carries, so a person can tell an empty row from the
+/// study it was meant to be.
+pub fn raise_empty_study(
+    store: &mut Store,
+    study_id: i64,
+    subject_id: i64,
+    code: &str,
+    day: Option<&str>,
+    now: &str,
+) -> Result<i64, StoreError> {
+    let key = empty_study_key(study_id);
+    let reference =
+        serde_json::json!({ "study_id": study_id, "subject_id": subject_id, "code": code });
+    let evidence = serde_json::json!({ "series": 0, "day": day, "session": false });
+    if let Some((id, _)) = open_item(store, EMPTY_STUDY_KIND, &key)? {
+        refresh_item(store, id, &evidence, 1, None)?;
+        return Ok(id);
+    }
+    open_new(
+        store,
+        EMPTY_STUDY_KIND,
+        "study",
+        &key,
+        &reference,
+        &evidence,
+        1,
+        None,
+        now,
+    )
+}
+
+/// One open `identity.no_study` item per subject, with the series and the
+/// instances it owns counted up by a later run.
+pub fn raise_no_study(
+    store: &mut Store,
+    subject_id: i64,
+    code: &str,
+    series: i64,
+    instances: i64,
+    now: &str,
+) -> Result<i64, StoreError> {
+    let key = no_study_key(subject_id);
+    let reference = serde_json::json!({ "subject_id": subject_id, "code": code });
+    let evidence = serde_json::json!({ "series": series, "instances": instances, "studies": 0 });
+    if let Some((id, _)) = open_item(store, NO_STUDY_KIND, &key)? {
+        refresh_item(store, id, &evidence, 1, None)?;
+        return Ok(id);
+    }
+    open_new(
+        store,
+        NO_STUDY_KIND,
+        "subject",
+        &key,
+        &reference,
+        &evidence,
+        1,
+        None,
+        now,
+    )
+}
+
+/// Close every open item of a kind whose group key this run did not find
+/// again: the row it spoke about has series now, or the subject has a study,
+/// so there is nothing left to decide. `keep` is every key still true.
+pub fn close_resolved(
+    store: &mut Store,
+    kind: &str,
+    keep: &[String],
+    actor: &str,
+    decision: &serde_json::Value,
+) -> Result<u64, StoreError> {
+    let d = store.dialect();
+    let mut params: Vec<Param> = vec![
+        Param::from(now_iso()),
+        Param::from(actor),
+        Param::from(decision.to_string()),
+        Param::from(kind),
+    ];
+    let mut held = String::new();
+    if !keep.is_empty() {
+        let holes: Vec<String> = keep
+            .iter()
+            .enumerate()
+            .map(|(i, _)| d.param(params.len() + i + 1, Type::Text))
+            .collect();
+        held = format!(" AND group_key NOT IN ({})", holes.join(", "));
+        params.extend(keep.iter().map(|k| Param::from(k.as_str())));
+    }
+    let sql = format!(
+        "UPDATE {} SET status = '{RESOLVED}', decided_at = {}, actor = {}, decision = {} \
+         WHERE kind = {} AND status = 'open'{held}",
+        store.qualified("review_item"),
+        d.param(1, Type::Timestamp),
+        d.param(2, Type::Text),
+        d.param(3, Type::Json),
+        d.param(4, Type::Text),
+    );
+    store.execute(&sql, &params)
 }
 
 #[cfg(test)]

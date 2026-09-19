@@ -141,10 +141,12 @@ pub struct Penalty {
 /// When a pick is not to be trusted on its own.
 #[derive(Debug, Clone)]
 pub struct Borders {
-    /// The runner-up is within this fraction of the winner.
+    /// The runner-up is within this fraction of the winner. `within`
+    /// includes the fraction itself: a margin of exactly this is too close.
     pub runner_up_within: f64,
-    /// The winning value of this axis is held by less than this share of the
-    /// population, so the pick is right by the numbers and odd by the protocol.
+    /// The winning value of this axis is held by a share of the population
+    /// strictly below this, so the pick is right by the numbers and odd by
+    /// the protocol. A share of exactly this is not rare.
     pub rare_within: Option<(String, f64)>,
 }
 
@@ -606,12 +608,18 @@ pub fn pick(model: &Model, role: &str, candidates: &[Candidate], reference: &Ref
     };
 
     let mut borders = Vec::new();
-    if second.is_some() && margin <= model.borders.runner_up_within {
+    // `within` takes the number itself and `below` does not, as each is
+    // written: a margin of exactly the fraction is too close, and a share of
+    // exactly the floor is not rare.
+    if second.is_some()
+        && (margin <= model.borders.runner_up_within
+            || crate::pack::at_threshold(margin, model.borders.runner_up_within))
+    {
         borders.push(Border::TooClose);
     }
     if let Some((of, floor)) = &model.borders.rare_within {
         let share = reference.share(of, candidates[first].get(of));
-        if reference.total > 0 && share < *floor {
+        if reference.total > 0 && crate::pack::weaker_than(share, *floor) {
             borders.push(Border::Rare);
         }
     }

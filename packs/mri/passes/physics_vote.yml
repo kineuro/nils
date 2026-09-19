@@ -65,9 +65,24 @@ reference:
 # a half to even and Rust rounds it away from zero, which puts a TR of exactly
 # 50 ms in a different bin. A pack that does not carry its conventions is not
 # portable, only untested on the other implementation.
+#
+# `zero: absent` says the same thing about the echo time here that the base
+# windows say about it in `rules/base.yml`: no readout has an echo time of
+# zero, and a scanner that writes 0.0 is saying it has nothing to say. The
+# windows were guarded and this was not, so the same zero went on deciding a
+# base by the other route the pack has: a bin is evidence too. A flow study
+# whose echo time is 0.0 landed in the bin short-echo gradient-echo anatomy
+# sits in, and 288 of one study's 297 one-image fragments were voted T1w
+# from it. A zero here is now a hole, and a hole matches only a hole, so a
+# stack with no echo time votes only among stacks with no echo time.
+#
+# Only the echo time says it. A repetition time, an inversion time and a
+# flip angle of zero are as impossible, but nothing measured says what
+# declaring them would move, and a key is shared by every stack in the
+# archive.
 key:
   repetition_time: {round: 100, rounding: half_even}
-  echo_time:       {round: 5,   rounding: half_even}
+  echo_time:       {round: 5,   rounding: half_even, zero: absent}
   inversion_time:  {round: 100, rounding: half_even}
   flip_angle:      {round: 5,   rounding: half_even}
   n_instances:     {ceil: 20}
@@ -89,6 +104,9 @@ decide:
 
 emit:
   evidence: always
+  # Strictly below, as the axis thresholds are (pack.yml, review): a vote
+  # that comes out at exactly 0.7 is this pass's answer and is not asked
+  # about; the run counts how many did.
   review_item_below: 0.7
   review_all_touched: false
 

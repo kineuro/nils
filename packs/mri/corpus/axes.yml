@@ -105,10 +105,11 @@ cases:
     axes:
       construct: ND
 
-  # The word that decided this one in the gate: the normalizer drops `brain`
+  # The word that decided this one in the gate: `search_text` drops `brain`
   # and `head` as boilerplate, which is right for telling techniques apart,
   # so what says brain here is the Swedish for it, with the non-ASCII folded
-  # to a space exactly as the keyword list spells it.
+  # to a space exactly as the keyword list spells it. The body-part axis no
+  # longer depends on that accident; the cases below are why.
   - name: a description in Swedish says which body part it is
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
@@ -118,3 +119,134 @@ cases:
       repetition_time: 4000
     axes:
       body_part: brain
+
+  # --- the body part the file states (record 35, S2). The body-part rules
+  # read `anatomy_text`, which drops nothing, so a stack whose
+  # `BodyPartExamined` says so in English gets a body part even where the
+  # description says nothing about anatomy at all.
+
+  - name: a stated body part of BRAIN,HEAD is a brain, whatever the description says
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'BRAIN,HEAD'
+      text_series_description: 'ax t2 tse'
+      text_sequence_name: '*tse2d1_15'
+      scanning_sequence: 'SE'
+      echo_time: 100
+      repetition_time: 4000
+    axes:
+      body_part: brain
+
+  - name: a stated body part of HEAD alone is a brain
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'HEAD'
+      text_series_description: 'sag 3d t1'
+    axes:
+      body_part: brain
+
+  - name: a spine and a neck stated together are a spine, as they always were
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'SPINE,NECK'
+      text_series_description: 'sag t2 tse'
+    axes:
+      body_part: spine
+
+  - name: a neck stated beside a brain is both
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'BRAIN,NECK'
+      text_series_description: 'cor t1 tse'
+    axes:
+      body_part: brain-neck
+
+  - name: a neck stated on its own is a neck
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'NECK'
+      text_series_description: 'ax t2 tse'
+    axes:
+      body_part: neck
+
+  # Record 35, the re-run: `cou` is three letters and was matched as a plain
+  # substring, so it fired inside longer words, and because it is the neck
+  # half of the brain-and-neck rule as well, an ordinary brain series with
+  # such a word in it came out as a neck beside a brain. The rule that can
+  # name a neck sits behind that one, so it was reached by nothing: the
+  # French word is a word now, and a fragment decides neither rule.
+  - name: a word that merely contains a neck term is not a neck
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'BRAIN,HEAD'
+      text_series_description: 'ax t2 acoustic'
+    axes:
+      body_part: brain
+
+  - name: a neck named in French is still a neck
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'COU'
+      text_series_description: 'ax t2 tse'
+    axes:
+      body_part: neck
+
+  - name: a body part whose accented letter came through damaged still decides
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      text_body_part: 'MR hj?rna'
+      text_series_description: 'ax t2 tse'
+    axes:
+      body_part: brain
+
+  - name: the boilerplate is still boilerplate to the axes it was written for
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      text_body_part: 'BRAIN,HEAD'
+      text_series_description: 'sag brain T1 mprage'
+      text_sequence_name: '*tfl3d1_16'
+      scanning_sequence: GR
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+    axes:
+      technique: MPRAGE
+      body_part: brain
+
+  # --- a physics value is evidence only where there is one (record 35, S4).
+  # Every window whose evidence is that a time is small asks first that the
+  # time was measured: an echo time of 0.0 is what a flow study writes, and
+  # reading it as a very short one made 297 phase-contrast stacks anatomical.
+
+  - name: a gradient echo whose echo time is zero is not a T1w
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      text_series_description: 'ax flow'
+      text_sequence_name: '*fl2d1'
+      echo_time: 0
+      repetition_time: 30
+    axes:
+      base: ''
+
+  - name: a gradient echo with a measured short echo time is a T1w, as it was
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: GR
+      text_series_description: 'ax flow'
+      text_sequence_name: '*fl2d1'
+      echo_time: 4
+      repetition_time: 30
+    axes:
+      base: 'T1w'
+
+  - name: an inversion time of zero is not a short one
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'SE\IR'
+      text_series_description: 'ax study'
+      text_sequence_name: '*tir2d1_15'
+      inversion_time: 0
+      echo_time: 15
+      repetition_time: 1500
+    axes:
+      base: ''

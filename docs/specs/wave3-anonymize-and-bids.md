@@ -659,12 +659,28 @@ block is emptied goes with it; one that still reserves a kept element stays, or
 a reader cannot tell whose the kept element is.
 
 **"No tag" is not "no text".** The third answer is the point of the check. A
-stack the file says is burned in is not written, one it says is clean is
-written, and one whose `BurnedInAnnotation` is absent is neither: it is held and
-raises a review item, and `--on-unknown write` is the deliberate answer for an
-archive somebody has already looked at. An archive where most stacks are
-unjudgeable is a fact a release should have to confront rather than one it can
-average away, and reading absent as clean is exactly how a screenshot leaves.
+stack the file says is burned in is not written and raises a review item, one it
+says is clean is written, and one whose `BurnedInAnnotation` is absent is
+neither: it is written and **counted**, and the release says how many stacks it
+could not judge, in its report and in its own row. Reading absent as clean is
+exactly how a screenshot leaves, so absent is never read as clean; it is read as
+a number a release has to print. `--on-unknown hold` is the deliberate answer
+for a site that will not let an unjudged stack leave before somebody has looked
+at it, and it holds every one of them.
+
+**The strict answer cannot be the default.** The tag is absent on most of the
+series of a real archive, so holding on it holds three quarters of what a
+selection reaches and most subjects release nothing at all. An archive where
+most stacks are unjudgeable is a fact a release should have to confront, and the
+way it confronts it is the count: a check that stops every release is one a site
+switches off rather than one it reads.
+
+**A held stack raises its review item once, not once per release.** A release is
+re-run whenever anything upstream of it changes (§8.6), and the file says the
+same thing every time, so a question per held stack per release is the same
+question filed again: two releases of one selection file two queues of identical
+rows. What recurs is the count in the report and in the release row, which is
+where a fact about a whole run belongs.
 
 The judgement reads the stack and its series and not the fingerprint, so a
 release after a digest alone judges as well as one after a fingerprint. A check
@@ -676,11 +692,40 @@ category table is a menu rather than a policy: a deployment picks from it, and
 nothing in the output says which pick was made. "De-identified" is not a
 property a file can carry without saying under what rule.
 
+Declaring is not printing. Record 35's re-run found the names on the release
+row and in nothing a person reads, so the report said which tags moved and
+never under what rule they moved. The report **names the categories it
+applied**, in the order they were given, and where fewer than all of them
+were applied it names the rest too: what a release left in is the half of
+that sentence an operator has to see. `/api/releases` and
+`nils release --history --json` answer with the same names, off the row.
+
 The four categories that survive from v0 are carried tag for tag: patient (34),
 trial (23), provider (38), institution (5). The default is all of them, because
 the safe set is the one nobody had to think about. Two elements are never
 removed whatever a category says, the SOP class and instance UID, because
 without them the file is not a DICOM object; they are remapped rather than kept.
+
+A **sixth category, `ids` (47)**, is the one thing carrying v0 tag for tag could
+not give us: the direct identifiers v0's own list never named. Record 35,
+finding 1 found `AccessionNumber` and `DeviceSerialNumber` in none of the five,
+so a release wrote both through verbatim and its change list said nothing about
+either. An accession number is the hospital's own identifier for that
+examination, and whoever holds one and can reach the hospital's systems undoes
+everything else the release did. The category is measured against PS3.15 Annex E
+and holds the examination and order numbers, the machine and the stations it was
+run from, the free text where a name or an accession gets typed, and the few
+names, issuers and places the patient and provider categories missed. It is
+**considered rather than complete**: descriptions the pack classifies on are
+kept on purpose, dates stay under §8.3 and UIDs under §8.2, since two policies
+on one element is how one of them is forgotten.
+
+Beside the categories the engine holds one list of its own: **what may never
+survive a release**, the direct identifiers across every category that holds
+one, written out rather than derived from the categories, and checked against
+the files a release actually wrote. A list built from what the code removes can
+only ever agree with the code, which is how the accession number was written
+through for as long as it was.
 
 One thing is **added** where v0 subtracts. v0 removes the birth date and
 computes nothing from it, so an age that was derivable from the archive is not

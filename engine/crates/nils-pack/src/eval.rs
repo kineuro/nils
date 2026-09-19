@@ -220,6 +220,11 @@ struct Fired {
     confidence: f64,
     source: String,
     matched: String,
+    /// The text `matched` was found in, where the clause read exactly one.
+    /// A pack normalizes its fingerprint more than once (`search_text` drops
+    /// the boilerplate, `anatomy_text` keeps it), so a citation without the
+    /// text it came from cannot be compared with another rule's.
+    text: Option<usize>,
 }
 
 impl Evaluated<'_> {
@@ -330,6 +335,7 @@ impl Evaluated<'_> {
                                 confidence: rule.confidence.unwrap_or(fired.confidence),
                                 source: fired.source.clone(),
                                 matched: fired.matched.clone(),
+                                text: fired.text,
                             },
                             set.name.clone(),
                             rule.id.clone(),
@@ -360,6 +366,58 @@ impl Evaluated<'_> {
                     self.decided.borrow_mut()[sets.axis].extend(just_set);
                 }
                 if !set.collect {
+                    // A later rule of this same set that would have stored
+                    // something else is a disagreement about the answer and
+                    // not only a keyword that went uncited: the set stops at
+                    // its first firing rule, so nothing else records that
+                    // the other rule would have fired at all. v0's brain
+                    // beside a spine is this case, and it is what a person
+                    // reviewing the stack has to see.
+                    //
+                    // Only where both rules read the stack's own text, and
+                    // cited different words in it. An ordered set puts the
+                    // specific rule before the general one and both are true
+                    // of the same evidence, so a later rule firing on the
+                    // same flags is the order doing its work: an MPRAGE is a
+                    // spoiled gradient echo, and asking about that is v0's
+                    // queue. Two different words in one text pointing at two
+                    // different answers is the archive disagreeing with
+                    // itself.
+                    //
+                    // The same text, and not merely text: record 35 slice S2
+                    // gave the MRI pack a second normalization, so a rule
+                    // may read `anatomy_text` where the rule before it read
+                    // `search_text`. A word the one keeps and the other
+                    // drops is not the archive contradicting itself, it is
+                    // two readings of one description, and a conflict
+                    // recorded across them would cite a word the winning
+                    // rule never saw.
+                    if fired.source == "text" && fired.text.is_some() {
+                        for later in &set.rules[ri + 1..] {
+                            let Some(also) = self.fire(later) else {
+                                continue;
+                            };
+                            if also.source != "text"
+                                || also.text != fired.text
+                                || also.matched.eq_ignore_ascii_case(&fired.matched)
+                            {
+                                continue;
+                            }
+                            for sets in &later.sets {
+                                if closed[sets.axis] && decided_by[sets.axis].is_some() {
+                                    self.conflict(
+                                        &mut verdict,
+                                        set,
+                                        later,
+                                        &also,
+                                        sets,
+                                        &derived,
+                                        &decided_by,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     // Wave 4c §6.6: what else would have matched on this
                     // stack, in this rule and in the rest of the set, and
                     // was never cited because this rule won. A keyword
@@ -639,6 +697,7 @@ impl Evaluated<'_> {
                             confidence: *confidence,
                             source: "flags".into(),
                             matched: name.clone(),
+                            text: None,
                         });
                     }
                 }
@@ -660,6 +719,7 @@ impl Evaluated<'_> {
                             confidence: *confidence,
                             source: "text".into(),
                             matched: kw.clone(),
+                            text: Some(*field),
                         });
                     }
                 }
@@ -675,6 +735,7 @@ impl Evaluated<'_> {
                             confidence: *confidence,
                             source: "flags".into(),
                             matched: names[i].clone(),
+                            text: None,
                         });
                     }
                 }
@@ -690,6 +751,7 @@ impl Evaluated<'_> {
                             confidence: *confidence,
                             source: "flags".into(),
                             matched: names.join("+"),
+                            text: None,
                         });
                     }
                 }
@@ -706,6 +768,7 @@ impl Evaluated<'_> {
                             confidence: *confidence,
                             source: source.clone(),
                             matched: cite.clone(),
+                            text: expr.one_text(),
                         });
                     }
                 }

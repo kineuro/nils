@@ -291,11 +291,16 @@ struct ReleaseArgs {
     #[arg(long, value_name = "OID")]
     uid_root: Option<String>,
     /// Which categories of element to remove; all of them by default
-    #[arg(long, value_name = "patient,trial,provider,institution,times")]
+    #[arg(long, value_name = "patient,trial,provider,institution,times,ids")]
     categories: Option<String>,
     /// What to do with a stack whose file says nothing about text in its
-    /// pixels. Holding is the default, because a release is a thing that leaves
-    #[arg(long = "on-unknown", default_value = "hold", value_name = "hold|write")]
+    /// pixels. Writing it is the default, and either way the release says how
+    /// many stacks it could not judge
+    #[arg(
+        long = "on-unknown",
+        default_value = "write",
+        value_name = "write|hold"
+    )]
     on_unknown: String,
     /// Only these subjects, by code
     #[arg(long, value_name = "CODE")]
@@ -1898,7 +1903,8 @@ struct ClassifyArgs {
     /// Only stacks of this modality
     #[arg(long, value_name = "MR|CT|PT|...")]
     modality: Option<String>,
-    /// Ask about every axis below this confidence, whatever the pack declares
+    /// Ask about every axis strictly below this confidence, whatever the pack
+    /// declares; an axis exactly on it is an answer
     #[arg(long, value_name = "0..1")]
     review_below: Option<f64>,
     /// Stacks per window, one transaction each
@@ -5815,6 +5821,17 @@ fn session_rebuild(home: &Home, args: SessionRebuildArgs) -> Result<(), Exit> {
         done.picks_withdrawn,
         done.items
     );
+    // Record 35 finding 7: what no timeline could take, named rather than
+    // made into a session with nothing in it.
+    if done.empty_studies > 0 || done.without_a_study > 0 {
+        println!(
+            "  {} {} hold no series and made no session; {} {} own series and no study",
+            done.empty_studies,
+            counted("studies", done.empty_studies as u64),
+            done.without_a_study,
+            counted("subjects", done.without_a_study as u64),
+        );
+    }
     Ok(())
 }
 
@@ -7891,7 +7908,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             for name in text.split(',').map(str::trim).filter(|n| !n.is_empty()) {
                 out.push(tags::Category::parse(name).ok_or_else(|| {
                     usage(format!(
-                        "{name} is not a category: patient, trial, provider, institution, times"
+                        "{name} is not a category: patient, trial, provider, institution, times, ids"
                     ))
                 })?);
             }
@@ -7901,7 +7918,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
 
     let on_unknown = nils_release::burned::OnUnknown::parse(&args.on_unknown).ok_or_else(|| {
         usage(format!(
-            "--on-unknown is hold or write, not {}",
+            "--on-unknown is write or hold, not {}",
             args.on_unknown
         ))
     })?;
@@ -8050,6 +8067,28 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             p["from"].as_str().unwrap_or_default()
         );
     }
+    // Record 35: under what rule the file was de-identified. The row has
+    // recorded the categories since they existed and nothing a person reads
+    // printed them, so the report said which tags moved and never why.
+    println!(
+        "  categories       {}",
+        if report.categories.is_empty() {
+            "none; no element was removed by category".to_string()
+        } else {
+            report.categories.join(", ")
+        }
+    );
+    let left: Vec<&str> = tags::Category::every()
+        .into_iter()
+        .map(tags::Category::name)
+        .filter(|name| !report.categories.iter().any(|c| c == name))
+        .collect();
+    if !left.is_empty() {
+        println!(
+            "  not removed      {}; those elements leave the file unchanged",
+            left.join(", ")
+        );
+    }
     // section 4.3: the sessions were numbered because a dataset's dates moved
     if let Some(why) = &report.session_naming {
         println!("  sessions         {why}");
@@ -8103,28 +8142,45 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         }
         println!("      {:>10}   files written", report.written);
     }
-    // §8.4. The second number is the one worth reading: "no tag" is not "no
-    // text", and an archive where most stacks are unjudgeable is a fact a
-    // release should have to confront rather than average away.
-    if report.burned_in > 0 || report.unjudged > 0 {
+    // §8.4. The first number is what was held; the second is what the file
+    // would not say either way, which the release counts whether it wrote it
+    // or held it, because "no tag" is not "no text" and an archive full of
+    // stacks nobody can judge is a fact a release should have to print.
+    if report.burned_in > 0 {
         println!("  held back");
-        if report.burned_in > 0 {
-            println!(
-                "      {:>10}   stacks the file says carry text in their pixels",
-                report.burned_in
-            );
-        }
-        if report.unjudged > 0 {
-            println!(
-                "      {:>10}   stacks the file will not say either way, each a review item",
-                report.unjudged
-            );
-        }
+        println!(
+            "      {:>10}   stacks the file says carry text in their pixels, each a review item",
+            report.burned_in
+        );
+    }
+    if report.unjudged > 0 {
+        println!("  could not judge");
+        println!(
+            "      {:>10}   stacks the file will not say either way, {}",
+            report.unjudged,
+            match report.on_unknown.as_str() {
+                "hold" => "held back and each a review item, as --on-unknown hold asked",
+                _ => "written; --on-unknown hold holds them instead",
+            }
+        );
     }
     if !report.refused.is_empty() {
         println!("  not written");
         for (why, n) in &report.refused {
             println!("      {n:>10}   {why}");
+        }
+    }
+    // Record 35 finding 1: a subject the session layer derived no session for
+    // is refused rather than written under a ses- no scheme produced, and it
+    // is named, because a number alone leaves nobody anything to look at.
+    if !report.without_a_session.is_empty() {
+        println!(
+            "  no session       {:>12}   subject(s) that own series and no study, so they are \
+             on no timeline and were refused; identity.no_study says why",
+            report.without_a_session.len()
+        );
+        for (code, n) in &report.without_a_session {
+            println!("      {n:>10}   stacks of {code}");
         }
     }
     // §9.3. Less than half of a clinical archive has a BIDS name, and where
@@ -8257,7 +8313,7 @@ fn releases_doc(
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
-         {policies}, {scheme}, session_naming FROM {}{wheres} \
+         {policies}, {scheme}, session_naming, categories FROM {}{wheres} \
          ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
@@ -8305,6 +8361,14 @@ fn releases_doc(
                 "sessions": sessions.get(&id).copied(),
                 "session_scheme": json(r.opt_text(19)?),
                 "session_naming": r.opt_text(20)?,
+                // Record 35: the categories of element the version removed,
+                // which is the rule its files were de-identified under.
+                "categories": r
+                    .opt_text(21)?
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|name| !name.is_empty())
+                    .collect::<Vec<&str>>(),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
