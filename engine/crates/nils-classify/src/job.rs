@@ -20,6 +20,7 @@ use nils_registry::schema::{Column, table};
 use nils_registry::store::{Insert, Param, Store};
 use nils_registry::{HomeError, Registry};
 
+use crate::coverage;
 use crate::dwi;
 use crate::fingerprint::{self, First};
 use crate::report::Report;
@@ -209,6 +210,7 @@ fn run(
     let select = fingerprint::select(store, &extra);
     let select_first = fingerprint::select_first_instances(store);
     let select_diffusion = fingerprint::select_diffusion(store);
+    let select_positions = fingerprint::select_positions(store);
     let select_fresh = fingerprint::select_fresh(store);
     let table = fingerprint::fingerprint_table();
     let overwritten = fingerprint::overwritten();
@@ -276,6 +278,20 @@ fn run(
             }
         }
 
+        // Where the slices of each stack in the window sit (record 37, S1),
+        // as the positions themselves: the counting and the tolerance that
+        // says which of them are one slice are in `coverage`, so a stack is
+        // covered the same way whichever backend the rows came off.
+        let mut positions: Vec<(i64, Vec<f64>)> = Vec::new();
+        for r in store.query(&select_positions, &[Param::Int(after), Param::Int(last)])? {
+            let stack_id = r.int(0)?;
+            let at = r.double(1)?;
+            match positions.last_mut() {
+                Some((id, values)) if *id == stack_id => values.push(at),
+                _ => positions.push((stack_id, vec![at])),
+            }
+        }
+
         // Why each multi-stack series in this window split. v0 stores this on
         // the stack and then never reads it (spikes/pack, finding 1); it is a
         // fact about the series, so it is derived here and a pack reads it.
@@ -306,8 +322,14 @@ fn run(
                 .binary_search_by_key(&stack_id, |(id, _)| *id)
                 .map(|i| diffusion[i].1.as_slice())
                 .unwrap_or(&[]);
+            let cover = coverage::of(
+                positions
+                    .binary_search_by_key(&stack_id, |(id, _)| *id)
+                    .map(|i| positions[i].1.as_slice())
+                    .unwrap_or(&[]),
+            );
             params.push(fingerprint::derive(
-                r, first, reason, images, job_id, epoch,
+                r, first, reason, images, &cover, job_id, epoch,
             )?);
         }
 

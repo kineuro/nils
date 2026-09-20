@@ -11,6 +11,9 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Record 37 S2: the coverage comparison of S1, which is the fact that
+# separates more colliding names than any other and is written once.
+nils-classify.workspace = true
 nils-dicom.workspace = true
 nils-pack.workspace = true
 nils-registry.workspace = true
@@ -36,7 +39,6 @@ libc.workspace = true
 # side: what `nils select` reaches and what an ask over it holds.
 nils-ask.workspace = true
 nils-catalog.workspace = true
-nils-classify.workspace = true
 nils-digest.workspace = true
 dicom-core.workspace = true
 dicom-dictionary-std.workspace = true

@@ -39,7 +39,13 @@ rules:
       - {keywords: [minip, 'min ip'], tier: keywords}
     set:
       base: SWI
-      construct: [MinIP]
+      construct:
+        - MinIP
+        # The echo-combined output of a multi-echo susceptibility
+        # acquisition, whichever of the route's outputs it is: 1,084 of the
+        # 1,154 stacks that carry `MEAN` are SWI, MinIP, MIP or magnitude
+        # images of one, so this is where the identity has to be said.
+        - {value: EchoCombined, when: is_mean}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.95
@@ -51,7 +57,9 @@ rules:
       - {when: {all: [{text: search_text, substring: mip}, {not: {text: search_text, substring: minip}}]}, cite: mip, source: text, tier: keywords}
     set:
       base: SWI
-      construct: [MIP]
+      construct:
+        - MIP
+        - {value: EchoCombined, when: is_mean}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -67,6 +75,7 @@ rules:
       construct:
         - Phase
         - {value: QSM, when: {text: search_text, substring: qsm}}
+        - {value: EchoCombined, when: is_mean}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -76,7 +85,9 @@ rules:
       - {flag: has_swi, tier: exclusive}
     set:
       base: SWI
-      construct: [SWI]
+      construct:
+        - SWI
+        - {value: EchoCombined, when: is_mean}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -86,7 +97,9 @@ rules:
       - {flag: is_projection, tier: exclusive}
     set:
       base: SWI
-      construct: [SWI]
+      construct:
+        - SWI
+        - {value: EchoCombined, when: is_mean}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.8
@@ -100,6 +113,7 @@ rules:
       construct:
         - {value: QSM, when: {any: [has_qsm, {text: search_text, substring: qsm}]}}
         - R2starmap
+        - {value: EchoCombined, when: is_mean}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.9
@@ -113,6 +127,7 @@ rules:
       construct:
         - Magnitude
         - {value: QSM, when: {text: search_text, substring: qsm}}
+        - {value: EchoCombined, when: is_mean}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.85
@@ -132,7 +147,10 @@ rules:
         tier: keywords
     set:
       base: SWI
-      construct: [Magnitude, QSM]
+      construct:
+        - Magnitude
+        - QSM
+        - {value: EchoCombined, when: is_mean}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.8
@@ -143,7 +161,9 @@ rules:
       - {keywords: [qsm], tier: keywords}
     set:
       base: SWI
-      construct: [QSM]
+      construct:
+        - QSM
+        - {value: EchoCombined, when: is_mean}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.95
@@ -153,7 +173,9 @@ rules:
       - {when: true, cite: SWIRecon, source: provenance}
     set:
       base: SWI
-      construct: [SWI]
+      construct:
+        - SWI
+        - {value: EchoCombined, when: is_mean}
       technique: {from: swi_technique}
       directory_type: anat
     confidence: 0.7

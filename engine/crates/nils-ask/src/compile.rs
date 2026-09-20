@@ -419,6 +419,8 @@ const PHYSICS: &[&str] = &[
     "pixel_spacing_row",
     "pixel_spacing_col",
     "number_of_averages",
+    "n_slices",
+    "slice_span_mm",
 ];
 
 fn cte_name(set: &str) -> String {

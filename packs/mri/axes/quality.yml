@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# What the file says is wrong with its own image.
+#
+# The other axes answer what an image is and how it was made. Three tokens in
+# `ImageType` answer neither: they say the image in front of you is less than
+# a whole, honest one, and they are the reason two otherwise identical stacks
+# are not interchangeable. The 2026-09-19 survey found `NAVAIL` separating 93
+# colliding names on 105 stacks and `DISTORTED` separating 15 on 19, and the
+# pack parsed both into flags nothing read.
+#
+# Kept apart from the disposition because that says what to do with a stack
+# and this says what the stack claims about itself: a reviewer asks about the
+# second, a release acts on the first.
+#
+# Multi-valued: nothing stops a file saying two of these at once, and an axis
+# that forced a choice would be choosing for it. An empty value is the ordinary
+# case and is not a question: most files say nothing here, which is not the
+# same as saying the image is sound.
+
+axis: quality
+kind: multi
+# The tiers the other axes use, so a confidence read off this one means what
+# it means everywhere else. Every value below is stated in the file, so every
+# one of them is decided at the exclusive tier.
+tiers: {exclusive: 0.95, keywords: 0.85, combination: 0.75}
+search: search_text
+
+order:
+  - Distorted
+  - InputUnavailable
+  - Encrypted
+
+values:
+  # The vendor's own word for an image its distortion correction did not
+  # reach, written beside the `DIS2D` and `DIS3D` siblings that it did.
+  Distorted:
+    detection:
+      exclusive: is_distorted
+  # `NAVAIL`: a derived image the scanner produced without one of the inputs
+  # it is computed from. What comes out looks like its sound siblings and is
+  # not one.
+  InputUnavailable:
+    detection:
+      exclusive: is_navail
+  # Pixels nothing downstream can read. Said here rather than by excluding the
+  # stack, because what was received is still a fact about the examination;
+  # what it costs is a conversion, and the disposition rules take that away.
+  Encrypted:
+    detection:
+      exclusive: is_encrypted

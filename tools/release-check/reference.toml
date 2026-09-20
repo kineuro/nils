@@ -58,13 +58,21 @@ names = [
 # The functional series is not here at all, and that is the point: `func`
 # requires `task`, nothing in a DICOM says what a subject was doing, and the
 # release put it nowhere and raised one question per study.
+#
+# Amended 2026-09-20, record 37 S6. One name changed: `DTIRecon` left the `acq-`
+# label for `rec-`. It is a provenance, the thing that made the image out of the
+# acquisition, which is what BIDS means by `rec-`; the schema's `dwi`
+# ScannerDerivatives group, which owns the `ADC` suffix, allows the entity. The
+# move loses no distinction and gains one: the `ADC` and the `trace` now share
+# `acq-BrainAx2DDWIEPI`, which is true of them, where the old pair of labels
+# claimed two different acquisitions. Checked name by name; nothing else moved.
 files = [
   "derivatives/nils/sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-AxSWI3DGREMagnitude.nii.gz",
   "sourcedata/sub-X/ses-20220115/localizer/Ax_T1w_2D_MPRAGE_ND/<dicom>",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx2DIRTSEFLAIR_FLAIR.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DMPRAGE_run-1_T1w.nii.gz",
   "sub-X/ses-20220115/anat/sub-X_ses-20220115_acq-BrainAx3DMPRAGE_run-2_T1w.nii.gz",
-  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-BrainAx2DDWIEPIDTIRecon_ADC.nii.gz",
+  "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-BrainAx2DDWIEPI_rec-DTIRecon_ADC.nii.gz",
   "sub-X/ses-20220115/dwi/sub-X_ses-20220115_acq-BrainAx2DDWIEPI_trace.nii.gz",
   "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-BrainAx2DGRE_echo-1_T1w.nii.gz",
   "sub-X/ses-20220715/anat/sub-X_ses-20220715_acq-BrainAx2DGRE_echo-2_T1w.nii.gz",

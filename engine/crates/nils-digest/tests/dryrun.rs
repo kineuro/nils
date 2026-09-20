@@ -310,3 +310,119 @@ fn an_empty_root_is_an_empty_report() {
     assert!(report.diagnostics.is_empty());
     assert!(report.to_string().contains("  none\n"));
 }
+
+/// Record 37 S9: the objects a study directory holds beside its images are
+/// about one file in a hundred, and a digest now says what they were.
+/// Candidates AD, AE and AF hold exactly these kinds.
+#[test]
+fn the_quarantine_says_what_it_set_aside_by_kind() {
+    const PRESENTATION_STATE: &str = "1.2.840.10008.5.1.4.1.1.11.1";
+    const ENHANCED_SR: &str = "1.2.840.10008.5.1.4.1.1.88.22";
+    const BASIC_TEXT_SR: &str = "1.2.840.10008.5.1.4.1.1.88.11";
+    const KEY_OBJECT: &str = "1.2.840.10008.5.1.4.1.1.88.59";
+    const REGISTRATION: &str = "1.2.840.10008.5.1.4.1.1.66.1";
+    const RAW_DATA: &str = "1.2.840.10008.5.1.4.1.1.66";
+    const PDF: &str = "1.2.840.10008.5.1.4.1.1.104.1";
+    const PRIVATE: &str = "1.3.46.670589.11.0.0.12.2";
+
+    let dir = TempDir::new("set-aside");
+    // one image NILS takes, so the counts have something to be a share of
+    dir.file(
+        "study/IM_0001",
+        &synth::part10(
+            &MetaFields::mr("1.2.3.A.1.1"),
+            &with_patient(
+                synth::minimal_mr("1.2.3.A", "1.2.3.A.1", "1.2.3.A.1.1"),
+                "P1",
+            ),
+            true,
+        ),
+    );
+    let object = |name: &str, class: &str, sop: &str| {
+        let mut elems = synth::minimal_mr("1.2.3.A", "1.2.3.A.9", sop);
+        elems.retain(|e| e.tag != tags::SOP_CLASS_UID);
+        elems.push(synth::text(tags::SOP_CLASS_UID, VR::UI, class));
+        dir.file(
+            name,
+            &synth::part10(&MetaFields::with(EXPLICIT, class, sop), &elems, true),
+        );
+    };
+    object("study/SC0001", SECONDARY_CAPTURE, "1.2.3.A.9.1");
+    object("study/SC0002", SECONDARY_CAPTURE, "1.2.3.A.9.2");
+    object("study/PS0001", PRESENTATION_STATE, "1.2.3.A.9.3");
+    object("study/SR0001", ENHANCED_SR, "1.2.3.A.9.4");
+    object("study/SR0002", BASIC_TEXT_SR, "1.2.3.A.9.5");
+    object("study/KO0001", KEY_OBJECT, "1.2.3.A.9.6");
+    object("study/REG001", REGISTRATION, "1.2.3.A.9.7");
+    object("study/RAW001", RAW_DATA, "1.2.3.A.9.8");
+    object("study/DOC001", PDF, "1.2.3.A.9.9");
+    object("study/PRV001", PRIVATE, "1.2.3.A.9.10");
+    dir.file("study/report.txt", b"not a DICOM file at all\n");
+
+    let report = dry_run(&settings(&dir)).unwrap();
+    assert_eq!(report.parsed, 1);
+    assert_eq!(report.quarantined, 11);
+    let kinds: Vec<(String, u64)> = report
+        .set_aside
+        .iter()
+        .map(|k| (k.kind.clone(), k.count))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("secondary capture".to_string(), 2),
+            ("structured report".to_string(), 2),
+            ("a private class".to_string(), 1),
+            ("encapsulated document".to_string(), 1),
+            ("key object selection".to_string(), 1),
+            ("not DICOM".to_string(), 1),
+            ("presentation state".to_string(), 1),
+            ("raw data".to_string(), 1),
+            ("registration".to_string(), 1),
+        ],
+        "{:?}",
+        report.set_aside
+    );
+    // every quarantined file is in exactly one kind
+    assert_eq!(
+        report.set_aside.iter().map(|k| k.count).sum::<u64>(),
+        report.quarantined
+    );
+    // and the classes inside a kind are named as the standard names them
+    let classes = |kind: &str| -> Vec<(String, u64)> {
+        report
+            .set_aside
+            .iter()
+            .find(|k| k.kind == kind)
+            .unwrap()
+            .classes
+            .iter()
+            .map(|c| (c.key.clone(), c.count))
+            .collect()
+    };
+    assert_eq!(
+        classes("structured report"),
+        vec![
+            ("Basic Text SR".to_string(), 1),
+            ("Enhanced SR".to_string(), 1)
+        ]
+    );
+    assert_eq!(
+        classes("secondary capture"),
+        vec![("Secondary Capture".to_string(), 2)]
+    );
+    assert_eq!(classes("a private class"), vec![(PRIVATE.to_string(), 1)]);
+    assert_eq!(classes("not DICOM"), vec![]);
+
+    // the printed report carries the block, and the JSON one the same counts
+    let text = report.to_string();
+    assert!(text.contains("set aside"), "{text}");
+    assert!(text.contains("secondary capture"), "{text}");
+    assert!(
+        text.contains("Grayscale Softcopy Presentation State 1"),
+        "{text}"
+    );
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["set_aside"][0]["kind"], "secondary capture");
+    assert_eq!(json["set_aside"][0]["count"], 2);
+}

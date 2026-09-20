@@ -21,6 +21,7 @@ use std::io;
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender, select};
+use nils_dicom::{Diagnostic, DiagnosticKind};
 use nils_registry::dialect::Conflict;
 use nils_registry::job;
 use nils_registry::schema::{Type, table};
@@ -36,7 +37,7 @@ use crate::report::{Counts, Joined, Report, Setup, Written};
 use crate::resume::{self, Records};
 use crate::rss::peak_rss;
 use crate::rule::Rule;
-use crate::stack::Signature;
+use crate::stack;
 use crate::walk::{Filter, WalkEvent, walk};
 use crate::writer::{self, QUARANTINE_KIND, Writer};
 
@@ -587,7 +588,14 @@ fn finish(
             .filter(|c| c.count > 0)
             .map(|c| {
                 let reference = serde_json::json!({ "batch_id": run.batch_id, "class": c.class });
-                let evidence = serde_json::json!({ "count": c.count });
+                // record 37 S9: what was set aside, by kind, so a reader of
+                // the queue knows what the archive held and NILS did not take
+                let kinds: Vec<serde_json::Value> = c
+                    .kinds()
+                    .iter()
+                    .map(|k| serde_json::json!({ "kind": k.key, "count": k.count }))
+                    .collect();
+                let evidence = serde_json::json!({ "count": c.count, "kinds": kinds });
                 vec![
                     Param::from(QUARANTINE_KIND),
                     Param::from("batch"),
@@ -896,20 +904,22 @@ fn parse_all(
                 Ok(mut x) => {
                     let ident = rule.apply(&mut x, &rel);
                     counts.probe_identity(ident.probe.as_deref());
-                    let signature = Signature::of(&x);
-                    counts.accepted(
-                        &x,
-                        rule.id_type_of(&ident),
-                        &ident.value,
-                        &signature.key,
-                        size,
-                    );
+                    let stacks = stack::stacks_of(&x);
+                    if stacks.len() > 1 {
+                        // record 37 S8: one file, more than one stack, and a
+                        // reader of the report is told how many
+                        x.diagnostics.push(Diagnostic::new(
+                            DiagnosticKind::FramesMultiStack,
+                            format!("{} stacks in one file", stacks.len()),
+                        ));
+                    }
+                    counts.accepted(&x, rule.id_type_of(&ident), &ident.value, &stacks, size);
                     progress.file(true);
                     let hashes = RowHashes::of(&x);
                     Item::Parsed(Box::new(ParsedFile {
                         extracted: x,
                         ident,
-                        signature,
+                        stacks,
                         path: rel,
                         dir,
                         size,

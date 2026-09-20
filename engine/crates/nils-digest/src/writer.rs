@@ -408,6 +408,8 @@ impl<'a> Writer<'a> {
         self.checkpoint()?;
         let filed = self.instances(&parsed, &series_ids, &stack_ids, &mut tally)?;
         self.checkpoint()?;
+        self.instance_frames(&parsed, &stack_ids, &filed)?;
+        self.checkpoint()?;
         self.source_files(batch, &filed, &held, &now, progress)?;
         self.checkpoint()?;
         self.diagnostics(&tally, &now)?;
@@ -1251,23 +1253,29 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
-    /// Stacks (§8): a row per `(series, stack key)` the registry does not
-    /// hold, its index the next of its series; every file's stack id comes
-    /// back, for its instance. The stacks of a series the cache misses are
-    /// read in one select, so the next index is the registry's, not the
-    /// cache's.
+    /// Stacks (§8, record 37 S8): a row per `(series, stack key)` the registry
+    /// does not hold, its index the next of its series; every stack of every
+    /// file comes back, in the file's order, the first for its instance. A
+    /// classic instance holds one; an enhanced object whose frames state more
+    /// than one holds one per group of frames. The stacks of a series the
+    /// cache misses are read in one select, so the next index is the
+    /// registry's, not the cache's.
     fn stacks(
         &mut self,
         parsed: &[&ParsedFile],
         series_ids: &[i64],
         tally: &mut Counts,
-    ) -> Result<Vec<i64>, HomeError> {
+    ) -> Result<Vec<Vec<i64>>, HomeError> {
         let t = table("stack");
         let missed: Vec<i64> = {
             let mut ids: Vec<i64> = parsed
                 .iter()
                 .zip(series_ids)
-                .filter(|(p, sid)| !self.stacks.contains(&(**sid, p.signature.key.clone())))
+                .filter(|(p, sid)| {
+                    p.stacks
+                        .iter()
+                        .any(|s| !self.stacks.contains(&(**sid, s.signature.key.clone())))
+                })
                 .map(|(_, sid)| *sid)
                 .collect();
             ids.sort_unstable();
@@ -1293,35 +1301,42 @@ impl<'a> Writer<'a> {
                 *n = (*n).max(r.int(3)? + 1);
             }
         }
-        // (series id, key) → the first file of the batch in the stack
-        let mut pending: HashMap<(i64, String), usize> = HashMap::new();
+        // (series id, key) → the first stack of the batch with it
+        let mut pending: HashMap<(i64, String), (usize, usize)> = HashMap::new();
         let mut rows = Vec::new();
         let mut per_series: BTreeMap<i64, i64> = BTreeMap::new();
         for (i, p) in parsed.iter().enumerate() {
             let sid = series_ids[i];
-            let key = (sid, p.signature.key.clone());
-            if self.stacks.contains(&key) || pending.contains_key(&key) {
-                continue;
+            for (n, s) in p.stacks.iter().enumerate() {
+                let key = (sid, s.signature.key.clone());
+                if self.stacks.contains(&key) || pending.contains_key(&key) {
+                    continue;
+                }
+                let x = &p.extracted;
+                let index = next.entry(sid).or_default();
+                let mut row = vec![
+                    Param::Int(sid),
+                    Param::Int(*index),
+                    Param::from(s.signature.key.as_str()),
+                    Param::from(x.modality.as_str()),
+                    Param::from(s.signature.orientation.class.name()),
+                ];
+                match &s.values {
+                    // a stack made of some of a file's frames says what those
+                    // frames said, not what the file's first frame said
+                    Some(values) => row.extend(values.iter().map(|v| Param::from(v.as_ref()))),
+                    None => row.extend(x.row(Level::Stack).map(|(_, v)| Param::from(v))),
+                }
+                row.extend([
+                    Param::Double(s.signature.orientation.confidence),
+                    Param::Int(0),
+                    Param::Int(self.batch_id),
+                ]);
+                rows.push(row);
+                *index += 1;
+                *per_series.entry(sid).or_default() += 1;
+                pending.insert(key, (i, n));
             }
-            let x = &p.extracted;
-            let index = next.entry(sid).or_default();
-            let mut row = vec![
-                Param::Int(sid),
-                Param::Int(*index),
-                Param::from(p.signature.key.as_str()),
-                Param::from(x.modality.as_str()),
-                Param::from(p.signature.orientation.class.name()),
-            ];
-            row.extend(x.row(Level::Stack).map(|(_, v)| Param::from(v)));
-            row.extend([
-                Param::Double(p.signature.orientation.confidence),
-                Param::Int(0),
-                Param::Int(self.batch_id),
-            ]);
-            rows.push(row);
-            *index += 1;
-            *per_series.entry(sid).or_default() += 1;
-            pending.insert(key, i);
         }
         let mut diags = Vec::new();
         if !rows.is_empty() {
@@ -1331,11 +1346,11 @@ impl<'a> Writer<'a> {
             let returned = self.registry.store().insert(&spec, &rows)?;
             for r in &returned {
                 let key = (r.int(1)?, r.text(2)?.to_string());
-                let Some(i) = pending.remove(&key) else {
+                let Some((i, n)) = pending.remove(&key) else {
                     continue;
                 };
                 self.stacks.put(key, r.int(0)?);
-                let o = &parsed[i].signature.orientation;
+                let o = &parsed[i].stacks[n].signature.orientation;
                 if o.oblique() {
                     diags.push(Diagnostic::new(
                         DiagnosticKind::OrientationOblique,
@@ -1376,12 +1391,16 @@ impl<'a> Writer<'a> {
         }
         let mut ids = Vec::with_capacity(parsed.len());
         for (i, p) in parsed.iter().enumerate() {
-            let id = self
-                .stacks
-                .get(&(series_ids[i], p.signature.key.clone()))
-                .copied()
-                .ok_or_else(|| missing_row("stack"))?;
-            ids.push(id);
+            let mut per_file = Vec::with_capacity(p.stacks.len());
+            for s in &p.stacks {
+                let id = self
+                    .stacks
+                    .get(&(series_ids[i], s.signature.key.clone()))
+                    .copied()
+                    .ok_or_else(|| missing_row("stack"))?;
+                per_file.push(id);
+            }
+            ids.push(per_file);
         }
         self.note(tally, diags);
         Ok(ids)
@@ -1394,7 +1413,7 @@ impl<'a> Writer<'a> {
         &mut self,
         parsed: &[&ParsedFile],
         series_ids: &[i64],
-        stack_ids: &[i64],
+        stack_ids: &[Vec<i64>],
         tally: &mut Counts,
     ) -> Result<Vec<Filed>, HomeError> {
         let t = table("instance");
@@ -1410,7 +1429,9 @@ impl<'a> Writer<'a> {
             let mut row = vec![
                 Param::from(x.sop_uid.as_str()),
                 Param::Int(series_ids[i]),
-                Param::Int(stack_ids[i]),
+                // the stack of the instance is its first, which for an
+                // enhanced object is the stack of its first frame
+                Param::Int(stack_ids[i][0]),
             ];
             row.extend(x.row(Level::Instance).map(|(_, v)| Param::from(v)));
             row.extend([Param::Null, Param::Int(self.batch_id)]);
@@ -1453,7 +1474,10 @@ impl<'a> Writer<'a> {
             let same = p.prior.is_some_and(|prior| prior.instance_id == Some(id));
             let (st, own) = if creator {
                 *per_series.entry(series_ids[i]).or_default() += 1;
-                *per_stack.entry(stack_ids[i]).or_default() += 1;
+                // an instance counts once in every stack its frames reach
+                for id in &stack_ids[i] {
+                    *per_stack.entry(*id).or_default() += 1;
+                }
                 (status::INGESTED, true)
             } else if same {
                 (status::INGESTED, false)
@@ -1500,6 +1524,48 @@ impl<'a> Writer<'a> {
         }
         self.note(tally, diags);
         Ok(filed)
+    }
+
+    /// Which frames of an instance are in which stack (record 37, S8): one
+    /// row per stack of a file whose frames made more than one, so that a
+    /// reader of the second stack can find the frames it is made of. A file
+    /// whose frames are all in one stack writes nothing here: its instance
+    /// row already names that stack, and `number_of_frames` says how many.
+    fn instance_frames(
+        &mut self,
+        parsed: &[&ParsedFile],
+        stack_ids: &[Vec<i64>],
+        filed: &[Filed],
+    ) -> Result<(), HomeError> {
+        let mut rows = Vec::new();
+        for (i, p) in parsed.iter().enumerate() {
+            // the instance's own file, whether this run created it or read it
+            // again, so a registry brought up to date by a re-digest gets the
+            // rows too; a duplicate path writes nothing
+            if p.stacks.len() < 2 || filed[i].status != status::INGESTED {
+                continue;
+            }
+            for (n, s) in p.stacks.iter().enumerate() {
+                rows.push(vec![
+                    Param::Int(filed[i].instance_id),
+                    Param::Int(stack_ids[i][n]),
+                    Param::Int(i64::from(s.frames)),
+                    Param::Int(i64::from(s.first_frame())),
+                    Param::from(s.list()),
+                    Param::Int(self.batch_id),
+                ]);
+            }
+        }
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let t = table("instance_frame");
+        let spec = Insert::all(t)
+            .on_conflict(Conflict::Nothing(&["instance_id", "stack_id"]))
+            .returning(&["id"]);
+        let written = self.registry.store().insert(&spec, &rows)?;
+        self.written.frame_groups += written.len() as u64;
+        Ok(())
     }
 
     /// Source files: every read item's row, upserted on `(source_id, path)`,

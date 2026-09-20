@@ -270,10 +270,13 @@ flags:
 
   # === 7. post-processing ===================================================
 
-  is_mip:        {any: [image_type.is_mip, image_type.is_mip_thin]}
+  is_mip:        {any: [image_type.is_mip, image_type.is_mip_thin, image_type.has_maximum]}
   is_minip:      image_type.is_minip
   is_projection: image_type.is_projection
-  is_mpr:        {any: [image_type.is_mpr, image_type.is_mpr_thick, has_mpr_in_text]}
+  # A curved planar reformat is a reformat: v0 parses `CPR` and reads it
+  # nowhere.
+  is_mpr:        {any: [image_type.is_mpr, image_type.is_mpr_thick, image_type.layout_cpr,
+                        has_mpr_in_text]}
   is_subtraction: image_type.is_subtraction
   is_mean:       image_type.is_mean
   is_composite:  image_type.is_composite
@@ -292,7 +295,12 @@ flags:
 
   is_error:      image_type.is_error
   is_screenshot: image_type.is_screenshot
+  # Read by nothing, and deliberately: wiring it would stop 21 standard
+  # deviation and coverage maps being classified as images of a person,
+  # which is a change to what is excluded and belongs with the rest of the
+  # exclusion tail, not here.
   is_qa:         image_type.is_qa
+  is_ttest:      image_type.has_ttest
   is_tune:       sequence_name.is_tune
   is_wip:        sequence_name.is_wip
 
@@ -330,18 +338,22 @@ flags:
   has_psir_synthetic: {any: [image_type.has_psir_synthetic, image_type.has_psir_synthetic_token]}
   has_stir_synthetic: image_type.has_stir_synthetic
   is_magic_raw:   image_type.is_magic_raw
-  is_dixon_water:
-    any:
-      - all: [image_type.has_water, image_type.has_dixon]
-      - all: [image_type.has_water, scan_options.has_dix_water]
-      - all: [image_type.has_water,
-              {any: [image_type.has_in_phase, image_type.has_out_phase]}]
-  is_dixon_fat:
-    any:
-      - all: [image_type.has_fat, image_type.has_dixon]
-      - all: [image_type.has_fat, scan_options.has_dix_fat]
-      - all: [image_type.has_fat,
-              {any: [image_type.has_in_phase, image_type.has_out_phase]}]
-  is_dixon_in_phase:  image_type.has_in_phase
-  is_dixon_out_phase: image_type.has_out_phase
+  # The four `is_dixon_*` flags that stood here said the Dixon part over
+  # again: `has_water`, `has_fat`, `has_in_phase` and `has_out_phase` are
+  # what the construct axis reads, and they have carried the part on all
+  # 2,773 stacks that state it since the axis was written. Nothing read the
+  # four, and a second spelling of a decided fact is how two parts of one
+  # program come to disagree about it.
   has_fat_fraction:   image_type.has_fat_fraction
+
+  # === 10. what the file says is wrong with the image ========================
+  # Three statements a file makes about its own image being less than a
+  # whole, honest one. None of them says what the image is, so none of them
+  # belongs on an axis that answers that; they are the `quality` axis.
+
+  # The vendor says this image was not distortion corrected.
+  is_distorted:  image_type.is_distorted
+  # A derived image the scanner made without one of its inputs.
+  is_navail:     image_type.has_navail
+  # Pixels NILS cannot read, so not an image it can convert.
+  is_encrypted:  image_type.is_encrypted

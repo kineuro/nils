@@ -354,6 +354,56 @@ pub fn minimal_pet(study: &str, series: &str, sop: &str) -> Vec<Elem> {
     minimal(study, series, sop, "1.2.840.10008.5.1.4.1.1.128", "PT")
 }
 
+/// One functional group: a sequence of a single item, as the standard writes
+/// the groups inside SharedFunctionalGroupsSequence and
+/// PerFrameFunctionalGroupsSequence.
+pub fn fg(sequence: Tag, elems: Vec<Elem>) -> Elem {
+    seq(sequence, vec![elems])
+}
+
+/// The PlaneOrientationSequence functional group with an
+/// ImageOrientationPatient, which is what tells one stack of frames from
+/// another when a file holds two orientations.
+pub fn fg_orientation(iop: &str) -> Elem {
+    fg(
+        tags::PLANE_ORIENTATION_SEQUENCE,
+        vec![text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, iop)],
+    )
+}
+
+/// An Enhanced MR Image Storage object: the five elements an accepted file
+/// needs, NumberOfFrames, the shared functional groups and one per-frame item
+/// per frame. Each per-frame item is a list of functional groups, so a test
+/// says what varies frame to frame and nothing else.
+pub fn enhanced_mr(
+    study: &str,
+    series: &str,
+    sop: &str,
+    shared: Vec<Elem>,
+    per_frame: Vec<Vec<Elem>>,
+) -> Vec<Elem> {
+    let mut elems = minimal(study, series, sop, "1.2.840.10008.5.1.4.1.1.4.1", "MR");
+    elems.push(text(
+        tags::NUMBER_OF_FRAMES,
+        VR::IS,
+        &per_frame.len().to_string(),
+    ));
+    if !shared.is_empty() {
+        elems.push(seq(tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE, vec![shared]));
+    }
+    elems.push(seq(tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE, per_frame));
+    elems
+}
+
+/// The file meta of an Enhanced MR Image Storage object.
+pub fn enhanced_meta(sop_instance: &str) -> MetaFields {
+    MetaFields::with(
+        crate::read::EXPLICIT_VR_LE,
+        "1.2.840.10008.5.1.4.1.1.4.1",
+        sop_instance,
+    )
+}
+
 /// A directory under the system's temporary directory, removed on drop.
 #[derive(Debug)]
 pub struct TempDir(PathBuf);

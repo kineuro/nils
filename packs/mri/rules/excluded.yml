@@ -8,7 +8,7 @@
 # set runs first and decides every axis, most of them to nothing.
 
 rule_set: excluded
-decides: [directory_type, base, technique, modifier, construct, provenance, body_part, post_contrast]
+decides: [directory_type, base, technique, modifier, construct, quality, provenance, body_part, post_contrast]
 
 order: [screenshot, error_map, secondary_reformat]
 
@@ -23,6 +23,7 @@ rules:
       technique: null
       modifier: null
       construct: null
+      quality: null
       provenance: null
       body_part: null
       post_contrast: null

@@ -178,7 +178,15 @@ that has a value, §9.1, which is not a rewrite).
   unit, and its input is `WHERE <previous> IS NOT NULL AND <mine> IS NULL`.
 - `instance`: `id`, `sop_instance_uid` (unique), `series_id`, `stack_id`, the
   instance columns of the catalogue, `charset` (the SpecificCharacterSet as
-  written), `source_file_id` (the first path), `first_batch_id`.
+  written), `source_file_id` (the first path), `first_batch_id`. `stack_id` is
+  the stack of the instance's first frame, which for every file but a split
+  enhanced object is its only one.
+- `instance_frame` (record 37, S8): `id`, `instance_id`, `stack_id`,
+  `n_frames`, `first_frame`, `frames` (the frame numbers as ranges from one,
+  `1-4,9,12-20`), `first_batch_id`. Unique `(instance_id, stack_id)`. One row
+  per stack of an enhanced multi-frame object whose frames held more than one;
+  a file whose frames are all in one stack writes none, since its instance row
+  names that stack and `number_of_frames` says how many.
 - `diagnostic`: `id`, `batch_id`, `kind`, `scope` (`file`, `instance`, `series`,
   `study`, `subject`, `batch`), `ref_id`, `count`, `sample` (json), `created_at`.
 - `review_item`: `id`, `kind`, `scope`, `ref` (json), `evidence` (json), `status`
@@ -406,12 +414,39 @@ spike's harness counted exactly these, and the dry run of slice 2 over the nmosd
 corpus refused the same 134 files (124 `not_dicom`, 10 `missing_uid`). The other
 three are the batch's knobs at work.
 
+Since record 37 S9 each quarantined file also carries a **kind**, which is
+what the file held in words: the family of its SOP class where the class is
+the reason (`secondary capture`, `presentation state`, `structured report`,
+`key object selection`, `registration`, `fiducials`, `segmentation`, `raw
+data`, `encapsulated document`, `waveform`, `parametric map`, `another image
+class`, `another standard class`, `a private class`), and what the class
+itself means otherwise (`not DICOM`, `unreadable`, `a broken header`, `no
+identifier`, `no modality`, `another modality`). The kind is derived from the
+UID the refusal already recorded, so nothing new is read and no new column is
+needed on `source_file`.
+
 Each class is a listed output: `nils quarantine list [--batch <id>] [--class <c>]`
 prints paths, and the batch's report carries the counts. One review item of kind
 `ingest.quarantine` per batch and class groups the rows (D7, C5: one item, N
 members), with the count as evidence and no path in the item body; a human or an
 agent decides "accepted" (these are sidecars, this is not our data) or "retry" and
 the decision is a row, not a deletion.
+
+Settled while saying what was set aside (record 37, S9): the kinds are
+reported in three places, because three readers ask the question. The digest's
+report gains a `set aside` block, one line per kind with its count and the
+classes inside it named as the standard names them (`structured report 129
+Enhanced SR 120, Basic Text SR 6, Comprehensive SR 3`); it is in the printed
+report and in the JSON of `ingest_batch.counts`, so a batch says forever what
+it set aside. The `ingest.quarantine` review item of each class carries the
+same kinds in its evidence beside the count, so a queue reads as "1,677 files:
+secondary capture 822, presentation state 574, structured report 129" rather
+than a number. And `nils quarantine list` prints the kind beside the class per
+file, with a `set aside` summary line above the paths and a `kinds` array in
+`--json`, so the per-file answer and the per-batch one agree. The registry
+needs nothing new: `source_file.reason` and `source_file.detail` already hold
+the class and the UID, and the kind is a reading of them, which is why an old
+registry answers the question too.
 
 Settled while building custody (slice 6): `nils quarantine list` prints each
 refused path joined to its root, with the batch, the class and the detail,
@@ -570,12 +605,12 @@ PatientName and PatientID are read for identity (§7) and stored nowhere in the
 registry.
 
 The Enhanced MR fallback is v0's, in v0's order: the standard functional group
-sequences first (SharedFunctionalGroupsSequence, then the first item of
+sequences first (SharedFunctionalGroupsSequence, then the *frame's* item of
 PerFrameFunctionalGroupsSequence), then the private per-frame sequences, Philips
 (2005,140F) and Siemens (0021,1201). A multi-frame object is one instance with
-`number_of_frames`, its stack fields taken from the first frame, as in v0;
-per-frame stacks are a question Wave 2 answers with the fingerprint pass in hand
-(§15).
+`number_of_frames`, whose own columns are its first frame's, as in v0; since
+record 37 S8 every frame is read as well, and the frames are grouped into
+stacks (§8).
 
 ### 6.3 Normalization
 
@@ -923,6 +958,65 @@ Settled while building stacks (slice 5):
   creating nothing. The mix corpus is compared the same way when it lands
   (`spikes/stacks/`).
 
+Settled while reading enhanced objects whole (record 37, S8):
+
+- **A frame contributes what an instance contributes**: the same fourteen
+  values of the signature above, read for that frame. The eight columns whose
+  source is one top-level element (`inversion_time`, `echo_numbers`,
+  `image_type`, `xray_exposure`, `kvp`, `tube_current`, `pet_bed_index`,
+  `pet_frame_type`) cannot differ frame to frame and are read once from the
+  file; the six that resolve through the functional groups (`echo_time`,
+  `echo_train_length`, `repetition_time`, `flip_angle`, `receive_coil_name`,
+  `image_orientation_patient`) are resolved per frame, the shared groups still
+  the fallback of a frame that says nothing, and the orientation class is
+  derived per frame from what that frame's PlaneOrientationSequence says. So a
+  frame and an instance are told apart by exactly the same rule, and the key
+  of a stack made of frames is the key that single-frame instances of the same
+  acquisition would have had.
+- **Frames are grouped by their raw values first, then by their key.** Two
+  frames whose fourteen values are equal are one group; groups whose
+  signatures come out equal (two spellings of one orientation, two echo times
+  that round alike) are then one stack. A file whose frames make one stack
+  after that is what it always was: one instance, one stack, and no
+  `instance_frame` row.
+- **The instance stays one.** One SOP instance is one file is one `instance`
+  row, filed under the stack of its first frame; the other stacks reach it
+  through `instance_frame`, which also says which frames are in each. A stack
+  counts the instance in `n_instances` once for every stack its frames reach,
+  so `SUM(n_instances)` over a series is no longer the number of its instances
+  when one of them is split; the series' own `n_instances` is.
+- **A file may not state more than 64 stacks.** Past that the file is read as
+  one stack, as before, and a `frames_multi_stack` diagnostic says so: a
+  registry is not the place to discover that one object claims a thousand
+  identities. The same diagnostic counts the files that did split, with the
+  number of stacks as its sample.
+- **A registry digested before this is short, and only a re-digest fixes it.**
+  The migration adds the table empty, and that is all a migration can do:
+  nothing in a stored row can recover what was never read, since the frames
+  beyond the first were never parsed and the stacks they hold have no rows to
+  migrate. A registry holding enhanced series is wrong until its tree is
+  digested again, and an ordinary re-digest is not enough either, because an
+  unchanged file is not re-read (§5.2). The instruction is
+  `nils digest <root> --restart`, which parses every file again whatever
+  `source_file` says: the missing stacks are then created and their frames
+  recorded. What such a run does not move is `stack.n_instances` on those new
+  stacks, which counts the instances a run created and those instances existed
+  already, so a registry whose numbers must add up is digested afresh. Both
+  routes are honest and the difference is said here rather than discovered.
+- **What a release makes of a split stack is not this slice's.** The frames of
+  each stack are written down, which is what a later pass needs to write the
+  right pixels; until one does, a release of a stack made of some of a file's
+  frames would write the whole object. Nothing in Wave 1 writes pixels, and
+  the question is named here rather than left to be discovered.
+- **The cost.** Grouping the frames of a file costs about 0.7 microseconds per
+  frame on the development machine in a release build
+  (`cargo run --release -p nils-dicom --example frame-cost`), against 1.2 to
+  1.8 microseconds per frame to parse the header the reader already parses:
+  a 1,200-frame object is 0.8 ms of grouping on top of 2.2 ms of parsing. Over
+  the archive's 1.13 million frames that is under a second of CPU in total,
+  spread over the workers, on a digest that reads thousands of files a second.
+  Nothing else in the file is read: the pixel data is still never touched.
+
 ## 9. The pipeline
 
 ### 9.1 Stages and bounds
@@ -1206,9 +1300,18 @@ Settled while building stacks (slice 5): the report counts `stacks` beside
 `stacks_created` is filled; `orientation_oblique` is counted per stack created
 (§8) and its samples are the class and the confidence (`Coronal 0.71`).
 
+Settled while reading enhanced objects whole (record 37, S8): the report counts
+`frames` (one per classic instance, one per frame of a multi-frame object) and
+`multi_stack_files`, printed as a `frames` line under `content` when a run read
+more frames than files; the `written` block gained `frame_groups`, the
+`instance_frame` rows written. `frames_multi_stack` is a diagnostic kind, with
+the number of stacks as its sample.
+
 The diagnostics are counted per batch and kind, with `scope` and `ref_id` where
 one row is the subject and a `sample` of at most ten shapes:
 
+`frames_multi_stack` (record 37, S8: a file whose frames made more than one
+stack, or more than the cap),
 `walk_error`, `charset_unknown`, `charset_lossy`, `value_invalid`,
 `field_disagreement` (per series or study, per field), `identity_unparsed`,
 `identity_fallback`, `subject_field_disagreement` (birth date or sex),
@@ -1612,11 +1715,12 @@ record and does not gate Wave 1.
 
 ## 15. Open questions carried into the wave
 
-- **Per-frame stacks.** A multi-frame object is one instance with first-frame
-  values here, as in v0. Whether Enhanced MR frames with different echo times
-  should be stacks of their own is Wave 2's to decide with the fingerprint pass
-  in hand; Wave 1 records `number_of_frames` and the charset so that the
-  question can be counted.
+- **Per-frame stacks.** ~~A multi-frame object is one instance with first-frame
+  values here, as in v0.~~ Answered by record 37, S8, which counted the
+  question first: 1,567 enhanced series, 1.13 million frames, and about one
+  object in ten holding more than one stack. Every frame is read and grouped
+  (§8), and an object whose frames hold more than one stack becomes more than
+  one stack.
 - **The default file filter.** `all` is the honest default; the gate's runs say
   whether the sidecars in real trees make it expensive or noisy.
 - **Hashing.** No content hash in Wave 1. The anonymizer and the custody page

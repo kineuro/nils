@@ -82,6 +82,8 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("aspect_ratio", "aspect_ratio"),
     ("field_strength_normalized", "field_strength_normalized"),
     ("dwi_directions", "dwi_directions"),
+    ("n_slices", "n_slices"),
+    ("slice_span_mm", "slice_span_mm"),
     ("modality", "modality"),
     ("manufacturer", "manufacturer"),
     ("manufacturer_model_name", "manufacturer_model_name"),
@@ -117,6 +119,9 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("dwi_pe_direction_source", "dwi_pe_direction_source"),
     ("dwi_directions_source", "dwi_directions_source"),
     ("field_strength_unit", "field_strength_unit"),
+    ("coverage_source", "coverage_source"),
+    ("acquisition_matrix", "acquisition_matrix"),
+    ("receive_coil_name", "receive_coil_name"),
 ];
 
 /// The select that reads one window of fingerprints, ordered by stack. With

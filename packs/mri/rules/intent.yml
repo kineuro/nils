@@ -170,6 +170,8 @@ rules:
             - {axis: construct, is: R1map}
             - {axis: construct, is: R2map}
             - {axis: construct, is: B1map}
+            # A map that names no quantity is still a map of the anatomy.
+            - {axis: construct, is: Qmap}
         cite: 'a quantitative map'
         source: construct
     set: {directory_type: anat}

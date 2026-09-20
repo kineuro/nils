@@ -367,3 +367,149 @@ fn the_dry_run_counts_the_stacks() {
     assert_eq!(json["stacks"], 3);
     assert!(report.to_string().contains("stacks 3"));
 }
+
+/// Record 37 S8: an enhanced multi-frame file is read whole. Candidate Q's
+/// shape, synthesized: one object of eight frames, four axial and four
+/// sagittal, beside an ordinary single-frame instance of the same series.
+#[test]
+fn an_enhanced_file_whose_frames_hold_two_orientations_becomes_two_stacks() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("stacks-enhanced");
+        let per_frame: Vec<Vec<synth::Elem>> = (0..8)
+            .map(|i| {
+                vec![synth::fg_orientation(match i < 4 {
+                    true => "1\\0\\0\\0\\1\\0",
+                    false => "0\\1\\0\\0\\0\\-1",
+                })]
+            })
+            .collect();
+        dir.file(
+            "a/1",
+            &enhanced("A", "A.1", "A.1.1", "P1", Vec::new(), per_frame),
+        );
+        // an enhanced object whose frames agree is one stack, as before
+        dir.file(
+            "a/2",
+            &enhanced(
+                "A",
+                "A.2",
+                "A.2.1",
+                "P1",
+                vec![synth::fg_orientation("1\\0\\0\\0\\1\\0")],
+                (0..4).map(|_| Vec::new()).collect(),
+            ),
+        );
+        let s = settings(&dir);
+        let mut reg = lab.open();
+
+        let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(report.parsed, 2, "{name}");
+        assert_eq!(report.series, 2, "{name}");
+        // two files, three stacks: the split one is two
+        assert_eq!(report.stacks, 3, "{name}");
+        assert_eq!(report.frames, 12, "{name}");
+        assert_eq!(report.multi_stack_files, 1, "{name}");
+        let w = report.written.clone().unwrap();
+        assert_eq!(w.stacks_created, 3, "{name}");
+        assert_eq!(w.frame_groups, 2, "{name}");
+        let split: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.kind == "frames_multi_stack")
+            .collect();
+        assert_eq!(split.len(), 1, "{name}: {:?}", report.diagnostics);
+        assert_eq!(split[0].count, 1, "{name}");
+        assert_eq!(split[0].samples, ["2 stacks in one file"], "{name}");
+
+        // the split series holds two stacks, one per orientation, each
+        // counting the one instance its frames came from
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT k.orientation FROM {stack} k JOIN {series} s ON s.id = k.series_id \
+                 WHERE s.series_instance_uid = 'A.1' ORDER BY k.stack_index"
+            ),
+            ["Axial", "Sagittal"],
+            "{name}"
+        );
+        assert_eq!(
+            ints(
+                &mut reg,
+                "SELECT k.n_instances FROM {stack} k JOIN {series} s ON s.id = k.series_id \
+                 WHERE s.series_instance_uid = 'A.1' ORDER BY k.stack_index"
+            ),
+            [1, 1],
+            "{name}"
+        );
+        // a stack made of frames says what those frames said, not what the
+        // file's first frame said
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT k.image_orientation_patient FROM {stack} k \
+                 JOIN {series} s ON s.id = k.series_id \
+                 WHERE s.series_instance_uid = 'A.1' ORDER BY k.stack_index"
+            ),
+            ["1\\0\\0\\0\\1\\0", "0\\1\\0\\0\\0\\-1"],
+            "{name}"
+        );
+        // the instance is filed under the stack of its first frame
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT k.orientation FROM {instance} i JOIN {stack} k ON k.id = i.stack_id \
+                 JOIN {series} s ON s.id = i.series_id WHERE s.series_instance_uid = 'A.1'"
+            ),
+            ["Axial"],
+            "{name}"
+        );
+        // and which frames are in which stack is written down
+        assert_eq!(
+            rows(
+                &mut reg,
+                "SELECT f.frames, f.n_frames, f.first_frame FROM {instance_frame} f \
+                 JOIN {stack} k ON k.id = f.stack_id ORDER BY k.stack_index"
+            )
+            .iter()
+            .map(|r| (
+                r.text(0).unwrap().to_string(),
+                r.int(1).unwrap(),
+                r.int(2).unwrap()
+            ))
+            .collect::<Vec<_>>(),
+            [("1-4".to_string(), 4, 1), ("5-8".to_string(), 4, 5)],
+            "{name}"
+        );
+        // the file whose frames agree writes none of those rows
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(*) FROM {instance_frame} f JOIN {instance} i ON i.id = f.instance_id \
+                 WHERE i.sop_instance_uid = 'A.2.1'"
+            ),
+            0,
+            "{name}"
+        );
+
+        // a second run reads the same files again and creates nothing
+        let report = digest(&s, &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(report.unchanged, 2, "{name}");
+        let w = report.written.unwrap();
+        assert_eq!(w.stacks_created, 0, "{name}");
+        assert_eq!(w.frame_groups, 0, "{name}");
+        assert_eq!(
+            one(&mut reg, "SELECT COUNT(*) FROM {instance_frame}"),
+            2,
+            "{name}"
+        );
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT CAST(SUM(n_instances) AS BIGINT) FROM {stack}"
+            ),
+            3,
+            "{name}"
+        );
+    }
+}

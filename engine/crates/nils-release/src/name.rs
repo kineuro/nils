@@ -33,6 +33,45 @@
 
 use std::collections::BTreeMap;
 
+/// Which of the two naming modes a release writes (record 37 S7).
+///
+/// Not two grammars for one tree: one question, asked of every name a release
+/// writes. **BIDS** is the default and is what the standard's entities carry,
+/// with what they have no entity for in `acq-`; a validator reads it and a
+/// tool joins on it. **Informative** carries every axis the pack declares,
+/// including the ones an entity already says, for a tree a person reads: in
+/// the BIDS layout that is a longer `acq-` label, which is still a legal BIDS
+/// label because `acq-` is free-form, and in the descriptive layout it is
+/// §9.1's grammar, which has no entities to carry anything.
+///
+/// So the mode is a fact about the release and not about the run: it is
+/// recorded on the release row, reported, and a re-run under the same mode
+/// writes the same names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Naming {
+    #[default]
+    Bids,
+    Informative,
+}
+
+impl Naming {
+    /// The word a flag, a row and a report use.
+    pub fn name(self) -> &'static str {
+        match self {
+            Naming::Bids => "bids",
+            Naming::Informative => "informative",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Naming> {
+        match text.trim() {
+            "bids" => Some(Naming::Bids),
+            "informative" => Some(Naming::Informative),
+            _ => None,
+        }
+    }
+}
+
 /// What a stack is called, before anything about its siblings is known.
 #[derive(Debug, Clone, Default)]
 pub struct Fields<'a> {
@@ -211,40 +250,46 @@ pub struct Named {
 ///
 /// Three passes, weakest last:
 ///
-/// 1. an echo or inversion suffix, where the stacks differ in one;
-/// 2. still colliding, a `_1`, `_2` counter in a fixed order;
-/// 3. nothing else, because a name that needs more than this is a name the
-///    grammar cannot make, and quietly numbering it hides that.
+/// 1. the measured echo number, on each stack that has one;
+/// 2. still colliding, an inversion time, ordered, where every stack has one;
+/// 3. still colliding, a `_1`, `_2` counter in a fixed order, and nothing
+///    after it, because a name that needs more than this is a name the
+///    grammar cannot make and quietly numbering it hides that.
+///
+/// The echo pass is **per stack** (record 37 S7). It used to be all or
+/// nothing: the suffix went on only where every member of a bucket had an
+/// echo number and all of them differed, so one stack without one dropped the
+/// echo suffix for the whole bucket and everybody fell to a counter. Measured
+/// over 836 stacks, that is 78 buckets and 453 stacks under `_1`, `_2`, of
+/// which 6,997 pairs differ in nothing but their echo number. Naming each
+/// stack from its own measured echo leaves 448 such pairs instead of 7,451.
 pub fn disambiguate(bucket: &mut [Named]) {
-    let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (i, s) in bucket.iter().enumerate() {
-        by_name.entry(s.name.clone()).or_default().push(i);
-    }
-
-    for (_, members) in by_name {
-        if members.len() < 2 {
-            // One stack of this name, and no suffix unless its own series says
-            // it is one of several: v0 emits the echo suffix for a multi-stack
-            // series whether or not anything collides, and those names are on
-            // disk.
-            for i in members {
-                if let Some(suffix) = own_suffix(&bucket[i]) {
-                    bucket[i].name = format!("{}_{suffix}", bucket[i].name);
-                }
-            }
+    // First the echo, on every stack that has one, wherever its name is not
+    // its alone. A stack with no echo number keeps its name and is told apart
+    // by a later pass, rather than taking the whole bucket down to a counter
+    // with it.
+    let first = groups(bucket);
+    for members in first.iter().filter(|m| m.len() > 1) {
+        if !members.iter().any(|i| bucket[*i].echo.is_some()) {
             continue;
         }
-
-        // The measured echo number first, which is what v0's own bug report
-        // says the suffix should have come from all along.
-        let echoes: Vec<Option<i64>> = members.iter().map(|i| bucket[*i].echo).collect();
-        if echoes.iter().all(Option::is_some) && distinct(&echoes) {
-            for i in &members {
-                let echo = bucket[*i].echo.expect("all some");
+        for i in members {
+            if let Some(echo) = bucket[*i].echo {
                 bucket[*i].name = format!("{}_e{echo}", bucket[*i].name);
             }
-            continue;
         }
+    }
+    // One stack of a name, and no suffix unless its own series says it is one
+    // of several: v0 emits the echo suffix for a multi-stack series whether or
+    // not anything collides, and those names are on disk.
+    for members in first.iter().filter(|m| m.len() == 1) {
+        let i = members[0];
+        if let Some(suffix) = own_suffix(&bucket[i]) {
+            bucket[i].name = format!("{}_{suffix}", bucket[i].name);
+        }
+    }
+
+    for members in groups(bucket).into_iter().filter(|m| m.len() > 1) {
         // Then the inversion time, ordered, which has no measured index.
         let times: Vec<Option<i64>> = members
             .iter()
@@ -267,6 +312,15 @@ pub fn disambiguate(bucket: &mut [Named]) {
             bucket[i].name = format!("{}_{}", bucket[i].name, n + 1);
         }
     }
+}
+
+/// The bucket's stacks by the name they hold now, in a fixed order.
+fn groups(bucket: &[Named]) -> Vec<Vec<usize>> {
+    let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, s) in bucket.iter().enumerate() {
+        by_name.entry(s.name.clone()).or_default().push(i);
+    }
+    by_name.into_values().collect()
 }
 
 /// The suffix a stack gets from its own series alone, which is v0's rule.
@@ -526,6 +580,48 @@ mod tests {
         disambiguate(&mut bucket);
         assert_eq!(bucket[0].name, "Ax_T1w_3D_MP2RAGE_ti1");
         assert_eq!(bucket[1].name, "Ax_T1w_3D_MP2RAGE_ti2");
+    }
+
+    #[test]
+    fn one_stack_without_an_echo_number_no_longer_takes_the_bucket_to_a_counter() {
+        // Record 37 S7. The echo pass used to be all or nothing, so a bucket
+        // where one stack had no echo number lost the suffix for everybody and
+        // fell to `_1`, `_2`: measured over 836 stacks, 78 buckets and 453
+        // stacks, of which 6,997 pairs differed in nothing but their echo. The
+        // suffix is per stack now, and what still shares a name after it is
+        // counted, which is the stack that had nothing to say.
+        let mut bucket = vec![
+            named(1, "Ax_T2starw_2D_MEGRE", Some(1)),
+            named(2, "Ax_T2starw_2D_MEGRE", Some(2)),
+            named(3, "Ax_T2starw_2D_MEGRE", None),
+            named(4, "Ax_T2starw_2D_MEGRE", None),
+        ];
+        disambiguate(&mut bucket);
+        assert_eq!(bucket[0].name, "Ax_T2starw_2D_MEGRE_e1");
+        assert_eq!(bucket[1].name, "Ax_T2starw_2D_MEGRE_e2");
+        assert_eq!(bucket[2].name, "Ax_T2starw_2D_MEGRE_1");
+        assert_eq!(bucket[3].name, "Ax_T2starw_2D_MEGRE_2");
+    }
+
+    #[test]
+    fn a_stack_named_by_its_echo_is_not_named_by_it_twice() {
+        // The pass before the counter and v0's own suffix are the same fact,
+        // so a stack that took the first does not take the second as well.
+        let mut bucket = vec![
+            Named {
+                siblings: 2,
+                split: Some("multi_echo".into()),
+                ..named(1, "Ax_T2starw_2D_MEGRE", Some(1))
+            },
+            Named {
+                siblings: 2,
+                split: Some("multi_echo".into()),
+                ..named(2, "Ax_T2starw_2D_MEGRE", Some(2))
+            },
+        ];
+        disambiguate(&mut bucket);
+        assert_eq!(bucket[0].name, "Ax_T2starw_2D_MEGRE_e1");
+        assert_eq!(bucket[1].name, "Ax_T2starw_2D_MEGRE_e2");
     }
 
     #[test]

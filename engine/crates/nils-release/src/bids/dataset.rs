@@ -201,6 +201,21 @@ pub fn bidsignore(lines: &[String]) -> String {
     out
 }
 
+/// Record 37 S2: the three numbers behind every `run-` index in the tree.
+///
+/// In the `README` because the reader of a tree is exactly the person a false
+/// `run-2` fools: a validator passes it, and nothing else in a BIDS dataset
+/// says whether the second run happened or was invented.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Repeats {
+    /// Names two or more stacks of one subject, session and datatype built.
+    pub names: i64,
+    /// Stacks under those names that are one acquisition measured again.
+    pub repeats: i64,
+    /// Stacks that are not, and have no name in this tree.
+    pub refused: i64,
+}
+
 /// The `README`, which BIDS requires and which is the one file in the tree
 /// written for a person.
 pub fn readme(
@@ -208,6 +223,8 @@ pub fn readme(
     made_by: &MadeBy,
     counts: &BTreeMap<String, i64>,
     nowhere: &BTreeMap<String, i64>,
+    repeats: Repeats,
+    by_text: &BTreeMap<String, i64>,
 ) -> String {
     let mut out = format!("# {name}\n\n");
     let _ = writeln!(
@@ -252,6 +269,44 @@ pub fn readme(
         out.push_str("| why | stacks |\n|---|---|\n");
         for (why, n) in nowhere {
             let _ = writeln!(out, "| {why} | {n} |");
+        }
+        out.push('\n');
+    }
+    // Record 37 S2. A `run-` index claims one acquisition was made twice, and
+    // until this was measured two thirds of them were a different acquisition
+    // wearing one name. So the tree says what its own indices are worth.
+    if repeats.names > 0 {
+        let _ = writeln!(
+            out,
+            "## What `run-` means here\n\n\
+             {} name(s) here were built by more than one stack. {} of those stacks are \
+             measurably one acquisition made again, which is what `run-` says, and they are \
+             told apart by it. {} are not, so they have no name in this tree at all: they are \
+             under `sourcedata/` with their informative names, and each carries a question \
+             saying what differs. A `run-` index in this tree is never a counter.\n",
+            repeats.names, repeats.repeats, repeats.refused
+        );
+    }
+    // Record 37, S4. A reader of the tree meets these names without knowing
+    // how much is behind them, and the difference between a name earned by a
+    // measurement and one earned by a line somebody typed at a console is a
+    // difference the tree should admit to rather than hide.
+    if !by_text.is_empty() {
+        let n: i64 = by_text.values().sum();
+        let _ = writeln!(
+            out,
+            "## Names that rest on the protocol text\n\n\
+             {n} stack(s) carry a `Text` mark in their `acq-` label. Those stacks agree with \
+             a neighbour on every fact this engine holds, coverage, coil, timings and every \
+             classified axis alike, and differ only in the free text the scanner recorded, \
+             so the text is what tells them apart. The mark is six characters of a digest of \
+             that text and never the text itself. **It is the weakest reason a name in this \
+             tree has**, and each group of them is an open review item in the registry it \
+             came from.\n"
+        );
+        out.push_str("| element | stacks |\n|---|---|\n");
+        for (element, n) in by_text {
+            let _ = writeln!(out, "| {element} | {n} |");
         }
         out.push('\n');
     }
@@ -388,7 +443,14 @@ mod tests {
     fn the_readme_says_where_things_were_put() {
         let counts = [("raw".to_string(), 12i64), ("nowhere".to_string(), 3)].into();
         let nowhere = [("no_task".to_string(), 2i64), ("no_suffix".to_string(), 1)].into();
-        let text = readme("a cohort", &made_by(), &counts, &nowhere);
+        let text = readme(
+            "a cohort",
+            &made_by(),
+            &counts,
+            &nowhere,
+            Repeats::default(),
+            &BTreeMap::new(),
+        );
         assert!(text.contains("2026.09.05.1"), "{text}");
         assert!(text.contains("localizers: sourcedata"), "{text}");
         assert!(text.contains("| nowhere | 3 |"), "{text}");
@@ -403,8 +465,41 @@ mod tests {
     #[test]
     fn a_tree_that_left_nothing_out_says_nothing_about_it() {
         let counts = [("raw".to_string(), 12i64)].into();
-        let text = readme("a cohort", &made_by(), &counts, &BTreeMap::new());
+        let text = readme(
+            "a cohort",
+            &made_by(),
+            &counts,
+            &BTreeMap::new(),
+            Repeats {
+                names: 2,
+                repeats: 2,
+                refused: 3,
+            },
+            &BTreeMap::new(),
+        );
         assert!(!text.contains("What is not here"), "{text}");
+        // Record 37 S2: and it says what its own `run-` indices are worth,
+        // which is a different question from what is missing.
+        assert!(text.contains("What `run-` means here"), "{text}");
+        assert!(
+            text.contains("2 name(s) here were built by more than one stack"),
+            "{text}"
+        );
+        assert!(text.contains("never a counter"), "{text}");
+    }
+
+    #[test]
+    fn a_tree_where_no_two_stacks_wanted_one_name_says_nothing_about_run() {
+        let counts = [("raw".to_string(), 12i64)].into();
+        let text = readme(
+            "a cohort",
+            &made_by(),
+            &counts,
+            &BTreeMap::new(),
+            Repeats::default(),
+            &BTreeMap::new(),
+        );
+        assert!(!text.contains("run-"), "{text}");
     }
 
     #[test]

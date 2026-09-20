@@ -19,6 +19,7 @@ decides: [disposition, convertible]
 tiers: {stated: 0.9}
 
 order:
+  - encrypted
   - not_an_image
   - ruled_out
   - scout
@@ -30,6 +31,14 @@ order:
   - derived_provenance
 
 rules:
+
+  # Pixels nothing downstream can read. It decides the conversion and nothing
+  # else, so the rules below still say what the stack is for; it is first
+  # because whatever that turns out to be, a NIfTI of it would be noise.
+  encrypted:
+    clauses:
+      - {when: {axis: quality, is: Encrypted}, cite: Encrypted, source: quality}
+    set: {convertible: 'no'}
 
   # The fingerprint's own reading of ImageType (§6): a screen capture, a
   # pasted report or an error image, whatever else it claims to be.

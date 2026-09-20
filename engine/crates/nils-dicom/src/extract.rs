@@ -25,6 +25,7 @@ use crate::catalogue::{
 };
 use crate::charset::Charset;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
+use crate::frames::Frames;
 use crate::private::{Ingest, read_ingest};
 use crate::read::{Form, Header, ReadFailure, read};
 use crate::refusal::{QuarantineClass, Refusal};
@@ -142,6 +143,10 @@ pub struct Extracted {
     /// One slot per catalogue row, in catalogue order; a modality level that is
     /// not this file's stays null.
     pub values: Vec<Option<Value>>,
+    /// What the frames of an enhanced multi-frame object say about its stacks
+    /// (record 37, S8); empty for a file that is one frame, which is every
+    /// classic instance.
+    pub frames: Frames,
     pub identity: Identity,
     /// Text found in this file's **private** elements, capped, for the date
     /// vote (Wave 3 §4.2). Some vendors leave the acquisition date inside a
@@ -369,6 +374,16 @@ pub fn extract_header(
 
     let private_text = private_text_of(&dataset);
 
+    // record 37 S8: the frames of an enhanced object, grouped as stacks. A
+    // file with no per-frame groups pays one lookup for this.
+    let frames = crate::frames::frame_groups(&dataset, &charset, &values);
+    if frames.capped {
+        diagnostics.push(Diagnostic::new(
+            DiagnosticKind::FramesMultiStack,
+            format!("over {} stacks in one file", crate::frames::GROUPS_MAX),
+        ));
+    }
+
     let private = read_ingest(&dataset, ingest, &charset);
     Ok(Extracted {
         form,
@@ -380,6 +395,7 @@ pub fn extract_header(
         modality,
         charset,
         values,
+        frames,
         identity,
         private_text,
         private,
@@ -520,33 +536,53 @@ fn meta_field(meta: &dicom_object::FileMetaTable, which: Meta) -> Option<String>
 
 /// The first item of a sequence element, when it has one.
 fn first_item(e: &InMemElement) -> Option<&InMemDicomObject> {
+    nth_item(e, 0)
+}
+
+/// The item of a sequence element at `n`, when it has one.
+fn nth_item(e: &InMemElement, n: usize) -> Option<&InMemDicomObject> {
     match e.value() {
-        DicomValue::Sequence(seq) => seq.items().first(),
+        DicomValue::Sequence(seq) => seq.items().get(n),
         _ => None,
     }
 }
 
-/// The element a chain step names, when the path to it exists.
+/// The element a chain step names, when the path to it exists, reading the
+/// file as one instance: the first per-frame item, as v0 did.
 fn resolve<'a>(dataset: &'a InMemDicomObject, step: &Step) -> Option<&'a InMemElement> {
+    resolve_at(dataset, step, 0)
+}
+
+/// The element a chain step names, reading `frame` of the per-frame
+/// functional groups sequence (record 37, S8). The shared groups are shared,
+/// so they are read at their only item whatever the frame.
+pub fn resolve_at<'a>(
+    dataset: &'a InMemDicomObject,
+    step: &Step,
+    frame: usize,
+) -> Option<&'a InMemElement> {
     match *step {
         Step::Top(tag) => dataset.get(tag),
         Step::Item(seq, tag) => dataset.get(seq).and_then(first_item)?.get(tag),
         Step::Fg(seq, tag) => FG_ROOTS.iter().find_map(|root| {
+            let n = match *root == tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE {
+                true => frame,
+                false => 0,
+            };
             dataset
                 .get(*root)
-                .and_then(first_item)?
+                .and_then(|e| nth_item(e, n))?
                 .get(seq)
                 .and_then(first_item)?
                 .get(tag)
                 .filter(|e| !is_empty(e))
         }),
         Step::Private(tag) => {
-            let frame = dataset
+            let item = dataset
                 .get(tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE)
-                .and_then(first_item)?;
+                .and_then(|e| nth_item(e, frame))?;
             PRIVATE_PER_FRAME.iter().find_map(|p| {
-                frame
-                    .get(*p)
+                item.get(*p)
                     .and_then(first_item)?
                     .get(tag)
                     .filter(|e| !is_empty(e))

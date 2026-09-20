@@ -25,11 +25,12 @@ pub enum DiagnosticKind {
     SeriesMultiStudy,
     RaggedLength,
     IdentityConstant,
+    FramesMultiStack,
 }
 
 impl DiagnosticKind {
     /// Every kind, in the order the report prints them.
-    pub const ALL: [DiagnosticKind; 13] = [
+    pub const ALL: [DiagnosticKind; 14] = [
         DiagnosticKind::WalkError,
         DiagnosticKind::CharsetUnknown,
         DiagnosticKind::CharsetLossy,
@@ -43,6 +44,7 @@ impl DiagnosticKind {
         DiagnosticKind::SeriesMultiStudy,
         DiagnosticKind::RaggedLength,
         DiagnosticKind::IdentityConstant,
+        DiagnosticKind::FramesMultiStack,
     ];
 
     /// The name as written in `diagnostic.kind` and the report.
@@ -61,6 +63,7 @@ impl DiagnosticKind {
             DiagnosticKind::SeriesMultiStudy => "series_multi_study",
             DiagnosticKind::RaggedLength => "ragged_length",
             DiagnosticKind::IdentityConstant => "identity_constant",
+            DiagnosticKind::FramesMultiStack => "frames_multi_stack",
         }
     }
 }

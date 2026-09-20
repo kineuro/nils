@@ -353,6 +353,12 @@ struct ReleaseArgs {
     /// which names what the standard admits and routes the rest (§9)
     #[arg(long, default_value = "descriptive", value_name = "descriptive|bids")]
     layout: String,
+    /// What a name carries: what the standard's entities admit, with the rest
+    /// in acq-, or every axis the pack declares, for a tree a person reads.
+    /// The default is bids in the BIDS layout, and informative in the
+    /// descriptive one, which has no entities to carry anything (record 37)
+    #[arg(long, value_name = "bids|informative")]
+    naming: Option<String>,
     /// Where a localizer goes in a BIDS tree. BIDS has no word for one, and
     /// 22 percent of a clinical archive is one (§9.3)
     #[arg(
@@ -4274,8 +4280,19 @@ fn quarantine_command(home: &Home, command: QuarantineCommand) -> Result<(), Exi
         batch.map(|b| format!("   batch {b}")).unwrap_or_default(),
         class.map(|c| format!("   class {c}")).unwrap_or_default()
     );
+    // record 37 S9: what was set aside, by kind, before the paths
+    if let Some(kinds) = doc["kinds"].as_array().filter(|k| !k.is_empty()) {
+        println!(
+            "  set aside   {}",
+            kinds
+                .iter()
+                .map(|k| format!("{} {}", s(&k["kind"]), k["count"]))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     if !files.is_empty() {
-        println!("  {:>5}  {:<14} path", "batch", "class");
+        println!("  {:>5}  {:<14} {:<22} path", "batch", "class", "kind");
     }
     for f in &files {
         let detail = match f["detail"].as_str() {
@@ -4283,9 +4300,10 @@ fn quarantine_command(home: &Home, command: QuarantineCommand) -> Result<(), Exi
             _ => String::new(),
         };
         println!(
-            "  {:>5}  {:<14} {}{detail}",
+            "  {:>5}  {:<14} {:<22} {}{detail}",
             n_i64(&f["batch_id"]),
             s(&f["class"]),
+            f["kind"].as_str().unwrap_or("-"),
             s(&f["path"])
         );
     }
@@ -4632,10 +4650,22 @@ fn about(item: &serde_json::Value) -> String {
     let e = &item["evidence"];
     match s(&item["kind"]) {
         "ingest.quarantine" => format!(
-            "batch {}, class {}, {} file(s)",
+            "batch {}, class {}, {} file(s){}",
             r["batch_id"],
             s(&r["class"]),
-            e["count"]
+            e["count"],
+            // record 37 S9: what those files held, by kind
+            match e["kinds"].as_array() {
+                Some(kinds) if !kinds.is_empty() => format!(
+                    ": {}",
+                    kinds
+                        .iter()
+                        .map(|k| format!("{} {}", s(&k["kind"]), k["count"]))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ => String::new(),
+            }
         ),
         "identity.collision" => format!(
             "subject {} under {} ({}), batch {}",
@@ -4657,6 +4687,16 @@ fn about(item: &serde_json::Value) -> String {
             s(&e["id_type"]),
             s(&e["shape"]),
             s(&e["place"])
+        ),
+        // Record 37 S2: a BIDS name more than one acquisition wanted. What a
+        // person is asked is which of them it belongs to, or whether the pack
+        // needs an axis for what differs.
+        "release.shared_name" => format!(
+            "{} stack(s) would share one {} name and are not repeats of one another: {}; they \
+             are in sourcedata/ under their informative names",
+            e["stacks"],
+            s(&e["suffix"]),
+            s(&e["why"])
         ),
         _ if s(&item["scope"]) == "group" => format!(
             "{} stack(s): {} = {} ({})",
@@ -7929,6 +7969,27 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             args.layout
         ))
     })?;
+    // Record 37 S7: what a name carries. Unasked, it follows the layout,
+    // because a descriptive tree has no entities and a BIDS tree is written
+    // for a validator first; asked for, it is the release's own answer and is
+    // recorded on the row, so a re-run writes the same names.
+    let naming = match &args.naming {
+        None => match layout {
+            run::Layout::Bids => nils_release::name::Naming::Bids,
+            run::Layout::Descriptive => nils_release::name::Naming::Informative,
+        },
+        Some(text) => {
+            let asked = nils_release::name::Naming::parse(text)
+                .ok_or_else(|| usage(format!("--naming is bids or informative, not {text}")))?;
+            if asked == nils_release::name::Naming::Bids && layout == run::Layout::Descriptive {
+                return Err(usage(
+                    "--naming bids needs --layout bids: the descriptive tree has no \
+                     entities, so its names carry every axis whatever this says",
+                ));
+            }
+            asked
+        }
+    };
     let places = nils_release::bids::place::Options {
         localizers: nils_release::bids::place::Localizers::parse(&args.localizers).ok_or_else(
             || {
@@ -8033,6 +8094,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         key: &key,
         pack: &pack,
         layout,
+        naming,
         places,
         converter: converter.as_ref(),
         compress: !args.no_compress,
@@ -8057,6 +8119,14 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         report.name, report.version, report.layout, report.policy
     );
     println!("  into             {}", report.root);
+    // Record 37 S7: what the names carry, which the row records too.
+    println!(
+        "  names            {}",
+        match report.naming.as_str() {
+            "informative" => "informative: every axis the pack declares",
+            _ => "bids: the standard's entities, and the rest in acq-",
+        }
+    );
     // record 26 section 13: what each dataset's files left under
     for p in &report.policies {
         println!(
@@ -8170,6 +8240,15 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             println!("      {n:>10}   {why}");
         }
     }
+    // Record 37 S6: the entities the standard would not give the suffix that
+    // wanted them. The fact is in `acq-` instead of being lost, and a number
+    // here is a place BIDS has no slot for something the archive states.
+    if !report.refused_entities.is_empty() {
+        println!("  said in acq- instead, the standard having no slot on that suffix");
+        for (entity, n) in &report.refused_entities {
+            println!("      {n:>10}   stacks whose {entity} the suffix would not take");
+        }
+    }
     // Record 35 finding 1: a subject the session layer derived no session for
     // is refused rather than written under a ses- no scheme produced, and it
     // is named, because a number alone leaves nobody anything to look at.
@@ -8202,8 +8281,40 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         for (why, n) in &report.nowhere {
             println!("      {n:>10}   nowhere: {why}");
         }
+        // Record 37 S2. A `run-` index is a claim that one acquisition was
+        // made twice, and the three numbers behind every one of them are
+        // printed because the failure they replace was silent: a counter
+        // looks the same whether it is true or invented.
+        if report.shared_names > 0 {
+            println!("  one name, more than one stack");
+            println!(
+                "      {:>10}   name(s) two or more stacks of one session and datatype built",
+                report.shared_names
+            );
+            println!(
+                "      {:>10}   stack(s) measurably one acquisition made again, told apart by run-",
+                report.repeats
+            );
+            println!(
+                "      {:>10}   stack(s) that are not: no BIDS name, in sourcedata/ under their \
+                 informative names, each a review item",
+                report.not_repeats
+            );
+        }
         for (why, n) in &report.unconvertible {
             println!("      {n:>10}   written as DICOM instead: {why}");
+        }
+        // Record 37, S4. A name earned by a measurement and a name earned by
+        // a line somebody typed at a console are not worth the same, and the
+        // report is where the difference is said out loud.
+        if !report.named_by_text.is_empty() {
+            println!("  named by text alone");
+            for (element, n) in &report.named_by_text {
+                println!(
+                    "      {n:>10}   stacks a neighbour agrees with on every fact held, told \
+                     apart by {element}; each group is an open review item"
+                );
+            }
         }
         // Wave 4a §7.4: what the clinical layer put in the tree, counted.
         for (what, n) in &report.clinical {
@@ -8313,7 +8424,7 @@ fn releases_doc(
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
-         {policies}, {scheme}, session_naming, categories FROM {}{wheres} \
+         {policies}, {scheme}, session_naming, categories, naming FROM {}{wheres} \
          ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
@@ -8369,6 +8480,11 @@ fn releases_doc(
                     .split(',')
                     .filter(|name| !name.is_empty())
                     .collect::<Vec<&str>>(),
+                // Record 37 S7: what its names carried. Null on a version
+                // written before there were two modes, which is honest: it
+                // was written when there was one and calling it either now
+                // would be a claim nobody made.
+                "naming": r.opt_text(22)?,
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
@@ -8978,16 +9094,44 @@ pub(crate) fn quarantine_doc(
         .iter()
         .map(|r| {
             let path = PathBuf::from(r.text(2)?).join(r.text(3)?);
+            let class = r.opt_text(1)?.unwrap_or("-");
+            let detail = r.opt_text(4)?;
             Ok(serde_json::json!({
                 "batch_id": r.opt_int(0)?,
-                "class": r.opt_text(1)?.unwrap_or("-"),
+                "class": class,
                 "path": path.display().to_string(),
-                "detail": r.opt_text(4)?,
+                "detail": detail,
+                // record 37 S9: what the file held, in words
+                "kind": kind_of(class, detail),
                 "seen_at": r.opt_text(5)?,
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
-    Ok(serde_json::json!({ "count": files.len(), "files": files }))
+    // record 37 S9: the kinds the listed files hold, so a reader sees what was
+    // set aside without counting lines
+    let mut kinds: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for f in &files {
+        if let Some(k) = f["kind"].as_str() {
+            *kinds.entry(k.to_string()).or_default() += 1;
+        }
+    }
+    let mut by_kind: Vec<serde_json::Value> = kinds
+        .iter()
+        .map(|(k, n)| serde_json::json!({ "kind": k, "count": n }))
+        .collect();
+    by_kind.sort_by_key(|k| std::cmp::Reverse(k["count"].as_u64().unwrap_or(0)));
+    Ok(serde_json::json!({ "count": files.len(), "kinds": by_kind, "files": files }))
+}
+
+/// What a quarantined file held, in words (record 37, S9): the SOP class's
+/// family where the class is `unsupported_sop_class`, else what the class
+/// itself means.
+fn kind_of(class: &str, detail: Option<&str>) -> Option<&'static str> {
+    nils_dicom::QuarantineClass::ALL
+        .iter()
+        .copied()
+        .find(|c| c.name() == class)
+        .map(|c| nils_dicom::set_aside_kind(c, detail))
 }
 
 fn backup_command(home: &Home, args: BackupArgs) -> Result<(), Exit> {

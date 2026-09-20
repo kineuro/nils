@@ -11,10 +11,12 @@ use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use nils_dicom::extract::sop_class_name;
+use nils_dicom::refusal::{set_aside_kind, sop_class_kind, sop_class_label};
 use nils_dicom::{Diagnostic, DiagnosticKind, Extracted, QuarantineClass, Refusal};
 use serde::{Deserialize, Serialize};
 
 use crate::cancel::Cancelled;
+use crate::stack::FileStack;
 use crate::walk::SkipReason;
 
 /// How many distinct samples a diagnostic kind keeps.
@@ -45,6 +47,11 @@ pub struct Counts {
     subjects: HashSet<u64>,
     /// Stacks as `(series, key)` pairs (§8).
     stacks: HashSet<u64>,
+    /// Frames read, one per classic instance and one per frame of an
+    /// enhanced multi-frame object (record 37, S8).
+    frames: u64,
+    /// Files whose frames made more than one stack.
+    multi_stack_files: u64,
     modalities: BTreeMap<String, u64>,
     sop_classes: BTreeMap<String, u64>,
     transfer_syntaxes: BTreeMap<String, u64>,
@@ -91,13 +98,14 @@ fn hash_of(text: &str) -> u64 {
 
 impl Counts {
     /// A file the reader accepted, filed under `value` of `id_type` (§7.3)
-    /// and in the stack of `stack_key` within its series (§8).
+    /// and in the stacks `stacks` of its series (§8): one, unless the frames
+    /// of an enhanced object state more (record 37, S8).
     pub fn accepted(
         &mut self,
         x: &Extracted,
         id_type: &str,
         value: &str,
-        stack_key: &str,
+        stacks: &[FileStack],
         bytes: u64,
     ) {
         self.seen += 1;
@@ -107,8 +115,14 @@ impl Counts {
         self.series.insert(hash_of(&x.series_uid));
         self.subjects
             .insert(hash_of(&format!("{id_type}\0{value}")));
-        self.stacks
-            .insert(hash_of(&format!("{}\0{stack_key}", x.series_uid)));
+        for s in stacks {
+            self.stacks
+                .insert(hash_of(&format!("{}\0{}", x.series_uid, s.signature.key)));
+        }
+        self.frames += u64::from(x.frames.count.max(1));
+        if stacks.len() > 1 {
+            self.multi_stack_files += 1;
+        }
         *self.modalities.entry(x.modality.clone()).or_default() += 1;
         *self.sop_classes.entry(x.sop_class.clone()).or_default() += 1;
         *self
@@ -225,6 +239,8 @@ impl Counts {
         self.special += other.special;
         self.walk_errors += other.walk_errors;
         self.bytes += other.bytes;
+        self.frames += other.frames;
+        self.multi_stack_files += other.multi_stack_files;
         for (k, v) in other.quarantine {
             *self.quarantine.entry(k).or_default() += v;
         }
@@ -299,6 +315,50 @@ fn breakdown_key(r: &Refusal) -> Option<String> {
     }
 }
 
+/// What a run set aside, by kind (record 37, S9). Every quarantined file is
+/// in exactly one kind: the SOP classes by their family, the rest by what the
+/// class itself means.
+fn set_aside(counts: &Counts) -> Vec<SetAside> {
+    let mut kinds: BTreeMap<&'static str, (u64, BTreeMap<String, u64>)> = BTreeMap::new();
+    for &class in &QuarantineClass::ALL {
+        let total = counts.class(class);
+        if total == 0 {
+            continue;
+        }
+        let breakdown = counts.breakdown.get(&class);
+        if class == QuarantineClass::UnsupportedSopClass {
+            // one kind per family, the classes inside it named
+            let mut named = 0;
+            for (uid, n) in breakdown.into_iter().flatten() {
+                let entry = kinds.entry(sop_class_kind(uid)).or_default();
+                entry.0 += n;
+                *entry.1.entry(sop_class_label(uid)).or_default() += n;
+                named += n;
+            }
+            // a file whose refusal carried no UID cannot be named further
+            if total > named {
+                kinds.entry("a class with no UID").or_default().0 += total - named;
+            }
+            continue;
+        }
+        let entry = kinds.entry(set_aside_kind(class, None)).or_default();
+        entry.0 += total;
+        for (key, n) in breakdown.into_iter().flatten() {
+            *entry.1.entry(key.clone()).or_default() += n;
+        }
+    }
+    let mut out: Vec<SetAside> = kinds
+        .into_iter()
+        .map(|(kind, (count, classes))| SetAside {
+            kind: kind.to_string(),
+            count,
+            classes: keyed(&classes),
+        })
+        .collect();
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(&b.kind)));
+    out
+}
+
 /// A count keyed by a text.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Keyed {
@@ -324,6 +384,52 @@ pub struct ClassCount {
     pub class: String,
     pub count: u64,
     pub breakdown: Vec<Keyed>,
+}
+
+impl ClassCount {
+    /// The kinds of object this class set aside, with their counts
+    /// (record 37, S9): the families of the SOP classes it refused, or the
+    /// one kind the class itself means. What the review item carries as its
+    /// evidence, so a queue says what was left behind and not only how much.
+    pub fn kinds(&self) -> Vec<Keyed> {
+        let class = QuarantineClass::ALL
+            .iter()
+            .copied()
+            .find(|c| c.name() == self.class);
+        let Some(class) = class else {
+            return Vec::new();
+        };
+        if class != QuarantineClass::UnsupportedSopClass {
+            return vec![Keyed {
+                key: set_aside_kind(class, None).to_string(),
+                count: self.count,
+            }];
+        }
+        let mut kinds: BTreeMap<String, u64> = BTreeMap::new();
+        let mut named = 0;
+        for k in &self.breakdown {
+            *kinds.entry(sop_class_kind(&k.key).to_string()).or_default() += k.count;
+            named += k.count;
+        }
+        if self.count > named {
+            *kinds.entry("a class with no UID".to_string()).or_default() += self.count - named;
+        }
+        keyed(&kinds)
+    }
+}
+
+/// One kind of object a run set aside, with the classes inside it
+/// (record 37, S9): what the archive held and NILS did not take.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetAside {
+    /// The family in words: `secondary capture`, `presentation state`, `not
+    /// DICOM`.
+    pub kind: String,
+    pub count: u64,
+    /// What the kind was made of: the standard's name for each SOP class
+    /// where NILS knows it, else the UID; for the other quarantine classes,
+    /// the class's own breakdown (a modality code, a reader's error kind).
+    pub classes: Vec<Keyed>,
 }
 
 /// One SOP class in the report.
@@ -399,6 +505,10 @@ pub struct Written {
     pub studies_created: u64,
     pub series_created: u64,
     pub stacks_created: u64,
+    /// Record 37 S8: rows written saying which frames of an instance are in
+    /// which stack, for the files whose frames made more than one.
+    #[serde(default)]
+    pub frame_groups: u64,
 }
 
 /// Record 26 §8: what feeding the dataset's cohort did. Every subject the
@@ -443,6 +553,16 @@ pub struct Report {
     /// Distinct `(series, stack key)` pairs among the parsed files (§8).
     #[serde(default)]
     pub stacks: u64,
+    /// Frames read (record 37, S8): one per classic instance, one per frame
+    /// of an enhanced multi-frame object.
+    #[serde(default)]
+    pub frames: u64,
+    /// Files whose frames held more than one stack.
+    #[serde(default)]
+    pub multi_stack_files: u64,
+    /// Record 37 S9: what was set aside, by kind and count.
+    #[serde(default)]
+    pub set_aside: Vec<SetAside>,
     pub modalities: Vec<Keyed>,
     pub sop_classes: Vec<SopClassCount>,
     pub transfer_syntaxes: Vec<Keyed>,
@@ -504,10 +624,13 @@ impl Report {
                     breakdown: counts.breakdown.get(&class).map(keyed).unwrap_or_default(),
                 })
                 .collect(),
+            set_aside: set_aside(counts),
             studies: counts.studies.len() as u64,
             series: counts.series.len() as u64,
             subjects: counts.subjects.len() as u64,
             stacks: counts.stacks.len() as u64,
+            frames: counts.frames,
+            multi_stack_files: counts.multi_stack_files,
             modalities: keyed(&counts.modalities),
             sop_classes,
             transfer_syntaxes: keyed(&counts.transfer_syntaxes),
@@ -664,11 +787,15 @@ impl fmt::Display for Report {
             )?;
             writeln!(
                 f,
-                "  created          subjects {}   studies {}   series {}   stacks {}",
+                "  created          subjects {}   studies {}   series {}   stacks {}{}",
                 thousands(w.subjects_created),
                 thousands(w.studies_created),
                 thousands(w.series_created),
                 thousands(w.stacks_created),
+                match w.frame_groups {
+                    0 => String::new(),
+                    n => format!("   frame groups {}", thousands(n)),
+                },
             )?;
             writeln!(
                 f,
@@ -706,6 +833,23 @@ impl fmt::Display for Report {
             writeln!(f)?;
         }
 
+        if !self.set_aside.is_empty() {
+            writeln!(f, "set aside")?;
+            for k in &self.set_aside {
+                write!(f, "  {:<24} {:>9}", k.kind, thousands(k.count))?;
+                if !k.classes.is_empty() {
+                    f.write_str("   ")?;
+                    for (i, c) in k.classes.iter().enumerate() {
+                        if i > 0 {
+                            f.write_str(", ")?;
+                        }
+                        write!(f, "{} {}", c.key, thousands(c.count))?;
+                    }
+                }
+                writeln!(f)?;
+            }
+        }
+
         writeln!(f, "content")?;
         writeln!(
             f,
@@ -715,6 +859,14 @@ impl fmt::Display for Report {
             thousands(self.stacks),
             thousands(self.subjects)
         )?;
+        if self.frames > self.parsed {
+            writeln!(
+                f,
+                "  frames {}   over more than one stack   {} file(s)",
+                thousands(self.frames),
+                thousands(self.multi_stack_files),
+            )?;
+        }
         keyed_line(f, "modality", &self.modalities)?;
         if !self.sop_classes.is_empty() {
             write!(f, "  {:<17}", "sop class")?;

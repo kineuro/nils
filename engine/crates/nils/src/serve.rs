@@ -2469,6 +2469,7 @@ fn routed(
             command.extend(["--name".into(), name.into(), "--out".into(), out.into()]);
             for (flag, key) in [
                 ("--layout", "layout"),
+                ("--naming", "naming"),
                 ("--dates", "dates"),
                 ("--uids", "uids"),
                 ("--on-unknown", "on_unknown"),

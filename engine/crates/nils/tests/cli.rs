@@ -1106,8 +1106,12 @@ fn custody_quarantine_review_and_purge_go_round() {
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("   1 file(s)"), "{text}");
+    // record 37 S9: the kind says what was set aside, beside the class
+    assert!(text.contains("  set aside   not DICOM 1"), "{text}");
     assert!(
-        text.contains(&format!("      1  not_dicom      {notes}")),
+        text.contains(&format!(
+            "      1  not_dicom      not DICOM              {notes}"
+        )),
         "{text}"
     );
     let out = run(&["quarantine", "list", "--batch", "1", "--class", "not_dicom"]);
@@ -1127,6 +1131,11 @@ fn custody_quarantine_review_and_purge_go_round() {
     assert_eq!(doc["files"][0]["batch_id"], 1);
     assert_eq!(doc["files"][0]["class"], "not_dicom");
     assert_eq!(doc["files"][0]["path"], notes);
+    assert_eq!(doc["files"][0]["kind"], "not DICOM");
+    assert_eq!(
+        doc["kinds"][0],
+        serde_json::json!({"kind": "not DICOM", "count": 1})
+    );
     assert!(doc["files"][0]["seen_at"].as_str().unwrap().ends_with('Z'));
 
     // one review item groups the class, with the count and no path
@@ -1159,6 +1168,10 @@ fn custody_quarantine_review_and_purge_go_round() {
     assert_eq!(doc["items"][0]["ref"]["batch_id"], 1);
     assert_eq!(doc["items"][0]["ref"]["class"], "not_dicom");
     assert_eq!(doc["items"][0]["evidence"]["count"], 1);
+    assert_eq!(
+        doc["items"][0]["evidence"]["kinds"][0],
+        serde_json::json!({"kind": "not DICOM", "count": 1})
+    );
     assert!(doc["items"][0]["decided_at"].is_null());
     let out = run(&["review", "show", "1"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -1168,10 +1181,15 @@ fn custody_quarantine_review_and_purge_go_round() {
         "{text}"
     );
     assert!(
-        text.contains("  about      batch 1, class not_dicom, 1 file(s)\n"),
+        text.contains("  about      batch 1, class not_dicom, 1 file(s): not DICOM 1\n"),
         "{text}"
     );
-    assert!(text.contains("  evidence   {\"count\":1}\n"), "{text}");
+    assert!(
+        text.contains(
+            "  evidence   {\"count\":1,\"kinds\":[{\"kind\":\"not DICOM\",\"count\":1}]}\n"
+        ),
+        "{text}"
+    );
     assert!(!text.contains("decided"), "{text}");
     let out = run(&["review", "show", "1", "--json"]);
     assert_eq!(json(&out)["id"], 1);
@@ -1585,7 +1603,7 @@ fn pack_validate_says_what_is_wrong_and_where() {
     assert!(out.status.success(), "{}", stderr(&out));
     let said = stdout(&out);
     assert!(said.contains("mri@"), "{said}");
-    assert!(said.contains("220 predicates"), "{said}");
+    assert!(said.contains("222 predicates"), "{said}");
     assert!(said.contains("cases"), "{said}");
 
     // a pack that is wrong is refused, by file, line and path
@@ -1645,7 +1663,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@0.1.5"),
+            .any(|p| p["pack"] == "mri@0.2.0"),
         "{listed}"
     );
 
@@ -3041,6 +3059,76 @@ fn a_scheme_anchored_on_a_diagnosis_takes_month_zero_from_the_clinical_layer() {
         .unwrap();
     assert!(!out.status.success());
     assert!(stderr(&out).contains("Wobble"), "{}", stderr(&out));
+}
+
+#[test]
+fn a_release_says_which_naming_mode_it_wrote_and_refuses_the_pair_that_makes_no_sense() {
+    // Record 37 S7. A person chooses with `--naming`; unasked it follows the
+    // layout, and the release row carries the answer, so a re-run of that
+    // release writes the names that release wrote. `--naming bids` on a
+    // descriptive tree is the one pair that means nothing: that tree has no
+    // entities, so its names carry every axis whatever the flag says.
+    let home = home();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let dir = tree();
+    let out = TempDir::new("cli-naming");
+    let digested = nils()
+        .args(registry)
+        .args([
+            "digest",
+            "--name",
+            "a",
+            "--no-private",
+            dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(digested.status.success(), "{}", stderr(&digested));
+
+    let refused = nils()
+        .args(registry)
+        .args([
+            "release",
+            "--name",
+            "naming",
+            "--layout",
+            "descriptive",
+            "--naming",
+            "bids",
+            "--pack-dir",
+            packs.to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("--naming bids needs --layout bids"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let written = nils()
+        .args(registry)
+        .args([
+            "release",
+            "--name",
+            "naming",
+            "--layout",
+            "descriptive",
+            "--pack-dir",
+            packs.to_str().unwrap(),
+            "--json",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(written.status.success(), "{}", stderr(&written));
+    let report: serde_json::Value = serde_json::from_str(&stdout(&written)).unwrap();
+    assert_eq!(report["naming"], "informative", "{report}");
 }
 
 #[test]

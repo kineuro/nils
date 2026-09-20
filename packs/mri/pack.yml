@@ -9,7 +9,7 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 0.1.5
+version: 0.2.0
 contract: 4
 modality: MR
 
@@ -33,6 +33,9 @@ axes:
   - axes/technique.yml
   - axes/modifier.yml
   - axes/construct.yml
+  # What the file says is wrong with the image, which is not what it is: read
+  # after the axes that answer that, so a rule may cite them.
+  - axes/quality.yml
   - axes/base.yml
   - axes/body_part.yml
   - axes/post_contrast.yml
@@ -62,7 +65,7 @@ rules:
   - rules/role.yml
 
 # The order the rule sets run in.
-order: [excluded, provenance, swi, symri, epimix, stage, technique, base, modifier, construct, body_part, post_contrast, intent, disposition, role]
+order: [excluded, provenance, swi, symri, epimix, stage, technique, base, modifier, construct, quality, body_part, post_contrast, intent, disposition, role]
 
 # The phases that read more than one stack (spec section 7). A pack that
 # declares none gets none.

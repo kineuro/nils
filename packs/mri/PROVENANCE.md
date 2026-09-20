@@ -60,6 +60,30 @@ either; that is the point.
 | two of the ten `technique_inference` entries | `SWI` and `DSC-EPI` are not values of v0's own technique axis, so they can never fire |
 | the perfusion guard on the anat intent rule | `DSC`, `DCE` and `ASL` are not values of v0's modifier axis, so the guard can never block |
 | the `PhaseMap` rule of the intent cascade | no construct of that name exists and none was ever written |
+| `is_dixon_water`, `is_dixon_fat`, `is_dixon_in_phase` and `is_dixon_out_phase` | v0 reads none of the four either; the construct axis reads `has_water`, `has_fat`, `has_in_phase` and `has_out_phase`, and has carried the Dixon part on every stack that states it since it was written. Removed by record 37 rather than wired, because a second spelling of a decided fact is how two parts of one program come to disagree about it |
+
+## What this pack has that v0 does not
+
+v0 is the source of the vocabulary and not its limit. A survey of 437,069
+classified stacks of the legacy archive on 2026-09-19 found 17,065 of them
+stating an identity in `ImageType` that no axis read, thirteen of those
+identities sitting in flags v0 parses and reads nowhere. Record 37 slice S5
+gives each of them an axis. What is new here, and so is nobody's transcription
+of v0:
+
+| value | axis | what it says |
+|---|---|---|
+| `Composed` | construct | one image built out of several, `COMPOSED` and the `COMP_*` spellings; 2,792 stacks, telling 2,525 colliding names apart |
+| `EchoCombined` | construct | the image written beside the echoes it combines, `MEAN`; 1,154 stacks, 308 colliding names |
+| `TTestMap` | construct | a statistic over a series rather than an image of a person; 357 stacks, 209 colliding names |
+| `Qmap` | construct | a quantitative map that does not say of what |
+| `MAVRIC` | technique | the metal artefact technique, and its composite is a composed image of one |
+| `Distorted`, `InputUnavailable`, `Encrypted` | quality | what a file says is wrong with its own image: no distortion correction, a missing input, unreadable pixels |
+
+The `quality` axis itself is new. v0 has no concept of it, and neither had
+this pack: three tokens that answer neither what an image is nor how it was
+made, and that are the whole reason two otherwise identical stacks are not
+interchangeable.
 
 ## The pattern behind half of these
 

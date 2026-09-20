@@ -19,7 +19,7 @@ use nils_dicom::{Converter, Extracted, Level, Refusal, Value};
 use nils_registry::store::Cell;
 
 use crate::rule::Ident;
-use crate::stack::Signature;
+use crate::stack::FileStack;
 use crate::walk::SkipReason;
 
 /// What an earlier run recorded for a path that is read again (§5.2).
@@ -36,8 +36,11 @@ pub struct ParsedFile {
     pub extracted: Extracted,
     /// The identifier the rule resolved (§7.3); the values it read are gone.
     pub ident: Ident,
-    /// The stack the instance belongs to (§8), computed from the file alone.
-    pub signature: Signature,
+    /// The stacks the file holds (§8, record 37 S8), computed from the file
+    /// alone: one for a classic instance, one per group of frames for an
+    /// enhanced object whose frames state more than one. The first is the
+    /// stack the instance is filed under.
+    pub stacks: Vec<FileStack>,
     /// Relative to the root, forward slashes.
     pub path: String,
     /// The directory part of `path`, empty at the root.

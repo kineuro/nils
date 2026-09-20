@@ -647,6 +647,26 @@ fn build_registry() -> Vec<Table> {
         .unique(&["sop_instance_uid"])
         .index(&["series_id"])
         .index(&["stack_id"]),
+        // Record 37 S8: which frames of an enhanced multi-frame instance are
+        // in which stack. One row per stack of a file whose frames held more
+        // than one; a file whose frames are all in one stack has none, since
+        // its instance row already names that stack.
+        Table::new(
+            "instance_frame",
+            vec![
+                col("id", Type::Id),
+                req("instance_id", Type::Int),
+                req("stack_id", Type::Int),
+                // How many frames of the instance are in the stack.
+                req("n_frames", Type::Int),
+                req("first_frame", Type::Int),
+                // The frames, counting from one, as ranges: `1-4,9,12-20`.
+                req("frames", Type::Text),
+                req("first_batch_id", Type::Int),
+            ],
+        )
+        .unique(&["instance_id", "stack_id"])
+        .index(&["stack_id"]),
         // The fingerprint of Wave 2 (`docs/specs/wave2-fingerprint-and-classify.md`,
         // §4.2): the join a classifier would otherwise do per stack, materialized
         // and typed. It holds what is true of the file; what is true of MRI is in
@@ -728,6 +748,33 @@ fn build_registry() -> Vec<Table> {
                 col("fov_x", Type::Double),
                 col("fov_y", Type::Double),
                 col("aspect_ratio", Type::Double),
+                // Record 37 S1: what the stack covers. Rows, columns, the
+                // spacings and the thickness say what one slice looks like;
+                // nothing said how many slices there were nor how far they
+                // reached, and on a real archive the slice count is the
+                // commonest single difference between two stacks that
+                // otherwise share everything. `coverage_source` says which
+                // evidence answered, so an unmeasured coverage reads as
+                // unmeasured rather than as zero. The acquisition matrix is
+                // the rest of the geometry, read from the series.
+                col("n_slices", Type::Int),
+                col("slice_span_mm", Type::Double),
+                col("coverage_source", Type::Text),
+                col("acquisition_matrix", Type::Text),
+                // Record 37 S3: which coil received the signal. A series is
+                // already split into one stack per coil, so the digest reads
+                // the value, uses it to decide that these are two stacks, and
+                // then keeps it nowhere a classifier or a name can reach: the
+                // engine manufactured a difference it could not say. From the
+                // stack's own row and never the series', because the series
+                // holds one of the coils its stacks were split over.
+                col("receive_coil_name", Type::Text),
+                // Which derivation wrote the row. The fingerprint is a cache
+                // of the registry's own columns, so a build that learned a
+                // new fact has to rewrite what an older one left: a row
+                // whose revision is not the current one is stale however
+                // many instances its stack still has.
+                col("fingerprint_revision", Type::Int),
                 // provenance
                 col("manufacturer", Type::Text),
                 col("manufacturer_model_name", Type::Text),
@@ -1116,6 +1163,11 @@ fn build_registry() -> Vec<Table> {
                 // not say where it put its localizers is a tree whose absence
                 // of localizers means nothing.
                 req("layout", Type::Text),
+                // Record 37 S7: which naming mode the names were built under,
+                // the standard's entities or every axis the pack declares. A
+                // tree that did not say would be a tree whose names cannot be
+                // reproduced, since the same registry writes two of them.
+                col("naming", Type::Text),
                 req("placements", Type::Json),
                 // The converter it found, recorded because a tree should say
                 // which converter made it (§9.6).

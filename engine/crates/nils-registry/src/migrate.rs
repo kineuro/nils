@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 45;
+pub const SCHEMA_VERSION: i64 = 49;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,7 +234,65 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 45,
         apply: a_release_says_how_many_stacks_it_could_not_judge,
     },
+    Migration {
+        version: 46,
+        apply: a_stack_says_what_it_covers,
+    },
+    Migration {
+        version: 47,
+        apply: a_stack_says_which_coil_received_it,
+    },
+    Migration {
+        version: 48,
+        apply: a_release_says_which_naming_mode_it_wrote,
+    },
+    Migration {
+        version: 49,
+        apply: an_instance_may_hold_frames_of_more_than_one_stack,
+    },
 ];
+
+/// Record 37 S7: which naming mode a release's names were built under. A row
+/// from before says nothing, which is right: it was written when there was
+/// one mode, and calling it either now would be a claim nobody made.
+fn a_release_says_which_naming_mode_it_wrote(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "release", &["naming"])
+}
+
+/// Record 37 S3: the receive coil, which a series is already split on. A
+/// registry from before gains the column empty and fills it on the next
+/// `nils fingerprint`, which derives every stack again because the
+/// derivation's revision moved with it.
+fn a_stack_says_which_coil_received_it(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "stack_fingerprint", &["receive_coil_name"])
+}
+
+/// Record 37 S1: the coverage facts, and the revision that says which
+/// derivation wrote a fingerprint row. A registry from before gains five
+/// columns, all empty; the next `nils fingerprint` sees a revision that is
+/// not the current one and derives every stack again, without `--force`.
+fn a_stack_says_what_it_covers(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "stack_fingerprint",
+        &[
+            "n_slices",
+            "slice_span_mm",
+            "coverage_source",
+            "acquisition_matrix",
+            "fingerprint_revision",
+        ],
+    )
+}
 
 /// Record 26 §3, §4 and §14: a batch says which step it is, `digest` or
 /// `pseudonymize`, every batch from before being a digest; a subject says
@@ -393,6 +451,20 @@ fn a_release_says_how_many_stacks_it_could_not_judge(
         return Ok(());
     }
     add_columns(store, "release", &["burned_in", "unjudged"])
+}
+
+/// Record 37 S8: an enhanced multi-frame instance whose frames hold more than
+/// one stack says which frames are in which. A registry digested before this
+/// gains the table empty, and stays short of those stacks until the tree is
+/// digested again: nothing in a row can say what was never read.
+fn an_instance_may_hold_frames_of_more_than_one_stack(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["instance_frame"])
 }
 
 /// Wave 4b §11.3 and §11.4: the case folded companions of the fingerprint's
