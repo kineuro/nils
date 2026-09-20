@@ -221,20 +221,15 @@ pub fn one_acquisition(group: &[&Acquisition]) -> Vec<String> {
 /// and `T2 MPRAGE` as one protocol. That is stricter than the study, which
 /// dropped all of them, and strict is the safe direction here: what it costs
 /// is a refusal and a question, not a wrong filename.
+///
+/// **One function, in [`super::protocol`].** S2 and S4 both fold a counter
+/// away, and where they are two spellings of one rule they can come to
+/// disagree about it, one calling a pair a repeat while the other names them
+/// apart. The two were written separately and to the same behaviour; this is
+/// the one that survives the wave, and it is the one S4 already documented as
+/// the shared half of the contract.
 pub fn step(text: &str) -> String {
-    let mut out = fold(text);
-    loop {
-        let body = out.trim_end_matches(|c: char| c.is_ascii_digit());
-        if body.len() == out.len() {
-            break;
-        }
-        let head = body.trim_end_matches([' ', '_', '-', '.']);
-        if head.len() == body.len() || head.is_empty() {
-            break;
-        }
-        out = head.to_string();
-    }
-    out
+    super::protocol::step(text)
 }
 
 /// Text as it is compared: whitespace collapsed, case dropped.
