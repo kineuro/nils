@@ -27,7 +27,7 @@
 //! | every axis the pack decided agrees | the axes are what the engine claims the stack *is*, and they carry the identities `ImageType` states |
 //! | the whole `ImageType` agrees, as a set of tokens | "everything" means everything: a token no axis reads still says the two images were made differently |
 //! | the protocol name, the series description, the sequence name, the body part examined and the contrast administration agree, folded for case and whitespace only | inside one session a rescan is the same protocol run again and its texts are identical; a pair that differs only there is asked about, not numbered. No counter is taken off: `T1 MPRAGE 2` is a different text |
-//! | the coverage does not differ ([`coverage::differs`]) and the stack sits in the same place ([`coverage::moved`]) | slice count alone separates 3,610 colliding names in the archive; the centre along the slice normal is what tells two stations of one prescription apart |
+//! | the coverage does not differ ([`coverage::differs`]) and the stack sits in the same place ([`coverage::moved`]) | slice count alone separates 3,610 colliding names in the archive; the centre, along the slice normal and in three dimensions where the images say where they sit, is what tells two stations of one prescription apart, sagittal ones included |
 //! | the slice orientation agrees, as a label and as cosines within [`SAME_COSINE`] | a stack planned at another angle covers other ground |
 //! | the modality, the scanner and its field strength agree | one acquisition is made on one machine |
 //! | the receive coil agrees | the digest already splits a series on it |
@@ -160,7 +160,10 @@ pub fn differences(a: &Acquisition, b: &Acquisition) -> Vec<String> {
     if coverage::differs(&a.coverage, &b.coverage) {
         out.push("what it covers".to_string());
     }
-    if coverage::moved(&a.coverage, &b.coverage) {
+    // The two are held to one orientation below, so either's cosines say
+    // which way is along the slices and which across them.
+    let planes = a.cosines.as_deref().and_then(read_cosines);
+    if coverage::moved(&a.coverage, &b.coverage, planes.as_deref()) {
         out.push("where it sits".to_string());
     }
     if cosines_differ(a.cosines.as_deref(), b.cosines.as_deref()) {
@@ -416,17 +419,19 @@ fn tokens_differ(a: Option<&str>, b: Option<&str>) -> bool {
     matches!((a, b), (Some(x), Some(y)) if set(x) != set(y))
 }
 
+/// `ImageOrientationPatient` as six numbers, or nothing.
+fn read_cosines(t: &str) -> Option<Vec<f64>> {
+    let v: Vec<f64> = t
+        .split('\\')
+        .map(|p| p.trim().parse().ok())
+        .collect::<Option<Vec<f64>>>()?;
+    (v.len() == 6).then_some(v)
+}
+
 /// Six direction cosines further apart than [`SAME_COSINE`] in any one of
 /// them. Cosines that do not read as six numbers are not a measurement.
 fn cosines_differ(a: Option<&str>, b: Option<&str>) -> bool {
-    let read = |t: &str| -> Option<Vec<f64>> {
-        let v: Vec<f64> = t
-            .split('\\')
-            .map(|p| p.trim().parse().ok())
-            .collect::<Option<Vec<f64>>>()?;
-        (v.len() == 6).then_some(v)
-    };
-    match (a.and_then(read), b.and_then(read)) {
+    match (a.and_then(read_cosines), b.and_then(read_cosines)) {
         (Some(x), Some(y)) => x.iter().zip(&y).any(|(p, q)| (p - q).abs() > SAME_COSINE),
         _ => false,
     }

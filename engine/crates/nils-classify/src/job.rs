@@ -283,13 +283,20 @@ fn run(
         // as the positions themselves: the counting and the tolerance that
         // says which of them are one slice are in `coverage`, so a stack is
         // covered the same way whichever backend the rows came off.
-        let mut positions: Vec<(i64, Vec<f64>)> = Vec::new();
+        // With them, where each image sits in three dimensions (record 38,
+        // S2), for the stations a slice location cannot tell apart.
+        let mut positions: Vec<(i64, Vec<f64>, Vec<[f64; 3]>)> = Vec::new();
         for r in store.query(&select_positions, &[Param::Int(after), Param::Int(last)])? {
             let stack_id = r.int(0)?;
-            let at = r.double(1)?;
+            let at = r.opt_double(1)?;
+            let point = r.opt_text(2)?.and_then(coverage::point);
             match positions.last_mut() {
-                Some((id, values)) if *id == stack_id => values.push(at),
-                _ => positions.push((stack_id, vec![at])),
+                Some((id, _, _)) if *id == stack_id => {}
+                _ => positions.push((stack_id, Vec::new(), Vec::new())),
+            }
+            if let Some((_, values, points)) = positions.last_mut() {
+                values.extend(at);
+                points.extend(point);
             }
         }
 
@@ -340,12 +347,13 @@ fn run(
                 .map(|i| diffusion[i].1.as_slice())
                 .unwrap_or(&[]);
             let seen = fingerprint::Seen {
-                cover: coverage::of(
-                    positions
-                        .binary_search_by_key(&stack_id, |(id, _)| *id)
-                        .map(|i| positions[i].1.as_slice())
-                        .unwrap_or(&[]),
-                ),
+                cover: match positions.binary_search_by_key(&stack_id, |(id, _, _)| *id) {
+                    Ok(i) => coverage::Coverage {
+                        position: coverage::centre_of(&positions[i].2),
+                        ..coverage::of(&positions[i].1)
+                    },
+                    Err(_) => coverage::Coverage::default(),
+                },
                 acquired: fingerprint::earliest(
                     acquired
                         .binary_search_by_key(&stack_id, |(id, _)| *id)

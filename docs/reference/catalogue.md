@@ -182,7 +182,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `pet_bed_index` | NumberOfSlices (0054,0081) | int | technical | NumberOfSlices, v0's name |
 | `pet_frame_type` | SeriesType (0054,1000) | text | technical | SeriesType, v0's name |
 
-## instance (33)
+## instance (34)
 
 | column | source | converter | class | note |
 |---|---|---|---|---|
@@ -195,6 +195,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `presentation_creation_date` | PresentationCreationDate (0070,0082) | date | quasi-identifying | addition: the same, and weaker |
 | `content_time` | ContentTime (0008,0033) | time | quasi-identifying |  |
 | `slice_location` | SliceLocation (0020,1041) | double | technical |  |
+| `image_position_patient` | ImagePositionPatient, then fg PlanePositionSequence.ImagePositionPatient | text | technical | addition: where each image sits in three dimensions, which tells two stations of a sagittal spine apart where SliceLocation cannot (record 38); the series keeps its first instance's |
 | `pixel_spacing` | PixelSpacing, then fg PixelMeasuresSequence.PixelSpacing | text | technical | Enhanced MR fallback: the functional groups, shared then per-frame (v0) |
 | `rows` | Rows (0028,0010) | int | technical |  |
 | `columns` | Columns (0028,0011) | int | technical |  |
@@ -220,4 +221,4 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `dwi_ge_b_value` | (0043,xx39) GEMS_PARM_01, first value | int | technical | the first of the four values |
 | `dwi_philips_b_value` | (2001,xx03) Philips Imaging DD 001, sentinel above 1e37 is null | double | technical | the sentinel above 1e37 is null (v0); bytes read as FL |
 
-178 columns.
+179 columns.

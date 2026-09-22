@@ -326,8 +326,10 @@ fn the_date_is_the_date(store: &mut Store, kind: Kind) -> Result<(), Error> {
 }
 
 /// Record 38 S2: a repeat is the same stack in the same place, identical in
-/// everything but its own acquisition time, and numbered in that order. The
-/// fingerprint gains the centre of a stack's slices, the earliest acquisition
+/// everything but its own acquisition time, and numbered in that order. An
+/// instance gains the position it sits at in three dimensions. The
+/// fingerprint gains the centre of a stack's slices, along the slice normal
+/// and in three dimensions, the earliest acquisition
 /// date and time of its images, its series number, the gradient directions it
 /// played and its temporal position, and a series gains the number the
 /// scanner gave it. A registry from before gains them empty; the next `nils
@@ -347,6 +349,9 @@ fn a_stack_says_where_it_sits_and_when_it_was_made(
         "stack_fingerprint",
         &[
             "slice_centre_mm",
+            "centre_x_mm",
+            "centre_y_mm",
+            "centre_z_mm",
             "earliest_acquisition_date",
             "earliest_acquisition_time",
             "series_number",
@@ -355,7 +360,8 @@ fn a_stack_says_where_it_sits_and_when_it_was_made(
             "temporal_positions",
         ],
     )?;
-    add_columns(store, "series", &["series_number"])
+    add_columns(store, "series", &["series_number"])?;
+    add_columns(store, "instance", &["image_position_patient"])
 }
 
 /// Record 37 S7: which naming mode a release's names were built under. A row

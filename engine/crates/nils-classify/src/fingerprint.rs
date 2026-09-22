@@ -178,6 +178,9 @@ pub const WRITTEN: &[&str] = &[
     "acquisition_matrix",
     "receive_coil_name",
     "slice_centre_mm",
+    "centre_x_mm",
+    "centre_y_mm",
+    "centre_z_mm",
     "earliest_acquisition_date",
     "earliest_acquisition_time",
     "series_number",
@@ -318,8 +321,9 @@ pub fn select_diffusion(store: &Store) -> String {
 /// carry none has no row here at all.
 pub fn select_positions(store: &Store) -> String {
     format!(
-        "SELECT DISTINCT stack_id, slice_location FROM {} \
-         WHERE stack_id > {} AND stack_id <= {} AND slice_location IS NOT NULL \
+        "SELECT DISTINCT stack_id, slice_location, image_position_patient FROM {} \
+         WHERE stack_id > {} AND stack_id <= {} \
+           AND (slice_location IS NOT NULL OR image_position_patient IS NOT NULL) \
          ORDER BY stack_id",
         store.qualified("instance"),
         store.dialect().param(1, Type::Int),
@@ -655,6 +659,9 @@ pub fn derive(
         // Record 38 S2. Where the stack sits along the slice normal, and when
         // its first image was made.
         num(seen.cover.centre_mm),
+        num(seen.cover.position.map(|p| p[0])),
+        num(seen.cover.position.map(|p| p[1])),
+        num(seen.cover.position.map(|p| p[2])),
         opt(seen.acquired.date.clone()),
         opt(seen.acquired.time.clone()),
         int(opt_int(r, S + 24)?), // series_number

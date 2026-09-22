@@ -689,6 +689,17 @@ pub static CATALOGUE: &[Field] = &[
         "",
     ),
     f(
+        "image_position_patient",
+        Instance,
+        Chain(&[
+            Top(tags::IMAGE_POSITION_PATIENT),
+            Fg(tags::PLANE_POSITION_SEQUENCE, tags::IMAGE_POSITION_PATIENT),
+        ]),
+        Text,
+        Tech,
+        "addition: where each image sits in three dimensions, which tells two stations of a sagittal spine apart where SliceLocation cannot (record 38); the series keeps its first instance's",
+    ),
+    f(
         "pixel_spacing",
         Instance,
         Chain(&[
@@ -1776,12 +1787,12 @@ mod tests {
         // of a series to the next: a b value, a gradient orientation and a
         // directionality are per image by design, and keeping one per series
         // records a multi-shell acquisition as its smallest shell.
-        assert_eq!(count(Instance), 33);
+        assert_eq!(count(Instance), 34);
         assert_eq!(count(Stack), 14);
         assert_eq!(count(SeriesMr), 32);
         assert_eq!(count(SeriesCt), 24);
         assert_eq!(count(SeriesPet), 29);
-        assert_eq!(CATALOGUE.len(), 178);
+        assert_eq!(CATALOGUE.len(), 179);
     }
 
     #[test]
@@ -1870,6 +1881,6 @@ mod tests {
         ));
         let md = render_markdown();
         assert!(md.contains("## series_mr (32, MR only)"));
-        assert!(md.contains("178 columns."));
+        assert!(md.contains("179 columns."));
     }
 }

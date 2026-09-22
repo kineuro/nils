@@ -3105,7 +3105,8 @@ fn places(
                 {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, \
                 f.slice_centre_mm, f.field_strength_normalized, f.pixel_spacing_row, \
                 f.pixel_spacing_col, f.n_instances, f.temporal_position, \
-                f.temporal_positions, f.series_number \
+                f.temporal_positions, f.series_number, f.centre_x_mm, f.centre_y_mm, \
+                f.centre_z_mm \
          FROM {} f ORDER BY f.stack_id",
         text("orientation"),
         text("split_reason"),
@@ -3304,6 +3305,10 @@ fn places(
                     n_slices: r.opt_int(16)?,
                     span_mm: r.opt_double(17)?,
                     centre_mm: r.opt_double(47)?,
+                    position: match (r.opt_double(55)?, r.opt_double(56)?, r.opt_double(57)?) {
+                        (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+                        _ => None,
+                    },
                     source: match r.opt_text(31)? {
                         Some(t) => nils_classify::coverage::Source::parse(t),
                         None => nils_classify::coverage::Source::Unmeasured,

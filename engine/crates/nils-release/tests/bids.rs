@@ -1082,6 +1082,10 @@ struct Twin<'a> {
     protocol: &'a str,
     first_slice: f64,
     acquired: Option<&'a str>,
+    /// Sagittal slices, and how far down the spine the station sits: the
+    /// slice location is the position along the normal, left to right, and
+    /// this moves the stack in the plane of its slices, which it never sees.
+    sagittal_at: Option<f64>,
 }
 
 fn twin<'a>(description: &'a str, protocol: &'a str) -> Twin<'a> {
@@ -1090,6 +1094,7 @@ fn twin<'a>(description: &'a str, protocol: &'a str) -> Twin<'a> {
         protocol,
         first_slice: 1.0,
         acquired: None,
+        sagittal_at: None,
     }
 }
 
@@ -1101,6 +1106,10 @@ fn twins(one: Twin, two: Twin) -> TempDir {
     for (n, t) in [("1", one), ("2", two)] {
         for slice in 1..=4 {
             let at = t.first_slice + f64::from(slice - 1);
+            let (orientation, position) = match t.sagittal_at {
+                None => ("1\\0\\0\\0\\1\\0", format!("0\\0\\{at}")),
+                Some(z) => ("0\\1\\0\\0\\0\\-1", format!("{at}\\0\\{z}")),
+            };
             let sop = format!("1.2.3.{n}.{slice}");
             let mut e = synth::minimal_mr(&format!("1.2.3.{n}"), &format!("1.2.3.{n}.0"), &sop);
             e.extend([
@@ -1127,8 +1136,8 @@ fn twins(one: Twin, two: Twin) -> TempDir {
                 synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME2"),
                 synth::text(tags::PIXEL_SPACING, VR::DS, "1.0\\1.0"),
                 synth::text(tags::SLICE_THICKNESS, VR::DS, "1.0"),
-                synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, "1\\0\\0\\0\\1\\0"),
-                synth::text(tags::IMAGE_POSITION_PATIENT, VR::DS, &format!("0\\0\\{at}")),
+                synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, orientation),
+                synth::text(tags::IMAGE_POSITION_PATIENT, VR::DS, &position),
                 synth::text(tags::SLICE_LOCATION, VR::DS, &at.to_string()),
                 synth::text(tags::INSTANCE_NUMBER, VR::IS, &slice.to_string()),
                 synth::bytes(tags::PIXEL_DATA, VR::OW, vec![0x40u8; 16 * 16 * 2]),
@@ -1316,4 +1325,20 @@ fn two_series_made_at_one_moment_are_asked_about() {
         ..twin("t1_mprage_sag", "T1 MPRAGE")
     };
     refused_with(one, one, serde_json::json!(["acquired at the same moment"]));
+}
+
+#[test]
+fn two_sagittal_stations_that_share_every_slice_location_are_two_acquisitions() {
+    // The stations of a sagittal spine sit one above the other, in the plane
+    // of their slices: the slice locations agree, and the images' positions
+    // are 200 mm apart.
+    let upper = Twin {
+        sagittal_at: Some(0.0),
+        ..twin("t2_tse_sag_spine", "T2 TSE SAG")
+    };
+    let lower = Twin {
+        sagittal_at: Some(-200.0),
+        ..upper
+    };
+    refused_with(upper, lower, serde_json::json!(["where it sits"]));
 }

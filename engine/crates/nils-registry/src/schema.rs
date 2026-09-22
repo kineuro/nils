@@ -782,6 +782,13 @@ fn build_registry() -> Vec<Table> {
                 // and how many there are, because a dynamic stored one series
                 // per time point is too.
                 col("slice_centre_mm", Type::Double),
+                // The same centre in three dimensions, the midpoint of the
+                // extremes of the images' ImagePositionPatient, because the
+                // stations of a sagittal spine are displaced in the plane of
+                // their slices and share every SliceLocation.
+                col("centre_x_mm", Type::Double),
+                col("centre_y_mm", Type::Double),
+                col("centre_z_mm", Type::Double),
                 col("earliest_acquisition_date", Type::Date),
                 col("earliest_acquisition_time", Type::Time),
                 col("series_number", Type::Int),
