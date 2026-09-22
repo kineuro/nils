@@ -596,10 +596,10 @@ paths:
   /api/explain/{stack}:
     get:
       summary: Why one stack was judged so, as nils explain prints it (record 26 section 11; review:see)
-      description: "The classification of the stack: the pack and its version, the overlay it was judged under, the review items it raised, and every axis row with its value, the pack's label for the value (null when the pack is not served here), its confidence and tier, the evidence rows that carried it (the rule set, the rule, the source it read, what matched, the value the row voted for, its tier and confidence, the pass and reference for a pass's row) and, where a person, an agent or a model decided it, `decision` {kind, actor, why, version}, null otherwise. One reading for the command line and the door, so the two cannot disagree."
+      description: "The classification of the stack: the pack and its version, the overlay it was judged under, the review items it raised with each open one named (`review`: its id, kind, scope, status, how many stacks it holds and a sentence about what it asks, record 38 S4), and every axis row with its value, the pack's label for the value (null when the pack is not served here), its confidence and tier, the evidence rows that carried it (the rule set, the rule, the source it read, what matched, the value the row voted for, its tier and confidence, the pass and reference for a pass's row) and, where a person, an agent or a model decided it, `decision` {kind, actor, why, version}, null otherwise. One reading for the command line and the door, so the two cannot disagree."
       parameters: [{name: stack, in: path, required: true, schema: {type: integer}}]
       responses:
-        "200": {description: "{stack, pack, version, contract, overlay, review_items, axes: [{axis, value, label, confidence, tier, evidence: [{rule_set, rule, source, matched, value, tier, confidence, pass, reference}], decision: {kind, actor, why, version} | null}]}"}
+        "200": {description: "{stack, pack, version, contract, overlay, review_items, review: [{id, kind, scope, status, members, about, evidence}], axes: [{axis, value, label, confidence, tier, evidence: [{rule_set, rule, source, matched, value, tier, confidence, pass, reference}], decision: {kind, actor, why, version} | null}]}"}
         "404": {description: The stack has not been classified}
   /api/linkage/types:
     get:
