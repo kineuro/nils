@@ -18,7 +18,6 @@ use dicom_object::{DefaultDicomObject, FileMetaTableBuilder, InMemDicomObject};
 use nils_dicom::{Framed, QuarantineClass, Refusal};
 use nils_digest::rule::{Ident, Rule};
 use nils_pack::private::Allowed;
-use nils_release::dates::Offset;
 use nils_release::policy::{Policy, Uids};
 use nils_release::scrub::{self, Applied, Plan};
 use nils_release::tags::Category;
@@ -114,7 +113,6 @@ impl<'a> Scrub<'a> {
     pub fn new(private: &'a [Allowed], keep: &'a [Tag], remove: &'a [Tag]) -> Scrub<'a> {
         Scrub {
             policy: Policy {
-                dates: nils_release::dates::Policy::Keep,
                 uids: Uids::Preserve,
                 ..Policy::default()
             },
@@ -134,7 +132,6 @@ impl<'a> Scrub<'a> {
             categories: &CATEGORIES,
             private: self.private,
             code,
-            offset: Offset(0),
             remap: None,
             keep: self.keep,
             remove: self.remove,

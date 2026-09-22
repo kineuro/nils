@@ -680,6 +680,11 @@ pub struct Algebra {
 #[serde(deny_unknown_fields)]
 pub struct GroupSpec {
     pub of: String,
+    /// The keys: fields and bindings of the child, and over a stack set
+    /// the pack's axes, `["axis", {}, name]`. An axis key is a stack's
+    /// values as one sorted list, so each stack counts once;
+    /// `["axis", {each: true}, name]` counts a stack once under each of its
+    /// values. A stack with no value falls under null.
     pub by: Vec<Clause>,
 }
 

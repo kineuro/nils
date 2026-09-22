@@ -13,8 +13,9 @@
 //!
 //! v0 does not do this at all. Its scrubber skips every element whose VR is UI
 //! or whose name contains "uid", so every UID leaves the building unchanged.
-//! That is the whole reason §4.3 exists: a UID commonly embeds the acquisition
-//! date, so a release that shifts dates and keeps UIDs has shifted nothing.
+//! A UID commonly embeds the acquisition date; since the release keeps the
+//! real date (record 38 S3) that is no longer a leak, and remapping is about
+//! the UID itself, which names a study in the source PACS.
 
 use blake2::Blake2bMac;
 use blake2::digest::consts::U32;

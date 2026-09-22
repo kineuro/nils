@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! What a release declares it will do, and the combinations it refuses
-//! (`docs/specs/wave3-anonymize-and-bids.md`, §8 and §4.3).
+//! What a release declares it will do
+//! (`docs/specs/wave3-anonymize-and-bids.md`, §8).
 //!
 //! A policy is written down and recorded on the run, because **"de-identified"
 //! is not a property a file can carry without saying under what rule**. v0's
 //! category table is a menu: a deployment picks from it, the pick is a
 //! command-line argument, and nothing in the output says which pick was made.
 
-use crate::dates;
 use crate::uid;
 
 /// What a release does with UIDs.
@@ -19,7 +18,8 @@ pub enum Uids {
     #[default]
     Remap,
     /// As they are. A real policy for a recipient who has to match the release
-    /// against a PACS, and constrained by §4.3.
+    /// against a PACS; since every release keeps the dates (record 38 S3), a
+    /// date a UID carries is no leak.
     Preserve,
 }
 
@@ -40,10 +40,16 @@ impl Uids {
     }
 }
 
+/// What a release writes for the dates: the dates, always (record 38 S3).
+///
+/// Not a choice any more. The name stays on the row, in the dataset
+/// description and in the content digest, so a reader from before reads the
+/// truth and a tree released before record 38 re-runs unchanged.
+pub const DATES: &str = "keep";
+
 /// Everything a release declares.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Policy {
-    pub dates: dates::Policy,
     pub uids: Uids,
     pub root: uid::Root,
 }
@@ -51,8 +57,9 @@ pub struct Policy {
 /// Where a run's policy comes from (record 26 §13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Source {
-    /// `--dates` or `--uids` was given: the run's policy applies to every
-    /// file, whatever its dataset says, and the row says so.
+    /// `--uids` was given (or `--dates keep`, which a caller from before
+    /// record 38 may still send): the run's policy applies to every file,
+    /// whatever its dataset says, and the row says so.
     Flags,
     /// Neither was given: each dataset's `on_release` applies to its own
     /// files, and the run's defaults to a file under no dataset.
@@ -72,16 +79,11 @@ impl Source {
 impl Policy {
     /// A dataset's leaving policy as its place declares it,
     /// `handling.on_release`, under the run's UID root; the defaults where
-    /// nothing is declared. Read as written, so a combination the run
-    /// refuses is refused by `check` under the dataset's name rather than
-    /// quietly replaced.
+    /// nothing is declared. The dates are not read: every release keeps them
+    /// (record 38 S3).
     pub fn of_handling(handling: &serde_json::Value, root: &uid::Root) -> Policy {
         let release = &handling["on_release"];
         Policy {
-            dates: release["dates"]
-                .as_str()
-                .and_then(dates::Policy::parse)
-                .unwrap_or_default(),
             uids: release["uids"]
                 .as_str()
                 .and_then(Uids::parse)
@@ -91,43 +93,10 @@ impl Policy {
     }
 }
 
-/// A combination the engine will not write.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Refused(pub String);
-
-impl std::fmt::Display for Refused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Refused {}
-
 impl Policy {
-    /// §4.3, which is the finding that most changes the release.
-    ///
-    /// A UID commonly embeds `YYYYMMDD`, and it is the last-resort source the
-    /// date vote of §4 reads. So the two policies are one policy: a release
-    /// that shifts or truncates dates and preserves UIDs has shifted nothing,
-    /// because the true date leaves in the UID.
-    ///
-    /// **Refused rather than warned about.** A warning on a run that produced
-    /// a tree is read after the tree exists, and by then the dataset has left.
-    pub fn check(&self) -> Result<(), Refused> {
-        if self.dates.moves_dates() && self.uids == Uids::Preserve {
-            return Err(Refused(format!(
-                "dates {} and UIDs preserved is not a policy: a UID commonly carries the \
-                 acquisition date, so the date would leave in the UID and the policy would be \
-                 decorative (§4.3). Remap the UIDs, or keep the dates.",
-                self.dates.name()
-            )));
-        }
-        Ok(())
-    }
-
     /// How the run and the dataset description say what was done.
     pub fn describe(&self) -> String {
-        let mut out = format!("dates {}, uids {}", self.dates.name(), self.uids.name());
+        let mut out = format!("dates {DATES}, uids {}", self.uids.name());
         if self.uids == Uids::Remap {
             out.push_str(&format!(" under {}", self.root.as_str()));
         }
@@ -136,7 +105,7 @@ impl Policy {
 
     pub fn as_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "dates": self.dates.name(),
+            "dates": DATES,
             "uids": self.uids.name(),
             "uid_root": (self.uids == Uids::Remap).then(|| self.root.as_str()),
         })
@@ -149,10 +118,9 @@ mod tests {
 
     #[test]
     fn a_dataset_declares_its_leaving_policy_and_the_defaults_stand_in() {
-        let declared = serde_json::json!({"on_release": {"dates": "shift", "uids": "remap"}});
+        let declared = serde_json::json!({"on_release": {"uids": "preserve"}});
         let p = Policy::of_handling(&declared, &uid::Root::default());
-        assert_eq!(p.dates, dates::Policy::Shift);
-        assert_eq!(p.uids, Uids::Remap);
+        assert_eq!(p.uids, Uids::Preserve);
         let nothing = Policy::of_handling(&serde_json::Value::Null, &uid::Root::default());
         assert_eq!(nothing, Policy::default());
         assert_eq!(Source::default(), Source::Datasets);
@@ -160,40 +128,14 @@ mod tests {
     }
 
     #[test]
-    fn keeping_dates_and_preserving_uids_is_a_policy() {
-        let p = Policy {
-            dates: dates::Policy::Keep,
-            uids: Uids::Preserve,
-            ..Policy::default()
-        };
-        assert!(p.check().is_ok());
-    }
-
-    #[test]
-    fn moving_dates_and_preserving_uids_is_refused_and_not_warned_about() {
-        // The true date would leave in the UID, so the policy would be
-        // decorative. A warning is read after the tree exists.
-        for dates in [dates::Policy::Shift, dates::Policy::Year] {
-            let p = Policy {
-                dates,
-                uids: Uids::Preserve,
-                ..Policy::default()
-            };
-            let e = p.check().unwrap_err().to_string();
-            assert!(e.contains("§4.3"), "{e}");
-            assert!(e.contains("decorative"), "{e}");
-        }
-    }
-
-    #[test]
-    fn moving_dates_and_remapping_uids_is_the_combination_that_works() {
-        for dates in [dates::Policy::Shift, dates::Policy::Year] {
-            let p = Policy {
-                dates,
-                uids: Uids::Remap,
-                ..Policy::default()
-            };
-            assert!(p.check().is_ok());
+    fn a_dataset_that_declared_a_moving_date_policy_before_is_read_and_keeps_its_dates() {
+        // Record 38 S3: a handling written before the shift and the year were
+        // removed still opens, and its files leave with their real dates.
+        for dates in ["shift", "year"] {
+            let declared = serde_json::json!({"on_release": {"dates": dates, "uids": "remap"}});
+            let p = Policy::of_handling(&declared, &uid::Root::default());
+            assert_eq!(p.uids, Uids::Remap);
+            assert_eq!(p.as_json()["dates"], "keep");
         }
     }
 

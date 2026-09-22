@@ -83,6 +83,7 @@ pub(crate) fn document(
         })
         .collect::<Result<_, StoreError>>()?;
     let decisions = decisions_of(store, stack)?;
+    let review = review_of(store, stack)?;
 
     let mut per_axis: BTreeMap<&str, usize> = BTreeMap::new();
     for (axis, ..) in &axes {
@@ -168,8 +169,145 @@ pub(crate) fn document(
         "contract": contract,
         "overlay": overlay,
         "review_items": review_items,
+        "review": review,
         "axes": axes_doc,
     })))
+}
+
+/// Record 38 S4: the review items that hold the stack, each named. A count
+/// of questions tells a reader there is something to look at and not what:
+/// a stack carrying two conflicts said `2 review item(s)` and neither the
+/// axis nor the losing value. Each item here is its id and kind, its status,
+/// and what it asks about this stack, read from the stack's own evidence
+/// (a group item's member row, or a stack item's own). Superseded items
+/// are an earlier run's questions and are left out.
+fn review_of(store: &mut Store, stack: i64) -> Result<Vec<Value>, StoreError> {
+    let d = store.dialect();
+    let item = nils_registry::schema::table("review_item");
+    let member = nils_registry::schema::table("review_member");
+    let column = |t: &nils_registry::schema::Table, alias: &str, c: &str| {
+        d.text_of_qualified(Some(alias), t.column(c).expect("a review column"))
+    };
+    let mut out: Vec<Value> = Vec::new();
+    // grouped questions, through their membership
+    let sql = format!(
+        "SELECT i.id, i.kind, i.scope, i.status, i.members, {}, {} FROM {} i \
+         JOIN {} m ON m.item_id = i.id \
+         WHERE m.stack_id = {} AND i.status <> 'superseded' ORDER BY i.id",
+        column(item, "i", "evidence"),
+        column(member, "m", "evidence"),
+        store.qualified("review_item"),
+        store.qualified("review_member"),
+        d.param(1, Type::Int)
+    );
+    for r in store.query(&sql, &[Param::Int(stack)])? {
+        let group: Value = r
+            .opt_text(5)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(Value::Null);
+        let own: Value = r
+            .opt_text(6)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(Value::Null);
+        let evidence = if own.is_object() { own } else { group };
+        let kind = r.text(1)?.to_string();
+        out.push(json!({
+            "id": r.int(0)?,
+            "kind": kind,
+            "scope": r.text(2)?,
+            "status": r.text(3)?,
+            "members": r.opt_int(4)?,
+            "about": about(&kind, &evidence),
+            "evidence": evidence,
+        }));
+    }
+    // questions asked of this stack alone; the ref is matched exactly once
+    // read, since its text is spelled apart on the two backends
+    let reference = column(item, "i", "ref");
+    let sql = format!(
+        "SELECT i.id, i.kind, i.scope, i.status, i.members, {}, {reference} FROM {} i \
+         WHERE i.scope = 'stack' AND i.status <> 'superseded' AND {reference} LIKE {} \
+         ORDER BY i.id",
+        column(item, "i", "evidence"),
+        store.qualified("review_item"),
+        d.param(1, Type::Text)
+    );
+    for r in store.query(&sql, &[Param::from(format!("%\"stack_id\"%{stack}%"))])? {
+        let reference: Value = r
+            .opt_text(6)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(Value::Null);
+        if reference["stack_id"].as_i64() != Some(stack) {
+            continue;
+        }
+        let evidence: Value = r
+            .opt_text(5)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(Value::Null);
+        let kind = r.text(1)?.to_string();
+        out.push(json!({
+            "id": r.int(0)?,
+            "kind": kind,
+            "scope": r.text(2)?,
+            "status": r.text(3)?,
+            "members": r.opt_int(4)?,
+            "about": about(&kind, &evidence),
+            "evidence": evidence,
+        }));
+    }
+    out.sort_by_key(|v| v["id"].as_i64().unwrap_or(0));
+    Ok(out)
+}
+
+/// What one of the classifier's questions asks, in a line: the axis, the
+/// value and what it is weighed against.
+fn about(kind: &str, e: &Value) -> String {
+    let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+    let rule = |v: &Value| {
+        let set = text(&v["rule_set"]);
+        let rule = text(&v["rule"]);
+        match (set.is_empty(), rule.is_empty()) {
+            (true, true) => "a rule".to_string(),
+            (false, true) => set,
+            (true, false) => rule,
+            (false, false) => format!("{set}/{rule}"),
+        }
+    };
+    let axis = text(&e["axis"]);
+    let value = |v: &Value| match v.as_str() {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => "(nothing)".to_string(),
+    };
+    match kind.split_once(':').map(|(_, k)| k) {
+        Some("conflict") => format!(
+            "{axis} {} over {}: {} decided it, {} would have said otherwise",
+            value(&e["value"]),
+            value(&e["other"]),
+            rule(&e["decided_by"]),
+            rule(&e["over"])
+        ),
+        Some("low_confidence") => format!(
+            "{axis} {} at {:.2}, below {:.2} ({})",
+            value(&e["value"]),
+            e["confidence"].as_f64().unwrap_or(0.0),
+            e["below"].as_f64().unwrap_or(0.0),
+            text(&e["tier"])
+        ),
+        Some("missing") => format!("{axis} has no value"),
+        Some("decision") => format!(
+            "{axis}: the rule says {}, a decision says {}",
+            value(&e["rule"]),
+            value(&e["decision"])
+        ),
+        Some("one_image_per_stack") => format!(
+            "split on {}: {} stacks of {} image(s) in the series",
+            value(&e["value"]),
+            e["stacks_in_series"],
+            e["n_instances"]
+        ),
+        _ if !axis.is_empty() => format!("{axis} {}", value(&e["value"])),
+        _ => e.to_string(),
+    }
 }
 
 /// One decision in force: the axis, the value and the why.
@@ -300,11 +438,26 @@ pub(crate) fn text(doc: &Value) -> String {
             out.push('\n');
         }
     }
+    let items = doc["review"].as_array().cloned().unwrap_or_default();
     if let Some(n) = doc["review_items"].as_i64()
         && n > 0
     {
         out.push_str(&format!(
             "  {n} review item(s) were raised for this stack\n"
+        ));
+    }
+    // record 38 S4: each item by its id and kind, with what it asks
+    for i in &items {
+        let members = match i["members"].as_i64() {
+            Some(m) if i["scope"] == "group" => format!(", one of {m} stack(s)"),
+            _ => String::new(),
+        };
+        out.push_str(&format!(
+            "  review item {} {} ({}{members}): {}\n",
+            i["id"].as_i64().unwrap_or(0),
+            i["kind"].as_str().unwrap_or_default(),
+            i["status"].as_str().unwrap_or_default(),
+            i["about"].as_str().unwrap_or_default()
         ));
     }
     out

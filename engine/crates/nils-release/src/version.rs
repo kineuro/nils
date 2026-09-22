@@ -196,7 +196,7 @@ mod tests {
     fn a_change_to_any_input_of_the_bytes_is_a_rewrite() {
         let base = content_of("p", "c", "v", "mri@1", &[(1, 100, 5)]);
         for other in [
-            content_of("shifted", "c", "v", "mri@1", &[(1, 100, 5)]),
+            content_of("another policy", "c", "v", "mri@1", &[(1, 100, 5)]),
             content_of("p", "fewer", "v", "mri@1", &[(1, 100, 5)]),
             content_of("p", "c", "another list", "mri@1", &[(1, 100, 5)]),
             content_of("p", "c", "v", "mri@2", &[(1, 100, 5)]),

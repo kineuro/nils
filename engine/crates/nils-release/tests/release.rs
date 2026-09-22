@@ -13,9 +13,9 @@ use nils_pack as _;
 use nils_registry::home::{Home, InitOptions};
 use nils_registry::session::{Naming, Scheme as SessionScheme};
 use nils_registry::{Backend, Registry, Scheme};
-use nils_release::policy::{Policy, Uids};
+use nils_release::policy::Policy;
 use nils_release::run::{self, Selection};
-use nils_release::{dates, tags as categories};
+use nils_release::tags as categories;
 
 const KEY: &[u8] = b"a release test key of some length";
 
@@ -224,10 +224,9 @@ fn what_leaves_carries_no_identifier_and_says_what_was_done_to_it() {
     assert!(!rendered.contains("SVENSSON"), "{rendered}");
     assert!(rendered.contains("(0010,0010) removed"), "{rendered}");
 
-    // The row records the scheme that named the sessions, which here is the
-    // one the run asked for, and says nothing about why they were named that
-    // way: §4.3 numbered nothing, because nothing moved the dates.
-    assert!(report.session_naming.is_none(), "{report:?}");
+    // The row records the scheme that named the sessions, which is the one
+    // the run asked for, and says nothing about why they were named that
+    // way: since record 38 S3 nothing numbers them in its place.
     let store = reg.store();
     let sql = format!(
         "SELECT session_scheme, session_naming FROM {} ORDER BY id DESC",
@@ -272,18 +271,16 @@ fn the_same_release_twice_writes_the_same_bytes() {
 }
 
 #[test]
-fn a_shift_moves_the_dates_and_keeps_the_interval() {
+fn a_release_keeps_every_date_whatever_labels_the_sessions() {
+    // Record 38 S3: the date is the date. Numbered sessions hide the date in
+    // the path and nowhere else; the files carry it as the archive does, and
+    // nothing is drawn or kept to move it.
     let source = tree();
     let home_dir = TempDir::new("release-home");
     let out = TempDir::new("release-out");
     let (_home, mut reg) = registry(&home_dir, &source);
 
-    let policy = Policy {
-        dates: dates::Policy::Shift,
-        ..Policy::default()
-    };
-    // §4.3: a scheme that labels by the date would put the date back in the
-    // path, so a shifted release uses another.
+    let policy = Policy::default();
     let scheme = SessionScheme {
         naming: Naming::Ordinal,
         ..SessionScheme::default()
@@ -292,6 +289,11 @@ fn a_shift_moves_the_dates_and_keeps_the_interval() {
 
     let mut days: Vec<String> = Vec::new();
     for path in files_under(out.path()) {
+        let text = path.display().to_string();
+        assert!(
+            !text.contains("20220115") && !text.contains("20220715"),
+            "{text}"
+        );
         let object = dicom_object::open_file(&path).unwrap();
         days.push(
             object
@@ -305,25 +307,11 @@ fn a_shift_moves_the_dates_and_keeps_the_interval() {
         );
     }
     days.sort();
-    assert_eq!(days.len(), 2);
-    assert!(!days.contains(&"20220115".to_string()), "{days:?}");
-    let a = nils_registry::day::Day::parse(&days[0]).unwrap();
-    let b = nils_registry::day::Day::parse(&days[1]).unwrap();
-    assert_eq!(a.days_to(b), 181, "the interval is what survives");
+    assert_eq!(days, vec!["20220115".to_string(), "20220715".to_string()]);
 
-    // And the offset is kept with the identifiers, because it is the thing
-    // that undoes the policy.
+    // and the linkage store holds no offset, because there is none
     let mut linkage = reg.open_linkage().unwrap();
-    let rows = linkage
-        .query(
-            &format!(
-                "SELECT offset_days FROM {}",
-                linkage.qualified("date_shift")
-            ),
-            &[],
-        )
-        .unwrap();
-    assert_eq!(rows.len(), 1);
+    assert!(!nils_registry::migrate::table_exists(&mut linkage, "date_shift").unwrap());
 }
 
 /// One study of one person, under its own UIDs, for a second dataset.
@@ -403,15 +391,15 @@ fn a_release_spanning_two_datasets_leaves_each_under_its_own_policy() {
     digest(&s, &mut reg).unwrap();
     dataset(
         &mut reg,
-        "ds-shifted",
+        "ds-remapped",
         a.path(),
-        serde_json::json!({"dates": "shift", "uids": "remap"}),
+        serde_json::json!({"uids": "remap"}),
     );
     dataset(
         &mut reg,
         "ds-kept",
         b.path(),
-        serde_json::json!({"dates": "keep", "uids": "preserve"}),
+        serde_json::json!({"uids": "preserve"}),
     );
     let ordinal = SessionScheme {
         naming: Naming::Ordinal,
@@ -449,20 +437,20 @@ fn a_release_spanning_two_datasets_leaves_each_under_its_own_policy() {
                 "dataset".into()
             ),
             (
-                "ds-shifted".into(),
-                "shift".into(),
+                "ds-remapped".into(),
+                "keep".into(),
                 "remap".into(),
                 "dataset".into()
             ),
         ]
     );
     assert!(
-        report.policy.contains("ds-shifted: dates shift"),
+        report.policy.contains("ds-kept: dates keep, uids preserve"),
         "{}",
         report.policy
     );
     // and each file left under its own: the kept dataset's file keeps its
-    // date and its UID, the shifted dataset's has neither
+    // UID, the remapped dataset's does not, and both keep their date
     let files = written_dates_and_uids(out.path());
     assert_eq!(files.len(), 2, "{files:?}");
     let kept = files.iter().find(|(_, _, uid)| uid == "B.1.1.1");
@@ -471,9 +459,9 @@ fn a_release_spanning_two_datasets_leaves_each_under_its_own_policy() {
         "the preserved UID names the file: {files:?}"
     );
     assert_eq!(kept.unwrap().1, "20220115");
-    let shifted = files.iter().find(|(_, _, uid)| uid != "B.1.1.1").unwrap();
-    assert_ne!(shifted.1, "20220115", "{files:?}");
-    assert_ne!(shifted.2, "A.1.1.1", "{files:?}");
+    let remapped = files.iter().find(|(_, _, uid)| uid != "B.1.1.1").unwrap();
+    assert_eq!(remapped.1, "20220115", "{files:?}");
+    assert_ne!(remapped.2, "A.1.1.1", "{files:?}");
     let store = reg.store();
     let sql = format!(
         "SELECT policies, policy FROM {} ORDER BY id DESC",
@@ -527,9 +515,9 @@ fn a_release_spanning_two_datasets_leaves_each_under_its_own_policy() {
     assert_eq!(report.policies.len(), 1, "{:?}", report.policies);
     assert_eq!(report.policies[0]["dataset"], "ds-kept");
 
-    // a dataset whose declared policy would shift dates and preserve UIDs is
-    // refused by name, as the run's own is; the declaration door refuses
-    // it too, so it is written past the door here
+    // a dataset that declared a shift with preserved UIDs before record 38
+    // S3, written past the door as a registry from before holds it, is read
+    // and released: its dates stay and its UIDs are preserved, as declared
     let t = nils_registry::schema::table("place");
     let store = reg.store();
     let sql = format!(
@@ -546,79 +534,56 @@ fn a_release_spanning_two_datasets_leaves_each_under_its_own_policy() {
             )],
         )
         .unwrap();
-    let refused_out = TempDir::new("release-out-refused");
-    let refused = run::Settings {
-        name: "refused",
+    let old_out = TempDir::new("release-out-old");
+    let old = run::Settings {
+        name: "old",
         policy_from: nils_release::policy::Source::Datasets,
-        ..settings(refused_out.path(), &policy, &ordinal)
+        ..settings(old_out.path(), &policy, &ordinal)
     };
-    let e = run::run(&mut reg, &refused).unwrap_err().to_string();
+    let report = run::run(&mut reg, &old).unwrap();
+    assert_eq!(report.files, 2, "{report:?}");
+    let files = written_dates_and_uids(old_out.path());
     assert!(
-        e.contains("dataset ds-kept") && e.contains("decorative"),
-        "{e}"
+        files.iter().all(|(_, day, _)| day == "20220115"),
+        "{files:?}"
     );
-    assert!(files_under(refused_out.path()).is_empty());
+    assert!(
+        files.iter().any(|(_, _, uid)| uid == "B.1.1.1"),
+        "{files:?}"
+    );
 }
 
 #[test]
-fn the_two_halves_of_4_3_are_refused_rather_than_warned_about() {
-    let source = tree();
-    let home_dir = TempDir::new("release-home");
-    let out = TempDir::new("release-out");
-    let (_home, mut reg) = registry(&home_dir, &source);
-
-    // A shift with the UIDs kept: the true date leaves in the UID.
-    let kept_uids = Policy {
-        dates: dates::Policy::Shift,
-        uids: Uids::Preserve,
-        ..Policy::default()
-    };
-    let ordinal = SessionScheme {
-        naming: Naming::Ordinal,
-        ..SessionScheme::default()
-    };
-    let e = run::run(&mut reg, &settings(out.path(), &kept_uids, &ordinal))
-        .unwrap_err()
-        .to_string();
-    assert!(e.contains("decorative"), "{e}");
-
-    // And a shift with a date-named session, both halves asked for by the
-    // run's own flags: the tree would carry the date the files no longer do,
-    // and a warning on a run that produced a tree is read after the tree
-    // exists. The refusal names the case that is resolved instead, a dataset
-    // declaring the policy of its own.
-    let shifted = Policy {
-        dates: dates::Policy::Shift,
-        ..Policy::default()
-    };
-    let by_date = SessionScheme::default();
-    let e = run::run(&mut reg, &settings(out.path(), &shifted, &by_date))
-        .unwrap_err()
-        .to_string();
-    assert!(e.contains("labels by the date"), "{e}");
-    assert!(e.contains("numbered in date order"), "{e}");
-
-    // Neither wrote anything.
-    assert!(files_under(out.path()).is_empty());
-}
-
-#[test]
-fn a_dataset_that_declares_moved_dates_numbers_its_sessions_rather_than_refusing() {
-    // §4.3 with record 26 section 13: nobody gave --dates or --uids, so the
-    // shift is the dataset's own standing rule rather than an instruction of
-    // this run's. A declared policy that could never be released would be a
-    // declaration nobody could use, and an ordinal label leaks no date, which
-    // is what §4.3 protects: here the labels give way rather than the release.
+fn a_dataset_that_declared_moved_dates_before_keeps_the_scheme_it_was_asked_for() {
+    // Record 38 S3: a registry from before may hold a dataset whose handling
+    // says `shift`. It is read as it stands and never crashes a release: the
+    // files keep their dates, and the sessions are labelled the way the
+    // scheme asks, since there is no moved date left to protect.
     let source = tree();
     let home_dir = TempDir::new("release-home");
     let out = TempDir::new("release-out");
     let (_home, mut reg) = registry(&home_dir, &source);
     dataset(
         &mut reg,
-        "ds-shifted",
+        "ds-old",
         source.path(),
-        serde_json::json!({"dates": "shift", "uids": "remap"}),
+        serde_json::json!({"uids": "remap"}),
     );
+    let t = nils_registry::schema::table("place");
+    let store = reg.store();
+    let sql = format!(
+        "UPDATE {} SET handling = {} WHERE name = 'ds-old'",
+        store.qualified("place"),
+        store.dialect().param(1, t.column("handling").unwrap().ty)
+    );
+    store
+        .execute(
+            &sql,
+            &[nils_registry::Param::from(
+                serde_json::json!({"on_release": {"dates": "shift", "uids": "remap"}}).to_string(),
+            )],
+        )
+        .unwrap();
 
     let by_date = SessionScheme::default();
     let defaults = Policy::default();
@@ -628,37 +593,23 @@ fn a_dataset_that_declares_moved_dates_numbers_its_sessions_rather_than_refusing
     };
     let report = run::run(&mut reg, &declared).unwrap();
     assert_eq!(report.files, 2, "{report:?}");
-    // the report says why, and names whose declaration it was
-    let why = report.session_naming.clone().unwrap_or_default();
-    assert!(why.contains("ds-shifted"), "{why}");
-    assert!(why.contains("numbered in date order"), "{why}");
+    assert_eq!(report.policies[0]["dates"], "keep", "{:?}", report.policies);
     let written = files_under(out.path());
-    assert!(!written.is_empty());
-    for path in &written {
-        let text = path.display().to_string();
-        assert!(
-            !text.contains("20220115") && !text.contains("20220715"),
-            "{text}"
-        );
-        assert!(text.contains("ses-01") || text.contains("ses-02"), "{text}");
-    }
-    // and the row records the scheme that named them, not the one asked for
+    assert!(
+        written
+            .iter()
+            .any(|p| p.display().to_string().contains("ses-20220115")),
+        "{written:?}"
+    );
     let store = reg.store();
     let sql = format!(
-        "SELECT session_scheme FROM {} ORDER BY id DESC",
+        "SELECT session_scheme, session_naming FROM {} ORDER BY id DESC",
         store.qualified("release")
     );
     let stored = store.query(&sql, &[]).unwrap();
     let scheme: serde_json::Value = serde_json::from_str(stored[0].text(0).unwrap()).unwrap();
-    assert_eq!(scheme["naming"], "ordinal", "{scheme}");
-    // and the sentence with it, so that why they were numbered hangs off the
-    // release itself and not off the job that happened to make it
-    let sql = format!(
-        "SELECT session_naming FROM {} ORDER BY id DESC",
-        store.qualified("release")
-    );
-    let stored = store.query(&sql, &[]).unwrap();
-    assert_eq!(stored[0].text(0).unwrap(), why, "{why}");
+    assert_eq!(scheme["naming"], "date", "{scheme}");
+    assert_eq!(stored[0].opt_text(1).unwrap(), None);
 }
 
 /// A tree whose files say something about their own pixels, and carry two

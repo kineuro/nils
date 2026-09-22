@@ -19,9 +19,9 @@ use std::fmt::Write as _;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Participant {
     pub id: String,
-    /// Only what the policy allows out. A release that shifted dates has no
-    /// age to give unless the age was computed before the birth date went
-    /// (§8.3), and one that removed the patient categories has no sex.
+    /// Only what the policy allows out. The age is computed before the birth
+    /// date goes (§8.3), and a release that removed the patient categories
+    /// has no sex.
     pub extra: BTreeMap<String, String>,
 }
 
@@ -224,7 +224,6 @@ pub fn readme(
     counts: &BTreeMap<String, i64>,
     nowhere: &BTreeMap<String, i64>,
     repeats: Repeats,
-    by_text: &BTreeMap<String, i64>,
 ) -> String {
     let mut out = format!("# {name}\n\n");
     let _ = writeln!(
@@ -287,29 +286,6 @@ pub fn readme(
             repeats.names, repeats.repeats, repeats.refused
         );
     }
-    // Record 37, S4. A reader of the tree meets these names without knowing
-    // how much is behind them, and the difference between a name earned by a
-    // measurement and one earned by a line somebody typed at a console is a
-    // difference the tree should admit to rather than hide.
-    if !by_text.is_empty() {
-        let n: i64 = by_text.values().sum();
-        let _ = writeln!(
-            out,
-            "## Names that rest on the protocol text\n\n\
-             {n} stack(s) carry a `Text` mark in their `acq-` label. Those stacks agree with \
-             a neighbour on every fact this engine holds, coverage, coil, timings and every \
-             classified axis alike, and differ only in the free text the scanner recorded, \
-             so the text is what tells them apart. The mark is six characters of a digest of \
-             that text and never the text itself. **It is the weakest reason a name in this \
-             tree has**, and each group of them is an open review item in the registry it \
-             came from.\n"
-        );
-        out.push_str("| element | stacks |\n|---|---|\n");
-        for (element, n) in by_text {
-            let _ = writeln!(out, "| {element} | {n} |");
-        }
-        out.push('\n');
-    }
     out.push_str(
         "Less than half of a clinical archive has a BIDS name, and that is not a defect in\n\
          BIDS: a localizer, a reformat, a projection and a synthetic contrast are not\n\
@@ -331,7 +307,7 @@ mod tests {
             version: "1.0.0".into(),
             dataset_version: "2026.09.05.1".into(),
             converter: Some("dcm2niix v1.0.20260724".into()),
-            policy: "dates shift, uids remap under 2.25".into(),
+            policy: "dates keep, uids remap under 2.25".into(),
             pack: "mri@0.1.0".into(),
             placements: [("localizers".to_string(), "sourcedata".to_string())].into(),
             authors: vec!["a person".to_string()],
@@ -449,7 +425,6 @@ mod tests {
             &counts,
             &nowhere,
             Repeats::default(),
-            &BTreeMap::new(),
         );
         assert!(text.contains("2026.09.05.1"), "{text}");
         assert!(text.contains("localizers: sourcedata"), "{text}");
@@ -475,7 +450,6 @@ mod tests {
                 repeats: 2,
                 refused: 3,
             },
-            &BTreeMap::new(),
         );
         assert!(!text.contains("What is not here"), "{text}");
         // Record 37 S2: and it says what its own `run-` indices are worth,
@@ -497,7 +471,6 @@ mod tests {
             &counts,
             &BTreeMap::new(),
             Repeats::default(),
-            &BTreeMap::new(),
         );
         assert!(!text.contains("run-"), "{text}");
     }

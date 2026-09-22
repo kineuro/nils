@@ -276,14 +276,16 @@ struct ReleaseArgs {
     /// What to call this release, on its row and in its report
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
-    /// What happens to every date: as they are, moved by one offset per
-    /// subject, or the year only. Without --dates and --uids each dataset's
-    /// own leaving policy applies to its files (record 26 section 13); given,
-    /// the run's applies to every file
-    #[arg(long, value_name = "keep|shift|year")]
+    /// Accepted as `keep` alone, for a caller from before record 38: a
+    /// release writes every date as the archive holds it. Given, it applies
+    /// the run's policy to every file, as --uids does
+    #[arg(long, hide = true, value_name = "keep")]
     dates: Option<String>,
     /// What happens to UIDs. Remapping is keyed and deterministic, so two
-    /// releases of overlapping selections agree
+    /// releases of overlapping selections agree. Without --uids each
+    /// dataset's own leaving policy applies to its files (record 26 section
+    /// 13); given, the run's applies to every file. Every release keeps the
+    /// dates as the archive holds them
     #[arg(long, value_name = "remap|preserve")]
     uids: Option<String>,
     /// The arc new UIDs hang from. The default is DICOM's UUID arc, which is
@@ -7899,7 +7901,7 @@ fn handover_list(home: &Home, args: HandoverListArgs) -> Result<(), Exit> {
 // --------------------------------------------------------------------------
 
 fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
-    use nils_release::{dates, policy, run, tags, uid};
+    use nils_release::{policy, run, tags, uid};
 
     if args.history {
         return history(home, &args);
@@ -7917,11 +7919,16 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         (None, None) => policy::Source::Datasets,
         _ => policy::Source::Flags,
     };
-    let dates_policy = match &args.dates {
-        Some(text) => dates::Policy::parse(text)
-            .ok_or_else(|| usage(format!("--dates is keep, shift or year, not {text}")))?,
-        None => dates::Policy::default(),
-    };
+    // Record 38 S3: the date is the date. `keep` is taken from a caller
+    // from before; anything else is refused in words saying what to do.
+    if let Some(text) = &args.dates
+        && text != "keep"
+    {
+        return Err(usage(format!(
+            "--dates {text}: {}",
+            nils_registry::place::DATES_ARE_KEPT
+        )));
+    }
     let uids = match &args.uids {
         Some(text) => policy::Uids::parse(text)
             .ok_or_else(|| usage(format!("--uids is remap or preserve, not {text}")))?,
@@ -7931,15 +7938,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         Some(text) => uid::Root::new(text).map_err(|e| usage(e.to_string()))?,
         None => uid::Root::default(),
     };
-    let policy = policy::Policy {
-        dates: dates_policy,
-        uids,
-        root,
-    };
-    // §4.3, before a registry is even opened: the two policies are one, and a
-    // combination that would leave the date in the UID is refused rather than
-    // warned about.
-    policy.check().map_err(|e| usage(e.to_string()))?;
+    let policy = policy::Policy { uids, root };
 
     let categories = match &args.categories {
         None => tags::Category::every(),
@@ -8130,9 +8129,8 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // record 26 section 13: what each dataset's files left under
     for p in &report.policies {
         println!(
-            "  dataset          {:<24} dates {}   uids {}   from {}",
+            "  dataset          {:<24} uids {}   from {}",
             p["dataset"].as_str().unwrap_or("(none)"),
-            p["dates"].as_str().unwrap_or_default(),
             p["uids"].as_str().unwrap_or_default(),
             p["from"].as_str().unwrap_or_default()
         );
@@ -8158,10 +8156,6 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             "  not removed      {}; those elements leave the file unchanged",
             left.join(", ")
         );
-    }
-    // section 4.3: the sessions were numbered because a dataset's dates moved
-    if let Some(why) = &report.session_naming {
-        println!("  sessions         {why}");
     }
     if let Some(c) = &report.converter {
         println!("  converted by     {c}");
@@ -8303,18 +8297,6 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         }
         for (why, n) in &report.unconvertible {
             println!("      {n:>10}   written as DICOM instead: {why}");
-        }
-        // Record 37, S4. A name earned by a measurement and a name earned by
-        // a line somebody typed at a console are not worth the same, and the
-        // report is where the difference is said out loud.
-        if !report.named_by_text.is_empty() {
-            println!("  named by text alone");
-            for (element, n) in &report.named_by_text {
-                println!(
-                    "      {n:>10}   stacks a neighbour agrees with on every fact held, told \
-                     apart by {element}; each group is an open review item"
-                );
-            }
         }
         // Wave 4a §7.4: what the clinical layer put in the tree, counted.
         for (what, n) in &report.clinical {
@@ -8466,9 +8448,10 @@ fn releases_doc(
                 "policy": json(r.opt_text(17)?),
                 "policies": json(r.opt_text(18)?),
                 // How many sessions the release holds, the scheme that named
-                // them, and, where §4.3 numbered them in date order under a
-                // dataset's declared shift, the engine's own sentence for why
-                // they are not labelled the way the scheme asked.
+                // them, and, on a release from before record 38 where §4.3
+                // numbered them in date order under a dataset's declared
+                // shift, the engine's own sentence for why; null on every
+                // release since.
                 "sessions": sessions.get(&id).copied(),
                 "session_scheme": json(r.opt_text(19)?),
                 "session_naming": r.opt_text(20)?,

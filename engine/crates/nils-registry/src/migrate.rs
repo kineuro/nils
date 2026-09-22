@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 49;
+pub const SCHEMA_VERSION: i64 = 51;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,7 +250,119 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 49,
         apply: an_instance_may_hold_frames_of_more_than_one_stack,
     },
+    Migration {
+        version: 50,
+        apply: the_date_is_the_date,
+    },
+    Migration {
+        version: 51,
+        apply: a_stack_says_where_it_sits_and_when_it_was_made,
+    },
 ];
+
+/// Record 38 S3: a release keeps the real date, and the shift and year
+/// policies are gone with everything that served them.
+///
+/// In the registry, a place's declared handling loses `on_release.dates`,
+/// since the dates are no longer a choice and a desk showing "dates shifted"
+/// on a dataset whose release keeps them would be wrong; and the release
+/// plan loses the offset it carried per stack, which is scratch a version
+/// clears when it closes. In the linkage store the per-subject offsets go:
+/// they served only the shift, and each was derivable from the key anyway.
+///
+/// What a release from before recorded is not touched: its row keeps its
+/// policy, its `session_naming` sentence and its `shifted` change counts,
+/// because they say what that release did.
+fn the_date_is_the_date(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    match kind {
+        Kind::Linkage => {
+            if table_exists(store, "date_shift")? {
+                let t = store.qualified("date_shift");
+                store.batch(&format!("DROP TABLE {t}"))?;
+            }
+            Ok(())
+        }
+        Kind::Registry => {
+            if column_exists(store, "release_plan", "offset_days")? {
+                let t = store.qualified("release_plan");
+                store.batch(&format!("ALTER TABLE {t} DROP COLUMN offset_days"))?;
+            }
+            if !table_exists(store, "place")? {
+                return Ok(());
+            }
+            let t = schema::table("place");
+            let handling = store
+                .dialect()
+                .text_of(t.column("handling").expect("place.handling"));
+            let rows = store.query(
+                &format!(
+                    "SELECT id, {handling} FROM {} ORDER BY id",
+                    store.qualified("place")
+                ),
+                &[],
+            )?;
+            for r in &rows {
+                let id = r.int(0)?;
+                let Some(mut doc) = r
+                    .opt_text(1)?
+                    .and_then(|h| serde_json::from_str::<serde_json::Value>(h).ok())
+                else {
+                    continue;
+                };
+                let Some(release) = doc
+                    .get_mut("on_release")
+                    .and_then(serde_json::Value::as_object_mut)
+                else {
+                    continue;
+                };
+                if release.remove("dates").is_none() {
+                    continue;
+                }
+                store.update_by_id(t, &[("handling", Param::from(doc.to_string()))], "id", id)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Record 38 S2: a repeat is the same stack in the same place, identical in
+/// everything but its own acquisition time, and numbered in that order. An
+/// instance gains the position it sits at in three dimensions. The
+/// fingerprint gains the centre of a stack's slices, along the slice normal
+/// and in three dimensions, the earliest acquisition
+/// date and time of its images, its series number, the gradient directions it
+/// played and its temporal position, and a series gains the number the
+/// scanner gave it. A registry from before gains them empty; the next `nils
+/// fingerprint` derives every stack again because the derivation's revision
+/// moved with them, and a series keeps no number until its files are read
+/// again, so a `run-` index there falls back to the stack's id after the
+/// acquisition time.
+fn a_stack_says_where_it_sits_and_when_it_was_made(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "stack_fingerprint",
+        &[
+            "slice_centre_mm",
+            "centre_x_mm",
+            "centre_y_mm",
+            "centre_z_mm",
+            "earliest_acquisition_date",
+            "earliest_acquisition_time",
+            "series_number",
+            "dwi_gradients",
+            "temporal_position",
+            "temporal_positions",
+        ],
+    )?;
+    add_columns(store, "series", &["series_number"])?;
+    add_columns(store, "instance", &["image_position_patient"])
+}
 
 /// Record 37 S7: which naming mode a release's names were built under. A row
 /// from before says nothing, which is right: it was written when there was
@@ -1824,5 +1936,87 @@ mod column_migration {
         let places = crate::place::list(&mut store).unwrap();
         let plain = places.iter().find(|p| p.name == "plain").unwrap();
         assert_eq!(plain.dataset["arrives"], "coded");
+    }
+
+    /// Record 38 S3: a registry and a linkage store from before open with
+    /// the shift gone. A place's handling loses `on_release.dates` and keeps
+    /// the rest; one that never said anything is left alone; the release
+    /// plan loses its offset; the linkage store loses the offsets. Twice is
+    /// the same as once.
+    #[test]
+    fn a_store_from_before_loses_the_shift_and_keeps_the_rest() {
+        use crate::schema::table;
+        use crate::store::Insert;
+        let mut store = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 49) {
+            (m.apply)(&mut store, Kind::Registry).unwrap();
+        }
+        store
+            .batch("ALTER TABLE release_plan ADD COLUMN offset_days INTEGER NOT NULL DEFAULT 0")
+            .unwrap();
+        let row = |name: &str, handling: Option<&str>| {
+            vec![
+                Param::from(name),
+                Param::from("source"),
+                Param::from(format!("/data/{name}")),
+                Param::from("{}"),
+                Param::from("2026-09-01T00:00:00Z"),
+                handling.map_or(Param::Null, Param::from),
+            ]
+        };
+        let spec = Insert::new(
+            table("place"),
+            &[
+                "name",
+                "role",
+                "path",
+                "guarantees",
+                "created_at",
+                "handling",
+            ],
+        );
+        store
+            .insert(
+                &spec,
+                &[
+                    row("shifted", Some(r#"{"arrives": "identified", "on_release": {"dates": "shift", "uids": "remap", "deface": true}}"#)),
+                    row("kept", Some(r#"{"arrives": "coded", "on_release": {"dates": "keep", "uids": "preserve", "deface": false}}"#)),
+                    row("plain", None),
+                ],
+            )
+            .unwrap();
+
+        let mut linkage = Store::sqlite_in_memory().unwrap();
+        for m in MIGRATIONS.iter().take_while(|m| m.version <= 49) {
+            (m.apply)(&mut linkage, Kind::Linkage).unwrap();
+        }
+        linkage
+            .batch("CREATE TABLE date_shift (subject_id INTEGER PRIMARY KEY, offset_days INTEGER NOT NULL)")
+            .unwrap();
+
+        for _ in 0..2 {
+            the_date_is_the_date(&mut store, Kind::Registry).unwrap();
+            the_date_is_the_date(&mut linkage, Kind::Linkage).unwrap();
+        }
+        assert!(!column_exists(&mut store, "release_plan", "offset_days").unwrap());
+        assert!(!table_exists(&mut linkage, "date_shift").unwrap());
+        let places = crate::place::list(&mut store).unwrap();
+        let of = |name: &str| {
+            places
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+                .handling
+                .clone()
+        };
+        assert_eq!(
+            of("shifted"),
+            serde_json::json!({"arrives": "identified", "on_release": {"uids": "remap", "deface": true}})
+        );
+        assert_eq!(
+            of("kept"),
+            serde_json::json!({"arrives": "coded", "on_release": {"uids": "preserve", "deface": false}})
+        );
+        assert!(of("plain").is_null() || of("plain")["on_release"].get("dates").is_none());
     }
 }

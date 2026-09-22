@@ -33,7 +33,6 @@ SOURCE_VALUES = [
     b"081500",
     b"082000",
 ]
-SOURCE_DATES = [b"20220115", b"20220715"]
 # The example root the reference corpus hangs its UIDs from.
 SOURCE_UID_ROOT = b"1.2.826.0.1.3680043.8.498"
 
@@ -323,7 +322,7 @@ def bar_deidentified(work: Path) -> list[str]:
     `carries`).
     """
     bad = []
-    for tree, shifted in (("descriptive", False), ("shifted", True)):
+    for tree in ("descriptive",):
         root = work / tree
         if not root.is_dir():
             continue
@@ -348,14 +347,6 @@ def bar_deidentified(work: Path) -> list[str]:
             for group in (0x6000, 0x5000):
                 if bytes([group & 0xFF, group >> 8, 0x00, 0x30]) in data:
                     bad.append(f"{tree}: a released file still carries a {group:04X} block")
-            if shifted:
-                for date in SOURCE_DATES:
-                    if date in data:
-                        # 4.3 as a test: including inside a UID.
-                        bad.append(
-                            f"shifted: a released file still carries {date.decode()}, "
-                            "which is the date it was supposed to have moved"
-                        )
     return bad
 
 
@@ -405,7 +396,7 @@ def bar_private(work: Path) -> list[str]:
     bad = []
     import subprocess
 
-    for tree in ("descriptive", "bids", "shifted"):
+    for tree in ("descriptive", "bids"):
         root = work / tree
         if not root.is_dir():
             continue
@@ -467,12 +458,10 @@ def bar_dates(work: Path, db: sqlite3.Connection) -> list[str]:
     section 7.4, which is the join itself.
 
     First the mechanism: the time in the standard's own column is the
-    registry's, under the policy the release ran under. Then the join: each
-    session's row in `_sessions.tsv` carries the nearest EDSS the registry
-    holds, with its signed distance in days, and the participant row the sex
-    and the age; and in the shifted tree the observation's date moved with
-    the scan, so the distance between the two columns is still the
-    registry's.
+    registry's own date, which a release keeps (record 38 S3). Then the join:
+    each session's row in `_sessions.tsv` carries the nearest EDSS the
+    registry holds, with its signed distance in days and its real date, and
+    the participant row the sex and the age.
     """
     if not (work / "bids").is_dir():
         return []
@@ -491,7 +480,7 @@ def bar_dates(work: Path, db: sqlite3.Connection) -> list[str]:
         for line in (work / "bids" / path).read_text().splitlines()[1:]:
             _, _, acq_time = line.partition("\t")
             if acq_time in ("", "n/a"):
-                bad.append(f"{path}: a scan with no time, under a policy that keeps them")
+                bad.append(f"{path}: a scan with no time")
                 continue
             day = acq_time.split("T")[0].replace("-", "")
             if day not in wanted:
@@ -570,25 +559,6 @@ def clinical_join(work: Path, db: sqlite3.Connection) -> list[str]:
                     f"{path}: {row['session_id']} carries EDSS {row.get('edss')} at {row.get('edss_days')} days"
                     f" on {row.get('edss_date')}; the registry's nearest is {value} at {offset} on {when}"
                 )
-    # The shifted tree: the date moved with the scan, and the distance held.
-    shifted = work / "bids-shifted"
-    if shifted.is_dir():
-        unshifted = {r[2] for r in (nearest_edss(db, "2022-01-15"), nearest_edss(db, "2022-07-15")) if r}
-        for path in [p for p in files_under(shifted) if p.endswith("_sessions.tsv")]:
-            for row in tsv(shifted / path):
-                scan = date.fromisoformat(row["acq_time"][:10])
-                edss_date = row.get("edss_date", "")
-                if edss_date in ("", "n/a"):
-                    bad.append(f"shifted {path}: {row['session_id']} has no EDSS date under shift")
-                    continue
-                held = (date.fromisoformat(edss_date) - scan).days
-                if str(held) != row.get("edss_days"):
-                    bad.append(
-                        f"shifted {path}: {row['session_id']} EDSS date is {held} days from the scan,"
-                        f" the row says {row.get('edss_days')}"
-                    )
-                if edss_date in unshifted:
-                    bad.append(f"shifted {path}: {row['session_id']} EDSS date {edss_date} did not move")
     return bad
 
 

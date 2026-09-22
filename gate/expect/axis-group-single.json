@@ -1,0 +1,39 @@
+{
+  "name": "axis-group-single",
+  "question": "How many stacks per technique",
+  "hash": "0077cc6264e45e4376554d62a8a9dfaa2eb1d5e70b96eb46fb0a7e1b1167fa7a",
+  "columns": [
+    "_key",
+    "_subject",
+    "technique",
+    "_rows",
+    "_subjects"
+  ],
+  "row_count": 3,
+  "rows": [
+    [
+      "1",
+      "",
+      "GRE",
+      "183",
+      "48"
+    ],
+    [
+      "2",
+      "",
+      "MPRAGE",
+      "344",
+      "48"
+    ],
+    [
+      "3",
+      "",
+      "TSE",
+      "345",
+      "48"
+    ]
+  ],
+  "funnel": {
+    "acquisitions": 48
+  }
+}

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::name;
 use nils_registry::day::Day;
 use nils_registry::schema::{Type, table};
-use nils_registry::session::{self, Scheme};
+use nils_registry::session::Scheme;
 use nils_registry::store::{Error as StoreError, Insert, Param, Store};
 use nils_registry::{Registry, time::now_iso};
 
@@ -141,11 +141,6 @@ pub struct Report {
     /// read. Under `hold` they are held and are not in the tree; under the
     /// default they are written and counted.
     pub on_unknown: String,
-    /// Why the tree's sessions are numbered rather than labelled the way the
-    /// run's scheme asked: §4.3 with record 26 §13, a dataset whose files
-    /// leave with their dates moved under a scheme that labels by the date.
-    /// None where the scheme stood, which is every other run.
-    pub session_naming: Option<String>,
     /// Which layout was written, and for BIDS what it chose (§9.3).
     pub layout: String,
     /// Which naming mode it was written under (record 37 S7).
@@ -180,14 +175,6 @@ pub struct Report {
     pub shared_names: i64,
     pub repeats: i64,
     pub not_repeats: i64,
-    /// Record 37, S4: stacks whose name is told from its neighbour's by the
-    /// protocol text and by nothing else, counted by the DICOM keyword that
-    /// answered. **A name that rests on free text is weaker than one that
-    /// rests on a measurement**, and a person should be able to see that it
-    /// did: the `acq-` label carries a `Text` mark, this says how many and on
-    /// which element, and a review item per group says which stacks. No
-    /// protocol text is here, nor anywhere else a release writes.
-    pub named_by_text: BTreeMap<String, i64>,
     /// Stacks by the route of §9.3 they took.
     pub routes: BTreeMap<String, i64>,
     /// And, for the ones that went nowhere, why. Never a silent drop.
@@ -379,7 +366,6 @@ struct Job {
     /// What the state said, when the stack was there.
     was: Option<State>,
     code: String,
-    offset: crate::dates::Offset,
     /// Which of the policies in play the stack's files leave under
     /// (record 26 §13), an index into `Policies::all`.
     policy: usize,
@@ -503,66 +489,10 @@ pub fn run(registry: &mut Registry, settings: &Settings) -> Result<Report, Error
 
 fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, Error> {
     let started = std::time::Instant::now();
-    // §4.3, before anything is read: a release that shifts dates and preserves
-    // UIDs has shifted nothing, and a warning is read after the tree exists.
-    settings
-        .policy
-        .check()
-        .map_err(|e| Error::Refused(e.to_string()))?;
     // Record 26 §13: the policies in play, the run's own and each
     // dataset's, every one checked by name before anything is read.
     let policies = Policies::resolve(registry.store(), settings)?;
-    // And the other half of §4.3: a session label that is a date under a
-    // policy that moves dates would put the true date back in the path. What
-    // happens then turns on where the policy came from (record 26 §13).
-    //
-    // From the run's own flags, it is refused and no tree is written, which
-    // is §4.3 as it stands: a warning on a run that produced a tree is read
-    // after the tree exists, and by then the dataset has left. The caller
-    // named both halves of the contradiction, and quietly altering either is
-    // not the engine's to do.
-    //
-    // From the datasets' own declarations, with neither flag given, the tree
-    // gives way rather than the release: the sessions are numbered in date
-    // order, the row records the scheme that named them, and the report says
-    // why. Here the registry is resolving a standing rule rather than
-    // altering anybody's instruction; a declared policy that could never be
-    // released would be a declaration nobody could use; and the policy is
-    // not made decorative by it, since an ordinal label leaks no date, which
-    // is what §4.3 protects.
-    let mut scheme = settings.scheme.clone();
-    let mut session_naming = None;
-    if let Some(i) = policies.all.iter().position(|p| p.dates.moves_dates())
-        && scheme.naming == session::Naming::Date
-    {
-        let moving = policies.all[i].dates.name();
-        match policies.from {
-            crate::policy::Source::Flags => {
-                return Err(Error::Refused(format!(
-                    "dates {moving} and a session scheme that labels by the date is not a \
-                     policy: the tree would carry the date the files no longer do (§4.3). Use a \
-                     months or ordinal scheme, or keep the dates. A dataset that declares dates \
-                     {moving} of its own is resolved rather than refused, on a run that gives \
-                     neither --dates nor --uids: its sessions are numbered in date order."
-                )));
-            }
-            crate::policy::Source::Datasets => {
-                let declared = match policies.datasets.get(i).and_then(|d| d.as_deref()) {
-                    Some(name) => format!("dataset {name} declares dates {moving}"),
-                    None => format!("dates {moving}"),
-                };
-                scheme.naming = session::Naming::Ordinal;
-                session_naming = Some(format!(
-                    "{declared}, and a session scheme that labels by the date would put the date \
-                     back in the tree the files no longer carry (§4.3), so the sessions are \
-                     numbered in date order instead. Asked for by --dates on the run, this is \
-                     refused rather than numbered; name a months or ordinal scheme to choose the \
-                     labels yourself."
-                ));
-            }
-        }
-    }
-    let scheme = &scheme;
+    let scheme = settings.scheme;
 
     // §9.2 and §9.6, before a registry row exists. A pack with no mapping
     // cannot name a BIDS tree, and a converter is not a thing to discover
@@ -613,7 +543,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let Placements {
         by_stack: named,
         shared,
-        by_text,
     } = places(registry.store(), &by_study, settings.pack, settings.naming)?;
     // §9.4 with record 37 S6: where in the body, for the sidecar, by stack.
     // The name carries it too, because two files must not overwrite each
@@ -655,7 +584,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             .iter()
             .map(|c| c.name().to_string())
             .collect(),
-        session_naming,
         on_unknown: settings.on_unknown.name().to_string(),
         // Record 37 S2. Only a BIDS run spells a `run-`, so only a BIDS run
         // reports on one: the descriptive layout names every stack and needs
@@ -671,16 +599,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         not_repeats: match settings.layout {
             Layout::Bids => shared.refused,
             Layout::Descriptive => 0,
-        },
-        // Record 37, S4. The BIDS names are worked out for every release, but
-        // only a BIDS tree is written under them, so only a BIDS tree has a
-        // weakness to admit to here.
-        named_by_text: match settings.layout {
-            Layout::Bids => by_text.iter().fold(BTreeMap::new(), |mut m, s| {
-                *m.entry(s.field.to_string()).or_insert(0) += s.stacks.len() as i64;
-                m
-            }),
-            Layout::Descriptive => BTreeMap::new(),
         },
         ..Report::default()
     };
@@ -700,7 +618,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         earlier.as_ref(),
         &report.placements,
         &report.policies,
-        report.session_naming.as_deref(),
     )?;
 
     // The parts of a stack's content digest that are the same for every stack
@@ -739,34 +656,19 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let mut absent: Vec<(i64, String, String)> = Vec::new();
     let mut planned: Vec<Vec<Param>> = Vec::new();
     let mut people: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Wave 4a §7.4: each subject's id, and each session's earliest study day
-    // and the subject's offset, for the clinical export.
+    // Wave 4a §7.4: each subject's id, and each session's earliest study day,
+    // for the clinical export.
     let mut subjects_seen: BTreeMap<String, i64> = BTreeMap::new();
-    let mut sessions_seen: BTreeMap<(String, String), (i64, Day, crate::dates::Offset)> =
-        BTreeMap::new();
+    let mut sessions_seen: BTreeMap<(String, String), (i64, Day)> = BTreeMap::new();
     let mut stacks_planned = 0i64;
     // which policy each planned stack leaves under, read back with the plan
     let mut policy_of: HashMap<i64, usize> = HashMap::new();
-    let any_shift = policies
-        .all
-        .iter()
-        .any(|p| p.dates == crate::dates::Policy::Shift);
     for (subject, code) in selected_subjects(registry.store(), &settings.selection)? {
         let mine = select_subject(registry.store(), &settings.selection, subject)?;
         if mine.is_empty() {
             continue;
         }
         let labels = session_labels(&mine, &by_study, subject);
-        // one offset per subject, drawn once and kept, when any policy in
-        // play shifts; applied to the stacks whose policy does
-        let offset = match any_shift {
-            true => {
-                let o = crate::dates::draw(settings.key, subject);
-                remember_offset(registry, subject, o)?;
-                o
-            }
-            false => crate::dates::Offset(0),
-        };
         let mut grouped: BTreeMap<i64, Vec<Instance>> = BTreeMap::new();
         for i in mine {
             grouped.entry(i.stack).or_default().push(i);
@@ -872,7 +774,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                 continue;
             }
             let content = crate::version::content_of(
-                &subject_policy(settings, policy, &code, offset),
+                &subject_policy(settings, policy, &code),
                 &categories,
                 &private,
                 &pack,
@@ -896,12 +798,12 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
             if let Some(day) = days.get(&study).copied() {
                 sessions_seen
                     .entry((code.clone(), label.clone()))
-                    .and_modify(|(_, d, _)| {
+                    .and_modify(|(_, d)| {
                         if day < *d {
                             *d = day;
                         }
                     })
-                    .or_insert((subject, day, offset));
+                    .or_insert((subject, day));
             }
             // Record 37 S6. An entity the schema refuses this suffix put its
             // fact in `acq-` instead of losing it, and the release says how
@@ -934,7 +836,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                 },
                 Param::from(code.as_str()),
                 Param::from(label),
-                Param::Int(offset.0),
             ]);
             if planned.len() >= PLAN_BATCH {
                 write_plan(registry.store(), &planned)?;
@@ -1027,7 +928,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                 change,
                 was,
                 code: planned.code,
-                offset: planned.offset,
                 policy: policy_of.get(&planned.stack).copied().unwrap_or(0),
                 instances: Vec::new(),
             });
@@ -1092,7 +992,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                     categories: &settings.categories,
                     private: settings.private,
                     code: &code,
-                    offset: job.offset,
                     remap: (policy.uids == Uids::Remap)
                         .then_some(remap.as_ref())
                         .flatten(),
@@ -1195,9 +1094,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
                     .or_default()
                     .push(crate::bids::dataset::Scan {
                         filename: file.to_string(),
-                        acq_time: acq_times
-                            .get(&job.stack)
-                            .and_then(|t| under_policy(t, &policies.all[job.policy], job.offset)),
+                        acq_time: acq_times.get(&job.stack).map(acquisition_time),
                     });
             }
         }
@@ -1224,12 +1121,9 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     if settings.layout == Layout::Bids {
         let mut codes: Vec<String> = people.into_iter().collect();
         codes.sort();
-        // the tree's one clinical export leaves under the strictest policy
-        // in play, since a date in it is one file for every dataset
         let clinical = clinical_rows(
             registry.store(),
             settings,
-            policies.strictest(),
             &subjects_seen,
             &sessions_seen,
             &mut report,
@@ -1273,12 +1167,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // occasion and not of a stack, and one answer settles every functional
     // stack of it.
     ask_about_tasks(registry.store(), &report, &absent, settings)?;
-    // Record 37, S4. A name that rests on free text is weaker than one that
-    // rests on a measurement, and this is where a person is told so about the
-    // particular stacks it happened to.
-    if settings.layout == Layout::Bids {
-        ask_about_text(registry.store(), &report, &by_text)?;
-    }
     forget_plan(registry.store(), report.release_id)?;
     close_row(registry.store(), &report)?;
     report.seconds = started.elapsed().as_secs_f64();
@@ -1296,7 +1184,6 @@ struct Planned {
     fallback: Place,
     route: String,
     code: String,
-    offset: crate::dates::Offset,
 }
 
 fn write_plan(store: &mut Store, rows: &[Vec<Param>]) -> Result<(), Error> {
@@ -1314,7 +1201,6 @@ fn write_plan(store: &mut Store, rows: &[Vec<Param>]) -> Result<(), Error> {
             "fallback_stem",
             "code",
             "label",
-            "offset_days",
         ],
         rows,
     )
@@ -1333,7 +1219,7 @@ fn plan_page(
     let d = store.dialect();
     let sql = format!(
         "SELECT p.stack_id, p.content, p.dir, p.stem, p.route, p.fallback_dir, p.fallback_stem, \
-                p.code, p.label, p.offset_days, \
+                p.code, p.label, \
                 s.content, s.dir, s.stem, s.route, s.files, s.bytes, s.digest, s.extensions \
          FROM {} p LEFT JOIN {} s ON s.dataset_id = {} AND s.stack_id = p.stack_id \
          WHERE p.release_id = {} AND p.stack_id > {} \
@@ -1363,22 +1249,21 @@ fn plan_page(
                 stem: r.opt_text(6)?.map(str::to_string),
             },
             code: r.text(7)?.to_string(),
-            offset: crate::dates::Offset(r.int(9)?),
         };
-        let was = match r.opt_text(10)? {
+        let was = match r.opt_text(9)? {
             None => None,
             Some(content) => Some(State {
                 content: content.to_string(),
                 place: Place {
-                    dir: r.text(11)?.to_string(),
-                    stem: r.opt_text(12)?.map(str::to_string),
+                    dir: r.text(10)?.to_string(),
+                    stem: r.opt_text(11)?.map(str::to_string),
                 },
-                route: r.text(13)?.to_string(),
-                files: r.int(14)?,
-                bytes: r.int(15)?,
-                digest: r.text(16)?.to_string(),
+                route: r.text(12)?.to_string(),
+                files: r.int(13)?,
+                bytes: r.int(14)?,
+                digest: r.text(15)?.to_string(),
                 extensions: r
-                    .opt_text(17)?
+                    .opt_text(16)?
                     .map(|e| e.split(',').map(str::to_string).collect())
                     .unwrap_or_default(),
             }),
@@ -1559,17 +1444,15 @@ struct Clinical {
 }
 
 /// Wave 4a §7.4. An age is computed before the birth date goes (Wave 3
-/// §8.3) and is written under every policy, because a number of years is
-/// not a date; an observation's date moves with the subject's offset under
-/// `shift` and is not written at all under `year`; the signed distance in
-/// days from the session to the observation is written under every policy,
-/// because it is what a join on the nearest value needs and it names no day.
+/// §8.3); an observation's date is written as it is, since the date is the
+/// date (record 38 S3); and the signed distance in days from the session to
+/// the observation is written beside it, because it is what a join on the
+/// nearest value needs.
 fn clinical_rows(
     store: &mut Store,
     settings: &Settings,
-    policy: &Policy,
     subjects: &BTreeMap<String, i64>,
-    sessions: &BTreeMap<(String, String), (i64, Day, crate::dates::Offset)>,
+    sessions: &BTreeMap<(String, String), (i64, Day)>,
     report: &mut Report,
 ) -> Result<Clinical, Error> {
     use nils_registry::clinical;
@@ -1606,7 +1489,7 @@ fn clinical_rows(
     }
     // The first session per subject, for the age at entry.
     let mut first: BTreeMap<String, Day> = BTreeMap::new();
-    for ((code, _), (_, day, _)) in sessions {
+    for ((code, _), (_, day)) in sessions {
         first
             .entry(code.clone())
             .and_modify(|f| {
@@ -1634,7 +1517,7 @@ fn clinical_rows(
         }
         out.participants.insert(code.clone(), row);
     }
-    for ((code, label), (subject, day, offset)) in sessions {
+    for ((code, label), (subject, day)) in sessions {
         let mut row = BTreeMap::new();
         if let Some((Some(born), _)) = demographics.get(subject)
             && let Some(age) = crate::dates::age_years(*born, *day)
@@ -1657,13 +1540,7 @@ fn clinical_rows(
             };
             row.insert(column.clone(), value);
             row.insert(format!("{column}_days"), near.offset_days.to_string());
-            match policy.dates {
-                crate::dates::Policy::Year => {}
-                dates => {
-                    let when = crate::dates::apply(dates, *offset, near.date);
-                    row.insert(format!("{column}_date"), when.to_string());
-                }
-            }
+            row.insert(format!("{column}_date"), near.date.to_string());
             *report
                 .clinical
                 .entry(format!("nearest {}", kind.name))
@@ -1764,7 +1641,6 @@ fn write_dataset(
                 repeats: report.repeats,
                 refused: report.not_repeats,
             },
-            &report.named_by_text,
         ),
     )?;
 
@@ -1909,92 +1785,6 @@ fn ask_about_tasks(
     )
 }
 
-/// One review item per group of stacks the protocol text alone told apart
-/// (record 37, S4).
-///
-/// **Not a refusal.** These stacks are named, and their names are unique and
-/// valid; what the item carries is the reason, because the reason is weaker
-/// than the reasons under every other name in the tree. A person who opens it
-/// sees which element answered and which stacks took a mark, and can say the
-/// two really are two things, or that the site types a different protocol name
-/// for one acquisition and the pair should have been a repeat.
-///
-/// **Once per group, not once per release**, for the reason [`raise_review`]
-/// gives: a release is re-run whenever anything upstream changes, and the same
-/// question filed again every time is a queue nobody reads.
-///
-/// The evidence holds the DICOM keyword, the stacks and the marks. **It holds
-/// no protocol text.** The whole point of the mark is that the text stays in
-/// the registry, and a review queue is read by more people than a registry is.
-fn ask_about_text(store: &mut Store, report: &Report, by_text: &[Separated]) -> Result<(), Error> {
-    if by_text.is_empty() {
-        return Ok(());
-    }
-    let asked = already_asked_about_text(store)?;
-    let now = now_iso();
-    let rows: Vec<Vec<Param>> = by_text
-        .iter()
-        .filter(|s| s.stacks.first().is_some_and(|first| !asked.contains(first)))
-        .map(|s| {
-            vec![
-                Param::from("release.named_by_text"),
-                Param::from("stack"),
-                // The group's lowest stack, because the question is about the
-                // group and a `ref` names one thing.
-                Param::from(
-                    serde_json::json!({ "stack_id": s.stacks.first().copied().unwrap_or(0) })
-                        .to_string(),
-                ),
-                Param::from(
-                    serde_json::json!({
-                        "release": report.release_id,
-                        "element": s.field,
-                        "stacks": s.stacks,
-                        "marks": s.marks,
-                        "why": "these stacks agree on every fact the engine holds and differ \
-                                only in their protocol text, so the text is what tells them \
-                                apart and the acq- label carries a mark of it rather than a \
-                                run- index; a name that rests on free text is weaker than one \
-                                that rests on a measurement",
-                    })
-                    .to_string(),
-                ),
-                Param::from("open"),
-                Param::from(now.as_str()),
-            ]
-        })
-        .collect();
-    write_rows(
-        store,
-        "review_item",
-        &["kind", "scope", "ref", "evidence", "status", "created_at"],
-        &rows,
-    )
-}
-
-/// The groups already asked about, by the stack their item names.
-fn already_asked_about_text(store: &mut Store) -> Result<std::collections::HashSet<i64>, Error> {
-    let reference = table("review_item")
-        .column("ref")
-        .expect("review_item.ref is a column");
-    let sql = format!(
-        "SELECT {} FROM {} WHERE kind = 'release.named_by_text'",
-        store.dialect().text_of(reference),
-        store.qualified("review_item"),
-    );
-    let mut asked = std::collections::HashSet::new();
-    for r in store.query(&sql, &[])? {
-        let Some(text) = r.opt_text(0)? else { continue };
-        if let Some(stack) = serde_json::from_str::<serde_json::Value>(text)
-            .ok()
-            .and_then(|v| v["stack_id"].as_i64())
-        {
-            asked.insert(stack);
-        }
-    }
-    Ok(asked)
-}
-
 /// Where a stack's files go, given the route it took (§9.3).
 ///
 /// Both layouts end here, which is what lets §8.6 compare a place without
@@ -2094,37 +1884,26 @@ fn acquisition_times(
     Ok(out)
 }
 
-/// One acquisition time, under the release's date policy (§9.4 and §8.3).
+/// One acquisition time (§9.4).
 ///
 /// The whole point of §9.4: the directory is named by the session scheme and
-/// the time is carried in the standard's own slot, **under the same policy the
-/// files are under**. A release that shifted its dates writes the shifted time
-/// here, and one that kept only the year writes nothing, because a time whose
-/// date was truncated is not a time.
-fn under_policy(
-    (day, time): &(Day, Option<String>),
-    policy: &Policy,
-    offset: crate::dates::Offset,
-) -> Option<String> {
-    let day = match policy.dates {
-        crate::dates::Policy::Keep => *day,
-        crate::dates::Policy::Shift => Day::from_days(day.to_days() + offset.0),
-        crate::dates::Policy::Year => return None,
-    };
+/// the time is carried in the standard's own slot, as the archive holds it
+/// (record 38 S3).
+fn acquisition_time((day, time): &(Day, Option<String>)) -> String {
     let stamp = format!("{:04}-{:02}-{:02}", day.year(), day.month(), day.day());
     let Some(t) = time.as_deref().map(str::trim).filter(|t| t.len() >= 6) else {
-        return Some(stamp);
+        return stamp;
     };
     // `HHMMSS` or `HH:MM:SS`, either of which the store may hand back.
     let digits: String = t.chars().filter(char::is_ascii_digit).collect();
     match digits.len() >= 6 {
-        true => Some(format!(
+        true => format!(
             "{stamp}T{}:{}:{}",
             &digits[0..2],
             &digits[2..4],
             &digits[4..6]
-        )),
-        false => Some(stamp),
+        ),
+        false => stamp,
     }
 }
 
@@ -2204,20 +1983,18 @@ fn today() -> Day {
 
 /// The policy, as it applies to one subject.
 ///
-/// The pseudonym and the date offset are in it because both are drawn from the
-/// key, and neither is anywhere else in the content digest. A release re-run
-/// under a different key writes different bytes into a differently named tree,
-/// and a comparison that could not see that would call it unchanged.
-fn subject_policy(
-    settings: &Settings,
-    policy: &Policy,
-    code: &str,
-    offset: crate::dates::Offset,
-) -> String {
+/// The pseudonym is in it because it is drawn from the key, and it is nowhere
+/// else in the content digest. A release re-run under a different key writes
+/// different bytes into a differently named tree, and a comparison that could
+/// not see that would call it unchanged.
+///
+/// `offset=0` is what every release that kept its dates wrote here while a
+/// shift drew an offset per subject (before record 38 S3). It stays, so a
+/// tree released before re-runs unchanged rather than rewritten whole.
+fn subject_policy(settings: &Settings, policy: &Policy, code: &str) -> String {
     format!(
-        "{} code={code} offset={} unknown={} layout={} converter={}",
+        "{} code={code} offset=0 unknown={} layout={} converter={}",
         policy.as_json(),
-        offset.0,
         settings.on_unknown.name(),
         settings.layout.name(),
         // A different converter writes different NIfTI, so an upgrade rewrites
@@ -2586,9 +2363,6 @@ impl Policies {
                             Policy::of_handling(&place.handling, &settings.policy.root)
                         }
                     };
-                    policy
-                        .check()
-                        .map_err(|e| Error::Refused(format!("dataset {}: {e}", place.name)))?;
                     out.all.push(policy);
                     out.datasets.push(Some(place.name.clone()));
                     let i = out.all.len() - 1;
@@ -2604,25 +2378,6 @@ impl Policies {
     /// The policy a file walked from this root leaves under.
     fn of_root(&self, root: &str) -> usize {
         self.by_root.get(root).copied().unwrap_or(0)
-    }
-
-    /// The strictest date policy in play, for the one clinical export of the
-    /// tree: the year over a shift over the dates kept, remapped UIDs over
-    /// preserved ones.
-    fn strictest(&self) -> &Policy {
-        self.all
-            .iter()
-            .max_by_key(|p| {
-                (
-                    match p.dates {
-                        crate::dates::Policy::Keep => 0,
-                        crate::dates::Policy::Shift => 1,
-                        crate::dates::Policy::Year => 2,
-                    },
-                    p.uids == Uids::Remap,
-                )
-            })
-            .unwrap_or(&self.all[0])
     }
 
     /// How the run and the dataset description say what was done: the run's
@@ -2655,7 +2410,7 @@ impl Policies {
             };
             rows.push(serde_json::json!({
                 "dataset": name,
-                "dates": self.all[i].dates.name(),
+                "dates": crate::policy::DATES,
                 "uids": self.all[i].uids.name(),
                 "from": from,
             }));
@@ -3152,31 +2907,6 @@ fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or(text).to_string()
 }
 
-/// The offset a subject's dates moved by, kept with the identifiers rather
-/// than beside the images: it is the thing that undoes the policy.
-fn remember_offset(
-    registry: &mut Registry,
-    subject: i64,
-    offset: crate::dates::Offset,
-) -> Result<(), Error> {
-    let mut store = registry
-        .open_linkage()
-        .map_err(|e| Error::Refused(e.to_string()))?;
-    let sql = format!(
-        "SELECT offset_days FROM {} WHERE subject_id = {}",
-        store.qualified("date_shift"),
-        store.dialect().param(1, Type::Int)
-    );
-    if store.query_opt(&sql, &[Param::Int(subject)])?.is_some() {
-        return Ok(());
-    }
-    store.insert(
-        &Insert::new(table("date_shift"), &["subject_id", "offset_days"]),
-        &[vec![Param::Int(subject), Param::Int(offset.0)]],
-    )?;
-    Ok(())
-}
-
 // what the row says is what the run worked out: its settings, the scheme
 // that named the sessions, and the four things read before anything was
 // written
@@ -3184,18 +2914,13 @@ fn remember_offset(
 fn open_row(
     store: &mut Store,
     settings: &Settings,
-    // the scheme that named the sessions, the run's own unless §4.3 numbered
-    // them instead
+    // the scheme that named the sessions
     scheme: &Scheme,
     version: &str,
     dataset: i64,
     earlier: Option<&Earlier>,
     placements: &BTreeMap<String, String>,
     policies: &[serde_json::Value],
-    // §4.3: the sentence the report carries where a dataset's own declaration
-    // moved the dates and the sessions were numbered instead, and nothing
-    // where the scheme stood
-    session_naming: Option<&str>,
 ) -> Result<i64, Error> {
     let categories: Vec<&str> = settings.categories.iter().map(|c| c.name()).collect();
     // record 26 §13: the row says where its policy came from, and what each
@@ -3236,7 +2961,6 @@ fn open_row(
                 "added",
                 "removed",
                 "policies",
-                "session_naming",
             ],
         )
         .returning(&["id"]),
@@ -3274,10 +2998,6 @@ fn open_row(
             Param::Int(0),
             Param::Int(0),
             Param::from(serde_json::Value::Array(policies.to_vec()).to_string()),
-            match session_naming {
-                Some(why) => Param::from(why),
-                None => Param::Null,
-            },
         ]],
     )?;
     Ok(written.first().map(|r| r.int(0)).transpose()?.unwrap_or(0))
@@ -3381,16 +3101,22 @@ fn places(
                 {}, {}, f.n_slices, f.slice_span_mm, f.echo_time, f.repetition_time, \
                 f.flip_angle, f.echo_train_length, f.number_of_averages, \
                 f.slice_thickness, f.spacing_between_slices, {}, f.rows, f.columns, \
-                {}, {}, {}, {} \
+                {}, {}, {}, {}, \
+                {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, \
+                f.slice_centre_mm, f.field_strength_normalized, f.pixel_spacing_row, \
+                f.pixel_spacing_col, f.n_instances, f.temporal_position, \
+                f.temporal_positions, f.series_number, f.centre_x_mm, f.centre_y_mm, \
+                f.centre_z_mm \
          FROM {} f ORDER BY f.stack_id",
         text("orientation"),
         text("split_reason"),
         text("echo_numbers"),
         text("mr_acquisition_type"),
         text("dwi_pe_direction"),
-        // Record 37 S2: what the repeat test reads. The protocol name in the
-        // folded and lower-cased spelling, because the test compares it and
-        // never writes it, and the two backends fold the same way there.
+        // What the repeat test reads (record 37 S2, record 38). The texts in
+        // their folded and lower-cased spellings, because the test compares
+        // them and never writes them, and the two backends fold the same way
+        // there.
         text("text_protocol_name_ci"),
         text("receive_coil_name"),
         text("acquisition_matrix"),
@@ -3398,6 +3124,23 @@ fn places(
         text("scanning_sequence"),
         text("sequence_variant"),
         text("coverage_source"),
+        // 32 on: the rest of what record 38 compares, and the acquisition time
+        // `run-` is numbered by.
+        text("text_series_description_ci"),
+        text("text_sequence_name_ci"),
+        text("text_body_part_ci"),
+        text("text_contrast_ci"),
+        text("image_type"),
+        text("modality"),
+        text("manufacturer"),
+        text("manufacturer_model_name"),
+        text("station_name"),
+        text("image_orientation_patient"),
+        text("dwi_b_values"),
+        text("pixel_bandwidth"),
+        text("dwi_gradients"),
+        text("earliest_acquisition_date"),
+        text("earliest_acquisition_time"),
         store.qualified("stack_fingerprint"),
     );
 
@@ -3418,8 +3161,9 @@ fn places(
     // unique in, which for BIDS is the datatype and not a directory per stack.
     let mut bids: HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>> =
         HashMap::new();
-    // Ordered by series, then by the stack's index in it, then by its id, so
-    // that two runs of one version assign the same `run-` numbers.
+    // Ordered by the stack's earliest acquisition, then its series number,
+    // then its id (record 38, S2), so that `run-1` is the one made first and
+    // two runs of one version assign the same numbers.
     let mut bids_buckets: BidsBuckets = BTreeMap::new();
     let mut extra: HashMap<i64, (bool, Option<String>, Option<String>)> = HashMap::new();
     // Record 37 S2: what the repeat test reads of each stack, kept for the
@@ -3546,6 +3290,8 @@ fn places(
                 body_part.clone(),
             ),
         );
+        let acquired_date = r.opt_text(45)?.map(str::to_string);
+        let acquired_time = r.opt_text(46)?.map(str::to_string);
         // Record 37 S2. Every axis the pack decided, not only the ones a name
         // spells: the point of the test is to ask whether two stacks are one
         // acquisition, and an axis that does not reach a filename still says
@@ -3558,6 +3304,11 @@ fn places(
                 coverage: nils_classify::coverage::Coverage {
                     n_slices: r.opt_int(16)?,
                     span_mm: r.opt_double(17)?,
+                    centre_mm: r.opt_double(47)?,
+                    position: match (r.opt_double(55)?, r.opt_double(56)?, r.opt_double(57)?) {
+                        (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+                        _ => None,
+                    },
                     source: match r.opt_text(31)? {
                         Some(t) => nils_classify::coverage::Source::parse(t),
                         None => nils_classify::coverage::Source::Unmeasured,
@@ -3565,6 +3316,34 @@ fn places(
                 },
                 coil: r.opt_text(15)?.map(str::to_string),
                 protocol: r.opt_text(14)?.map(str::to_string),
+                description: r.opt_text(32)?.map(str::to_string),
+                sequence_name: r.opt_text(33)?.map(str::to_string),
+                body_part: r.opt_text(34)?.map(str::to_string),
+                contrast: r.opt_text(35)?.map(str::to_string),
+                image_type: r.opt_text(36)?.map(str::to_string),
+                modality: r.opt_text(37)?.map(str::to_string),
+                manufacturer: r.opt_text(38)?.map(str::to_string),
+                model: r.opt_text(39)?.map(str::to_string),
+                station: r.opt_text(40)?.map(str::to_string),
+                orientation: r.opt_text(6)?.map(str::to_string),
+                cosines: r.opt_text(41)?.map(str::to_string),
+                b_values: r.opt_text(42)?.map(str::to_string),
+                pixel_bandwidth: r.opt_text(43)?.and_then(|v| v.trim().parse().ok()),
+                gradients: r.opt_text(44)?.map(str::to_string),
+                acquired_date: acquired_date.clone(),
+                acquired_time: acquired_time.clone(),
+                field_strength: r.opt_double(48)?,
+                pixel_spacing_row: r.opt_double(49)?,
+                pixel_spacing_col: r.opt_double(50)?,
+                images: r.opt_int(51)?,
+                temporal_position: r.opt_int(52)?,
+                temporal_positions: r.opt_int(53)?,
+                echo_numbers: r.opt_text(8)?.map(str::to_string),
+                acquisition_type: r.opt_text(9)?.map(str::to_string),
+                directions: r.opt_int(13)?,
+                pe_direction: r.opt_text(10)?.map(str::to_string),
+                split_reason: r.opt_text(7)?.map(str::to_string),
+                stacks_in_series: r.opt_int(4)?,
                 echo_time: r.opt_double(18)?,
                 repetition_time: r.opt_double(19)?,
                 inversion_time: r.opt_double(11)?,
@@ -3586,7 +3365,17 @@ fn places(
             bids_buckets
                 .entry((subject, label.clone(), n.datatype))
                 .or_default()
-                .push((r.int(3)?, r.int(5)?, stack, n.stem("s", "s")));
+                .push((
+                    (
+                        acquired_time.is_none(),
+                        acquired_date.clone().unwrap_or_default(),
+                        acquired_time.clone().unwrap_or_default(),
+                        r.opt_int(54)?.is_none(),
+                        r.opt_int(54)?.unwrap_or(0),
+                    ),
+                    stack,
+                    n.stem("s", "s"),
+                ));
         }
         bids.insert(stack, built);
 
@@ -3606,14 +3395,6 @@ fn places(
             });
     }
 
-    // Record 37, S4, and **before** `run-` is considered at all. Where two
-    // stacks want one name and everything NILS holds about them agrees, the
-    // protocol text is the only thing left, and it names them apart instead
-    // of one of them being written down as a repeat of the other. Last among
-    // the facts, and so first among the answers: a group the text does not
-    // separate falls through to the rule below exactly as it did before.
-    let by_text = separate_by_text(store, &axes, &mut bids, &mut bids_buckets)?;
-
     // Record 37 S2. Where two stacks of one subject, session and datatype
     // build one name, `run-` is written only when they are measurably one
     // acquisition done twice (`bids::repeat`). Where they are not, no name is
@@ -3625,13 +3406,14 @@ fn places(
     // name that covered more than one acquisition. A `run-2` that is really a
     // different echo time is a claim no validator can catch.
     //
-    // In a fixed order, so that two runs of one version agree: by series, then
-    // by the stack's index in it, then by its id.
+    // In a fixed order, so that `run-1` is the one made first and two runs of
+    // one version agree: by the earliest acquisition, then by the series
+    // number, then by the stack's id.
     let mut shared = Shared::default();
     for bucket in bids_buckets.values_mut() {
         bucket.sort();
         let mut groups: BTreeMap<&String, Vec<i64>> = BTreeMap::new();
-        for (_, _, stack, stem) in bucket.iter() {
+        for (_, stack, stem) in bucket.iter() {
             groups.entry(stem).or_default().push(*stack);
         }
         for (_, group) in groups.iter().filter(|(_, g)| g.len() > 1) {
@@ -3659,15 +3441,7 @@ fn places(
                         .to_string(),
                 )
             } else if !differs.is_empty() {
-                let mut said = differs.clone();
-                let last = said.pop().unwrap_or_default();
-                Some(format!(
-                    "they are not repeats of one another: {}",
-                    match said.is_empty() {
-                        true => format!("{last} differs"),
-                        false => format!("{} and {last} differ", said.join(", ")),
-                    }
-                ))
+                Some(crate::bids::repeat::why(&differs))
             } else if !admits_run {
                 Some(format!(
                     "they are one acquisition measured {} times, and BIDS gives this suffix no \
@@ -3738,17 +3512,14 @@ fn places(
     Ok(Placements {
         by_stack: out,
         shared,
-        by_text,
     })
 }
 
-/// What [`places`] worked out for a run: where every stack goes, what the
-/// collision test of record 37 S2 found, and the groups record 37 S4 had to
-/// tell apart by their protocol text.
+/// What [`places`] worked out for a run: where every stack goes, and what the
+/// collision test of record 37 S2 found.
 struct Placements {
     by_stack: HashMap<i64, Placed>,
     shared: Shared,
-    by_text: Vec<Separated>,
 }
 
 /// What the collision test of record 37 S2 found, for the report and the
@@ -3786,121 +3557,21 @@ struct SharedGroup {
     why: String,
 }
 
-/// The stacks of one subject, session and datatype, ordered by series, then by
-/// the stack's index in it, then by its id, each with the stem it wants. The
-/// order is fixed so that two runs of one version assign the same names.
-type Ordered = Vec<(i64, i64, i64, String)>;
+/// The stacks of one subject, session and datatype, ordered by when they
+/// were made, then by series number, then by id, each with the stem it
+/// wants. The order is fixed so that two runs of one version assign the same
+/// names.
+type Ordered = Vec<(When, i64, String)>;
+
+/// Where a stack falls in the order `run-` is numbered in (record 38, S2):
+/// whether its acquisition time is unknown, its earliest acquisition date and
+/// time, whether its series number is unknown, and the number. A stack whose
+/// images carried no time comes after every one that did, and a series with
+/// no number after every one with one; the stack's id settles the rest.
+type When = (bool, String, String, bool, i64);
 
 /// Those, by the directory a name has to be unique in.
 type BidsBuckets = BTreeMap<(i64, String, &'static str), Ordered>;
-
-/// One group of stacks that wanted one name and whose protocol text is all
-/// that separates them (record 37, S4).
-///
-/// The field is a DICOM keyword, which names an element and nobody, and the
-/// stacks are registry ids. **No protocol text is in here**, because this is
-/// carried into the report and into a review item.
-#[derive(Debug, Clone)]
-struct Separated {
-    field: &'static str,
-    stacks: Vec<i64>,
-    /// The mark each of those stacks took, in the same order: a digest of the
-    /// text and never the text, so a person can find the files in the tree
-    /// without the queue carrying what a console recorded.
-    marks: Vec<String>,
-}
-
-/// Name apart the groups that only their protocol text separates, and say
-/// which groups those were (record 37, S4).
-///
-/// The order this keeps is the point of the slice. It is asked about a group
-/// only once that group has been given every name the axes, the identities
-/// and the entities can give it, and [`protocol::separates`] then refuses to
-/// answer unless everything else the fingerprint holds agrees as well. So the
-/// text can separate only what nothing else does.
-///
-/// **All or nothing per group.** Either every member takes its mark or none
-/// does: half a partition would be a tree naming two of three stacks apart
-/// and leaving the third as a repeat of whichever it landed beside, which is
-/// a claim nobody could read back. A group that cannot be named apart, because
-/// its suffix admits no `acq-`, falls through untouched to the `run-` rule.
-fn separate_by_text(
-    store: &mut Store,
-    axes: &HashMap<i64, BTreeMap<String, String>>,
-    bids: &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
-    buckets: &mut BidsBuckets,
-) -> Result<Vec<Separated>, Error> {
-    use crate::bids::protocol;
-
-    // The stacks that want one name, which are the only ones this question is
-    // about.
-    let mut wanted: Vec<i64> = Vec::new();
-    for bucket in buckets.values() {
-        let mut counts: BTreeMap<&String, i64> = BTreeMap::new();
-        for (_, _, _, stem) in bucket.iter() {
-            *counts.entry(stem).or_insert(0) += 1;
-        }
-        for (_, _, stack, stem) in bucket.iter() {
-            if counts.get(stem).copied().unwrap_or(0) > 1 {
-                wanted.push(*stack);
-            }
-        }
-    }
-    if wanted.is_empty() {
-        return Ok(Vec::new());
-    }
-    wanted.sort_unstable();
-    let stacks = protocol::read(store, axes, &wanted)?;
-
-    let mut out: Vec<Separated> = Vec::new();
-    for bucket in buckets.values_mut() {
-        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for (i, (_, _, _, stem)) in bucket.iter().enumerate() {
-            groups.entry(stem.clone()).or_default().push(i);
-        }
-        for members in groups.values() {
-            if members.len() < 2 {
-                continue;
-            }
-            let facts: Option<Vec<&protocol::Stack>> =
-                members.iter().map(|i| stacks.get(&bucket[*i].2)).collect();
-            let Some(facts) = facts else { continue };
-            let Some(separation) = protocol::separates(&facts) else {
-                continue;
-            };
-            let named: Option<Vec<crate::bids::name::Name>> = members
-                .iter()
-                .zip(&separation.marks)
-                .map(|(i, mark)| {
-                    bids.get(&bucket[*i].2)
-                        .and_then(|b| b.as_ref().ok())
-                        .and_then(|n| n.with_text(mark))
-                })
-                .collect();
-            let Some(named) = named else { continue };
-            for (i, name) in members.iter().zip(named) {
-                let stack = bucket[*i].2;
-                // The stem is what the `run-` rule below counts collisions
-                // with, so it moves with the name or the two would disagree.
-                bucket[*i].3 = name.stem("s", "s");
-                bids.insert(stack, Ok(name));
-            }
-            let mut pairs: Vec<(i64, String)> = members
-                .iter()
-                .zip(&separation.marks)
-                .map(|(i, mark)| (bucket[*i].2, mark.clone()))
-                .collect();
-            pairs.sort();
-            out.push(Separated {
-                field: separation.field.keyword(),
-                stacks: pairs.iter().map(|(stack, _)| *stack).collect(),
-                marks: pairs.into_iter().map(|(_, mark)| mark).collect(),
-            });
-        }
-    }
-    out.sort_by(|a, b| a.stacks.cmp(&b.stacks));
-    Ok(out)
-}
 
 /// Where one stack goes, in both layouts (§9).
 ///
@@ -4279,7 +3950,6 @@ mod tests {
             change: crate::version::Change::Moved,
             was: Some(state(Place::dir(was.to_string()), &[])),
             code: "x".to_string(),
-            offset: crate::dates::Offset(0),
             policy: 0,
             instances: Vec::new(),
         }
@@ -4463,74 +4133,39 @@ mod tests {
     }
 
     #[test]
-    fn a_time_is_carried_under_the_policy_that_moved_it() {
-        // §9.4 and §8.3: the tree's own column says what the files say.
-        let day = Day::parse("20220115").unwrap();
-        let scheme = session::Scheme::default();
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
-        let pack = nils_pack::load(&dir, None).expect("the MRI pack loads");
-        let settings = Settings {
-            name: "t",
-            root: Path::new("/tmp"),
-            policy: &crate::policy::Policy::default(),
-            policy_from: crate::policy::Source::Flags,
-            categories: Vec::new(),
-            selection: Selection::default(),
-            scheme: &scheme,
-            private: &[],
-            on_unknown: crate::burned::OnUnknown::Write,
-            actor: "t",
-            key: b"k",
-            pack: &pack,
-            layout: Layout::Bids,
-            naming: crate::name::Naming::Bids,
-            places: crate::bids::place::Options::default(),
-            converter: None,
-            compress: true,
-            observations: &[],
-            authors: &[],
-        };
-        let when = (day, Some("031415".to_string()));
-        assert_eq!(
-            under_policy(&when, settings.policy, crate::dates::Offset(0)).as_deref(),
-            Some("2022-01-15T03:14:15")
-        );
-        let shifted = crate::policy::Policy {
-            dates: crate::dates::Policy::Shift,
+    fn a_time_is_carried_as_the_archive_holds_it() {
+        // §9.4 and record 38 S3: the tree's own column says what the files
+        // say, and the files keep the date.
+        let when = (Day::parse("20220115").unwrap(), Some("031415".to_string()));
+        assert_eq!(acquisition_time(&when), "2022-01-15T03:14:15");
+        let no_time = (Day::parse("20220115").unwrap(), None);
+        assert_eq!(acquisition_time(&no_time), "2022-01-15");
+        // record 26 §13: the rows say where each dataset's policy came from,
+        // and every one of them kept the dates
+        let preserved = crate::policy::Policy {
+            uids: crate::policy::Uids::Preserve,
             ..crate::policy::Policy::default()
         };
-        assert_eq!(
-            under_policy(&when, &shifted, crate::dates::Offset(-10)).as_deref(),
-            Some("2022-01-05T03:14:15")
-        );
-        // A time whose date was truncated is not a time.
-        let year = crate::policy::Policy {
-            dates: crate::dates::Policy::Year,
-            ..crate::policy::Policy::default()
-        };
-        assert_eq!(under_policy(&when, &year, crate::dates::Offset(0)), None);
-        // record 26 §13: the strictest policy in play rules the tree's one
-        // clinical export, and the rows say where each came from
         let policies = Policies {
             all: vec![
                 crate::policy::Policy::default(),
-                shifted.clone(),
-                year.clone(),
+                crate::policy::Policy::default(),
+                preserved,
             ],
             datasets: vec![None, Some("a".into()), Some("b".into())],
             by_root: HashMap::from([("/a".to_string(), 1), ("/b".to_string(), 2)]),
             from: crate::policy::Source::Datasets,
         };
-        assert_eq!(policies.strictest().dates, crate::dates::Policy::Year);
         assert_eq!(policies.of_root("/a"), 1);
         assert_eq!(policies.of_root("/elsewhere"), 0);
         let rows = policies.as_json();
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert_eq!(rows[0]["dataset"], "a");
-        assert_eq!(rows[0]["dates"], "shift");
+        assert_eq!(rows[0]["dates"], "keep");
         assert_eq!(rows[0]["from"], "dataset");
+        assert_eq!(rows[1]["uids"], "preserve");
         assert!(
-            policies.describe().contains("b: dates year"),
+            policies.describe().contains("b: dates keep, uids preserve"),
             "{}",
             policies.describe()
         );

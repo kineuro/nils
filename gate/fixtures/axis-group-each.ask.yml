@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+ast_version: 1
+name: How many stacks carry each modifier
+sets:
+  acquisitions: {grain: stack}
+  per_modifier:
+    grain: group
+    group:
+      of: acquisitions
+      by: [["axis", {each: true}, "modifier"]]
+    bind:
+      stacks: ["distinct", {set: acquisitions}]
+keep: [per_modifier]
+out:
+  set: per_modifier
+  level: record
+  columns:
+    - ["field", {}, "modifier"]
+    - ["field", {}, "_rows"]
+    - ["field", {}, "stacks"]
+  order:
+    - [["field", {}, "modifier"], asc]

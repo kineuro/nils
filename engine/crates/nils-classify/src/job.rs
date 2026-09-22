@@ -211,6 +211,7 @@ fn run(
     let select_first = fingerprint::select_first_instances(store);
     let select_diffusion = fingerprint::select_diffusion(store);
     let select_positions = fingerprint::select_positions(store);
+    let select_acquired = fingerprint::select_acquired(store);
     let select_fresh = fingerprint::select_fresh(store);
     let table = fingerprint::fingerprint_table();
     let overwritten = fingerprint::overwritten();
@@ -282,13 +283,36 @@ fn run(
         // as the positions themselves: the counting and the tolerance that
         // says which of them are one slice are in `coverage`, so a stack is
         // covered the same way whichever backend the rows came off.
-        let mut positions: Vec<(i64, Vec<f64>)> = Vec::new();
+        // With them, where each image sits in three dimensions (record 38,
+        // S2), for the stations a slice location cannot tell apart.
+        let mut positions: Vec<(i64, Vec<f64>, Vec<[f64; 3]>)> = Vec::new();
         for r in store.query(&select_positions, &[Param::Int(after), Param::Int(last)])? {
             let stack_id = r.int(0)?;
-            let at = r.double(1)?;
+            let at = r.opt_double(1)?;
+            let point = r.opt_text(2)?.and_then(coverage::point);
             match positions.last_mut() {
-                Some((id, values)) if *id == stack_id => values.push(at),
-                _ => positions.push((stack_id, vec![at])),
+                Some((id, _, _)) if *id == stack_id => {}
+                _ => positions.push((stack_id, Vec::new(), Vec::new())),
+            }
+            if let Some((_, values, points)) = positions.last_mut() {
+                values.extend(at);
+                points.extend(point);
+            }
+        }
+
+        // When each stack of the window was first acquired (record 38, S2),
+        // as one row per stack and acquisition date; `earliest` picks the
+        // day and its hour.
+        let mut acquired: Vec<(i64, Vec<fingerprint::AcquiredOn>)> = Vec::new();
+        for r in store.query(&select_acquired, &[Param::Int(after), Param::Int(last)])? {
+            let stack_id = r.int(0)?;
+            let Some(time) = r.opt_text(2)?.map(str::to_string) else {
+                continue;
+            };
+            let row = (r.opt_text(1)?.map(str::to_string), time);
+            match acquired.last_mut() {
+                Some((id, rows)) if *id == stack_id => rows.push(row),
+                _ => acquired.push((stack_id, vec![row])),
             }
         }
 
@@ -322,14 +346,23 @@ fn run(
                 .binary_search_by_key(&stack_id, |(id, _)| *id)
                 .map(|i| diffusion[i].1.as_slice())
                 .unwrap_or(&[]);
-            let cover = coverage::of(
-                positions
-                    .binary_search_by_key(&stack_id, |(id, _)| *id)
-                    .map(|i| positions[i].1.as_slice())
-                    .unwrap_or(&[]),
-            );
+            let seen = fingerprint::Seen {
+                cover: match positions.binary_search_by_key(&stack_id, |(id, _, _)| *id) {
+                    Ok(i) => coverage::Coverage {
+                        position: coverage::centre_of(&positions[i].2),
+                        ..coverage::of(&positions[i].1)
+                    },
+                    Err(_) => coverage::Coverage::default(),
+                },
+                acquired: fingerprint::earliest(
+                    acquired
+                        .binary_search_by_key(&stack_id, |(id, _)| *id)
+                        .map(|i| acquired[i].1.as_slice())
+                        .unwrap_or(&[]),
+                ),
+            };
             params.push(fingerprint::derive(
-                r, first, reason, images, &cover, job_id, epoch,
+                r, first, reason, images, &seen, job_id, epoch,
             )?);
         }
 

@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+ast_version: 1
+name: How many stacks per technique
+sets:
+  acquisitions: {grain: stack}
+  per_technique:
+    grain: group
+    group:
+      of: acquisitions
+      by: [["axis", {}, "technique"]]
+keep: [per_technique]
+out:
+  set: per_technique
+  level: record
+  columns:
+    - ["field", {}, "technique"]
+    - ["field", {}, "_rows"]
+    - ["field", {}, "_subjects"]
+  order:
+    - [["field", {}, "technique"], asc]

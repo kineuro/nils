@@ -1,0 +1,32 @@
+{
+  "name": "axis-group-each",
+  "question": "How many stacks carry each modifier",
+  "hash": "71f94a0cd5368a0259427f8a90d597e9ecf9e66791a9cab0305aacb310633fb2",
+  "columns": [
+    "_key",
+    "_subject",
+    "modifier",
+    "_rows",
+    "stacks"
+  ],
+  "row_count": 2,
+  "rows": [
+    [
+      "1",
+      "",
+      "FLAIR",
+      "162",
+      "162"
+    ],
+    [
+      "2",
+      "",
+      "",
+      "710",
+      "710"
+    ]
+  ],
+  "funnel": {
+    "acquisitions": 48
+  }
+}

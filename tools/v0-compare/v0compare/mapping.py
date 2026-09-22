@@ -43,7 +43,8 @@ LEVELS: dict[str, Level] = {
     # about text in its own pixels. v0 never reads it, so there is nothing to
     # compare against.
     "series": Level(
-        "series", "series", absent=frozenset({"burned_in_annotation"})
+        # record 38 S2: v0 never kept the series number
+        "series", "series", absent=frozenset({"burned_in_annotation", "series_number"})
     ),
     "series_mr": Level("series_mr", "mri_series_details"),
     "series_ct": Level("series_ct", "ct_series_details"),
@@ -102,6 +103,8 @@ LEVELS: dict[str, Level] = {
                 "dwi_siemens_directionality",
                 "dwi_ge_b_value",
                 "dwi_philips_b_value",
+                # record 38 S2: v0 kept one position per series, never per image
+                "image_position_patient",
             }
         ),
     ),

@@ -20,7 +20,7 @@ use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
 use dicom_dictionary_std::tags;
 use dicom_object::{DefaultDicomObject, InMemDicomObject};
 
-use crate::dates::{self, Offset};
+use crate::dates;
 use crate::policy::Policy;
 use crate::tags::{Category, MANDATORY};
 use crate::uid::Remap;
@@ -36,7 +36,6 @@ pub struct Plan<'a> {
     /// The pseudonym this subject's `PatientID` becomes. The registry chose
     /// it; the release does not choose a pseudonym of its own (§8.1).
     pub code: &'a str,
-    pub offset: Offset,
     /// None when the policy preserves UIDs.
     pub remap: Option<&'a Remap>,
     /// Tags kept whatever a category says (record 26 §3: a dataset's `keep`
@@ -50,7 +49,7 @@ pub struct Plan<'a> {
 /// the value was (§8.5).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Applied {
-    /// Tag to action to count. The action is `removed`, `replaced`, `shifted`
+    /// Tag to action to count. The action is `removed`, `replaced`, `kept`
     /// or `remapped`; there is deliberately no old value anywhere.
     pub changes: BTreeMap<(String, &'static str), i64>,
     /// The age it wrote, when it could compute one.
@@ -137,30 +136,7 @@ pub fn apply(object: &mut DefaultDicomObject, plan: &Plan) -> Applied {
     ));
     done.note(tags::PATIENT_ID, "replaced");
 
-    // 4. Every date, under the policy. Every one, rather than a list, because
-    //    a list is what goes stale and because the intervals between them are
-    //    what a reader measures on.
-    if plan.policy.dates.moves_dates() {
-        let dated: Vec<(Tag, VR, String)> = object
-            .iter()
-            .filter(|e| matches!(e.vr(), VR::DA | VR::DT))
-            .filter_map(|e| {
-                e.value()
-                    .to_str()
-                    .ok()
-                    .map(|s| (e.tag(), e.vr(), s.to_string()))
-            })
-            .collect();
-        for (tag, vr, raw) in dated {
-            let Some(moved) = under(plan.policy.dates, plan.offset, vr, &raw) else {
-                continue;
-            };
-            object.put(DataElement::new(tag, vr, PrimitiveValue::from(moved)));
-            done.note(tag, "shifted");
-        }
-    }
-
-    // 5. The private blocks, the overlays and the curves, none of which a
+    // 4. The private blocks, the overlays and the curves, none of which a
     //    list of named standard tags can reach.
     let dropped = crate::blocks::strip(object, plan.private);
     if dropped.overlay > 0 {
@@ -176,7 +152,7 @@ pub fn apply(object: &mut DefaultDicomObject, plan: &Plan) -> Applied {
         done.count(what, "kept", *n);
     }
 
-    // 6. The UIDs, keyed and deterministic. Last, because everything above
+    // 5. The UIDs, keyed and deterministic. Last, because everything above
     //    reads the dataset as it was.
     if let Some(remap) = plan.remap {
         let uids: Vec<(Tag, String)> = object
@@ -220,36 +196,6 @@ fn is_a_class(tag: Tag) -> bool {
             | tags::IMPLEMENTATION_CLASS_UID
             | tags::SPECIFIC_CHARACTER_SET
     )
-}
-
-/// One date value under the policy, keeping whatever else a `DT` carries.
-fn under(policy: dates::Policy, offset: Offset, vr: VR, raw: &str) -> Option<String> {
-    let text = raw.trim();
-    if text.is_empty() {
-        return None;
-    }
-    match vr {
-        VR::DA => {
-            let day = Day::parse(text)?;
-            Some(dates::apply(policy, offset, day).compact())
-        }
-        VR::DT => {
-            // `YYYYMMDDHHMMSS.FFFFFF&ZZXX`: the first eight are the date and
-            // the rest is time, which the `times` category removes on its own
-            // terms. Moving the date and keeping the rest is what keeps a
-            // datetime a datetime.
-            if text.len() < 8 {
-                return None;
-            }
-            let day = Day::parse(&text[..8])?;
-            Some(format!(
-                "{}{}",
-                dates::apply(policy, offset, day).compact(),
-                &text[8..]
-            ))
-        }
-        _ => None,
-    }
 }
 
 fn text_of(object: &InMemDicomObject, tag: Tag) -> Option<String> {
@@ -297,13 +243,12 @@ mod tests {
         .expect("a meta table")
     }
 
-    fn plan<'a>(policy: &'a Policy, remap: Option<&'a Remap>, offset: i64) -> Plan<'a> {
+    fn plan<'a>(policy: &'a Policy, remap: Option<&'a Remap>) -> Plan<'a> {
         Plan {
             policy,
             private: &[],
             categories: ALL,
             code: "a1b2c3d4",
-            offset: Offset(offset),
             remap,
             keep: &[],
             remove: &[],
@@ -322,7 +267,7 @@ mod tests {
             (tags::STUDY_DATE, VR::DA, "20220115"),
         ]);
         let policy = Policy::default();
-        apply(&mut o, &plan(&policy, None, 0));
+        apply(&mut o, &plan(&policy, None));
         assert_eq!(text(&o, tags::PATIENT_ID).as_deref(), Some("a1b2c3d4"));
         assert_eq!(text(&o, tags::PATIENT_NAME), None, "the name is gone");
     }
@@ -337,7 +282,7 @@ mod tests {
             (tags::STUDY_DATE, VR::DA, "20220115"),
         ]);
         let policy = Policy::default();
-        let done = apply(&mut o, &plan(&policy, None, 0));
+        let done = apply(&mut o, &plan(&policy, None));
         assert_eq!(done.age, Some(41));
         assert_eq!(text(&o, tags::PATIENT_AGE).as_deref(), Some("041Y"));
         assert_eq!(text(&o, tags::PATIENT_BIRTH_DATE), None);
@@ -352,26 +297,14 @@ mod tests {
             (tags::STUDY_DATE, VR::DA, "20220115"),
         ]);
         let policy = Policy::default();
-        apply(&mut o, &plan(&policy, None, 0));
+        apply(&mut o, &plan(&policy, None));
         assert_eq!(text(&o, tags::PATIENT_AGE).as_deref(), Some("037Y"));
     }
 
     #[test]
-    fn keeping_the_dates_writes_them_as_they_are() {
-        let mut o = object(&[
-            (tags::PATIENT_ID, VR::LO, "x"),
-            (tags::STUDY_DATE, VR::DA, "20220115"),
-        ]);
-        let policy = Policy::default();
-        let done = apply(&mut o, &plan(&policy, None, 37));
-        assert_eq!(text(&o, tags::STUDY_DATE).as_deref(), Some("20220115"));
-        assert_eq!(done.total("shifted"), 0);
-    }
-
-    #[test]
-    fn a_shift_moves_every_date_in_the_file_by_the_same_amount() {
-        // Every date rather than a list, because a list goes stale and because
-        // the intervals between them are what a reader measures on.
+    fn every_date_is_written_as_it_is() {
+        // Record 38 S3: the date is the date, a datetime keeps its date and
+        // its time, and nothing counts a date as changed.
         let mut o = object(&[
             (tags::PATIENT_ID, VR::LO, "x"),
             (tags::STUDY_DATE, VR::DA, "20220115"),
@@ -379,39 +312,24 @@ mod tests {
             (tags::ACQUISITION_DATE, VR::DA, "20220116"),
             (tags::ACQUISITION_DATE_TIME, VR::DT, "20220116101530.000000"),
         ]);
-        let policy = Policy {
-            dates: dates::Policy::Shift,
-            ..Policy::default()
-        };
+        let policy = Policy::default();
         let remap = Remap::new(Root::default(), b"a key of some length");
-        let done = apply(&mut o, &plan(&policy, Some(&remap), -10));
-        assert_eq!(text(&o, tags::STUDY_DATE).as_deref(), Some("20220105"));
-        assert_eq!(text(&o, tags::SERIES_DATE).as_deref(), Some("20220105"));
+        let done = apply(&mut o, &plan(&policy, Some(&remap)));
+        assert_eq!(text(&o, tags::STUDY_DATE).as_deref(), Some("20220115"));
+        assert_eq!(text(&o, tags::SERIES_DATE).as_deref(), Some("20220115"));
         assert_eq!(
             text(&o, tags::ACQUISITION_DATE).as_deref(),
-            Some("20220106")
+            Some("20220116")
         );
-        // A datetime keeps its time and moves its date.
         assert_eq!(
             text(&o, tags::ACQUISITION_DATE_TIME).as_deref(),
-            Some("20220106101530.000000")
+            Some("20220116101530.000000")
         );
-        assert_eq!(done.total("shifted"), 4);
-    }
-
-    #[test]
-    fn a_year_only_release_writes_the_first_of_january() {
-        let mut o = object(&[
-            (tags::PATIENT_ID, VR::LO, "x"),
-            (tags::STUDY_DATE, VR::DA, "20220715"),
-        ]);
-        let policy = Policy {
-            dates: dates::Policy::Year,
-            ..Policy::default()
-        };
-        let remap = Remap::new(Root::default(), b"a key of some length");
-        apply(&mut o, &plan(&policy, Some(&remap), 0));
-        assert_eq!(text(&o, tags::STUDY_DATE).as_deref(), Some("20220101"));
+        assert!(
+            done.changes.keys().all(|(tag, _)| tag != "(0008,0020)"),
+            "{:?}",
+            done.changes
+        );
     }
 
     #[test]
@@ -427,7 +345,7 @@ mod tests {
         ]);
         let policy = Policy::default();
         let remap = Remap::new(Root::default(), b"a key of some length");
-        let done = apply(&mut o, &plan(&policy, Some(&remap), 0));
+        let done = apply(&mut o, &plan(&policy, Some(&remap)));
         assert_eq!(
             text(&o, tags::SOP_CLASS_UID).as_deref(),
             Some("1.2.840.10008.5.1.4.1.1.4"),
@@ -461,7 +379,7 @@ mod tests {
             uids: Uids::Preserve,
             ..Policy::default()
         };
-        apply(&mut o, &plan(&policy, None, 0));
+        apply(&mut o, &plan(&policy, None));
         assert_eq!(
             text(&o, tags::STUDY_INSTANCE_UID).as_deref(),
             Some("1.2.3.4")
@@ -483,8 +401,8 @@ mod tests {
             (tags::STUDY_INSTANCE_UID, VR::UI, "1.2.3.4"),
             (tags::SOP_INSTANCE_UID, VR::UI, "1.2.3.7"),
         ]);
-        apply(&mut one, &plan(&policy, Some(&remap), 0));
-        apply(&mut two, &plan(&policy, Some(&remap), 0));
+        apply(&mut one, &plan(&policy, Some(&remap)));
+        apply(&mut two, &plan(&policy, Some(&remap)));
         assert_eq!(
             text(&one, tags::STUDY_INSTANCE_UID),
             text(&two, tags::STUDY_INSTANCE_UID)
@@ -503,7 +421,7 @@ mod tests {
             (tags::SOP_INSTANCE_UID, VR::UI, "1.2.3.6"),
         ]);
         let policy = Policy::default();
-        apply(&mut o, &plan(&policy, None, 0));
+        apply(&mut o, &plan(&policy, None));
         assert!(text(&o, tags::SOP_CLASS_UID).is_some());
         assert!(text(&o, tags::SOP_INSTANCE_UID).is_some());
     }
@@ -519,7 +437,7 @@ mod tests {
             (tags::INSTITUTION_NAME, VR::LO, "Karolinska"),
         ]);
         let policy = Policy::default();
-        let done = apply(&mut o, &plan(&policy, None, 0));
+        let done = apply(&mut o, &plan(&policy, None));
         assert_eq!(done.total("removed"), 2);
         let rendered = format!("{:?}", done.changes);
         assert!(!rendered.contains("SVENSSON"), "{rendered}");
@@ -545,7 +463,7 @@ mod tests {
         let plan = Plan {
             keep: &keep,
             remove: &remove,
-            ..plan(&policy, None, 0)
+            ..plan(&policy, None)
         };
         let done = apply(&mut o, &plan);
         assert_eq!(text(&o, tags::PATIENT_SEX).as_deref(), Some("F"));
@@ -579,7 +497,7 @@ mod tests {
             (tags::ADMISSION_ID, VR::LO, "V0001"),
         ]);
         let policy = Policy::default();
-        let done = apply(&mut o, &plan(&policy, None, 0));
+        let done = apply(&mut o, &plan(&policy, None));
         for tag in [
             tags::ACCESSION_NUMBER,
             tags::DEVICE_SERIAL_NUMBER,
@@ -600,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn the_times_go_and_the_dates_stay_to_be_governed_by_the_policy() {
+    fn the_times_go_and_the_dates_stay() {
         let mut o = object(&[
             (tags::PATIENT_ID, VR::LO, "x"),
             (tags::STUDY_DATE, VR::DA, "20220115"),
@@ -608,7 +526,7 @@ mod tests {
             (tags::SERIES_TIME, VR::TM, "031500"),
         ]);
         let policy = Policy::default();
-        apply(&mut o, &plan(&policy, None, 0));
+        apply(&mut o, &plan(&policy, None));
         assert_eq!(text(&o, tags::STUDY_TIME), None, "a scan at 03:14 narrows");
         assert_eq!(text(&o, tags::SERIES_TIME), None);
         assert_eq!(text(&o, tags::STUDY_DATE).as_deref(), Some("20220115"));

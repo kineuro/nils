@@ -2188,7 +2188,7 @@ fn places_are_registry_objects_and_the_rules_hold_at_the_doors() {
     let elsewhere = TempDir::new("a4-elsewhere");
     let server = Server::start(
         &home,
-        15,
+        16,
         &[
             "--auth",
             "token",
@@ -2336,6 +2336,19 @@ fn places_are_registry_objects_and_the_rules_hold_at_the_doors() {
     assert_eq!(status, 409, "{refused}");
     assert!(
         refused["error"].as_str().unwrap().contains("export place"),
+        "{refused}"
+    );
+    // record 38 S3: a date policy other than the dates is refused at the
+    // door, before a job is queued
+    let (status, refused) = server.request(
+        "POST",
+        "/api/releases",
+        Some(&serde_json::json!({"name": "d", "dates": "shift", "out": export.path().join("tree").display().to_string()}).to_string()),
+        ops,
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("record 38"),
         "{refused}"
     );
     // and one under the export place is queued
@@ -2487,7 +2500,7 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
     );
     let server = Server::start(
         &home,
-        6,
+        7,
         &[
             "--auth",
             "token",
@@ -2546,24 +2559,31 @@ fn a_source_lists_its_digests_what_they_added_and_how_it_is_handled() {
         reader,
     );
     assert_eq!(status, 403, "{refused}");
-    // dates that move cannot keep the original UIDs
-    let (status, refused) = server.request(
-        "PUT",
-        &path,
-        Some(r#"{"handling": {"on_release": {"dates": "shift", "uids": "preserve"}}}"#),
-        ops,
-    );
-    assert_eq!(status, 400, "{refused}");
+    // record 38 S3: the dates are kept, and a policy that moves them is
+    // refused in words saying what to do instead
+    for dates in ["shift", "year"] {
+        let (status, refused) = server.request(
+            "PUT",
+            &path,
+            Some(&format!(
+                r#"{{"handling": {{"on_release": {{"dates": "{dates}", "uids": "remap"}}}}}}"#
+            )),
+            ops,
+        );
+        assert_eq!(status, 400, "{refused}");
+        assert!(refused.to_string().contains("record 38"), "{refused}");
+    }
+    // `keep` from a desk from before is taken and not stored
     let (status, place) = server.request(
         "PUT",
         &path,
-        Some(r#"{"handling": {"arrives": "deidentified", "on_release": {"dates": "year"}}}"#),
+        Some(r#"{"handling": {"arrives": "deidentified", "on_release": {"dates": "keep"}}}"#),
         ops,
     );
     assert_eq!(status, 200, "{place}");
     assert_eq!(
         place["handling"],
-        serde_json::json!({"arrives": "deidentified", "on_release": {"dates": "year", "uids": "remap", "deface": false}}),
+        serde_json::json!({"arrives": "deidentified", "on_release": {"uids": "remap", "deface": false}}),
         "{place}"
     );
     assert_eq!(place["handling_declared"], true, "{place}");

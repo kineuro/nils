@@ -525,17 +525,14 @@ fn a_conversion_the_converter_refuses_is_planned_as_refused_next_time() {
 }
 
 #[test]
-fn the_tree_carries_the_clinical_layer_under_the_policy() {
+fn the_tree_carries_the_clinical_layer_with_its_real_dates() {
     // Wave 4a §7.4. participants.tsv carries the sex and the age at the
     // first session; each sessions.tsv the age at the session and the
     // nearest observation of each kind the release names, with its distance
-    // in days and, under a policy that keeps or shifts dates, its date.
-    // Under `year` the date is not written at all, and under `shift` it
-    // moves with the subject's offset, so the interval to the scan holds.
+    // in days and its date, which is the real date (record 38 S3).
     use nils_registry::clinical::{self, Vocabulary};
     use nils_registry::schema;
     use nils_registry::store::{Insert, Param};
-    use nils_release::dates;
     let Some(converter) = converter() else { return };
     let source = tree();
     let home_dir = TempDir::new("bids-home");
@@ -599,28 +596,18 @@ fn the_tree_carries_the_clinical_layer_under_the_policy() {
                 .unwrap();
         }
     }
-    // A date-labelled scheme is refused with shifted dates (Wave 3 §4.3), so
-    // the shifted and year trees label their sessions by ordinal.
+    // Record 38 S3: the date is the date, whatever labels the session. A
+    // tree whose sessions are numbered carries the same real dates in its
+    // clinical columns as one labelled by the date.
     let by_date = SessionScheme::default();
     let ordinal = SessionScheme {
         naming: nils_registry::session::Naming::Ordinal,
         ..SessionScheme::default()
     };
     let kinds = ["EDSS".to_string(), "Relapse".to_string()];
-    for policy_dates in [
-        dates::Policy::Keep,
-        dates::Policy::Shift,
-        dates::Policy::Year,
-    ] {
-        let scheme = match policy_dates {
-            dates::Policy::Keep => &by_date,
-            _ => &ordinal,
-        };
+    for (label, scheme) in [("date", &by_date), ("ordinal", &ordinal)] {
         let out = TempDir::new("bids-clinical");
-        let policy = Policy {
-            dates: policy_dates,
-            ..Policy::default()
-        };
+        let policy = Policy::default();
         let mut settings = settings(
             out.path(),
             &policy,
@@ -638,12 +625,12 @@ fn the_tree_carries_the_clinical_layer_under_the_policy() {
         let cell = |name: &str| -> Option<&str> {
             header.iter().position(|h| *h == name).map(|i| values[i])
         };
-        assert_eq!(cell("sex"), Some("F"), "{policy_dates:?}: {participants}");
-        assert_eq!(cell("age"), Some("42"), "{policy_dates:?}: {participants}");
+        assert_eq!(cell("sex"), Some("F"), "{label}: {participants}");
+        assert_eq!(cell("age"), Some("42"), "{label}: {participants}");
         let sessions = written
             .iter()
             .find(|f| f.ends_with("_sessions.tsv"))
-            .unwrap_or_else(|| panic!("{policy_dates:?}: {written:?}"));
+            .unwrap_or_else(|| panic!("{label}: {written:?}"));
         let text = std::fs::read_to_string(out.path().join(sessions)).unwrap();
         let mut lines = text.lines();
         let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
@@ -651,37 +638,17 @@ fn the_tree_carries_the_clinical_layer_under_the_policy() {
         let cell = |name: &str| -> Option<&str> {
             header.iter().position(|h| *h == name).map(|i| values[i])
         };
-        assert_eq!(cell("age"), Some("42"), "{policy_dates:?}: {text}");
-        assert_eq!(cell("edss"), Some("3.5"), "{policy_dates:?}: {text}");
-        assert_eq!(cell("edss_days"), Some("-5"), "{policy_dates:?}: {text}");
-        assert_eq!(cell("relapse"), Some("yes"), "{policy_dates:?}: {text}");
-        assert_eq!(
-            cell("relapse_days"),
-            Some("-365"),
-            "{policy_dates:?}: {text}"
-        );
-        match policy_dates {
-            dates::Policy::Keep => {
-                assert_eq!(cell("edss_date"), Some("2022-01-10"), "{text}");
-                assert_eq!(cell("relapse_date"), Some("2021-01-15"), "{text}");
-            }
-            dates::Policy::Shift => {
-                // The scan moved by the offset, and so did the observation.
-                let scan = cell("acq_time").unwrap();
-                let scan_day = nils_registry::day::Day::parse(&scan[..10]).unwrap();
-                let edss_day = nils_registry::day::Day::parse(cell("edss_date").unwrap()).unwrap();
-                assert_eq!(edss_day.to_days() - scan_day.to_days(), -5, "{text}");
-                assert_ne!(cell("edss_date"), Some("2022-01-10"), "shifted: {text}");
-            }
-            dates::Policy::Year => {
-                assert_eq!(cell("edss_date"), None, "no date under year: {text}");
-                assert_eq!(cell("relapse_date"), None, "{text}");
-            }
-        }
+        assert_eq!(cell("age"), Some("42"), "{label}: {text}");
+        assert_eq!(cell("edss"), Some("3.5"), "{label}: {text}");
+        assert_eq!(cell("edss_days"), Some("-5"), "{label}: {text}");
+        assert_eq!(cell("relapse"), Some("yes"), "{label}: {text}");
+        assert_eq!(cell("relapse_days"), Some("-365"), "{label}: {text}");
+        assert_eq!(cell("edss_date"), Some("2022-01-10"), "{label}: {text}");
+        assert_eq!(cell("relapse_date"), Some("2021-01-15"), "{label}: {text}");
         // The sensitive kind is not a column, and naming it is refused.
         assert!(
             !header.iter().any(|h| h.starts_with("delivery")),
-            "{policy_dates:?}: {text}"
+            "{label}: {text}"
         );
         assert_eq!(
             report.clinical.get("sex"),
@@ -1078,7 +1045,10 @@ fn two_acquisitions_that_want_one_name_are_refused_and_a_person_is_asked() {
     let (reference, evidence) = &items[0];
     assert_eq!(evidence["stacks"], 2);
     assert_eq!(evidence["placed"], "sourcedata");
-    assert_eq!(evidence["differs"], serde_json::json!(["what it covers"]));
+    assert_eq!(
+        evidence["differs"],
+        serde_json::json!(["the number of images", "what it covers"])
+    );
     assert_eq!(
         reference["stack_ids"].as_array().map(Vec::len),
         Some(2),
@@ -1104,24 +1074,51 @@ fn two_acquisitions_that_want_one_name_are_refused_and_a_person_is_asked() {
     assert_eq!(asked(&mut reg).len(), 1, "the question is filed once");
 }
 
-/// Two series of one session that agree on every fact the engine holds and
-/// differ only in the text a console recorded: record 37, S4's case.
-///
-/// Built from the survey's characteristics and from no archive: one protocol
-/// step, the same geometry, the same timings, the same image type, written
-/// twice under two spellings of its name.
-fn twins(one: (&str, &str), two: (&str, &str)) -> TempDir {
+/// One series of a pair: what a console recorded for it, where its first
+/// slice sits, when it was acquired, and the number the scanner gave it.
+#[derive(Clone, Copy)]
+struct Twin<'a> {
+    description: &'a str,
+    protocol: &'a str,
+    first_slice: f64,
+    acquired: Option<&'a str>,
+    /// Sagittal slices, and how far down the spine the station sits: the
+    /// slice location is the position along the normal, left to right, and
+    /// this moves the stack in the plane of its slices, which it never sees.
+    sagittal_at: Option<f64>,
+}
+
+fn twin<'a>(description: &'a str, protocol: &'a str) -> Twin<'a> {
+    Twin {
+        description,
+        protocol,
+        first_slice: 1.0,
+        acquired: None,
+        sagittal_at: None,
+    }
+}
+
+/// Two series of one session built from the survey's characteristics and from
+/// no archive: one protocol step, the same geometry, the same timings, the
+/// same image type, written twice (record 37 S4's fixture, and record 38's).
+fn twins(one: Twin, two: Twin) -> TempDir {
     let dir = TempDir::new("bids-twins");
-    for (n, (description, protocol)) in [("1", one), ("2", two)] {
+    for (n, t) in [("1", one), ("2", two)] {
         for slice in 1..=4 {
+            let at = t.first_slice + f64::from(slice - 1);
+            let (orientation, position) = match t.sagittal_at {
+                None => ("1\\0\\0\\0\\1\\0", format!("0\\0\\{at}")),
+                Some(z) => ("0\\1\\0\\0\\0\\-1", format!("{at}\\0\\{z}")),
+            };
             let sop = format!("1.2.3.{n}.{slice}");
             let mut e = synth::minimal_mr(&format!("1.2.3.{n}"), &format!("1.2.3.{n}.0"), &sop);
             e.extend([
                 synth::text(tags::PATIENT_ID, VR::LO, "19800101-1234"),
                 synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
                 synth::text(tags::SERIES_TIME, VR::TM, "031415"),
-                synth::text(tags::SERIES_DESCRIPTION, VR::LO, description),
-                synth::text(tags::PROTOCOL_NAME, VR::LO, protocol),
+                synth::text(tags::SERIES_NUMBER, VR::IS, n),
+                synth::text(tags::SERIES_DESCRIPTION, VR::LO, t.description),
+                synth::text(tags::PROTOCOL_NAME, VR::LO, t.protocol),
                 synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "3D"),
                 synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
                 synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
@@ -1139,15 +1136,15 @@ fn twins(one: (&str, &str), two: (&str, &str)) -> TempDir {
                 synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME2"),
                 synth::text(tags::PIXEL_SPACING, VR::DS, "1.0\\1.0"),
                 synth::text(tags::SLICE_THICKNESS, VR::DS, "1.0"),
-                synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, "1\\0\\0\\0\\1\\0"),
-                synth::text(
-                    tags::IMAGE_POSITION_PATIENT,
-                    VR::DS,
-                    &format!("0\\0\\{slice}"),
-                ),
+                synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, orientation),
+                synth::text(tags::IMAGE_POSITION_PATIENT, VR::DS, &position),
+                synth::text(tags::SLICE_LOCATION, VR::DS, &at.to_string()),
                 synth::text(tags::INSTANCE_NUMBER, VR::IS, &slice.to_string()),
                 synth::bytes(tags::PIXEL_DATA, VR::OW, vec![0x40u8; 16 * 16 * 2]),
             ]);
+            if let Some(time) = t.acquired {
+                e.push(synth::text(tags::ACQUISITION_TIME, VR::TM, time));
+            }
             dir.file(
                 &format!("{n}/{slice}"),
                 &synth::part10(&MetaFields::mr(&sop), &e, true),
@@ -1163,13 +1160,6 @@ fn anat_names(root: &Path) -> Vec<String> {
         .into_iter()
         .filter(|f| f.ends_with("_T1w.nii.gz"))
         .collect()
-}
-
-/// The `acq-` label of a released name.
-fn acq_of(name: &str) -> &str {
-    name.split('_')
-        .find_map(|part| part.strip_prefix("acq-"))
-        .expect("the name carries an acq- label")
 }
 
 fn review_kinds(reg: &mut Registry) -> Vec<String> {
@@ -1210,150 +1200,145 @@ fn released(
     (reg, report)
 }
 
-#[test]
-fn two_stacks_that_only_their_protocol_text_separates_are_named_apart() {
-    // Record 37, S4. The archive's 1,093 colliding names: everything NILS
-    // holds agrees, so nothing but the text can say these are two things.
-    // They are named apart, the name admits what it rests on, and the report
-    // and a review item say so too.
-    let Some(converter) = converter() else { return };
-    let source = twins(
-        ("t1_mprage_sag", "T1 MPRAGE"),
-        ("t1_mprage_sag", "T1 MPRAGE ISO"),
-    );
-    let home_dir = TempDir::new("bids-home");
-    let out = TempDir::new("bids-out");
-    let (mut reg, report) = released(&source, &home_dir, &out, &converter);
-
-    let names = anat_names(out.path());
-    assert_eq!(names.len(), 2, "both were named: {names:?}");
-    assert!(
-        names.iter().all(|n| !n.contains("_run-")),
-        "and neither is written down as a repeat of the other: {names:?}"
-    );
-    let (a, b) = (acq_of(&names[0]), acq_of(&names[1]));
-    assert_ne!(a, b, "the two labels differ: {names:?}");
-    // The mark is the last thing in the label, after every axis, and what
-    // comes before it is the same for both: the only difference is the text.
-    let (head_a, mark_a) = a.split_at(a.len() - "Text000000".len());
-    let (head_b, mark_b) = b.split_at(b.len() - "Text000000".len());
-    assert_eq!(head_a, head_b, "everything but the mark agrees: {names:?}");
-    for mark in [mark_a, mark_b] {
-        assert!(mark.starts_with("Text"), "{mark}");
-        assert!(
-            mark["Text".len()..].chars().all(|c| c.is_ascii_hexdigit()),
-            "{mark}"
-        );
-    }
-    assert_ne!(mark_a, mark_b);
-
-    // The report says how many and on which element.
-    assert_eq!(report.named_by_text.get("ProtocolName"), Some(&2));
-    // A person is asked about the group, because this is the weakest reason a
-    // name in the tree has.
-    assert!(
-        review_kinds(&mut reg).contains(&"release.named_by_text".to_string()),
-        "a review item was raised"
-    );
-    // And the tree itself says so, in the one file written for a person.
-    let readme = std::fs::read_to_string(out.path().join("README")).unwrap();
-    assert!(
-        readme.contains("Names that rest on the protocol text"),
-        "{readme}"
-    );
-}
-
-#[test]
-fn the_protocol_text_itself_reaches_no_name_and_no_report() {
-    // The rule that cannot bend. Protocol text is free text a person typed
-    // and it can carry a name, so what separates the files is a digest of it
-    // and the text stays in the registry.
-    let Some(converter) = converter() else { return };
-    let source = twins(
-        ("t1_mprage_sag", "T1 MPRAGE"),
-        ("t1_mprage_sag", "T1 MPRAGE ISO"),
-    );
-    let home_dir = TempDir::new("bids-home");
-    let out = TempDir::new("bids-out");
-    let (mut reg, report) = released(&source, &home_dir, &out, &converter);
-    assert_eq!(report.named_by_text.get("ProtocolName"), Some(&2));
-
-    for file in files_under(out.path()) {
-        assert!(
-            !file.to_lowercase().contains("iso"),
-            "no filename carries the text: {file}"
-        );
-    }
-    let readme = std::fs::read_to_string(out.path().join("README")).unwrap();
-    assert!(!readme.to_lowercase().contains("iso"), "{readme}");
-    // Nor the evidence of the question a person is asked.
+/// What each open `release.shared_name` question says differs.
+fn shared_differs(reg: &mut Registry) -> Vec<serde_json::Value> {
     let store = reg.store();
     let sql = format!(
-        "SELECT evidence FROM {} WHERE kind = 'release.named_by_text'",
-        store.qualified("review_item")
+        "SELECT evidence FROM {} WHERE kind = 'release.shared_name' ORDER BY id",
+        store.qualified("review_item"),
     );
-    let rows = store.query(&sql, &[]).unwrap();
-    assert_eq!(rows.len(), 1, "one question per group");
-    for r in rows.iter() {
-        let evidence = r.text(0).unwrap();
-        assert!(evidence.contains("ProtocolName"), "{evidence}");
-        assert!(
-            !evidence.to_lowercase().contains(" iso"),
-            "and never the text: {evidence}"
-        );
-    }
+    store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let evidence: serde_json::Value =
+                serde_json::from_str(r.text(0).unwrap()).unwrap_or_default();
+            evidence["differs"].clone()
+        })
+        .collect()
+}
+
+/// A pair that is not a rescan: no BIDS name for either, nothing numbered,
+/// nothing named by text, and one question saying what differs.
+fn refused_with(one: Twin, two: Twin, differs: serde_json::Value) {
+    let Some(converter) = converter() else { return };
+    let source = twins(one, two);
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (mut reg, report) = released(&source, &home_dir, &out, &converter);
+
+    assert_eq!(report.shared_names, 1, "{report:?}");
+    assert_eq!(report.repeats, 0, "{report:?}");
+    assert_eq!(report.not_repeats, 2, "{report:?}");
+    let names = anat_names(out.path());
+    assert!(names.is_empty(), "neither has a BIDS name: {names:?}");
+    let written = files_under(out.path());
+    assert!(
+        written.iter().all(|f| !f.contains("Text")),
+        "no name rests on text: {written:?}"
+    );
+    assert_eq!(shared_differs(&mut reg), [differs]);
+    assert!(
+        !review_kinds(&mut reg).contains(&"release.named_by_text".to_string()),
+        "and no text question is raised"
+    );
 }
 
 #[test]
-fn one_protocol_measured_twice_still_takes_the_standards_run() {
-    // The case `run-` exists for, and the one record 37 is careful not to
-    // break: two series, one protocol, nothing to tell apart.
+fn one_protocol_measured_twice_is_numbered_in_the_order_it_was_made() {
+    // Record 38 S2: the case `run-` exists for. Identical in everything, each
+    // at its own moment, and series 2 was made first, so it is `run-1`.
     let Some(converter) = converter() else { return };
-    let source = twins(
-        ("t1_mprage_sag", "T1 MPRAGE"),
-        ("t1_mprage_sag", "T1 MPRAGE"),
-    );
+    let first = Twin {
+        acquired: Some("102000"),
+        ..twin("t1_mprage_sag", "T1 MPRAGE")
+    };
+    let earlier = Twin {
+        acquired: Some("100500"),
+        ..first
+    };
+    let source = twins(first, earlier);
     let home_dir = TempDir::new("bids-home");
     let out = TempDir::new("bids-out");
-    let (_reg, report) = released(&source, &home_dir, &out, &converter);
+    let (mut reg, report) = released(&source, &home_dir, &out, &converter);
 
     let names = anat_names(out.path());
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(
         names.iter().any(|n| n.contains("_run-1_")) && names.iter().any(|n| n.contains("_run-2_")),
-        "the standard's answer, not a mark of ours: {names:?}"
+        "the standard's answer: {names:?}"
     );
-    assert!(
-        names.iter().all(|n| !n.contains("Text")),
-        "and no name claims the text separated them: {names:?}"
-    );
-    assert!(report.named_by_text.is_empty());
+    assert!(names.iter().all(|n| !n.contains("Text")), "{names:?}");
+    assert_eq!(report.repeats, 2, "{report:?}");
+    assert!(shared_differs(&mut reg).is_empty());
+
+    // `run-1` is the one acquired at 10:05, which is series 2.
+    let sidecar = |run: &str| -> serde_json::Value {
+        let name = names.iter().find(|n| n.contains(run)).unwrap();
+        let json = out.path().join(name.replace(".nii.gz", ".json"));
+        serde_json::from_str(&std::fs::read_to_string(json).unwrap()).unwrap()
+    };
+    assert_eq!(sidecar("_run-1_")["SeriesNumber"], 2, "{names:?}");
+    assert_eq!(sidecar("_run-2_")["SeriesNumber"], 1, "{names:?}");
 }
 
 #[test]
-fn the_counter_a_scanner_welds_on_a_rerun_step_separates_nothing() {
-    // The contract with S2, end to end. S2's repeat test reads `T1 MPRAGE 2`
-    // as the same protocol run again, so if this slice separated on that
-    // digit the two would say opposite things about one pair. It does not:
-    // the pair falls through to the repeat rule and takes `run-`.
-    let Some(converter) = converter() else { return };
-    let source = twins(
-        ("t1_mprage_sag", "T1 MPRAGE"),
-        ("t1_mprage_sag", "T1 MPRAGE 2"),
+fn a_pair_whose_series_description_differs_is_asked_about_and_not_numbered() {
+    // Record 38: inside one session a rescan's texts are identical. The text
+    // makes no name; it refuses one, and a person decides.
+    refused_with(
+        twin("t1_mprage_sag", "T1 MPRAGE"),
+        twin("t1_mprage_sag_iso", "T1 MPRAGE"),
+        serde_json::json!(["the series description"]),
     );
-    let home_dir = TempDir::new("bids-home");
-    let out = TempDir::new("bids-out");
-    let (_reg, report) = released(&source, &home_dir, &out, &converter);
+}
 
-    let names = anat_names(out.path());
-    assert_eq!(names.len(), 2, "{names:?}");
-    assert!(
-        names.iter().all(|n| !n.contains("Text")),
-        "the counter is not a separation: {names:?}"
+#[test]
+fn the_counter_a_scanner_welds_on_a_rerun_step_is_a_different_text() {
+    // Record 37 folded the counter away; record 38 compares the texts as they
+    // were written, less case and whitespace.
+    refused_with(
+        twin("t1_mprage_sag", "T1 MPRAGE"),
+        twin("t1_mprage_sag", "T1 MPRAGE 2"),
+        serde_json::json!(["the protocol name"]),
     );
-    assert!(
-        names.iter().any(|n| n.contains("_run-1_")) && names.iter().any(|n| n.contains("_run-2_")),
-        "{names:?}"
-    );
-    assert!(report.named_by_text.is_empty());
+}
+
+#[test]
+fn two_stations_that_differ_only_in_position_are_two_acquisitions() {
+    // Record 38 S2's proof: every parameter, the slice count and the extent
+    // agree, and the second station sits 200 mm further along.
+    let upper = twin("t1_mprage_sag", "T1 MPRAGE");
+    let lower = Twin {
+        first_slice: -199.0,
+        ..upper
+    };
+    refused_with(upper, lower, serde_json::json!(["where it sits"]));
+}
+
+#[test]
+fn two_series_made_at_one_moment_are_asked_about() {
+    // One acquisition written twice is not a rescan, whatever its UIDs.
+    let one = Twin {
+        acquired: Some("102000"),
+        ..twin("t1_mprage_sag", "T1 MPRAGE")
+    };
+    refused_with(one, one, serde_json::json!(["acquired at the same moment"]));
+}
+
+#[test]
+fn two_sagittal_stations_that_share_every_slice_location_are_two_acquisitions() {
+    // The stations of a sagittal spine sit one above the other, in the plane
+    // of their slices: the slice locations agree, and the images' positions
+    // are 200 mm apart.
+    let upper = Twin {
+        sagittal_at: Some(0.0),
+        ..twin("t2_tse_sag_spine", "T2 TSE SAG")
+    };
+    let lower = Twin {
+        sagittal_at: Some(-200.0),
+        ..upper
+    };
+    refused_with(upper, lower, serde_json::json!(["where it sits"]));
 }

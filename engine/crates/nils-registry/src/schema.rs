@@ -769,6 +769,32 @@ fn build_registry() -> Vec<Table> {
                 // stack's own row and never the series', because the series
                 // holds one of the coils its stacks were split over.
                 col("receive_coil_name", Type::Text),
+                // Record 38 S2: what a repeat is compared on that the row did
+                // not hold. The centre of the slice positions along the slice
+                // normal, because two stations of one prescription agree on
+                // the count and the extent and differ only in place. The
+                // earliest acquisition date and time of the stack's images,
+                // because a rescan is made at its own moment and `run-`
+                // follows that order, then the series number. The gradient
+                // directions the stack played, because readout-segmented
+                // diffusion stored one series per direction is alike in
+                // everything else. And the temporal position of the series
+                // and how many there are, because a dynamic stored one series
+                // per time point is too.
+                col("slice_centre_mm", Type::Double),
+                // The same centre in three dimensions, the midpoint of the
+                // extremes of the images' ImagePositionPatient, because the
+                // stations of a sagittal spine are displaced in the plane of
+                // their slices and share every SliceLocation.
+                col("centre_x_mm", Type::Double),
+                col("centre_y_mm", Type::Double),
+                col("centre_z_mm", Type::Double),
+                col("earliest_acquisition_date", Type::Date),
+                col("earliest_acquisition_time", Type::Time),
+                col("series_number", Type::Int),
+                col("dwi_gradients", Type::Text),
+                col("temporal_position", Type::Int),
+                col("temporal_positions", Type::Int),
                 // Which derivation wrote the row. The fingerprint is a cache
                 // of the registry's own columns, so a build that learned a
                 // new fact has to rewrite what an older one left: a row
@@ -1197,10 +1223,10 @@ fn build_registry() -> Vec<Table> {
                 col("policies", Type::Json),
                 // §4.3 with record 26 §13: why this release's sessions were
                 // numbered in date order rather than labelled the way its
-                // scheme asked, in the engine's own words. The scheme in
-                // `session_scheme` is the one that named them, so without
-                // this the row says what happened and never why. Null on a
-                // run whose scheme stood, which is nearly every one.
+                // scheme asked, where a dataset's declared shift moved the
+                // dates. Nothing writes it since record 38 S3 removed the
+                // shift; a row from before keeps its sentence and is read as
+                // it stands.
                 col("session_naming", Type::Text),
                 // §8.4: stacks whose file said their pixels carry text, which
                 // this release held, and stacks whose file would not say,
@@ -1278,7 +1304,6 @@ fn build_registry() -> Vec<Table> {
                 col("fallback_stem", Type::Text),
                 req("code", Type::Text),
                 req("label", Type::Text),
-                req("offset_days", Type::Int),
             ],
         )
         .unique(&["release_id", "stack_id"]),
@@ -1397,7 +1422,8 @@ fn build_registry() -> Vec<Table> {
                 // `(0010,0010)` for a standard element, `(0019,xx0C) CREATOR`
                 // for a private one, `overlay` and `curve` for a whole group.
                 req("tag", Type::Text),
-                // `removed`, `replaced`, `shifted`, `remapped`, `kept`.
+                // `removed`, `replaced`, `remapped`, `kept`; `shifted` on
+                // a row from before record 38 S3.
                 req("action", Type::Text),
                 req("count", Type::Int),
             ],
@@ -1772,11 +1798,6 @@ fn build_linkage() -> Vec<Table> {
         .index(&["subject_a"])
         .index(&["subject_b"]),
         Table::new(
-            "date_shift",
-            vec![req("subject_id", Type::Int), req("offset_days", Type::Int)],
-        )
-        .keyed_by("subject_id"),
-        Table::new(
             "read_audit",
             vec![
                 col("id", Type::Id),
@@ -1826,7 +1847,7 @@ mod tests {
         assert_eq!(table("series_mr").primary, Some("series_id"));
         assert_eq!(table("instance").uniques[0], vec!["sop_instance_uid"]);
         assert_eq!(table("source_file").uniques[0], vec!["source_id", "path"]);
-        assert_eq!(linkage_tables().len(), 6);
+        assert_eq!(linkage_tables().len(), 5);
         assert_eq!(linkage_tables()[0].name, "linkage_meta");
     }
 

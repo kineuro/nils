@@ -437,6 +437,14 @@ pub static CATALOGUE: &[Field] = &[
     f("series_date", Series, T(tags::SERIES_DATE), Date, Quasi, ""),
     f("series_time", Series, T(tags::SERIES_TIME), Time, Quasi, ""),
     f(
+        "series_number",
+        Series,
+        T(tags::SERIES_NUMBER),
+        Int,
+        Tech,
+        "addition: the order the scanner gave its series, which a run- index follows after the acquisition time (record 38)",
+    ),
+    f(
         "series_description",
         Series,
         T(tags::SERIES_DESCRIPTION),
@@ -679,6 +687,17 @@ pub static CATALOGUE: &[Field] = &[
         Double,
         Tech,
         "",
+    ),
+    f(
+        "image_position_patient",
+        Instance,
+        Chain(&[
+            Top(tags::IMAGE_POSITION_PATIENT),
+            Fg(tags::PLANE_POSITION_SEQUENCE, tags::IMAGE_POSITION_PATIENT),
+        ]),
+        Text,
+        Tech,
+        "addition: where each image sits in three dimensions, which tells two stations of a sagittal spine apart where SliceLocation cannot (record 38); the series keeps its first instance's",
     ),
     f(
         "pixel_spacing",
@@ -1763,17 +1782,17 @@ mod tests {
         let count = |l: Level| CATALOGUE.iter().filter(|f| f.level == l).count();
         assert_eq!(count(Subject), 2);
         assert_eq!(count(Study), 12);
-        assert_eq!(count(Series), 31);
+        assert_eq!(count(Series), 32);
         // Wave 3 §6 moved the seven diffusion values that vary from one image
         // of a series to the next: a b value, a gradient orientation and a
         // directionality are per image by design, and keeping one per series
         // records a multi-shell acquisition as its smallest shell.
-        assert_eq!(count(Instance), 33);
+        assert_eq!(count(Instance), 34);
         assert_eq!(count(Stack), 14);
         assert_eq!(count(SeriesMr), 32);
         assert_eq!(count(SeriesCt), 24);
         assert_eq!(count(SeriesPet), 29);
-        assert_eq!(CATALOGUE.len(), 177);
+        assert_eq!(CATALOGUE.len(), 179);
     }
 
     #[test]
@@ -1862,6 +1881,6 @@ mod tests {
         ));
         let md = render_markdown();
         assert!(md.contains("## series_mr (32, MR only)"));
-        assert!(md.contains("177 columns."));
+        assert!(md.contains("179 columns."));
     }
 }

@@ -94,7 +94,7 @@ dropped = ["0051xx0F SIEMENS MR HEADER"]
 # two EDSS scores are the gate's, five days before the first session and five
 # days after the second, so each session's nearest value is its own and the
 # signed distance tells the two apart. The date column is checked against the
-# registry by the bar, not listed here, because under the shift it moves.
+# registry's own nearest by the bar, not listed here.
 sex = "F"
 age = 42
 

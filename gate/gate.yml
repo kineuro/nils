@@ -150,6 +150,28 @@ gate:
       outcome: passes
       note: The sequences over one subject, ordered by day then precision then key.
 
+    # --- record 38 S4: a group keyed by an axis of the pack
+    - name: axis-group-single
+      family: record 38
+      question: How many stacks per technique
+      file: fixtures/axis-group-single.ask.yml
+      outcome: passes
+      note: >-
+        A single-valued axis as a group's key: one row per technique, each
+        stack counted once, and the counts sum to the stacks the registry
+        holds that the pack has not ruled out.
+    - name: axis-group-each
+      family: record 38
+      question: How many stacks carry each modifier
+      file: fixtures/axis-group-each.ask.yml
+      outcome: passes
+      note: >-
+        A multi-valued axis read with `each`: a stack counts once under each
+        of its values, and a stack with none falls under the null key, which
+        is numbered last on both backends. The generator writes one
+        modifier per stack at most; the engine's own tests hold the stack
+        with two values and the stack the pack ruled out.
+
     # --- what this wave does not answer, named rather than hidden
     - name: pair-grain-matching
       family: family 6, pairs

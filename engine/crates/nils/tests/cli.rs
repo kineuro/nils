@@ -1839,6 +1839,46 @@ fn classify_explains_itself_and_a_decision_closes_the_question() {
         .iter()
         .find(|i| i["kind"] == "base:low_confidence")
         .unwrap_or_else(|| panic!("{open:#?}"));
+
+    // Record 38 S4: explain names every question it counts, by its id and
+    // kind, with what it asks, in the text and in the document the door
+    // answers. The registry holds one stack, so every open item holds it.
+    let named: Vec<serde_json::Value> = shown["review"].as_array().unwrap().clone();
+    assert_eq!(named.len(), open.len(), "{shown}");
+    let out = nils()
+        .args(registry)
+        .args(["explain", "1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    for item in &open {
+        let id = item["id"].as_i64().unwrap();
+        let kind = item["kind"].as_str().unwrap();
+        let line = text
+            .lines()
+            .find(|l| {
+                l.trim_start()
+                    .starts_with(&format!("review item {id} {kind} (open"))
+            })
+            .unwrap_or_else(|| panic!("item {id} {kind} is not named: {text}"));
+        let axis = kind.split(':').next().unwrap();
+        assert!(line.contains(axis), "{line}");
+        let doc = named
+            .iter()
+            .find(|n| n["id"].as_i64() == Some(id))
+            .unwrap_or_else(|| panic!("{named:#?}"));
+        assert_eq!(doc["kind"], kind);
+        assert!(doc["about"].as_str().unwrap().starts_with(axis), "{doc}");
+    }
+    let about_base = named
+        .iter()
+        .find(|n| n["kind"] == "base:low_confidence")
+        .unwrap();
+    assert!(
+        about_base["about"].as_str().unwrap().contains("below 1.00"),
+        "{about_base}"
+    );
     let id = base["id"].as_i64().unwrap().to_string();
 
     let out = nils()
@@ -2104,11 +2144,11 @@ fn sessions_tree() -> TempDir {
 
 #[test]
 fn a_release_says_how_many_sessions_it_holds_and_what_named_them() {
-    // §4.3 with record 26 section 13, as a caller reads it. The history asked
-    // for by machine is the document the door answers, so a release says how
-    // many sessions it holds and under which scheme; and where a dataset's
-    // own declared shift had the sessions numbered in date order rather than
-    // labelled the way the scheme asked, it says so in words.
+    // Record 26 section 13, as a caller reads it. The history asked for by
+    // machine is the document the door answers, so a release says how many
+    // sessions it holds and under which scheme. Since record 38 S3 nothing
+    // numbers them in the scheme's place: a dataset's release keeps the
+    // dates and the labels the scheme asked for.
     let home = home();
     let dir = sessions_tree();
     let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
@@ -2143,10 +2183,9 @@ fn a_release_says_how_many_sessions_it_holds_and_what_named_them() {
     let plainly = TempDir::new("cli-sessions-plain");
     release("plain", plainly.path());
 
-    // Now the folder is a dataset whose files leave with their dates moved,
-    // which nobody asked for on the run: the release numbers its sessions
-    // rather than refusing, and records why. A declared place puts the rules
-    // of Wave 5 §10.2 in force, so the tree leaves into an export place.
+    // Now the folder is a dataset with a leaving policy of its own. A
+    // declared place puts the rules of Wave 5 §10.2 in force, so the tree
+    // leaves into an export place.
     let exports = TempDir::new("cli-sessions-exports");
     {
         let mut store =
@@ -2167,10 +2206,10 @@ fn a_release_says_how_many_sessions_it_holds_and_what_named_them() {
             .unwrap();
         };
         declare(
-            "ds-shifted",
+            "ds-declared",
             nils_registry::place::Role::Source,
             dir.path(),
-            serde_json::json!({"on_release": {"dates": "shift", "uids": "remap"}}),
+            serde_json::json!({"on_release": {"uids": "remap"}}),
         );
         declare(
             "exports",
@@ -2179,8 +2218,34 @@ fn a_release_says_how_many_sessions_it_holds_and_what_named_them() {
             serde_json::Value::Null,
         );
     }
-    let shifted = exports.path().join("shifted");
-    release("shifted", &shifted);
+    let declared = exports.path().join("declared");
+    release("declared", &declared);
+
+    // a date policy other than the dates is refused before anything is
+    // read, in words saying what to do instead; `keep` from a caller from
+    // before is taken
+    for dates in ["shift", "year"] {
+        let refused = nils()
+            .args(registry)
+            .args([
+                "release",
+                "--name",
+                "refused",
+                "--dates",
+                dates,
+                "--out",
+                exports.path().join("refused").to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(!refused.status.success());
+        assert!(
+            stderr(&refused).contains("record 38"),
+            "{}",
+            stderr(&refused)
+        );
+        assert!(!exports.path().join("refused").exists());
+    }
 
     let history = nils()
         .args(registry)
@@ -2205,16 +2270,13 @@ fn a_release_says_how_many_sessions_it_holds_and_what_named_them() {
     assert_eq!(plain["session_scheme"]["naming"], "date", "{plain}");
     assert!(plain["session_naming"].is_null(), "{plain}");
 
-    // Made under the dataset's declaration: numbered, and why.
-    let declared = of("shifted");
+    // Made under the dataset's declaration: the same scheme, and nothing
+    // to explain either.
+    let declared = of("declared");
     assert_eq!(declared["sessions"], 2, "{declared}");
-    assert_eq!(
-        declared["session_scheme"]["naming"], "ordinal",
-        "{declared}"
-    );
-    let why = declared["session_naming"].as_str().unwrap_or_default();
-    assert!(why.contains("ds-shifted"), "{why}");
-    assert!(why.contains("numbered in date order"), "{why}");
+    assert_eq!(declared["session_scheme"]["naming"], "date", "{declared}");
+    assert!(declared["session_naming"].is_null(), "{declared}");
+    assert_eq!(declared["policies"][0]["dates"], "keep", "{declared}");
 }
 
 /// A tree whose files carry a Siemens block: a b value that varies, a

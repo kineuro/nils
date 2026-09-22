@@ -451,36 +451,43 @@ pub const ARRIVALS: [&str; 3] = ["identified", "deidentified", "coded"];
 /// How what comes in through a place is handled, as the operator declares it:
 /// whether it arrives identified, and what a release does to it on the way
 /// out. A key not given takes its default; a value not known is refused with
-/// the choices. Moving dates while preserving UIDs is refused, as a release's
-/// policy refuses it. `arrives` lives on the dataset since record 26 and is
+/// the choices. `arrives` lives on the dataset since record 26 and is
 /// mirrored here for a reader from before.
+///
+/// The dates are not a choice (record 38 S3): a release writes the real date.
+/// `dates: keep`, which a caller from before may send, is taken and dropped;
+/// `shift` and `year` are refused in words saying what to do instead.
 pub fn handling_of(doc: &Value) -> Result<Value, String> {
     if !(doc.is_object() || doc.is_null()) {
-        return Err("handling is an object: {arrives, on_release: {dates, uids, deface}}".into());
+        return Err("handling is an object: {arrives, on_release: {uids, deface}}".into());
     }
     let arrives = pick(doc, None, "arrives", &ARRIVALS, "identified")?;
     let release = doc.get("on_release").cloned().unwrap_or(Value::Null);
     if !(release.is_object() || release.is_null()) {
-        return Err("on_release is an object: {dates, uids, deface}".into());
+        return Err("on_release is an object: {uids, deface}".into());
     }
-    let dates = pick(&release, None, "dates", &["keep", "shift", "year"], "keep")?;
+    match release.get("dates") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(s)) if s == "keep" => {}
+        Some(other) => return Err(format!("{}, not {other}", DATES_ARE_KEPT)),
+    }
     let uids = pick(&release, None, "uids", &["remap", "preserve"], "remap")?;
     let deface = match release.get("deface") {
         None | Some(Value::Null) => false,
         Some(Value::Bool(b)) => *b,
         Some(other) => return Err(format!("deface is true or false, not {other}")),
     };
-    if dates != "keep" && uids == "preserve" {
-        return Err(
-            "dates that move cannot keep the original UIDs: preserve UIDs only with dates kept"
-                .into(),
-        );
-    }
     Ok(json!({
         "arrives": arrives,
-        "on_release": {"dates": dates, "uids": uids, "deface": deface},
+        "on_release": {"uids": uids, "deface": deface},
     }))
 }
+
+/// Why a date policy other than `keep` is refused, wherever one is asked for.
+pub const DATES_ARE_KEPT: &str = "a release keeps the dates (record 38): the release is \
+     pseudonymous, not anonymous, and the date is the key the clinical layer joins on. The \
+     shift and year policies were removed; where a date must not show in a path, label the \
+     sessions by months since baseline (M00, M06) with a months scheme";
 
 /// The handling a place has until one is declared.
 pub fn default_handling() -> Value {
@@ -997,10 +1004,10 @@ mod tests {
     }
 
     #[test]
-    fn a_handling_not_declared_arrives_identified_keeps_dates_and_remaps_uids() {
+    fn a_handling_not_declared_arrives_identified_and_remaps_uids() {
         assert_eq!(
             default_handling(),
-            json!({"arrives": "identified", "on_release": {"dates": "keep", "uids": "remap", "deface": false}})
+            json!({"arrives": "identified", "on_release": {"uids": "remap", "deface": false}})
         );
         assert_eq!(handling_of(&json!({})).unwrap(), default_handling());
     }
@@ -1008,14 +1015,11 @@ mod tests {
     #[test]
     fn a_handling_fills_what_it_does_not_name_and_refuses_what_it_does_not_know() {
         let h = handling_of(
-            &json!({"arrives": "deidentified", "on_release": {"dates": "shift", "deface": true}}),
+            &json!({"arrives": "deidentified", "on_release": {"dates": "keep", "deface": true}}),
         )
         .unwrap();
         assert_eq!(h["arrives"], "deidentified");
-        assert_eq!(
-            h["on_release"],
-            json!({"dates": "shift", "uids": "remap", "deface": true})
-        );
+        assert_eq!(h["on_release"], json!({"uids": "remap", "deface": true}));
         let why = handling_of(&json!({"arrives": "maybe"})).unwrap_err();
         assert!(why.contains("identified, deidentified"), "{why}");
         assert!(handling_of(&json!({"on_release": {"deface": "yes"}})).is_err());
@@ -1023,12 +1027,20 @@ mod tests {
     }
 
     #[test]
-    fn dates_that_move_cannot_keep_the_original_uids() {
+    fn the_dates_are_kept_and_a_policy_that_moves_them_is_refused() {
+        // Record 38 S3: `shift` and `year` are gone, in words saying what to
+        // do instead; `keep` from a caller before is taken and not stored.
         for dates in ["shift", "year"] {
-            let why = handling_of(&json!({"on_release": {"dates": dates, "uids": "preserve"}}))
-                .unwrap_err();
-            assert!(why.contains("preserve UIDs only with dates kept"), "{why}");
+            let why =
+                handling_of(&json!({"on_release": {"dates": dates, "uids": "remap"}})).unwrap_err();
+            assert!(why.contains("record 38"), "{why}");
+            assert!(why.contains("M00"), "{why}");
         }
-        assert!(handling_of(&json!({"on_release": {"dates": "keep", "uids": "preserve"}})).is_ok());
+        let kept =
+            handling_of(&json!({"on_release": {"dates": "keep", "uids": "preserve"}})).unwrap();
+        assert_eq!(
+            kept["on_release"],
+            json!({"uids": "preserve", "deface": false})
+        );
     }
 }
