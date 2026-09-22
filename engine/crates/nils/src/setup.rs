@@ -3829,6 +3829,12 @@ pub(crate) struct State {
     /// never what the machine had already.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) linger: Option<String>,
+    /// The Node the units of Kvasir and the assistant name, by its absolute
+    /// path. Recorded, so that an update run where this PATH has no Node, as
+    /// a service's may not, writes the same one again, and so that the
+    /// supervisor can say when it has gone.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) node: String,
 }
 
 impl State {
@@ -3986,6 +3992,11 @@ pub(crate) struct Plan {
     /// writing a unit stays a matter of text. Empty for every install whose
     /// services are an account's own.
     pub(crate) closed: Vec<(String, PathBuf)>,
+    /// The Node the units of Kvasir and the assistant name by its absolute
+    /// path, found when the plan is made by [`node_for`], so that writing a
+    /// unit stays a matter of text. `None` where they do not run on this
+    /// machine, or where no Node 22 is here.
+    pub(crate) node: Option<PathBuf>,
 }
 
 /// The provider the desk signs people in at, as the desk, the engine and
@@ -4254,8 +4265,10 @@ fn plan_and_sources(state: &State, channel: Option<&str>) -> (Plan, Option<(Stri
         // not recorded: a path can come within an account's reach, or out of
         // root's, after the install, so every run that writes units looks
         closed: Vec::new(),
+        node: None,
     };
-    (plan, read)
+    let node = node_for(&plan, Some(&state.node));
+    (Plan { node, ..plan }, read)
 }
 
 /// Where a recorded install's desk answers and where it binds: the origin a
@@ -6623,7 +6636,9 @@ fn questions(
         helper,
         site,
         closed: Vec::new(),
+        node: None,
     };
+    plan.node = node_for(&plan, existing.map(|s| s.node.as_str()));
     // Every path a unit would keep a part out of is looked at here, as root,
     // the way systemd looks at it before the part starts, now that the
     // places and the accounts are settled. A path the part's account could
@@ -7655,6 +7670,11 @@ fn do_it(
         // the record saying so
         registry_made: made_outside.0,
         linger: made_outside.1,
+        node: plan
+            .node
+            .as_ref()
+            .map(|node| node.display().to_string())
+            .unwrap_or_default(),
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
@@ -10135,14 +10155,93 @@ fn hides_from_root(plan: &Plan) -> bool {
 
 /// The major version of the Node on the path; 0 where there is none.
 fn node_major() -> u32 {
-    run_quiet("node", &["--version"])
-        .unwrap_or_default()
-        .trim()
+    major_of(&run_quiet("node", &["--version"]).unwrap_or_default())
+}
+
+/// The major version in what `node --version` says, `v22.3.0`; 0 where it
+/// says none.
+fn major_of(said: &str) -> u32 {
+    said.trim()
         .trim_start_matches('v')
         .split('.')
         .next()
         .and_then(|n| n.parse().ok())
         .unwrap_or(0)
+}
+
+/// The Node Kvasir and the assistant run, by the absolute path their units
+/// name it at. A unit that said `/usr/bin/env node` looked for it on the
+/// service manager's PATH, and at boot the user manager's PATH does not yet
+/// hold `~/.local/bin`, where a Node of an account's own is linked: both
+/// services failed five times there and stayed down until they were started
+/// by hand, while after a login the same units ran. So the Node is found
+/// here, where setup and update run: the first Node 22 or newer on this
+/// PATH, which is the one that builds them, or else the one the install
+/// recorded, while it is still there. A run with no PATH of its own, as a
+/// service's can be, so keeps the Node the install ran. The path is kept as
+/// it was found, a link not followed, so that a Node replaced behind its
+/// link is the one run. Where the unit keeps its service out of the home
+/// directories, a Node inside one could not be run by it, so none there is
+/// named.
+fn node_here(recorded: Option<&str>, homes_hidden: bool) -> Option<PathBuf> {
+    node_among(
+        node_candidates(std::env::var_os("PATH").as_deref(), recorded, homes_hidden),
+        |path| {
+            path.to_str()
+                .and_then(|program| run_quiet(program, &["--version"]))
+                .map_or(0, |said| major_of(&said))
+        },
+    )
+}
+
+/// Where a Node may be, in the order they are asked: `node` in each
+/// absolute folder of a PATH, then the path an install recorded, leaving out
+/// those under a home where the service is kept out of the homes.
+fn node_candidates(
+    path: Option<&std::ffi::OsStr>,
+    recorded: Option<&str>,
+    homes_hidden: bool,
+) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = path
+        .map(|path| {
+            std::env::split_paths(path)
+                .filter(|dir| dir.is_absolute())
+                .map(|dir| dir.join("node"))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(recorded) = recorded.map(PathBuf::from).filter(|p| p.is_absolute()) {
+        out.push(recorded);
+    }
+    out.retain(|node| !homes_hidden || !under_home(node));
+    out
+}
+
+/// The first candidate that is a file and a Node 22 or newer, by the major
+/// version each is asked for.
+fn node_among(candidates: Vec<PathBuf>, major: impl Fn(&Path) -> u32) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .find(|path| path.is_file() && major(path) >= 22)
+}
+
+/// The Node a plan's units run, where they run Kvasir and the assistant on
+/// this machine; none for an install without them or with them in
+/// containers, whose image has its own.
+fn node_for(plan: &Plan, recorded: Option<&str>) -> Option<PathBuf> {
+    (plan.has(Part::Assistant) && plan.runtime == Runtime::Machine)
+        .then(|| node_here(recorded, home_out_of_reach(plan, "assistant")))
+        .flatten()
+}
+
+/// How a unit starts Node: by the path found for it. Only where none was
+/// found, which setup refuses before it builds Kvasir or the assistant and an
+/// update says, does the unit look for it on the manager's PATH.
+fn node_program(plan: &Plan) -> String {
+    plan.node.as_ref().map_or_else(
+        || "/usr/bin/env node".to_string(),
+        |node| node.display().to_string(),
+    )
 }
 
 /// The ref a Node part is taken at: the release tag pinned here, or, for
@@ -14563,9 +14662,10 @@ pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)>
             "kvasir.service".to_string(),
             format!(
                 "[Unit]\nDescription=Kvasir, the model gateway\n\n[Service]\n{}\
-                 ExecStart=/usr/bin/env node dist/main.js --config kvasir.json\n\
+                 ExecStart={} dist/main.js --config kvasir.json\n\
                  WorkingDirectory={}\nRestart=on-failure\n\n[Install]\nWantedBy={wanted}\n",
                 service_of_machine(plan, "assistant"),
+                node_program(plan),
                 plan.dir.join("kvasir").display()
             ),
         ));
@@ -14577,10 +14677,11 @@ pub(crate) fn systemd_units(plan: &Plan, state: &State) -> Vec<(String, String)>
             format!(
                 "[Unit]\nDescription=NILS assistant\nAfter=nils-engine.service kvasir.service\n\n\
                  [Service]\n{}EnvironmentFile={}\n\
-                 ExecStart=/usr/bin/env node {}\n\
+                 ExecStart={} {}\n\
                  WorkingDirectory={}\nRestart=on-failure\n\n[Install]\nWantedBy={wanted}\n",
                 service_of_machine(plan, "assistant"),
                 dir.join("assistant.env").display(),
+                node_program(plan),
                 assistant_entry(&dir),
                 dir.display()
             ),
@@ -15400,6 +15501,12 @@ pub(crate) fn update_all(channel: Option<&str>) -> Result<bool, Exit> {
         }
     }
 
+    // The Node the units will name, which the restart after this writes them
+    // with, is recorded, so that a later update from a PATH with none, as a
+    // service's may be, still names it.
+    if let Some(node) = plan_from_state(&state, channel).node {
+        state.node = node.display().to_string();
+    }
     state.at = nils_registry::time::now_iso();
     write_state(&state)?;
     // The record is the one the parts are at now, and the helper is written
@@ -15496,6 +15603,9 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     }
     if let Some(engine) = state.parts.get("engine") {
         plan.version = engine.version.clone();
+    }
+    if let Some(said) = node_missing(&plan, &state) {
+        println!("{said}");
     }
     // Kvasir trusts what the desk signs as the desk signs it now, before it
     // starts again (record 25)
@@ -15677,6 +15787,43 @@ pub(crate) fn addresses(state: &State) -> Vec<serde_json::Value> {
     out
 }
 
+/// What to say where Kvasir and the assistant run on this machine and their
+/// units have no Node to name: none on this PATH, and the one the install
+/// recorded gone. Their units then look for it on the manager's PATH, which
+/// at boot does not hold a Node of an account's own.
+fn node_missing(plan: &Plan, state: &State) -> Option<String> {
+    if !plan.has(Part::Assistant) || plan.runtime != Runtime::Machine || plan.node.is_some() {
+        return None;
+    }
+    let recorded = if state.node.is_empty() {
+        String::new()
+    } else {
+        format!(", and {} the install ran is gone", state.node)
+    };
+    Some(format!(
+        "no Node 22 or newer is on this PATH{recorded}, so Kvasir and the assistant may not          start; install it and run nils update --all again"
+    ))
+}
+
+/// The Node the units of Kvasir and the assistant name, as the supervisor
+/// reports it: its path and whether it is still there. Null where the
+/// install recorded none.
+fn node_doc(state: &State) -> serde_json::Value {
+    if state.node.is_empty() {
+        return serde_json::Value::Null;
+    }
+    let present = Path::new(&state.node).is_file();
+    serde_json::json!({
+        "path": state.node,
+        "present": present,
+        "said": (!present).then(|| format!(
+            "{} is gone, which Kvasir and the assistant run on; install Node 22 or newer and \
+             run nils update --all",
+            state.node
+        )),
+    })
+}
+
 /// The install as the supervisor reports it: the setup record without its
 /// secrets, the parts, where each answers, and each service with whether it
 /// runs.
@@ -15713,6 +15860,7 @@ pub(crate) fn install_doc(state: &State) -> serde_json::Value {
         "addresses": addresses(state),
         "services": services,
         "unfinished": state.unfinished,
+        "node": node_doc(state),
     })
 }
 
@@ -17628,6 +17776,7 @@ mod tests {
             helper: None,
             site: None,
             closed: Vec::new(),
+            node: Some(PathBuf::from("/opt/node/bin/node")),
         }
     }
 
@@ -25873,6 +26022,166 @@ mod tests {
         );
     }
 
+    /// Every unit an install writes names what it runs by an absolute path,
+    /// on a laptop and among the services of a machine: a unit that looked
+    /// Node up on the manager's PATH found none at boot, where the user
+    /// manager's PATH does not yet hold `~/.local/bin`, and Kvasir and the
+    /// assistant stayed down.
+    #[test]
+    fn every_unit_names_what_it_runs_by_an_absolute_path() {
+        let mut laptop = plan(Runtime::Machine);
+        laptop.parts = vec![Part::Engine, Part::Desk, Part::Assistant];
+        for (plan, wanted) in [
+            (laptop, "default.target"),
+            (deployment(), "multi-user.target"),
+        ] {
+            let state = state_of(&plan, &deployed_parts());
+            let units = systemd_units(&plan, &state);
+            let names: Vec<&str> = units.iter().map(|(n, _)| n.as_str()).collect();
+            assert!(names.contains(&"kvasir.service"), "{names:?}");
+            assert!(names.contains(&"nils-assistant.service"), "{names:?}");
+            for (name, text) in &units {
+                assert!(text.contains(&format!("WantedBy={wanted}")), "{text}");
+                assert!(!text.contains("/usr/bin/env"), "{name}: {text}");
+                for line in text.lines().filter(|l| l.starts_with("ExecStart=")) {
+                    let program = line["ExecStart=".len()..].split(' ').next().unwrap();
+                    assert!(
+                        Path::new(program).is_absolute(),
+                        "{name} runs {program} by name: {text}"
+                    );
+                }
+            }
+            let unit = |name: &str| {
+                units
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, t)| t.clone())
+                    .unwrap()
+            };
+            assert!(
+                unit("kvasir.service")
+                    .contains("ExecStart=/opt/node/bin/node dist/main.js --config kvasir.json\n"),
+                "{}",
+                unit("kvasir.service")
+            );
+            assert!(
+                unit("nils-assistant.service")
+                    .contains("ExecStart=/opt/node/bin/node bin/serve.mjs\n"),
+                "{}",
+                unit("nils-assistant.service")
+            );
+        }
+        // the supervisor's too, where it is a systemd unit
+        if !cfg!(target_os = "macos") {
+            let plan = deployment();
+            let (_, supervisor) = supervisor_service(&plan, &state_of(&plan, &deployed_parts()));
+            let line = supervisor
+                .lines()
+                .find(|l| l.starts_with("ExecStart="))
+                .unwrap();
+            assert!(line.starts_with("ExecStart=/"), "{supervisor}");
+        }
+    }
+
+    /// The Node a unit names is the first Node 22 or newer on the PATH,
+    /// which builds the parts, then the one the install recorded while it is
+    /// there; a folder named relatively, a Node too old and one that is gone
+    /// are passed over.
+    #[test]
+    fn the_node_a_unit_names_is_found_on_the_path_or_kept_from_the_record() {
+        let dir = scratch("node-here");
+        let old = dir.join("old");
+        let new = dir.join("new");
+        let gone = dir.join("gone");
+        let kept = dir.join("kept");
+        for folder in [&old, &new, &kept] {
+            std::fs::create_dir_all(folder).unwrap();
+            std::fs::write(folder.join("node"), "").unwrap();
+        }
+        let major = |path: &Path| if path.starts_with(&old) { 18 } else { 22 };
+        let path = std::env::join_paths([
+            PathBuf::from("relative"),
+            gone.clone(),
+            old.clone(),
+            new.clone(),
+        ])
+        .unwrap();
+        let recorded = kept.join("node").display().to_string();
+
+        let candidates = node_candidates(Some(&path), Some(&recorded), false);
+        assert_eq!(
+            candidates,
+            vec![
+                gone.join("node"),
+                old.join("node"),
+                new.join("node"),
+                kept.join("node")
+            ]
+        );
+        assert_eq!(node_among(candidates, major), Some(new.join("node")));
+        // a service's run with no Node on its PATH keeps the recorded one
+        let bare = std::env::join_paths([gone.clone()]).unwrap();
+        assert_eq!(
+            node_among(node_candidates(Some(&bare), Some(&recorded), false), major),
+            Some(kept.join("node"))
+        );
+        // and with that gone too there is none, which is said
+        let gone_too = gone.join("node").display().to_string();
+        assert_eq!(
+            node_among(node_candidates(None, Some(&gone_too), false), major),
+            None
+        );
+        // a service kept out of the homes cannot run a Node inside one
+        let homes =
+            std::env::join_paths(["/home/x/.local/bin", "/root/bin", "/usr/local/bin"]).unwrap();
+        assert_eq!(
+            node_candidates(Some(&homes), Some("/home/x/.local/bin/node"), true),
+            vec![PathBuf::from("/usr/local/bin/node")]
+        );
+        assert_eq!(major_of("v22.11.0\n"), 22);
+        assert_eq!(major_of(""), 0);
+
+        // the plan of an install in containers names none: its image has one
+        let mut docker = plan(Runtime::Docker);
+        docker.parts = vec![Part::Engine, Part::Assistant];
+        assert_eq!(node_for(&docker, Some(&recorded)), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Node that is gone is said: by an update that finds none to write
+    /// into the units, and by the supervisor's report of the install.
+    #[test]
+    fn a_node_that_is_gone_is_said() {
+        let dir = scratch("node-gone");
+        let there = dir.join("node");
+        std::fs::write(&there, "").unwrap();
+        let mut plan = plan(Runtime::Machine);
+        plan.parts = vec![Part::Engine, Part::Assistant];
+        let mut state = state_of(&plan, &[("engine", "binary"), ("assistant", "node")]);
+
+        state.node = there.display().to_string();
+        assert_eq!(node_missing(&plan, &state), None);
+        assert_eq!(node_doc(&state)["present"], true);
+        assert!(node_doc(&state)["said"].is_null());
+
+        std::fs::remove_file(&there).unwrap();
+        plan.node = None;
+        let said = node_missing(&plan, &state).unwrap();
+        assert!(said.contains(&state.node), "{said}");
+        assert!(said.contains("nils update --all"), "{said}");
+        assert_eq!(node_doc(&state)["present"], false);
+        assert!(
+            node_doc(&state)["said"]
+                .as_str()
+                .unwrap()
+                .contains(&state.node)
+        );
+        // an install without the assistant has no Node to miss
+        plan.parts = vec![Part::Engine];
+        assert_eq!(node_missing(&plan, &state), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_assistant_starts_from_its_own_entry_when_the_checkout_has_one() {
         let dir = scratch("assistant-entry");
@@ -25890,7 +26199,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("assistant")).unwrap();
         let before = unit(&plan);
         assert!(
-            before.contains("ExecStart=/usr/bin/env node dist/app/server.mjs"),
+            before.contains("ExecStart=/opt/node/bin/node dist/app/server.mjs"),
             "{before}"
         );
         // one with it: the entry that listens on loopback and stops cleanly
@@ -25898,7 +26207,7 @@ mod tests {
         std::fs::write(dir.join("assistant").join("bin").join("serve.mjs"), "").unwrap();
         let after = unit(&plan);
         assert!(
-            after.contains("ExecStart=/usr/bin/env node bin/serve.mjs"),
+            after.contains("ExecStart=/opt/node/bin/node bin/serve.mjs"),
             "{after}"
         );
         let _ = std::fs::remove_dir_all(&dir);
