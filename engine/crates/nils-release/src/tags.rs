@@ -6,10 +6,10 @@
 //! Carried from v0's `anonymize/tags.py`, tag for tag, with one change of
 //! shape. v0 has five categories and the fifth is `Time_And_Date_Information`,
 //! which **removes** the series, acquisition and content dates and every time.
-//! Here the dates are not a category: they are the policy of §8.3, which
-//! applies to every date in the file, because the intervals between them are
-//! the science and removing them throws that away to hide something a shift
-//! already hides. What is left of that category is the **times**, which are
+//! Here the dates are not a category: every date in the file leaves as it is
+//! (§8.3, record 38 S3), because the date is the clinical join key and the
+//! intervals between dates are the science, and a release is pseudonymous,
+//! not anonymous. What is left of that category is the **times**, which are
 //! identifying at a granularity nobody needs: a scan at 03:14 on a known day
 //! narrows a population a long way.
 //!
@@ -46,7 +46,7 @@ pub enum Category {
     Provider,
     /// Where it was done: the institution, its address and department.
     Institution,
-    /// The times of day. The dates are §8.3's policy and not a removal.
+    /// The times of day. The dates stay (§8.3) and are not a removal.
     Times,
     /// The identifiers themselves, which v0's five never named (record 35):
     /// the accession number and its issuer, the study id, the admission and
@@ -231,7 +231,7 @@ const INSTITUTION: &[(u16, u16)] = &[
     (0x0008, 0x1041),
 ];
 
-/// v0's `Time_And_Date_Information` less its dates, which §8.3 governs.
+/// v0's `Time_And_Date_Information` less its dates, which stay (§8.3).
 const TIMES: &[(u16, u16)] = &[
     (0x0008, 0x0013),
     (0x0008, 0x0030),
@@ -432,7 +432,7 @@ mod tests {
             assert!(!MANDATORY.contains(&(*g, *e)));
         }
         // The one date on the list is the birth date, which its category
-        // removes outright before the date policy ever reads the file.
+        // removes outright; the age is computed from it first.
         assert!(NEVER_LEAVES.contains(&(0x0010, 0x0030)));
         assert!(PATIENT.contains(&(0x0010, 0x0030)));
     }
@@ -452,11 +452,10 @@ mod tests {
     }
 
     #[test]
-    fn a_category_holding_a_date_would_be_the_policy_overruling_itself() {
-        // §8.3 governs every date in the file, and a category that removed one
-        // would take it out from under the policy: the interval between two
-        // visits is the science, and a removal throws it away to hide
-        // something a shift already hides.
+    fn no_category_removes_a_date() {
+        // §8.3 and record 38 S3: every date leaves as it is. A category that
+        // removed one would throw away the clinical join key and the interval
+        // between two visits, which is the science.
         let dates = [
             (0x0008u16, 0x0020u16),
             (0x0008, 0x0021),

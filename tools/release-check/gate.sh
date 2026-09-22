@@ -4,7 +4,7 @@
 # The release gate (`docs/specs/wave3-anonymize-and-bids.md`, §12).
 #
 # Builds a registry from the reference selections, releases it in both layouts
-# under three date policies, hands one over, and asserts every bar. Nothing here
+# with the dates kept (record 38 S3), hands one over, and asserts every bar. Nothing here
 # touches a real corpus: the reference tree is synthetic and its right answers
 # are checked in beside it, which is what lets the gate assert rather than
 # eyeball.
@@ -101,42 +101,20 @@ if [[ -n "$converter" ]]; then
     --json > "$work/bids.json" 2> "$work/bids.time"
   "$nils" release --out "$work/bids" --name gate-bids --layout bids \
     --json > "$work/bids-again.json"
-  echo "gate: a shifted BIDS tree, for the clinical join under the shift"
-  cat > "$work/ordinal.yml" <<'YML'
-session:
-  window_days: 0
-  naming: ordinal
-YML
-  "$nils" release --out "$work/bids-shifted" --name gate-bids-shifted --layout bids \
-    --dates shift --scheme "$work/ordinal.yml" --json > "$work/bids-shifted.json"
 else
   echo "gate: dcm2niix is not installed; the BIDS bars are skipped" >&2
 fi
 
-echo "gate: a shifted release, for the date rules"
-# 4.3's other half: a scheme that names a session by its date would put the
-# date back in the path, and the release refuses it. So a shifted release runs
-# under an ordinal one, which is the combination that works.
-cat > "$work/ordinal.yml" <<'YML'
-session:
-  window_days: 0
-  naming: ordinal
-YML
-"$nils" release --out "$work/shifted" --name gate-shifted --layout descriptive \
-  --dates shift --scheme "$work/ordinal.yml" --json > "$work/shifted.json"
-
-echo "gate: 4.3 is refused rather than warned about"
-if "$nils" release --out "$work/refused" --name gate-refused --layout descriptive \
-     --dates shift --json > /dev/null 2> "$work/refused.txt"; then
-  echo "gate: a shifted release with a date-named scheme was accepted (4.3)" >&2
-  exit 1
-fi
-if "$nils" release --out "$work/refused" --name gate-refused --layout descriptive \
-     --dates shift --uids preserve --scheme "$work/ordinal.yml" \
-     --json > /dev/null 2>> "$work/refused.txt"; then
-  echo "gate: a shifted release with preserved UIDs was accepted (4.3)" >&2
-  exit 1
-fi
+echo "gate: the date is the date, and a policy that moves it is refused"
+# Record 38 S3: a release keeps the real date. The shift and year policies are
+# gone, and asking for one is refused before anything is written.
+for dates in shift year; do
+  if "$nils" release --out "$work/refused" --name gate-refused --layout descriptive \
+       --dates "$dates" --json > /dev/null 2>> "$work/refused.txt"; then
+    echo "gate: --dates $dates was accepted" >&2
+    exit 1
+  fi
+done
 if [[ -e "$work/refused" ]]; then
   echo "gate: a refused release wrote a tree" >&2
   exit 1

@@ -48,8 +48,7 @@ pub enum Handling {
 }
 
 /// Every table with a `subject_id` column, in either store, and what the
-/// merge does to it. `date_shift` keeps the canonical's offset where both
-/// have one.
+/// merge does to it.
 pub const SUBJECT_TABLES: &[(&str, Handling)] = &[
     ("study", Handling::Repoint),
     ("series", Handling::Repoint),
@@ -64,7 +63,6 @@ pub const SUBJECT_TABLES: &[(&str, Handling)] = &[
     ("values_member", Handling::Repoint),
     // the linkage store
     ("identity", Handling::Repoint),
-    ("date_shift", Handling::Repoint),
 ];
 
 /// The tables that name a subject otherwise, each handled by name in
@@ -336,34 +334,10 @@ pub fn merge_in(
         alias.id,
     )?;
 
-    // the linkage store: the identities move, the canonical's offset stays
-    // where both have one, and the alias's code is filed on the canonical
-    let d = linkage.dialect();
+    // the linkage store: the identities move, and the alias's code is filed
+    // on the canonical
     let n = repoint(linkage, "identity", canonical.id, alias.id)?;
     moved.insert("identity", n);
-    let shift = linkage.qualified("date_shift");
-    let has = linkage
-        .query_opt(
-            &format!(
-                "SELECT 1 FROM {shift} WHERE subject_id = {}",
-                d.param(1, Type::Int)
-            ),
-            &[Param::Int(canonical.id)],
-        )?
-        .is_some();
-    let n = if has {
-        linkage.execute(
-            &format!(
-                "DELETE FROM {shift} WHERE subject_id = {}",
-                d.param(1, Type::Int)
-            ),
-            &[Param::Int(alias.id)],
-        )?;
-        0
-    } else {
-        repoint(linkage, "date_shift", canonical.id, alias.id)?
-    };
-    moved.insert("date_shift", n);
     let type_id = match linkage::id_type_id(linkage, SUBJECT_CODE_TYPE)? {
         Some(id) => id,
         None => linkage::add_id_type(linkage, SUBJECT_CODE_TYPE, None)?.id,
@@ -581,7 +555,7 @@ mod tests {
             "t",
         )
         .unwrap();
-        // the linkage store: an identity each, a shift for the alias only
+        // the linkage store: an identity each
         linkage::insert_identities(
             &mut linkage,
             &[
@@ -604,10 +578,6 @@ mod tests {
             ],
         )
         .unwrap();
-        exec(
-            &mut linkage,
-            "INSERT INTO date_shift (subject_id, offset_days) VALUES (2, 7)",
-        );
         // a store migrated in memory has no epoch row yet: it reads as zero
         let epoch_before = registry
             .query_opt("SELECT value FROM registry_meta WHERE key = 'epoch'", &[])
@@ -649,7 +619,6 @@ mod tests {
             ("values_member", 1),
             ("decision", 1),
             ("identity", 1),
-            ("date_shift", 1),
         ] {
             assert_eq!(moved.get(t).copied(), Some(n), "{t}");
         }
@@ -759,8 +728,8 @@ mod tests {
         assert!(audit.text(3).unwrap().contains("renamed P2 to P1"));
         assert_eq!(audit.int(4).unwrap(), 9);
         assert_eq!(audit.int(5).unwrap(), epoch_before + 1);
-        // the linkage store: identities on the canonical, the shift moved,
-        // the alias's code filed as subject-code, from the merge
+        // the linkage store: identities on the canonical, the alias's code
+        // filed as subject-code, from the merge
         let shown = linkage::reveal(&mut linkage, &keys, 1, "tester", None).unwrap();
         let mut values: Vec<(String, String, String)> = shown
             .into_iter()
@@ -787,7 +756,6 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(one(&mut linkage, "SELECT subject_id FROM date_shift"), 1);
 
         // merged once: the alias is refused as either side
         let err = merge(
@@ -824,34 +792,6 @@ mod tests {
             )
             .is_err()
         );
-        // a shift on both sides keeps the canonical's
-        exec(
-            &mut linkage,
-            "INSERT INTO date_shift (subject_id, offset_days) VALUES (3, 9)",
-        );
-        let again = merge(
-            &mut registry,
-            &mut linkage,
-            &keys,
-            &Ask {
-                canonical: 1,
-                alias: 3,
-                why: "y",
-                actor: "anna@lab",
-                job_id: None,
-                place_id: Some(4),
-            },
-        )
-        .unwrap();
-        assert_eq!(again.moved.get("date_shift"), Some(&0));
-        assert_eq!(
-            one(
-                &mut linkage,
-                "SELECT offset_days FROM date_shift WHERE subject_id = 1"
-            ),
-            7
-        );
-        assert_eq!(one(&mut linkage, "SELECT COUNT(*) FROM date_shift"), 1);
     }
 
     /// Lab 26, defect 1: a digest joins every subject it makes to the

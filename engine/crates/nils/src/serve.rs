@@ -2466,6 +2466,19 @@ fn routed(
                 std::path::Path::new(out),
             )
             .map_err(|r| Reply::error(409, r.message))?;
+            // Record 38 S3: the date is the date. `keep`, which a desk from
+            // before may send, is passed on; anything else is refused here
+            // rather than by the job after it has queued.
+            match &doc["dates"] {
+                serde_json::Value::Null => {}
+                serde_json::Value::String(d) if d == "keep" => {}
+                other => {
+                    return Err(Reply::error(
+                        400,
+                        format!("dates {other}: {}", nils_registry::place::DATES_ARE_KEPT),
+                    ));
+                }
+            }
             command.extend(["--name".into(), name.into(), "--out".into(), out.into()]);
             for (flag, key) in [
                 ("--layout", "layout"),

@@ -1197,10 +1197,10 @@ fn build_registry() -> Vec<Table> {
                 col("policies", Type::Json),
                 // §4.3 with record 26 §13: why this release's sessions were
                 // numbered in date order rather than labelled the way its
-                // scheme asked, in the engine's own words. The scheme in
-                // `session_scheme` is the one that named them, so without
-                // this the row says what happened and never why. Null on a
-                // run whose scheme stood, which is nearly every one.
+                // scheme asked, where a dataset's declared shift moved the
+                // dates. Nothing writes it since record 38 S3 removed the
+                // shift; a row from before keeps its sentence and is read as
+                // it stands.
                 col("session_naming", Type::Text),
                 // §8.4: stacks whose file said their pixels carry text, which
                 // this release held, and stacks whose file would not say,
@@ -1278,7 +1278,6 @@ fn build_registry() -> Vec<Table> {
                 col("fallback_stem", Type::Text),
                 req("code", Type::Text),
                 req("label", Type::Text),
-                req("offset_days", Type::Int),
             ],
         )
         .unique(&["release_id", "stack_id"]),
@@ -1397,7 +1396,8 @@ fn build_registry() -> Vec<Table> {
                 // `(0010,0010)` for a standard element, `(0019,xx0C) CREATOR`
                 // for a private one, `overlay` and `curve` for a whole group.
                 req("tag", Type::Text),
-                // `removed`, `replaced`, `shifted`, `remapped`, `kept`.
+                // `removed`, `replaced`, `remapped`, `kept`; `shifted` on
+                // a row from before record 38 S3.
                 req("action", Type::Text),
                 req("count", Type::Int),
             ],
@@ -1772,11 +1772,6 @@ fn build_linkage() -> Vec<Table> {
         .index(&["subject_a"])
         .index(&["subject_b"]),
         Table::new(
-            "date_shift",
-            vec![req("subject_id", Type::Int), req("offset_days", Type::Int)],
-        )
-        .keyed_by("subject_id"),
-        Table::new(
             "read_audit",
             vec![
                 col("id", Type::Id),
@@ -1826,7 +1821,7 @@ mod tests {
         assert_eq!(table("series_mr").primary, Some("series_id"));
         assert_eq!(table("instance").uniques[0], vec!["sop_instance_uid"]);
         assert_eq!(table("source_file").uniques[0], vec!["source_id", "path"]);
-        assert_eq!(linkage_tables().len(), 6);
+        assert_eq!(linkage_tables().len(), 5);
         assert_eq!(linkage_tables()[0].name, "linkage_meta");
     }
 

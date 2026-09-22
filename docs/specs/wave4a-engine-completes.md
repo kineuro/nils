@@ -475,8 +475,8 @@ counts are the shape the schema has to hold, not a claim about the fixture.
 The date is the join key of the clinical layer, as Nima ruled in Wave 3: the
 clinical import matches on `(subject, event_date)`, the session anchors are
 themselves event dates, and age, disease duration and the nearest EDSS are date
-arithmetic. Nothing here is ever rewritten by a date policy; that is a release's
-concern.
+arithmetic. Nothing here is ever rewritten, and since record 38 S3 a release
+keeps the real date too.
 
 **Corrections** (settled here, §13.2): a corrected row supersedes the old one,
 the old one stays with `superseded_by`, and a retraction is a supersede by
@@ -589,13 +589,13 @@ it is what §7.4's release and the gate's bar read.
 
 `participants.tsv` carries the sex and the age at first session; `sessions.tsv`
 carries the age at session and the nearest observation the release names,
-under the date policy (an age is computed before a birth date goes, Wave 3
-§8.3; under `shift` the observation's date moves with the subject's offset;
-under `year` no date is written at all). Sensitivity is enforced here: a field
-the pack marks sensitive never reaches the tree.
+with its real date (an age is computed before a birth date goes, Wave 3
+§8.3; record 38 S3 removed the shift and year policies, so the date is the
+date). Sensitivity is enforced here: a field the pack marks sensitive never
+reaches the tree.
 
 This closes **Wave 3's deferred bar 10**: the EDSS nearest each scan is the
-same computed from the registry and from the tree, under every date policy.
+same computed from the registry and from the tree.
 
 **As built (slice 9, 2026-09-06).** `participants.tsv` carries `age` (whole
 years at the subject's first session in the release) and `sex`; each
@@ -603,10 +603,9 @@ years at the subject's first session in the release) and `sex`; each
 names, three columns from the kind's name in lower case with underscores:
 `<kind>` (the number, else the value, else `yes` for a kind that is a date
 and nothing else), `<kind>_days` (the signed distance in days from the
-session's earliest study day to the observation, written under every policy
-because it names no day), and `<kind>_date` (under `keep` the date; under
-`shift` the date moved by the subject's offset, so the distance holds; under
-`year` not written at all). The nearest is `clinical::nearest`, the earlier
+session's earliest study day to the observation), and `<kind>_date` (the
+date; before record 38 S3 a shift moved it by the subject's offset and a
+year-only release left it out). The nearest is `clinical::nearest`, the earlier
 of two equidistant. Kinds come from `--observation KIND`, repeatable, or by
 default the vocabulary's primary kinds. Sensitivity is a mark on the kind
 in the vocabulary (`sensitive: true`; the delivery carries it): a sensitive
@@ -614,10 +613,10 @@ kind is refused by name and left out of the default, before anything is
 planned and whatever the layout, and so is a name the registry does not
 hold. Migration 22 adds `observation_type.is_sensitive`. The release report
 counts what it wrote (`sex`, `age`, `session age`, `nearest <kind>`). The
-gate loads the vocabulary, imports two EDSS scores by subject code, releases
-a shifted BIDS tree beside the kept one, and bar 10 now compares each
-session's row with the registry's own nearest and checks that the shifted
-tree's date moved while its distance held.
+gate loads the vocabulary, imports two EDSS scores by subject code, and bar
+10 compares each session's row with the registry's own nearest. (The shifted
+BIDS tree it released beside the kept one, and the bar's check that its date
+moved while its distance held, went with the shift in record 38 S3.)
 
 ## 8. Selection
 
@@ -928,7 +927,7 @@ its clinical file imported, because there is no migration:
    cannot be written without a test failing.
 5. **A role match is an equality**, and no reader splits a comma.
 6. **The EDSS nearest each scan is the same** from the registry and from the
-   tree, under every date policy (Wave 3's deferred bar).
+   tree (Wave 3's deferred bar).
 7. **Every one of v0's thirteen import shapes** runs through the one importer,
    and a re-run changes nothing.
 8. **The review queue for the reference corpus is readable in an afternoon**,
@@ -994,7 +993,8 @@ What proves each bar:
    get past.
 5. Slice 4, §6.1: one row per axis value, and the role match is `IN`.
 6. Slice 9, §7.4: the reference gate's bar 10 compares each session's EDSS
-   with the registry's own nearest under keep and shift.
+   with the registry's own nearest (under keep and shift until record 38 S3
+   removed the shift).
 7. Slice 7, §7.2: the cohort gate runs the cohort, membership, demographics,
    disease and event files through the one importer, and the second apply
    changes nothing. The cohort's four files and the cohort row: 1

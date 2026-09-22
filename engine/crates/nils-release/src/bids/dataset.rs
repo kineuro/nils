@@ -19,9 +19,9 @@ use std::fmt::Write as _;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Participant {
     pub id: String,
-    /// Only what the policy allows out. A release that shifted dates has no
-    /// age to give unless the age was computed before the birth date went
-    /// (§8.3), and one that removed the patient categories has no sex.
+    /// Only what the policy allows out. The age is computed before the birth
+    /// date goes (§8.3), and a release that removed the patient categories
+    /// has no sex.
     pub extra: BTreeMap<String, String>,
 }
 
@@ -331,7 +331,7 @@ mod tests {
             version: "1.0.0".into(),
             dataset_version: "2026.09.05.1".into(),
             converter: Some("dcm2niix v1.0.20260724".into()),
-            policy: "dates shift, uids remap under 2.25".into(),
+            policy: "dates keep, uids remap under 2.25".into(),
             pack: "mri@0.1.0".into(),
             placements: [("localizers".to_string(), "sourcedata".to_string())].into(),
             authors: vec!["a person".to_string()],

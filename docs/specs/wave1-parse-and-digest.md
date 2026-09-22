@@ -218,8 +218,9 @@ registry's key (§7.2), and it can be backed up, exported and purged on its own
   (json), `actor`, `created_at`, `reversed_at`, `reversed_by`. Merges are logical:
   `subject_a` is canonical, `subject_b` an alias, and reversing is a column, never
   row surgery (03).
-- `date_shift`: `subject_id`, `offset_days`. Created now, filled by Wave 3's
-  anonymizer (D13).
+- ~~`date_shift`: `subject_id`, `offset_days`.~~ Created here, filled by Wave
+  3's release under a date shift, and dropped by migration 50 when record 38 S3
+  removed the shift: a release keeps the real date.
 - `read_audit`: `id`, `at`, `actor`, `identity_id`, `why`. Every command that
   decrypts an identifier writes a row.
 

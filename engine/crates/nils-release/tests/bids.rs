@@ -525,17 +525,14 @@ fn a_conversion_the_converter_refuses_is_planned_as_refused_next_time() {
 }
 
 #[test]
-fn the_tree_carries_the_clinical_layer_under_the_policy() {
+fn the_tree_carries_the_clinical_layer_with_its_real_dates() {
     // Wave 4a §7.4. participants.tsv carries the sex and the age at the
     // first session; each sessions.tsv the age at the session and the
     // nearest observation of each kind the release names, with its distance
-    // in days and, under a policy that keeps or shifts dates, its date.
-    // Under `year` the date is not written at all, and under `shift` it
-    // moves with the subject's offset, so the interval to the scan holds.
+    // in days and its date, which is the real date (record 38 S3).
     use nils_registry::clinical::{self, Vocabulary};
     use nils_registry::schema;
     use nils_registry::store::{Insert, Param};
-    use nils_release::dates;
     let Some(converter) = converter() else { return };
     let source = tree();
     let home_dir = TempDir::new("bids-home");
@@ -599,28 +596,18 @@ fn the_tree_carries_the_clinical_layer_under_the_policy() {
                 .unwrap();
         }
     }
-    // A date-labelled scheme is refused with shifted dates (Wave 3 §4.3), so
-    // the shifted and year trees label their sessions by ordinal.
+    // Record 38 S3: the date is the date, whatever labels the session. A
+    // tree whose sessions are numbered carries the same real dates in its
+    // clinical columns as one labelled by the date.
     let by_date = SessionScheme::default();
     let ordinal = SessionScheme {
         naming: nils_registry::session::Naming::Ordinal,
         ..SessionScheme::default()
     };
     let kinds = ["EDSS".to_string(), "Relapse".to_string()];
-    for policy_dates in [
-        dates::Policy::Keep,
-        dates::Policy::Shift,
-        dates::Policy::Year,
-    ] {
-        let scheme = match policy_dates {
-            dates::Policy::Keep => &by_date,
-            _ => &ordinal,
-        };
+    for (label, scheme) in [("date", &by_date), ("ordinal", &ordinal)] {
         let out = TempDir::new("bids-clinical");
-        let policy = Policy {
-            dates: policy_dates,
-            ..Policy::default()
-        };
+        let policy = Policy::default();
         let mut settings = settings(
             out.path(),
             &policy,
@@ -638,12 +625,12 @@ fn the_tree_carries_the_clinical_layer_under_the_policy() {
         let cell = |name: &str| -> Option<&str> {
             header.iter().position(|h| *h == name).map(|i| values[i])
         };
-        assert_eq!(cell("sex"), Some("F"), "{policy_dates:?}: {participants}");
-        assert_eq!(cell("age"), Some("42"), "{policy_dates:?}: {participants}");
+        assert_eq!(cell("sex"), Some("F"), "{label}: {participants}");
+        assert_eq!(cell("age"), Some("42"), "{label}: {participants}");
         let sessions = written
             .iter()
             .find(|f| f.ends_with("_sessions.tsv"))
-            .unwrap_or_else(|| panic!("{policy_dates:?}: {written:?}"));
+            .unwrap_or_else(|| panic!("{label}: {written:?}"));
         let text = std::fs::read_to_string(out.path().join(sessions)).unwrap();
         let mut lines = text.lines();
         let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
@@ -651,37 +638,17 @@ fn the_tree_carries_the_clinical_layer_under_the_policy() {
         let cell = |name: &str| -> Option<&str> {
             header.iter().position(|h| *h == name).map(|i| values[i])
         };
-        assert_eq!(cell("age"), Some("42"), "{policy_dates:?}: {text}");
-        assert_eq!(cell("edss"), Some("3.5"), "{policy_dates:?}: {text}");
-        assert_eq!(cell("edss_days"), Some("-5"), "{policy_dates:?}: {text}");
-        assert_eq!(cell("relapse"), Some("yes"), "{policy_dates:?}: {text}");
-        assert_eq!(
-            cell("relapse_days"),
-            Some("-365"),
-            "{policy_dates:?}: {text}"
-        );
-        match policy_dates {
-            dates::Policy::Keep => {
-                assert_eq!(cell("edss_date"), Some("2022-01-10"), "{text}");
-                assert_eq!(cell("relapse_date"), Some("2021-01-15"), "{text}");
-            }
-            dates::Policy::Shift => {
-                // The scan moved by the offset, and so did the observation.
-                let scan = cell("acq_time").unwrap();
-                let scan_day = nils_registry::day::Day::parse(&scan[..10]).unwrap();
-                let edss_day = nils_registry::day::Day::parse(cell("edss_date").unwrap()).unwrap();
-                assert_eq!(edss_day.to_days() - scan_day.to_days(), -5, "{text}");
-                assert_ne!(cell("edss_date"), Some("2022-01-10"), "shifted: {text}");
-            }
-            dates::Policy::Year => {
-                assert_eq!(cell("edss_date"), None, "no date under year: {text}");
-                assert_eq!(cell("relapse_date"), None, "{text}");
-            }
-        }
+        assert_eq!(cell("age"), Some("42"), "{label}: {text}");
+        assert_eq!(cell("edss"), Some("3.5"), "{label}: {text}");
+        assert_eq!(cell("edss_days"), Some("-5"), "{label}: {text}");
+        assert_eq!(cell("relapse"), Some("yes"), "{label}: {text}");
+        assert_eq!(cell("relapse_days"), Some("-365"), "{label}: {text}");
+        assert_eq!(cell("edss_date"), Some("2022-01-10"), "{label}: {text}");
+        assert_eq!(cell("relapse_date"), Some("2021-01-15"), "{label}: {text}");
         // The sensitive kind is not a column, and naming it is refused.
         assert!(
             !header.iter().any(|h| h.starts_with("delivery")),
-            "{policy_dates:?}: {text}"
+            "{label}: {text}"
         );
         assert_eq!(
             report.clinical.get("sex"),

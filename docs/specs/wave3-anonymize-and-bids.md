@@ -242,37 +242,27 @@ Every weight, the placeholder list, the year range and the epoch bounds are pack
 shaped data with defaults, exposed like every other knob (C37). "Eight digits
 that parse as a date" is a guess, and the range is what makes it reasonable.
 
-### 4.3 The UID carries the date, so the two policies are one
+### 4.3 The UID carries the date
 
-This is the finding that most changes the release, and the first draft of this
-spec had it wrong by treating UID remapping and date policy as independent.
+This section once bound the UID policy to a date policy that could shift or
+truncate the dates. **Record 38 S3 removed both of those policies** (Nima,
+2026-09-19, confirmed for release-time dates 2026-09-22): the release is
+pseudonymous, not anonymous, the date is the key the clinical layer joins on,
+and a release keeps the real date. Where a date must not show in a path, the
+session scheme labels by months since baseline (`M00`, `M06`) or by ordinal,
+which is the scheme's business and not the file's.
 
-Because a UID can embed `YYYYMMDD`, and because it is the last-resort date
-source:
+What remains of this section:
 
-- **A release that shifts or truncates dates must remap UIDs.** Otherwise the
-  true date leaves in the UID and the policy is decorative. The engine refuses
-  the combination rather than warning about it.
-- **A release that preserves UIDs may only keep dates**, and says both in its
-  report and in the dataset description.
+- **A UID may carry the date**, and it is the last-resort date source. Remapping
+  UIDs (§8.2) is about the UID itself, which names a study in the source PACS;
+  with the dates kept it no longer has a date to protect.
 - **A release always writes the date it used into the tree** (§9.4), because for
   a study whose date came from a UID, remapping the UID means the tree can never
   re-derive it.
-- **A session labelled by its date is no label for files whose dates moved**,
-  since the path would carry what the files no longer do. What happens then
-  turns on where the policy came from. **Asked for on the run itself**, by
-  `--dates shift` or `--dates year`, it is refused like the first rule and no
-  tree is written: the caller named both halves of the contradiction, and a
-  warning is read after the tree exists. **Declared by a dataset** (record 26,
-  the leaving policy), with the run giving neither `--dates` nor `--uids`, the
-  tree gives way rather than the release: the sessions are numbered in date
-  order, the release row records the scheme that named them, and the report
-  says why. Refusing there would make a declared policy one nobody could ever
-  release, and it is the registry resolving a standing rule rather than a
-  person's instruction being quietly altered. Either way the policy keeps
-  doing its work, because an ordinal label leaks no date, which is what this
-  section protects. A months or ordinal scheme named by the caller stands as
-  it is.
+- A release row written before record 38 may say its sessions were numbered in
+  date order because a dataset declared a shift (`session_naming`); it is read
+  as it stands, and nothing writes one since.
 
 ## 5. Repair three: the session scheme
 
@@ -591,12 +581,12 @@ identifiers become the subject's code under the registry's declared scheme
 Remapped, keyed, deterministically, so the same UID gives the same new UID for
 ever and two releases of overlapping selections agree. Nothing downstream needs
 the original because the join is the registry's id. `preserve_uids` is a real
-policy, defaults to off, and is constrained by §4.3.
+policy and defaults to off.
 
 It costs no table: the mapping is a function of the key, so nothing has to be
 stored and nothing can go stale. **v0 does not remap at all.** Its scrubber
 skips every element whose VR is `UI` or whose name contains "uid", so every UID
-leaves the building unchanged, which is the whole reason §4.3 exists.
+leaves the building unchanged.
 
 A UID that names a standard rather than a study, the SOP class and the transfer
 syntax, is never remapped: doing so makes the file unreadable. The file meta
@@ -611,22 +601,16 @@ answered here**; what is answered is that the default must work without one.
 
 ### 8.3 Dates
 
-The registry is never rewritten. A release declares `keep`, `shift` (one offset
-per subject, drawn once, uniform within +/- 180 days, held in `date_shift`, so
-every interval survives and the clinical layer joins as before) or `year`. Age
-at study is computed before anything is applied. §4.3 binds this to §8.2, and a
-release under `shift` or `year` refuses to write a session label that is a date.
-
-A policy moves **every** date in the file rather than a list of them, because a
-list is what goes stale and because the intervals are what a reader measures on.
-A `DT` keeps its time and moves its date. The offset is drawn from the key and
-the subject, so it is reproducible, and it is **also** stored, because it is the
-thing that undoes the policy and it belongs with the identifiers: a lost row is
-recoverable and a tampered one is detectable.
+**The date is the date** (record 38 S3). The registry is never rewritten, and a
+release writes every date as the archive holds it. The `shift` and `year`
+policies, the per-subject offset and the linkage store's `date_shift` table
+were removed with everything that served them; `nils release --dates` accepts
+`keep` alone, for a caller from before, and refuses the others in words saying
+what to do instead. Age at study is computed before the birth date goes.
 
 v0 has no date policy. Its scrubber records `StudyDate` as "retained" and moves
 on, and its fifth category removes the series, acquisition and content dates
-outright. So one v0 category becomes two things here: the dates are the policy
+outright. So one v0 category becomes two things here: the dates stay, as
 above, and what is left of the category is the **times**, which are identifying
 at a granularity nobody needs. A scan at 03:14 on a known day narrows a
 population a long way, and no interval is measured in seconds.
@@ -1081,9 +1065,9 @@ does; in `derivatives/` and in the two unofficial placements it is carried in
 
 `_sessions.tsv` has an `acq_time` column and `_scans.tsv` has one per file. The
 directory is named by the session scheme, the time is carried in the standard's
-own slot under the release's date policy, and anything joining on a date reads
-the column rather than parsing a directory name. This is the coupling of §2.1
-broken, and it is what makes §4.3's third rule cheap.
+own slot as the archive holds it, and anything joining on a date reads the
+column rather than parsing a directory name. This is the coupling of §2.1
+broken, and it is what makes §4.3's rule cheap.
 
 ### 9.5 The dataset, not just the files
 
@@ -1383,15 +1367,16 @@ against it would be a bar against being correct.
    weakening: a NIfTI is a whole stack, so its instances are the stack's, and
    saying so is more honest than naming one of them.
 8. **The de-identification does what it says**: no tag from the removed set, no
-   private tag outside the allowlist, no overlay group, no UID that appears in
-   the source, and under `shift` no date that appears in the source **including
-   inside a UID**, which is §4.3 as a test.
+   private tag outside the allowlist, no overlay group, and no UID that appears
+   in the source. (The shifted-tree half of this bar went with the shift, in
+   record 38 S3.)
 9. **Round trip and increment**: two runs over one selection agree; a run over a
    superset leaves the first run's files untouched.
 10. **The date the clinical join needs survives**: for the reference
     selections, the acquisition time in `_sessions.tsv` and `_scans.tsv` equals
-    the registry's under every date policy, which is the coupling of §2.1
-    broken and the whole of what this wave owns.
+    the registry's own, which is the coupling of §2.1 broken and the whole of
+    what this wave owns. Since record 38 S3 there is one date policy, the
+    date itself.
 
     The join itself, the EDSS nearest each scan computed both ways, **moves to
     Wave 4's gate**, because v1 has no clinical layer to join to:
@@ -1582,7 +1567,7 @@ The repairs first, because everything after them assumes a subject and a date.
 4. The four fingerprint fields (§6).
 5. The disposition, in the pack, with its corpus cases (§7).
 6. Roles and picks, carrying v0's weights (§10), and §10.1.
-7. `nils release`: selection, identifiers, UIDs, dates, with §4.3 enforced (§8).
+7. `nils release`: selection, identifiers, UIDs, dates (§8).
 8. Private tags, overlays, burned-in, the audit (§8.4, §8.5).
 9. The descriptive layout (§9.1).
 10. Versioning and the incremental re-run (§8.6).
@@ -1653,4 +1638,5 @@ before the rest is written.
    Siemens CSA headers have carried the patient name, the operator and the
    institution in shipping firmware, so an element comes back by name or not at
    all.
-7. **The default date policy per registry.** `keep` is right for KI today.
+7. ~~**The default date policy per registry.**~~ Answered by record 38 S3: a
+   release keeps the date, and there is no other policy to default to.
