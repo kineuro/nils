@@ -4,6 +4,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-alpha.37] - 2026-09-23
+
 ### Fixed
 
 - An install survives a reboot. `nils setup` wrote the units of Kvasir and the assistant as `ExecStart=/usr/bin/env node ...`, which looks Node up on the service manager's PATH, and at boot the user manager's PATH does not yet hold `~/.local/bin`, where a Node of an account's own is linked. Both services exited 127 five times and stayed down until somebody started them by hand, while after a login the same units ran, which is why no test ever saw it. Setup now finds the Node it builds them with, the first Node 22 or newer on its PATH, and every unit names it by that absolute path, as the engine, the desk, llama.cpp and the supervisor were already named; the path is kept as it was found, so a Node replaced behind its link is the one that runs. The install records it as `node`, so that an update run from a PATH with no Node on it, as a service's can be, writes the same one again, and `nils update --all` writes every unit again as it always has, so an install made before this is mended by its next update. Where no Node is left, neither on the PATH nor at the recorded path, the update says so and the unit falls back to the manager's PATH, and the supervisor's install report carries `node` with its path, whether it is still there and what to do if it is not. Units in containers are unchanged, since the image has its own Node.
