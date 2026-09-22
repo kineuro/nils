@@ -26,7 +26,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `station_name` | StationName (0008,1010) | text | quasi-identifying |  |
 | `institution_name` | InstitutionName (0008,0080) | text | quasi-identifying |  |
 
-## series (31)
+## series (32)
 
 | column | source | converter | class | note |
 |---|---|---|---|---|
@@ -40,6 +40,7 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `protocol_name` | ProtocolName (0018,1030) | text | quasi-identifying |  |
 | `series_date` | SeriesDate (0008,0021) | date | quasi-identifying |  |
 | `series_time` | SeriesTime (0008,0031) | time | quasi-identifying |  |
+| `series_number` | SeriesNumber (0020,0011) | int | technical | addition: the order the scanner gave its series, which a run- index follows after the acquisition time (record 38) |
 | `series_description` | SeriesDescription (0008,103E) | text | quasi-identifying |  |
 | `body_part_examined` | BodyPartExamined (0018,0015) | text | technical |  |
 | `burned_in_annotation` | BurnedInAnnotation (0028,0301) | text | technical | addition: what the file says about text in its own pixels (Wave 3 §8.4); v0 never reads it |
@@ -219,4 +220,4 @@ Generated from `engine/crates/nils-dicom/src/catalogue.rs` by `cargo run -p nils
 | `dwi_ge_b_value` | (0043,xx39) GEMS_PARM_01, first value | int | technical | the first of the four values |
 | `dwi_philips_b_value` | (2001,xx03) Philips Imaging DD 001, sentinel above 1e37 is null | double | technical | the sentinel above 1e37 is null (v0); bytes read as FL |
 
-177 columns.
+178 columns.

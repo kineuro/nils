@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 50;
+pub const SCHEMA_VERSION: i64 = 51;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +254,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 50,
         apply: the_date_is_the_date,
     },
+    Migration {
+        version: 51,
+        apply: a_stack_says_where_it_sits_and_when_it_was_made,
+    },
 ];
 
 /// Record 38 S3: a release keeps the real date, and the shift and year
@@ -319,6 +323,39 @@ fn the_date_is_the_date(store: &mut Store, kind: Kind) -> Result<(), Error> {
             Ok(())
         }
     }
+}
+
+/// Record 38 S2: a repeat is the same stack in the same place, identical in
+/// everything but its own acquisition time, and numbered in that order. The
+/// fingerprint gains the centre of a stack's slices, the earliest acquisition
+/// date and time of its images, its series number, the gradient directions it
+/// played and its temporal position, and a series gains the number the
+/// scanner gave it. A registry from before gains them empty; the next `nils
+/// fingerprint` derives every stack again because the derivation's revision
+/// moved with them, and a series keeps no number until its files are read
+/// again, so a `run-` index there falls back to the stack's id after the
+/// acquisition time.
+fn a_stack_says_where_it_sits_and_when_it_was_made(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(
+        store,
+        "stack_fingerprint",
+        &[
+            "slice_centre_mm",
+            "earliest_acquisition_date",
+            "earliest_acquisition_time",
+            "series_number",
+            "dwi_gradients",
+            "temporal_position",
+            "temporal_positions",
+        ],
+    )?;
+    add_columns(store, "series", &["series_number"])
 }
 
 /// Record 37 S7: which naming mode a release's names were built under. A row

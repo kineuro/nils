@@ -175,14 +175,6 @@ pub struct Report {
     pub shared_names: i64,
     pub repeats: i64,
     pub not_repeats: i64,
-    /// Record 37, S4: stacks whose name is told from its neighbour's by the
-    /// protocol text and by nothing else, counted by the DICOM keyword that
-    /// answered. **A name that rests on free text is weaker than one that
-    /// rests on a measurement**, and a person should be able to see that it
-    /// did: the `acq-` label carries a `Text` mark, this says how many and on
-    /// which element, and a review item per group says which stacks. No
-    /// protocol text is here, nor anywhere else a release writes.
-    pub named_by_text: BTreeMap<String, i64>,
     /// Stacks by the route of §9.3 they took.
     pub routes: BTreeMap<String, i64>,
     /// And, for the ones that went nowhere, why. Never a silent drop.
@@ -551,7 +543,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     let Placements {
         by_stack: named,
         shared,
-        by_text,
     } = places(registry.store(), &by_study, settings.pack, settings.naming)?;
     // §9.4 with record 37 S6: where in the body, for the sidecar, by stack.
     // The name carries it too, because two files must not overwrite each
@@ -608,16 +599,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         not_repeats: match settings.layout {
             Layout::Bids => shared.refused,
             Layout::Descriptive => 0,
-        },
-        // Record 37, S4. The BIDS names are worked out for every release, but
-        // only a BIDS tree is written under them, so only a BIDS tree has a
-        // weakness to admit to here.
-        named_by_text: match settings.layout {
-            Layout::Bids => by_text.iter().fold(BTreeMap::new(), |mut m, s| {
-                *m.entry(s.field.to_string()).or_insert(0) += s.stacks.len() as i64;
-                m
-            }),
-            Layout::Descriptive => BTreeMap::new(),
         },
         ..Report::default()
     };
@@ -1186,12 +1167,6 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
     // occasion and not of a stack, and one answer settles every functional
     // stack of it.
     ask_about_tasks(registry.store(), &report, &absent, settings)?;
-    // Record 37, S4. A name that rests on free text is weaker than one that
-    // rests on a measurement, and this is where a person is told so about the
-    // particular stacks it happened to.
-    if settings.layout == Layout::Bids {
-        ask_about_text(registry.store(), &report, &by_text)?;
-    }
     forget_plan(registry.store(), report.release_id)?;
     close_row(registry.store(), &report)?;
     report.seconds = started.elapsed().as_secs_f64();
@@ -1666,7 +1641,6 @@ fn write_dataset(
                 repeats: report.repeats,
                 refused: report.not_repeats,
             },
-            &report.named_by_text,
         ),
     )?;
 
@@ -1809,92 +1783,6 @@ fn ask_about_tasks(
         &["kind", "scope", "ref", "evidence", "status", "created_at"],
         &rows,
     )
-}
-
-/// One review item per group of stacks the protocol text alone told apart
-/// (record 37, S4).
-///
-/// **Not a refusal.** These stacks are named, and their names are unique and
-/// valid; what the item carries is the reason, because the reason is weaker
-/// than the reasons under every other name in the tree. A person who opens it
-/// sees which element answered and which stacks took a mark, and can say the
-/// two really are two things, or that the site types a different protocol name
-/// for one acquisition and the pair should have been a repeat.
-///
-/// **Once per group, not once per release**, for the reason [`raise_review`]
-/// gives: a release is re-run whenever anything upstream changes, and the same
-/// question filed again every time is a queue nobody reads.
-///
-/// The evidence holds the DICOM keyword, the stacks and the marks. **It holds
-/// no protocol text.** The whole point of the mark is that the text stays in
-/// the registry, and a review queue is read by more people than a registry is.
-fn ask_about_text(store: &mut Store, report: &Report, by_text: &[Separated]) -> Result<(), Error> {
-    if by_text.is_empty() {
-        return Ok(());
-    }
-    let asked = already_asked_about_text(store)?;
-    let now = now_iso();
-    let rows: Vec<Vec<Param>> = by_text
-        .iter()
-        .filter(|s| s.stacks.first().is_some_and(|first| !asked.contains(first)))
-        .map(|s| {
-            vec![
-                Param::from("release.named_by_text"),
-                Param::from("stack"),
-                // The group's lowest stack, because the question is about the
-                // group and a `ref` names one thing.
-                Param::from(
-                    serde_json::json!({ "stack_id": s.stacks.first().copied().unwrap_or(0) })
-                        .to_string(),
-                ),
-                Param::from(
-                    serde_json::json!({
-                        "release": report.release_id,
-                        "element": s.field,
-                        "stacks": s.stacks,
-                        "marks": s.marks,
-                        "why": "these stacks agree on every fact the engine holds and differ \
-                                only in their protocol text, so the text is what tells them \
-                                apart and the acq- label carries a mark of it rather than a \
-                                run- index; a name that rests on free text is weaker than one \
-                                that rests on a measurement",
-                    })
-                    .to_string(),
-                ),
-                Param::from("open"),
-                Param::from(now.as_str()),
-            ]
-        })
-        .collect();
-    write_rows(
-        store,
-        "review_item",
-        &["kind", "scope", "ref", "evidence", "status", "created_at"],
-        &rows,
-    )
-}
-
-/// The groups already asked about, by the stack their item names.
-fn already_asked_about_text(store: &mut Store) -> Result<std::collections::HashSet<i64>, Error> {
-    let reference = table("review_item")
-        .column("ref")
-        .expect("review_item.ref is a column");
-    let sql = format!(
-        "SELECT {} FROM {} WHERE kind = 'release.named_by_text'",
-        store.dialect().text_of(reference),
-        store.qualified("review_item"),
-    );
-    let mut asked = std::collections::HashSet::new();
-    for r in store.query(&sql, &[])? {
-        let Some(text) = r.opt_text(0)? else { continue };
-        if let Some(stack) = serde_json::from_str::<serde_json::Value>(text)
-            .ok()
-            .and_then(|v| v["stack_id"].as_i64())
-        {
-            asked.insert(stack);
-        }
-    }
-    Ok(asked)
 }
 
 /// Where a stack's files go, given the route it took (§9.3).
@@ -3213,16 +3101,21 @@ fn places(
                 {}, {}, f.n_slices, f.slice_span_mm, f.echo_time, f.repetition_time, \
                 f.flip_angle, f.echo_train_length, f.number_of_averages, \
                 f.slice_thickness, f.spacing_between_slices, {}, f.rows, f.columns, \
-                {}, {}, {}, {} \
+                {}, {}, {}, {}, \
+                {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, \
+                f.slice_centre_mm, f.field_strength_normalized, f.pixel_spacing_row, \
+                f.pixel_spacing_col, f.n_instances, f.temporal_position, \
+                f.temporal_positions, f.series_number \
          FROM {} f ORDER BY f.stack_id",
         text("orientation"),
         text("split_reason"),
         text("echo_numbers"),
         text("mr_acquisition_type"),
         text("dwi_pe_direction"),
-        // Record 37 S2: what the repeat test reads. The protocol name in the
-        // folded and lower-cased spelling, because the test compares it and
-        // never writes it, and the two backends fold the same way there.
+        // What the repeat test reads (record 37 S2, record 38). The texts in
+        // their folded and lower-cased spellings, because the test compares
+        // them and never writes them, and the two backends fold the same way
+        // there.
         text("text_protocol_name_ci"),
         text("receive_coil_name"),
         text("acquisition_matrix"),
@@ -3230,6 +3123,23 @@ fn places(
         text("scanning_sequence"),
         text("sequence_variant"),
         text("coverage_source"),
+        // 32 on: the rest of what record 38 compares, and the acquisition time
+        // `run-` is numbered by.
+        text("text_series_description_ci"),
+        text("text_sequence_name_ci"),
+        text("text_body_part_ci"),
+        text("text_contrast_ci"),
+        text("image_type"),
+        text("modality"),
+        text("manufacturer"),
+        text("manufacturer_model_name"),
+        text("station_name"),
+        text("image_orientation_patient"),
+        text("dwi_b_values"),
+        text("pixel_bandwidth"),
+        text("dwi_gradients"),
+        text("earliest_acquisition_date"),
+        text("earliest_acquisition_time"),
         store.qualified("stack_fingerprint"),
     );
 
@@ -3250,8 +3160,9 @@ fn places(
     // unique in, which for BIDS is the datatype and not a directory per stack.
     let mut bids: HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>> =
         HashMap::new();
-    // Ordered by series, then by the stack's index in it, then by its id, so
-    // that two runs of one version assign the same `run-` numbers.
+    // Ordered by the stack's earliest acquisition, then its series number,
+    // then its id (record 38, S2), so that `run-1` is the one made first and
+    // two runs of one version assign the same numbers.
     let mut bids_buckets: BidsBuckets = BTreeMap::new();
     let mut extra: HashMap<i64, (bool, Option<String>, Option<String>)> = HashMap::new();
     // Record 37 S2: what the repeat test reads of each stack, kept for the
@@ -3378,6 +3289,8 @@ fn places(
                 body_part.clone(),
             ),
         );
+        let acquired_date = r.opt_text(45)?.map(str::to_string);
+        let acquired_time = r.opt_text(46)?.map(str::to_string);
         // Record 37 S2. Every axis the pack decided, not only the ones a name
         // spells: the point of the test is to ask whether two stacks are one
         // acquisition, and an axis that does not reach a filename still says
@@ -3390,6 +3303,7 @@ fn places(
                 coverage: nils_classify::coverage::Coverage {
                     n_slices: r.opt_int(16)?,
                     span_mm: r.opt_double(17)?,
+                    centre_mm: r.opt_double(47)?,
                     source: match r.opt_text(31)? {
                         Some(t) => nils_classify::coverage::Source::parse(t),
                         None => nils_classify::coverage::Source::Unmeasured,
@@ -3397,6 +3311,34 @@ fn places(
                 },
                 coil: r.opt_text(15)?.map(str::to_string),
                 protocol: r.opt_text(14)?.map(str::to_string),
+                description: r.opt_text(32)?.map(str::to_string),
+                sequence_name: r.opt_text(33)?.map(str::to_string),
+                body_part: r.opt_text(34)?.map(str::to_string),
+                contrast: r.opt_text(35)?.map(str::to_string),
+                image_type: r.opt_text(36)?.map(str::to_string),
+                modality: r.opt_text(37)?.map(str::to_string),
+                manufacturer: r.opt_text(38)?.map(str::to_string),
+                model: r.opt_text(39)?.map(str::to_string),
+                station: r.opt_text(40)?.map(str::to_string),
+                orientation: r.opt_text(6)?.map(str::to_string),
+                cosines: r.opt_text(41)?.map(str::to_string),
+                b_values: r.opt_text(42)?.map(str::to_string),
+                pixel_bandwidth: r.opt_text(43)?.and_then(|v| v.trim().parse().ok()),
+                gradients: r.opt_text(44)?.map(str::to_string),
+                acquired_date: acquired_date.clone(),
+                acquired_time: acquired_time.clone(),
+                field_strength: r.opt_double(48)?,
+                pixel_spacing_row: r.opt_double(49)?,
+                pixel_spacing_col: r.opt_double(50)?,
+                images: r.opt_int(51)?,
+                temporal_position: r.opt_int(52)?,
+                temporal_positions: r.opt_int(53)?,
+                echo_numbers: r.opt_text(8)?.map(str::to_string),
+                acquisition_type: r.opt_text(9)?.map(str::to_string),
+                directions: r.opt_int(13)?,
+                pe_direction: r.opt_text(10)?.map(str::to_string),
+                split_reason: r.opt_text(7)?.map(str::to_string),
+                stacks_in_series: r.opt_int(4)?,
                 echo_time: r.opt_double(18)?,
                 repetition_time: r.opt_double(19)?,
                 inversion_time: r.opt_double(11)?,
@@ -3418,7 +3360,17 @@ fn places(
             bids_buckets
                 .entry((subject, label.clone(), n.datatype))
                 .or_default()
-                .push((r.int(3)?, r.int(5)?, stack, n.stem("s", "s")));
+                .push((
+                    (
+                        acquired_time.is_none(),
+                        acquired_date.clone().unwrap_or_default(),
+                        acquired_time.clone().unwrap_or_default(),
+                        r.opt_int(54)?.is_none(),
+                        r.opt_int(54)?.unwrap_or(0),
+                    ),
+                    stack,
+                    n.stem("s", "s"),
+                ));
         }
         bids.insert(stack, built);
 
@@ -3438,14 +3390,6 @@ fn places(
             });
     }
 
-    // Record 37, S4, and **before** `run-` is considered at all. Where two
-    // stacks want one name and everything NILS holds about them agrees, the
-    // protocol text is the only thing left, and it names them apart instead
-    // of one of them being written down as a repeat of the other. Last among
-    // the facts, and so first among the answers: a group the text does not
-    // separate falls through to the rule below exactly as it did before.
-    let by_text = separate_by_text(store, &axes, &mut bids, &mut bids_buckets)?;
-
     // Record 37 S2. Where two stacks of one subject, session and datatype
     // build one name, `run-` is written only when they are measurably one
     // acquisition done twice (`bids::repeat`). Where they are not, no name is
@@ -3457,13 +3401,14 @@ fn places(
     // name that covered more than one acquisition. A `run-2` that is really a
     // different echo time is a claim no validator can catch.
     //
-    // In a fixed order, so that two runs of one version agree: by series, then
-    // by the stack's index in it, then by its id.
+    // In a fixed order, so that `run-1` is the one made first and two runs of
+    // one version agree: by the earliest acquisition, then by the series
+    // number, then by the stack's id.
     let mut shared = Shared::default();
     for bucket in bids_buckets.values_mut() {
         bucket.sort();
         let mut groups: BTreeMap<&String, Vec<i64>> = BTreeMap::new();
-        for (_, _, stack, stem) in bucket.iter() {
+        for (_, stack, stem) in bucket.iter() {
             groups.entry(stem).or_default().push(*stack);
         }
         for (_, group) in groups.iter().filter(|(_, g)| g.len() > 1) {
@@ -3491,15 +3436,7 @@ fn places(
                         .to_string(),
                 )
             } else if !differs.is_empty() {
-                let mut said = differs.clone();
-                let last = said.pop().unwrap_or_default();
-                Some(format!(
-                    "they are not repeats of one another: {}",
-                    match said.is_empty() {
-                        true => format!("{last} differs"),
-                        false => format!("{} and {last} differ", said.join(", ")),
-                    }
-                ))
+                Some(crate::bids::repeat::why(&differs))
             } else if !admits_run {
                 Some(format!(
                     "they are one acquisition measured {} times, and BIDS gives this suffix no \
@@ -3570,17 +3507,14 @@ fn places(
     Ok(Placements {
         by_stack: out,
         shared,
-        by_text,
     })
 }
 
-/// What [`places`] worked out for a run: where every stack goes, what the
-/// collision test of record 37 S2 found, and the groups record 37 S4 had to
-/// tell apart by their protocol text.
+/// What [`places`] worked out for a run: where every stack goes, and what the
+/// collision test of record 37 S2 found.
 struct Placements {
     by_stack: HashMap<i64, Placed>,
     shared: Shared,
-    by_text: Vec<Separated>,
 }
 
 /// What the collision test of record 37 S2 found, for the report and the
@@ -3618,121 +3552,21 @@ struct SharedGroup {
     why: String,
 }
 
-/// The stacks of one subject, session and datatype, ordered by series, then by
-/// the stack's index in it, then by its id, each with the stem it wants. The
-/// order is fixed so that two runs of one version assign the same names.
-type Ordered = Vec<(i64, i64, i64, String)>;
+/// The stacks of one subject, session and datatype, ordered by when they
+/// were made, then by series number, then by id, each with the stem it
+/// wants. The order is fixed so that two runs of one version assign the same
+/// names.
+type Ordered = Vec<(When, i64, String)>;
+
+/// Where a stack falls in the order `run-` is numbered in (record 38, S2):
+/// whether its acquisition time is unknown, its earliest acquisition date and
+/// time, whether its series number is unknown, and the number. A stack whose
+/// images carried no time comes after every one that did, and a series with
+/// no number after every one with one; the stack's id settles the rest.
+type When = (bool, String, String, bool, i64);
 
 /// Those, by the directory a name has to be unique in.
 type BidsBuckets = BTreeMap<(i64, String, &'static str), Ordered>;
-
-/// One group of stacks that wanted one name and whose protocol text is all
-/// that separates them (record 37, S4).
-///
-/// The field is a DICOM keyword, which names an element and nobody, and the
-/// stacks are registry ids. **No protocol text is in here**, because this is
-/// carried into the report and into a review item.
-#[derive(Debug, Clone)]
-struct Separated {
-    field: &'static str,
-    stacks: Vec<i64>,
-    /// The mark each of those stacks took, in the same order: a digest of the
-    /// text and never the text, so a person can find the files in the tree
-    /// without the queue carrying what a console recorded.
-    marks: Vec<String>,
-}
-
-/// Name apart the groups that only their protocol text separates, and say
-/// which groups those were (record 37, S4).
-///
-/// The order this keeps is the point of the slice. It is asked about a group
-/// only once that group has been given every name the axes, the identities
-/// and the entities can give it, and [`protocol::separates`] then refuses to
-/// answer unless everything else the fingerprint holds agrees as well. So the
-/// text can separate only what nothing else does.
-///
-/// **All or nothing per group.** Either every member takes its mark or none
-/// does: half a partition would be a tree naming two of three stacks apart
-/// and leaving the third as a repeat of whichever it landed beside, which is
-/// a claim nobody could read back. A group that cannot be named apart, because
-/// its suffix admits no `acq-`, falls through untouched to the `run-` rule.
-fn separate_by_text(
-    store: &mut Store,
-    axes: &HashMap<i64, BTreeMap<String, String>>,
-    bids: &mut HashMap<i64, Result<crate::bids::name::Name, crate::bids::name::Why>>,
-    buckets: &mut BidsBuckets,
-) -> Result<Vec<Separated>, Error> {
-    use crate::bids::protocol;
-
-    // The stacks that want one name, which are the only ones this question is
-    // about.
-    let mut wanted: Vec<i64> = Vec::new();
-    for bucket in buckets.values() {
-        let mut counts: BTreeMap<&String, i64> = BTreeMap::new();
-        for (_, _, _, stem) in bucket.iter() {
-            *counts.entry(stem).or_insert(0) += 1;
-        }
-        for (_, _, stack, stem) in bucket.iter() {
-            if counts.get(stem).copied().unwrap_or(0) > 1 {
-                wanted.push(*stack);
-            }
-        }
-    }
-    if wanted.is_empty() {
-        return Ok(Vec::new());
-    }
-    wanted.sort_unstable();
-    let stacks = protocol::read(store, axes, &wanted)?;
-
-    let mut out: Vec<Separated> = Vec::new();
-    for bucket in buckets.values_mut() {
-        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for (i, (_, _, _, stem)) in bucket.iter().enumerate() {
-            groups.entry(stem.clone()).or_default().push(i);
-        }
-        for members in groups.values() {
-            if members.len() < 2 {
-                continue;
-            }
-            let facts: Option<Vec<&protocol::Stack>> =
-                members.iter().map(|i| stacks.get(&bucket[*i].2)).collect();
-            let Some(facts) = facts else { continue };
-            let Some(separation) = protocol::separates(&facts) else {
-                continue;
-            };
-            let named: Option<Vec<crate::bids::name::Name>> = members
-                .iter()
-                .zip(&separation.marks)
-                .map(|(i, mark)| {
-                    bids.get(&bucket[*i].2)
-                        .and_then(|b| b.as_ref().ok())
-                        .and_then(|n| n.with_text(mark))
-                })
-                .collect();
-            let Some(named) = named else { continue };
-            for (i, name) in members.iter().zip(named) {
-                let stack = bucket[*i].2;
-                // The stem is what the `run-` rule below counts collisions
-                // with, so it moves with the name or the two would disagree.
-                bucket[*i].3 = name.stem("s", "s");
-                bids.insert(stack, Ok(name));
-            }
-            let mut pairs: Vec<(i64, String)> = members
-                .iter()
-                .zip(&separation.marks)
-                .map(|(i, mark)| (bucket[*i].2, mark.clone()))
-                .collect();
-            pairs.sort();
-            out.push(Separated {
-                field: separation.field.keyword(),
-                stacks: pairs.iter().map(|(stack, _)| *stack).collect(),
-                marks: pairs.into_iter().map(|(_, mark)| mark).collect(),
-            });
-        }
-    }
-    out.sort_by(|a, b| a.stacks.cmp(&b.stacks));
-    Ok(out)
-}
 
 /// Where one stack goes, in both layouts (§9).
 ///

@@ -437,6 +437,14 @@ pub static CATALOGUE: &[Field] = &[
     f("series_date", Series, T(tags::SERIES_DATE), Date, Quasi, ""),
     f("series_time", Series, T(tags::SERIES_TIME), Time, Quasi, ""),
     f(
+        "series_number",
+        Series,
+        T(tags::SERIES_NUMBER),
+        Int,
+        Tech,
+        "addition: the order the scanner gave its series, which a run- index follows after the acquisition time (record 38)",
+    ),
+    f(
         "series_description",
         Series,
         T(tags::SERIES_DESCRIPTION),
@@ -1763,7 +1771,7 @@ mod tests {
         let count = |l: Level| CATALOGUE.iter().filter(|f| f.level == l).count();
         assert_eq!(count(Subject), 2);
         assert_eq!(count(Study), 12);
-        assert_eq!(count(Series), 31);
+        assert_eq!(count(Series), 32);
         // Wave 3 §6 moved the seven diffusion values that vary from one image
         // of a series to the next: a b value, a gradient orientation and a
         // directionality are per image by design, and keeping one per series
@@ -1773,7 +1781,7 @@ mod tests {
         assert_eq!(count(SeriesMr), 32);
         assert_eq!(count(SeriesCt), 24);
         assert_eq!(count(SeriesPet), 29);
-        assert_eq!(CATALOGUE.len(), 177);
+        assert_eq!(CATALOGUE.len(), 178);
     }
 
     #[test]
@@ -1862,6 +1870,6 @@ mod tests {
         ));
         let md = render_markdown();
         assert!(md.contains("## series_mr (32, MR only)"));
-        assert!(md.contains("177 columns."));
+        assert!(md.contains("178 columns."));
     }
 }

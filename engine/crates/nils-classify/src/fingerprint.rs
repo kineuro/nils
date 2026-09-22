@@ -20,7 +20,9 @@ use crate::{coverage, derived, dwi, fold};
 ///
 /// 1: record 37, S1. The coverage and the acquisition matrix.
 /// 2: record 37, S3. The receive coil.
-pub const REVISION: i64 = 2;
+/// 3: record 38, S2. The centre of the slices, the earliest acquisition, the
+///    series number, the gradient directions and the temporal position.
+pub const REVISION: i64 = 3;
 
 /// The stack's own columns, in the order the select reads them.
 const STACK: &[&str] = &[
@@ -73,6 +75,8 @@ const SERIES: &[&str] = &[
     "contrast_bolus_volume",
     "contrast_flow_rate",
     "contrast_flow_duration",
+    // Record 38 S2: the order a `run-` index follows after the time.
+    "series_number",
 ];
 
 /// The MR detail columns, absent for a CT or PET stack.
@@ -99,6 +103,9 @@ const MR: &[&str] = &[
     // Record 37 S1: the rest of the geometry. The matrix is the only one of
     // the four the survey names that the fingerprint did not already hold.
     "acquisition_matrix",
+    // Record 38 S2: where in a dynamic the series is, and of how many.
+    "temporal_position_identifier",
+    "number_of_temporal_positions",
 ];
 
 const STUDY: &[&str] = &["manufacturer", "manufacturer_model_name", "station_name"];
@@ -170,6 +177,13 @@ pub const WRITTEN: &[&str] = &[
     "coverage_source",
     "acquisition_matrix",
     "receive_coil_name",
+    "slice_centre_mm",
+    "earliest_acquisition_date",
+    "earliest_acquisition_time",
+    "series_number",
+    "dwi_gradients",
+    "temporal_position",
+    "temporal_positions",
     "fingerprint_revision",
     "manufacturer",
     "manufacturer_model_name",
@@ -313,6 +327,85 @@ pub fn select_positions(store: &Store) -> String {
     )
 }
 
+/// The earliest acquisition time of every stack in the window, per
+/// acquisition date (record 38, S2).
+///
+/// Grouped by date so that a session running past midnight is ordered by the
+/// day before the hour: the caller takes the earliest date and that date's
+/// earliest time ([`earliest`]). One row per stack and date, so a stack of a
+/// thousand images returns one. An image that carries no acquisition time
+/// contributes nothing, and a stack whose images all carry none has no row.
+pub fn select_acquired(store: &Store) -> String {
+    let (date, time) = match store.dialect() {
+        nils_registry::dialect::Dialect::Postgres => (
+            "acquisition_date::text".to_string(),
+            "to_char(MIN(acquisition_time), 'HH24:MI:SS.US')".to_string(),
+        ),
+        nils_registry::dialect::Dialect::Sqlite => (
+            "acquisition_date".to_string(),
+            "MIN(acquisition_time)".to_string(),
+        ),
+    };
+    format!(
+        "SELECT stack_id, {date}, {time} FROM {} \
+         WHERE stack_id > {} AND stack_id <= {} AND acquisition_time IS NOT NULL \
+         GROUP BY stack_id, acquisition_date ORDER BY stack_id",
+        store.qualified("instance"),
+        store.dialect().param(1, Type::Int),
+        store.dialect().param(2, Type::Int),
+    )
+}
+
+/// One row of [`select_acquired`]: an acquisition date, if the images had
+/// one, and the earliest time on it.
+pub type AcquiredOn = (Option<String>, String);
+
+/// When a stack's images were first acquired, as the fingerprint writes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Acquired {
+    /// `YYYY-MM-DD`, or nothing where the images carried a time and no date.
+    pub date: Option<String>,
+    /// `HH:MM:SS.ffffff`, the fraction always written, so that two backends
+    /// and two spellings of one instant compare as one string.
+    pub time: Option<String>,
+}
+
+/// The earliest of a stack's `(date, earliest time that date)` rows: the
+/// earliest date, and that date's time. A row with no date comes after every
+/// dated one, because a time without its day cannot be placed before one
+/// that has it.
+pub fn earliest(rows: &[AcquiredOn]) -> Acquired {
+    let best = rows
+        .iter()
+        .min_by(|a, b| (a.0.is_none(), &a.0, pad(&a.1)).cmp(&(b.0.is_none(), &b.0, pad(&b.1))));
+    match best {
+        Some((date, time)) => Acquired {
+            date: date.clone(),
+            time: Some(pad(time)),
+        },
+        None => Acquired::default(),
+    }
+}
+
+/// A time with its fraction written out to six digits, which is the spelling
+/// Postgres hands back and the one that sorts as a string.
+fn pad(time: &str) -> String {
+    let time = time.trim();
+    match time.split_once('.') {
+        Some((hms, fraction)) => format!("{hms}.{:0<6}", &fraction[..fraction.len().min(6)]),
+        None => format!("{time}.000000"),
+    }
+}
+
+/// What a stack's own images say about where and when it was made: the
+/// coverage of record 37 S1, with its centre, and the earliest acquisition of
+/// record 38 S2.
+#[derive(Debug, Clone, Default)]
+pub struct Seen {
+    pub cover: coverage::Coverage,
+    pub acquired: Acquired,
+}
+
 /// The stack ids in the window that already have a fingerprint agreeing with
 /// the stack's instance count, written by this derivation. A stack that
 /// gained instances since is stale and is derived again, and so is a row a
@@ -405,7 +498,7 @@ pub fn derive(
     first: &First,
     split_reason: Option<&str>,
     images: &[dwi::Image],
-    cover: &coverage::Coverage,
+    seen: &Seen,
     job_id: i64,
     epoch: i64,
 ) -> Result<Vec<Param>, Error> {
@@ -554,11 +647,20 @@ pub fn derive(
         num(aspect),
         // Record 37 S1. The count is of positions and not of images, and the
         // source says which of those two sentences is the true one here.
-        int(cover.n_slices),
-        num(cover.span_mm),
-        opt(Some(cover.source.name().to_string())),
+        int(seen.cover.n_slices),
+        num(seen.cover.span_mm),
+        opt(Some(seen.cover.source.name().to_string())),
         opt(text(r, E + 13)?), // acquisition_matrix
         opt(text(r, 16)?),     // receive_coil_name
+        // Record 38 S2. Where the stack sits along the slice normal, and when
+        // its first image was made.
+        num(seen.cover.centre_mm),
+        opt(seen.acquired.date.clone()),
+        opt(seen.acquired.time.clone()),
+        int(opt_int(r, S + 24)?), // series_number
+        opt(dwi::gradients(images)),
+        int(opt_int(r, E + 14)?), // temporal_position_identifier
+        int(opt_int(r, E + 15)?), // number_of_temporal_positions
         Param::Int(REVISION),
         opt(text(r, M)?),     // manufacturer
         opt(text(r, M + 1)?), // manufacturer_model_name
@@ -709,7 +811,7 @@ pub fn same(a: &nils_registry::store::Cell, b: &nils_registry::store::Cell) -> b
 
 #[cfg(test)]
 mod split_tests {
-    use super::split_reason;
+    use super::{Acquired, earliest, split_reason};
     use std::collections::BTreeSet;
 
     fn of(names: &[&str]) -> Option<&'static str> {
@@ -742,5 +844,27 @@ mod split_tests {
         assert_eq!(of(&["kvp", "tube_current"]), Some("multi_parameter"));
         assert_eq!(of(&["repetition_time"]), Some("multi_stack"));
         assert_eq!(of(&[]), Some("multi_stack"));
+    }
+
+    #[test]
+    fn the_earliest_acquisition_is_the_earliest_day_and_its_earliest_hour() {
+        let rows = vec![
+            (Some("2022-01-16".to_string()), "00:10:00".to_string()),
+            (Some("2022-01-15".to_string()), "23:50:00.5".to_string()),
+            (None, "00:01:00".to_string()),
+        ];
+        assert_eq!(
+            earliest(&rows),
+            Acquired {
+                date: Some("2022-01-15".to_string()),
+                time: Some("23:50:00.500000".to_string()),
+            }
+        );
+        // a time with no day is used only where no image had a day
+        assert_eq!(
+            earliest(&rows[2..]).time.as_deref(),
+            Some("00:01:00.000000")
+        );
+        assert_eq!(earliest(&[]), Acquired::default());
     }
 }

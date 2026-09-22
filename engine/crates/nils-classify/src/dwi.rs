@@ -403,6 +403,17 @@ fn directions(images: &[Image], stack: &Stack) -> (Option<i64>, &'static str) {
     // values are for. The unweighted volumes carry no direction and are left
     // out, which is what makes this the number of directions rather than the
     // number of volumes.
+    let vectors = vectors(images);
+    if !vectors.is_empty() {
+        return (Some(vectors.len() as i64), "gradients");
+    }
+    (in_text_directions(stack.text.unwrap_or("")), "text")
+}
+
+/// The distinct gradient directions the weighted images of a stack played,
+/// each rounded to four places so that two images of one direction are one
+/// direction and not two. The unweighted volumes carry no direction.
+fn vectors(images: &[Image]) -> BTreeSet<Vec<i64>> {
     let mut vectors: BTreeSet<Vec<i64>> = BTreeSet::new();
     for i in images {
         if i.unweighted() {
@@ -416,8 +427,6 @@ fn directions(images: &[Image], stack: &Stack) -> (Option<i64>, &'static str) {
         if parts.len() != 3 || parts.iter().all(|p| p.abs() <= 0.001) {
             continue;
         }
-        // Rounded to four places before comparing, so that two images of one
-        // direction are one direction and not two.
         vectors.insert(
             parts
                 .iter()
@@ -425,10 +434,34 @@ fn directions(images: &[Image], stack: &Stack) -> (Option<i64>, &'static str) {
                 .collect(),
         );
     }
-    if !vectors.is_empty() {
-        return (Some(vectors.len() as i64), "gradients");
+    vectors
+}
+
+/// Which gradient directions a stack played, written out so two stacks can be
+/// compared (record 38, S2): each direction as `x,y,z` to four places, the
+/// directions sorted and joined by `;`. Nothing where no weighted image
+/// stored a direction.
+///
+/// The count alone is not enough. Readout-segmented diffusion is stored by
+/// some scanners as one series per direction, dozens of them in one session,
+/// alike in every other fact the fingerprint holds: each plays one direction,
+/// and which one is the only thing that tells them apart.
+pub fn gradients(images: &[Image]) -> Option<String> {
+    let vectors = vectors(images);
+    if vectors.is_empty() {
+        return None;
     }
-    (in_text_directions(stack.text.unwrap_or("")), "text")
+    let place = |v: i64| {
+        let sign = if v < 0 { "-" } else { "" };
+        format!("{sign}{}.{:04}", v.abs() / 10_000, v.abs() % 10_000)
+    };
+    Some(
+        vectors
+            .iter()
+            .map(|v| v.iter().map(|p| place(*p)).collect::<Vec<_>>().join(","))
+            .collect::<Vec<_>>()
+            .join(";"),
+    )
 }
 
 /// A direction count written into a name: `32 directions`, `dir32`, and the
@@ -770,5 +803,22 @@ mod tests {
             assert_eq!(d.pe_direction.as_deref(), Some("PA"), "{iop}");
             assert_eq!(d.pe_direction_source.as_deref(), Some("text"));
         }
+    }
+
+    #[test]
+    fn the_directions_a_stack_played_are_written_out_to_be_compared() {
+        let image = |g: &str| Image {
+            gradient: Some(g.into()),
+            ..Image::default()
+        };
+        let one = [
+            image("0.70710678\\0.70710678\\0"),
+            image("0.7071\\0.7071\\0.0"),
+        ];
+        assert_eq!(gradients(&one).as_deref(), Some("0.7071,0.7071,0.0000"));
+        let other = [image("-1\\0\\0")];
+        assert_eq!(gradients(&other).as_deref(), Some("-1.0000,0.0000,0.0000"));
+        assert_ne!(gradients(&one), gradients(&other));
+        assert_eq!(gradients(&[Image::default()]), None);
     }
 }

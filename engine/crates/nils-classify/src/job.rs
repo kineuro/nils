@@ -211,6 +211,7 @@ fn run(
     let select_first = fingerprint::select_first_instances(store);
     let select_diffusion = fingerprint::select_diffusion(store);
     let select_positions = fingerprint::select_positions(store);
+    let select_acquired = fingerprint::select_acquired(store);
     let select_fresh = fingerprint::select_fresh(store);
     let table = fingerprint::fingerprint_table();
     let overwritten = fingerprint::overwritten();
@@ -292,6 +293,22 @@ fn run(
             }
         }
 
+        // When each stack of the window was first acquired (record 38, S2),
+        // as one row per stack and acquisition date; `earliest` picks the
+        // day and its hour.
+        let mut acquired: Vec<(i64, Vec<fingerprint::AcquiredOn>)> = Vec::new();
+        for r in store.query(&select_acquired, &[Param::Int(after), Param::Int(last)])? {
+            let stack_id = r.int(0)?;
+            let Some(time) = r.opt_text(2)?.map(str::to_string) else {
+                continue;
+            };
+            let row = (r.opt_text(1)?.map(str::to_string), time);
+            match acquired.last_mut() {
+                Some((id, rows)) if *id == stack_id => rows.push(row),
+                _ => acquired.push((stack_id, vec![row])),
+            }
+        }
+
         // Why each multi-stack series in this window split. v0 stores this on
         // the stack and then never reads it (spikes/pack, finding 1); it is a
         // fact about the series, so it is derived here and a pack reads it.
@@ -322,14 +339,22 @@ fn run(
                 .binary_search_by_key(&stack_id, |(id, _)| *id)
                 .map(|i| diffusion[i].1.as_slice())
                 .unwrap_or(&[]);
-            let cover = coverage::of(
-                positions
-                    .binary_search_by_key(&stack_id, |(id, _)| *id)
-                    .map(|i| positions[i].1.as_slice())
-                    .unwrap_or(&[]),
-            );
+            let seen = fingerprint::Seen {
+                cover: coverage::of(
+                    positions
+                        .binary_search_by_key(&stack_id, |(id, _)| *id)
+                        .map(|i| positions[i].1.as_slice())
+                        .unwrap_or(&[]),
+                ),
+                acquired: fingerprint::earliest(
+                    acquired
+                        .binary_search_by_key(&stack_id, |(id, _)| *id)
+                        .map(|i| acquired[i].1.as_slice())
+                        .unwrap_or(&[]),
+                ),
+            };
             params.push(fingerprint::derive(
-                r, first, reason, images, &cover, job_id, epoch,
+                r, first, reason, images, &seen, job_id, epoch,
             )?);
         }
 

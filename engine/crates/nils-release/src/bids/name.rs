@@ -355,52 +355,6 @@ impl Name {
         }
     }
 
-    /// Add the mark of a protocol text to `acq-` (record 37, S4).
-    ///
-    /// The **last** thing a name is allowed to say. Every axis and every
-    /// identity is already in the label by the time this is called, and it is
-    /// called only where two stacks agree on all of them and on every
-    /// measurement the fingerprint holds, so the mark goes at the end of the
-    /// label where the weakest fact belongs and where a reader meets it last.
-    ///
-    /// It fails where the group admits no `acq-`, which is how a caller learns
-    /// that this name cannot carry the one thing that separates it. Nothing is
-    /// forced: a fact the grammar has no room for is said elsewhere rather
-    /// than written into a name the standard would refuse.
-    pub fn with_text(&self, mark: &str) -> Option<Name> {
-        let group = schema::group_of(self.datatype, self.suffix)?;
-        if !group.allowed.contains(&"acquisition") {
-            return None;
-        }
-        let mut label = self
-            .entities
-            .iter()
-            .find(|(k, _)| *k == "acquisition")
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default();
-        label.push_str(mark);
-        if !schema::admits("acquisition", &label) {
-            return None;
-        }
-        let mut have: Vec<(&'static str, String)> = self
-            .entities
-            .iter()
-            .filter(|(k, _)| *k != "acquisition")
-            .cloned()
-            .collect();
-        have.push(("acquisition", label));
-        let mut out = self.clone();
-        out.entities = schema::ENTITIES
-            .iter()
-            .filter_map(|e| {
-                have.iter()
-                    .find(|(k, _)| *k == e.key)
-                    .map(|(k, v)| (*k, v.clone()))
-            })
-            .collect();
-        Some(out)
-    }
-
     /// Add `run-<n>`, which is the standard's word for one acquisition made
     /// again.
     ///
@@ -842,39 +796,6 @@ mod tests {
                 .stem("x", "1"),
             "sub-x_ses-1_acq-MPRAGEMagDTIRecon_rec-DTIRecon_part-mag_T1w"
         );
-    }
-
-    #[test]
-    fn the_mark_of_a_protocol_text_goes_last_in_the_label() {
-        // Record 37, S4. The weakest fact a name carries, so it is written
-        // where a reader meets it last, after every axis the pack decided.
-        let n = build(&t1w(), &mapping(), Naming::Bids).unwrap();
-        assert_eq!(
-            n.with_text("Text9f3ac1").unwrap().stem("x", "1"),
-            "sub-x_ses-1_acq-Text9f3ac1_T1w"
-        );
-        // Record 37 S6 moved the orientation into the axes the pack declares,
-        // so the test says it where a stack now says it.
-        let facts = Facts {
-            technique: Some("MPRAGE"),
-            axes: axes(&[("technique", "MPRAGE"), ("orientation", "Ax")]),
-            ..t1w()
-        };
-        let n = build(&facts, &mapping(), Naming::Bids).unwrap();
-        let with = n.with_text("Text9f3ac1").unwrap();
-        let label = with
-            .entities
-            .iter()
-            .find(|(k, _)| *k == "acquisition")
-            .map(|(_, v)| v.clone())
-            .unwrap();
-        assert!(label.ends_with("Text9f3ac1"), "{label}");
-        assert!(
-            label.starts_with(&acq_label(&facts, &mapping(), Naming::Bids)),
-            "and everything the axes said is still in front of it: {label}"
-        );
-        // A mark the grammar would refuse is not forced into a name.
-        assert_eq!(n.with_text("not a label"), None);
     }
 
     #[test]

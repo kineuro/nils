@@ -769,6 +769,25 @@ fn build_registry() -> Vec<Table> {
                 // stack's own row and never the series', because the series
                 // holds one of the coils its stacks were split over.
                 col("receive_coil_name", Type::Text),
+                // Record 38 S2: what a repeat is compared on that the row did
+                // not hold. The centre of the slice positions along the slice
+                // normal, because two stations of one prescription agree on
+                // the count and the extent and differ only in place. The
+                // earliest acquisition date and time of the stack's images,
+                // because a rescan is made at its own moment and `run-`
+                // follows that order, then the series number. The gradient
+                // directions the stack played, because readout-segmented
+                // diffusion stored one series per direction is alike in
+                // everything else. And the temporal position of the series
+                // and how many there are, because a dynamic stored one series
+                // per time point is too.
+                col("slice_centre_mm", Type::Double),
+                col("earliest_acquisition_date", Type::Date),
+                col("earliest_acquisition_time", Type::Time),
+                col("series_number", Type::Int),
+                col("dwi_gradients", Type::Text),
+                col("temporal_position", Type::Int),
+                col("temporal_positions", Type::Int),
                 // Which derivation wrote the row. The fingerprint is a cache
                 // of the registry's own columns, so a build that learned a
                 // new fact has to rewrite what an older one left: a row

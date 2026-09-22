@@ -29,6 +29,15 @@
 //!    [`SAME_SPAN_MM`] and [`SAME_SPAN_FRACTION`] of the larger. Where either
 //!    side never measured a coverage, nothing differs, because an absence is
 //!    not a difference.
+//!
+//! **Where, as well as how much** (record 38, S2). A count and an extent say
+//! how much ground a stack covers and not which ground: two stations of a
+//! spine, or of a body, are one prescription placed twice, and they share
+//! every parameter, the count and the extent included. So a coverage also
+//! carries its centre, the midpoint of the same positions, and [`moved`] says
+//! whether two stacks sit in measurably different places along the slice
+//! normal. Its tolerance is the wider of [`SAME_SPAN_MM`] and half a slice
+//! step ([`moved`] says why), and an absence is again not a difference.
 
 /// Two slice positions no further apart than this are the same slice.
 pub const SAME_POSITION_MM: f64 = 0.01;
@@ -78,6 +87,11 @@ pub struct Coverage {
     /// The distance from the first slice to the last, in millimetres. Zero
     /// for a stack of one slice, which is a fact and not a hole.
     pub span_mm: Option<f64>,
+    /// The midpoint of the first slice and the last, in the same frame as
+    /// the positions: where along the slice normal the stack sits (record 38,
+    /// S2). Only a comparison between two stacks of one session means
+    /// anything; the number alone is a coordinate of one scanner's table.
+    pub centre_mm: Option<f64>,
     pub source: Source,
 }
 
@@ -101,10 +115,12 @@ pub fn of(positions: &[f64]) -> Coverage {
             last = *v;
         }
     }
-    let span = values[values.len() - 1] - values[0];
+    let (low, high) = (values[0], values[values.len() - 1]);
+    let hundredths = |v: f64| (v * 100.0).round() / 100.0;
     Coverage {
         n_slices: Some(n),
-        span_mm: Some((span * 100.0).round() / 100.0),
+        span_mm: Some(hundredths(high - low)),
+        centre_mm: Some(hundredths((low + high) / 2.0)),
         source: Source::SliceLocation,
     }
 }
@@ -126,6 +142,38 @@ pub fn differs(a: &Coverage, b: &Coverage) -> bool {
             (sa - sb).abs() > tolerance
         }
         _ => false,
+    }
+}
+
+/// Whether two stacks sit in measurably different places along the slice
+/// normal: their centres are further apart than the wider of
+/// [`SAME_SPAN_MM`] and half the larger of their two slice steps (record 38,
+/// S2). A centre either side never measured moves nothing.
+///
+/// **Why half a slice step.** Two stacks whose centres are closer than that
+/// sample the same positions: every slice of one lies nearer a slice of the
+/// other than any other slice does, so they cover one place, and a re-planned
+/// rescan that lands a millimetre off its first attempt is still a rescan.
+/// Beyond it the two sample different ground, and a second station of a
+/// spine is tens of slices away rather than a fraction of one. The step is
+/// the stack's own, the extent over the gaps between its slices, so the
+/// tolerance follows the geometry the scanner used rather than a constant
+/// that is too tight for a 5 mm brain stack and too loose for a 0.8 mm one.
+/// A stack of one slice has no step and is held to the millimetre.
+pub fn moved(a: &Coverage, b: &Coverage) -> bool {
+    let (Some(ca), Some(cb)) = (a.centre_mm, b.centre_mm) else {
+        return false;
+    };
+    let tolerance = SAME_SPAN_MM.max(step(a).max(step(b)) / 2.0);
+    (ca - cb).abs() > tolerance
+}
+
+/// The distance between neighbouring slices, measured as the extent over
+/// the gaps. Zero where there is no gap to measure.
+fn step(c: &Coverage) -> f64 {
+    match (c.n_slices, c.span_mm) {
+        (Some(n), Some(span)) if n > 1 => span.abs() / (n - 1) as f64,
+        _ => 0.0,
     }
 }
 
@@ -192,6 +240,7 @@ mod tests {
         let a = Coverage {
             n_slices: Some(200),
             span_mm: Some(400.0),
+            centre_mm: Some(0.0),
             source: Source::SliceLocation,
         };
         let within = Coverage {
@@ -213,5 +262,54 @@ mod tests {
         assert!(!differs(&known, &unknown));
         assert!(!differs(&unknown, &known));
         assert!(!differs(&unknown, &unknown));
+    }
+
+    #[test]
+    fn the_centre_is_the_midpoint_of_the_positions() {
+        let c = of(&[-30.0, 0.0, 30.0, 60.0]);
+        assert_eq!(c.centre_mm, Some(15.0));
+        assert_eq!(of(&[-7.25]).centre_mm, Some(-7.25));
+        assert_eq!(of(&[]).centre_mm, None);
+    }
+
+    #[test]
+    fn two_stations_of_one_prescription_are_two_places() {
+        // Record 38 S2: the count and the extent agree, so `differs` cannot
+        // tell them apart, and the centre is 200 mm down the table.
+        let upper = of(&[0.0, 5.0, 10.0, 15.0, 20.0]);
+        let lower = of(&[-200.0, -195.0, -190.0, -185.0, -180.0]);
+        assert!(!differs(&upper, &lower));
+        assert!(moved(&upper, &lower));
+    }
+
+    #[test]
+    fn a_rescan_less_than_half_a_slice_off_is_the_same_place() {
+        // A 5 mm step: a re-planned rescan 2 mm off still samples the same
+        // positions, and one 3 mm off samples between them.
+        let first = of(&[0.0, 5.0, 10.0, 15.0, 20.0]);
+        let near = of(&[2.0, 7.0, 12.0, 17.0, 22.0]);
+        let between = of(&[3.0, 8.0, 13.0, 18.0, 23.0]);
+        assert!(!moved(&first, &near));
+        assert!(moved(&first, &between));
+        // and a fine stack is held to the millimetre, not to half its step
+        let fine = of(&[0.0, 0.8, 1.6, 2.4]);
+        let off = Coverage {
+            centre_mm: fine.centre_mm.map(|c| c + 1.5),
+            ..fine
+        };
+        assert!(moved(&fine, &off));
+        let within = Coverage {
+            centre_mm: fine.centre_mm.map(|c| c + 0.9),
+            ..fine
+        };
+        assert!(!moved(&fine, &within));
+    }
+
+    #[test]
+    fn an_unmeasured_centre_moves_nothing() {
+        let known = of(&[0.0, 5.0]);
+        let unknown = of(&[]);
+        assert!(!moved(&known, &unknown));
+        assert!(!moved(&unknown, &known));
     }
 }
