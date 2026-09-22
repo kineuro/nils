@@ -1748,11 +1748,65 @@ impl<'a> Builder<'a> {
         let mut cols: Vec<String> = Vec::new();
         let mut group_cols: Vec<String> = Vec::new();
         let mut frame = Frame::default();
+        // Record 38 S4: an axis is a key a group may be read by. The value
+        // is a stack fact kept one row per value, so it is read beside the
+        // child's rows before they are grouped: by default the stack's
+        // values as one sorted list (H5), which puts every stack under
+        // exactly one key and keeps a two-valued stack apart from a
+        // one-valued one; with `each`, one row per value, so a stack with
+        // two values counts once under each and the counts sum to more
+        // than the stacks. A stack with no value falls under null.
+        let mut axis_cols: Vec<String> = Vec::new();
+        let mut axis_joins: Vec<String> = Vec::new();
+        let mut by_sql: Vec<String> = Vec::new();
         for (i, c) in g.by.iter().enumerate() {
-            let e = self.expr(c, &child_terms, "ch", &format!("{path}.group.by[{i}]"))?;
+            let at = format!("{path}.group.by[{i}]");
+            if c.op != "axis" {
+                by_sql.push(self.expr(c, &child_terms, "ch", &at)?.sql);
+                continue;
+            }
+            let child_grain = self.ask.sets.get(&g.of).map(|s| s.grain);
+            if child_grain != Some(Grain::Stack) {
+                return Err(err(at, "an axis groups a stack set"));
+            }
+            let axis = c
+                .ref_name()
+                .ok_or_else(|| err(&at, "an axis ref names an axis"))?;
+            let ax = self.p(Param::from(axis), Type::Text);
+            let col = format!("axis_g{i}");
+            if c.opts.get("each").and_then(Value::as_bool).unwrap_or(false) {
+                let alias = format!("ax{i}");
+                axis_joins.push(format!(
+                    "LEFT JOIN {} {alias} ON {alias}.stack_id = ch.k AND {alias}.axis = {ax}",
+                    self.q("classification_axis")
+                ));
+                axis_cols.push(format!("{alias}.value AS {col}"));
+            } else {
+                axis_cols.push(format!(
+                    "(SELECT {} FROM {} ax WHERE ax.stack_id = ch.k AND ax.axis = {ax}) AS {col}",
+                    self.sql.sorted_list("ax.value"),
+                    self.q("classification_axis")
+                ));
+            }
+            by_sql.push(format!("ch.{col}"));
+        }
+        let source = if axis_cols.is_empty() {
+            format!("{} ch", cte_name(&g.of))
+        } else {
+            format!(
+                "(SELECT ch.*, {} FROM {} ch{}) ch",
+                axis_cols.join(", "),
+                cte_name(&g.of),
+                axis_joins
+                    .iter()
+                    .map(|j| format!(" {j}"))
+                    .collect::<String>()
+            )
+        };
+        for (i, (c, e)) in g.by.iter().zip(by_sql).enumerate() {
             let col = format!("g{i}");
-            cols.push(format!("{} AS {col}", e.sql));
-            group_cols.push(e.sql.clone());
+            cols.push(format!("{e} AS {col}"));
+            group_cols.push(e);
             let label = c
                 .ref_name()
                 .map(str::to_string)
@@ -1807,9 +1861,8 @@ impl<'a> Builder<'a> {
             terms.push((b.clone(), Term::plain(col)));
         }
         let mut layer = format!(
-            "SELECT {} FROM {} ch GROUP BY {}",
+            "SELECT {} FROM {source} GROUP BY {}",
             cols.join(", "),
-            cte_name(&g.of),
             group_cols.join(", ")
         );
         for (b, col) in post {
@@ -1819,10 +1872,13 @@ impl<'a> Builder<'a> {
             frame.bindings.push((b.clone(), col.clone()));
             terms.push((b, Term::plain(col)));
         }
+        // A null key (a stack with no value on an axis, a field nobody
+        // filled) is numbered last on both backends, so a group's key is
+        // the same number on either.
         let order: Vec<String> = frame
             .group_by
             .iter()
-            .map(|(_, c)| format!("q.{c}"))
+            .map(|(_, c)| self.sql.order_term(&format!("q.{c}"), Dir::Asc))
             .collect();
         layer = format!(
             "SELECT q.*, ROW_NUMBER() OVER (ORDER BY {}) AS k, NULL AS subj FROM ({layer}) q",
@@ -2358,7 +2414,7 @@ impl<'a> Builder<'a> {
             }
             "axis" => Err(err(
                 at,
-                "an axis is read through has or =, which compile it as a predicate",
+                "an axis is read through has or =, which compile it as a predicate, or as a group's by",
             )),
             "derived" => self.derived(c, terms, alias, at),
             "=" | "<>" | ">" | ">=" | "<" | "<=" => {

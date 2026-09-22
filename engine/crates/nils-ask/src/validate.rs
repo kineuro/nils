@@ -1372,6 +1372,20 @@ fn check_clause(
                         "GET /api/ask/catalog for the axes",
                     ));
                 }
+                // Record 38 S4: `each` is how a group counts a stack with
+                // several values; an axis takes no other option.
+                for (k, v) in &cl.opts {
+                    if k != "each" || !v.is_boolean() {
+                        issues.push(issue(
+                            Code::UnknownField,
+                            path,
+                            format!(
+                                "axis {a} takes no option {k} {v}; it takes each: true or false"
+                            ),
+                            "drop the option",
+                        ));
+                    }
+                }
             }
             "derived" => {
                 let Some(d) = cl.ref_name() else {

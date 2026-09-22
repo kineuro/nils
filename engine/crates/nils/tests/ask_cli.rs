@@ -750,3 +750,272 @@ fn what_the_ask_prints_as_its_predicate_is_what_a_reader_can_reproduce() {
         "the predicate a reader reproduces is the one the ask applied"
     );
 }
+
+/// The handle a run printed.
+fn handle_of(text: &str) -> String {
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    let at = fields
+        .iter()
+        .position(|f| *f == "handle")
+        .unwrap_or_else(|| panic!("no handle in {text}"));
+    fields[at + 1].to_string()
+}
+
+/// A run's answer as rows of text, the header left out.
+fn answer(home: &TempDir, doc: &str, p: &str) -> Vec<Vec<String>> {
+    let out = run(home, &["ask", "run", "--file", doc, "--pack-dir", p], None);
+    let handle = handle_of(out.ok("run"));
+    let out = run(
+        home,
+        &["ask", "handles", "export", "--handle", &handle],
+        None,
+    );
+    out.ok("export").lines().skip(1).map(csv_fields).collect()
+}
+
+/// One CSV line's fields, a quoted field's comma kept.
+fn csv_fields(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => out.push(std::mem::take(&mut field)),
+            c => field.push(c),
+        }
+    }
+    out.push(field);
+    out
+}
+
+/// A group's counts by the key in its third column, `_rows` in its fourth.
+fn counts(rows: &[Vec<String>]) -> std::collections::BTreeMap<String, usize> {
+    rows.iter()
+        .map(|r| (r[2].clone(), r[3].parse().unwrap()))
+        .collect()
+}
+
+/// Record 38 S4: a group keyed by an axis. Single-valued, every stack counts
+/// once under its value. Multi-valued, the default key is a stack's values
+/// as one sorted list, so every stack still counts once and a stack with two
+/// values is its own key; `each` counts it under both. A stack with no value
+/// falls under the empty key, and a stack the pack ruled out is in none.
+#[test]
+fn a_group_keyed_by_an_axis_counts_every_stack_it_should_and_says_how() {
+    let home = synthetic();
+    let packs = packs();
+    let p = packs.to_str().unwrap();
+    let ruled_out = rule_out(&home, 20);
+
+    // Ten FLAIR stacks also say FatSat: the generator writes one modifier
+    // per stack at most, and the case that needs saying is two.
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let flair: Vec<i64> = store
+        .query(
+            "SELECT stack_id FROM classification_axis \
+             WHERE axis = 'modifier' AND value = 'FLAIR' ORDER BY stack_id LIMIT 10",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect();
+    assert_eq!(flair.len(), 10);
+    for id in &flair {
+        store
+            .batch(&format!(
+                "INSERT INTO classification_axis (stack_id, axis, value, confidence, tier) \
+                 VALUES ({id}, 'modifier', 'FatSat', 0.95, 'exclusive')"
+            ))
+            .unwrap();
+    }
+    let count = |sql: &str| -> usize {
+        nils_registry::Store::open_sqlite(&home.path().join("registry.db"))
+            .unwrap()
+            .query(sql, &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap() as usize
+    };
+    let not_excluded = "NOT EXISTS (SELECT 1 FROM classification_axis x WHERE x.stack_id = st.id \
+                        AND x.axis = 'disposition' AND x.value = 'excluded')";
+    let stacks = count(&format!(
+        "SELECT COUNT(*) FROM stack st WHERE {not_excluded}"
+    ));
+    let with_flair = count(&format!(
+        "SELECT COUNT(*) FROM stack st WHERE {not_excluded} AND EXISTS (SELECT 1 FROM \
+         classification_axis a WHERE a.stack_id = st.id AND a.axis = 'modifier' AND a.value = 'FLAIR')"
+    ));
+    let scouts = count(
+        "SELECT COUNT(*) FROM classification_axis WHERE axis = 'disposition' AND value = 'scout'",
+    );
+    assert!(scouts > 0 && with_flair > 10, "{scouts} {with_flair}");
+
+    let group = |name: &str, by: &str, key: &str| -> String {
+        document(
+            &home,
+            name,
+            &format!(
+                "ast_version: 1\n\
+                 sets:\n  acquisitions: {{grain: stack}}\n  per:\n    grain: group\n    \
+                 group: {{of: acquisitions, by: [{by}]}}\n\
+                 out:\n  set: per\n  level: record\n  columns:\n    - [\"field\", {{}}, \"{key}\"]\n    \
+                 - [\"field\", {{}}, \"_rows\"]\n  order:\n    - [[\"field\", {{}}, \"{key}\"], asc]\n"
+            ),
+        )
+    };
+
+    // a single-valued axis: one row per value, and the rows sum to the stacks
+    let doc = group(
+        "per-technique.ask.yml",
+        "[\"axis\", {}, \"technique\"]",
+        "technique",
+    );
+    let per = counts(&answer(&home, &doc, p));
+    assert_eq!(per.values().sum::<usize>(), stacks, "{per:?}");
+    let gre = count(
+        "SELECT COUNT(*) FROM classification_axis WHERE axis = 'technique' AND value = 'GRE'",
+    );
+    // every scout is a GRE localizer, and the twenty ruled out are not read
+    assert_eq!(per["GRE"], gre - ruled_out.len(), "{per:?}");
+
+    // a multi-valued axis, the default reading: one key per stack
+    let doc = group(
+        "per-modifier.ask.yml",
+        "[\"axis\", {}, \"modifier\"]",
+        "modifier",
+    );
+    let per = counts(&answer(&home, &doc, p));
+    assert_eq!(per.values().sum::<usize>(), stacks, "{per:?}");
+    assert_eq!(per.len(), 3, "FLAIR, FLAIR with FatSat, and none: {per:?}");
+    let two: Vec<(&String, &usize)> = per.iter().filter(|(k, _)| k.contains(',')).collect();
+    assert_eq!(two.len(), 1, "{per:?}");
+    assert_eq!(*two[0].1, 10, "{per:?}");
+    assert!(two[0].0.contains("FLAIR") && two[0].0.contains("FatSat"));
+    assert_eq!(per["FLAIR"], with_flair - 10, "{per:?}");
+    assert_eq!(
+        per[""],
+        stacks - with_flair,
+        "no modifier, one key: {per:?}"
+    );
+
+    // `each`: a stack with two values counts under both
+    let doc = group(
+        "per-modifier-each.ask.yml",
+        "[\"axis\", {each: true}, \"modifier\"]",
+        "modifier",
+    );
+    let rows = answer(&home, &doc, p);
+    let per = counts(&rows);
+    assert_eq!(per["FLAIR"], with_flair, "{per:?}");
+    assert_eq!(per["FatSat"], 10, "{per:?}");
+    assert_eq!(per[""], stacks - with_flair, "{per:?}");
+    assert_eq!(per.values().sum::<usize>(), stacks + 10, "{per:?}");
+    // the empty key is numbered last
+    assert_eq!(rows.last().unwrap()[2], "", "{rows:?}");
+
+    // describe says which reading a document asked for
+    let out = run(
+        &home,
+        &["ask", "describe", "--file", &doc, "--pack-dir", p],
+        None,
+    );
+    assert!(
+        out.ok("describe").contains(
+            "each value of the axis modifier (a stack with two values counts under both)"
+        ),
+        "{}",
+        out.stdout
+    );
+
+    // and an axis takes no option but each
+    let bad = group(
+        "per-modifier-bad.ask.yml",
+        "[\"axis\", {every: true}, \"modifier\"]",
+        "modifier",
+    );
+    let out = run(
+        &home,
+        &["ask", "validate", "--file", &bad, "--pack-dir", p],
+        None,
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", out.stdout);
+    assert!(
+        out.stderr.contains("takes no option every"),
+        "{}",
+        out.stderr
+    );
+}
+
+/// Record 38 S4: `ask run` finds the installed pack as `classify` does, and
+/// `--pack-dir` still overrides it. The corpus run's own command line, with
+/// no pack directory, exited 2 before this.
+#[test]
+fn ask_run_finds_the_installed_pack_without_being_told() {
+    let home = synthetic();
+    let packs = packs();
+    let p = packs.to_str().unwrap();
+    let doc = document(&home, "stacks-count.ask.yml", STACKS_COUNT);
+    let told = run(
+        &home,
+        &["ask", "run", "--file", &doc, "--pack-dir", p],
+        None,
+    );
+    let hash = hash_of_run(told.ok("run with --pack-dir"));
+
+    // the first place `classify` looks: the registry's own packs
+    std::os::unix::fs::symlink(packs.canonicalize().unwrap(), home.path().join("packs")).unwrap();
+    let bare = |args: &[&str]| -> Out {
+        let out = nils()
+            .arg("--registry")
+            .arg(home.path())
+            .args(args)
+            .env_remove("NILS_PACK_DIR")
+            .env("HOME", home.path())
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        Out {
+            status: out.status,
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    };
+    let found = bare(&["ask", "run", "--file", &doc]);
+    assert_eq!(
+        hash_of_run(found.ok("run with no --pack-dir")),
+        hash,
+        "the same pack answers the same hash"
+    );
+
+    // the flag still wins, and a wrong one is an error, not a fall through
+    let missing = home.path().join("no-packs-here");
+    let wrong = bare(&[
+        "ask",
+        "run",
+        "--file",
+        &doc,
+        "--pack-dir",
+        missing.to_str().unwrap(),
+    ]);
+    assert!(!wrong.status.success(), "{}", wrong.stdout);
+}
+
+/// The hash a run printed on its one line.
+fn hash_of_run(text: &str) -> String {
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    let at = fields
+        .iter()
+        .position(|f| *f == "hash")
+        .unwrap_or_else(|| panic!("no hash in {text}"));
+    fields[at + 1].to_string()
+}

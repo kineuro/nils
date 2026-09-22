@@ -240,6 +240,19 @@ with declared parameters (`acquisition_type`, `field_strength`, `study_day`,
 string, except set valued components (modifier, construct), which are the H5
 sorted list. `distinct` of a tuple is not available; group by it instead.
 
+**group** reads a key from the child set's fields and bindings, and over a
+stack set from the pack's axes too (record 38): `by: [["axis", {}, "technique"]]`
+answers how many stacks there are per technique, with the axis name as the
+key's column. A multi-valued axis (modifier, construct, quality, role) keeps a
+row per value, so how a stack with two values counts is the document's to say.
+By default the key is the stack's values as one H5 sorted list: every stack
+counts once, a stack saying FLAIR and FatSat is its own key beside the stacks
+saying FLAIR alone, and the counts sum to the stacks. `["axis", {each: true},
+"modifier"]` counts a stack once under each of its values instead, which is the
+number `has` would give per value and sums to more than the stacks. A stack with
+no value on the axis falls under the null key, numbered last on both backends.
+A stack the pack ruled out is in no group, as in every stack set.
+
 **share** names its denominator. A denominator is an uncorrelated scalar count
 over a named set, legal only in a denominator position and only at count or
 distinct, so no generic join enters through that door (C39):

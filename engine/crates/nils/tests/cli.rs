@@ -1839,6 +1839,46 @@ fn classify_explains_itself_and_a_decision_closes_the_question() {
         .iter()
         .find(|i| i["kind"] == "base:low_confidence")
         .unwrap_or_else(|| panic!("{open:#?}"));
+
+    // Record 38 S4: explain names every question it counts, by its id and
+    // kind, with what it asks, in the text and in the document the door
+    // answers. The registry holds one stack, so every open item holds it.
+    let named: Vec<serde_json::Value> = shown["review"].as_array().unwrap().clone();
+    assert_eq!(named.len(), open.len(), "{shown}");
+    let out = nils()
+        .args(registry)
+        .args(["explain", "1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    for item in &open {
+        let id = item["id"].as_i64().unwrap();
+        let kind = item["kind"].as_str().unwrap();
+        let line = text
+            .lines()
+            .find(|l| {
+                l.trim_start()
+                    .starts_with(&format!("review item {id} {kind} (open"))
+            })
+            .unwrap_or_else(|| panic!("item {id} {kind} is not named: {text}"));
+        let axis = kind.split(':').next().unwrap();
+        assert!(line.contains(axis), "{line}");
+        let doc = named
+            .iter()
+            .find(|n| n["id"].as_i64() == Some(id))
+            .unwrap_or_else(|| panic!("{named:#?}"));
+        assert_eq!(doc["kind"], kind);
+        assert!(doc["about"].as_str().unwrap().starts_with(axis), "{doc}");
+    }
+    let about_base = named
+        .iter()
+        .find(|n| n["kind"] == "base:low_confidence")
+        .unwrap();
+    assert!(
+        about_base["about"].as_str().unwrap().contains("below 1.00"),
+        "{about_base}"
+    );
     let id = base["id"].as_i64().unwrap().to_string();
 
     let out = nils()

@@ -279,8 +279,10 @@ pub(crate) struct AskRunArgs {
     /// Honour the document's `keep`
     #[arg(long)]
     keep: bool,
-    /// The pack directory, when this registry answers
-    #[arg(long, value_name = "DIR", required_unless_present = "server")]
+    /// The pack directory, when this registry answers; found as `nils
+    /// classify` finds it when absent (NILS_PACK_DIR, then the installed
+    /// packs)
+    #[arg(long, value_name = "DIR")]
     pack_dir: Option<PathBuf>,
     /// The pack, by name in the pack directory
     #[arg(long, default_value = "mri")]

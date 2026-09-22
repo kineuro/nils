@@ -59,6 +59,20 @@ fn opt_text(v: &Value) -> String {
     }
 }
 
+/// A group's key in words. An axis says how a stack with several values is
+/// counted (record 38 S4), because the two readings answer different numbers.
+fn by_text(c: &Clause) -> String {
+    if c.op != "axis" {
+        return clause_text(c);
+    }
+    let name = c.ref_name().unwrap_or("");
+    if c.opts.get("each").and_then(Value::as_bool).unwrap_or(false) {
+        format!("each value of the axis {name} (a stack with two values counts under both)")
+    } else {
+        format!("the axis {name} (a stack's values as one sorted list, so each stack counts once)")
+    }
+}
+
 /// A clause in words, deterministic.
 pub fn clause_text(c: &Clause) -> String {
     let op = c.op.as_str();
@@ -239,7 +253,7 @@ pub fn set_sentence(name: &str, set: &Set) -> String {
         s = format!(
             "{name}: groups of {} by {}",
             g.of,
-            g.by.iter().map(clause_text).collect::<Vec<_>>().join(", ")
+            g.by.iter().map(by_text).collect::<Vec<_>>().join(", ")
         );
     }
     if let Some(of) = &set.of {
