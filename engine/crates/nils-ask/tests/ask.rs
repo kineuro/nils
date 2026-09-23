@@ -822,3 +822,48 @@ out: {{set: by_sex, level: aggregate, columns: [["field", {{}}, "sex"], ["field"
         "{issues:?}"
     );
 }
+
+/// kineuro/nils#101: a list of literals in an argument is a list, not a
+/// clause without its options map. Repair leaves an inline list whose first
+/// element is not an op of the language as it was written, and still
+/// repairs a ref written without its options inside the same clause.
+#[test]
+fn repair_leaves_an_inline_list_of_literals_a_list() {
+    let text = r#"
+ast_version: 1
+sets:
+  scope: {grain: cohort, where: [["in", {}, ["field", {}, "name"], ["ms-cohort-a", "ms-cohort-b"]]]}
+  people: {grain: subject, of: scope, where: [["in", ["field", "sex"], ["F", "M"]]]}
+out: {set: people, level: count}
+"#;
+    let (ask, repairs) = parse_repaired(text).unwrap();
+    assert!(
+        !repairs.iter().any(|r| r.path.starts_with("sets.scope")),
+        "an inline list is not a clause: {repairs:?}"
+    );
+    let clause = &ask.sets["scope"].where_[0];
+    assert_eq!(clause.op, "in");
+    match &clause.args[1] {
+        nils_ask::ast::Arg::List(items) => {
+            let texts: Vec<&str> = items.iter().filter_map(|a| a.as_text()).collect();
+            assert_eq!(texts, vec!["ms-cohort-a", "ms-cohort-b"]);
+        }
+        other => panic!("not a list: {other:?}"),
+    }
+    // the ref inside the second set is still repaired, its list left alone
+    let people = &ask.sets["people"].where_[0];
+    match (&people.args[0], &people.args[1]) {
+        (nils_ask::ast::Arg::Clause(f), nils_ask::ast::Arg::List(items)) => {
+            assert_eq!(f.ref_name(), Some("sex"));
+            assert_eq!(items.len(), 2);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        repairs
+            .iter()
+            .any(|r| r.path == "sets.people.where[0][2]" && r.what.contains("options map of field")),
+        "{repairs:?}"
+    );
+    accepted(serde_json::to_value(&ask).unwrap());
+}

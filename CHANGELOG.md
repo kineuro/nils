@@ -10,6 +10,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - A share measure names its denominator before it runs. Strict validation accepted `{share: {of: n}}` on `out` and the run answered `500 share names {of, over}`. The validator now refuses a measure that names no column, a share with no `over` and a percentile with no `p` at `out.measures[i]`, as it refuses a share clause in a `bind` without its denominator, and a measure that fails at run is a refusal with its path rather than a server error. The ask specification now points at `share` for a share inside a group: a `count {set: people}` in a group's `bind` counts per group, so dividing by it gives 1.0 on every row (kineuro/nils#99).
 
+- The draft door leaves an inline list of literals a list. Its repair pass took any array inside a clause whose first element was a string for a clause written without its options map, so `["in", {}, ["field", {}, "name"], ["ms-cohort-a", "ms-cohort-b"]]` became a clause called `ms-cohort-a` and was refused as `ms-cohort-a is not an op of the language`, while the same document as JSON ran. An array in an argument is repaired as a clause only when its first element is an op of the language or an alias of one (kineuro/nils#101).
+
 ## [1.0.0-alpha.37] - 2026-09-23
 
 ### Fixed

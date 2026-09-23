@@ -166,6 +166,18 @@ fn is_clause_shaped(v: &Value) -> bool {
     }
 }
 
+/// An argument that is a clause: clause shaped, and its first element an
+/// op of the language or an alias of one. Any other array in an argument
+/// is a list of literals, as section 4.5 allows, and stays one
+/// (kineuro/nils#101): `["in", {}, ["field", {}, "name"], ["a", "b"]]`
+/// names two cohorts, not an op called `a`.
+fn is_clause_argument(v: &Value) -> bool {
+    is_clause_shaped(v)
+        && v.get(0).and_then(Value::as_str).is_some_and(|op| {
+            crate::schema::OPS.contains(&op) || OP_ALIASES.iter().any(|(a, _)| *a == op)
+        })
+}
+
 fn repair_clause(v: &mut Value, path: &str, out: &mut Vec<Repair>) {
     let Some(items) = v.as_array_mut() else {
         return;
@@ -197,7 +209,7 @@ fn repair_clause(v: &mut Value, path: &str, out: &mut Vec<Repair>) {
     }
     // the arguments, recursively
     for (i, a) in items.iter_mut().enumerate().skip(2) {
-        if is_clause_shaped(a) {
+        if is_clause_argument(a) {
             repair_clause(a, &format!("{path}[{i}]"), out);
         }
     }
