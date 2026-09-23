@@ -389,7 +389,7 @@ pub struct Author {
 /// decision wider than a stack exists, so the usual run is one table.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Ids {
-    stack: i64,
+    pub(crate) stack: i64,
     series: i64,
     subject: i64,
 }

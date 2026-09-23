@@ -1520,26 +1520,25 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     );
     assert!(signals["diagnostics"].is_object(), "{signals}");
     // kineuro/nils#94: the text each unresolved axis was matched against,
-    // folded and bounded, and the stacks it counts are the diagnostics'
+    // folded and bounded, and the stacks it counts are the diagnostics'.
+    // Two stacks of one subject are under the showing threshold, so every
+    // text is withheld and counted.
     let unresolved = &signals["unresolved_texts"];
     assert_eq!(unresolved["read"], 2, "{signals}");
     assert_eq!(unresolved["complete"], true, "{signals}");
     assert_eq!(unresolved["text"], "search_text", "{signals}");
+    assert_eq!(
+        unresolved["shown_when"],
+        serde_json::json!({"stacks": 5, "subjects": 3}),
+        "{signals}"
+    );
     let axes = unresolved["axes"]
         .as_object()
         .unwrap_or_else(|| panic!("{signals}"));
     let mut stacks = 0;
     for doc in axes.values() {
-        let texts = doc["texts"].as_array().unwrap();
-        assert!(!texts.is_empty() && texts.len() <= 10, "{signals}");
-        assert_eq!(
-            texts
-                .iter()
-                .map(|t| t["stacks"].as_i64().unwrap())
-                .sum::<i64>(),
-            doc["stacks"].as_i64().unwrap(),
-            "{signals}"
-        );
+        assert_eq!(doc["texts"], serde_json::json!([]), "{signals}");
+        assert_eq!(doc["withheld"]["stacks"], doc["stacks"], "{signals}");
         stacks += doc["stacks"].as_i64().unwrap();
     }
     assert_eq!(

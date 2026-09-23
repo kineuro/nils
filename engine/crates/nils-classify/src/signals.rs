@@ -236,6 +236,14 @@ pub fn signals(store: &mut Store, scope: &Scope) -> Result<Value, Error> {
 /// The most distinct search texts listed per axis (kineuro/nils#94).
 pub const TEXTS_MAX: usize = 10;
 
+/// The fewest stacks a search text must cover, inside the sampled scope,
+/// before the door shows it (kineuro/nils#94, Nima's ruling for record 41).
+pub const TEXT_MIN_STACKS: i64 = 5;
+
+/// The fewest distinct subjects those stacks must belong to, inside the
+/// sampled scope, before the door shows a search text.
+pub const TEXT_MIN_SUBJECTS: usize = 3;
+
 /// The text each unresolved axis was matched against (Wave 4c section
 /// 9.13, kineuro/nils#94): over a bounded sample of the stacks in scope,
 /// the pack's verdict on each, and per axis, for the stacks it leaves
@@ -243,8 +251,18 @@ pub const TEXTS_MAX: usize = 10;
 /// distinct texts with the number of stacks each covers, the most common
 /// first and at most [`TEXTS_MAX`]. That is the text a keyword is matched
 /// against, so a reviewer tuning the words reads the site's own word where
-/// the rules found none. Counts and texts only, never a stack; `sample`
-/// bounds the stacks read, and `complete` says whether it read them all.
+/// the rules found none.
+///
+/// A text is shown only when it covers at least [`TEXT_MIN_STACKS`] stacks
+/// of at least [`TEXT_MIN_SUBJECTS`] distinct subjects in the sample. A
+/// series description can carry free text about one person, and a text
+/// only one or two people's stacks carry is theirs rather than the site's
+/// word; those are withheld, and the axis says how many texts and stacks
+/// it withheld. The same spirit as record 39's word allowlist for training
+/// (at least ten people and two scanners), lighter here because the door
+/// is a reviewer's and no model is trained on what it shows. Counts and
+/// texts only, never a stack; `sample` bounds the stacks read, and
+/// `complete` says whether it read them all.
 pub fn unresolved_texts(
     store: &mut Store,
     pack: &Pack,
@@ -257,11 +275,23 @@ pub fn unresolved_texts(
     let rows = store.query(&sql, &params)?;
     let complete = rows.len() <= sample;
     let read = rows.len().min(sample);
-    // axis -> text -> stacks
-    let mut texts: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
+    // whose each stack in scope is, for the subject threshold
+    let (stacks_sql, stacks_params) = scope.stacks_sql(store, 1);
+    let owner_sql = format!(
+        "SELECT stack_id, subject_id FROM {} WHERE stack_id IN {stacks_sql}",
+        store.qualified("stack_fingerprint")
+    );
+    let mut owner: BTreeMap<i64, i64> = BTreeMap::new();
+    for r in store.query(&owner_sql, &stacks_params)? {
+        owner.insert(r.int(0)?, r.opt_int(1)?.unwrap_or(0));
+    }
+    // axis -> text -> (stacks, subjects)
+    type Covered = (i64, BTreeSet<i64>);
+    let mut texts: BTreeMap<String, BTreeMap<String, Covered>> = BTreeMap::new();
     for r in rows.iter().take(sample) {
-        let (_, stack, private) =
+        let (ids, stack, private) =
             to_stack(r, false, pack).map_err(|e| Error::Message(e.to_string()))?;
+        let subject = owner.get(&ids.stack).copied().unwrap_or(0);
         let evaluated = Evaluated::with_private(pack, &stack, private);
         let verdict = evaluated.classify();
         let text = evaluated.derived_text("search_text").unwrap_or_default();
@@ -272,19 +302,27 @@ pub fn unresolved_texts(
             .map(|d| d.axis.as_str())
             .collect();
         for axis in axes {
-            *texts
+            let c = texts
                 .entry(axis.to_string())
                 .or_default()
                 .entry(text.to_string())
-                .or_insert(0) += 1;
+                .or_default();
+            c.0 += 1;
+            c.1.insert(subject);
         }
     }
     let axes: BTreeMap<String, Value> = texts
         .into_iter()
         .map(|(axis, by_text)| {
-            let stacks: i64 = by_text.values().sum();
+            let stacks: i64 = by_text.values().map(|c| c.0).sum();
             let distinct = by_text.len();
-            let mut listed: Vec<(String, i64)> = by_text.into_iter().collect();
+            let (shown, withheld): (Vec<_>, Vec<_>) =
+                by_text.into_iter().partition(|(_, (n, subjects))| {
+                    *n >= TEXT_MIN_STACKS && subjects.len() >= TEXT_MIN_SUBJECTS
+                });
+            let withheld_stacks: i64 = withheld.iter().map(|(_, c)| c.0).sum();
+            let mut listed: Vec<(String, i64)> =
+                shown.into_iter().map(|(t, (n, _))| (t, n)).collect();
             listed.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             listed.truncate(TEXTS_MAX);
             let listed: Vec<Value> = listed
@@ -293,7 +331,12 @@ pub fn unresolved_texts(
                 .collect();
             (
                 axis,
-                json!({"stacks": stacks, "distinct": distinct, "texts": listed}),
+                json!({
+                    "stacks": stacks,
+                    "distinct": distinct,
+                    "texts": listed,
+                    "withheld": {"texts": withheld.len(), "stacks": withheld_stacks},
+                }),
             )
         })
         .collect();
@@ -303,6 +346,7 @@ pub fn unresolved_texts(
         "sample": sample,
         "read": read,
         "complete": complete,
+        "shown_when": {"stacks": TEXT_MIN_STACKS, "subjects": TEXT_MIN_SUBJECTS},
         "axes": axes,
     }))
 }
