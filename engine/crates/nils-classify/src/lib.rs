@@ -23,6 +23,7 @@ pub mod rehearse;
 pub mod report;
 pub mod scope;
 pub mod signals;
+pub mod votes;
 
 pub use job::{Error, Settings, fingerprint as run};
 pub use report::{Classified, Report};

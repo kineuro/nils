@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 51;
+pub const SCHEMA_VERSION: i64 = 52;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,7 +258,26 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 51,
         apply: a_stack_says_where_it_sits_and_when_it_was_made,
     },
+    Migration {
+        version: 52,
+        apply: every_rule_votes,
+    },
 ];
+
+/// Record 41 S2: every rule's vote. A registry from before gains the two
+/// tables empty, and the next `nils classify` fills them; until then
+/// `nils classify votes` has nothing to say about a stack, rather than
+/// something wrong.
+fn every_rule_votes(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(
+        store,
+        kind,
+        &["classification_voter", "classification_vote"],
+    )
+}
 
 /// Record 38 S3: a release keeps the real date, and the shift and year
 /// policies are gone with everything that served them.

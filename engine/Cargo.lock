@@ -1755,6 +1755,7 @@ dependencies = [
  "nils-pack",
  "nils-registry",
  "nils-session",
+ "nils-synth",
  "serde",
  "serde_json",
  "unicode-normalization",

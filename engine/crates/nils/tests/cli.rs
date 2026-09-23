@@ -1854,6 +1854,44 @@ fn classify_explains_itself_and_a_decision_closes_the_question() {
         "{shown}"
     );
 
+    // record 41: the vote matrix, on standard output and to a file
+    let out = nils()
+        .args(registry)
+        .args(["classify", "votes"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let matrix = stdout(&out);
+    let mut lines = matrix.lines();
+    assert_eq!(
+        lines.next(),
+        Some("stack_id\taxis\trule_set\trule\tclause\tvalue\ttier")
+    );
+    let votes: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
+    assert!(
+        votes
+            .iter()
+            .any(|v| v[0] == "1" && v[1] == "technique" && v[5] == "MPRAGE"),
+        "{matrix}"
+    );
+    let file = home.path().join("votes.tsv");
+    let out = nils()
+        .args(registry)
+        .args(["classify", "votes", "--axis", "base", "--json", "--out"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(summary["stacks"], 1, "{summary}");
+    assert_eq!(summary["axes"], serde_json::json!(["base"]), "{summary}");
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        written.lines().count() as i64 - 1,
+        summary["votes"].as_i64().unwrap(),
+        "{written}"
+    );
+
     let items = |status: &str| -> Vec<serde_json::Value> {
         let out = nils()
             .args(registry)

@@ -1893,7 +1893,10 @@ fn key_in_use(home: &Home, config: Option<&Config>) -> Option<String> {
 
 /// `nils classify` (Wave 2 §9).
 #[derive(Debug, Parser)]
+#[command(args_conflicts_with_subcommands = true)]
 struct ClassifyArgs {
+    #[command(subcommand)]
+    command: Option<ClassifyCommand>,
     /// The pack's name, looked up in the pack directory
     #[arg(long, default_value = "mri")]
     pack: String,
@@ -1918,12 +1921,81 @@ struct ClassifyArgs {
     /// Stacks per window, one transaction each
     #[arg(long, value_name = "N")]
     window: Option<usize>,
+    /// Write no votes: the verdicts are the same, and the votes a run would
+    /// have replaced are removed (record 41)
+    #[arg(long)]
+    no_votes: bool,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
 }
 
+#[derive(Debug, Subcommand)]
+enum ClassifyCommand {
+    /// The vote matrix: every clause that held on each stack, of every rule
+    /// whose set was entered, and the value its rule said, as tab-separated
+    /// lines (record 41): stack_id, axis, rule_set, rule, clause, value, tier
+    Votes {
+        /// Write to this file rather than to standard output
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Only this axis
+        #[arg(long, value_name = "AXIS")]
+        axis: Option<String>,
+        /// With --out, the summary as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `nils classify votes` (record 41, S2).
+fn classify_votes(
+    home: &Home,
+    out: Option<PathBuf>,
+    axis: Option<String>,
+    json: bool,
+) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let filter = nils_classify::votes::Filter { axis };
+    let written = match &out {
+        Some(path) => {
+            let file = fs::File::create(path)
+                .map_err(|e| fail(format!("{} will not open: {e}", path.display())))?;
+            let mut w = std::io::BufWriter::new(file);
+            nils_classify::votes::write(registry.store(), &filter, &mut w)
+        }
+        None => {
+            let stdout = std::io::stdout();
+            let mut w = std::io::BufWriter::new(stdout.lock());
+            nils_classify::votes::write(registry.store(), &filter, &mut w)
+        }
+    }
+    .map_err(|e| fail(e.to_string()))?;
+    // The matrix is the output; a summary goes where it cannot mix with it.
+    if let Some(path) = out {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&written)
+                    .map_err(|e| fail(format!("will not serialize: {e}")))?
+            );
+        } else {
+            println!(
+                "{} votes on {} stacks over {} axes, in {}",
+                written.votes,
+                written.stacks,
+                written.axes.len(),
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
+    if let Some(ClassifyCommand::Votes { out, axis, json }) = args.command {
+        return classify_votes(home, out, axis, json);
+    }
     let dir = pack_dir(home, args.pack_dir)?;
     let found = packs_in(&dir)?
         .into_iter()
@@ -1937,6 +2009,7 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
 
     let mut settings = nils_classify::Settings {
         modality: args.modality,
+        votes: !args.no_votes,
         ..nils_classify::Settings::default()
     };
     if let Some(n) = args.name {
@@ -4986,16 +5059,16 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
         serde_json::json!({
             "store": "classifications",
             "owner": "the pack's author for the rules, the reviewers for the decisions",
-            "what": "what a pack decided about each stack, one row per axis, with the evidence that made it and any decision a person recorded",
-            "where": "rows of stack_fingerprint, classification, classification_axis, classification_evidence and decision in the registry",
+            "what": "what a pack decided about each stack, one row per axis, with the evidence that made it, every rule's vote on it and any decision a person recorded",
+            "where": "rows of stack_fingerprint, classification, classification_axis, classification_evidence, classification_voter, classification_vote and decision in the registry",
             "files": [],
-            "holds": ["technical: the fields a pack reads, the axes, the tiers and confidences, the rule that fired", "a person's words: the why on a decision"],
+            "holds": ["technical: the fields a pack reads, the axes, the tiers and confidences, the rule that fired, every clause that held and the value its rule said", "a person's words: the why on a decision"],
             "counts": { "fingerprints": fingerprints, "classified": classified, "decisions": decisions },
             "kept": "until the next run of that job replaces it; a decision until withdrawn, and a withdrawn one for good",
             "commands": {
                 "read": ["nils explain <stack>", "nils review list", "nils pack show <name>"],
-                "change": ["nils fingerprint", "nils classify", "nils review decide <id> --value <v>"],
-                "export": ["nils explain <stack> --json"],
+                "change": ["nils fingerprint", "nils classify", "nils classify --no-votes", "nils review decide <id> --value <v>"],
+                "export": ["nils explain <stack> --json", "nils classify votes [--out <file>] [--axis <axis>]"],
                 "delete": "with the registry",
             },
         }),

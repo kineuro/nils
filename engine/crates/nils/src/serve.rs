@@ -2998,6 +2998,9 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
         // record 26 §9: a promotion is a cohort act, which is Data work
         ("ask", Some("promote")) => ("data:work", Detail::Plain),
         ("ask", Some("run")) => ("query:work", Detail::Plain),
+        // record 41: the vote matrix is a read that writes a file where it
+        // is told, which no door queues
+        ("classify", Some("votes")) => return None,
         ("fingerprint" | "classify" | "pick" | "session" | "pyramid", _) => {
             ("pipelines:work", Detail::Plain)
         }
@@ -4480,5 +4483,23 @@ mod token_tests {
         );
         // a piece before any entry stays on its own, and is refused as before
         assert_eq!(token_entries("reader,t1=bo@lab"), ["reader", "t1=bo@lab"]);
+    }
+}
+
+#[cfg(test)]
+mod verb_tests {
+    use super::verb_needs;
+
+    fn words(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn a_classify_is_queued_and_its_vote_matrix_is_not() {
+        // record 41: `classify votes --out FILE` writes where it is told,
+        // and a door never names a path of the host
+        assert!(verb_needs(&words("classify --pack mri")).is_some());
+        assert!(verb_needs(&words("classify")).is_some());
+        assert!(verb_needs(&words("classify votes --out x.tsv")).is_none());
     }
 }

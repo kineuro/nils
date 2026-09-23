@@ -49,6 +49,10 @@ pub struct Settings {
     pub review_below: Option<f64>,
     /// Stacks per window.
     pub window: usize,
+    /// Record every rule's vote beside the verdict (record 41, S2). On by
+    /// default; off, a run writes no votes and removes the ones it would
+    /// have replaced, so what is stored never outlives the verdict it heard.
+    pub votes: bool,
 }
 
 impl Default for Settings {
@@ -59,6 +63,7 @@ impl Default for Settings {
             modality: None,
             review_below: None,
             window: WINDOW,
+            votes: true,
         }
     }
 }
@@ -71,6 +76,7 @@ impl Settings {
             "modality": self.modality,
             "review_below": self.review_below,
             "window": self.window,
+            "votes": self.votes,
         })
     }
 }
