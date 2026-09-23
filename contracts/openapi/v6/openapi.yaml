@@ -307,6 +307,7 @@ paths:
   /api/ask/catalog:
     get:
       summary: The catalog the caller may see, every level's first page (Wave 4b section 9)
+      description: "Section 4.4 rule 15 applied to the caller's detail after any ceiling: `kinds` lists the event kinds that detail opens, a sensitive kind only at detail sensitive and marked `sensitive: true` there, so a document written from the catalog read under one ceiling validates under the same ceiling, and a kind absent from it is refused at validate as forbidden_field (kineuro/nils#100)."
       responses:
         "200": {description: The catalog document}
   /api/ask/catalog/{level}:

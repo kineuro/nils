@@ -2285,3 +2285,87 @@ fn a_share_measure_names_its_denominator_and_a_measure_failure_is_a_refusal() {
     );
     server.finish();
 }
+
+/// kineuro/nils#100, section 4.4 rule 15: a sensitive kind is absent from
+/// what a caller without the class reads, whether its own step or a
+/// ceiling put it there, and refused at validate; a caller holding the
+/// class reads it listed and marked sensitive, and may name it. A document
+/// written from the catalog read under one ceiling validates under it.
+#[test]
+fn the_catalog_lists_only_the_kinds_the_callers_detail_opens() {
+    let home = synthetic();
+    let server = Server::start(
+        &home,
+        6,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reviewer",
+            "--token",
+            "an-operator-token-of-len=ops@lab:operator",
+        ],
+    );
+    let reviewer = Some("a-reviewer-token-of-len");
+    let ops = Some("an-operator-token-of-len");
+    let ceiling: &[(&str, &str)] = &[("X-Nils-Ceiling", "reviewer")];
+    let kinds = |doc: &serde_json::Value| -> Vec<(String, bool)> {
+        doc["kinds"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{doc}"))
+            .iter()
+            .map(|k| {
+                (
+                    k["name"].as_str().unwrap().to_string(),
+                    k["sensitive"].as_bool().unwrap(),
+                )
+            })
+            .collect()
+    };
+    // the reviewer's own step, and the operator under the reviewer's ceiling
+    let (status, own) = server.request("GET", "/api/ask/catalog", None, reviewer);
+    assert_eq!(status, 200, "{own}");
+    let (status, narrowed) = server.request_with("GET", "/api/ask/catalog", None, ops, ceiling);
+    assert_eq!(status, 200, "{narrowed}");
+    for doc in [&own, &narrowed] {
+        let listed = kinds(doc);
+        assert!(listed.iter().any(|(k, _)| k == "EDSS"), "{listed:?}");
+        assert!(
+            listed
+                .iter()
+                .all(|(k, sensitive)| k != "HIV Status" && !sensitive),
+            "a sensitive kind listed for a caller without the class: {listed:?}"
+        );
+        assert!(!doc.to_string().contains("HIV"), "{doc}");
+    }
+    let (status, page) = server.request_with("GET", "/api/ask/catalog/event", None, ops, ceiling);
+    assert_eq!(status, 200, "{page}");
+    assert!(!page.to_string().contains("HIV"), "{page}");
+    // what the catalog does not list, validate refuses under the same ceiling
+    let doc = serde_json::json!({
+        "ast_version": 1,
+        "sets": {"e": {"grain": "event", "where": [["=", {}, ["field", {}, "kind"], "HIV Status"]]}},
+        "out": {"set": "e", "level": "count"}
+    });
+    let request = body(serde_json::json!({"document": doc, "mode": "strict"}));
+    let (status, refused) =
+        server.request_with("POST", "/api/ask/validate", Some(&request), ops, ceiling);
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["issues"][0]["code"], "forbidden_field", "{refused}");
+    // the class opens the kind, and the kind says it is sensitive
+    let (status, full) = server.request("GET", "/api/ask/catalog", None, ops);
+    assert_eq!(status, 200, "{full}");
+    assert!(
+        kinds(&full).contains(&("HIV Status".to_string(), true)),
+        "{full}"
+    );
+    assert!(
+        kinds(&full)
+            .iter()
+            .all(|(k, sensitive)| *sensitive == (k == "HIV Status")),
+        "{full}"
+    );
+    let (status, valid) = server.request("POST", "/api/ask/validate", Some(&request), ops);
+    assert_eq!(status, 200, "{valid}");
+    server.finish();
+}
