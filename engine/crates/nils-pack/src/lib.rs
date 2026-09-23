@@ -26,6 +26,7 @@ pub mod pass;
 pub mod pick;
 pub mod private;
 pub mod rules;
+pub mod shape;
 pub mod stack;
 pub mod verdict;
 pub mod version;

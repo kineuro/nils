@@ -2043,6 +2043,19 @@ enum PackCommand {
         #[arg(long, value_name = "FILE")]
         overlay: Option<PathBuf>,
     },
+    /// What a pack directory's rules can reach: the values no rule and no
+    /// valid combination of the other axes reaches, and the clauses that
+    /// only restate another axis (record 41)
+    Shape {
+        /// The pack directory
+        dir: PathBuf,
+        /// Load it under this overlay
+        #[arg(long, value_name = "FILE")]
+        overlay: Option<PathBuf>,
+        /// Machine-readable output: every value and every clause
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Whether a directory is a pack directory: one that holds at least one
@@ -3036,10 +3049,32 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                             None => String::new(),
                         }
                     );
+                    let shape = pack.shape();
+                    let (values, reached) = shape.counts();
+                    println!(
+                        "{reached} of {values} values reached by a rule, {} unreachable, {} clauses restate another axis (nils pack shape)",
+                        shape.unreachable(),
+                        shape.implications.len()
+                    );
                     Ok(())
                 }
                 Err(e) => Err(fail(e.to_string())),
             }
+        }
+        PackCommand::Shape { dir, overlay, json } => {
+            let ov = load_overlay(overlay.as_ref())?;
+            let pack = nils_pack::load(&dir, ov.as_ref()).map_err(|e| fail(e.to_string()))?;
+            let shape = pack.shape();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&shape)
+                        .map_err(|e| fail(format!("will not serialize: {e}")))?
+                );
+            } else {
+                print!("{shape}");
+            }
+            Ok(())
         }
     }
 }

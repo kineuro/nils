@@ -39,7 +39,12 @@ the order the values are tried in are this pack's, and an overlay that
 reaches for them is refused.
 
     nils pack validate packs/mri
+    nils pack shape packs/mri
     nils pack show mri --pack-dir packs
+
+`nils pack shape` names every value no rule can reach and every clause that
+only restates another axis; a change that leaves a value unreachable should
+say why.
 
 Packs are AGPL-3.0-only like the engine. Third-party packs for other modalities
 follow the specification in `contracts/pack/`.
