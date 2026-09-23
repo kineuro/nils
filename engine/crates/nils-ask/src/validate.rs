@@ -291,6 +291,23 @@ const LEVELS: &[&str] = &[
     "cohort", "subject", "study", "series", "session", "stack", "instance", "event",
 ];
 
+/// The clause options that name a binding, a set or a kind.
+const NAME_OPTIONS: &[&str] = &["of", "over", "set"];
+
+/// A name the reader took for a boolean (kineuro/nils#98): YAML reads a
+/// plain `true` or `false` as one, so the option named nothing, and the
+/// refusal says why rather than that the name is missing.
+fn read_as_boolean(path: impl Into<String>, what: &str, key: &str, b: bool) -> Issue {
+    issue(
+        Code::UnknownField,
+        path,
+        format!(
+            "{what}'s {key} was read as the boolean {b}, not a name: a plain true or false is a boolean in YAML"
+        ),
+        format!("write the name in quotes: {key}: \"{b}\""),
+    )
+}
+
 fn issue(
     code: Code,
     path: impl Into<String>,
@@ -442,6 +459,11 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
             }
             for (i, m) in ask.out.measures.iter().enumerate() {
                 for (k, v) in &m.0 {
+                    for key in ["of", "over"] {
+                        if let Some(Value::Bool(b)) = v.get(key) {
+                            issues.push(read_as_boolean(format!("out.measures[{i}]"), k, key, *b));
+                        }
+                    }
                     if !matches!(k.as_str(), "share" | "stddev" | "median" | "percentile") {
                         issues.push(issue(
                             Code::UnknownField,
@@ -1322,6 +1344,11 @@ fn check_clause(
     }
     for cl in all {
         let op = cl.op.as_str();
+        for key in NAME_OPTIONS {
+            if let Some(Value::Bool(b)) = cl.opts.get(*key) {
+                issues.push(read_as_boolean(path, op, key, *b));
+            }
+        }
         match op {
             "field" => {
                 let Some(p) = cl.ref_name() else {
@@ -1498,6 +1525,8 @@ fn check_clause(
                 }
             }
             "share" => match cl.opts.get("over").and_then(Value::as_str) {
+                // said above: a name read as a boolean
+                None if matches!(cl.opts.get("over"), Some(Value::Bool(_))) => {}
                 None => issues.push(issue(
                     Code::UnknownSet,
                     path,

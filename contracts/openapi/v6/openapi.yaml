@@ -488,7 +488,7 @@ paths:
   /api/ask/draft:
     post:
       summary: Authored text with add only repair (Wave 4c section 6.4)
-      description: A document as YAML or JSON text; the structural repairs are applied and reported, the diagnosis says what is wrong in domain words, and a valid document is stored and answered by handle. The engine never parses a sentence.
+      description: "A document as YAML or JSON text; the structural repairs are applied and reported, the diagnosis says what is wrong in domain words, and a valid document is stored and answered by handle. The engine never parses a sentence. Since record 41 S4 YAML is read under the 1.2 core booleans: only true and false are booleans, and a plain n, y, yes, no, on or off is the text it says, so a binding named n is named in an option as written; a name written true or false is refused at its path in words saying it was read as a boolean (kineuro/nils#98)."
       requestBody: {content: {application/json: {schema: {type: object, required: [text], properties: {text: {type: string}}}}}}
       responses:
         "200": {description: "{repairs, diagnosis, document, hash}"}

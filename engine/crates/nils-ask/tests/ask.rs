@@ -761,3 +761,64 @@ fn collect_refs(v: &Value, out: &mut BTreeSet<String>) {
         _ => {}
     }
 }
+
+/// kineuro/nils#98: YAML is read under the 1.2 core booleans, so a binding
+/// named `n` (or `y`, `yes`, `no`, `on`, `off`) is a name in an option, and
+/// a name written `true` or `false` is refused in words that say it was
+/// read as a boolean, at the clause's path.
+#[test]
+fn yaml_reads_a_bare_n_as_a_name_and_says_when_a_name_was_read_as_a_boolean() {
+    let text = |name: &str| {
+        format!(
+            r#"
+ast_version: 1
+sets:
+  people: {{grain: subject}}
+  by_sex:
+    grain: group
+    group: {{of: people, by: [["field", {{}}, "sex"]]}}
+    bind:
+      {name}:     ["count", {{set: people}}]
+      share: ["share", {{of: {name}, over: people}}]
+out: {{set: by_sex, level: aggregate, columns: [["field", {{}}, "sex"], ["field", {{}}, "share"]]}}
+"#
+        )
+    };
+    for name in ["n", "y", "yes", "no", "on", "off", "N", "Yes"] {
+        let v = nils_ask::read(&text(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            v["sets"]["by_sex"]["bind"]["share"][1]["of"],
+            json!(name),
+            "{name}"
+        );
+        assert!(v["sets"]["by_sex"]["bind"][name].is_array(), "{name}: {v}");
+        accepted(v);
+    }
+    // true and false stay booleans, and the refusal says so
+    let v = nils_ask::read(&text("true").replace("true:", "t:")).unwrap();
+    assert_eq!(v["sets"]["by_sex"]["bind"]["share"][1]["of"], json!(true));
+    let issues = refused(v);
+    let hit = issues
+        .iter()
+        .find(|i| i.path == "sets.by_sex.bind.share")
+        .unwrap_or_else(|| panic!("{issues:?}"));
+    assert!(
+        hit.message.contains("read as the boolean true"),
+        "{}",
+        hit.message
+    );
+    assert!(hit.next.contains("quotes"), "{}", hit.next);
+    // the same on a measure of out
+    let issues = refused(json!({
+        "ast_version": 1,
+        "sets": {"people": {"grain": "subject"}},
+        "out": {"set": "people", "level": "record", "columns": [["field", {}, "sex"]],
+                "measures": [{"share": {"of": false, "over": "people"}}]}
+    }));
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.path == "out.measures[0]" && i.message.contains("read as the boolean false")),
+        "{issues:?}"
+    );
+}

@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- The ask reads YAML under the 1.2 core booleans. A plain `n`, `y`, `yes`, `no`, `on` or `off` was read as a boolean under the 1.1 rules, so a count bound as `n`, which is what a person and a small model call a count more often than anything else, could not be named in an option: `share {of: n, over: people}` was refused as `share names {of, over}` through the draft door while the same document as JSON ran. Only `true` and `false` are booleans now, and a name written as one of those is refused at its path in words saying it was read as a boolean and should be quoted (kineuro/nils#98).
+
 ## [1.0.0-alpha.37] - 2026-09-23
 
 ### Fixed
