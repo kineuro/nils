@@ -940,6 +940,14 @@ slice 1 so every later slice's gate runs on it, and slice 12 completes the
 adversarial seed. The private study's counts inform its shapes and nothing
 else.
 
+Record 41 adds what record 35 found missing: beside the first study of one
+background subject in six the generator writes a stack the pack ruled out,
+the scanner's screen capture of the MPRAGE, an MPRAGE on every axis but a
+disposition of `excluded`. It is written after every other row, so every id
+and UID before it is unchanged and every earlier canonical holds, and the
+gate's `ruled-out-stacks` fixture fails when a stack set forgets the standing
+predicate of rule 10.
+
 ### 13.2 The fixtures and the oracle
 
 C16 asked that the 28 gold tasks reproduce their hashes. The frozen table

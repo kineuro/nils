@@ -18,6 +18,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - A BIDS sidecar keeps every number the converter wrote. A release reads dcm2niix's JSON to add a field and writes it back, and the JSON reader's default number parsing misread some 17-digit decimals by one unit in the last place, so a slice timing of `212.91890726713459` left as `212.9189072671346`. The engine's JSON reader now parses every number to the nearest double (serde_json's `float_roundtrip`).
 
+- The ask gate can see a stack the pack ruled out. The one predicate the ask describes in words for stacks, "not excluded", was missing until record 35, and the gate passed identically with and without it because `nils synth` wrote no excluded stack. The generator now writes one beside the first study of one background subject in six, the scanner's screen capture of the MPRAGE, written after every other row so that every earlier answer is unchanged, and the gate's new `ruled-out-stacks` fixture, with four of the existing ones, fails when the predicate is dropped.
+
 ## [1.0.0-alpha.37] - 2026-09-23
 
 ### Fixed

@@ -1,0 +1,32 @@
+{
+  "name": "ruled-out-stacks",
+  "question": "How many MPRAGE stacks per disposition",
+  "hash": "694db107228f58a1869de2e3fb69cb29b902ed581dd4111cbd70ef720aa23084",
+  "columns": [
+    "_key",
+    "_subject",
+    "disposition",
+    "_rows",
+    "_subjects"
+  ],
+  "row_count": 2,
+  "rows": [
+    [
+      "1",
+      "",
+      "acquisition",
+      "172",
+      "48"
+    ],
+    [
+      "2",
+      "",
+      "scanner_derived",
+      "172",
+      "48"
+    ]
+  ],
+  "funnel": {
+    "mprage": 48
+  }
+}
