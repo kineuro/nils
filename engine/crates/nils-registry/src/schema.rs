@@ -1059,6 +1059,9 @@ fn build_registry() -> Vec<Table> {
                 req("clause", Type::Int),
                 req("axis", Type::Text),
                 req("tier", Type::Text),
+                // 1 where the clause only restates another axis (record 41,
+                // S3): a schema implication, not a witness.
+                req("restates", Type::Int),
             ],
         )
         .unique(&[

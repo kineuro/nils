@@ -4,7 +4,9 @@
 //! reads.
 //!
 //! One line per vote: the stack, the axis, the rule set, the rule, the
-//! clause's place in it, the value it said and the clause's tier. Identities
+//! clause's place in it, the value it said, the clause's tier, and 1 where
+//! the clause only restates another axis (a schema implication, which a
+//! label model reads as a constraint rather than a witness). Identities
 //! and the pack's own vocabulary only: no text a stack carried, no keyword
 //! it matched, nothing a person typed. Read in windows of stacks, so memory
 //! does not follow the size of the registry.
@@ -19,7 +21,7 @@ use serde::Serialize;
 use crate::job::Error;
 
 /// The columns, in order, as the first line says them.
-pub const HEADER: &str = "stack_id\taxis\trule_set\trule\tclause\tvalue\ttier";
+pub const HEADER: &str = "stack_id\taxis\trule_set\trule\tclause\tvalue\ttier\trestates";
 
 /// What was written.
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
@@ -47,9 +49,9 @@ pub fn write(store: &mut Store, filter: &Filter, out: &mut dyn Write) -> Result<
             "the votes will not write: {e}"
         )))
     };
-    let mut voters: HashMap<i64, (String, String, String, i64, String)> = HashMap::new();
+    let mut voters: HashMap<i64, (String, String, String, i64, String, i64)> = HashMap::new();
     let sql = format!(
-        "SELECT id, axis, rule_set, rule, clause, tier FROM {}",
+        "SELECT id, axis, rule_set, rule, clause, tier, restates FROM {}",
         store.qualified("classification_voter")
     );
     for r in store.query(&sql, &[])? {
@@ -61,6 +63,7 @@ pub fn write(store: &mut Store, filter: &Filter, out: &mut dyn Write) -> Result<
                 r.text(3)?.to_string(),
                 r.int(4)?,
                 r.text(5)?.to_string(),
+                r.int(6)?,
             ),
         );
     }
@@ -104,7 +107,8 @@ pub fn write(store: &mut Store, filter: &Filter, out: &mut dyn Write) -> Result<
                 )))
             })?;
             for (voter, value) in pairs {
-                let Some((axis, rule_set, rule, clause, tier)) = voters.get(&voter) else {
+                let Some((axis, rule_set, rule, clause, tier, restates)) = voters.get(&voter)
+                else {
                     continue;
                 };
                 if filter.axis.as_ref().is_some_and(|a| a != axis) {
@@ -112,7 +116,7 @@ pub fn write(store: &mut Store, filter: &Filter, out: &mut dyn Write) -> Result<
                 }
                 writeln!(
                     out,
-                    "{stack}\t{axis}\t{rule_set}\t{rule}\t{clause}\t{value}\t{tier}"
+                    "{stack}\t{axis}\t{rule_set}\t{rule}\t{clause}\t{value}\t{tier}\t{restates}"
                 )
                 .map_err(io)?;
                 written.votes += 1;

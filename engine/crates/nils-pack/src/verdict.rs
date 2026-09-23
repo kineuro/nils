@@ -97,14 +97,54 @@ pub struct Vote {
 }
 
 /// Who may vote: one clause of one rule, for one axis its rule writes. A
-/// [`Vote`] is one of these holding on a stack, with a value.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+/// [`Vote`] is one of these holding on a stack, with a value. A voter is
+/// identified by where it sits (set, rule, clause, axis, tier); `restates`
+/// follows from that place, so equality and hashing leave it out and a
+/// vote can find its voter without knowing it.
+#[derive(Debug, Clone, Serialize)]
 pub struct Voter {
     pub rule_set: String,
     pub rule: String,
     pub clause: usize,
     pub axis: String,
     pub tier: String,
+    /// The clause only restates another axis ([`crate::Rule::restates`]):
+    /// an implication of the schema, which a label model must not count as
+    /// a second witness.
+    pub restates: bool,
+}
+
+impl PartialEq for Voter {
+    fn eq(&self, other: &Self) -> bool {
+        (
+            &self.rule_set,
+            &self.rule,
+            self.clause,
+            &self.axis,
+            &self.tier,
+        ) == (
+            &other.rule_set,
+            &other.rule,
+            other.clause,
+            &other.axis,
+            &other.tier,
+        )
+    }
+}
+
+impl Eq for Voter {}
+
+impl std::hash::Hash for Voter {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        (
+            &self.rule_set,
+            &self.rule,
+            self.clause,
+            &self.axis,
+            &self.tier,
+        )
+            .hash(h);
+    }
 }
 
 /// Every voter a pack has, in the order its rule sets, rules, clauses and
@@ -123,6 +163,7 @@ pub fn voters(pack: &crate::Pack) -> Vec<Voter> {
                         clause,
                         axis: pack.axes[sets.axis].name.clone(),
                         tier: c.tier().name().to_string(),
+                        restates: rule.restates(clause),
                     };
                     if seen.insert(v.clone()) {
                         out.push(v);

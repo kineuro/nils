@@ -135,7 +135,7 @@ fn settings(votes: bool) -> nils_classify::Settings {
     }
 }
 
-/// The matrix as lines, split into their seven columns, header checked.
+/// The matrix as lines, split into their eight columns, header checked.
 fn matrix(reg: &mut Registry, filter: &Filter) -> (Vec<Vec<String>>, votes::Written) {
     let mut out: Vec<u8> = Vec::new();
     let written = votes::write(reg.store(), filter, &mut out).unwrap();
@@ -146,7 +146,8 @@ fn matrix(reg: &mut Registry, filter: &Filter) -> (Vec<Vec<String>>, votes::Writ
         .map(|l| l.split('\t').map(str::to_string).collect())
         .collect();
     for r in &rows {
-        assert_eq!(r.len(), 7, "{r:?}");
+        assert_eq!(r.len(), 8, "{r:?}");
+        assert!(r[7] == "0" || r[7] == "1", "{r:?}");
     }
     (rows, written)
 }

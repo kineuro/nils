@@ -1865,7 +1865,7 @@ fn classify_explains_itself_and_a_decision_closes_the_question() {
     let mut lines = matrix.lines();
     assert_eq!(
         lines.next(),
-        Some("stack_id\taxis\trule_set\trule\tclause\tvalue\ttier")
+        Some("stack_id\taxis\trule_set\trule\tclause\tvalue\ttier\trestates")
     );
     let votes: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
     assert!(

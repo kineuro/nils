@@ -566,6 +566,7 @@ impl Voters {
                     Param::Int(v.clause as i64),
                     Param::from(v.axis.as_str()),
                     Param::from(v.tier.as_str()),
+                    Param::Int(i64::from(v.restates)),
                 ]
             })
             .collect();
@@ -578,9 +579,19 @@ impl Voters {
             "axis",
             "tier",
         ];
+        const COLUMNS: &[&str] = &[
+            "pack",
+            "pack_version",
+            "rule_set",
+            "rule",
+            "clause",
+            "axis",
+            "tier",
+            "restates",
+        ];
         store.begin()?;
         let written = store.insert(
-            &Insert::new(table("classification_voter"), KEY).on_conflict(Conflict::Nothing(KEY)),
+            &Insert::new(table("classification_voter"), COLUMNS).on_conflict(Conflict::Nothing(KEY)),
             &rows,
         );
         match written {
@@ -591,7 +602,7 @@ impl Voters {
             }
         }
         let sql = format!(
-            "SELECT id, rule_set, rule, clause, axis, tier FROM {} WHERE pack = {} AND pack_version = {}",
+            "SELECT id, rule_set, rule, clause, axis, tier, restates FROM {} WHERE pack = {} AND pack_version = {}",
             store.qualified("classification_voter"),
             store.dialect().param(1, Type::Text),
             store.dialect().param(2, Type::Text),
@@ -611,6 +622,7 @@ impl Voters {
                     clause: r.int(3)? as usize,
                     axis: r.text(4)?.to_string(),
                     tier: r.text(5)?.to_string(),
+                    restates: r.int(6)? != 0,
                 },
                 r.int(0)?,
             );
@@ -632,6 +644,7 @@ impl Voters {
                     clause: v.clause,
                     axis: v.axis.clone(),
                     tier: v.tier.clone(),
+                    restates: false,
                 };
                 self.ids.get(&key).map(|id| (*id, v.value.as_str()))
             })
