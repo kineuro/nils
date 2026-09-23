@@ -16,6 +16,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - The draft door leaves an inline list of literals a list. Its repair pass took any array inside a clause whose first element was a string for a clause written without its options map, so `["in", {}, ["field", {}, "name"], ["ms-cohort-a", "ms-cohort-b"]]` became a clause called `ms-cohort-a` and was refused as `ms-cohort-a is not an op of the language`, while the same document as JSON ran. An array in an argument is repaired as a clause only when its first element is an op of the language or an alias of one (kineuro/nils#101).
 
+- A BIDS sidecar keeps every number the converter wrote. A release reads dcm2niix's JSON to add a field and writes it back, and the JSON reader's default number parsing misread some 17-digit decimals by one unit in the last place, so a slice timing of `212.91890726713459` left as `212.9189072671346`. The engine's JSON reader now parses every number to the nearest double (serde_json's `float_roundtrip`).
+
 ## [1.0.0-alpha.37] - 2026-09-23
 
 ### Fixed
