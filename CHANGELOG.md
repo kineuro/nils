@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- The classifier's signals carry the text an unresolved axis was matched against. `GET /api/classify/signals` answered the tiers, the spread, the review items, the shadowed and unused words and the fields of overridden stacks, and named only the axes that were left unresolved, so a reviewer, or a station tuning a site's words, had nothing to read a site's own word from until a person had already overridden a decision. `unresolved_texts` now samples the stacks in scope under the served pack, at most 2,000 unless `sample` says otherwise, and per axis, for the stacks the pack leaves `axis_unresolved`, folds the pack's own normalised `search_text` into distinct texts with the number of stacks each covers, the most common ten first. It is the text a keyword is matched against, it carries counts and texts and never a stack, and the door stays a reviewer's (kineuro/nils#94).
+
 ### Fixed
 
 - The ask reads YAML under the 1.2 core booleans. A plain `n`, `y`, `yes`, `no`, `on` or `off` was read as a boolean under the 1.1 rules, so a count bound as `n`, which is what a person and a small model call a count more often than anything else, could not be named in an option: `share {of: n, over: people}` was refused as `share names {of, over}` through the draft door while the same document as JSON ran. Only `true` and `false` are booleans now, and a name written as one of those is refused at its path in words saying it was read as a boolean and should be quoted (kineuro/nils#98).

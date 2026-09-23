@@ -21,11 +21,13 @@
 //! reviewer; no row leaves, and the fingerprint fields shown are acquisition
 //! parameters, never identifiers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use nils_pack::{Evaluated, Pack};
 use nils_registry::store::{Error, Param, Store};
 use serde_json::{Value, json};
 
+use crate::classify::{scoped_select, to_stack};
 use crate::scope::Scope;
 
 /// The fingerprint fields summarised for the overridden stacks.
@@ -228,6 +230,80 @@ pub fn signals(store: &mut Store, scope: &Scope) -> Result<Value, Error> {
         "shadowed_keywords": shadowed,
         "unused_overlay_terms": unused,
         "fields": fields,
+    }))
+}
+
+/// The most distinct search texts listed per axis (kineuro/nils#94).
+pub const TEXTS_MAX: usize = 10;
+
+/// The text each unresolved axis was matched against (Wave 4c section
+/// 9.13, kineuro/nils#94): over a bounded sample of the stacks in scope,
+/// the pack's verdict on each, and per axis, for the stacks it leaves
+/// `axis_unresolved`, the pack's own normalised `search_text` folded into
+/// distinct texts with the number of stacks each covers, the most common
+/// first and at most [`TEXTS_MAX`]. That is the text a keyword is matched
+/// against, so a reviewer tuning the words reads the site's own word where
+/// the rules found none. Counts and texts only, never a stack; `sample`
+/// bounds the stacks read, and `complete` says whether it read them all.
+pub fn unresolved_texts(
+    store: &mut Store,
+    pack: &Pack,
+    scope: &Scope,
+    sample: usize,
+) -> Result<Value, Error> {
+    let sample = sample.clamp(1, crate::rehearse::SAMPLE_MAX);
+    // one past the bound, to say whether the sample read every stack
+    let (sql, params) = scoped_select(store, &pack.modality, scope, sample + 1);
+    let rows = store.query(&sql, &params)?;
+    let complete = rows.len() <= sample;
+    let read = rows.len().min(sample);
+    // axis -> text -> stacks
+    let mut texts: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
+    for r in rows.iter().take(sample) {
+        let (_, stack, private) =
+            to_stack(r, false, pack).map_err(|e| Error::Message(e.to_string()))?;
+        let evaluated = Evaluated::with_private(pack, &stack, private);
+        let verdict = evaluated.classify();
+        let text = evaluated.derived_text("search_text").unwrap_or_default();
+        let axes: BTreeSet<&str> = verdict
+            .diagnostics
+            .iter()
+            .filter(|d| d.kind == "axis_unresolved")
+            .map(|d| d.axis.as_str())
+            .collect();
+        for axis in axes {
+            *texts
+                .entry(axis.to_string())
+                .or_default()
+                .entry(text.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+    let axes: BTreeMap<String, Value> = texts
+        .into_iter()
+        .map(|(axis, by_text)| {
+            let stacks: i64 = by_text.values().sum();
+            let distinct = by_text.len();
+            let mut listed: Vec<(String, i64)> = by_text.into_iter().collect();
+            listed.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            listed.truncate(TEXTS_MAX);
+            let listed: Vec<Value> = listed
+                .into_iter()
+                .map(|(text, n)| json!({"text": text, "stacks": n}))
+                .collect();
+            (
+                axis,
+                json!({"stacks": stacks, "distinct": distinct, "texts": listed}),
+            )
+        })
+        .collect();
+    Ok(json!({
+        "pack": format!("{}@{}", pack.name, pack.version),
+        "text": "search_text",
+        "sample": sample,
+        "read": read,
+        "complete": complete,
+        "axes": axes,
     }))
 }
 

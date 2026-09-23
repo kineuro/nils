@@ -1519,6 +1519,36 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
         "{signals}"
     );
     assert!(signals["diagnostics"].is_object(), "{signals}");
+    // kineuro/nils#94: the text each unresolved axis was matched against,
+    // folded and bounded, and the stacks it counts are the diagnostics'
+    let unresolved = &signals["unresolved_texts"];
+    assert_eq!(unresolved["read"], 2, "{signals}");
+    assert_eq!(unresolved["complete"], true, "{signals}");
+    assert_eq!(unresolved["text"], "search_text", "{signals}");
+    let axes = unresolved["axes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{signals}"));
+    let mut stacks = 0;
+    for doc in axes.values() {
+        let texts = doc["texts"].as_array().unwrap();
+        assert!(!texts.is_empty() && texts.len() <= 10, "{signals}");
+        assert_eq!(
+            texts
+                .iter()
+                .map(|t| t["stacks"].as_i64().unwrap())
+                .sum::<i64>(),
+            doc["stacks"].as_i64().unwrap(),
+            "{signals}"
+        );
+        stacks += doc["stacks"].as_i64().unwrap();
+    }
+    assert_eq!(
+        stacks,
+        signals["diagnostics"]["axis_unresolved"]
+            .as_i64()
+            .unwrap_or(0),
+        "{signals}"
+    );
     // record 26: the same by value, and the origins for the scope chips
     let by_value = signals["by_value"]["technique"]
         .as_object()

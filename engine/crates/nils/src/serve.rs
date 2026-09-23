@@ -1501,10 +1501,36 @@ fn routed(
             })?;
             let scope =
                 nils_classify::scope::Scope::parse(scope).map_err(|e| Reply::error(400, e))?;
-            Ok(Reply::ok(nils_classify::signals::signals(
-                registry.store(),
-                &scope,
-            )?))
+            let mut doc = nils_classify::signals::signals(registry.store(), &scope)?;
+            // kineuro/nils#94: the text each unresolved axis was matched
+            // against, under the pack the engine serves, over a bounded sample
+            let name = query
+                .get("pack")
+                .cloned()
+                .unwrap_or_else(|| doors.ask_pack.clone());
+            let found = doors.pack_dir.as_ref().and_then(|dir| {
+                crate::packs_in(dir)
+                    .ok()?
+                    .into_iter()
+                    .find(|p| p.file_name().is_some_and(|f| *f == *name))
+            });
+            doc["unresolved_texts"] = match found {
+                Some(dir) => {
+                    let pack = nils_pack::load(&dir, None)
+                        .map_err(|e| Reply::error(500, format!("the pack {name}: {e}")))?;
+                    let sample = nils_classify::rehearse::sample_of(
+                        query.get("sample").and_then(|s| s.parse().ok()),
+                    );
+                    nils_classify::signals::unresolved_texts(
+                        registry.store(),
+                        &pack,
+                        &scope,
+                        sample,
+                    )?
+                }
+                None => serde_json::Value::Null,
+            };
+            Ok(Reply::ok(doc))
         }
         ["api", "classify", "try"] if post => {
             let doc = json_body(body)?;
