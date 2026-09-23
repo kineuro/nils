@@ -2195,3 +2195,93 @@ fn a_profile_counts_what_is_under_a_set_and_withholds_what_the_role_may_not_read
     );
     assert_eq!(status, 404, "{refused}");
 }
+
+/// kineuro/nils#99: a share measure without its denominator is refused by
+/// strict validation at `out.measures[0]`, as a share clause in a bind is,
+/// and a measure that fails at run is a refusal with its path, not a 500.
+#[test]
+fn a_share_measure_names_its_denominator_and_a_measure_failure_is_a_refusal() {
+    let home = synthetic();
+    let server = Server::start(&home, 4, &[]);
+    let doc = |measure: serde_json::Value| {
+        serde_json::json!({
+            "ast_version": 1,
+            "sets": {
+                "people": {"grain": "subject"},
+                "by_sex": {"grain": "group",
+                           "group": {"of": "people", "by": [["field", {}, "sex"]]},
+                           "bind": {"n": ["count", {"set": "people"}]}}
+            },
+            "out": {"set": "by_sex", "level": "aggregate",
+                    "columns": [["field", {}, "sex"], ["field", {}, "n"]],
+                    "measures": [measure]}
+        })
+    };
+    let (status, v) = server.request(
+        "POST",
+        "/api/ask/validate",
+        Some(&body(serde_json::json!({
+            "document": doc(serde_json::json!({"share": {"of": "n"}})),
+            "mode": "strict"
+        }))),
+        None,
+    );
+    assert_eq!(status, 400, "{v}");
+    assert_eq!(v["issues"][0]["path"], "out.measures[0]", "{v}");
+    assert_eq!(v["issues"][0]["code"], "unknown_set", "{v}");
+    assert!(
+        v["issues"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("denominator"),
+        "{v}"
+    );
+    let (status, v) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(serde_json::json!({
+            "document": doc(serde_json::json!({"share": {"of": "n"}}))
+        }))),
+        None,
+    );
+    assert_eq!(status, 400, "{v}");
+    assert_eq!(v["issues"][0]["path"], "out.measures[0]", "{v}");
+    // a measure of a column the answer lacks fails at run: a refusal with
+    // the measure's path
+    let (status, v) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(serde_json::json!({
+            "document": doc(serde_json::json!({"share": {"of": "nothing", "over": "people"}}))
+        }))),
+        None,
+    );
+    assert_eq!(status, 400, "{v}");
+    assert_eq!(v["issues"][0]["path"], "out.measures[0]", "{v}");
+    assert!(
+        v["issues"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("nothing"),
+        "{v}"
+    );
+    // with its denominator the measure runs and adds its column
+    let (status, v) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(serde_json::json!({
+            "document": doc(serde_json::json!({"share": {"of": "n", "over": "people"}}))
+        }))),
+        None,
+    );
+    assert_eq!(status, 200, "{v}");
+    assert!(
+        v["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "share.n"),
+        "{v}"
+    );
+    server.finish();
+}

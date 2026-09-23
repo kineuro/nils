@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::ast::Measure;
 use crate::exec::Answer;
+use crate::validate::{Code, Issue};
 
 #[derive(Debug)]
 pub enum MeasureError {
@@ -23,6 +24,34 @@ pub enum MeasureError {
     Unknown(String),
     NoDenominator(String),
     Message(String),
+    /// One measure's failure, at its place in `out.measures`
+    /// (kineuro/nils#99): a refusal with a path, never a server's fault.
+    At(usize, Box<MeasureError>),
+}
+
+impl MeasureError {
+    /// The refusal as an issue of the taxonomy, with the measure's path.
+    pub fn issue(&self) -> Issue {
+        let (path, inner) = match self {
+            MeasureError::At(i, e) => (format!("out.measures[{i}]"), e.as_ref()),
+            other => ("out.measures".to_string(), other),
+        };
+        let (code, next) = match inner {
+            MeasureError::Truncated => (Code::Truncated, "POST /api/ask/jobs runs it unbounded"),
+            MeasureError::NoDenominator(_) => (Code::UnknownSet, "name the denominator's set"),
+            MeasureError::NoColumn(_) => (
+                Code::UnknownField,
+                "measure a column the answer carries: one of out.columns",
+            ),
+            _ => (Code::UnknownField, "change the measure as the message says"),
+        };
+        Issue {
+            code,
+            path,
+            message: inner.to_string(),
+            next: next.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for MeasureError {
@@ -38,6 +67,7 @@ impl fmt::Display for MeasureError {
             ),
             MeasureError::NoDenominator(s) => write!(f, "no count for the set {s} a share is over"),
             MeasureError::Message(m) => f.write_str(m),
+            MeasureError::At(i, e) => write!(f, "out.measures[{i}]: {e}"),
         }
     }
 }
@@ -147,10 +177,11 @@ pub fn number(c: &Cell) -> Option<f64> {
 }
 
 /// Apply the measures to an answer; `over` holds the distinct subject
-/// count of every set a share is over.
+/// count of every set a share is over. Each measure comes with its place
+/// in `out.measures`, which a failure names.
 pub fn apply(
     answer: &mut Answer,
-    measures: &[Measure],
+    measures: &[(usize, &Measure)],
     over: &BTreeMap<String, f64>,
 ) -> Result<Measured, MeasureError> {
     if measures.is_empty() {
@@ -160,7 +191,19 @@ pub fn apply(
         return Err(MeasureError::Truncated);
     }
     let mut out = Measured::default();
-    for m in measures {
+    for (at, m) in measures {
+        one(answer, m, over, &mut out).map_err(|e| MeasureError::At(*at, Box::new(e)))?;
+    }
+    Ok(out)
+}
+
+fn one(
+    answer: &mut Answer,
+    m: &Measure,
+    over: &BTreeMap<String, f64>,
+    out: &mut Measured,
+) -> Result<(), MeasureError> {
+    {
         for (kind, spec) in &m.0 {
             let of = spec
                 .get("of")
@@ -216,5 +259,5 @@ pub fn apply(
             }
         }
     }
-    Ok(out)
+    Ok(())
 }

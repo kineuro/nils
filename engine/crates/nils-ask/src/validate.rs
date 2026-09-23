@@ -474,6 +474,32 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
                             "rename the measure",
                         ));
                     }
+                    // kineuro/nils#99: what run would refuse, refused here
+                    // at the measure's path
+                    if v.get("of").is_none() {
+                        issues.push(issue(
+                            Code::UnknownField,
+                            format!("out.measures[{i}]"),
+                            format!("{k} names the column it measures: {{of: <column>}}"),
+                            "add of",
+                        ));
+                    }
+                    if k == "share" && v.get("over").is_none() {
+                        issues.push(issue(
+                            Code::UnknownSet,
+                            format!("out.measures[{i}]"),
+                            "share names its denominator: {over: <set>}",
+                            "add over",
+                        ));
+                    }
+                    if k == "percentile" && !v.get("p").is_some_and(Value::is_number) {
+                        issues.push(issue(
+                            Code::UnknownField,
+                            format!("out.measures[{i}]"),
+                            "percentile names its rank: {p: <0 to 100>}",
+                            "add p",
+                        ));
+                    }
                     if k == "share"
                         && let Some(over) = v.get("over").and_then(Value::as_str)
                         && !ask.sets.contains_key(over)

@@ -323,7 +323,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, mode: {type: string, enum: [strict, repair]}}}}}}
       responses:
         "200": {description: "{hash, warnings, pinned, repairs}"}
-        "400": {description: "{error, issues}: the taxonomy errors with their paths and next calls"}
+        "400": {description: "{error, issues}: the taxonomy errors with their paths and next calls; since record 41 S4 a measure of out that names no column (of), a share with no denominator (over) and a percentile with no rank (p) are refused at out.measures[i] (kineuro/nils#99)"}
   /api/ask/run:
     post:
       summary: "The bounded path, inside the caps (Wave 4b section 11.5): a handle with its first page of rows"
@@ -331,7 +331,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, name: {type: string}, keep: {type: boolean}, after: {type: integer}, limit: {type: integer}, purpose: {type: string}, fresh: {type: boolean}}}}}}
       responses:
         "200": {description: "{handle, hash, columns, rows, truncated, pages, measures, drift, kept, identifiers, declaration, epoch} and, on a cached answer, {cached: true, produced_at, produced_by}; the declaration (Wave 4c section 6.4) names the grain, the session scheme and its digest, the membership reading, the key namespace, the pick rule, the denominator, the disclosure and whether a cap truncated"}
-        "400": {description: The document is refused}
+        "400": {description: "The document is refused: {error, issues}. Since record 41 S4 a measure that fails at run (a column the answer does not carry, a denominator with no count) is refused here with its path, out.measures[i], and no longer answers 500 (kineuro/nils#99)"}
         "403": {description: Identifiers are projected at detail sensitive only}
   /api/ask/jobs:
     post:

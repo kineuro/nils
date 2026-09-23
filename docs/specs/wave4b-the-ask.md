@@ -261,6 +261,17 @@ binding>, over: <set name>}` on a group set and on `out`, which desugars to the
 same thing and which describe prints by name. A share inside a group over the
 group's own `_subjects` is ordinary arithmetic and needs no clause.
 
+Record 41 (kineuro/nils#99): write a share as `share`, the clause in a group's
+`bind` (`["share", {of: n, over: people}]`) or the measure on `out`
+(`{share: {of: n, over: people}}`). Both name the denominator and both are
+refused at validate without `over`. Inside a group's `bind` a `count {set:
+people}` is an aggregate of the group, counted per group like every other
+binding there, so `["/", {}, ["field", {}, "n"], ["count", {set: people}]]`
+divides each group's count by itself and answers 1.0 on every row; it is not
+the uncorrelated count this paragraph describes. The `bind: {denom: ...}`
+form above stays as the record wrote it; the language reaches it through
+`share`.
+
 **values** goes by reference (C41). The document carries `{upload: id}` and a
 digest of the resolved keys; the rows exist only in the request that creates
 the upload and die on resolution into `values_member`. A federated request

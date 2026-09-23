@@ -431,11 +431,12 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
         req.scope,
         &mut answer,
     )?;
-    let remaining: Vec<crate::ast::Measure> = ask
+    let remaining: Vec<(usize, &crate::ast::Measure)> = ask
         .out
         .measures
         .iter()
-        .filter(|m| {
+        .enumerate()
+        .filter(|(_, m)| {
             m.0.iter().all(|(kind, spec)| {
                 !measure::is_scalar(kind)
                     || spec
@@ -444,7 +445,6 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
                         .is_some_and(|of| stored_answer.columns.iter().any(|c| c == of))
             })
         })
-        .cloned()
         .collect();
     let mut measured = measure::apply(&mut answer, &remaining, &over)?;
     // the columns in the answer's order: the group's scalars, then the shares
