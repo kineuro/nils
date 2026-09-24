@@ -72,11 +72,13 @@ rules:
   # --- 2. the coil. Only a spine coil says which part it was on: 36 stacks
   # of five protocols were received on one and every one was a spine, four
   # of them in an exam registered as a brain. A head and neck coil received
-  # 1,900 brain stacks and 144 spinal ones, so it decides nothing.
+  # 1,900 brain stacks and 144 spinal ones, so it decides nothing. A coil
+  # named for the spine and for the head or neck as well, such as Philips'
+  # dS HeadNeckSpine, images all of them and says nothing either.
 
   spine_coil:
     clauses:
-      - {when: {text: receive_coil_name, substring: spine}, cite: 'a spine coil', source: coil, tier: keywords}
+      - {when: {all: [{text: receive_coil_name, substring: spine}, {not: {text: receive_coil_name, substring: head}}, {not: {text: receive_coil_name, substring: neck}}]}, cite: 'a spine coil', source: coil, tier: keywords}
     set: {body_part: spine}
     confidence: 0.65
     why: 'the series was received on a spine coil'

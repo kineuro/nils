@@ -542,6 +542,17 @@ cases:
     axes:
       body_part: spine
 
+  - name: a head, neck and spine coil says nothing about which of the three was scanned
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: SE
+      text_body_part: 'HEAD'
+      text_sequence_name: 'TSE'
+      text_series_description: 'T2W_TSE_TRA'
+      receive_coil_name: 'dS HeadNeckSpine'
+    axes:
+      body_part: brain
+
   - name: a head and neck coil says nothing about which of the two was scanned
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
