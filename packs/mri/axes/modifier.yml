@@ -141,12 +141,12 @@ values:
       - mtc
     detection:
       exclusive: has_mtc
+  # From ScanOptions only. A name is not a scan option: `0 flow comp` in a
+  # protocol whose printout says flow compensation is off made 87 stacks and
+  # 125 reformats of them FlowComp by the words alone (record 41), and `fc`
+  # as a substring is inside far more words than it means. A site whose
+  # names are reliable may give the value words through an overlay.
   FlowComp:
-    keywords:
-      - flow comp
-      - flowcomp
-      - gmn
-      - fc
     detection:
       exclusive: has_flow_comp
   BlackBlood:

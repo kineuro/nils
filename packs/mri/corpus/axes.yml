@@ -461,3 +461,31 @@ cases:
       text_series_description: 'Ax ASL 3D'
     axes:
       technique: ASL
+
+  # A name is not a scan option. The console's printout for this protocol
+  # says flow compensation is off, ScanOptions holds only `PFP`, and the
+  # name says `0 flow comp`: 87 acquired stacks and 125 reformats of them
+  # were FlowComp by the words alone.
+  - name: a name that mentions flow compensation does not switch it on
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      scan_options: PFP
+      text_sequence_name: '*spc_314ns'
+      text_series_description: 'Sag T2 3D SPACE 0 flow comp'
+      mr_acquisition_type: 3D
+    axes:
+      technique: SPACE
+      modifier: ''
+
+  - name: flow compensation is what ScanOptions says it is
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: SE
+      sequence_variant: 'SK\SP'
+      scan_options: 'FC\PFP'
+      text_sequence_name: '*tse2d1_15'
+      text_series_description: 'sag t2 tse'
+    axes:
+      modifier: FlowComp

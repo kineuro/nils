@@ -26,6 +26,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - The MRI pack calls an EPI RESOLVE only when its sequence name says so. The technique `MS-EPI` (label `RESOLVE`) was also reached by segmented k-space beside an EPI readout, a combination v0 carried, and Siemens writes `SK` in SequenceVariant on every EPI it makes, single shot or not. Read against the printouts of five scanner protocols, that combination called 2,916 single-shot diffusion stacks and 462 BOLD stacks RESOLVE, and every 3D GRASE ASL series too; none was. The value now comes from the readout-segmented sequence's own name (`*re_b`) or its words, so the diffusion series are `DWI-EPI`, the BOLD series and their motion-corrected copies `BOLD`, the ASL series `ASL`, and a gradient-echo EPI that nothing else names `GRE-EPI`.
 
+- The MRI pack takes flow compensation from ScanOptions and not from a name. `FlowComp` was also reached by the words `flow comp`, `flowcomp`, `gmn` and `fc` anywhere in the text, and a 3D SPACE protocol named `... 0 flow comp`, whose printout says flow compensation is off and whose ScanOptions hold only `PFP`, was FlowComp on 87 acquired stacks and 125 reformats of them. The value now comes from the scan option `FC` alone; a site whose names are reliable can still give it words through an overlay (`lists.modifier.FlowComp`).
+
 ## [1.0.0-alpha.37] - 2026-09-23
 
 ### Fixed
