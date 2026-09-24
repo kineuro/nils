@@ -38,6 +38,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - A longhand rule's `requires` gates it. The loader read `requires` on a value of an axis file and skipped it on a rule written longhand, which is the same rule in its long form, so a longhand rule fired where its author said it must not and nothing said so. It is honoured now, is checked like any other condition (a rule decided before the passes may not require an axis decided after them), and any key a longhand rule does not have is refused with its file, line and path instead of being ignored.
 
+### Changed
+
+- The MRI pack is version 0.3.0, because the rules the five scanner protocols proved wrong now give other answers: RESOLVE, FlowComp, the t test map of an ASL series, the body part, and the reformats of a susceptibility acquisition. Its vocabulary is unchanged, so a question asked of 0.2.0 means the same words here.
+
 ## [1.0.0-alpha.37] - 2026-09-23
 
 ### Fixed
