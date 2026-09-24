@@ -4003,7 +4003,7 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
     );
     assert_eq!(
         row("GET /api/status")["grant"].as_array().unwrap().len(),
-        26
+        28
     );
     // record 42 R7: a rater is not a reviewer of the whole queue; closing a
     // campaign writes decisions, which needs both
