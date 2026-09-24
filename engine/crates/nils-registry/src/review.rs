@@ -1779,12 +1779,14 @@ pub struct PipelineQc<'a> {
     pub run_id: i64,
     /// `name@version`.
     pub pipeline: &'a str,
-    /// `sub-<s>`, `sub-<s>_ses-<t>` or `stack-<id>`.
+    /// `sub-<s>`, `sub-<s>_ses-<t>` or `stack-<id>`, or `run` for the run's
+    /// own files.
     pub unit: &'a str,
     pub stack_id: Option<i64>,
     pub subject_id: Option<i64>,
     pub session_day: Option<&'a str>,
-    /// `failed`, or `unreported` for a unit the results did not name.
+    /// `failed`, `unreported` for a unit the results did not name, or
+    /// `refused` for a file the engine would not take (record 43 review).
     pub status: &'a str,
     pub error: Option<&'a str>,
     pub metrics: &'a serde_json::Value,

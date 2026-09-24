@@ -5,7 +5,7 @@
 //! under the folder, and each file's size and sha256, read by the engine and
 //! never taken from the pipeline.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 /// The size and the sha256 (hex) of a file, read through once.
@@ -47,6 +47,57 @@ pub fn inside(root: &Path, rel: &str) -> Result<PathBuf, String> {
         return Err(format!("{rel} is not a file"));
     }
     Ok(real)
+}
+
+/// Read a file under the output folder, the engine's or a pipeline's,
+/// only where [`inside`] takes it: never through a link out of the folder.
+pub fn read_inside(root: &Path, rel: &str) -> Result<Vec<u8>, String> {
+    let file = inside(root, rel)?;
+    std::fs::read(&file).map_err(|e| format!("{rel}: {e}"))
+}
+
+/// Write a file the engine makes, refusing one that is there already and
+/// never following a link: the file is created new (`O_EXCL`) and opened
+/// with `O_NOFOLLOW`, so a link a container planted is refused, not
+/// written through.
+pub fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut f = open.open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
+/// Which of `outputs` a unit's file is: the first whose template, with the
+/// unit's own words filled in, matches it. None when the file is not the
+/// unit's, however another unit's template would read it.
+pub fn unit_output<'a>(
+    outputs: &'a [crate::descriptor::Output],
+    rel: &str,
+    vars: &[(&str, &str)],
+) -> Option<&'a crate::descriptor::Output> {
+    outputs.iter().find(|o| {
+        let mut t = o.template.clone();
+        for (k, v) in vars {
+            t = t.replace(&format!("{{{k}}}"), &glob::Pattern::escape(v));
+        }
+        !t.contains('{')
+            && glob::Pattern::new(&t).is_ok_and(|p| {
+                p.matches_with(
+                    rel,
+                    glob::MatchOptions {
+                        case_sensitive: true,
+                        require_literal_separator: true,
+                        require_literal_leading_dot: false,
+                    },
+                )
+            })
+    })
 }
 
 /// The files under `root` a path template finds for one unit, relative to
@@ -196,5 +247,42 @@ mod tests {
         assert_eq!(media_type("x.nii.gz", None), "application/x-nifti+gzip");
         assert_eq!(media_type("x.bin", Some("a/b")), "a/b");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The review of record 43: an engine write never follows a link a
+    /// container planted, and a unit claims only its own files.
+    #[test]
+    fn an_engine_write_refuses_a_link_and_a_unit_claims_only_its_own_files() {
+        let dir = temp("write-new");
+        let host = dir.join("host.txt");
+        std::fs::write(&host, "the host's own").unwrap();
+        #[cfg(unix)]
+        {
+            let link = dir.join("planted.json");
+            std::os::unix::fs::symlink(&host, &link).unwrap();
+            assert!(write_new(&link, b"engine").is_err());
+            assert_eq!(std::fs::read_to_string(&host).unwrap(), "the host's own");
+            // a link out of the folder is not read either
+            let out = dir.join("out");
+            std::fs::create_dir_all(&out).unwrap();
+            std::os::unix::fs::symlink(&host, out.join("results.json")).unwrap();
+            assert!(read_inside(&out, "results.json").is_err());
+        }
+        assert!(write_new(&host, b"engine").is_err(), "there already");
+        let fresh = dir.join("fresh.json");
+        write_new(&fresh, b"engine").unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"engine");
+
+        let outputs = vec![crate::descriptor::Output {
+            id: "o".into(),
+            kind: "output".into(),
+            template: "stack-{stack}/out.txt".into(),
+            media_type: None,
+            run_level: false,
+            card: None,
+        }];
+        assert!(unit_output(&outputs, "stack-4/out.txt", &[("stack", "4")]).is_some());
+        assert!(unit_output(&outputs, "stack-5/out.txt", &[("stack", "4")]).is_none());
+        assert!(unit_output(&outputs, "other/out.txt", &[("stack", "4")]).is_none());
     }
 }

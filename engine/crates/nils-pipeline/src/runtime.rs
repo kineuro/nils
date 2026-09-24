@@ -406,6 +406,8 @@ pub fn run(
     log: &Path,
     tick: &mut dyn FnMut() -> bool,
 ) -> std::io::Result<Ended> {
+    check_mounts(&inv.mounts).map_err(std::io::Error::other)?;
+    prepare_mountpoints(&inv.mounts)?;
     let out = std::fs::File::create(log)?;
     let err = out.try_clone()?;
     let mut child = rt
@@ -436,6 +438,58 @@ pub fn run(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Refuse a mount the runtimes' mount syntax would misread: `--volume
+/// host:container:ro` and apptainer's `--bind` split on `:` and `,`, so a
+/// path holding either would bind something other than what was meant.
+pub fn check_mounts(mounts: &[Mount]) -> Result<(), String> {
+    for m in mounts {
+        let host = m.host.to_string_lossy();
+        for (what, path) in [("host", host.as_ref()), ("container", m.container.as_str())] {
+            if path.contains(':') || path.contains(',') {
+                return Err(format!(
+                    "the {what} path {path} of a mount holds a ':' or a ',', which a runtime's mount syntax splits on"
+                ));
+            }
+        }
+        if !m.container.starts_with('/') {
+            return Err(format!("{} is not an absolute container path", m.container));
+        }
+    }
+    Ok(())
+}
+
+/// Make, in the host folder of each mount, the mountpoints of the mounts
+/// nested inside it (`/inputs/<id>` inside `/inputs`): a runtime cannot make
+/// one inside a read-only bind, and a real runtime then refuses to start.
+pub fn prepare_mountpoints(mounts: &[Mount]) -> std::io::Result<()> {
+    for inner in mounts {
+        for outer in mounts {
+            let Some(rest) = inner
+                .container
+                .strip_prefix(&outer.container)
+                .and_then(|r| r.strip_prefix('/'))
+            else {
+                continue;
+            };
+            if rest.is_empty() || rest.split('/').any(|s| s.is_empty() || s == "..") {
+                continue;
+            }
+            let at = outer.host.join(rest);
+            if inner.host.is_file() {
+                if let Some(parent) = at.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                if !at.exists() {
+                    std::fs::File::create(&at)?;
+                }
+            } else {
+                std::fs::create_dir_all(&at)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A runtime for tests: runs a host program in place of a container, with
@@ -630,5 +684,41 @@ mod tests {
         assert!(ended.stopped);
         assert!(started.elapsed() < Duration::from_secs(10));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The review of record 43: a path a mount syntax would split is
+    /// refused, and a nested mount's point is made in its parent's folder
+    /// before the run, since none can be made inside a read-only bind.
+    #[test]
+    fn a_mount_is_checked_and_its_nested_points_are_made_first() {
+        let m = |host: &str, container: &str| Mount {
+            host: PathBuf::from(host),
+            container: container.into(),
+            read_only: true,
+        };
+        assert!(check_mounts(&[m("/data/a", "/source/0")]).is_ok());
+        for bad in [
+            m("/data/a:b", "/source/0"),
+            m("/data/a,b", "/source/0"),
+            m("/a", "/in:x"),
+        ] {
+            assert!(check_mounts(&[bad]).is_err());
+        }
+        let root = std::env::temp_dir().join(format!("nils-mountpoints-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (inputs, labels) = (root.join("inputs"), root.join("labels"));
+        std::fs::create_dir_all(&inputs).unwrap();
+        std::fs::create_dir_all(&labels).unwrap();
+        let card = root.join("card.json");
+        std::fs::write(&card, "{}").unwrap();
+        prepare_mountpoints(&[
+            m(inputs.to_str().unwrap(), "/inputs"),
+            m(labels.to_str().unwrap(), "/inputs/labels"),
+            m(card.to_str().unwrap(), "/inputs/head/card.json"),
+        ])
+        .unwrap();
+        assert!(inputs.join("labels").is_dir());
+        assert!(inputs.join("head/card.json").is_file());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

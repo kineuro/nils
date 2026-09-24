@@ -1813,6 +1813,7 @@ version = "1.0.0-alpha.37"
 dependencies = [
  "glob",
  "hex",
+ "libc",
  "ring",
  "serde-saphyr",
  "serde_json",

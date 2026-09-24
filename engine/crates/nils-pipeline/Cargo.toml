@@ -17,5 +17,8 @@ ring.workspace = true
 serde_json.workspace = true
 serde-saphyr.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [lints]
 workspace = true

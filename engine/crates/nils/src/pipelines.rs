@@ -907,116 +907,193 @@ struct Materialised {
     mounts: Vec<Mount>,
     release_id: Option<i64>,
     stopped: bool,
+    /// What the run was given of the source places (record 43 review).
+    scope: Value,
 }
 
-/// `stacks.json`: each stack's files under the source places, mounted
-/// read-only at `/source/<n>`, and the frames of a multi-frame file; since
-/// record 43 also each stack's orientation, its `body_part` and `technique`
-/// as the registry holds them now, and how many slices its files hold, so
-/// an image seeds and picks slices without reading every header.
+/// At most this many folders are bound one by one for a stacks input; a
+/// selection whose files lie in more is given the source places' roots
+/// instead, which the run records and its report says.
+pub(crate) const MAX_BINDS: usize = 2000;
+
+/// `stacks.json`: each stack's files, and the frames of a multi-frame
+/// file; since record 43 also each stack's orientation, its `body_part` and
+/// `technique` as the registry holds them now, and how many slices its
+/// files hold, so an image seeds and picks slices without reading every
+/// header. Each folder that holds a file of the selection is bound
+/// read-only at `/source/<n>`, one bind per folder and never a whole source
+/// place, unless the folders are more than [`MAX_BINDS`]. The registry is
+/// read a few hundred stacks at a time, not stack by stack.
 fn materialise_stacks(
     store: &mut Store,
     stacks: &[i64],
     input: &Path,
 ) -> Result<Materialised, String> {
     let d = store.dialect();
-    let mut sources: BTreeMap<i64, (usize, String)> = BTreeMap::new();
-    let mut entries: Vec<Value> = Vec::new();
-    let mut units: Vec<Unit> = Vec::new();
     let err = |e: nils_registry::Error| e.to_string();
-    for &stack in stacks {
+    type Info = (i64, i64, String, Option<String>);
+    let mut info: BTreeMap<i64, Info> = BTreeMap::new();
+    let mut axes: BTreeMap<i64, BTreeMap<String, String>> = BTreeMap::new();
+    // per stack: (source id, source root, path, frames and their count)
+    type File = (i64, String, String, Option<(String, i64)>);
+    let mut files_of: BTreeMap<i64, Vec<File>> = BTreeMap::new();
+    for chunk in stacks.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
-            "SELECT st.series_id, se.subject_id, st.modality, st.orientation FROM {} st JOIN {} se ON se.id = st.series_id WHERE st.id = {}",
+            "SELECT st.id, st.series_id, se.subject_id, st.modality, st.orientation FROM {} st \
+             JOIN {} se ON se.id = st.series_id WHERE st.id IN ({list})",
             store.qualified("stack"),
             store.qualified("series"),
-            d.param(1, Type::Int)
         );
-        let Some(row) = store.query_opt(&sql, &[Param::Int(stack)]).map_err(err)? else {
-            return Err(format!(
-                "stack {stack} of the selection is not in the registry"
-            ));
-        };
-        let series_id = row.int(0).map_err(err)?;
-        let subject_id = row.int(1).map_err(err)?;
-        let modality = row.text(2).map_err(err)?.to_string();
-        let orientation = row.opt_text(3).map_err(err)?.map(str::to_string);
-        // the axes an image reads, as the registry holds them now
-        let axes_sql = format!(
-            "SELECT axis, value FROM {} WHERE stack_id = {} AND axis IN ('body_part', 'technique') \
-             AND value IS NOT NULL ORDER BY axis, value",
-            store.qualified("classification_axis"),
-            d.param(1, Type::Int)
-        );
-        let mut axes: BTreeMap<String, String> = BTreeMap::new();
-        for r in store.query(&axes_sql, &[Param::Int(stack)]).map_err(err)? {
-            axes.entry(r.text(0).map_err(err)?.to_string())
-                .or_insert(r.text(1).map_err(err)?.to_string());
+        for r in store.query(&sql, &[]).map_err(err)? {
+            info.insert(
+                r.int(0).map_err(err)?,
+                (
+                    r.int(1).map_err(err)?,
+                    r.int(2).map_err(err)?,
+                    r.text(3).map_err(err)?.to_string(),
+                    r.opt_text(4).map_err(err)?.map(str::to_string),
+                ),
+            );
         }
-        // the files: a multi-frame file's frames first, then the files whose
-        // every frame is the stack's
+        // the axes an image reads, as the registry holds them now
+        let sql = format!(
+            "SELECT stack_id, axis, value FROM {} WHERE stack_id IN ({list}) \
+             AND axis IN ('body_part', 'technique') AND value IS NOT NULL \
+             ORDER BY stack_id, axis, value",
+            store.qualified("classification_axis"),
+        );
+        for r in store.query(&sql, &[]).map_err(err)? {
+            axes.entry(r.int(0).map_err(err)?)
+                .or_default()
+                .entry(r.text(1).map_err(err)?.to_string())
+                .or_insert(r.text(2).map_err(err)?.to_string());
+        }
+        // a multi-frame file's frames first, then the files whose every
+        // frame is the stack's
         let framed = format!(
-            "SELECT so.id, so.root, f.path, fr.frames, fr.n_frames FROM {} fr JOIN {} i ON i.id = fr.instance_id \
-             JOIN {} f ON f.id = i.source_file_id JOIN {} so ON so.id = f.source_id \
-             WHERE fr.stack_id = {} ORDER BY f.path",
+            "SELECT fr.stack_id, so.id, so.root, f.path, fr.frames, fr.n_frames FROM {} fr \
+             JOIN {} i ON i.id = fr.instance_id JOIN {} f ON f.id = i.source_file_id \
+             JOIN {} so ON so.id = f.source_id WHERE fr.stack_id IN ({list}) \
+             ORDER BY fr.stack_id, f.path",
             store.qualified("instance_frame"),
             store.qualified("instance"),
             store.qualified("source_file"),
             store.qualified("source"),
-            d.param(1, Type::Int)
         );
+        for r in store.query(&framed, &[]).map_err(err)? {
+            files_of.entry(r.int(0).map_err(err)?).or_default().push((
+                r.int(1).map_err(err)?,
+                r.text(2).map_err(err)?.to_string(),
+                r.text(3).map_err(err)?.to_string(),
+                Some((r.text(4).map_err(err)?.to_string(), r.int(5).map_err(err)?)),
+            ));
+        }
         let whole = format!(
-            "SELECT so.id, so.root, f.path FROM {} i JOIN {} f ON f.id = i.source_file_id \
-             JOIN {} so ON so.id = f.source_id WHERE i.stack_id = {} ORDER BY f.path",
+            "SELECT i.stack_id, so.id, so.root, f.path FROM {} i \
+             JOIN {} f ON f.id = i.source_file_id JOIN {} so ON so.id = f.source_id \
+             WHERE i.stack_id IN ({list}) ORDER BY i.stack_id, f.path",
             store.qualified("instance"),
             store.qualified("source_file"),
             store.qualified("source"),
-            d.param(1, Type::Int)
         );
+        for r in store.query(&whole, &[]).map_err(err)? {
+            files_of.entry(r.int(0).map_err(err)?).or_default().push((
+                r.int(1).map_err(err)?,
+                r.text(2).map_err(err)?.to_string(),
+                r.text(3).map_err(err)?.to_string(),
+                None,
+            ));
+        }
+    }
+    let _ = d;
+    // one bind per folder that holds a file of the selection, or the roots
+    let folder = |path: &str| -> String {
+        Path::new(path)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let mut folders: BTreeMap<(i64, String), (String, String)> = BTreeMap::new();
+    let mut roots: BTreeMap<i64, String> = BTreeMap::new();
+    for files in files_of.values() {
+        for (so, root, path, _) in files {
+            roots.entry(*so).or_insert_with(|| root.clone());
+            folders
+                .entry((*so, folder(path)))
+                .or_insert_with(|| (root.clone(), folder(path)));
+        }
+    }
+    let by_folder = folders.len() <= MAX_BINDS;
+    let mut index: BTreeMap<(i64, String), usize> = BTreeMap::new();
+    let mut mounts = Vec::new();
+    let mut listed = Vec::new();
+    let bind = |host: PathBuf, n: usize, mounts: &mut Vec<Mount>, listed: &mut Vec<Value>| {
+        let at = format!("/source/{n}");
+        listed.push(json!({"id": n, "mount": at}));
+        mounts.push(Mount {
+            host,
+            container: at,
+            read_only: true,
+        });
+    };
+    if by_folder {
+        for (key, (root, dir)) in &folders {
+            let n = index.len();
+            index.insert(key.clone(), n);
+            bind(Path::new(root).join(dir), n, &mut mounts, &mut listed);
+        }
+    } else {
+        for (so, root) in &roots {
+            let n = index.len();
+            index.insert((*so, String::new()), n);
+            bind(PathBuf::from(root), n, &mut mounts, &mut listed);
+        }
+    }
+    let mut entries: Vec<Value> = Vec::new();
+    let mut units: Vec<Unit> = Vec::new();
+    for &stack in stacks {
+        let Some((series_id, subject_id, modality, orientation)) = info.remove(&stack) else {
+            return Err(format!(
+                "stack {stack} of the selection is not in the registry"
+            ));
+        };
+        let mut seen: std::collections::BTreeSet<(i64, String)> = Default::default();
         let mut files: Vec<Value> = Vec::new();
         let mut slices: i64 = 0;
-        let mut seen: std::collections::BTreeSet<(i64, String)> = Default::default();
-        let mut add = |sources: &mut BTreeMap<i64, (usize, String)>,
-                       so: i64,
-                       root: &str,
-                       path: &str,
-                       frames: Option<(&str, i64)>| {
-            if !seen.insert((so, path.to_string())) {
-                return;
+        for (so, _, path, frames) in files_of.remove(&stack).unwrap_or_default() {
+            if !seen.insert((so, path.clone())) {
+                continue;
             }
-            let n = sources.len();
-            let (index, _) = sources.entry(so).or_insert((n, root.to_string()));
+            let (n, rel) = if by_folder {
+                let n = index[&(so, folder(&path))];
+                let name = Path::new(&path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (n, name)
+            } else {
+                (index[&(so, String::new())], path.clone())
+            };
             // a single-frame file is one slice; a multi-frame file the
             // frames that are the stack's
-            slices += frames.map_or(1, |(_, n)| n);
-            files.push(json!({"source": *index, "path": path, "frames": frames.map(|(f, _)| f)}));
-        };
-        for r in store.query(&framed, &[Param::Int(stack)]).map_err(err)? {
-            add(
-                &mut sources,
-                r.int(0).map_err(err)?,
-                r.text(1).map_err(err)?,
-                r.text(2).map_err(err)?,
-                Some((r.text(3).map_err(err)?, r.int(4).map_err(err)?)),
-            );
-        }
-        for r in store.query(&whole, &[Param::Int(stack)]).map_err(err)? {
-            add(
-                &mut sources,
-                r.int(0).map_err(err)?,
-                r.text(1).map_err(err)?,
-                r.text(2).map_err(err)?,
-                None,
-            );
+            slices += frames.as_ref().map_or(1, |(_, n)| *n);
+            files.push(json!({"source": n, "path": rel, "frames": frames.map(|(f, _)| f)}));
         }
         if files.is_empty() {
             return Err(format!("stack {stack} has no files the registry can read"));
         }
         let unit = format!("stack-{stack}");
+        let ax = axes.remove(&stack).unwrap_or_default();
         entries.push(json!({
             "unit": unit, "stack_id": stack, "series_id": series_id,
             "subject_id": subject_id, "modality": modality, "files": files,
-            "orientation": orientation, "body_part": axes.get("body_part"),
-            "technique": axes.get("technique"), "slices": slices,
+            "orientation": orientation, "body_part": ax.get("body_part"),
+            "technique": ax.get("technique"), "slices": slices,
         }));
         units.push(Unit {
             id: unit,
@@ -1029,19 +1106,6 @@ fn materialise_stacks(
             stacks: vec![stack],
         });
     }
-    let mut mounts = Vec::new();
-    let mut listed = Vec::new();
-    let mut by_index: Vec<(usize, String)> = sources.into_values().collect();
-    by_index.sort();
-    for (index, root) in by_index {
-        let at = format!("/source/{index}");
-        listed.push(json!({"id": index, "mount": at}));
-        mounts.push(Mount {
-            host: PathBuf::from(root),
-            container: at,
-            read_only: true,
-        });
-    }
     let manifest =
         json!({"contract": nils_pipeline::CONTRACT, "sources": listed, "stacks": entries});
     std::fs::write(
@@ -1049,11 +1113,23 @@ fn materialise_stacks(
         serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
     )
     .map_err(|e| format!("the run's input: {e}"))?;
+    let scope = if by_folder {
+        json!({"sources": "folders", "binds": mounts.len()})
+    } else {
+        json!({
+            "sources": "roots", "binds": mounts.len(), "folders": folders.len(),
+            "why": format!(
+                "the selection's files lie in {} folders, more than {MAX_BINDS} binds, so the source places' roots were given",
+                folders.len()
+            ),
+        })
+    };
     Ok(Materialised {
         units,
         mounts,
         release_id: None,
         stopped: false,
+        scope,
     })
 }
 
@@ -1124,6 +1200,7 @@ fn materialise_bids(
             mounts: Vec::new(),
             release_id: None,
             stopped: true,
+            scope: Value::Null,
         });
     }
     if !status.success() {
@@ -1203,6 +1280,7 @@ fn materialise_bids(
         mounts: Vec::new(),
         release_id: Some(release_id),
         stopped: false,
+        scope: json!({"sources": "release"}),
     })
 }
 
@@ -1637,48 +1715,33 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
             }
         }
     }
+    // the derivatives a run takes, each linked into its input's own folder
+    // under the run's inputs (record 43 review): the container sees those
+    // files and no other, and no bind reaches the derivatives tree
     let mut derivative_doc = serde_json::Map::new();
+    let taken = derivative_inputs(registry.store(), d, x.stacks, x.place.id)?;
     for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
         let kind = t.ty.trim_start_matches("derivative:");
-        let mut listed = Vec::new();
-        for &stack in x.stacks {
-            let found = derivative::list(
-                registry.store(),
-                &derivative::Filter {
-                    kind: Some(kind),
-                    stack_id: Some(stack),
-                    limit: 10_000,
-                    ..derivative::Filter::default()
-                },
-            )
-            .map_err(|e| e.to_string())?;
-            for row in found.into_iter().filter(|r| r.withdrawn_at.is_none()) {
-                if row.place_id != x.place.id {
-                    continue;
-                }
-                let Some(rel) = row.path.strip_prefix(&format!("{}/", derivative::TREE)) else {
-                    continue;
-                };
-                listed.push(json!({
-                    "id": row.id, "kind": row.kind, "stack_id": row.stack_id,
-                    "subject_id": row.subject_id, "model_id": row.model_id,
-                    "preprocess_version": row.preprocess_version,
-                    "path": rel, "sha256": row.sha256,
-                }));
-            }
-        }
-        if listed.is_empty() && !t.optional {
+        let rows = taken.get(&t.id).cloned().unwrap_or_default();
+        if rows.is_empty() && !t.optional {
             return Err(format!(
                 "{} needs {kind} derivatives of the selection's stacks for its input {}, and none is registered",
                 p.label(),
                 t.id
             ));
         }
-        mounts.push(Mount {
-            host: working.join(derivative::TREE),
-            container: format!("/inputs/{}", t.id),
-            read_only: true,
-        });
+        let into = inputs.join(&t.id);
+        std::fs::create_dir_all(&into).map_err(|e| format!("the run's inputs: {e}"))?;
+        let mut listed = Vec::new();
+        for row in rows {
+            let rel = link_input(&working, &row.path, &into)?;
+            listed.push(json!({
+                "id": row.id, "kind": row.kind, "stack_id": row.stack_id,
+                "subject_id": row.subject_id, "model_id": row.model_id,
+                "preprocess_version": row.preprocess_version,
+                "path": rel, "sha256": row.sha256,
+            }));
+        }
         derivative_doc.insert(t.id.clone(), json!(listed));
     }
     let manifest = json!({
@@ -1751,10 +1814,12 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     }
 
     // what the run said, or what its templates find
+    // read only where it lies inside the output folder: never through a
+    // link the container planted (record 43 review)
     let results_path = out.join(nils_pipeline::results::FILE);
-    let (reported, unreadable) = if results_path.is_file() {
-        match std::fs::read_to_string(&results_path)
-            .map_err(|e| e.to_string())
+    let (reported, unreadable) = if std::fs::symlink_metadata(&results_path).is_ok() {
+        match nils_pipeline::files::read_inside(&out, nils_pipeline::results::FILE)
+            .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
             .and_then(|t| nils_pipeline::results::parse(&t))
         {
             Ok(r) => (Some(r), None),
@@ -1864,23 +1929,31 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
             continue;
         };
         let mut kept: Vec<String> = Vec::new();
+        let vars = u.vars();
+        let pairs: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
         for rel in &o.files {
+            // a unit's file is one its own templates find, never another's
+            let Some(declared) = nils_pipeline::files::unit_output(&unit_outputs, rel, &pairs)
+            else {
+                refused.push(json!({
+                    "unit": u.id, "file": rel,
+                    "why": "not a file this unit's declared outputs name",
+                }));
+                continue;
+            };
             let file = match nils_pipeline::files::inside(&out, rel) {
                 Ok(f) => f,
                 Err(e) => {
-                    refused.push(json!({"unit": u.id, "why": e}));
+                    refused.push(json!({"unit": u.id, "file": rel, "why": e}));
                     continue;
                 }
             };
             let (bytes, sha) =
                 nils_pipeline::files::sha256_file(&file).map_err(|e| format!("{rel}: {e}"))?;
-            let declared = nils_pipeline::files::which_output(&unit_outputs, rel);
-            let kind = declared.map_or("output", |o| o.kind.as_str());
-            let media = nils_pipeline::files::media_type(
-                rel,
-                declared.and_then(|o| o.media_type.as_deref()),
-            );
-            let path = format!("{rel_out}/{rel}");
+            let kind = declared.kind.as_str();
+            let media = nils_pipeline::files::media_type(rel, declared.media_type.as_deref());
+            // the row names the file where it is, never a link to it
+            let path = place_path(&working, &file)?;
             if kind == nils_registry::embedding::KIND {
                 match register_embedding(registry, x, u, &file, &path, bytes, &sha, &cards, &now) {
                     Ok(nils_registry::embedding::Registered::New(_)) => {
@@ -1937,7 +2010,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
             let found = nils_pipeline::files::found(&out, &o.template, &[]);
             if o.kind == "model" {
                 match found.as_slice() {
-                    [rel] => match register_model(registry, x, o, &out, rel, &rel_out, &now) {
+                    [rel] => match register_model(registry, x, o, &out, rel, &now) {
                         Ok((model, id, sha)) => {
                             registered += 1;
                             run_files.push(json!({"path": rel, "sha256": sha}));
@@ -1957,7 +2030,13 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                 continue;
             }
             for rel in found {
-                let file = nils_pipeline::files::inside(&out, &rel)?;
+                let file = match nils_pipeline::files::inside(&out, &rel) {
+                    Ok(f) => f,
+                    Err(why) => {
+                        refused.push(json!({"output": o.id, "file": rel, "why": why}));
+                        continue;
+                    }
+                };
                 let (bytes, sha) =
                     nils_pipeline::files::sha256_file(&file).map_err(|e| format!("{rel}: {e}"))?;
                 let media = nils_pipeline::files::media_type(&rel, o.media_type.as_deref());
@@ -1967,7 +2046,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                         kind: &o.kind,
                         belongs: &Belongs::run(),
                         place_id: x.place.id,
-                        path: &format!("{rel_out}/{rel}"),
+                        path: &place_path(&working, &file)?,
                         bytes: bytes as i64,
                         sha256: &sha,
                         media_type: &media,
@@ -2019,8 +2098,13 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
             "seeds": taken, "selection": {"stacks": selection},
         });
         let text = nils_pipeline::canonical(&doc);
-        let rel = nils_pipeline::results::SEEDS_FILE;
-        std::fs::write(out.join(rel), &text).map_err(|e| format!("{rel}: {e}"))?;
+        // into a folder of the engine's own beside the output, which the
+        // container never saw, created new and never through a link
+        let own = working.join(format!("{rel_out}.nils"));
+        std::fs::create_dir(&own).map_err(|e| format!("the run's own folder: {e}"))?;
+        let rel = format!("{rel_out}.nils/{}", nils_pipeline::results::SEEDS_FILE);
+        nils_pipeline::files::write_new(&working.join(&rel), text.as_bytes())
+            .map_err(|e| format!("{rel}: {e}"))?;
         let sha = hex_of(&nils_pipeline::sha256(text.as_bytes()));
         let id = derivative::insert_of_run(
             registry.store(),
@@ -2028,7 +2112,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                 kind: "seeds",
                 belongs: &Belongs::run(),
                 place_id: x.place.id,
-                path: &format!("{rel_out}/{rel}"),
+                path: &rel,
                 bytes: text.len() as i64,
                 sha256: &sha,
                 media_type: "application/json",
@@ -2091,6 +2175,33 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         items.push(id);
     }
 
+    // a file the engine refused, a unit's or the run's own, is a review
+    // item too (record 43 review)
+    for r in &refused {
+        let unit = r["unit"].as_str().unwrap_or("run");
+        let u = m.units.iter().find(|u| u.id == unit);
+        let id = nils_registry::review::raise_pipeline_qc(
+            registry.store(),
+            &nils_registry::review::PipelineQc {
+                run_id: x.run_id,
+                pipeline: &label,
+                unit,
+                stack_id: u.and_then(|u| u.stack_id),
+                subject_id: u.and_then(|u| u.subject_id),
+                session_day: u.and_then(|u| u.session_day.as_deref()),
+                status: "refused",
+                error: r["why"].as_str(),
+                metrics: &json!({"file": r["file"], "output": r["output"]}),
+                job_id: Some(x.job_id),
+            },
+            &now,
+        )
+        .map_err(|e| e.to_string())?;
+        if !items.contains(&id) {
+            items.push(id);
+        }
+    }
+
     // the proposals on the axes it declares, through the review spine
     // (record 43 S6): grouped model items, staged at the model's threshold
     let (declared, undeclared): (Vec<Value>, Vec<Value>) =
@@ -2099,6 +2210,15 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                 .as_str()
                 .is_some_and(|a| d.proposals.iter().any(|x| x == a))
         });
+    // a run speaks for its own stacks, and for the models it was given or
+    // made (record 43 review)
+    let ours: std::collections::BTreeSet<i64> = x.stacks.iter().copied().collect();
+    let speaks_for: std::collections::BTreeSet<i64> = x
+        .models
+        .iter()
+        .map(|m| m.id)
+        .chain(models_made.iter().filter_map(|m| m["model"]["id"].as_i64()))
+        .collect();
     let mut proposed = json!({
         "given": proposals.len(), "declared": declared.len(),
         "undeclared": undeclared.len(), "taken": 0,
@@ -2112,6 +2232,8 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
                         id: x.run_id,
                         job_id: Some(x.job_id),
                         principal: x.who,
+                        stacks: Some(&ours),
+                        models: Some(&speaks_for),
                     },
                     &parsed,
                     x.threshold,
@@ -2147,6 +2269,9 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
             (None, None) => json!("none: found by the declared templates"),
         },
         "input_release_id": m.release_id,
+        // what the container was given of the sources: one bind per folder
+        // of the selection's files, or the roots past the limit, and why
+        "scope": m.scope,
         "log": format!("{RUNS}/{}/log.txt", x.run_id),
     });
     if exit_code == Some(0) {
@@ -2231,6 +2356,65 @@ fn model_artifact(
         .map_err(|e| e.to_string())
 }
 
+/// The live derivatives of the working place each derivative input of a
+/// descriptor takes, over the selection's stacks, read a few hundred
+/// stacks at a time.
+fn derivative_inputs(
+    store: &mut Store,
+    d: &Descriptor,
+    stacks: &[i64],
+    place_id: i64,
+) -> Result<BTreeMap<String, Vec<derivative::Derivative>>, String> {
+    let mut out: BTreeMap<String, Vec<derivative::Derivative>> = BTreeMap::new();
+    for t in d.inputs.iter().filter(|t| t.ty.starts_with("derivative:")) {
+        let kind = t.ty.trim_start_matches("derivative:");
+        let rows =
+            derivative::of_stacks(store, kind, stacks, place_id).map_err(|e| e.to_string())?;
+        out.insert(t.id.clone(), rows);
+    }
+    Ok(out)
+}
+
+/// Link one derivative into a run's input folder at its path under the
+/// derivatives tree, by a hard link (a copy where the two are not on one
+/// filesystem). The file is taken only where it resolves inside the
+/// working place's derivatives tree. Answers the path under the input.
+fn link_input(working: &Path, path: &str, into: &Path) -> Result<String, String> {
+    let rel = path
+        .strip_prefix(&format!("{}/", derivative::TREE))
+        .ok_or_else(|| format!("{path} is not under the derivatives tree"))?;
+    let tree = std::fs::canonicalize(working.join(derivative::TREE))
+        .map_err(|e| format!("the derivatives tree: {e}"))?;
+    let real = std::fs::canonicalize(working.join(path)).map_err(|e| format!("{path}: {e}"))?;
+    if !real.starts_with(&tree) || !real.is_file() {
+        return Err(format!("{path} is not a file of the derivatives tree"));
+    }
+    if Path::new(rel)
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(format!("{path} is not a plain path"));
+    }
+    let at = into.join(rel);
+    if let Some(parent) = at.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("the run's inputs: {e}"))?;
+    }
+    if std::fs::hard_link(&real, &at).is_err() {
+        std::fs::copy(&real, &at).map_err(|e| format!("{path}: {e}"))?;
+    }
+    Ok(rel.to_string())
+}
+
+/// A file's path under the working place, from where it really is: the row
+/// never names a link (record 43 review).
+fn place_path(working: &Path, file: &Path) -> Result<String, String> {
+    let root = std::fs::canonicalize(working).map_err(|e| format!("the working place: {e}"))?;
+    let real = std::fs::canonicalize(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    real.strip_prefix(&root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|_| format!("{} is outside the working place", file.display()))
+}
+
 /// `sha256:<hex>` to its hex, as the derivative rows keep a digest.
 fn hex_of(digest: &str) -> String {
     digest.strip_prefix("sha256:").unwrap_or(digest).to_string()
@@ -2254,7 +2438,8 @@ fn register_embedding(
 ) -> Result<nils_registry::embedding::Registered, String> {
     use nils_registry::embedding;
     let data = std::fs::read(file).map_err(|e| e.to_string())?;
-    let (h, _) = embedding::decode_header(&data)?;
+    // read whole, every value finite, before anything is registered
+    let h = embedding::decode(&data)?.header;
     if u.stack_id != Some(h.stack_id) {
         return Err(format!(
             "the embedding names stack {}, and the unit is {}",
@@ -2320,7 +2505,6 @@ fn register_model(
     o: &descriptor::Output,
     out: &Path,
     rel: &str,
-    rel_out: &str,
     now: &str,
 ) -> Result<(nils_registry::model::Model, i64, String), String> {
     let file = nils_pipeline::files::inside(out, rel)?;
@@ -2374,7 +2558,7 @@ fn register_model(
             kind: "model",
             belongs: &Belongs::run(),
             place_id: x.place.id,
-            path: &format!("{rel_out}/{rel}"),
+            path: &place_path(Path::new(&x.place.path), &file)?,
             bytes: bytes as i64,
             sha256: &sha,
             media_type: &media,

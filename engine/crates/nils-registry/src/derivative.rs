@@ -360,6 +360,35 @@ pub fn get(store: &mut Store, id: i64) -> Result<Option<Derivative>, Error> {
         .transpose()
 }
 
+/// The live derivatives of one kind of `stacks` in one place, read a few
+/// hundred stacks at a time (record 43: a run's derivative inputs).
+pub fn of_stacks(
+    store: &mut Store,
+    kind: &str,
+    stacks: &[i64],
+    place_id: i64,
+) -> Result<Vec<Derivative>, Error> {
+    let d = store.dialect();
+    let mut out = Vec::new();
+    for chunk in stacks.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "{} WHERE kind = {} AND place_id = {} AND withdrawn_at IS NULL AND stack_id IN ({list}) ORDER BY id",
+            select(store),
+            d.param(1, Type::Text),
+            d.param(2, Type::Int)
+        );
+        for r in store.query(&sql, &[Param::from(kind), Param::Int(place_id)])? {
+            out.push(of(&r)?);
+        }
+    }
+    Ok(out)
+}
+
 /// What a listing narrows to.
 #[derive(Debug, Clone, Default)]
 pub struct Filter<'a> {

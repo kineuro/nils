@@ -147,6 +147,13 @@ pub struct Run<'a> {
     /// Who the model's decisions are written by: the principal the run was
     /// started for.
     pub principal: &'a str,
+    /// The stacks of the run's selection; a proposal on another stack is
+    /// dropped and counted, never written. None takes every stack (a caller
+    /// with no selection, such as an import).
+    pub stacks: Option<&'a BTreeSet<i64>>,
+    /// The models the run may speak for: those it was given and those it
+    /// registered itself. A proposal by another is dropped and counted.
+    pub models: Option<&'a BTreeSet<i64>>,
 }
 
 /// One group written.
@@ -187,6 +194,10 @@ pub struct Ingested {
     /// Items made for the members of a superseded group the run did not
     /// propose again, which keep their earlier proposal.
     pub carried: i64,
+    /// Proposals dropped because their stack is not the run's or their
+    /// model is not one the run was given or made, and why, once per kind.
+    pub out_of_run: i64,
+    pub out_of_run_why: Vec<String>,
 }
 
 impl Ingested {
@@ -201,6 +212,8 @@ impl Ingested {
             "superseded": self.superseded,
             "withdrawn": self.withdrawn,
             "carried": self.carried,
+            "out_of_run": self.out_of_run,
+            "out_of_run_why": self.out_of_run_why,
             "groups": self.groups.iter().map(|g| json!({
                 "item": g.item, "axis": g.axis, "value": g.value, "model_id": g.model_id,
                 "band": g.band, "members": g.members, "confidence": g.confidence,
@@ -415,6 +428,30 @@ pub fn ingest(
         )));
     }
     let resolved = checked(store, proposals)?;
+    // only the run's own stacks, and only the models it may speak for
+    let mut dropped: BTreeMap<String, i64> = BTreeMap::new();
+    let resolved: Vec<(usize, Model)> = resolved
+        .into_iter()
+        .filter(|(i, m)| {
+            let p = &proposals[*i];
+            let why = if run.stacks.is_some_and(|s| !s.contains(&p.stack_id)) {
+                Some("a stack outside the run's selection".to_string())
+            } else if run.models.is_some_and(|s| !s.contains(&m.id)) {
+                Some(format!(
+                    "model {} ({}), which the run was neither given nor made",
+                    m.id,
+                    m.label()
+                ))
+            } else {
+                None
+            };
+            if let Some(w) = why {
+                *dropped.entry(w).or_default() += 1;
+                return false;
+            }
+            true
+        })
+        .collect();
     // each model's threshold, refused before anything is written
     let mut thresholds: BTreeMap<i64, Option<f64>> = BTreeMap::new();
     for (_, m) in &resolved {
@@ -451,7 +488,14 @@ pub fn ingest(
             labels.iter().filter_map(|l| l.stack_id).collect(),
         );
     }
-    let mut out = Ingested::default();
+    let mut out = Ingested {
+        out_of_run: dropped.values().sum(),
+        out_of_run_why: dropped
+            .iter()
+            .map(|(w, n)| format!("{n} proposal(s) on {w}"))
+            .collect(),
+        ..Ingested::default()
+    };
     // the stacks the run proposes again, per axis and model, which is what
     // it supersedes of the model's earlier runs
     let mut again: BTreeMap<(String, i64), BTreeSet<i64>> = BTreeMap::new();

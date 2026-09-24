@@ -363,7 +363,16 @@ impl Lab {
 
     fn ok(&self, args: &[&str], stdin: Option<&str>) -> String {
         let (good, out, err) = self.run(args, stdin);
-        assert!(good, "nils {}: {err}", args.join(" "));
+        if !good {
+            // the containers' own words, where a run got that far
+            let logs: Vec<String> = std::fs::read_dir(self.work.path().join("runs"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| std::fs::read_to_string(e.path().join("log.txt")).ok())
+                .collect();
+            panic!("nils {}: {err}\n{}", args.join(" "), logs.join("\n"));
+        }
         out
     }
 
@@ -642,9 +651,26 @@ fn a_stacks_run_registers_its_outputs_raises_its_failures_and_repeats_its_digest
     )
     .unwrap();
     assert_eq!(manifest["contract"], "job/v1");
+    // record 43 review: one bind per folder that holds the selection's
+    // files, never the whole source place
     assert_eq!(
         manifest["sources"],
-        json!([{"id": 0, "mount": "/source/0"}])
+        json!([
+            {"id": 0, "mount": "/source/0"}, {"id": 1, "mount": "/source/1"},
+            {"id": 2, "mount": "/source/2"}, {"id": 3, "mount": "/source/3"},
+        ])
+    );
+    assert_eq!(first["summary"]["scope"]["sources"], "folders", "{first}");
+    let src = lab._src.path().display().to_string();
+    assert!(
+        !words.iter().any(|w| w == &format!("{src}:/source/0:ro")),
+        "the source root is not bound: {words:?}"
+    );
+    assert!(
+        words
+            .iter()
+            .any(|w| w == &format!("{src}/P1/1:/source/0:ro")),
+        "{words:?}"
     );
     let stacks = manifest["stacks"].as_array().unwrap();
     assert_eq!(stacks.len(), 4);
@@ -1206,6 +1232,32 @@ fn real_runtime() -> Option<&'static str> {
     None
 }
 
+/// A reader of the probe's files as a derivative input, beside a label
+/// set, in the stacks layout: it counts what it was given.
+const UID_READER: &str = r#"name: uid-reader
+schema-version: "0.5"
+tool-version: "1.37.0"
+container-image:
+  type: docker
+  image: "docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
+command-line: >-
+  sh -c 'n=$(find [Inputs]/prev -name uid.txt | wc -l);
+  l=no; if [ -f [Inputs]/labels/labels.tsv ]; then l=yes; fi;
+  echo "$n $l" > [OutputLocation]/stack-seen.txt;
+  for u in $(sed -n "s/.*\"unit\": *\"\(stack-[0-9]*\)\".*/\1/p" [Manifest]); do
+  mkdir -p [OutputLocation]/$u; echo read > [OutputLocation]/$u/read.txt; done'
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  inputs:
+    - {id: prev, type: "derivative:output"}
+    - {id: labels, type: label_set}
+  outputs:
+    - id: read
+      kind: output
+      path-template: "stack-{stack}/read.txt"
+"#;
+
 /// A probe of who a container's process is on the host, in the stacks
 /// layout, on a small public image pinned by its index digest.
 const UID_PROBE: &str = r#"name: uid-probe
@@ -1314,6 +1366,58 @@ fn real_containers_run_n4_rootless_with_no_network() {
         );
     }
 
+    // the typed inputs: the probe's files as a derivative input, linked
+    // into the run's own inputs, and a label set bound at /inputs/labels
+    // inside the read-only /inputs, whose mountpoint the engine makes first
+    let exp = lab.work.path().join("export");
+    std::fs::create_dir_all(&exp).unwrap();
+    ok(&[
+        "place",
+        "add",
+        "exp",
+        exp.to_str().unwrap(),
+        "--role",
+        "export",
+    ]);
+    let tsv = lab.work.path().join("v0.tsv");
+    std::fs::write(
+        &tsv,
+        "SeriesInstanceUID\tbody_part\tdate\n1.2.826.0.1.3680043.8.498.71.1.1\tBrain\t2024-05-06\n",
+    )
+    .unwrap();
+    let imported = ok(&[
+        "labels",
+        "import-v0",
+        "--tsv",
+        tsv.to_str().unwrap(),
+        "--to",
+        exp.join("v0").to_str().unwrap(),
+        "--json",
+    ]);
+    let set = imported["label_set"]["id"].to_string();
+    let file = lab.work.path().join("reader.yml");
+    std::fs::write(&file, UID_READER).unwrap();
+    ok(&["pipeline", "add", file.to_str().unwrap()]);
+    let read = ok(&[
+        "run",
+        "uid-reader",
+        "--select",
+        "selection:every@1",
+        "--labels",
+        &set,
+        "--json",
+    ]);
+    assert_eq!(read["status"], "done", "{read}");
+    let out = lab.work.path().join(read["output"].as_str().unwrap());
+    let seen = std::fs::read_to_string(out.join("stack-seen.txt"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    assert_eq!(
+        seen, "4 yes",
+        "four probe files and the label set's labels.tsv"
+    );
+
     // N4 over the frozen selection: one derivative per session, and the
     // same digests again
     let n4 = repo().join("pipelines/n4-bias-correction/nils.job.yml");
@@ -1397,7 +1501,9 @@ const LOOP: &str = r#"
   command: |
     python3 -c '
     import hashlib, json, os, sys
-    m = json.load(open(sys.argv[1])); out = sys.argv[2]; enc = sys.argv[3]; lie = sys.argv[4]
+    m = json.load(open(sys.argv[1])); out = sys.argv[2]; enc = sys.argv[3]; lie = sys.argv[4]; seen = sys.argv[5]
+    embs = [f for r, _, fs in os.walk(seen) for f in fs if f.endswith(".emb")]
+    assert len(embs) == len(m["stacks"]), embs
     os.makedirs(os.path.join(out, "head"), exist_ok=True)
     body = json.dumps({"format": "stand-in-head", "classes": ["brain", "spine"], "lie": lie}, sort_keys=True).encode()
     open(os.path.join(out, "head/head.json"), "wb").write(body)
@@ -1406,27 +1512,32 @@ const LOOP: &str = r#"
     json.dump(card, open(os.path.join(out, "head/card.json"), "w"))
     units = [{"unit_id": s["unit"], "status": "succeeded"} for s in m["stacks"]]
     json.dump({"schema_version": "1", "units": units, "models": [card]}, open(os.path.join(out, "results.json"), "w"))
-    ' [Manifest] [OutputLocation] [ENC] [LIE]
+    ' [Manifest] [OutputLocation] [ENC] [LIE] [Inputs]/embeddings
   inputs:
     - {id: labels, type: label_set, optional: true}
+    - {id: embeddings, type: "derivative:embedding"}
   outputs:
     - {id: head, kind: model, level: run, path-template: "head/head.json", card: head/card.json, media-type: application/json}
 - name: bp-infer
   params: |
     - {id: p, name: Confidence, type: Number, value-key: "[P]", default-value: 0.95}
+    - {id: extra, name: A stack outside, type: Number, value-key: "[EXTRA]", default-value: 0}
   command: |
     python3 -c '
     import hashlib, json, os, sys
-    m = json.load(open(sys.argv[1])); out = sys.argv[2]; head = sys.argv[3]; p = float(sys.argv[4])
+    m = json.load(open(sys.argv[1])); out = sys.argv[2]; head = sys.argv[3]; p = float(sys.argv[4]); extra = int(float(sys.argv[5]))
     d = "sha256:" + hashlib.sha256(open(head, "rb").read()).hexdigest()
     props, units = [], []
     for i, s in enumerate(m["stacks"]):
-        v, w = ("brain", "spine") if s["files"][0]["path"].split("/")[1] == "1" else ("spine", "brain")
+        v, w = ("brain", "spine") if s["files"][0]["source"] % 2 == 0 else ("spine", "brain")
         q = p
         props.append({"stack_id": s["stack_id"], "axis": "body_part", "value": v, "probabilities": {v: q, w: round(1 - q, 6)}, "model_digest": d})
         units.append({"unit_id": s["unit"], "status": "succeeded"})
+    if extra:
+        props.append({"stack_id": extra, "axis": "body_part", "value": "brain", "probabilities": {"brain": 0.99, "spine": 0.01}, "model_digest": d})
+        props.append({"stack_id": m["stacks"][0]["stack_id"], "axis": "body_part", "value": "brain", "probabilities": {"brain": 0.99, "spine": 0.01}, "model_digest": "sha256:" + "e" * 64})
     json.dump({"schema_version": "1", "units": units, "proposals": props}, open(os.path.join(out, "results.json"), "w"))
-    ' [Manifest] [OutputLocation] [Inputs]/head/head.json [P]
+    ' [Manifest] [OutputLocation] [Inputs]/head/head.json [P] [EXTRA]
   inputs:
     - {id: head, type: model}
   outputs:
@@ -1517,6 +1628,7 @@ fn the_body_part_loop_embeds_seeds_trains_a_model_and_proposes_through_the_runne
         &first["id"].to_string(),
         "--json",
     ]);
+    let rows_of_first = rows.as_array().unwrap().clone();
     for d in rows.as_array().unwrap() {
         assert_eq!(d["kind"], "embedding");
         assert_eq!(d["model_id"], enc["id"]);
@@ -1716,22 +1828,221 @@ fn the_body_part_loop_embeds_seeds_trains_a_model_and_proposes_through_the_runne
     ]);
     let ingested = &raised["summary"]["proposals"]["ingested"];
     assert_eq!(ingested["staged_members"], 0, "{raised}");
+    // record 43 review: a run speaks only for its stacks and its models; a
+    // proposal on a stack outside its selection, or by a model it was not
+    // given, is dropped and counted
+    let curated: Vec<i64> = saved["selection"]["stacks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_i64)
+        .collect();
+    let every: Vec<i64> = rows_of_first
+        .iter()
+        .filter_map(|d| d["stack_id"].as_i64())
+        .collect();
+    let extra = every.iter().find(|s| !curated.contains(s)).unwrap();
+    let outside = lab.json(&[
+        "run",
+        "bp-infer",
+        "--model",
+        "bp-head@hno",
+        "--select",
+        "selection:to-curate@1",
+        "--param",
+        &format!("extra={extra}"),
+        "--json",
+    ]);
+    let ingested = &outside["summary"]["proposals"]["ingested"];
+    assert_eq!(ingested["out_of_run"], 2, "{outside}");
+    // the words of the train run: no bind reaches the derivatives tree
+    let tree = format!("{}/derivatives:", lab.work.path().display());
+    assert!(
+        !lab.podman_runs()
+            .iter()
+            .flatten()
+            .any(|w| w.starts_with(&tree)),
+        "the derivatives tree is not bound"
+    );
     let open = lab.json(&["review", "list", "--kind", "body_part:model", "--json"]);
     let items = open["items"].as_array().unwrap();
+    // what is live is the newest run's on each stack: the raised run's on
+    // the stack the last run did not propose again, and the last run's
+    let newest = [&raised["id"], &outside["id"]];
     let live: Vec<&Value> = items
         .iter()
         .filter(|i| i["status"] == "open" || i["status"] == "staged")
         .collect();
     assert_eq!(live.len(), 2, "{open}");
     assert!(
-        live.iter().all(|i| i["ref"]["run_id"] == raised["id"]),
-        "only the newest run's items are open: {open}"
+        live.iter().all(|i| newest.contains(&&i["ref"]["run_id"])),
+        "{open}"
     );
     assert!(
         items
             .iter()
-            .filter(|i| i["ref"]["run_id"] != raised["id"])
+            .filter(|i| !newest.contains(&&i["ref"]["run_id"]))
             .all(|i| i["status"] == "superseded"),
         "{open}"
     );
+}
+
+/// A pipeline that tries what a hostile container could: links planted in
+/// its output folder, a unit claiming another unit's file, a run-level
+/// file that is a link out, and an embedding that is not a number.
+const HOSTILE: &str = r#"name: hostile
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/hostile@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+inputs:
+  - {id: mode, name: Mode, type: String, value-key: "[MODE]", default-value: plain}
+  - {id: victim, name: Victim, type: String, value-key: "[VICTIM]", default-value: none}
+command-line: |
+  python3 -c '
+  import json, os, struct, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]; mode = sys.argv[3]; victim = sys.argv[4]
+  st = m["stacks"]; units = []
+  for s in st:
+      u = s["unit"]; os.makedirs(os.path.join(out, u), exist_ok=True)
+      open(os.path.join(out, u, "out.txt"), "w").write(u)
+      units.append({"unit_id": u, "status": "succeeded", "derivatives": [u + "/out.txt"]})
+  if mode == "steal":
+      units[1]["derivatives"].append(units[0]["unit_id"] + "/out.txt")
+  doc = {"schema_version": "1", "units": units, "seeds": [{"stack_id": st[0]["stack_id"], "axis": "body_part", "value": "brain"}]}
+  if mode == "seeds-link":
+      os.symlink(victim, os.path.join(out, "nils-seeds.json"))
+  if mode == "run-link":
+      os.makedirs(os.path.join(out, "extra"), exist_ok=True)
+      os.symlink(victim, os.path.join(out, "extra", "leak.txt"))
+  if mode == "nan":
+      enc = "sha256:" + "e" * 64
+      for s in st:
+          h = json.dumps({"format": "nils-embedding", "dtype": "<f4", "stack_id": s["stack_id"], "encoder": enc, "preprocess_version": "v1", "rows": 1, "dim": 2, "slices": [0]}).encode()
+          start = (12 + len(h) + 63) // 64 * 64
+          b = b"NILSEMB1" + struct.pack("<I", len(h)) + h
+          b += bytes(start - len(b)) + struct.pack("<2f", float("nan"), 1.0)
+          rel = s["unit"] + "/x.emb"
+          open(os.path.join(out, rel), "wb").write(b)
+          next(u for u in units if u["unit_id"] == s["unit"])["derivatives"].append(rel)
+      doc["models"] = [{"name": "e", "version": "1", "kind": "encoder", "digest": enc, "task": "encoder"}]
+  if mode == "results-link":
+      os.symlink(victim, os.path.join(out, "results.json"))
+  else:
+      json.dump(doc, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation] [MODE] [VICTIM]
+x-nils:
+  analysis-level: stack
+  input: {layout: stacks}
+  outputs:
+    - {id: out, kind: output, path-template: "stack-{stack}/out.txt", media-type: text/plain}
+    - {id: emb, kind: embedding, path-template: "stack-{stack}/x.emb"}
+    - {id: extra, kind: output, level: run, path-template: "extra/*.txt"}
+"#;
+
+/// The review of record 43: the engine never reads or writes through a
+/// link a container planted in its output folder, a unit takes only its
+/// own files, a run-level file that leads out is refused as a review item
+/// and the run goes on, and an embedding is read whole before it is kept.
+#[test]
+fn a_hostile_output_folder_is_refused_file_by_file_and_never_followed() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-hostile");
+    lab.add_descriptor("hostile", HOSTILE);
+    let victim = lab.work.path().join("victim.txt");
+    std::fs::write(&victim, "the host's own file").unwrap();
+    let v = victim.to_str().unwrap();
+    let run = |mode: &str, victim: &str| -> Value {
+        lab.json(&[
+            "run",
+            "hostile",
+            "--select",
+            "selection:every@1",
+            "--param",
+            &format!("mode={mode}"),
+            "--param",
+            &format!("victim={victim}"),
+            "--json",
+        ])
+    };
+
+    // a planted nils-seeds.json is never written through
+    let seeded = run("seeds-link", v);
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "the host's own file"
+    );
+    assert_eq!(seeded["summary"]["seeds"]["seeds"], 1, "{seeded}");
+
+    // results.json that is a link out of the folder is not read
+    let fake = lab.work.path().join("fake-results.json");
+    std::fs::write(&fake, r#"{"units": []}"#).unwrap();
+    let linked = run("results-link", fake.to_str().unwrap());
+    assert!(
+        linked["summary"]["results"]
+            .as_str()
+            .unwrap()
+            .starts_with("unreadable"),
+        "{linked}"
+    );
+    assert_eq!(linked["summary"]["units"]["failed"], 4, "{linked}");
+    assert_eq!(linked["status"], "partial", "{linked}");
+
+    // a unit claims only its own files
+    let stolen = run("steal", "none");
+    assert_eq!(stolen["status"], "partial", "{stolen}");
+    assert_eq!(
+        stolen["summary"]["derivatives"], 5,
+        "four outputs and the seeds: {stolen}"
+    );
+    let why = &stolen["summary"]["refused_files"][0];
+    assert!(
+        why["why"]
+            .as_str()
+            .unwrap()
+            .contains("not a file this unit"),
+        "{why}"
+    );
+
+    // a run-level link out is refused as a review item, and the run goes on
+    let leaked = run("run-link", v);
+    assert_eq!(leaked["status"], "partial", "{leaked}");
+    assert_eq!(leaked["summary"]["derivatives"], 5, "{leaked}");
+    assert_eq!(
+        leaked["summary"]["refused_files"][0]["output"], "extra",
+        "{leaked}"
+    );
+    let items = lab.json(&["review", "list", "--kind", "pipeline:qc", "--json"]);
+    assert!(
+        items["items"].as_array().unwrap().iter().any(|i| {
+            i["ref"]["run_id"] == leaked["id"]
+                && i["ref"]["unit"] == "run"
+                && i["evidence"]["status"] == "refused"
+        }),
+        "{items}"
+    );
+
+    // an embedding holding a value that is not a number is refused whole
+    let nan = run("nan", "none");
+    assert_eq!(nan["summary"]["embeddings"]["registered"], 0, "{nan}");
+    assert_eq!(nan["status"], "partial", "{nan}");
+
+    // no registered path is a link: each row names the file where it is
+    let rows = lab.json(&["derivative", "list", "--json"]);
+    for d in rows.as_array().unwrap() {
+        let file = lab.work.path().join(d["path"].as_str().unwrap());
+        assert!(
+            !std::fs::symlink_metadata(&file)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "{d}"
+        );
+    }
 }

@@ -590,6 +590,8 @@ fn a_results_file_s_proposals_become_groups_and_staged_rows_and_nothing_in_force
             id: 7,
             job_id: None,
             principal: "runner@lab",
+            stacks: None,
+            models: None,
         };
 
         // what is wrong is refused before anything is written
@@ -913,6 +915,8 @@ fn a_model_s_card_sets_its_threshold_and_a_run_may_only_raise_it() {
             id,
             job_id: None,
             principal: "runner@lab",
+            stacks: None,
+            models: None,
         };
         // lowering the card's threshold is refused, and nothing is written
         let e = proposals::ingest(reg, &run(1), &given, Some(0.8)).unwrap_err();
@@ -988,6 +992,8 @@ fn a_newer_run_of_a_model_supersedes_what_its_earlier_runs_left_untaken() {
             id,
             job_id: None,
             principal: "runner@lab",
+            stacks: None,
+            models: None,
         };
         let first = proposals::ingest(
             reg,
@@ -1095,6 +1101,8 @@ fn a_stack_outside_the_newer_run_keeps_its_earlier_staged_proposal() {
             id,
             job_id: None,
             principal: "runner@lab",
+            stacks: None,
+            models: None,
         };
         let whole: Vec<proposals::Proposal> = ids[..4]
             .iter()
@@ -1219,5 +1227,75 @@ fn a_head_reads_several_encoders_in_the_order_its_card_lists_them() {
                 .unwrap_err();
             assert!(e.to_string().contains(words), "{name}: {e}");
         }
+    }
+}
+
+/// The review of record 43: a run speaks only for its own stacks and the
+/// models it was given or made. A proposal on another stack, or by another
+/// model, is dropped and counted, writes nothing, and supersedes nothing.
+#[test]
+fn a_run_proposes_only_on_its_stacks_and_for_its_models() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let a = head(reg, "1", '1', Some(0.8));
+        let b = head(reg, "2", '2', Some(0.8));
+        let open = |id| Run {
+            id,
+            job_id: None,
+            principal: "runner@lab",
+            stacks: None,
+            models: None,
+        };
+        // an earlier run of a staged a proposal on stack 3
+        proposals::ingest(
+            reg,
+            &open(1),
+            &[proposal(ids[3], "brain", 0.95, a.id)],
+            None,
+        )
+        .unwrap();
+        let ours: std::collections::BTreeSet<i64> = ids[..2].iter().copied().collect();
+        let given: std::collections::BTreeSet<i64> = [a.id].into();
+        let run = Run {
+            id: 2,
+            job_id: None,
+            principal: "runner@lab",
+            stacks: Some(&ours),
+            models: Some(&given),
+        };
+        let done = proposals::ingest(
+            reg,
+            &run,
+            &[
+                proposal(ids[0], "brain", 0.95, a.id),
+                proposal(ids[3], "spine", 0.95, a.id),
+                proposal(ids[1], "brain", 0.95, b.id),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(done.members, 1, "{name}: {done:?}");
+        assert_eq!(done.out_of_run, 2, "{name}");
+        assert_eq!(
+            done.out_of_run_why.len(),
+            2,
+            "{name}: {:?}",
+            done.out_of_run_why
+        );
+        assert_eq!(
+            done.superseded, 0,
+            "{name}: stack 3 is not the run's to supersede"
+        );
+        assert_eq!(
+            count(
+                reg,
+                "review_item",
+                " WHERE kind = 'body_part:model' AND status = 'staged'"
+            ),
+            2,
+            "{name}"
+        );
     }
 }
