@@ -90,6 +90,7 @@ x-nils:
     - {metric: brain_volume, op: ">=", value: 700000, description: "A mask smaller than 0.7 litres has cut into the brain"}
     - {metric: brain_volume, op: "<=", value: 2200000, description: "A mask larger than 2.2 litres has taken skull or neck"}
   needs:
+    cores-input: threads
     gpu: none
     cores: 2
     memory-gb: 4

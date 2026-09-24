@@ -63,7 +63,7 @@ Pipeline runs have a lane of their own: `nils serve --worker` runs them in a wor
 
 > **Warning:** the budget is the engine's own bookkeeping. Keep the container's own memory cap below the host's memory, so that what the lane is allowed is really there.
 
-A unit starts only when the cores and memory its descriptor declares (`x-nils.needs`) fit in what the running units leave. A unit that could never fit is refused before the run starts. A GPU unit waits until the card's free memory, as `nvidia-smi` reads it, less what the lane's own running units there declared, covers its `gpu-memory-gb`; the run's progress says what it waits for. Each unit holds its lease until its container ends, and is given that card alone.
+A unit starts only when the cores and memory its descriptor declares (`x-nils.needs`) fit in what the running units leave. A unit that could never fit is refused before the run starts. A GPU unit waits until the card's free memory, as `nvidia-smi` reads it, less what the lane's own running units there declared, covers its `gpu-memory-gb`; the run's progress says what it waits for. Each unit holds its lease until its container ends, and is given that card alone. Podman and docker hold each container to the cores and memory its unit declares (`--cpus`, `--memory`), and apptainer does where the host's cgroups delegate those controllers; elsewhere the budget is the engine's bookkeeping alone. A descriptor names the parameter its tool is told the threads by under `x-nils.needs.cores-input` (and the memory under `memory-input`): left out of a run it is the declared value, and asked above it the run is refused.
 
 ## Use the starter catalog
 
@@ -190,7 +190,7 @@ A pipeline that needs a licence, such as FreeSurfer, declares it under `x-nils.s
 
 The file is read when a run starts and mounted read-only into that pipeline's containers alone, at the path its descriptor names (`/secrets/<id>` by default), with the variable it names (such as `FS_LICENSE`) pointing there. A run that needs a secret the site has not set is refused before anything runs.
 
-> **Warning:** a container can print what it was given. After each container the engine removes every file it left that holds the secret, and refuses it as a `pipeline:qc` item, and writes its log and `results.json` again with the secret replaced by `[secret <id>]`. The run records the secret's id, never its path or its bytes.
+> **Warning:** a container can print what it was given. After each container the engine removes every file it left that holds the secret, and refuses it as a `pipeline:qc` item, and writes its log and `results.json` again with the secret replaced by `[secret <id>]`. The run records the secret's id, never its path or its bytes. Gzip streams and tar members are read inside, the secret is looked for as base64 too, and an archive the sweep cannot open is removed and refused; units stopped by a cancel are swept as well.
 
 ## Read a run's numbers in the ask
 
@@ -217,7 +217,7 @@ A table output (`kind: table`) is a file of numbers a unit or a run writes, with
     "out": {"set": "g", "level": "aggregate", "columns": [["field", {}, "subject.sex"], ["field", {}, "mean"]]}}
    ```
 
-> **Warning:** a measure is quasi identifying. Below detail quasi the ask refuses it in a column, an order, a group's key and any binding but a total (count, distinct, sum, avg, min or max) of a group set, and allows it in a predicate. A group of one scan is still one scan's value: the ask does not apply the agents' k rule to these totals.
+> **Warning:** a measure is quasi identifying. Below detail quasi the ask refuses it in a column, an order, a group's key and any binding but a total (count, distinct, sum, avg, min or max) of a group set, and allows it in a predicate. A group's totals of a measure, its `_rows` and its `_subjects` show below detail quasi only for a group of 5 scans or more, and so does a count of scans filtered on a measure (other than none); a smaller group's are withheld.
 
 A descriptor also declares its checks under `x-nils.qc`, as `snr >= 8` or `{metric, op, value}`. Each unit that succeeded is held to them, the metric read from its `results.json` metrics or else from its tables; a breach is one `pipeline:qc` review item, status `breach`, whose error names the metric, its value and the check. A breach does not make a run partial. A metric a check reads from `results.json` is kept as a measure too.
 

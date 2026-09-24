@@ -198,4 +198,34 @@ mod tests {
             "recon-all reads the lab's licence as a secret input (R3)"
         );
     }
+
+    /// Record 49, after review: each starter runs its sessions apart,
+    /// keeps its work under its own output (never a /tmp that apptainer
+    /// keeps small and podman keeps in the container's layer), and tells
+    /// its tool the threads and memory the unit declares.
+    #[test]
+    fn every_starter_runs_apart_works_in_its_output_and_is_held_to_its_needs() {
+        for (name, text) in CATALOG {
+            let d = descriptor::parse(text).unwrap();
+            assert_eq!(d.units, descriptor::Units::Apart, "{name}");
+            let line = d.document["command-line"].as_str().unwrap_or_default();
+            assert!(!line.contains("/tmp"), "{name}: {line}");
+            assert!(
+                !line.contains("mktemp -d)"),
+                "{name} makes its work folder where it writes: {line}"
+            );
+            for p in &d.params {
+                if ["threads", "processes"].contains(&p.id.as_str()) {
+                    assert_eq!(
+                        d.needs.cores_input.as_deref(),
+                        Some(p.id.as_str()),
+                        "{name}"
+                    );
+                }
+                if p.id == "memory_gb" {
+                    assert_eq!(d.needs.memory_input.as_deref(), Some("memory_gb"), "{name}");
+                }
+            }
+        }
+    }
 }

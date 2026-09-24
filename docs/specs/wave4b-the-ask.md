@@ -664,6 +664,21 @@ one grain is on the order of 7 to 10 KB. The policy this wave applies:
 - **Any count an agent principal sees** in options or diagnose passes the
   disclosure projection's k rule, because a bounded count on a narrow
   predicate is a record level fact under another name.
+- **A pipeline's measures below detail quasi** (record 49 R4, and Nima's
+  ruling after its review). `measure.<pipeline>.<column>` is quasi
+  identifying: below detail quasi it is refused in a column, an order, a
+  group's key and any binding but a total of a group set, and allowed in a
+  predicate. A group set that totals a measure, or that groups a set
+  filtered on one, shows its totals, `_rows` and `_subjects` only for a
+  group of at least 5 scans (k = 5, D27's federation default, applied to
+  measures alone); a smaller group's are null. A count or an existence
+  answered over a set filtered on a measure is shown for none or for 5 and
+  more, and withheld between. D51 stands for everything else: the ask does
+  no cell suppression of other fields inside the site.
+- **A measure's value is its unit's newest run of the pipeline's current
+  version** (the newest active version; any version where none has
+  measured the unit), and `measure.<pipeline>.run` names that same run, so
+  every value of a row traces to the run it came from.
 
 ## 10. The affordances
 

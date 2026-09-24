@@ -2612,6 +2612,9 @@ struct Shared {
     derivative_dirs: Vec<(String, PathBuf)>,
     manifest: Value,
     local_image: Option<PathBuf>,
+    /// Whether the runtime holds a container to its cores and its memory
+    /// here (record 49, after review).
+    limits: (bool, bool),
 }
 
 /// A unit's id as a folder name: the characters a unit's id is made of.
@@ -2847,6 +2850,7 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
         derivative_dirs,
         manifest,
         local_image,
+        limits: runtime::limits_here(x.runtime),
     };
 
     // the batches: those whose container ended and whose taking in a stop
@@ -2911,9 +2915,23 @@ fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<En
     // whatever ended the schedule, no container outlives it: a stop, a
     // cancel and an error each give their units back to the queue
     if !running.is_empty() {
+        let mut pulse = Pulse::new(x.job_id, json!({"run": x.run_id, "phase": "stop"}));
         for mut r in running.drain(..) {
             x.runtime.stop(&r.inv);
             let _ = runtime::kill(&mut r.child);
+            let _ = r.child.wait();
+            // record 49 R3: a unit stopped mid-way is swept as one that
+            // ended; where the sweep cannot vouch for its folder, the
+            // folder goes, since a resume runs the unit again from a clean
+            // one
+            match sweep_batch(registry, x, &r.batch, &mut pulse) {
+                Ok((_, shut)) if shut.is_empty() => {}
+                _ if r.batch.key.is_some() => {
+                    let _ = std::fs::remove_dir_all(&r.batch.out);
+                    let _ = std::fs::remove_file(&r.batch.log);
+                }
+                _ => {}
+            }
             for i in &r.batch.units {
                 if let Some((id, _)) = row_of.get(&m.units[*i].id) {
                     let _ = rows::unit_requeued(registry.store(), *id);
@@ -2971,6 +2989,9 @@ fn schedule(
     let mut card_asked: Option<Instant> = None;
     let mut beaten: Option<Instant> = None;
     let host = job::hostname();
+    // the one card a GPU unit leases and is given: the lane's, 0 where it
+    // names none (record 49, after review)
+    let card = x.lane.card.unwrap_or(0);
     loop {
         // start what fits
         while !pending.is_empty() {
@@ -2987,7 +3008,6 @@ fn schedule(
                     break;
                 }
                 card_asked = Some(Instant::now());
-                let card = x.lane.card.unwrap_or(0);
                 let held: u64 = running.iter().filter_map(|r| r.gpu_mib).sum();
                 let free = match &smi {
                     Some(smi) => lane::gpu_free_mib(smi, card),
@@ -3009,7 +3029,7 @@ fn schedule(
             }
             let Some(b) = pending.pop_front() else { break };
             let mut inv = invocation_of(x, m, &b, shared)?;
-            inv.card = gpu_mib.and(x.lane.card);
+            inv.card = gpu_mib.map(|_| card);
             if let Some(dir) = b.log.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| format!("the run's folder: {e}"))?;
             }
@@ -3025,7 +3045,7 @@ fn schedule(
                         &rows::UnitStart {
                             cores: i64::from(ask.cores),
                             memory_mb: ask.memory_mib as i64,
-                            gpu_card: gpu_mib.and(x.lane.card).map(i64::from),
+                            gpu_card: gpu_mib.map(|_| i64::from(card)),
                             gpu_memory_mb: gpu_mib.map(|g| g as i64),
                             device: if gpu_mib.is_some() { x.device } else { "cpu" },
                             container: &inv.name,
@@ -3259,6 +3279,10 @@ fn invocation_of(
         local_image: shared.local_image.clone(),
         env,
         user,
+        // the unit's declared cores and memory, enforced where the runtime
+        // can; the lane's budget counts them either way
+        cpus: shared.limits.0.then_some(d.needs.cores),
+        memory_mib: shared.limits.1.then(|| lane::mib_of_gb(d.needs.memory_gb)),
     })
 }
 
@@ -3338,6 +3362,8 @@ fn stop_left(x: &Execution<'_>, units: &[rows::Unit], out: &Path) {
                 local_image: None,
                 env: Vec::new(),
                 user: None,
+                cpus: None,
+                memory_mib: None,
             });
         }
         let Some(pid) = u.pid.filter(|_| u.host.as_deref() == Some(host.as_str())) else {
@@ -3375,8 +3401,21 @@ fn ensure_image(
     let dir = working.join(IMAGES);
     std::fs::create_dir_all(&dir).map_err(|e| format!("the image folder: {e}"))?;
     let target = runtime::local_image(&dir, &x.pipeline.image_digest, form);
-    if target.exists() {
+    // a cached copy is used only as the engine built it (record 49, after
+    // review): what fails its recorded digest, or is not what the engine
+    // builds, is built again
+    if runtime::image_verified(&target, form) {
         return Ok(Some(target));
+    }
+    if std::fs::symlink_metadata(&target).is_ok() {
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_dir_all(&target);
+        if std::fs::symlink_metadata(&target).is_ok() {
+            return Err(format!(
+                "the cached image {} is not what the engine built and cannot be removed",
+                target.display()
+            ));
+        }
     }
     let name = target
         .file_name()
@@ -3421,11 +3460,13 @@ fn ensure_image(
             x.pipeline.image, x.run_id
         ));
     }
-    if target.exists() {
+    if runtime::image_verified(&target, form) {
         // another run built it meanwhile
         clean(&part);
     } else {
+        clean(&target);
         std::fs::rename(&part, &target).map_err(|e| format!("the image folder: {e}"))?;
+        runtime::record_image(&target, form).map_err(|e| format!("the image folder: {e}"))?;
     }
     Ok(Some(target))
 }
@@ -3536,6 +3577,95 @@ fn outcome_of(
 /// idempotent (a file registered already is found, not registered again),
 /// so a resume that finds a unit registering takes it in again and runs
 /// nothing.
+/// A job's heart kept beating through long work that is not a container:
+/// hashing and sweeping what one left (record 49, after review), so a long
+/// intake is never taken for a stale job.
+struct Pulse {
+    job_id: i64,
+    last: Instant,
+    progress: Value,
+}
+
+impl Pulse {
+    fn new(job_id: i64, progress: Value) -> Pulse {
+        Pulse {
+            job_id,
+            last: Instant::now(),
+            progress,
+        }
+    }
+
+    /// Beat, at most every five seconds.
+    fn tick(&mut self, store: &mut Store) {
+        if self.last.elapsed() >= Duration::from_secs(5) {
+            self.last = Instant::now();
+            let _ = job::beat(store, self.job_id, Some(&self.progress));
+        }
+    }
+}
+
+/// The run's own folder beside its output, which no container sees: where
+/// the sweep writes the copies it renames over what it rewrites.
+fn scratch_of(x: &Execution<'_>, b: &Batch) -> PathBuf {
+    let run_rel = match &b.key {
+        Some(_) => b
+            .rel_out
+            .rsplit_once('/')
+            .map_or(b.rel_out.as_str(), |(r, _)| r),
+        None => b.rel_out.as_str(),
+    };
+    PathBuf::from(&x.place.path).join(format!("{run_rel}.nils"))
+}
+
+/// Sweep what a batch's container left of the secrets it was given (record
+/// 49 R3): its output folder, its `results.json` and its log. Answers what
+/// the sweep did, as the unit's row keeps it, and what it could not read.
+fn sweep_batch(
+    registry: &mut Registry,
+    x: &Execution<'_>,
+    b: &Batch,
+    pulse: &mut Pulse,
+) -> Result<(Vec<Value>, Vec<String>), String> {
+    let mut swept: Vec<Value> = Vec::new();
+    let mut shut: Vec<String> = Vec::new();
+    if x.secrets.is_empty() {
+        return Ok((swept, shut));
+    }
+    let held: Vec<secrets::Held> = x.secrets.iter().map(|g| g.held.clone()).collect();
+    let scratch = scratch_of(x, b);
+    let results_path = b.out.join(nils_pipeline::results::FILE);
+    let done = secrets::sweep(
+        &b.out,
+        &held,
+        &[results_path.as_path()],
+        &scratch,
+        &mut || pulse.tick(registry.store()),
+    )
+    .map_err(|e| format!("the sweep for secrets: {e}"))?;
+    for s in done.done {
+        match s {
+            secrets::Swept::Removed(rel) => swept.push(json!({
+                "file": rel.to_string_lossy(),
+                "why": "it held a secret input, and was removed",
+            })),
+            secrets::Swept::Unscannable(rel, why) => swept.push(json!({
+                "file": rel.to_string_lossy(),
+                "why": format!("it could not be read inside to sweep it for the secret inputs ({why}), and was removed"),
+            })),
+            secrets::Swept::Redacted(rel) => {
+                swept.push(json!({"file": rel.to_string_lossy(), "redacted": true}));
+            }
+        }
+    }
+    shut.extend(
+        done.unreadable
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned()),
+    );
+    secrets::redact_file(&b.log, &held, &scratch).map_err(|e| format!("the run's log: {e}"))?;
+    Ok((swept, shut))
+}
+
 fn take_in(
     registry: &mut Registry,
     x: &Execution<'_>,
@@ -3555,25 +3685,8 @@ fn take_in(
     }
     // record 49 R3: nothing a container left is read before what holds a
     // secret is swept from it
-    let mut swept: Vec<Value> = Vec::new();
-    if !x.secrets.is_empty() {
-        let held: Vec<secrets::Held> = x.secrets.iter().map(|g| g.held.clone()).collect();
-        let results_path = b.out.join(nils_pipeline::results::FILE);
-        let done = secrets::sweep(&b.out, &held, &[results_path.as_path()])
-            .map_err(|e| format!("the sweep for secrets: {e}"))?;
-        for s in done {
-            match s {
-                secrets::Swept::Removed(rel) => swept.push(json!({
-                    "file": rel.to_string_lossy(),
-                    "why": "it held a secret input, and was removed",
-                })),
-                secrets::Swept::Redacted(rel) => {
-                    swept.push(json!({"file": rel.to_string_lossy(), "redacted": true}));
-                }
-            }
-        }
-        secrets::redact_file(&b.log, &held).map_err(|e| format!("the run's log: {e}"))?;
-    }
+    let mut pulse = Pulse::new(x.job_id, json!({"run": x.run_id, "phase": "intake"}));
+    let (swept, shut) = sweep_batch(registry, x, b, &mut pulse)?;
     let (reported, unreadable) = read_results(&b.out);
     let unit_outputs: Vec<descriptor::Output> =
         d.outputs.iter().filter(|o| !o.run_level).cloned().collect();
@@ -3604,21 +3717,39 @@ fn take_in(
         let Some((row_id, _)) = row_of.get(&u.id) else {
             continue;
         };
-        let mut doc = match register_unit(
-            registry,
-            x,
-            u,
-            o,
-            &b.out,
-            &unit_outputs,
-            &cards,
-            taken_files,
-            &now,
-        ) {
-            Ok(doc) => doc,
-            Err(e) => {
-                json!({"status": "failed", "error": e, "metrics": {}, "files": [], "refused": []})
+        let mut doc = if shut.is_empty() {
+            match register_unit(
+                registry,
+                x,
+                u,
+                o,
+                &b.out,
+                &unit_outputs,
+                &cards,
+                taken_files,
+                &now,
+                &mut pulse,
+            ) {
+                Ok(doc) => doc,
+                Err(e) => {
+                    json!({"status": "failed", "error": e, "metrics": {}, "files": [], "refused": []})
+                }
             }
+        } else {
+            // record 49 R3: what could not be read could not be swept for
+            // the secret, so nothing of the batch is vouched for
+            json!({
+                "status": "failed",
+                "error": format!(
+                    "{} of what the container left could not be read, even given back to the engine, so it could not be swept for the secret inputs; nothing of it is registered",
+                    shut.len()
+                ),
+                "metrics": {}, "files": [],
+                "refused": shut.iter().map(|p| json!({
+                    "unit": u.id, "file": p,
+                    "why": "it could not be read to sweep it for the secret inputs",
+                })).collect::<Vec<_>>(),
+            })
         };
         doc["whole"] = json!(whole);
         if let Some(e) = &unreadable {
@@ -3664,6 +3795,7 @@ fn register_unit(
     cards: &[Value],
     taken_files: &mut std::collections::BTreeSet<PathBuf>,
     now: &str,
+    pulse: &mut Pulse,
 ) -> Result<Value, String> {
     let working = PathBuf::from(&x.place.path);
     let mut hashed: Vec<Value> = Vec::new();
@@ -3703,7 +3835,8 @@ fn register_unit(
             continue;
         }
         let (bytes, sha) =
-            nils_pipeline::files::sha256_file(&file).map_err(|e| format!("{rel}: {e}"))?;
+            nils_pipeline::files::sha256_file_ticking(&file, &mut || pulse.tick(registry.store()))
+                .map_err(|e| format!("{rel}: {e}"))?;
         let kind = declared.kind.as_str();
         let media = nils_pipeline::files::media_type(rel, declared.media_type.as_deref());
         // the row names the file where it is, never a link to it

@@ -59,14 +59,14 @@ command-line: >-
   bash -c 'set -u; shopt -s nullglob; cd [InputDataset];
   for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
   a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d";
-  b=$(basename "$f" .nii.gz); b=${b%_T1w}; w=$(mktemp -d);
+  b=$(basename "$f" .nii.gz); b=${b%_T1w}; w=$(mktemp -d [OutputLocation]/.work-XXXXXX);
   fl=""; for g in $a/*_FLAIR.nii.gz; do fl=$g; break; done;
   if [ "[LESION]" = on ]; then
   if [ -z "$fl" ]; then echo "$a holds no FLAIR, so no lesions"; rm -rf "$w"; continue; fi;
-  fspython -c "import sys, surfa; surfa.load_volume(sys.argv[1]).resample_like(surfa.load_volume(sys.argv[2])).save(sys.argv[3])" "$fl" "$f" "$w/flair.mgz" || continue;
-  run_samseg -i "$f" -i "$w/flair.mgz" --lesion --lesion-mask-pattern 0 1 -o "$w/out" --threads [THREADS] [PALLIDUM] || continue;
-  else run_samseg -i "$f" -o "$w/out" --threads [THREADS] [PALLIDUM] || continue; fi;
-  fspython -c "import sys, surfa; surfa.load_volume(sys.argv[1]).save(sys.argv[2])" "$w/out/seg.mgz" "$d/${b}_desc-samseg_dseg.nii.gz" || continue;
+  fspython -c "import sys, surfa; surfa.load_volume(sys.argv[1]).resample_like(surfa.load_volume(sys.argv[2])).save(sys.argv[3])" "$fl" "$f" "$w/flair.mgz" || { rm -rf "$w"; continue; };
+  run_samseg -i "$f" -i "$w/flair.mgz" --lesion --lesion-mask-pattern 0 1 -o "$w/out" --threads [THREADS] [PALLIDUM] || { rm -rf "$w"; continue; };
+  else run_samseg -i "$f" -o "$w/out" --threads [THREADS] [PALLIDUM] || { rm -rf "$w"; continue; }; fi;
+  fspython -c "import sys, surfa; surfa.load_volume(sys.argv[1]).save(sys.argv[2])" "$w/out/seg.mgz" "$d/${b}_desc-samseg_dseg.nii.gz" || { rm -rf "$w"; continue; };
   fspython -c "import sys, json; print(json.dumps(dict((p[0].strip(), float(p[1])) for n in (\"samseg.stats\", \"sbtiv.stats\") for l in open(sys.argv[1] + \"/\" + n) if l.startswith(\"# Measure\") for p in [l[9:].split(\",\")])))" "$w/out" > "$d/${b}_desc-samseg_volumes.json";
   rm -rf "$w"; done'
 
@@ -105,6 +105,7 @@ x-nils:
     - {metric: intracranial, op: ">=", value: 900000, description: "An intracranial volume under 0.9 litres is a failed segmentation more often than a head"}
     - {metric: intracranial, op: "<=", value: 2300000, description: "Over 2.3 litres the segmentation took more than the head"}
   needs:
+    cores-input: threads
     gpu: none
     cores: 4
     memory-gb: 16

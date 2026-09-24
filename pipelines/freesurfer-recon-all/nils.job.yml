@@ -49,7 +49,7 @@ inputs:
 command-line: >-
   bash -c 'set -u; shopt -s nullglob; cd [InputDataset];
   for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
-  a=$(dirname "$f"); s=$(echo "${a%/anat}" | tr / _); d=[OutputLocation]/$a; mkdir -p "$d"; w=$(mktemp -d);
+  a=$(dirname "$f"); s=$(echo "${a%/anat}" | tr / _); d=[OutputLocation]/$a; mkdir -p "$d"; w=$(mktemp -d [OutputLocation]/.work-XXXXXX);
   recon-all -all -s "$s" -i "$f" -sd "$w" -threads [THREADS] || { rm -rf "$w"; continue; };
   SUBJECTS_DIR="$w" asegstats2table --subjects "$s" --meas volume --tablefile "$d/${s}_desc-aseg_volumes.tsv";
   tar -C "$w" -czf "$d/${s}_desc-freesurfer_subject.tar.gz" "$s";
@@ -93,6 +93,7 @@ x-nils:
   qc:
     - {metric: surface_holes, op: "<=", value: 200, description: "More holes than 200 is a surface a person should look at"}
   needs:
+    cores-input: threads
     gpu: none
     cores: 2
     memory-gb: 8

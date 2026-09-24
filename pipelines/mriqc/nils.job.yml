@@ -54,7 +54,7 @@ inputs:
 
 command-line: >-
   [InputDataset] [OutputLocation] participant --participant-label [ParticipantLabels]
-  -m T1w --no-sub -w /tmp/mriqc-work --nprocs [NPROCS] --omp-nthreads [NPROCS] --mem-gb [MEM]
+  -m T1w --no-sub -w [OutputLocation]/.work-mriqc --nprocs [NPROCS] --omp-nthreads [NPROCS] --mem-gb [MEM]
 
 x-nils:
   contract: 1
@@ -89,6 +89,8 @@ x-nils:
     - {metric: snr_total, op: ">=", value: 8, description: "A starting point: an SNR below 8 is worth a look"}
     - {metric: cjv, op: "<=", value: 0.8, description: "A starting point: a CJV above 0.8 is noise or motion"}
   needs:
+    cores-input: processes
+    memory-input: memory_gb
     gpu: none
     cores: 4
     memory-gb: 12

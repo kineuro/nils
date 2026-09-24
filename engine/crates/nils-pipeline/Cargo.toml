@@ -12,6 +12,7 @@ publish.workspace = true
 
 [dependencies]
 csv.workspace = true
+flate2.workspace = true
 glob.workspace = true
 hex.workspace = true
 ring.workspace = true

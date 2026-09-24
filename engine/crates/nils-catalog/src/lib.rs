@@ -1020,7 +1020,7 @@ pub const MEASURE_TABLE: &str = "measure";
 
 /// The fields a pipeline's measures make (record 49 A3): for every measure a
 /// run loaded, `measure.<pipeline>.<name>` on the grain of its unit (a
-/// subject, a session or a stack), a unit's value being its newest run's;
+/// subject, a session or a stack), a unit's value being its newest run of the current version's;
 /// and `measure.<pipeline>.run`, the run that value came from, so every
 /// number traces to its run. A measure is read per scan only at detail
 /// quasi (R4): it is quasi identifying, and below that detail the ask
@@ -1077,12 +1077,12 @@ fn measure_fields(store: &mut Store) -> Result<Vec<Field>, Error> {
             dated: false,
             federated: false,
             description: format!(
-                "{}{unit}: from {from}, each {}'s value from its newest run",
+                "{}{unit}: from {from}, each {}'s value from its newest run of the current version",
                 words.unwrap_or_else(|| f.name.replace('_', " ")),
                 f.scope
             ),
             caveats: Some(
-                "read per row only at detail quasi (record 49 R4); below it, as a total over a group"
+                "read per row only at detail quasi (record 49 R4); below it, as a total over a group of 5 scans or more"
                     .into(),
             ),
             ai_context: None,

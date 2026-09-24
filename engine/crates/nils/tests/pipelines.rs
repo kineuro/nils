@@ -2453,7 +2453,7 @@ while i < len(a):
         host, ctr = a[i + 1].split(":")[:2]; mounts[ctr] = host; i += 2
     elif w == "--env":
         k, v = a[i + 1].split("=", 1); env[k] = v; i += 2
-    elif w == "--network":
+    elif w in ("--network", "--cpus", "--memory"):
         i += 2
     elif w.startswith("--"):
         i += 1
@@ -3282,6 +3282,108 @@ x-nils:
     }
 }
 
+/// Record 49 R3, after review: a run cancelled while its units hold the
+/// secret in their logs and outputs leaves none of it behind; the units in
+/// flight are swept as the ones that ended are.
+#[test]
+fn a_cancelled_run_leaves_no_secret_behind() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-secret-cancel");
+    const TOKEN: &str = "NILS-PLANTED-SECRET-c4nc3l-9d2e";
+    let secret_dir = TempDir::new("pipelines-secret-cancel-home");
+    let licence = secret_dir.file("license.txt", format!("{TOKEN}\n").as_bytes());
+    let leak = format!(
+        r#"name: leak-slow
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/leak-slow@sha256:{hex}"
+command-line: |
+  python3 -c '
+  import json, os, sys, time
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  lic = open(os.environ["FS_LICENSE"]).read()
+  print("the licence reads: " + lic, flush=True)
+  s = m["stacks"][0]; u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+  open(os.path.join(d, "copy.txt"), "w").write(lic)
+  with open(os.environ["LANE_TRACE"], "a") as f:
+      f.write("start %.6f %s - 1\n" % (time.time(), u))
+  time.sleep(60)
+  ' [Manifest] [OutputLocation]
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  units: apart
+  secrets:
+    - id: freesurfer_license
+      env: FS_LICENSE
+  outputs:
+    - id: out
+      kind: output
+      path-template: "stack-{{stack}}/*.txt"
+      media-type: text/plain
+  needs: {{cores: 1, memory-gb: 1}}
+"#,
+        hex = "e".repeat(64)
+    );
+    lab.add_descriptor("leak-slow", &leak);
+    lab.ok(
+        &[
+            "pipeline",
+            "secret",
+            "set",
+            "freesurfer_license",
+            "--file",
+            licence.to_str().unwrap(),
+        ],
+        None,
+    );
+    lab.ok(&["pipeline", "lane", "--cores", "2"], None);
+    let t = lab.work.path().join("trace");
+    let child = lab
+        .command(&lab.path)
+        .args(["run", "leak-slow", "--select", "selection:every@1"])
+        .env("LANE_TRACE", &t)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while trace(&t).len() < 2 {
+        assert!(started.elapsed().as_secs() < 60, "{:?}", trace(&t));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let job = lab.count("SELECT job_id FROM pipeline_run WHERE id = 1");
+    lab.ok(&["jobs", "cancel", &job.to_string()], None);
+    let _ = child.wait_with_output().unwrap();
+    let mut stack = vec![lab.work.path().to_path_buf()];
+    let mut seen = 0;
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let kind = e.file_type().unwrap();
+            if kind.is_dir() {
+                stack.push(e.path());
+            } else if kind.is_file() && e.file_name() != "trace" {
+                seen += 1;
+                let bytes = std::fs::read(e.path()).unwrap();
+                assert!(
+                    !bytes.windows(TOKEN.len()).any(|w| w == TOKEN.as_bytes()),
+                    "{} holds the secret",
+                    e.path().display()
+                );
+            }
+        }
+    }
+    assert!(seen > 3, "{seen}");
+}
+
 /// Record 49 A1: a person's cancel stops the units in flight and closes the
 /// run as cancelled, with the units it finished kept; `nils run --resume`
 /// goes on from there.
@@ -3594,6 +3696,17 @@ fn a_run_s_table_answers_in_the_ask_and_a_planted_breach_raises_its_item() {
     let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
     let rows = exported(&lab, &answer["handle"]);
     assert_eq!(rows.len(), 1, "{rows:?}");
+    // Nima's ruling after review: below detail quasi a group's totals of a
+    // measure show only for 5 scans or more (D27's k, for measures alone);
+    // this group holds 4, so its totals and its count are withheld
+    for c in ["total", "mean", "scans", "_rows"] {
+        if let Some(v) = rows[0].get(c) {
+            assert_eq!(v, "", "{c} is withheld for a group of 4: {rows:?}");
+        }
+    }
+    // at detail quasi the same group's totals are answered
+    let answer = lab.json(&["ask", "run", "--file", &file, "--pack-dir", p, "--json"]);
+    let rows = exported(&lab, &answer["handle"]);
     let sum: f64 = stacks.iter().map(|s| 1000.0 * *s as f64).sum();
     assert_eq!(
         cell(&rows[0], "total").parse::<f64>().unwrap(),
@@ -3601,6 +3714,33 @@ fn a_run_s_table_answers_in_the_ask_and_a_planted_breach_raises_its_item() {
         "{rows:?}"
     );
     assert_eq!(cell(&rows[0], "scans"), "4", "{rows:?}");
+    // a filter on a measure counts toward the same rule: a count of the
+    // scans it keeps is withheld below 5, and none is still none
+    for (bound, shown) in [(0.0, false), (1.0e12, true)] {
+        let filtered = json!({
+            "ast_version": 1,
+            "sets": {"s": {"grain": "stack", "where": [
+                [">", {}, ["field", {}, "measure.volumes.brain_volume"], bound]]}},
+            "out": {"set": "s", "level": "count"},
+        });
+        let file = ask_file(&lab, &format!("filtered-{bound}"), &filtered);
+        let out = lab
+            .command(&lab.path)
+            .env("NILS_JOB_DETAIL", "plain")
+            .args(["ask", "run", "--file", &file, "--pack-dir", p, "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let rows = exported(&lab, &answer["handle"]);
+        let want = if shown { "0" } else { "" };
+        assert_eq!(cell(&rows[0], "rows"), want, "{rows:?}");
+        assert_eq!(cell(&rows[0], "subjects"), want, "{rows:?}");
+    }
 
     // a newer run's value is the one the ask reads, and names that run
     let again = lab.json(&[
@@ -3625,6 +3765,45 @@ fn a_run_s_table_answers_in_the_ask_and_a_planted_breach_raises_its_item() {
         assert_eq!(
             cell(&r, "measure.volumes.run"),
             again["id"].to_string(),
+            "{r:?}"
+        );
+    }
+
+    // the newest run of the pipeline's current version is read, even where
+    // an older version ran later, and names that run
+    lab.add_descriptor(
+        "volumes",
+        &VOLUMES.replace("tool-version: \"1\"", "tool-version: \"2\""),
+    );
+    let current = lab.json(&[
+        "run",
+        "volumes",
+        "--select",
+        "selection:every@1",
+        "--param",
+        "scale=3000",
+        "--json",
+    ]);
+    assert_eq!(current["pipeline"], "volumes@2", "{current}");
+    let older = lab.json(&[
+        "run",
+        "volumes@1",
+        "--select",
+        "selection:every@1",
+        "--param",
+        "scale=5000",
+        "--json",
+    ]);
+    assert_eq!(older["pipeline"], "volumes@1", "{older}");
+    let file = ask_file(&lab, "per-scan-current", &per_scan);
+    let answer = lab.json(&["ask", "run", "--file", &file, "--pack-dir", p, "--json"]);
+    for r in exported(&lab, &answer["handle"]) {
+        let id: f64 = cell(&r, "id").parse().unwrap();
+        let volume: f64 = cell(&r, "measure.volumes.brain_volume").parse().unwrap();
+        assert_eq!(volume, 3000.0 * id, "{r:?}");
+        assert_eq!(
+            cell(&r, "measure.volumes.run"),
+            current["id"].to_string(),
             "{r:?}"
         );
     }

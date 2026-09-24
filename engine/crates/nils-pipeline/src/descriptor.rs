@@ -165,12 +165,19 @@ impl Units {
 
 /// What a scheduling unit needs (`x-nils.needs`): a unit where units run
 /// apart, the whole run where they run together.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Needs {
     pub cores: u32,
     pub memory_gb: f64,
     /// Of the card's memory, for a unit that takes the GPU.
     pub gpu_memory_gb: f64,
+    /// The Number parameter that sets a unit's threads (`cores-input`,
+    /// record 49 after review): left out, it is `cores`; above it, refused.
+    pub cores_input: Option<String>,
+    /// The Number parameter that sets the memory, in GB, a unit's tool
+    /// plans within (`memory-input`): left out, it is `memory-gb`; above
+    /// it, refused.
+    pub memory_input: Option<String>,
 }
 
 /// A secret input (`x-nils.secrets`, record 49 R3): a file the site keeps,
@@ -885,7 +892,24 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         cores,
         memory_gb: positive("memory-gb", DEFAULT_MEMORY_GB)?,
         gpu_memory_gb: positive("gpu-memory-gb", DEFAULT_GPU_MEMORY_GB)?,
+        cores_input: opt_text(n, "cores-input", "x-nils.needs.")?,
+        memory_input: opt_text(n, "memory-input", "x-nils.needs.")?,
     };
+    for (key, id) in [
+        ("cores-input", &needs.cores_input),
+        ("memory-input", &needs.memory_input),
+    ] {
+        let Some(id) = id else { continue };
+        match params.iter().find(|p| &p.id == id) {
+            None => return Err(format!("x-nils.needs.{key} names no parameter {id}")),
+            Some(p) if p.ty != ParamType::Number => {
+                return Err(format!(
+                    "x-nils.needs.{key}: {id} is to be a Number parameter, the count the tool is told"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
     let units = match opt_text(x, "units", "x-nils.")?.as_deref() {
         None | Some("together") => Units::Together,
         Some("apart") => Units::Apart,
@@ -1362,6 +1386,51 @@ impl Descriptor {
             };
             out.insert(p.id.clone(), value);
         }
+        // record 49, after review: the parameters a unit's threads and
+        // memory are told by are held to what the unit declares, which the
+        // lane counts and the runtime enforces
+        let held = [
+            (
+                &self.needs.cores_input,
+                f64::from(self.needs.cores),
+                "cores",
+            ),
+            (
+                &self.needs.memory_input,
+                self.needs.memory_gb,
+                "GB of memory",
+            ),
+        ];
+        for (input, most, what) in held {
+            let Some(id) = input else { continue };
+            let Some(p) = self.params.iter().find(|p| &p.id == id) else {
+                continue;
+            };
+            let asked = given.iter().any(|(g, _)| g == id);
+            if asked {
+                let v = out.get(id).and_then(Value::as_f64).unwrap_or(0.0);
+                if v > most {
+                    return Err(format!(
+                        "{id} {} is above the {} {what} each unit of {} declares (x-nils.needs), which is what the lane gives it; ask for {} or less",
+                        number_text(v),
+                        number_text(most),
+                        self.name,
+                        number_text(most)
+                    ));
+                }
+            } else {
+                let v = if p.integer {
+                    most.floor().max(1.0)
+                } else {
+                    most
+                };
+                let v = number(v);
+                check_value(p, &v).map_err(|e| {
+                    format!("{id}, set to what each unit declares (x-nils.needs): {e}")
+                })?;
+                out.insert(id.clone(), v);
+            }
+        }
         Ok(out)
     }
 
@@ -1683,7 +1752,9 @@ x-nils:
             Needs {
                 cores: 4,
                 memory_gb: 12.0,
-                gpu_memory_gb: 6.0
+                gpu_memory_gb: 6.0,
+                cores_input: None,
+                memory_input: None,
             }
         );
         assert_eq!(
@@ -1755,6 +1826,37 @@ x-nils:
         ))
         .unwrap_err();
         assert!(e.contains("runs its units together"), "{e}");
+    }
+
+    /// Record 49, after review: a parameter that sets a unit's threads or
+    /// its memory is tied to what the unit declares; left out, it is the
+    /// declared value, and asked above it, the run is refused.
+    #[test]
+    fn a_thread_or_memory_parameter_is_held_to_the_unit_s_needs() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let with =
+            |needs: &str| base.replace("  needs: {gpu: optional}", &format!("  needs: {needs}"));
+        let d = parse(&with(
+            "{cores: 2, memory-gb: 6, cores-input: dimension, memory-input: shrink}",
+        ))
+        .unwrap();
+        assert_eq!(d.needs.cores_input.as_deref(), Some("dimension"));
+        let p = d.resolve(&[]).unwrap();
+        assert_eq!(p["dimension"], 2, "{p:?}");
+        assert_eq!(p["shrink"], 6, "{p:?}");
+        let p = d.resolve(&[("dimension".into(), "2".into())]).unwrap();
+        assert_eq!(p["dimension"], 2);
+        let e = d.resolve(&[("dimension".into(), "3".into())]).unwrap_err();
+        assert!(e.contains("2 cores"), "{e}");
+        let e = d.resolve(&[("shrink".into(), "8".into())]).unwrap_err();
+        assert!(e.contains("6 GB"), "{e}");
+        for (needs, words) in [
+            ("{cores-input: nothing}", "names no parameter"),
+            ("{cores-input: verbose}", "a Number parameter"),
+        ] {
+            let e = parse(&with(needs)).unwrap_err();
+            assert!(e.contains(words), "{needs}: {e}");
+        }
     }
 
     /// Record 49 A3: a table output declares its format and typed columns,

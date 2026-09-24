@@ -3,9 +3,10 @@
 //! Measures (record 49 A3): the numbers a pipeline run's tables hold, one
 //! row per unit and measure, and the declared metrics its results carried,
 //! loaded so the ask reads them as fields of the unit's grain,
-//! `measure.<pipeline>.<name>`. A unit's value is its newest run's; the rows
-//! of older runs stay, and every row names the run and the table file it
-//! came from, so a number is traced to its run.
+//! `measure.<pipeline>.<name>`. A unit's value is its newest run's of the
+//! pipeline's current version; the rows of older runs stay, and every row
+//! names the run and the table file it came from, so a number is traced to
+//! its run.
 //!
 //! This module is the rows. Reading a table file is `nils-pipeline`'s and
 //! loading a run's tables the binary's.
