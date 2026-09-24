@@ -2613,9 +2613,9 @@ impl Closed {
 /// with the outcome. Every answer stays. The rest are left unresolved,
 /// their leases ended, and the campaign is closed.
 ///
-/// Record 42 R6: a decision goes in force as it closes only when the
-/// answers behind it and the closer are all persons. An item a model's
-/// answer settled is staged, and keeps the model as its author when that
+/// Record 42 R6, extended to agents: a decision goes in force as it closes
+/// only when the answers behind it and the closer are all persons. An item
+/// a model's or an agent's answer settled is staged, and keeps the model as its author when that
 /// model's answers were all there was; an agent's or a model's close is
 /// staged whoever rated. A person commits them.
 pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Closed, Error> {
@@ -2721,9 +2721,10 @@ fn close_items(
             ),
             None => (cl.who.to_string(), cl.author_kind.to_string(), cl.model),
         };
-        // R6: a model's answer is evidence until a person commits it, so an
-        // item a model's answer settled is staged; so is anything an agent
-        // or a model closes, or authors, whoever rated. Only raters and a
+        // R6, which the ruling on wave 42 extends to agents: a model's or an
+        // agent's answer is evidence until a person commits it, so an item
+        // either answered is staged; so is anything an agent or a model
+        // closes, or authors, whoever rated. Only raters and a
         // closer who are all persons put an item in force as it closes.
         let persons_only = cl.author_kind == "person"
             && kind == "person"

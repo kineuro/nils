@@ -1490,6 +1490,53 @@ fn a_close_stages_what_a_model_answered_and_what_an_agent_closed() {
         assert!(e.to_string().contains("R6"), "{name}: {e}");
         nils_registry::review::commit_as(reg, Some(mixed), true, "cleo@lab", "person").unwrap();
 
+        // a person and an agent, agreeing, closed by a person: staged as a
+        // model's would be (R6 holds for agents), and only a person commits
+        let c = campaign::create(
+            reg,
+            &new(
+                "with-agent",
+                &q,
+                &adj,
+                Items::Stacks(vec![ids[0]]),
+                2,
+                "decision",
+            ),
+        )
+        .unwrap();
+        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(4))
+            .unwrap()
+            .unwrap();
+        campaign::answer(reg, &give(a.assignment.id, "anna@lab", "brain"), &at(4)).unwrap();
+        let a = campaign::claim(reg, c.id, "helper@lab", Role::Rater, &at(4))
+            .unwrap()
+            .unwrap();
+        campaign::answer(
+            reg,
+            &Given {
+                author_kind: "agent",
+                ..give(a.assignment.id, "helper@lab", "brain")
+            },
+            &at(4),
+        )
+        .unwrap();
+        let closed = close(reg, c.id, "cleo@lab", "person", 5);
+        let with_agent = closed.decisions[0];
+        let (kind, _, _, staged, open) = decision(reg, with_agent);
+        assert_eq!(kind, "person", "{name}");
+        assert!(staged && open, "{name}: an agent answered, so it is staged");
+        let filter = nils_registry::review::CommitFilter {
+            min_confidence: None,
+            campaign: Some(c.id),
+        };
+        let e = nils_registry::review::commit_where(reg, &filter, true, "bot@lab", "agent")
+            .unwrap_err();
+        assert!(e.to_string().contains("R6"), "{name}: {e}");
+        let e = nils_registry::review::commit_as(reg, Some(with_agent), true, "bot@lab", "agent")
+            .unwrap_err();
+        assert!(e.to_string().contains("R6"), "{name}: {e}");
+        nils_registry::review::commit_where(reg, &filter, true, "cleo@lab", "person").unwrap();
+
         // two persons, closed by an agent: staged
         let c = campaign::create(
             reg,
@@ -1510,9 +1557,14 @@ fn a_close_stages_what_a_model_answered_and_what_an_agent_closed() {
             campaign::answer(reg, &give(a.assignment.id, who, "brain"), &at(5)).unwrap();
         }
         let closed = close(reg, c.id, "helper@lab", "agent", 6);
-        let (kind, _, _, staged, open) = decision(reg, closed.decisions[0]);
+        let by_agent = closed.decisions[0];
+        let (kind, _, _, staged, open) = decision(reg, by_agent);
         assert_eq!(kind, "agent", "{name}");
         assert!(staged && open, "{name}: an agent's close is staged");
+        // and the agent does not put its own close in force
+        let e = nils_registry::review::commit_as(reg, Some(by_agent), true, "helper@lab", "agent")
+            .unwrap_err();
+        assert!(e.to_string().contains("R6"), "{name}: {e}");
 
         // two persons, closed by a person: in force, as before
         let c = campaign::create(

@@ -82,6 +82,11 @@ acting is the registered model the issuer bound into the claim as
 out and cannot replace. A token whose claim carries no model cannot act as
 a model, so an agent never names a model of its own choosing.
 
+What an agent or a model answers is evidence until a person commits it
+(record 42 R6, which the wave's ruling extends to agents): a decision a
+model or an agent authored, or whose campaign item one of them answered, is
+staged, and a caller whose actor is an agent or a model cannot commit it.
+
 The other documents are version 2's.
 
 | document | what changes |

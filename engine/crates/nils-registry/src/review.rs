@@ -931,19 +931,20 @@ fn id_list(ids: &[i64]) -> String {
         .join(", ")
 }
 
-/// Record 42 R6: a model's answer is put in force by a person, so a
-/// committer who is an agent or a model is refused when any of the staged
-/// decisions it would commit carries one. Nothing is committed then.
+/// Record 42 R6, which the ruling on wave 42 extends to agents: a model's
+/// or an agent's answer is put in force by a person, so a committer who is
+/// an agent or a model is refused when any of the staged decisions it would
+/// commit carries one. Nothing is committed then.
 fn only_a_person_commits(store: &mut Store, ids: &[i64], kind: &str) -> Result<(), Error> {
     if kind == "person" || ids.is_empty() {
         return Ok(());
     }
-    let by_model = models_answers(store, ids)?;
+    let by_model = needs_a_person(store, ids)?;
     if by_model.is_empty() {
         return Ok(());
     }
     Err(refused(format!(
-        "decision(s) {} carry a model's answer, which a person puts in force (record 42 R6); {} does not",
+        "decision(s) {} carry a model's or an agent's answer, which a person puts in force (record 42 R6); {} does not",
         by_model
             .iter()
             .map(i64::to_string)
@@ -957,11 +958,11 @@ fn only_a_person_commits(store: &mut Store, ids: &[i64], kind: &str) -> Result<(
     )))
 }
 
-/// The decisions among `ids` that carry a model's answer: a model is their
-/// author, they name a registered model, or a campaign closed an item into
-/// them that a model answered (a person and a model who agreed, record 42
-/// R6).
-pub fn models_answers(store: &mut Store, ids: &[i64]) -> Result<Vec<i64>, StoreError> {
+/// The decisions among `ids` that carry a model's or an agent's answer: a
+/// model or an agent is their author, they name a registered model, or a
+/// campaign closed an item into them that a model or an agent answered (a
+/// person and a model or an agent who agreed, record 42 R6).
+pub fn needs_a_person(store: &mut Store, ids: &[i64]) -> Result<Vec<i64>, StoreError> {
     let mut out = Vec::new();
     for chunk in ids.chunks(500) {
         let list = chunk
@@ -970,9 +971,9 @@ pub fn models_answers(store: &mut Store, ids: &[i64]) -> Result<Vec<i64>, StoreE
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT id FROM {} WHERE id IN ({list}) AND (author_kind = 'model' OR model_id IS NOT NULL) \
+            "SELECT id FROM {} WHERE id IN ({list}) AND (author_kind IN ('model', 'agent') OR model_id IS NOT NULL) \
              UNION SELECT i.decision_id FROM {} i JOIN {} a ON a.item_id = i.id \
-             WHERE i.decision_id IN ({list}) AND a.author_kind = 'model'",
+             WHERE i.decision_id IN ({list}) AND a.author_kind IN ('model', 'agent')",
             store.qualified("decision"),
             store.qualified("campaign_item"),
             store.qualified("campaign_answer"),
