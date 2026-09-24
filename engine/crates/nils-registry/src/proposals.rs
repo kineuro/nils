@@ -506,6 +506,23 @@ pub fn ingest(
             .or_default()
             .insert(p.stack_id);
     }
+    // record 45: what each stack holds now on each axis, before the
+    // proposal, so the change a proposal would make reads from and to
+    let mut before: BTreeMap<String, BTreeMap<i64, Vec<String>>> = BTreeMap::new();
+    for (i, _) in &resolved {
+        let p = &proposals[*i];
+        before
+            .entry(p.axis.clone())
+            .or_default()
+            .insert(p.stack_id, Vec::new());
+    }
+    for (axis, stacks) in before.iter_mut() {
+        let ids: Vec<i64> = stacks.keys().copied().collect();
+        *stacks = review::holds_now(registry.store(), axis, &ids).map_err(|e| match e {
+            review::Error::Store(s) => Error::Store(s),
+            other => Error::Refused(other.to_string()),
+        })?;
+    }
     // (axis, model, value, band) -> members
     let mut groups: BTreeMap<(String, i64, String, String), Gathered> = BTreeMap::new();
     let mut models: BTreeMap<i64, Model> = BTreeMap::new();
@@ -519,9 +536,15 @@ pub fn ingest(
             continue;
         }
         let confidence = p.confidence();
+        let from = before
+            .get(&p.axis)
+            .and_then(|b| b.get(&p.stack_id))
+            .filter(|v| !v.is_empty())
+            .map(|v| v.join(","));
         let evidence = json!({
             "axis": p.axis,
             "value": p.value,
+            "from": from,
             "confidence": confidence,
             "probabilities": p.probabilities,
             "model_id": m.id,
@@ -556,6 +579,18 @@ pub fn ingest(
             Err(e)
         }
     }
+}
+
+/// How many of a group's members hold each value now, from their
+/// evidence's `from`: the change matrix's row of the group (record 45). A
+/// stack the axis holds nothing on counts under the empty key.
+fn from_counts<'a>(members: impl Iterator<Item = &'a Value>) -> Value {
+    let mut counts: BTreeMap<String, i64> = BTreeMap::new();
+    for ev in members {
+        let key = ev["from"].as_str().unwrap_or("").to_string();
+        *counts.entry(key).or_default() += 1;
+    }
+    json!(counts)
 }
 
 fn write(
@@ -598,6 +633,7 @@ fn write(
         let evidence = json!({
             "axis": axis,
             "value": value,
+            "from": from_counts(g.members.iter().map(|(_, _, ev)| ev)),
             "tier": band,
             "confidence": confidence,
             "mean_confidence": mean,
@@ -832,6 +868,7 @@ fn supersede(
             .collect();
         let mut ev = evidence.clone();
         ev["members"] = json!(kept.len());
+        ev["from"] = from_counts(kept.iter().map(|m| &m.evidence));
         ev["group"] = json!(carried_key);
         ev["carried_from"] = json!(item);
         if !confidences.is_empty() {

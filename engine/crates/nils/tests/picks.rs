@@ -531,3 +531,175 @@ fn a_pick_campaign_closes_through_the_person_s_pick_writer() {
     let still = run_pick(&mut store, *subject, day).unwrap();
     assert_eq!(still.0, person, "the person's pick still applies");
 }
+
+/// A server on a home, its first line read for the port.
+struct Served {
+    child: std::process::Child,
+    port: u16,
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+const CURATOR: &str = "a-curator-token-of-its-length";
+const PLAIN: &str = "a-plain-campaigns-token-long";
+
+impl Served {
+    fn start(home: &Home) -> Served {
+        use std::io::BufRead as _;
+        let tokens = [
+            format!("{CURATOR}=cleo@lab:reviewer,campaigns:work"),
+            format!("{PLAIN}=pat@lab:campaigns:see"),
+        ]
+        .join(",");
+        let mut child = nils()
+            .arg("--registry")
+            .arg(home.dir.path())
+            .args(["serve", "--bind", "127.0.0.1:0", "--auth", "token"])
+            .args(["--pack-dir", &packs()])
+            .env("NILS_TOKENS", tokens)
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .env_remove("NILS_DSN")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut lines = std::io::BufReader::new(stdout).lines();
+        let Some(Ok(first)) = lines.next() else {
+            let _ = child.kill();
+            panic!("nils serve did not listen");
+        };
+        let addr = first.split_whitespace().nth(2).unwrap();
+        let port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
+        Served { child, port }
+    }
+
+    fn get(&self, path: &str, token: &str) -> (u16, serde_json::Value) {
+        use std::io::Read as _;
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        let head = format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (headers, text) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+        let status: u16 = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (
+            status,
+            serde_json::from_str(text).unwrap_or(serde_json::Value::String(text.to_string())),
+        )
+    }
+}
+
+/// Record 45: a pick campaign's session item names its candidates at the
+/// door, the session's stacks with what the classifier says of each and the
+/// run's pick among them, at detail quasi, since a session is named by its
+/// subject and its day. On SQLite, and on Postgres where a test DSN is set.
+fn candidates_round(home: &Home) {
+    let p = packs();
+    home.ok(&["pick", "run", "--pack-dir", &p, "--json"]);
+    let doc = home.dir.path().join("visits.json");
+    std::fs::write(
+        &doc,
+        serde_json::json!({
+            "ast_version": 1,
+            "sets": {"visits": {"grain": "session"}},
+            "out": {"set": "visits", "level": "record"},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    home.ok(&[
+        "ask",
+        "selections",
+        "save",
+        "--name",
+        "visits",
+        "--file",
+        doc.to_str().unwrap(),
+        "--pack-dir",
+        &p,
+    ]);
+    let made = home.json(&[
+        "campaign",
+        "create",
+        "visits",
+        "--pick-role",
+        "t1w",
+        "--select",
+        "selection:visits@1",
+        "--closes-into",
+        "pick",
+        "--pack-dir",
+        &p,
+        "--json",
+    ]);
+    let campaign = made["id"].as_i64().unwrap();
+    let items = made["items"].as_array().unwrap();
+    let server = Served::start(home);
+    let mut with_a_pick = 0;
+    for it in items {
+        let item = it["id"].as_i64().unwrap();
+        let path = format!("/api/campaigns/{campaign}/items/{item}/candidates");
+        let (status, doc) = server.get(&path, PLAIN);
+        assert_eq!(status, 403, "a session opens at quasi: {doc}");
+        let (status, doc) = server.get(&path, CURATOR);
+        assert_eq!(status, 200, "{doc}");
+        assert_eq!(doc["role"], "t1w", "{doc}");
+        let candidates = doc["candidates"].as_array().unwrap();
+        assert!(!candidates.is_empty(), "every session holds a stack: {doc}");
+        for c in candidates {
+            assert!(c["stack_id"].is_i64(), "{doc}");
+            assert!(c["axes"].is_object(), "{doc}");
+        }
+        // the run's pick names stacks among the candidates
+        for pick in doc["picks"].as_array().unwrap() {
+            with_a_pick += 1;
+            for s in pick["stacks"].as_array().unwrap() {
+                let c = candidates
+                    .iter()
+                    .find(|c| c["stack_id"] == *s)
+                    .unwrap_or_else(|| panic!("a picked stack is a candidate: {doc}"));
+                assert!(
+                    c["picked_by"].as_array().unwrap().contains(&pick["id"]),
+                    "{doc}"
+                );
+            }
+        }
+    }
+    assert!(with_a_pick > 0, "the run picked on some occasion");
+}
+
+#[test]
+fn a_pick_campaign_s_item_names_its_candidates_at_the_door() {
+    candidates_round(&registry(None));
+}
+
+#[test]
+fn a_pick_campaign_s_item_names_its_candidates_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        return;
+    };
+    let schema = "nils_picks_candidates";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    candidates_round(&registry(Some((dsn.clone(), schema.to_string()))));
+    drop();
+}

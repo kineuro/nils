@@ -13,7 +13,7 @@
 //! groups; with every axis at 0.95 the two ask 10,791 and 10,725 items,
 //! which are 34 and 108 questions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Registry;
 use crate::audit::{self, Action, Entry};
@@ -405,6 +405,85 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
 /// are written as one act or none (an import); the caller commits, or
 /// rolls back and re-reads the registry's epoch.
 pub fn apply_within(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
+    apply_as(registry, a, None)
+}
+
+/// [`apply_within`] on one axis of an item that asks several (record 45):
+/// a campaign's `axes` item, or System 1's `classify.asked`, whose evidence
+/// names them in `axes`. The decision is the axis's, at the stack's scope,
+/// and it answers every open question about that axis on the stack; the
+/// item itself stays as it was, since its other axes are answered by their
+/// own decisions, and whoever writes the last closes it.
+pub fn apply_axis_within(
+    registry: &mut Registry,
+    a: &Apply<'_>,
+    axis: &str,
+) -> Result<Applied, Error> {
+    apply_as(registry, a, Some(axis))
+}
+
+/// One answer to an item that asks several axes, a decision per axis, in
+/// one transaction with the item closed (record 45 R5: choosing one of
+/// System 1's candidates answers every axis at once). `values` names each
+/// axis with its value, none for "no value here"; the whole is refused and
+/// nothing written when any axis is.
+pub fn apply_values(
+    registry: &mut Registry,
+    a: &Apply<'_>,
+    values: &[(String, Option<String>)],
+) -> Result<Vec<Applied>, Error> {
+    if values.is_empty() {
+        return Err(refused("name a value for each axis the item asks"));
+    }
+    registry.store().begin()?;
+    let written = (|| -> Result<Vec<Applied>, Error> {
+        let mut out = Vec::new();
+        for (axis, value) in values {
+            let one = Apply {
+                value: value.as_deref(),
+                ..a.clone()
+            };
+            out.push(apply_as(registry, &one, Some(axis))?);
+        }
+        let staged = out.iter().any(|x| x.staged);
+        let decisions: serde_json::Map<String, serde_json::Value> = out
+            .iter()
+            .map(|x| (x.axis.clone(), serde_json::json!(x.decision)))
+            .collect();
+        let answer = serde_json::json!({
+            "decisions": decisions, "actor": a.author.who, "author_kind": a.author.kind,
+            "model_id": a.author.model, "why": a.why, "staged": staged,
+        });
+        let first = out.first().map(|x| x.decision).unwrap_or_default();
+        close_item(
+            registry.store(),
+            a.item,
+            if staged { "staged" } else { "accepted" },
+            a.author.who,
+            &answer,
+            first,
+            &now_iso(),
+        )?;
+        Ok(out)
+    })();
+    match written {
+        Ok(out) => {
+            registry.store().commit()?;
+            Ok(out)
+        }
+        Err(e) => {
+            registry.store().rollback().ok();
+            registry.refresh_meta().ok();
+            Err(e)
+        }
+    }
+}
+
+fn apply_as(
+    registry: &mut Registry,
+    a: &Apply<'_>,
+    one_of: Option<&str>,
+) -> Result<Applied, Error> {
     if !["person", "agent", "model"].contains(&a.author.kind) {
         return Err(refused(format!(
             "an author is a person, an agent or a model, not {}",
@@ -455,15 +534,40 @@ pub fn apply_within(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, E
     let Some(it) = item(store, a.item)? else {
         return Err(refused(format!("no review item {}", a.item)));
     };
-    let axis = it.evidence["axis"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| {
-            refused(format!(
-                "review item {} is a {}, which is not a question about an axis",
-                it.id, it.kind
-            ))
-        })?;
+    let axis = match one_of {
+        // an item that asks several axes is answered one axis at a time
+        Some(want) => {
+            let asks = it.evidence["axes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|x| x.as_str())
+                .any(|x| x == want)
+                || it.evidence["axis"].as_str() == Some(want);
+            if !asks {
+                return Err(refused(format!(
+                    "review item {} does not ask about {want}",
+                    it.id
+                )));
+            }
+            if it.scope == "group" {
+                return Err(refused(format!(
+                    "review item {} is a group; one of its axes is answered on a stack",
+                    it.id
+                )));
+            }
+            want.to_string()
+        }
+        None => it.evidence["axis"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| {
+                refused(format!(
+                    "review item {} is a {}, which is not a question about an axis",
+                    it.id, it.kind
+                ))
+            })?,
+    };
     // A model answers the task it was registered for, and no other.
     if let Some(m) = &model
         && m.task != format!("axis:{axis}")
@@ -994,6 +1098,41 @@ pub fn needs_a_person(store: &mut Store, ids: &[i64]) -> Result<Vec<i64>, StoreE
         for r in store.query(&sql, &[])? {
             out.push(r.int(0)?);
         }
+        // record 45: an axes item closes into a decision per axis and links
+        // one of them; the others name their campaign and their stack, and
+        // the item of that campaign on that stack says who answered it
+        let sql = format!(
+            "SELECT id, campaign_id, ref FROM {} WHERE id IN ({list}) AND campaign_id IS NOT NULL AND scope = 'stack'",
+            store.qualified("decision"),
+        );
+        let mut by_item: BTreeMap<(i64, i64), Vec<i64>> = BTreeMap::new();
+        for r in store.query(&sql, &[])? {
+            if let Ok(stack) = r.text(2)?.parse::<i64>() {
+                by_item
+                    .entry((r.int(1)?, stack))
+                    .or_default()
+                    .push(r.int(0)?);
+            }
+        }
+        let campaigns: BTreeSet<i64> = by_item.keys().map(|(c, _)| *c).collect();
+        if !campaigns.is_empty() {
+            let sql = format!(
+                "SELECT DISTINCT i.campaign_id, i.stack_id FROM {} i JOIN {} a ON a.item_id = i.id \
+                 WHERE i.campaign_id IN ({}) AND i.stack_id IS NOT NULL AND a.author_kind IN ('model', 'agent')",
+                store.qualified("campaign_item"),
+                store.qualified("campaign_answer"),
+                campaigns
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            for r in store.query(&sql, &[])? {
+                if let Some(ids) = by_item.get(&(r.int(0)?, r.int(1)?)) {
+                    out.extend(ids);
+                }
+            }
+        }
     }
     out.sort_unstable();
     out.dedup();
@@ -1001,7 +1140,8 @@ pub fn needs_a_person(store: &mut Store, ids: &[i64]) -> Result<Vec<i64>, StoreE
 }
 
 /// Which staged decisions a commit by filter takes (record 42 S6, v0's
-/// commit by minimum confidence).
+/// commit by minimum confidence; record 45 E3, v0's "Commit all N
+/// matching" of a change matrix).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CommitFilter {
     /// Only decisions whose confidence is at least this: the agreement of
@@ -1010,6 +1150,48 @@ pub struct CommitFilter {
     pub min_confidence: Option<f64>,
     /// Only decisions a campaign's close staged.
     pub campaign: Option<i64>,
+    /// Only decisions a registered model authored, named by its id, its
+    /// digest or `name@version`.
+    pub model: Option<String>,
+    /// Only decisions on this axis; `from` and `to` are values of it.
+    pub axis: Option<String>,
+    /// Only where the axis holds this value now, on each stack the decision
+    /// reaches: the decision in force there, else the classifier's value. A
+    /// multi-valued axis is its values joined by commas; empty for none.
+    pub from: Option<String>,
+    /// Only decisions that set this value; empty for "no value here".
+    pub to: Option<String>,
+    /// Only on these stacks.
+    pub stacks: Option<Vec<i64>>,
+    /// Each name a value of the axis goes by, its label or the form the
+    /// classifier stores, to its identity, from the served pack: `from`,
+    /// `to`, what a decision says and what a stack holds are compared as
+    /// identities, so `T2*w` and `T2starw` are one value. Empty compares
+    /// them as written.
+    pub names: BTreeMap<String, String>,
+}
+
+impl CommitFilter {
+    /// A value as a set of identities.
+    fn set_of(&self, v: Option<&str>) -> Vec<String> {
+        let mut out: Vec<String> = value_set(v)
+            .into_iter()
+            .map(|x| self.names.get(&x).cloned().unwrap_or(x))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn names_nothing(&self) -> bool {
+        self.min_confidence.is_none()
+            && self.campaign.is_none()
+            && self.model.is_none()
+            && self.axis.is_none()
+            && self.from.is_none()
+            && self.to.is_none()
+            && self.stacks.is_none()
+    }
 }
 
 /// What a commit by filter did, and what it left staged.
@@ -1019,6 +1201,249 @@ pub struct CommittedPart {
     pub items: i64,
     /// Staged decisions the filter left as they were.
     pub left: i64,
+    /// Group decisions only part of whose stacks the filter names: the part
+    /// was written as decisions of those stacks by the same author and put
+    /// in force, and the group's decision stays staged for the rest.
+    pub split: Vec<i64>,
+}
+
+/// A value as a set of values: a multi-valued axis is stored joined by
+/// commas, and none is the empty set.
+fn value_set(v: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = v
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// One staged decision as a commit by filter reads it.
+struct Staged {
+    id: i64,
+    epoch: Option<i64>,
+    scope: String,
+    reference: String,
+    axis: String,
+    value: Option<String>,
+    model_id: Option<i64>,
+    campaign_id: Option<i64>,
+    actor: String,
+    author_kind: String,
+    author_version: Option<String>,
+    actor_detail: Option<String>,
+    why: Option<String>,
+}
+
+/// The stacks each decision reaches: its own, its group's members, its
+/// series' or its subject's; none for a decision about a machine.
+fn reached(store: &mut Store, staged: &[&Staged]) -> Result<BTreeMap<i64, Vec<i64>>, StoreError> {
+    let mut out: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    let groups: Vec<i64> = staged
+        .iter()
+        .filter(|s| s.scope == "group")
+        .filter_map(|s| s.reference.parse().ok())
+        .collect();
+    let mut members: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    for chunk in groups.chunks(500) {
+        let sql = format!(
+            "SELECT item_id, stack_id FROM {} WHERE item_id IN ({}) ORDER BY stack_id",
+            store.qualified("review_member"),
+            id_list(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            members.entry(r.int(0)?).or_default().push(r.int(1)?);
+        }
+    }
+    let wide = staged
+        .iter()
+        .any(|s| s.scope == "series" || s.scope == "subject");
+    let mut by_series: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    let mut by_subject: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    if wide {
+        let sql = format!(
+            "SELECT k.id, k.series_id, r.subject_id FROM {} k JOIN {} r ON r.id = k.series_id",
+            store.qualified("stack"),
+            store.qualified("series")
+        );
+        for r in store.query(&sql, &[])? {
+            by_series.entry(r.int(1)?).or_default().push(r.int(0)?);
+            by_subject.entry(r.int(2)?).or_default().push(r.int(0)?);
+        }
+    }
+    for s in staged {
+        let id: Option<i64> = s.reference.parse().ok();
+        let stacks = match s.scope.as_str() {
+            "stack" => id.into_iter().collect(),
+            "group" => id
+                .and_then(|i| members.get(&i).cloned())
+                .unwrap_or_default(),
+            "series" => id
+                .and_then(|i| by_series.get(&i).cloned())
+                .unwrap_or_default(),
+            "subject" => id
+                .and_then(|i| by_subject.get(&i).cloned())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        out.insert(s.id, stacks);
+    }
+    Ok(out)
+}
+
+/// What an axis holds now on each of `stacks`: the decision in force,
+/// resolved as the classifier resolves them, else the classifier's value,
+/// each as its set of values (none for nothing).
+pub fn holds_now(
+    store: &mut Store,
+    axis: &str,
+    stacks: &[i64],
+) -> Result<BTreeMap<i64, Vec<String>>, Error> {
+    let mut out: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    let decided = crate::labels::decision_labels(
+        store,
+        &crate::labels::DecisionQuery {
+            axis,
+            stacks: Some(stacks),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| match e {
+        crate::labels::Error::Store(s) => Error::Store(s),
+        other => refused(other.to_string()),
+    })?;
+    for l in decided {
+        if let Some(stack) = l.stack_id {
+            out.insert(stack, value_set(l.value.as_deref()));
+        }
+    }
+    let rest: Vec<i64> = stacks
+        .iter()
+        .copied()
+        .filter(|s| !out.contains_key(s))
+        .collect();
+    let d = store.dialect();
+    for chunk in rest.chunks(500) {
+        let sql = format!(
+            "SELECT stack_id, value FROM {} WHERE axis = {} AND stack_id IN ({})",
+            store.qualified("classification_axis"),
+            d.param(1, Type::Text),
+            id_list(chunk)
+        );
+        let mut rows: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+        for r in store.query(&sql, &[Param::from(axis)])? {
+            let e = rows.entry(r.int(0)?).or_default();
+            e.extend(value_set(r.opt_text(1)?));
+        }
+        for s in chunk {
+            let mut v = rows.remove(s).unwrap_or_default();
+            v.sort();
+            v.dedup();
+            out.insert(*s, v);
+        }
+    }
+    Ok(out)
+}
+
+/// One stack's part of a staged group decision, written as a staged
+/// decision of that stack by the group's author, with its model, campaign
+/// and actor, so the commit that follows puts it in force (record 45 E3).
+/// The rules of the spine hold (C15): a decision in force there by a higher
+/// rank leaves the stack with the group, and the earlier one on the same key
+/// gives way, withdrawn and never deleted. The group's item and its own
+/// decision stay as they are, staged for the rest.
+fn split_off(
+    store: &mut Store,
+    s: &Staged,
+    stack: i64,
+    why: &str,
+    epoch: i64,
+    now: &str,
+) -> Result<Option<i64>, Error> {
+    let d = store.dialect();
+    let key = [
+        Param::from("stack"),
+        Param::from(stack.to_string()),
+        Param::from(s.axis.as_str()),
+    ];
+    let standing = format!(
+        "SELECT author_kind FROM {} WHERE scope = {} AND ref = {} AND axis = {} \
+         AND withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL) \
+         ORDER BY id DESC LIMIT 1",
+        store.qualified("decision"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text),
+        d.param(3, Type::Text),
+    );
+    if let Some(r) = store.query_opt(&standing, &key)?
+        && rank(r.opt_text(0)?.unwrap_or("person")) > rank(&s.author_kind)
+    {
+        return Ok(None);
+    }
+    let withdraw = format!(
+        "UPDATE {} SET withdrawn_at = {} WHERE scope = {} AND ref = {} AND axis = {} AND withdrawn_at IS NULL",
+        store.qualified("decision"),
+        d.param(1, Type::Timestamp),
+        d.param(2, Type::Text),
+        d.param(3, Type::Text),
+        d.param(4, Type::Text),
+    );
+    store.execute(
+        &withdraw,
+        &[
+            Param::from(now),
+            key[0].clone(),
+            key[1].clone(),
+            key[2].clone(),
+        ],
+    )?;
+    let id = store
+        .insert(
+            &Insert::new(
+                table("decision"),
+                &[
+                    "scope",
+                    "ref",
+                    "axis",
+                    "value",
+                    "actor",
+                    "author_kind",
+                    "author_version",
+                    "actor_detail",
+                    "why",
+                    "decided_at",
+                    "staged_at",
+                    "epoch_staged",
+                    "model_id",
+                    "campaign_id",
+                ],
+            )
+            .returning(&["id"]),
+            &[vec![
+                Param::from("stack"),
+                Param::from(stack.to_string()),
+                Param::from(s.axis.as_str()),
+                s.value.as_deref().map_or(Param::Null, Param::from),
+                Param::from(s.actor.as_str()),
+                Param::from(s.author_kind.as_str()),
+                s.author_version.as_deref().map_or(Param::Null, Param::from),
+                s.actor_detail.as_deref().map_or(Param::Null, Param::from),
+                Param::from(why),
+                Param::from(now),
+                Param::from(now),
+                Param::Int(epoch),
+                s.model_id.map_or(Param::Null, Param::Int),
+                s.campaign_id.map_or(Param::Null, Param::Int),
+            ]],
+        )?
+        .first()
+        .ok_or_else(|| StoreError::Message("the decision was not written back".into()))?
+        .int(0)?;
+    Ok(Some(id))
 }
 
 /// Commit the part of the staged decisions a filter names, in one
@@ -1027,6 +1452,14 @@ pub struct CommittedPart {
 /// everything is always said as such. The committer is of a kind, as in
 /// [`commit_as`]: an agent or a model is refused when the part holds a
 /// model's answer (record 42 R6), and then nothing is committed.
+///
+/// Record 45 E3: `model`, `axis`, `from`, `to` and `stacks`. `from` and
+/// `stacks` are held against every stack a decision reaches. A decision all
+/// of whose stacks pass is committed whole; a group's decision only some of
+/// whose members pass is split, its passing members each written as a
+/// decision of that stack by the group's author through [`apply_within`]
+/// and put in force, the group's own decision left staged for the rest; a
+/// series' or a subject's that reaches past the filter is left.
 pub fn commit_where(
     registry: &mut Registry,
     filter: &CommitFilter,
@@ -1034,34 +1467,74 @@ pub fn commit_where(
     who: &str,
     kind: &str,
 ) -> Result<CommittedPart, Error> {
-    if filter.min_confidence.is_none() && filter.campaign.is_none() {
+    if filter.names_nothing() {
         return Err(refused(
-            "a commit by filter names a minimum confidence or a campaign; commit --all commits everything",
+            "a commit by filter names a minimum confidence, a campaign, a model, an axis, from, to or stacks; commit --all commits everything",
         ));
     }
+    if (filter.from.is_some() || filter.to.is_some()) && filter.axis.is_none() {
+        return Err(refused(
+            "from and to are values of an axis; name the axis beside them",
+        ));
+    }
+    if filter.stacks.as_ref().is_some_and(Vec::is_empty) {
+        return Err(refused("stacks names no stack"));
+    }
+    let model_id = match &filter.model {
+        Some(r) => Some(
+            crate::model::resolve(registry.store(), r)?
+                .ok_or_else(|| refused(format!("no registered model answers to {r}")))?
+                .id,
+        ),
+        None => None,
+    };
     let epoch = registry.meta().epoch;
     let store = registry.store();
-    let staged: Vec<(i64, Option<i64>)> = store
+    let staged: Vec<Staged> = store
         .query(
             &format!(
-                "SELECT id, epoch_staged FROM {} WHERE staged_at IS NOT NULL AND committed_at IS NULL \
+                "SELECT id, epoch_staged, scope, ref, axis, value, model_id, campaign_id, actor, author_kind, why, \
+                 author_version, {} FROM {} WHERE staged_at IS NOT NULL AND committed_at IS NULL \
                  AND withdrawn_at IS NULL ORDER BY id",
+                store
+                    .dialect()
+                    .text_of(table("decision").column("actor_detail").expect("actor_detail")),
                 store.qualified("decision")
             ),
             &[],
         )?
         .iter()
-        .map(|r| Ok((r.int(0)?, r.opt_int(1)?)))
+        .map(|r| {
+            Ok(Staged {
+                id: r.int(0)?,
+                epoch: r.opt_int(1)?,
+                scope: r.text(2)?.to_string(),
+                reference: r.text(3)?.to_string(),
+                axis: r.text(4)?.to_string(),
+                value: r.opt_text(5)?.map(str::to_string),
+                model_id: r.opt_int(6)?,
+                campaign_id: r.opt_int(7)?,
+                actor: r.text(8)?.to_string(),
+                author_kind: r.text(9)?.to_string(),
+                why: r.opt_text(10)?.map(str::to_string),
+                author_version: r.opt_text(11)?.map(str::to_string),
+                actor_detail: r.opt_text(12)?.map(str::to_string),
+            })
+        })
         .collect::<Result<_, StoreError>>()?;
     // what each staged decision's confidence and campaign are, read for
     // all of them at once: the confidence its first review item names,
     // and the agreement and campaign of the last campaign item closed into
-    // it, which wins
+    // it, which wins; a decision a campaign's close wrote names its
+    // campaign itself too (an axes item closes into several)
     let t = table("review_item");
     let d = store.dialect();
     let mut confidence: BTreeMap<i64, f64> = BTreeMap::new();
-    let mut campaign_of: BTreeMap<i64, i64> = BTreeMap::new();
-    let all: Vec<i64> = staged.iter().map(|(id, _)| *id).collect();
+    let mut campaign_of: BTreeMap<i64, i64> = staged
+        .iter()
+        .filter_map(|s| s.campaign_id.map(|c| (s.id, c)))
+        .collect();
+    let all: Vec<i64> = staged.iter().map(|s| s.id).collect();
     for chunk in all.chunks(500) {
         let sql = format!(
             "SELECT decision_id, {} FROM {} WHERE decision_id IN ({}) ORDER BY id DESC",
@@ -1098,27 +1571,81 @@ pub fn commit_where(
             }
         }
     }
-    let mut chosen = Vec::new();
-    let mut left = 0i64;
-    for (id, epoch_staged) in &staged {
-        let keep = filter
-            .min_confidence
-            .is_none_or(|min| confidence.get(id).is_some_and(|c| *c >= min))
-            && filter
-                .campaign
-                .is_none_or(|want| campaign_of.get(id) == Some(&want));
-        if keep {
-            chosen.push((*id, *epoch_staged));
-        } else {
-            left += 1;
+    let to = filter.to.as_deref().map(|v| filter.set_of(Some(v)));
+    let from = filter.from.as_deref().map(|v| filter.set_of(Some(v)));
+    let wanted: Option<BTreeSet<i64>> = filter.stacks.as_ref().map(|s| s.iter().copied().collect());
+    // the decisions the filter names as decisions, before their stacks
+    let named: Vec<&Staged> = staged
+        .iter()
+        .filter(|s| {
+            filter
+                .min_confidence
+                .is_none_or(|min| confidence.get(&s.id).is_some_and(|c| *c >= min))
+                && filter
+                    .campaign
+                    .is_none_or(|want| campaign_of.get(&s.id) == Some(&want))
+                && model_id.is_none_or(|m| s.model_id == Some(m))
+                && filter.axis.as_deref().is_none_or(|a| s.axis == a)
+                && to
+                    .as_ref()
+                    .is_none_or(|t| filter.set_of(s.value.as_deref()) == *t)
+        })
+        .collect();
+    let per_stack = from.is_some() || wanted.is_some();
+    let reach = if per_stack {
+        reached(store, &named)?
+    } else {
+        BTreeMap::new()
+    };
+    let now_holds = match (&from, filter.axis.as_deref()) {
+        (Some(_), Some(axis)) => {
+            let every: Vec<i64> = reach
+                .values()
+                .flatten()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            holds_now(store, axis, &every)?
+        }
+        _ => BTreeMap::new(),
+    };
+    let passes = |stack: &i64| -> bool {
+        wanted.as_ref().is_none_or(|w| w.contains(stack))
+            && from.as_ref().is_none_or(|f| {
+                now_holds
+                    .get(stack)
+                    .is_some_and(|v| filter.set_of(Some(&v.join(","))) == *f)
+            })
+    };
+    let mut whole: Vec<&Staged> = Vec::new();
+    let mut parts: Vec<(&Staged, Vec<i64>)> = Vec::new();
+    for s in &named {
+        if !per_stack {
+            whole.push(s);
+            continue;
+        }
+        let stacks = reach.get(&s.id).cloned().unwrap_or_default();
+        let taking: Vec<i64> = stacks.iter().filter(|x| passes(x)).copied().collect();
+        if !stacks.is_empty() && taking.len() == stacks.len() {
+            whole.push(s);
+        } else if !taking.is_empty() && s.scope == "group" {
+            parts.push((s, taking));
         }
     }
-    let ids: Vec<i64> = chosen.iter().map(|(id, _)| *id).collect();
-    only_a_person_commits(store, &ids, kind)?;
-    let drifted: Vec<i64> = chosen
+    let mut out = CommittedPart::default();
+    let touched: Vec<i64> = whole
         .iter()
-        .filter(|(_, e)| e.is_some_and(|e| e != epoch))
-        .map(|(id, _)| *id)
+        .map(|s| s.id)
+        .chain(parts.iter().map(|(s, _)| s.id))
+        .collect();
+    only_a_person_commits(store, &touched, kind)?;
+    let drifted: Vec<i64> = whole
+        .iter()
+        .copied()
+        .chain(parts.iter().map(|(s, _)| *s))
+        .filter(|s| s.epoch.is_some_and(|e| e != epoch))
+        .map(|s| s.id)
         .collect();
     if !drifted.is_empty() && !anyway {
         return Err(refused(format!(
@@ -1131,34 +1658,65 @@ pub fn commit_where(
             epoch
         )));
     }
-    let mut out = CommittedPart {
-        left,
-        ..CommittedPart::default()
-    };
-    if chosen.is_empty() {
+    if touched.is_empty() {
+        out.left = staged.len() as i64;
         return Ok(out);
     }
     let now = now_iso();
-    store.begin()?;
-    match put_in_force(store, &ids, who, &now) {
-        Ok(items) => out.items = items,
-        Err(e) => {
-            store.rollback().ok();
-            return Err(e.into());
+    registry.store().begin()?;
+    let written = (|| -> Result<(Vec<i64>, Vec<i64>, i64), Error> {
+        let mut ids: Vec<i64> = whole.iter().map(|s| s.id).collect();
+        let mut split = Vec::new();
+        for (s, stacks) in &parts {
+            let why = format!(
+                "part of staged decision {} (group), committed by a filter{}",
+                s.id,
+                s.why
+                    .as_deref()
+                    .map(|w| format!("; {w}"))
+                    .unwrap_or_default()
+            );
+            let mut took = false;
+            for stack in stacks {
+                if let Some(id) = split_off(registry.store(), s, *stack, &why, epoch, &now)? {
+                    ids.push(id);
+                    took = true;
+                }
+            }
+            if took {
+                split.push(s.id);
+            }
         }
-    }
-    store.commit()?;
+        let items = put_in_force(registry.store(), &ids, who, &now)?;
+        Ok((ids, split, items))
+    })();
+    let (ids, split, items) = match written {
+        Ok(w) => w,
+        Err(e) => {
+            registry.store().rollback().ok();
+            registry.refresh_meta().ok();
+            return Err(e);
+        }
+    };
+    registry.store().commit()?;
+    out.items = items;
+    out.left = staged.len() as i64 - whole.len() as i64;
     out.decisions = ids;
+    out.split = split;
     audit::record(
         registry,
         &Entry {
             principal: who,
             action: Action::Decision,
-            scope: serde_json::json!({ "committed": out.decisions, "items": out.items, "left": out.left }),
+            scope: serde_json::json!({
+                "committed": out.decisions, "items": out.items, "left": out.left, "split": out.split,
+            }),
             policy: None,
             job_id: None,
             details: Some(serde_json::json!({
                 "anyway": anyway, "min_confidence": filter.min_confidence, "campaign": filter.campaign,
+                "model": model_id, "axis": filter.axis, "from": filter.from, "to": filter.to,
+                "stacks": filter.stacks.as_ref().map(Vec::len),
             })),
         },
     )?;

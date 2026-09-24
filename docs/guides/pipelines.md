@@ -96,6 +96,16 @@ curl -X POST http://127.0.0.1:8437/api/jobs \
 
    A proposal is never in force until a person commits it. A newer run of the same model supersedes what its earlier runs left untaken on the stacks it proposes again; every other stack keeps its earlier proposal.
 
+3. Commit one change of the change matrix, one model's answers, or some stacks:
+
+   ```sh
+   nils review commit --axis body_part --from neck --to spine
+   nils review commit --model bodypart-head@h1a2b3
+   nils review commit --stacks 12,14,19
+   ```
+
+   `--from` is what the axis holds on a stack now: the decision in force there, else the classifier's value. A model's group whose stacks do not all match is split: the matching stacks each get a decision of their own by the same model, put in force, and the group's decision stays staged for the rest. The door is `POST /api/decisions/commit` with `model`, `axis`, `from`, `to` and `stacks`.
+
 ## Curate a run's seeds
 
 1. Read the seeds a run suggested and save the stacks as a selection:
@@ -109,6 +119,33 @@ curl -X POST http://127.0.0.1:8437/api/jobs \
    ```sh
    nils campaign create curate-body-part --axis body_part --select selection:seeds-to-curate@1
    ```
+
+## Build the pictures of a selection
+
+A review picture is drawn from the stack's pyramid in a working place. Build a selection's pyramids as one job, which skips the stacks that have one:
+
+```sh
+nils pyramid build --select selection:every-t1@1
+```
+
+The job's result counts what it built, skipped and failed, with why for each failure. Run it again after a failure and it builds only what is missing. A campaign made from a selection says how many of its stacks have their picture (`pictures {have, missing}`) and names the job that builds the rest, `pyramid build --handle <id>`. Each manifest names the stack's `orientation`, `origin` and `frame`, so a viewer draws the planes where they are in the patient.
+
+## Ask several axes of a stack at once
+
+1. Make an `axes` campaign. The served pack's legal combinations are frozen into the question:
+
+   ```sh
+   nils campaign create classify-review --axes base,technique,modifier \
+     --select selection:every-t1@1 --raters-per-item 2 --closes-into decision
+   ```
+
+2. Each rater answers every axis in one answer. A combination the pack forbids is refused, such as two modifiers of one exclusion group, or MPRAGE with a base other than T1w:
+
+   ```sh
+   nils campaign answer <assignment> --value '{"base": "T1w", "technique": "MPRAGE", "modifier": ["FatSat"]}'
+   ```
+
+3. Close it. Each item becomes one decision per axis, and agreement is reported whole and per axis.
 
 ## Fetch an output
 

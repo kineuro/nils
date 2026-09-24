@@ -32,9 +32,11 @@ pub(crate) const DOORS: &[&str] = &[
     "POST /api/campaigns",
     "GET /api/campaigns/{id}",
     "GET /api/campaigns/{id}/answers",
+    "GET /api/campaigns/{id}/items/{item}/candidates",
     "POST /api/campaigns/{id}/claim",
     "POST /api/campaigns/{id}/assignments/{assignment}/answer",
     "POST /api/campaigns/{id}/assignments/{assignment}/release",
+    "POST /api/campaigns/{id}/assignments/{assignment}/renew",
     "POST /api/campaigns/{id}/items/{item}/metric",
     "POST /api/campaigns/{id}/close",
     "POST /api/campaigns/{id}/export",
@@ -50,7 +52,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
     Some(match (method, segs) {
         ("GET", ["api", "campaigns"])
         | ("GET", ["api", "campaigns", _])
-        | ("GET", ["api", "campaigns", _, "answers"]) => (Need::One("campaigns:see"), Plain),
+        | ("GET", ["api", "campaigns", _, "answers"])
+        | ("GET", ["api", "campaigns", _, "items", _, "candidates"]) => {
+            (Need::One("campaigns:see"), Plain)
+        }
         ("POST", ["api", "campaigns"])
         | ("POST", ["api", "campaigns", _, "claim" | "export"])
         | (
@@ -61,7 +66,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
                 _,
                 "assignments",
                 _,
-                "answer" | "release",
+                "answer" | "release" | "renew",
             ],
         )
         | ("POST", ["api", "campaigns", _, "items", _, "metric"]) => {
@@ -121,6 +126,15 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "Read a campaign's answers",
     ),
     (
+        "GET /api/campaigns/{id}/items/{item}/candidates",
+        false,
+        false,
+        "bounded",
+        "one session's stacks",
+        "Reading a session's candidates",
+        "Read a session's candidates",
+    ),
+    (
         "POST /api/campaigns/{id}/claim",
         true,
         false,
@@ -146,6 +160,15 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "one assignment",
         "Giving an item back",
         "Gave an item back",
+    ),
+    (
+        "POST /api/campaigns/{id}/assignments/{assignment}/renew",
+        true,
+        false,
+        "free",
+        "one lease",
+        "Renewing a lease",
+        "Renewed a lease",
     ),
     (
         "POST /api/campaigns/{id}/items/{item}/metric",
@@ -294,19 +317,56 @@ pub(crate) fn route(
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let all = campaign::answers(registry.store(), c.id).map_err(campaign_err)?;
                 let free = c.question["kind"] == "free";
+                let sees_all = sees_all(registry.store(), caller, principal, &c)?;
                 let list: Vec<Value> = all
                     .iter()
+                    .filter(|a| sees_all || a.principal == principal)
                     .map(|a| {
                         let mut v = a.as_json();
+                        axes_value(&c.question, &mut v["value"]);
                         if plain(caller) {
                             plain_answer(&mut v, free);
                         }
                         v
                     })
                     .collect();
-                Ok(Reply::ok(
-                    json!({"campaign": c.id, "count": list.len(), "answers": list}),
-                ))
+                Ok(Reply::ok(json!({
+                    "campaign": c.id, "count": list.len(), "answers": list,
+                    "blind": !sees_all,
+                })))
+            }
+            // record 45: the stacks a session item's pick is made among
+            ["api", "campaigns", which, "items", item, "candidates"] if get => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let item = id_of(item)?;
+                belongs(registry.store(), c.id, "campaign_item", item)?;
+                let it = campaign::item(registry.store(), item)
+                    .map_err(campaign_err)?
+                    .ok_or_else(|| Reply::error(404, format!("no campaign item {item}")))?;
+                // the day as the day, whatever time a backend reads a date with
+                let day = it
+                    .session_day
+                    .as_deref()
+                    .map(|d| d.chars().take(10).collect::<String>());
+                let (Some(subject), Some(day)) = (it.subject_id, day) else {
+                    return Err(Reply::error(
+                        400,
+                        format!(
+                            "item {item} is a stack's; only an item of sessions has candidates"
+                        ),
+                    ));
+                };
+                // a session is named by its subject and its day
+                caller.allowed("a campaign of sessions", Need::Any, Detail::Quasi)?;
+                let role = c.question["role"].as_str().map(str::to_string);
+                Ok(Reply::ok(candidates(
+                    registry.store(),
+                    c.id,
+                    item,
+                    subject,
+                    &day,
+                    role.as_deref(),
+                )?))
             }
             ["api", "campaigns", which, "claim"] if post => {
                 let doc = json_body(body)?;
@@ -366,6 +426,14 @@ pub(crate) fn route(
                     "state": answered.state, "adjudication": answered.adjudication,
                 })))
             }
+            // record 45: the rating workspace's heartbeat
+            ["api", "campaigns", which, "assignments", a, "renew"] if post => {
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                let a = id_of(a)?;
+                belongs(registry.store(), c.id, "campaign_assignment", a)?;
+                let done = campaign::renew(registry, a, principal, &now).map_err(campaign_err)?;
+                Ok(Reply::ok(done.as_json()))
+            }
             ["api", "campaigns", which, "assignments", a, "release"] if post => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let a = id_of(a)?;
@@ -424,6 +492,18 @@ pub(crate) fn route(
                     }
                 };
                 no_sealed_flag(&doc)?;
+                // blind through the export too: every answer of an open
+                // campaign is for those who read them all at the answers door
+                if matches!(of, Of::Answers) && !sees_all(registry.store(), caller, principal, &c)?
+                {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "rating in {} is blind until it closes: its answers are exported by an adjudicator or a holder of review:work",
+                            c.name
+                        ),
+                    ));
+                }
                 let rows =
                     labels::campaign_labels(registry.store(), c.id, of).map_err(labels_err)?;
                 let name = doc["name"].as_str().unwrap_or(&c.name).to_string();
@@ -532,6 +612,17 @@ pub(crate) fn route(
                 if plain(caller) && holds_words(&set.what) {
                     return Ok(Reply::ok(set_json(&set, None)));
                 }
+                // a set of a campaign's answers is as blind as its answers
+                // door while the campaign is open: metadata and counts only
+                if set.kind == Of::Answers.name()
+                    && let Some(cid) = set.campaign_id
+                {
+                    let c =
+                        campaign::find(registry.store(), &cid.to_string()).map_err(campaign_err)?;
+                    if !sees_all(registry.store(), caller, principal, &c)? {
+                        return Ok(Reply::ok(set_json(&set, None)));
+                    }
+                }
                 let files = set.path.as_deref().map(|p| {
                     let dir = Path::new(p);
                     json!({
@@ -557,9 +648,63 @@ pub(crate) fn route(
                     ),
                     None => None,
                 };
+                // record 45 E3: a value of the axis, or several joined; an
+                // empty text for "no value here", and null for not asked
+                let value_of = |key: &str| -> Result<Option<String>, Reply> {
+                    Ok(match doc.get(key) {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(s)) => Some(s.clone()),
+                        Some(Value::Array(list)) => Some(
+                            list.iter()
+                                .map(|v| {
+                                    v.as_str().map(str::to_string).ok_or_else(|| {
+                                        Reply::error(
+                                            400,
+                                            format!("{key}: a value or a list of values"),
+                                        )
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, _>>()?
+                                .join(","),
+                        ),
+                        Some(_) => {
+                            return Err(Reply::error(
+                                400,
+                                format!("{key}: a value or a list of values"),
+                            ));
+                        }
+                    })
+                };
+                let stacks = match &doc["stacks"] {
+                    Value::Null => None,
+                    Value::Array(list) => Some(
+                        list.iter()
+                            .map(|v| {
+                                v.as_i64()
+                                    .ok_or_else(|| Reply::error(400, "stacks: a list of stack ids"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    ),
+                    _ => return Err(Reply::error(400, "stacks: a list of stack ids")),
+                };
+                let model = doc["model"]
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| doc["model"].as_i64().map(|i| i.to_string()));
+                let axis = doc["axis"].as_str().map(str::to_string);
+                let served = doors
+                    .pack_dir
+                    .as_ref()
+                    .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok());
                 let filter = nils_registry::review::CommitFilter {
                     min_confidence: doc["min_confidence"].as_f64(),
                     campaign: campaign_id,
+                    model,
+                    names: value_names(served.as_ref(), axis.as_deref()),
+                    axis,
+                    from: value_of("from")?,
+                    to: value_of("to")?,
+                    stacks,
                 };
                 let done = nils_registry::review::commit_where(
                     registry,
@@ -574,6 +719,7 @@ pub(crate) fn route(
                 })?;
                 Ok(Reply::ok(json!({
                     "committed": done.decisions, "items": done.items, "left": done.left,
+                    "split": done.split,
                 })))
             }
             _ => Err(Reply::error(
@@ -604,6 +750,25 @@ fn holds_words(what: &str) -> bool {
 
 /// Whether the caller reads at detail plain, where a campaign's doors
 /// leave out what is quasi-identifying or free text.
+/// Record 45: rating is blind until the campaign closes. A rater reads
+/// their own answers; an adjudicator of the campaign and a holder of
+/// review:work read every one, at the answers door, through an export of
+/// the answers and in the label set it wrote.
+fn sees_all(
+    store: &mut Store,
+    caller: &Caller,
+    principal: &str,
+    c: &campaign::Campaign,
+) -> Result<bool, Reply> {
+    Ok(c.status == "closed"
+        || caller.access.holds("review:work")
+        || c.adjudicators().iter().any(|p| p == principal)
+        || campaign::assignments(store, c.id)
+            .map_err(campaign_err)?
+            .iter()
+            .any(|a| a.role == "adjudicator" && a.principal.as_deref() == Some(principal)))
+}
+
 fn plain(caller: &Caller) -> bool {
     caller.access.detail < Detail::Quasi
 }
@@ -661,6 +826,18 @@ fn belongs(store: &mut Store, campaign: i64, t: &str, id: i64) -> Result<(), Rep
     }
 }
 
+/// Record 45: an axes answer is kept as one text, and read as the object
+/// it is.
+fn axes_value(question: &Value, value: &mut Value) {
+    if question["kind"] == "axes"
+        && let Some(text) = value.as_str()
+        && let Ok(v) = serde_json::from_str::<Value>(text)
+        && v.is_object()
+    {
+        *value = v;
+    }
+}
+
 fn shown(store: &mut Store, c: &campaign::Campaign) -> Result<Value, Reply> {
     let mut v = c.as_json();
     v["counts"] = campaign::counts(store, c.id).map_err(campaign_err)?;
@@ -668,7 +845,11 @@ fn shown(store: &mut Store, c: &campaign::Campaign) -> Result<Value, Reply> {
         campaign::items(store, c.id)
             .map_err(campaign_err)?
             .iter()
-            .map(campaign::Item::as_json)
+            .map(|it| {
+                let mut j = it.as_json();
+                axes_value(&c.question, &mut j["outcome"]["value"]);
+                j
+            })
             .collect::<Vec<_>>()
     );
     v["assignments"] = json!(
@@ -906,6 +1087,11 @@ fn create_at_door(
     {
         question["values"] = json!(a.values.iter().map(|v| v.id.clone()).collect::<Vec<_>>());
     }
+    let served = doors
+        .pack_dir
+        .as_ref()
+        .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok());
+    complete_axes(&mut question, served.as_ref()).map_err(|(s, m)| Reply::error(s, m))?;
     let question = &question;
     let q = campaign::Question::parse(question).map_err(campaign_err)?;
     let want = if matches!(q, campaign::Question::Pick { .. }) {
@@ -970,7 +1156,233 @@ fn create_at_door(
         },
     )
     .map_err(campaign_err)?;
-    shown(registry.store(), &made)
+    let mut v = shown(registry.store(), &made)?;
+    v["pictures"] = pictures_of(registry.store(), &made)?;
+    Ok(v)
+}
+
+/// Record 45 E3: every name a value of an axis goes by (its identity, its
+/// label, the form the classifier stores) to its identity, so a commit by
+/// filter compares values as the pack means them.
+pub(crate) fn value_names(
+    pack: Option<&nils_pack::Pack>,
+    axis: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let (Some(pack), Some(axis)) = (pack, axis) else {
+        return out;
+    };
+    if let Some(a) = pack.axes.iter().find(|a| a.name == axis) {
+        for (i, v) in a.values.iter().enumerate() {
+            out.insert(v.label.clone(), v.id.clone());
+            out.insert(a.stored(i).to_string(), v.id.clone());
+            out.insert(v.id.clone(), v.id.clone());
+        }
+    }
+    out
+}
+
+/// Record 45 E4: an axes question as a campaign keeps it, the served pack's
+/// legal combinations frozen into it (`nils_pack::legal`), so an answer is
+/// held to the pack the campaign was made under. The constraints are never
+/// the caller's to say, and without a pack no axes question is made.
+fn complete_axes(
+    question: &mut Value,
+    pack: Option<&nils_pack::Pack>,
+) -> Result<(), (u16, String)> {
+    if question["kind"] != "axes" {
+        return Ok(());
+    }
+    if question.get("constraints").is_some() {
+        return Err((
+            400,
+            "constraints are not the caller's to say: the engine freezes the served pack's legal combinations into an axes question".into(),
+        ));
+    }
+    let pack = pack.ok_or((
+        409,
+        "an axes question is held to the pack's legal combinations, and no pack is served here"
+            .to_string(),
+    ))?;
+    let axes = strings(&question["axes"]);
+    let mut values: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if let Some(m) = question["values"].as_object() {
+        for (axis, list) in m {
+            values.insert(axis.clone(), strings(list));
+        }
+    } else if !question["values"].is_null() {
+        return Err((400, "values: {axis: [values]}".into()));
+    }
+    let c = nils_pack::legal::constraints(pack, &axes, &values).map_err(|e| (400, e))?;
+    question["values"] = c["values"].clone();
+    question["constraints"] = c;
+    Ok(())
+}
+
+/// The stacks a campaign's items stand on: an item's stack, a session's
+/// stacks, or the members of an adopted group.
+fn campaign_stacks(store: &mut Store, c: &campaign::Campaign) -> Result<Vec<i64>, Reply> {
+    let mut out = Vec::new();
+    for it in campaign::items(store, c.id).map_err(campaign_err)? {
+        if let Some(s) = it.stack_id {
+            out.push(s);
+        } else if let (Some(subject), Some(day)) = (it.subject_id, it.session_day.as_deref()) {
+            out.extend(session_stacks(store, subject, day)?);
+        } else {
+            for m in nils_registry::review::members(store, it.review_item_id)
+                .map_err(|e| Reply::error(500, e.to_string()))?
+            {
+                out.push(m.stack_id);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The stacks of one session: its studies' series' stacks.
+fn session_stacks(store: &mut Store, subject: i64, day: &str) -> Result<Vec<i64>, Reply> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT DISTINCT k.id FROM {} k JOIN {} r ON r.id = k.series_id \
+         JOIN {} cs ON cs.study_id = r.study_id JOIN {} sc ON sc.id = cs.session_id \
+         WHERE sc.subject_id = {} AND {} = {} ORDER BY k.id",
+        store.qualified("stack"),
+        store.qualified("series"),
+        store.qualified("session_cache_study"),
+        store.qualified("session_cache"),
+        d.param(1, Type::Int),
+        d.text_of(
+            nils_registry::schema::table("session_cache")
+                .column("first")
+                .expect("first"),
+        ),
+        d.param(2, Type::Text),
+    );
+    Ok(store
+        .query(&sql, &[Param::Int(subject), Param::from(day)])?
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<_, _>>()?)
+}
+
+/// Record 45: what a pick question is answered among, for one session
+/// item: each of the session's stacks with what the classifier says of it,
+/// and the picks standing for the role on the occasion (a run's, with its
+/// scores, and a person's), each naming its stacks. Pack words and ids,
+/// never a value of a person.
+fn candidates(
+    store: &mut Store,
+    campaign: i64,
+    item: i64,
+    subject: i64,
+    day: &str,
+    role: Option<&str>,
+) -> Result<Value, Reply> {
+    let stacks = session_stacks(store, subject, day)?;
+    let d = store.dialect();
+    let mut axes: BTreeMap<i64, serde_json::Map<String, Value>> = BTreeMap::new();
+    let mut series: BTreeMap<i64, i64> = BTreeMap::new();
+    for chunk in stacks.chunks(500) {
+        let list = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT stack_id, axis, value FROM {} WHERE stack_id IN ({list}) ORDER BY stack_id, axis, value",
+            store.qualified("classification_axis")
+        );
+        for r in store.query(&sql, &[])? {
+            let entry = axes.entry(r.int(0)?).or_default();
+            let values = entry
+                .entry(r.text(1)?.to_string())
+                .or_insert_with(|| json!([]));
+            if let (Some(v), Some(list)) = (r.opt_text(2)?, values.as_array_mut()) {
+                list.push(json!(v));
+            }
+        }
+        let sql = format!(
+            "SELECT id, series_id FROM {} WHERE id IN ({list})",
+            store.qualified("stack")
+        );
+        for r in store.query(&sql, &[])? {
+            series.insert(r.int(0)?, r.int(1)?);
+        }
+    }
+    let mut picks = Vec::new();
+    let mut picked: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    if let Some(role) = role {
+        let t = nils_registry::schema::table("pick");
+        let sql = format!(
+            "SELECT id, author_kind, actor, score, margin, borders, {}, model FROM {} \
+             WHERE role = {} AND subject_id = {} AND {} = {} AND withdrawn_at IS NULL ORDER BY id",
+            d.text_of(t.column("considered").expect("considered")),
+            store.qualified("pick"),
+            d.param(1, Type::Text),
+            d.param(2, Type::Int),
+            d.text_of(t.column("session_day").expect("session_day")),
+            d.param(3, Type::Text),
+        );
+        let rows = store.query(
+            &sql,
+            &[Param::from(role), Param::Int(subject), Param::from(day)],
+        )?;
+        for r in &rows {
+            let id = r.int(0)?;
+            let sql = format!(
+                "SELECT stack_id FROM {} WHERE pick_id = {} ORDER BY stack_id",
+                store.qualified("pick_stack"),
+                d.param(1, Type::Int)
+            );
+            let its: Vec<i64> = store
+                .query(&sql, &[Param::Int(id)])?
+                .iter()
+                .map(|x| x.int(0))
+                .collect::<Result<_, _>>()?;
+            for s in &its {
+                picked.entry(*s).or_default().push(id);
+            }
+            picks.push(json!({
+                "id": id, "author_kind": r.text(1)?, "actor": r.text(2)?,
+                "score": r.opt_double(3)?, "margin": r.opt_double(4)?,
+                "borders": r
+                    .opt_text(5)?
+                    .filter(|b| !b.is_empty())
+                    .map(|b| b.split(',').map(str::to_string).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+                "considered": r.opt_text(6)?.and_then(|t| serde_json::from_str::<Value>(t).ok()),
+                "model": r.text(7)?, "stacks": its,
+            }));
+        }
+    }
+    let list: Vec<Value> = stacks
+        .iter()
+        .map(|s| {
+            json!({
+                "stack_id": s,
+                "series_id": series.get(s),
+                "axes": axes.remove(s).map(Value::Object).unwrap_or_else(|| json!({})),
+                "picked_by": picked.get(s).cloned().unwrap_or_default(),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "campaign": campaign, "item": item, "subject_id": subject, "session_day": day,
+        "role": role, "count": list.len(), "candidates": list, "picks": picks,
+    }))
+}
+
+/// Record 45 E1 and R3: how many of a campaign's stacks have their picture,
+/// and the job that builds the rest where the campaign pins a handle.
+fn pictures_of(store: &mut Store, c: &campaign::Campaign) -> Result<Value, Reply> {
+    let stacks = campaign_stacks(store, c)?;
+    let mut v = crate::pyramid::pictures(store, &stacks);
+    if v["missing"].as_u64().unwrap_or(0) > 0
+        && let Some(h) = c.handle_id
+    {
+        v["build"] = json!(["pyramid", "build", "--handle", h.to_string()]);
+    }
+    Ok(v)
 }
 
 fn items_of(store: &mut Store, want: Grain, keys: &[(i64, Option<i64>)]) -> Result<Items, Reply> {
@@ -1205,7 +1617,7 @@ pub(crate) enum CampaignCommand {
     Answer {
         /// The assignment a claim gave
         assignment: i64,
-        /// The value: an axis value, a pick's stack ids (12,14), a text
+        /// The value: an axis value, a pick's stack ids (12,14), a text, or for an axes question the joint answer as JSON ({"base": "T1w", "modifier": ["FatSat"]})
         #[arg(long, value_name = "VALUE")]
         value: Option<String>,
         /// The form, as JSON
@@ -1263,12 +1675,16 @@ pub(crate) struct CreateArgs {
     /// The campaign's name
     name: String,
     /// The question as JSON: {"kind": "axis", "axis": "body_part"} and the
-    /// other four kinds (pick, form, derivative, free)
-    #[arg(long, value_name = "JSON", conflicts_with_all = ["axis", "pick_role"])]
+    /// other five kinds (axes, pick, form, derivative, free)
+    #[arg(long, value_name = "JSON", conflicts_with_all = ["axis", "axes", "pick_role"])]
     question: Option<String>,
     /// An axis question: which value of this axis
-    #[arg(long, value_name = "AXIS")]
+    #[arg(long, value_name = "AXIS", conflicts_with = "axes")]
     axis: Option<String>,
+    /// An axes question (record 45): these axes of each stack at once, as
+    /// names joined by commas, held to the pack's legal combinations
+    #[arg(long, value_name = "AXES", value_delimiter = ',')]
+    axes: Option<Vec<String>>,
     /// The values an axis answer may take; the pack's when not given
     #[arg(long = "value", value_name = "VALUE")]
     values: Vec<String>,
@@ -1460,7 +1876,7 @@ fn lerr(e: labels::Error) -> Exit {
     }
 }
 
-fn rerr(r: Reply) -> Exit {
+pub(crate) fn rerr(r: Reply) -> Exit {
     let m = r.body["error"].as_str().unwrap_or("refused").to_string();
     if r.status >= 500 { fail(m) } else { usage(m) }
 }
@@ -1793,6 +2209,9 @@ fn create_verb(home: &Home, a: CreateArgs) -> Result<(), Exit> {
         (Some(q), _, _) => {
             serde_json::from_str(q).map_err(|e| usage(format!("--question: {e}")))?
         }
+        (None, None, None) if a.axes.is_some() => {
+            json!({"kind": "axes", "axes": a.axes})
+        }
         (None, Some(axis), _) => {
             let values = if a.values.is_empty() {
                 pack_values(home, a.pack_dir.clone(), &a.pack, axis)
@@ -1804,10 +2223,15 @@ fn create_verb(home: &Home, a: CreateArgs) -> Result<(), Exit> {
         (None, None, Some(role)) => json!({"kind": "pick", "role": role}),
         _ => {
             return Err(usage(
-                "the question: --axis AXIS, --pick-role ROLE or --question JSON",
+                "the question: --axis AXIS, --axes A,B, --pick-role ROLE or --question JSON",
             ));
         }
     };
+    let mut question = question;
+    let served = crate::pack_dir(home, a.pack_dir.clone())
+        .ok()
+        .and_then(|d| nils_pack::load(&d.join(&a.pack), None).ok());
+    complete_axes(&mut question, served.as_ref()).map_err(|(_, m)| usage(m))?;
     let q = campaign::Question::parse(&question).map_err(cerr)?;
     let want = if matches!(q, campaign::Question::Pick { .. }) {
         Grain::Session
@@ -1877,19 +2301,24 @@ fn create_verb(home: &Home, a: CreateArgs) -> Result<(), Exit> {
         },
     )
     .map_err(cerr)?;
+    let pictures = pictures_of(registry.store(), &made).map_err(rerr)?;
     if a.json {
-        print(&shown(registry.store(), &made).map_err(rerr)?);
+        let mut v = shown(registry.store(), &made).map_err(rerr)?;
+        v["pictures"] = pictures;
+        print(&v);
     } else {
         let n = campaign::items(registry.store(), made.id)
             .map_err(cerr)?
             .len();
         println!(
-            "campaign {} {}   {} item(s)   {} question   closes into {}",
+            "campaign {} {}   {} item(s)   {} question   closes into {}   pictures {} of {}",
             made.id,
             made.name,
             n,
             q.kind(),
-            made.closes_into
+            made.closes_into,
+            pictures["have"],
+            pictures["stacks"]
         );
     }
     Ok(())

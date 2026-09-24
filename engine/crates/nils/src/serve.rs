@@ -1270,6 +1270,40 @@ fn respond(request: Request, reply: Reply) -> std::io::Result<()> {
     request.respond(response)
 }
 
+/// Undo the percent-encoding of one query key or value (record 45: every
+/// door reads its query decoded, once, here). Percent-decoding only: a `+`
+/// stays a `+`, since it means one in a time's offset (`+02:00`) and may in
+/// a principal; a space comes as `%20`.
+pub(crate) fn decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                match std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+                {
+                    Some(b) => {
+                        out.push(b);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn handle(
     doors: &Doors,
     registry: &mut Registry,
@@ -1282,10 +1316,7 @@ fn handle(
     let query: HashMap<String, String> = query
         .split('&')
         .filter(|kv| !kv.is_empty())
-        .filter_map(|kv| {
-            kv.split_once('=')
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-        })
+        .filter_map(|kv| kv.split_once('=').map(|(k, v)| (decoded(k), decoded(v))))
         .collect();
     let mut body = String::new();
     // Record 42 S4: a derivative's body is a file, read by its door once
@@ -2877,6 +2908,80 @@ fn routed(
                 "member_stacks": members,
             })))
         }
+        ["api", "review", _, "apply"] if post && json_body(body)?["values"].is_object() => {
+            // Record 45 R5: an item that asks several axes (System 1's
+            // classify.asked, a campaign's axes item) answered whole, one
+            // decision per axis in one transaction, held to the served
+            // pack's legal combinations
+            let id = id_at(2)?;
+            let doc = json_body(body)?;
+            let item = nils_registry::review::item(registry.store(), id)
+                .map_err(review_err)?
+                .ok_or_else(|| Reply::error(404, format!("no review item {id}")))?;
+            not_held(registry, id)?;
+            let axes: Vec<String> = item.evidence["axes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.as_str().map(str::to_string))
+                .collect();
+            if axes.is_empty() {
+                return Err(Reply::error(
+                    400,
+                    format!("review item {id} asks about one axis; answer it with value"),
+                ));
+            }
+            let pack = doors
+                .pack_dir
+                .as_ref()
+                .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok())
+                .ok_or_else(|| {
+                    Reply::error(
+                        409,
+                        "an answer to several axes is held to the pack's legal combinations, and no pack is served here",
+                    )
+                })?;
+            let constraints =
+                nils_pack::legal::constraints(&pack, &axes, &std::collections::BTreeMap::new())
+                    .map_err(|e| Reply::error(400, e))?;
+            let joint =
+                nils_registry::campaign::joint_of(&axes, &constraints, &doc["values"].to_string())
+                    .map_err(|e| Reply::error(400, e.to_string()))?;
+            nils_registry::campaign::legal(&constraints, &joint)
+                .map_err(|e| Reply::error(400, e))?;
+            let values: Vec<(String, Option<String>)> = joint
+                .iter()
+                .map(|(a, v)| (a.clone(), (!v.is_empty()).then(|| v.join(","))))
+                .collect();
+            let (kind, version, model) = author_at_apply(registry, caller, &doc)?;
+            let applied = nils_registry::review::apply_values(
+                registry,
+                &nils_registry::review::Apply {
+                    item: id,
+                    member: None,
+                    scope: "stack",
+                    value: None,
+                    author: nils_registry::review::Author {
+                        who: principal,
+                        kind,
+                        version,
+                        model,
+                    },
+                    stage: doc["stage"].as_bool().unwrap_or(false),
+                    why: doc["why"].as_str(),
+                    campaign: None,
+                },
+                &values,
+            )
+            .map_err(review_err)?;
+            Ok(Reply::ok(serde_json::json!({
+                "decisions": applied.iter().map(|a| serde_json::json!({
+                    "decision": a.decision, "axis": a.axis, "scope": a.scope,
+                    "ref": a.reference, "closed": a.closed, "staged": a.staged,
+                })).collect::<Vec<_>>(),
+                "staged": applied.iter().any(|a| a.staged),
+            })))
+        }
         ["api", "review", _, "apply"] if post => {
             let id = id_at(2)?;
             let doc = json_body(body)?;
@@ -2885,6 +2990,7 @@ fn routed(
             if value.is_none() && !nothing {
                 return Err(Reply::error(400, "value, or nothing: true"));
             }
+            not_held(registry, id)?;
             let (kind, version, model) = author_at_apply(registry, caller, &doc)?;
             let applied = nils_registry::review::apply(
                 registry,
@@ -3979,6 +4085,9 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
         // record 43 S2: a run names a pipeline and a frozen selection, and
         // the deployment's packs; never a path
         "run" => return crate::pipelines::located(doors.pack_dir.as_deref(), command),
+        // record 45 E1: a pyramid names a stack, a selection or a handle, and
+        // the deployment's packs where a selection is frozen; never a path
+        "pyramid" => return crate::pyramid::located(doors.pack_dir.as_deref(), command),
         _ => {}
     }
     let takes_a_tree =
@@ -5087,6 +5196,22 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
     .collect()
 }
 
+/// Record 45: a review item an open campaign holds is answered in the
+/// campaign, held to the constraints it froze, and closed by its close;
+/// Review's apply doors refuse it and name the campaign.
+fn not_held(registry: &mut Registry, id: i64) -> Result<(), Reply> {
+    match nils_registry::campaign::holder(registry.store(), id) {
+        Ok(Some((campaign, name))) => Err(Reply::error(
+            409,
+            format!(
+                "review item {id} is asked by campaign {name} ({campaign}), which answers it and closes it; answer it there"
+            ),
+        )),
+        Ok(None) => Ok(()),
+        Err(e) => Err(Reply::error(500, e.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod disclosure_tests {
     use super::*;
@@ -5151,5 +5276,29 @@ mod verb_tests {
         assert!(verb_needs(&words("classify --pack mri")).is_some());
         assert!(verb_needs(&words("classify")).is_some());
         assert!(verb_needs(&words("classify votes --out x.tsv")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::decoded;
+
+    #[test]
+    fn a_query_key_and_value_are_decoded_once() {
+        assert_eq!(decoded("body_part%3Amodel"), "body_part:model");
+        assert_eq!(decoded("application%2Fx-nifti"), "application/x-nifti");
+        // percent-decoding only: a `+` keeps its meaning, as in a time's
+        // offset or a principal, and a space comes as %20
+        assert_eq!(decoded("a+b"), "a+b");
+        assert_eq!(
+            decoded("2026-09-24T10:00:00+02:00"),
+            "2026-09-24T10:00:00+02:00"
+        );
+        assert_eq!(decoded("anna+lab%40node"), "anna+lab@node");
+        assert_eq!(decoded("a%20b"), "a b");
+        assert_eq!(decoded("a%2Bb"), "a+b");
+        assert_eq!(decoded("100%"), "100%");
+        assert_eq!(decoded("%zz"), "%zz");
+        assert_eq!(decoded("%25zz"), "%zz");
     }
 }

@@ -7,6 +7,16 @@
 //! planes, and a server-rendered plane for the first picture, thin clients
 //! and the gated case. The codec is HTJ2K through a pure Rust port of
 //! OpenJPH, reversible, in-process.
+//!
+//! Record 45 E2: the manifest says where the planes are in the patient, so
+//! a viewer can draw MPR and label its sides: `orientation`, the six
+//! direction cosines of a plane's rows and columns (Image Orientation
+//! Patient), `origin`, the position of the first plane's first pixel (Image
+//! Position Patient), and `frame`, whether the planes are parallel and
+//! evenly spaced, which is what a volume needs. The planes are ordered along
+//! the normal the orientation gives. A manifest written before is read as
+//! axial with `orientation_known` false. E1: `nils pyramid build --select`
+//! builds a selection's pyramids as one job, skipping what is built.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -59,6 +69,57 @@ pub struct Annotation {
     pub place: String,
 }
 
+/// Whether a stack's planes make a volume: parallel to each other, and
+/// evenly spaced along their normal.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Frame {
+    pub parallel: bool,
+    pub evenly_spaced: bool,
+}
+
+/// The orientation a manifest from before record 45 is read with: axial.
+pub const AXIAL: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+
+fn axial() -> [f64; 6] {
+    AXIAL
+}
+
+/// The plane nearest the stack's, by the largest component of its normal.
+fn plane_of(orientation: &[f64; 6]) -> (&'static str, bool) {
+    let n = normal(orientation);
+    let (i, largest) = n
+        .iter()
+        .map(|c| c.abs())
+        .enumerate()
+        .fold(
+            (2, 0.0),
+            |(bi, bv), (i, v)| if v > bv { (i, v) } else { (bi, bv) },
+        );
+    let plane = match i {
+        0 => "sagittal",
+        1 => "coronal",
+        _ => "axial",
+    };
+    // more than about a degree off the nearest plane is oblique
+    (plane, largest < 0.9998)
+}
+
+/// The normal of a plane: the rows' direction crossed with the columns'.
+pub fn normal(o: &[f64; 6]) -> [f64; 3] {
+    let (r, c) = ([o[0], o[1], o[2]], [o[3], o[4], o[5]]);
+    let n = [
+        r[1] * c[2] - r[2] * c[1],
+        r[2] * c[0] - r[0] * c[2],
+        r[0] * c[1] - r[1] * c[0],
+    ];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if len > 0.0 {
+        [n[0] / len, n[1] / len, n[2] / len]
+    } else {
+        [0.0, 0.0, 1.0]
+    }
+}
+
 /// What the desk's loader reads first.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -71,9 +132,19 @@ pub struct Manifest {
     /// `[dz, dy, dx]` in millimetres.
     pub spacing: [f64; 3],
     pub dtype: String,
-    /// Stored values are `raw + intercept`: a signed volume is shifted by
-    /// 32768 into u16, and the viewer shifts it back.
-    pub intercept: i64,
+    /// A stored value is the modality's value as `stored * slope +
+    /// intercept` (record 45: the file's Rescale Slope and Intercept, with
+    /// a signed volume's shift by 32768 into u16 folded in). A manifest from
+    /// before has no slope, which reads as one, and its intercept is the
+    /// shift alone.
+    #[serde(serialize_with = "whole_when_whole")]
+    pub intercept: f64,
+    #[serde(default = "one", serialize_with = "whole_when_whole")]
+    pub slope: f64,
+    /// The files did not share one rescale; the first file's is the
+    /// manifest's.
+    #[serde(default)]
+    pub rescale_varies: bool,
     pub window: Window,
     pub bytes_per_level: Vec<u64>,
     pub level_shapes: Vec<Level>,
@@ -81,6 +152,44 @@ pub struct Manifest {
     pub built_at: String,
     pub pack_version: Option<String>,
     pub precompute: Precompute,
+    /// Record 45 E2: the direction cosines of a plane's rows, then of its
+    /// columns, in the patient's frame (LPS, as DICOM has it).
+    #[serde(default = "axial")]
+    pub orientation: [f64; 6],
+    /// The patient position of the first plane's first pixel, millimetres.
+    #[serde(default)]
+    pub origin: [f64; 3],
+    /// Whether the planes make a volume; none in a manifest from before.
+    #[serde(default)]
+    pub frame: Option<Frame>,
+    /// False when the files did not say (or the manifest is from before
+    /// record 45), and `orientation` is the axial it is read as.
+    #[serde(default)]
+    pub orientation_known: bool,
+    /// The plane nearest the stack's (axial, coronal or sagittal), and
+    /// whether it is oblique to it.
+    #[serde(default = "plane_axial")]
+    pub plane: String,
+    #[serde(default)]
+    pub oblique: bool,
+}
+
+fn plane_axial() -> String {
+    "axial".to_string()
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+/// A number that is whole is written as an integer, as the manifest wrote
+/// its intercept before it could be anything else.
+fn whole_when_whole<S: serde::Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
+    if v.fract() == 0.0 && v.abs() < 9.0e15 {
+        s.serialize_i64(*v as i64)
+    } else {
+        s.serialize_f64(*v)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,9 +203,25 @@ pub struct Precompute {
 pub struct Volume {
     pub shape: [u32; 3],
     pub spacing: [f64; 3],
+    /// What was added to a raw value to store it in u16: 32768 for a
+    /// signed volume, else nothing.
     pub intercept: i64,
+    /// The file's Rescale Slope and Intercept: the modality's value is
+    /// `raw * slope + intercept`.
+    pub rescale: (f64, f64),
+    pub rescale_varies: bool,
     pub burned_in: Option<bool>,
     pub data: Vec<u16>,
+    /// Where the planes are, when the files said (record 45 E2).
+    pub geometry: Option<Geometry>,
+}
+
+/// A stack's place in the patient, from its files.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Geometry {
+    pub orientation: [f64; 6],
+    pub origin: [f64; 3],
+    pub frame: Frame,
 }
 
 impl Volume {
@@ -140,6 +265,8 @@ pub fn read_volume(store: &mut Store, stack: i64) -> Result<Volume, String> {
 /// The tags read from a file's header.
 struct Slice {
     z: f64,
+    position: Option<[f64; 3]>,
+    orientation: Option<[f64; 6]>,
     instance: i64,
     rows: u32,
     cols: u32,
@@ -149,6 +276,7 @@ struct Slice {
     spacing: [f64; 2],
     thickness: f64,
     burned_in: Option<bool>,
+    rescale: (f64, f64),
 }
 
 fn f64s(obj: &InMemDicomObject, tag: dicom_core::Tag) -> Option<Vec<f64>> {
@@ -218,9 +346,13 @@ fn read_slice(path: &Path) -> Result<Slice, String> {
             pixels.len()
         ));
     }
-    let z = f64s(obj, tags::IMAGE_POSITION_PATIENT)
-        .and_then(|v| v.get(2).copied())
-        .unwrap_or(f64::NAN);
+    let position = f64s(obj, tags::IMAGE_POSITION_PATIENT)
+        .filter(|v| v.len() >= 3)
+        .map(|v| [v[0], v[1], v[2]]);
+    let orientation = f64s(obj, tags::IMAGE_ORIENTATION_PATIENT)
+        .filter(|v| v.len() >= 6)
+        .map(|v| [v[0], v[1], v[2], v[3], v[4], v[5]]);
+    let z = position.map(|p| p[2]).unwrap_or(f64::NAN);
     let instance = int(obj, tags::INSTANCE_NUMBER).unwrap_or(0);
     let spacing = f64s(obj, tags::PIXEL_SPACING)
         .map(|v| [v[0], *v.get(1).unwrap_or(&v[0])])
@@ -230,8 +362,19 @@ fn read_slice(path: &Path) -> Result<Slice, String> {
         .map(|v| v[0])
         .unwrap_or(1.0);
     let burned_in = text(obj, tags::BURNED_IN_ANNOTATION).map(|s| s.eq_ignore_ascii_case("YES"));
+    let slope = f64s(obj, tags::RESCALE_SLOPE)
+        .and_then(|v| v.first().copied())
+        .filter(|s| s.is_finite() && *s != 0.0)
+        .unwrap_or(1.0);
+    let rescale_intercept = f64s(obj, tags::RESCALE_INTERCEPT)
+        .and_then(|v| v.first().copied())
+        .filter(|b| b.is_finite())
+        .unwrap_or(0.0);
     Ok(Slice {
+        rescale: (slope, rescale_intercept),
         z,
+        position,
+        orientation,
         instance,
         rows,
         cols,
@@ -262,7 +405,20 @@ pub fn read_files(files: &[PathBuf]) -> Result<Volume, String> {
     {
         return Err("the stack's files do not share one matrix".to_string());
     }
-    // by position when every file has one, else by instance number
+    // Record 45 E2: along the normal of the planes when every file says
+    // where it is and how it is turned, which for an axial stack is the
+    // third coordinate as before; else by that coordinate; else by the
+    // instance number. Each plane's distance along the normal is its z.
+    let oriented = slices
+        .iter()
+        .all(|s| s.position.is_some() && s.orientation.is_some());
+    if oriented {
+        let n = normal(&slices[0].orientation.expect("every file is oriented"));
+        for s in &mut slices {
+            let p = s.position.expect("every file has a position");
+            s.z = p[0] * n[0] + p[1] * n[1] + p[2] * n[2];
+        }
+    }
     if slices.iter().all(|s| s.z.is_finite()) {
         slices.sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(std::cmp::Ordering::Equal));
     } else {
@@ -274,7 +430,14 @@ pub fn read_files(files: &[PathBuf]) -> Result<Volume, String> {
     for s in &slices {
         let n = (rows * cols) as usize;
         if bits == 8 {
-            data.extend(s.pixels[..n].iter().map(|&b| b as u16));
+            // a signed byte is shifted as a signed word is
+            data.extend(s.pixels[..n].iter().map(|&b| {
+                if signed {
+                    (b as i8 as i32 + 32768) as u16
+                } else {
+                    b as u16
+                }
+            }));
         } else {
             for px in s.pixels[..n * 2].as_chunks::<2>().0 {
                 let raw = u16::from_le_bytes(*px);
@@ -292,12 +455,48 @@ pub fn read_files(files: &[PathBuf]) -> Result<Volume, String> {
         slices[0].thickness
     };
     let burned_in = slices.iter().find_map(|s| s.burned_in);
+    let geometry = if oriented {
+        let first = slices[0].orientation.expect("every file is oriented");
+        let parallel = slices.iter().all(|s| {
+            s.orientation.is_some_and(|o| {
+                o.iter()
+                    .zip(first.iter())
+                    .all(|(a, b)| (a - b).abs() < 1e-3)
+            })
+        });
+        let gaps: Vec<f64> = slices.windows(2).map(|w| w[1].z - w[0].z).collect();
+        let evenly_spaced = match gaps.first() {
+            None => true,
+            Some(_) => {
+                let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
+                let tolerance = (mean.abs() * 0.01).max(1e-3);
+                mean.abs() > 1e-6 && gaps.iter().all(|g| (g - mean).abs() <= tolerance)
+            }
+        };
+        Some(Geometry {
+            orientation: first,
+            origin: slices[0].position.expect("every file has a position"),
+            frame: Frame {
+                parallel,
+                evenly_spaced,
+            },
+        })
+    } else {
+        None
+    };
+    let rescale = slices[0].rescale;
+    let rescale_varies = slices
+        .iter()
+        .any(|s| (s.rescale.0 - rescale.0).abs() > 1e-9 || (s.rescale.1 - rescale.1).abs() > 1e-9);
     Ok(Volume {
         shape: [nz, rows, cols],
         spacing: [dz, slices[0].spacing[0], slices[0].spacing[1]],
         intercept,
+        rescale,
+        rescale_varies,
         burned_in,
         data,
+        geometry,
     })
 }
 
@@ -424,13 +623,19 @@ fn window(vol: &Volume) -> Window {
             width: 1.0,
         };
     }
-    sample.sort_unstable();
-    let at = |q: f64| sample[((sample.len() - 1) as f64 * q) as usize] as i64 - vol.intercept;
+    // in the modality's values, which a descending slope reverses
+    let (slope, b) = vol.rescale;
+    let mut values: Vec<f64> = sample
+        .iter()
+        .map(|s| (*s as i64 - vol.intercept) as f64 * slope + b)
+        .collect();
+    values.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    let at = |q: f64| values[((values.len() - 1) as f64 * q) as usize];
     let (p1, p99) = (at(0.01), at(0.99));
     Window {
-        percentiles: [p1, p99],
-        center: (p1 + p99) as f64 / 2.0,
-        width: ((p99 - p1) as f64).max(1.0),
+        percentiles: [p1.round() as i64, p99.round() as i64],
+        center: (p1 + p99) / 2.0,
+        width: (p99 - p1).max(1.0),
     }
 }
 
@@ -513,7 +718,15 @@ pub fn build(
             "top-and-bottom-eighths".to_string()
         },
     };
+    let orientation = vol.geometry.map_or(AXIAL, |g| g.orientation);
+    let (plane, oblique) = plane_of(&orientation);
     let manifest = Manifest {
+        orientation,
+        origin: vol.geometry.map_or([0.0; 3], |g| g.origin),
+        frame: vol.geometry.map(|g| g.frame),
+        orientation_known: vol.geometry.is_some(),
+        plane: plane.to_string(),
+        oblique,
         stack,
         codec: CODEC.to_string(),
         tile: TILE,
@@ -521,7 +734,10 @@ pub fn build(
         shape: [nz, ny, nx],
         spacing: vol.spacing,
         dtype: "uint16".to_string(),
-        intercept: -vol.intercept,
+        // stored * slope + intercept: the shift undone, then the rescale
+        slope: vol.rescale.0,
+        intercept: vol.rescale.1 - vol.intercept as f64 * vol.rescale.0,
+        rescale_varies: vol.rescale_varies,
         window: window(vol),
         bytes_per_level,
         level_shapes,
@@ -673,28 +889,40 @@ pub fn plane_along(
 }
 
 /// The plane with window and level applied, as a JPEG; `blank` blanks the
-/// top and bottom eighths, where burned-in annotation is held.
+/// top and bottom eighths, where burned-in annotation is held. A stored
+/// value is the modality's as `stored * slope + intercept` (record 45), and
+/// the window is in the modality's values.
+#[allow(clippy::too_many_arguments)]
 pub fn render_jpeg(
     width: u32,
     height: u32,
     pixels: &[u16],
-    intercept: i64,
+    slope: f64,
+    intercept: f64,
     center: f64,
     wwidth: f64,
     blank: bool,
 ) -> Result<Vec<u8>, String> {
+    // a width below one (0 from a header, or a caller's) is one: a narrower
+    // window would divide into NaN or infinity and render black
+    let wwidth = if wwidth.is_finite() {
+        wwidth.max(1.0)
+    } else {
+        1.0
+    };
     let lo = center - wwidth / 2.0;
-    let scale = 255.0 / wwidth.max(1.0);
+    let scale = 255.0 / wwidth;
     let mut gray = Vec::with_capacity(pixels.len());
     let band = height / 8;
+    // the value to grey as one line: stored * (slope * scale) + offset
+    let (k, offset) = (slope * scale, (intercept - lo) * scale);
     for (n, &p) in pixels.iter().enumerate() {
         let y = n as u32 / width.max(1);
         if blank && (y < band || y >= height - band) {
             gray.push(0u8);
             continue;
         }
-        let v = (p as i64 + intercept) as f64;
-        gray.push(((v - lo) * scale).clamp(0.0, 255.0) as u8);
+        gray.push((p as f64 * k + offset).clamp(0.0, 255.0) as u8);
     }
     let img =
         image::GrayImage::from_raw(width, height, gray).ok_or("the plane's size does not match")?;
@@ -719,6 +947,200 @@ pub fn built(working: &Path) -> BTreeMap<i64, Manifest> {
         }
     }
     out
+}
+
+/// What a build over many stacks did (record 45 E1).
+#[derive(Debug, Default)]
+pub struct Many {
+    pub built: Vec<i64>,
+    pub skipped: Vec<i64>,
+    /// A stack whose pyramid could not be built, and a reason class
+    /// ([`reason_of`]): never the reader's words, which can hold a file's
+    /// path (a subject code, a series name) or header text, since a job's
+    /// result is served at detail plain.
+    pub failed: Vec<(i64, &'static str)>,
+    pub bytes: u64,
+    /// Cancelled part way: what was built stays built.
+    pub stopped: bool,
+}
+
+impl Many {
+    pub fn as_json(&self, place: &str) -> serde_json::Value {
+        serde_json::json!({
+            "place": place,
+            "stacks": self.built.len() + self.skipped.len() + self.failed.len(),
+            "built": self.built.len(),
+            "skipped": self.skipped.len(),
+            "failed": self.failed.len(),
+            "bytes": self.bytes,
+            "stopped": self.stopped,
+            // the first few: a stack id and a reason class, never a path
+            "failures": self.failed.iter().take(20).map(|(s, reason)| serde_json::json!({"stack": s, "reason": reason})).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// The class of a reason a stack's pyramid was not built, from the
+/// reader's or the builder's words, which stay on the machine: `no_files`,
+/// `compressed`, `unsupported_pixels`, `mixed_matrix`, `unreadable` for a
+/// file that did not open or parse, or `build_failed`.
+pub fn reason_of(why: &str, reading: bool) -> &'static str {
+    if !reading {
+        return "build_failed";
+    }
+    if why.contains("has no files") {
+        "no_files"
+    } else if why.starts_with("transfer syntax") {
+        "compressed"
+    } else if why.contains("bits allocated")
+        || why.contains("samples per pixel")
+        || why.starts_with("no Rows")
+        || why.starts_with("no Columns")
+        || why.starts_with("no Pixel Data")
+        || why.starts_with("pixel data holds")
+    {
+        "unsupported_pixels"
+    } else if why.contains("do not share one matrix") {
+        "mixed_matrix"
+    } else {
+        "unreadable"
+    }
+}
+
+/// Build the pyramids of `stacks` under a working place, one stack at a
+/// time, each with `workers` planes at once; a stack that has one is
+/// skipped, a stack that fails is counted with why and the rest go on.
+/// `go_on` is asked after each stack with the counts so far, and a false
+/// stops the build there (a cancel).
+pub fn build_many(
+    store: &mut Store,
+    working: &Path,
+    stacks: &[i64],
+    workers: usize,
+    pack_version: Option<String>,
+    go_on: &mut dyn FnMut(&mut Store, &Many) -> bool,
+) -> Many {
+    let mut out = Many::default();
+    let mut seen = std::collections::BTreeSet::new();
+    for &stack in stacks {
+        if !seen.insert(stack) {
+            continue;
+        }
+        let root = dir(working, stack);
+        if matches!(manifest(&root), Ok(Some(_))) {
+            out.skipped.push(stack);
+        } else {
+            match read_volume(store, stack)
+                .map_err(|why| reason_of(&why, true))
+                .and_then(|v| {
+                    build(&v, stack, &root, workers, pack_version.clone())
+                        .map_err(|why| reason_of(&why, false))
+                }) {
+                Ok(m) => {
+                    out.bytes += m.bytes_per_level.iter().sum::<u64>();
+                    out.built.push(stack);
+                }
+                Err(why) => {
+                    // a half-written pyramid is not one: without its
+                    // manifest it is built again next time
+                    let _ = std::fs::remove_file(root.join("manifest.json"));
+                    out.failed.push((stack, why));
+                }
+            }
+        }
+        if !go_on(store, &out) {
+            out.stopped = true;
+            break;
+        }
+    }
+    out
+}
+
+/// How many of `stacks` have their picture under the working place: what a
+/// campaign's items need before anyone looks at them (record 45 R3).
+pub fn pictures(store: &mut Store, stacks: &[i64]) -> serde_json::Value {
+    let mut unique: Vec<i64> = stacks.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    let Ok(working) = working_place(store, None) else {
+        return serde_json::json!({
+            "stacks": unique.len(), "have": 0, "missing": unique.len(), "place": null,
+        });
+    };
+    let root = Path::new(&working.path);
+    let have = unique
+        .iter()
+        .filter(|s| dir(root, **s).join("manifest.json").exists())
+        .count();
+    serde_json::json!({
+        "stacks": unique.len(), "have": have, "missing": unique.len() - have,
+        "place": working.name,
+    })
+}
+
+/// A pyramid command line as the jobs door queues it (record 45 E1): the
+/// flags each verb takes and no path, the deployment's packs added where a
+/// selection is frozen.
+pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<Vec<String>, Reply> {
+    let verb_owned = command.get(1).cloned();
+    let verb = verb_owned.as_deref();
+    let takes: &[&str] = match verb {
+        Some("build") => &[
+            "--stack",
+            "--select",
+            "--handle",
+            "--place",
+            "--workers",
+            "--pack",
+        ],
+        Some("list") => &["--place"],
+        _ => {
+            return Err(Reply::error(
+                400,
+                "pyramid build (--stack ID | --select selection:NAME@V | --handle ID) or pyramid list",
+            ));
+        }
+    };
+    let mut out = vec!["pyramid".to_string(), verb.unwrap_or_default().to_string()];
+    let mut it = command.into_iter().skip(2);
+    let mut sources = 0;
+    let mut select = false;
+    while let Some(arg) = it.next() {
+        if arg == "--json" && verb == Some("list") {
+            out.push(arg);
+            continue;
+        }
+        if !takes.contains(&arg.as_str()) {
+            return Err(Reply::error(
+                400,
+                format!(
+                    "pyramid {} takes {}, not {arg}",
+                    verb.unwrap_or_default(),
+                    takes.join(", ")
+                ),
+            ));
+        }
+        let value = it
+            .next()
+            .ok_or_else(|| Reply::error(400, format!("pyramid {arg} takes a value")))?;
+        if matches!(arg.as_str(), "--stack" | "--select" | "--handle") {
+            sources += 1;
+        }
+        select |= arg == "--select";
+        out.push(arg);
+        out.push(value);
+    }
+    if verb == Some("build") && sources != 1 {
+        return Err(Reply::error(
+            400,
+            "pyramid build names one of --stack, --select or --handle",
+        ));
+    }
+    if select && let Some(d) = pack_dir {
+        out.push("--pack-dir".into());
+        out.push(d.display().to_string());
+    }
+    Ok(out)
 }
 
 /// The working place a pyramid is written under: the one named, or the
@@ -747,6 +1169,22 @@ pub fn working_place(store: &mut Store, name: Option<&str>) -> Result<Place, Str
 /// The window the audit counts one opening in: ten minutes.
 const OPEN_WINDOW_SECS: u64 = 600;
 
+/// Who opened which stack when, in this process: the audit's own rows for
+/// the window, read once per principal, and every row written since, so
+/// the one-row-per-stack rule is kept exactly however many stacks a grid
+/// opens (record 45; a window of the newest 200 rows let a grid of more
+/// write each stack again).
+#[derive(Default)]
+struct Opened {
+    /// When a principal's rows of the window were read in.
+    warmed: std::collections::HashMap<String, u64>,
+    /// When (principal, stack) was last written, in seconds.
+    at: std::collections::HashMap<(String, i64), u64>,
+}
+
+static OPENED: std::sync::LazyLock<std::sync::Mutex<Opened>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Opened::default()));
+
 /// One audit row per stack opened by a person, not per tile: the first
 /// request in the window writes the row, the rest in the window do not.
 fn note_open(
@@ -757,24 +1195,45 @@ fn note_open(
     purpose: &str,
 ) -> Result<(), String> {
     use nils_registry::audit::{self, Action, Entry, Filter};
-    let since = nils_registry::time::iso_of(
-        nils_registry::time::now_secs().saturating_sub(OPEN_WINDOW_SECS),
-    );
-    let recent = audit::list(
-        registry.store(),
-        &Filter {
-            principal: Some(caller.principal.clone()),
-            action: Some("instance.open".to_string()),
-            since: Some(since),
-            limit: 200,
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    if recent
-        .iter()
-        .any(|r| r.scope["stack"].as_i64() == Some(stack))
-    {
-        return Ok(());
+    let now = nils_registry::time::now_secs();
+    let since = now.saturating_sub(OPEN_WINDOW_SECS);
+    let who = caller.principal.clone();
+    let key = (who.clone(), stack);
+    let fresh = |o: &Opened| o.at.get(&key).is_some_and(|t| *t >= since);
+    let warm = {
+        let o = OPENED.lock().map_err(|_| "the open register is poisoned")?;
+        if fresh(&o) {
+            return Ok(());
+        }
+        // read the window in once per principal; after that every row this
+        // process writes is in the register
+        !o.warmed.get(&who).is_some_and(|t| *t >= since)
+    };
+    if warm {
+        let rows = audit::list(
+            registry.store(),
+            &Filter {
+                principal: Some(who.clone()),
+                action: Some("instance.open".to_string()),
+                since: Some(nils_registry::time::iso_of(since)),
+                limit: i64::MAX as usize,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let mut o = OPENED.lock().map_err(|_| "the open register is poisoned")?;
+        for r in rows {
+            if let (Some(s), Some(t)) = (
+                r.scope["stack"].as_i64(),
+                nils_registry::time::secs_of(&r.at),
+            ) {
+                let e = o.at.entry((who.clone(), s)).or_insert(t);
+                *e = (*e).max(t);
+            }
+        }
+        o.warmed.insert(who.clone(), now);
+        if fresh(&o) {
+            return Ok(());
+        }
     }
     audit::record(
         registry,
@@ -787,8 +1246,64 @@ fn note_open(
             details: None,
         },
     )
-    .map(|_| ())
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    let mut o = OPENED.lock().map_err(|_| "the open register is poisoned")?;
+    // what fell out of the window is forgotten now and then
+    if o.at.len() > 100_000 {
+        o.at.retain(|_, t| *t >= since);
+    }
+    o.at.insert(key, now);
+    Ok(())
+}
+
+/// The manifests read by the doors, by path, kept while the file is the
+/// same (its modification time and length): a grid reads each stack's
+/// manifest once rather than on every tile.
+type Cached = std::collections::HashMap<PathBuf, (std::time::SystemTime, u64, Manifest)>;
+
+static MANIFESTS: std::sync::LazyLock<std::sync::Mutex<Cached>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Cached::new()));
+
+/// [`manifest`], through the cache the doors share.
+fn manifest_cached(root: &Path) -> Result<Option<Manifest>, String> {
+    let p = root.join("manifest.json");
+    let Ok(meta) = std::fs::metadata(&p) else {
+        return Ok(None);
+    };
+    let stamp = (meta.modified().map_err(|e| e.to_string())?, meta.len());
+    if let Ok(cache) = MANIFESTS.lock()
+        && let Some((t, n, m)) = cache.get(&p)
+        && (*t, *n) == stamp
+    {
+        return Ok(Some(m.clone()));
+    }
+    let m = manifest(root)?;
+    if let (Some(m), Ok(mut cache)) = (&m, MANIFESTS.lock()) {
+        if cache.len() > 4096 {
+            cache.clear();
+        }
+        cache.insert(p, (stamp.0, stamp.1, m.clone()));
+    }
+    Ok(m)
+}
+
+/// The working place the doors read under, looked up at most once a second:
+/// a grid's tiles do not each ask the registry which place it is.
+static WORKING: std::sync::LazyLock<std::sync::Mutex<Option<(std::time::Instant, Place)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+fn working_place_cached(store: &mut Store) -> Result<Place, String> {
+    if let Ok(w) = WORKING.lock()
+        && let Some((at, p)) = w.as_ref()
+        && at.elapsed() < std::time::Duration::from_secs(1)
+    {
+        return Ok(p.clone());
+    }
+    let p = working_place(store, None)?;
+    if let Ok(mut w) = WORKING.lock() {
+        *w = Some((std::time::Instant::now(), p.clone()));
+    }
+    Ok(p)
 }
 
 /// The gated instance door (Wave 5 §12.7): `manifest`, `tiles/{level}/{z}`,
@@ -803,9 +1318,9 @@ pub fn door(
     let stack: i64 = stack
         .parse()
         .map_err(|_| Reply::error(404, "a stack is named by its id"))?;
-    let working = working_place(registry.store(), None).map_err(|m| Reply::error(409, m))?;
+    let working = working_place_cached(registry.store()).map_err(|m| Reply::error(409, m))?;
     let root = dir(Path::new(&working.path), stack);
-    let m = manifest(&root)
+    let m = manifest_cached(&root)
         .map_err(|e| Reply::error(500, e))?
         .ok_or_else(|| {
             Reply::error(
@@ -940,7 +1455,7 @@ pub fn door(
             let (w, h, px) =
                 plane_along(&root, &m, level, axis, z).map_err(|e| Reply::error(404, e))?;
             // the band is held on every axis when the annotation is burned in and the caller is below the class
-            let jpeg = render_jpeg(w, h, &px, m.intercept, center, width, held)
+            let jpeg = render_jpeg(w, h, &px, m.slope, m.intercept, center, width, held)
                 .map_err(|e| Reply::error(500, e))?;
             Ok(Reply::raw(
                 "image/jpeg",
@@ -980,6 +1495,100 @@ mod tests {
         let bytes = encode_tile(&px, w, h).unwrap();
         let (_, _, back) = decode_tile(&bytes).unwrap();
         assert_eq!(back, px);
+    }
+
+    /// Record 45: a signed stack with a rescale renders in the modality's
+    /// values: stored * slope + intercept, the shift into u16 undone and
+    /// the file's Rescale Slope and Intercept applied, in that order.
+    #[test]
+    fn a_signed_rescaled_stack_renders_in_the_modality_s_values() {
+        use dicom_core::VR;
+        use nils_dicom::synth::{self, MetaFields, TempDir};
+        let dir = TempDir::new("pyramid-signed");
+        let (ny, nx) = (16u32, 16u32);
+        let raws: [i16; 2] = [-100, 100];
+        let mut files = Vec::new();
+        for (z, raw) in raws.iter().enumerate() {
+            let sop = format!("1.2.3.9.{}", z + 1);
+            let us = |tag, v: u16| synth::bytes(tag, VR::US, v.to_le_bytes().to_vec());
+            let mut e = synth::minimal_mr("1.2.3", "1.2.3.9", &sop);
+            e.push(synth::text(
+                tags::INSTANCE_NUMBER,
+                VR::IS,
+                &(z + 1).to_string(),
+            ));
+            e.push(synth::text(
+                tags::IMAGE_POSITION_PATIENT,
+                VR::DS,
+                &format!("0\\0\\{}", z * 3),
+            ));
+            e.push(synth::text(
+                tags::IMAGE_ORIENTATION_PATIENT,
+                VR::DS,
+                "1\\0\\0\\0\\1\\0",
+            ));
+            e.push(synth::text(tags::RESCALE_SLOPE, VR::DS, "2"));
+            e.push(synth::text(tags::RESCALE_INTERCEPT, VR::DS, "-50"));
+            e.push(us(tags::SAMPLES_PER_PIXEL, 1));
+            e.push(us(tags::ROWS, ny as u16));
+            e.push(us(tags::COLUMNS, nx as u16));
+            e.push(us(tags::BITS_ALLOCATED, 16));
+            e.push(us(tags::BITS_STORED, 16));
+            e.push(us(tags::HIGH_BIT, 15));
+            e.push(us(tags::PIXEL_REPRESENTATION, 1));
+            let px: Vec<u8> = (0..ny * nx).flat_map(|_| raw.to_le_bytes()).collect();
+            e.push(synth::bytes(tags::PIXEL_DATA, VR::OW, px));
+            files.push(dir.file(&sop, &synth::part10(&MetaFields::mr(&sop), &e, true)));
+        }
+        let vol = read_files(&files).unwrap();
+        let root = dir.path().join("pyramid");
+        let m = build(&vol, 9, &root, 2, None).unwrap();
+        assert_eq!(m.slope, 2.0);
+        assert_eq!(m.intercept, -50.0 - 32768.0 * 2.0);
+        assert!(!m.rescale_varies);
+        // the window is in the modality's values: -250 and 150
+        assert_eq!(m.window.percentiles, [-250, 150]);
+        let (w, h, plane) = decode_plane(&root, &m, 0, 0).unwrap();
+        let value = plane[0] as f64 * m.slope + m.intercept;
+        assert_eq!(value, -250.0);
+        // a window centred on the first plane's value renders it mid-grey,
+        // and one centred on the second's renders it black
+        let grey = |c: f64| -> f64 {
+            let jpeg = render_jpeg(w, h, &plane, m.slope, m.intercept, c, 100.0, false).unwrap();
+            let img = image::load_from_memory(&jpeg).unwrap().to_luma8();
+            img.pixels().map(|p| p.0[0] as f64).sum::<f64>() / (w * h) as f64
+        };
+        assert!((grey(-250.0) - 127.5).abs() < 2.0, "{}", grey(-250.0));
+        assert!(grey(150.0) < 2.0, "{}", grey(150.0));
+        // a manifest from before reads with slope one and its intercept the shift
+        let old: Manifest = serde_json::from_value({
+            let mut v = serde_json::to_value(&m).unwrap();
+            v.as_object_mut().unwrap().remove("slope");
+            v["intercept"] = serde_json::json!(-32768);
+            v
+        })
+        .unwrap();
+        assert_eq!((old.slope, old.intercept), (1.0, -32768.0));
+    }
+
+    #[test]
+    fn a_window_of_no_width_renders_as_one_of_width_one() {
+        // a window width of 0 (or a negative one) is floored at 1: a value
+        // above the centre is white, one below black, never NaN's black
+        let px = [100u16, 101, 99, 100];
+        let grey = |w: f64| {
+            let jpeg = render_jpeg(2, 2, &px, 1.0, 0.0, 100.0, w, false).unwrap();
+            image::load_from_memory(&jpeg)
+                .unwrap()
+                .to_luma8()
+                .into_raw()
+        };
+        for w in [0.0, -5.0] {
+            let g = grey(w);
+            assert!(g[1] > 200, "{w}: {g:?}");
+            assert!(g[2] < 50, "{w}: {g:?}");
+            assert_eq!(g, grey(1.0), "{w}");
+        }
     }
 
     #[test]
