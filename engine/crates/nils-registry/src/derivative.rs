@@ -176,6 +176,21 @@ pub fn belongs(
 /// Write the row. Answers its id. A model named is one the registry holds:
 /// the column refers to the model table, which the store does not enforce.
 pub fn insert(store: &mut Store, n: &New<'_>) -> Result<i64, Error> {
+    insert_row(store, n, None)
+}
+
+/// [`insert`] for a file a pipeline run made (record 43 S2): the row names
+/// the run, which the registry holds.
+pub fn insert_of_run(store: &mut Store, n: &New<'_>, run_id: i64) -> Result<i64, Error> {
+    if crate::pipeline::run(store, run_id)?.is_none() {
+        return Err(Error::Message(format!(
+            "no pipeline run {run_id} made this derivative"
+        )));
+    }
+    insert_row(store, n, Some(run_id))
+}
+
+fn insert_row(store: &mut Store, n: &New<'_>, run_id: Option<i64>) -> Result<i64, Error> {
     if let Some(model) = n.model_id
         && crate::model::get(store, model)?.is_none()
     {
@@ -201,6 +216,7 @@ pub fn insert(store: &mut Store, n: &New<'_>) -> Result<i64, Error> {
                 "registered_by",
                 "actor",
                 "model_id",
+                "run_id",
                 "supersedes_id",
                 "created_at",
             ],
@@ -224,6 +240,7 @@ pub fn insert(store: &mut Store, n: &New<'_>) -> Result<i64, Error> {
             Param::from(n.registered_by),
             n.actor.map_or(Param::Null, |a| Param::from(a.to_string())),
             n.model_id.map_or(Param::Null, Param::Int),
+            run_id.map_or(Param::Null, Param::Int),
             n.supersedes_id.map_or(Param::Null, Param::Int),
             Param::from(n.created_at),
         ]],
@@ -314,6 +331,8 @@ pub struct Filter<'a> {
     pub kind: Option<&'a str>,
     pub stack_id: Option<i64>,
     pub subject_id: Option<i64>,
+    /// Record 43: only the files one pipeline run made.
+    pub run_id: Option<i64>,
     pub limit: usize,
 }
 
@@ -340,6 +359,13 @@ pub fn list(store: &mut Store, f: &Filter<'_>) -> Result<Vec<Derivative>, Error>
         params.push(Param::Int(s));
         sql.push_str(&format!(
             " AND subject_id = {}",
+            d.param(params.len(), Type::Int)
+        ));
+    }
+    if let Some(r) = f.run_id {
+        params.push(Param::Int(r));
+        sql.push_str(&format!(
+            " AND run_id = {}",
             d.param(params.len(), Type::Int)
         ));
     }

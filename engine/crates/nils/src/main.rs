@@ -44,8 +44,10 @@ mod login;
 mod mcp;
 mod model_cli;
 mod originals;
+mod pipelines;
 mod places;
 mod profile;
+mod proposals;
 mod pyramid;
 mod schedule;
 mod serve;
@@ -252,6 +254,13 @@ enum Command {
         #[command(subcommand)]
         command: derivatives::DerivativeCommand,
     },
+    /// The pipeline catalog: descriptors (nils.job.yml) with their images pinned by digest, the runtime, the runs (record 43)
+    Pipeline {
+        #[command(subcommand)]
+        command: pipelines::PipelineCommand,
+    },
+    /// Run a pipeline over a frozen selection: its outputs become derivatives, its failed units review items (record 43)
+    Run(Box<pipelines::RunArgs>),
     /// The registry's settings: the timezone and the week start its dates are read under (Wave 5 section 12.6)
     Settings {
         #[command(subcommand)]
@@ -431,6 +440,10 @@ struct ReleaseArgs {
     /// Machine-readable output
     #[arg(long)]
     json: bool,
+    /// Record 43: release a pipeline run's bids input into the run's own
+    /// folder under its working place, which the runner alone asks for
+    #[arg(long = "into-run", value_name = "RUN", hide = true)]
+    into_run: Option<i64>,
 }
 
 #[derive(Debug, Parser)]
@@ -779,6 +792,11 @@ enum PlaceCommand {
         /// The storage is fast
         #[arg(long)]
         fast: bool,
+        /// Record 43 S3: the path the place's folder is reachable at by the
+        /// clients that share its volume, so a derivative's door answers
+        /// with a path there instead of the bytes, when asked
+        #[arg(long, value_name = "PATH")]
+        share: Option<String>,
         #[command(flatten)]
         dataset: DatasetFlags,
         #[arg(long)]
@@ -797,6 +815,12 @@ enum PlaceCommand {
         protected: Option<bool>,
         #[arg(long)]
         fast: Option<bool>,
+        /// The path the clients that share the place's volume reach it at (record 43 S3)
+        #[arg(long, value_name = "PATH", conflicts_with = "no_share")]
+        share: Option<String>,
+        /// Declare no share path: derivatives come through the door alone
+        #[arg(long)]
+        no_share: bool,
         #[command(flatten)]
         dataset: DatasetFlags,
         #[arg(long)]
@@ -1790,6 +1814,8 @@ fn main() -> ExitCode {
         Command::Settings { command } => settings_command(&home, command),
         Command::Pyramid { command } => pyramid_command(&home, command),
         Command::Derivative { command } => derivatives::command(&home, command),
+        Command::Pipeline { command } => pipelines::command(&home, command),
+        Command::Run(args) => pipelines::run_command(&home, *args),
         Command::Login(args) => login_command(args),
         Command::Logout => {
             if login::logout() {
@@ -2297,13 +2323,30 @@ fn stored_overlay(home: &Home, id: i64) -> Result<nils_pack::Overlay, Exit> {
 fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
     use nils_registry::place::{self, Role};
     let mut registry = open(home)?;
-    let guarantees = |backup: Option<&str>, snapshots: bool, protected: bool, fast: bool| {
-        serde_json::json!({
+    let guarantees = |backup: Option<&str>,
+                      snapshots: bool,
+                      protected: bool,
+                      fast: bool,
+                      share: Option<&str>| {
+        let mut g = serde_json::json!({
             "backup": backup,
             "snapshots": snapshots,
             "protected": protected,
             "fast": fast,
-        })
+        });
+        // record 43 S3: declared only where there is one
+        if let Some(path) = share {
+            g["share"] = serde_json::json!(path);
+        }
+        g
+    };
+    let share_checked = |share: &Option<String>| -> Result<(), Exit> {
+        match share {
+            Some(p) if !p.trim().starts_with('/') => Err(usage(format!(
+                "--share {p}: the absolute path the clients reach the place at"
+            ))),
+            _ => Ok(()),
+        }
     };
     // what a dataset's trees are, for the listing
     let trees_line = |p: &place::Place| -> Option<String> {
@@ -2407,9 +2450,11 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             snapshots,
             protected,
             fast,
+            share,
             dataset,
             json,
         } => {
+            share_checked(&share)?;
             let role = Role::parse(&role).ok_or_else(|| {
                 usage(format!(
                     "--role is one of {}, not {role}",
@@ -2459,7 +2504,13 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     name: &name,
                     role,
                     path: &path.display().to_string(),
-                    guarantees: guarantees(backup.as_deref(), snapshots, protected, fast),
+                    guarantees: guarantees(
+                        backup.as_deref(),
+                        snapshots,
+                        protected,
+                        fast,
+                        share.as_deref(),
+                    ),
                     probed,
                     handling: serde_json::Value::Null,
                     dataset,
@@ -2504,25 +2555,38 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             snapshots,
             protected,
             fast,
+            share,
+            no_share,
             dataset,
             json,
         } => {
+            share_checked(&share)?;
             let current = place::show(registry.store(), id)
                 .map_err(|e| fail(e.to_string()))?
                 .ok_or_else(|| fail(format!("no place {id}")))?;
             let g = &current.guarantees;
-            let next =
-                if backup.is_some() || snapshots.is_some() || protected.is_some() || fast.is_some()
-                {
-                    Some(guarantees(
-                        backup.as_deref().or_else(|| g["backup"].as_str()),
-                        snapshots.unwrap_or_else(|| g["snapshots"].as_bool().unwrap_or(false)),
-                        protected.unwrap_or_else(|| g["protected"].as_bool().unwrap_or(false)),
-                        fast.unwrap_or_else(|| g["fast"].as_bool().unwrap_or(false)),
-                    ))
-                } else {
+            let next = if backup.is_some()
+                || snapshots.is_some()
+                || protected.is_some()
+                || fast.is_some()
+                || share.is_some()
+                || no_share
+            {
+                let kept_share = if no_share {
                     None
+                } else {
+                    share.as_deref().or_else(|| g["share"].as_str())
                 };
+                Some(guarantees(
+                    backup.as_deref().or_else(|| g["backup"].as_str()),
+                    snapshots.unwrap_or_else(|| g["snapshots"].as_bool().unwrap_or(false)),
+                    protected.unwrap_or_else(|| g["protected"].as_bool().unwrap_or(false)),
+                    fast.unwrap_or_else(|| g["fast"].as_bool().unwrap_or(false)),
+                    kept_share,
+                ))
+            } else {
+                None
+            };
             let path = path.map(|p| fs::canonicalize(&p).unwrap_or(p));
             // record 26: a dataset's fields, and its folder looked at again
             // when they or its path change
@@ -5073,6 +5137,20 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let sealed_stacks = count_of(store, "sealed_stack", "")?;
     let schema = store.schema().map(str::to_string);
     let (derivative_rows, derivative_bytes) = nils_registry::derivative::totals(store)?;
+    let (pipeline_rows, pipeline_runs) = nils_registry::pipeline::totals(store)?;
+    let runs_where = match derivatives::working(store) {
+        Ok(p) => format!(
+            "rows of pipeline and pipeline_run in the registry; each run's input, manifest and container log under {}/<run> in the working place {} ({}), and its outputs under {}/<pipeline>/<run> there",
+            pipelines::RUNS,
+            p.name,
+            p.path,
+            nils_registry::derivative::TREE
+        ),
+        Err(_) => format!(
+            "rows of pipeline and pipeline_run in the registry; a run's folders go under {}/<run> in a working place, and none is bound now, so no pipeline can run",
+            pipelines::RUNS
+        ),
+    };
     let derivatives_where = match derivatives::working(store) {
         Ok(p) => format!(
             "files under {} in the working place {} ({}), and rows of derivative in the registry",
@@ -5458,9 +5536,25 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "counts": { "derivatives": derivative_rows, "bytes": derivative_bytes },
             "kept": "for ever; a newer file supersedes an older one by a link and both stay",
             "commands": {
-                "read": ["nils derivative list", "nils derivative show <id>", "GET /api/derivatives/{id}/content"],
+                "read": ["nils derivative list", "nils derivative show <id>", "GET /api/derivatives/{id}/content", "GET /api/derivatives/{id}/content?transport=share, where the place declares a share path"],
                 "change": ["nils derivative add <file>"],
                 "export": ["GET /api/derivatives/{id}/content"],
+                "delete": "with the registry and the working place; nils has no command for one",
+            },
+        }),
+        serde_json::json!({
+            "store": "pipelines",
+            "owner": "the operator who added each pipeline; each run is its principal's",
+            "what": "the pipeline catalog (record 43): each descriptor (nils.job.yml) kept whole with its digest, its image pinned by a registry manifest digest; and each run over a frozen selection: every parameter, the runtime and its version, the host and the device, the models and the label set it read, the handle it pinned, its status, its summary and the digest of its results; in the working place, the input it was given (a release in the BIDS layout, or stacks.json), its manifest and its container's log",
+            "where": runs_where,
+            "files": [],
+            "holds": ["quasi-identifying: a run's input folder is a release of its selection (pixels and dates), and its log is what the pipeline printed", "technical: names, versions, digests, parameters, the runtime, host and device, the principals and the times"],
+            "counts": { "pipelines": pipeline_rows, "runs": pipeline_runs },
+            "kept": "the rows for good, since a derivative names the run that made it; a run's folder under runs until an operator removes it",
+            "commands": {
+                "read": ["nils pipeline list", "nils pipeline show <pipeline>", "nils pipeline runs [<run>]"],
+                "change": ["nils pipeline add <nils.job.yml>", "nils pipeline runtime --set <choice>", "nils run <pipeline> --select selection:<name>@<v>"],
+                "export": ["nils pipeline show <pipeline> --json", "nils pipeline runs <run> --json"],
                 "delete": "with the registry and the working place; nils has no command for one",
             },
         }),
@@ -8456,8 +8550,12 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     let pack = nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
 
     let mut registry = open(home)?;
-    // Wave 5 section 10.2: a release writes only to an export place.
-    require_place(&mut registry, nils_registry::place::Role::Export, &out)?;
+    // Wave 5 section 10.2: a release writes only to an export place; a
+    // pipeline run's bids input (record 43 R4) into the run's own folder.
+    match args.into_run {
+        Some(run) => pipelines::release_target(registry.store(), run, &out).map_err(usage)?,
+        None => require_place(&mut registry, nils_registry::place::Role::Export, &out)?,
+    }
     // record 26 section 13: a dataset named is a source place in force
     for name in &args.dataset {
         let found = nils_registry::place::by_name(registry.store(), name)

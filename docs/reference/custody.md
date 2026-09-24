@@ -263,9 +263,23 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | holds | quasi-identifying: drawn from the pixels of a subject's stacks, and the stack, series or subject each belongs to<br>technical: the kind, the digest, the size, the media type, the place and the path, who registered it |
 | owner | the research group that owns the archive |
 | kept | for ever; a newer file supersedes an older one by a link and both stay |
-| read | `nils derivative list`<br>`nils derivative show <id>`<br>GET /api/derivatives/{id}/content |
+| read | `nils derivative list`<br>`nils derivative show <id>`<br>GET /api/derivatives/{id}/content<br>GET /api/derivatives/{id}/content?transport=share, where the place declares a share path |
 | change | `nils derivative add <file>` |
 | export | GET /api/derivatives/{id}/content |
+| delete | with the registry and the working place; nils has no command for one |
+
+## pipelines
+
+| | |
+|---|---|
+| what | the pipeline catalog (record 43): each descriptor (nils.job.yml) kept whole with its digest, its image pinned by a registry manifest digest; and each run over a frozen selection: every parameter, the runtime and its version, the host and the device, the models and the label set it read, the handle it pinned, its status, its summary and the digest of its results; in the working place, the input it was given (a release in the BIDS layout, or stacks.json), its manifest and its container's log |
+| where | rows of pipeline and pipeline_run in the registry; a run's folders go under runs/<run> in a working place, and none is bound now, so no pipeline can run |
+| holds | quasi-identifying: a run's input folder is a release of its selection (pixels and dates), and its log is what the pipeline printed<br>technical: names, versions, digests, parameters, the runtime, host and device, the principals and the times |
+| owner | the operator who added each pipeline; each run is its principal's |
+| kept | the rows for good, since a derivative names the run that made it; a run's folder under runs until an operator removes it |
+| read | `nils pipeline list`<br>`nils pipeline show <pipeline>`<br>`nils pipeline runs [<run>]` |
+| change | `nils pipeline add <nils.job.yml>`<br>`nils pipeline runtime --set <choice>`<br>`nils run <pipeline> --select selection:<name>@<v>` |
+| export | `nils pipeline show <pipeline> --json`<br>`nils pipeline runs <run> --json` |
 | delete | with the registry and the working place; nils has no command for one |
 
 ## logs

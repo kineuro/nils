@@ -1234,6 +1234,7 @@ fn custody_quarantine_review_and_purge_go_round() {
             "catalog curation",
             "identifier read audit",
             "derivatives",
+            "pipelines",
             "logs"
         ]
     );

@@ -1832,3 +1832,156 @@ fn migrations_55_and_56_add_the_person_s_pick_and_the_derivative() {
         );
     }
 }
+
+/// Record 43 S1 and S2, migration 59, on both backends: a registry from
+/// before gains the pipeline catalog and the runs empty, and a catalog
+/// entry, a run, the derivative it made and its review item read back the
+/// same on either.
+#[test]
+fn migration_59_gives_pipelines_a_catalog_and_runs_on_both_backends() {
+    use nils_registry::{derivative, pipeline, review};
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (p, r, meta) = (
+            store.qualified("pipeline"),
+            store.qualified("pipeline_run"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "DROP TABLE {r}; DROP TABLE {p};
+                 UPDATE {meta} SET value = '58' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(58),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            [59],
+            "{name}"
+        );
+        let descriptor = serde_json::json!({"name": "n4", "x-nils": {"analysis-level": "session"}});
+        let (entry, fresh) = pipeline::add(
+            &mut store,
+            &pipeline::New {
+                name: "n4",
+                tool_version: "2.6",
+                descriptor: &descriptor,
+                descriptor_digest: "sha256:01",
+                image: "antsx/ants@sha256:00",
+                image_digest: "sha256:00",
+                layout: "bids",
+                level: "session",
+                added_by: "ops@lab",
+                added_at: "2026-09-24T10:00:00Z",
+            },
+        )
+        .unwrap();
+        assert!(fresh, "{name}");
+        assert_eq!(entry.descriptor, descriptor, "{name}");
+        assert_eq!(entry.added_at, "2026-09-24T10:00:00Z", "{name}");
+        let params = serde_json::json!({"dimension": 3, "shrink_factor": 4});
+        let run = pipeline::start(
+            &mut store,
+            &pipeline::NewRun {
+                pipeline_id: entry.id,
+                job_id: Some(7),
+                handle_id: Some(3),
+                selection: Some("selection:every@1"),
+                params: &params,
+                runtime: "podman",
+                runtime_version: "5.0.3",
+                host: "ward-3",
+                device: "cpu",
+                model_ids: &[],
+                label_set_id: None,
+                place_id: Some(1),
+                principal: "ops@lab",
+                actor: None,
+                started_at: "2026-09-24T10:01:00Z",
+            },
+        )
+        .unwrap();
+        let summary = serde_json::json!({"units": {"succeeded": 1}});
+        pipeline::finish(
+            &mut store,
+            run,
+            &pipeline::Finish {
+                status: "done",
+                finished_at: "2026-09-24T10:02:00Z",
+                exit_code: Some(0),
+                results_digest: Some("sha256:ab"),
+                summary: &summary,
+                error: None,
+            },
+        )
+        .unwrap();
+        let back = pipeline::run(&mut store, run).unwrap().unwrap();
+        assert_eq!(back.params, params, "{name}");
+        assert_eq!(back.summary, summary, "{name}");
+        assert_eq!(back.model_ids, serde_json::json!([]), "{name}");
+        assert_eq!(
+            back.finished_at.as_deref(),
+            Some("2026-09-24T10:02:00Z"),
+            "{name}"
+        );
+        let belongs = derivative::Belongs {
+            scope: "session".into(),
+            stack_id: None,
+            series_id: None,
+            subject_id: 1,
+            session_day: Some("2022-01-15".into()),
+        };
+        let made = derivative::New {
+            kind: "output",
+            belongs: &belongs,
+            place_id: 1,
+            path: "derivatives/n4/1/sub-a/ses-b/anat/x_desc-n4_T1w.nii.gz",
+            bytes: 3,
+            sha256: "abc",
+            media_type: "application/x-nifti+gzip",
+            registered_by: "ops@lab",
+            actor: None,
+            model_id: None,
+            supersedes_id: None,
+            created_at: "2026-09-24T10:02:00Z",
+        };
+        assert!(
+            derivative::insert_of_run(&mut store, &made, run + 1).is_err(),
+            "{name}: a run the registry does not hold"
+        );
+        let id = derivative::insert_of_run(&mut store, &made, run).unwrap();
+        let listed = derivative::list(
+            &mut store,
+            &derivative::Filter {
+                run_id: Some(run),
+                limit: 10,
+                ..derivative::Filter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 1, "{name}");
+        assert_eq!(listed[0].id, id, "{name}");
+        assert_eq!(listed[0].run_id, Some(run), "{name}");
+        let metrics = serde_json::json!({"snr": 1.5});
+        let q = review::PipelineQc {
+            run_id: run,
+            pipeline: "n4@1",
+            unit: "sub-a_ses-b",
+            stack_id: None,
+            subject_id: Some(1),
+            session_day: Some("2022-01-15"),
+            status: "failed",
+            error: Some("no T1w"),
+            metrics: &metrics,
+            job_id: Some(7),
+        };
+        let item = review::raise_pipeline_qc(&mut store, &q, "2026-09-24T10:02:00Z").unwrap();
+        let again = review::raise_pipeline_qc(&mut store, &q, "2026-09-24T10:03:00Z").unwrap();
+        assert_eq!(item, again, "{name}: one item per run and unit");
+        assert_eq!(pipeline::totals(&mut store).unwrap(), (1, 1), "{name}");
+    }
+}

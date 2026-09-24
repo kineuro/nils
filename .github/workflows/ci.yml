@@ -71,12 +71,17 @@ jobs:
       # write a tree need one. A deployment takes a current build from
       # rordenlab/dcm2niix; here the distribution's is enough to prove the
       # orchestration, and the tests say so and pass when it is absent.
-      - name: the tools a release and a handover need
+      # Record 43: rootless podman runs real pipeline containers (N4 on a
+      # synthetic release, and who a container's process is on the host);
+      # the runner's image has it, and the test says so and passes without.
+      - name: the tools a release, a handover and a pipeline need
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends dcm2niix p7zip-full
+          sudo apt-get install -y --no-install-recommends dcm2niix p7zip-full podman
           dcm2niix --version || true
           7z | head -2 || true
+          podman --version || true
+          podman info --format 'rootless {{.Host.Security.Rootless}}' || true
       - name: rust-version matches the toolchain
         run: |
           channel="${{ steps.toolchain.outputs.channel }}"

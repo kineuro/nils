@@ -290,3 +290,98 @@ fn the_model_contract_is_the_engine_s_registry() {
         );
     }
 }
+
+/// Record 43 S1: the job contract (`contracts/job`), the descriptor, the
+/// stack manifest and the results, held to the runner that reads them: the
+/// levels, layouts, GPU needs, parameter types and output kinds (the
+/// registry's derivative kinds), the image pinned by a manifest digest in
+/// the schema's pattern as in the runner's check, and v0's N4 descriptor,
+/// re-pinned in this repository, valid under both.
+#[test]
+fn the_job_contract_is_the_runner_s() {
+    use nils_pipeline::descriptor;
+    let v = version("job");
+    assert_eq!(v, 1);
+    let job = json(&format!("job/v{v}/nils.job.schema.json"));
+    let results = json(&format!("job/v{v}/results.schema.json"));
+    let stacks = json(&format!("job/v{v}/stacks.schema.json"));
+    for doc in [&job, &results, &stacks] {
+        assert_eq!(
+            doc["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+    }
+    let x = &job["properties"]["x-nils"]["properties"];
+    assert_eq!(strings(&x["analysis-level"]["enum"]), descriptor::LEVELS);
+    assert_eq!(
+        strings(&x["input"]["properties"]["layout"]["enum"]),
+        descriptor::LAYOUTS
+    );
+    assert_eq!(
+        strings(&job["$defs"]["needs"]["properties"]["gpu"]["enum"]),
+        descriptor::GPU
+    );
+    assert_eq!(
+        strings(&job["$defs"]["parameter"]["properties"]["type"]["enum"]),
+        descriptor::PARAM_TYPES
+    );
+    assert_eq!(
+        strings(&job["$defs"]["output"]["properties"]["kind"]["enum"]),
+        descriptor::OUTPUT_KINDS
+    );
+    assert_eq!(descriptor::OUTPUT_KINDS, nils_registry::derivative::KINDS);
+    assert_eq!(
+        strings(&job["required"]),
+        [
+            "name",
+            "schema-version",
+            "tool-version",
+            "container-image",
+            "x-nils"
+        ]
+    );
+    let described = job["$defs"]["value_key"]["description"].as_str().unwrap();
+    for key in descriptor::RESERVED_KEYS {
+        assert!(described.contains(key), "{key} is the engine's own");
+    }
+    // the image: the schema's pattern and the runner's check agree
+    let pattern = regex::Regex::new(
+        job["properties"]["container-image"]["properties"]["image"]["pattern"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let hex = "59c45f54a1f1dc69134f63bec91a726e41c71c64a16cc21cda0b54526910a3c3";
+    for (image, pinned) in [
+        (format!("docker.io/antsx/ants@sha256:{hex}"), true),
+        (format!("registry.local:5000/a/b@sha256:{hex}"), true),
+        ("antsx/ants:latest".to_string(), false),
+        (format!("antsx/ants@sha256:{}", &hex[..12]), false),
+        (format!("antsx/ants@sha256:{}", hex.to_uppercase()), false),
+    ] {
+        assert_eq!(pattern.is_match(&image), pinned, "{image}");
+        assert_eq!(descriptor::pinned(&image).is_ok(), pinned, "{image}");
+    }
+    // the results and the manifest the runner reads and writes
+    assert_eq!(
+        strings(&results["properties"]["units"]["items"]["properties"]["status"]["enum"]),
+        ["succeeded", "failed", "skipped"]
+    );
+    assert_eq!(
+        stacks["properties"]["contract"]["const"],
+        nils_pipeline::CONTRACT
+    );
+    // v0's N4, re-pinned: it checks, and its image is the schema's
+    let text =
+        std::fs::read_to_string(contracts().join("../pipelines/n4-bias-correction/nils.job.yml"))
+            .unwrap();
+    let n4 = descriptor::parse(&text).unwrap();
+    assert_eq!(n4.name, "n4-bias-correction");
+    assert!(pattern.is_match(&n4.image.reference));
+    assert_eq!(n4.level, descriptor::Level::Session);
+    assert_eq!(n4.layout, descriptor::Layout::Bids);
+    assert_eq!(
+        serde_json::Value::Object(n4.resolve(&[]).unwrap()),
+        serde_json::json!({"dimension": 3, "shrink_factor": 4})
+    );
+}

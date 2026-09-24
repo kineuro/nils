@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 58;
+pub const SCHEMA_VERSION: i64 = 59;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +286,21 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 58,
         apply: labels_leave_with_their_provenance,
     },
+    Migration {
+        version: 59,
+        apply: a_pipeline_has_a_catalog_and_its_runs,
+    },
 ];
+
+/// Record 43 S1 and S2: the pipeline catalog and the runs. A registry from
+/// before gains the two tables empty; with no pipeline added nothing runs,
+/// and every derivative from before keeps its null run.
+fn a_pipeline_has_a_catalog_and_its_runs(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["pipeline", "pipeline_run"])
+}
 
 /// Record 42 S2: the model registry. A registry from before gains the two
 /// tables empty, since no model was registered before there was a place to

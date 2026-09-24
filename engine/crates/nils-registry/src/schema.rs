@@ -1302,7 +1302,7 @@ fn build_registry() -> Vec<Table> {
                 // Who made it. A person's upload names the principal and who
                 // acted for it; a model by its id in the model table (record
                 // 42 S2), checked when the row is written; a pipeline run by
-                // id once its table exists (wave 43), and null until then.
+                // its id in pipeline_run (record 43 S2), null for an upload.
                 col("registered_by", Type::Text),
                 col("actor", Type::Json),
                 col("model_id", Type::Int),
@@ -2112,6 +2112,81 @@ fn build_registry() -> Vec<Table> {
         .unique(&["sample", "stack_id"])
         .index(&["stack_id"])
         .index(&["subject_id"]),
+        // Record 43 S1: the pipeline catalog. One row per version of a
+        // descriptor (`contracts/job/v1`), kept whole with its digest; a
+        // name's next version is a descriptor that differs, and the same
+        // descriptor added again is the version it already is. The image is
+        // pinned by its registry manifest digest, or it was refused.
+        Table::new(
+            "pipeline",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("version", Type::Int),
+                req("tool_version", Type::Text),
+                req("descriptor", Type::Json),
+                // sha256:<hex> of the descriptor's canonical JSON
+                req("descriptor_digest", Type::Text),
+                // repository@sha256:<hex>, and the digest alone
+                req("image", Type::Text),
+                req("image_digest", Type::Text),
+                // bids | stacks, and participant | session | stack
+                req("layout", Type::Text),
+                req("level", Type::Text),
+                // active | retired
+                req("state", Type::Text),
+                req("added_by", Type::Text),
+                req("added_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["name", "version"])
+        .index(&["descriptor_digest"]),
+        // Record 43 S2: one run of a pipeline over a frozen selection, with
+        // everything it needs to be run again: every parameter with its
+        // default filled, the runtime and its version, the host and the
+        // device, the models and the label set it read, the handle it
+        // pinned, where its outputs went, and the digest of what it said.
+        Table::new(
+            "pipeline_run",
+            vec![
+                col("id", Type::Id),
+                req("pipeline_id", Type::Int),
+                col("job_id", Type::Int),
+                // the frozen list of stacks it ran over, pinned while the
+                // run's row stands, and the selection it was frozen from
+                col("handle_id", Type::Int),
+                col("selection", Type::Text),
+                req("params", Type::Json),
+                // podman | apptainer | docker
+                req("runtime", Type::Text),
+                req("runtime_version", Type::Text),
+                req("host", Type::Text),
+                // cpu | cuda:<name>
+                req("device", Type::Text),
+                req("model_ids", Type::Json),
+                col("label_set_id", Type::Int),
+                // running | done | failed | cancelled
+                req("status", Type::Text),
+                req("started_at", Type::Timestamp),
+                col("finished_at", Type::Timestamp),
+                col("exit_code", Type::Int),
+                // sha256:<hex> of the results as the engine read them
+                col("results_digest", Type::Text),
+                // the working place and the output folder under it
+                col("place_id", Type::Int),
+                col("output", Type::Text),
+                // the release a bids input was materialised by
+                col("input_release_id", Type::Int),
+                // units by status, derivatives, review items, proposals
+                col("summary", Type::Json),
+                req("principal", Type::Text),
+                col("actor", Type::Json),
+                col("error", Type::Text),
+            ],
+        )
+        .index(&["pipeline_id"])
+        .index(&["handle_id"])
+        .index(&["job_id"]),
     ]
 }
 

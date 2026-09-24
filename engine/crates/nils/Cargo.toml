@@ -26,6 +26,7 @@ nils-pseudonymize.workspace = true
 nils-synth.workspace = true
 nils-ask.workspace = true
 nils-catalog.workspace = true
+nils-pipeline.workspace = true
 
 clap.workspace = true
 serde-saphyr.workspace = true

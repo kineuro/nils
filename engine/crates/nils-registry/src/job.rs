@@ -629,6 +629,8 @@ pub fn kind_of(argv: &[String]) -> &str {
         argv.get(1).map(String::as_str),
     ) {
         (Some("place"), Some("originals")) => "originals",
+        // record 43 S2: `run` is a `pipeline` job
+        (Some("run"), _) => "pipeline",
         (Some(verb), _) => verb,
         (None, _) => "",
     }

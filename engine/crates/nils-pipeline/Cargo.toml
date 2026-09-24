@@ -1,0 +1,21 @@
+[package]
+name = "nils-pipeline"
+description = "The pipeline runner of NILS: the nils.job.yml descriptor (contracts/job), the container runtimes, the command line a container runs and the results it hands back (record 43)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+glob.workspace = true
+hex.workspace = true
+ring.workspace = true
+serde_json.workspace = true
+serde-saphyr.workspace = true
+
+[lints]
+workspace = true

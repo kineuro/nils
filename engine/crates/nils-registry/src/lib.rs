@@ -35,6 +35,7 @@ pub mod merge;
 pub mod migrate;
 pub mod model;
 pub mod overlay;
+pub mod pipeline;
 pub mod place;
 pub mod principal;
 pub mod pseudonym;
