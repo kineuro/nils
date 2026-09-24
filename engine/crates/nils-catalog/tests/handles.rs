@@ -782,3 +782,61 @@ fn the_measures_ride_on_the_answer() {
         assert_eq!(seen[0].2, seen[1].2, "the scalars differ between backends");
     }
 }
+
+/// The review of record 43: a selection saved before the bound hash stored
+/// the question's hash. Promotion still finds the version that holds a
+/// handle's ask, by hashing that version's own ask again, and never takes
+/// a version that binds other values under the same question.
+#[test]
+fn a_selection_saved_under_the_question_s_hash_still_holds_its_handle() {
+    for mut l in labs() {
+        let ask = fixture("yardstick");
+        let out = go(&mut l, ask.clone(), None, false);
+        let stored = out.handle.ask.clone().unwrap();
+        assert_ne!(
+            out.handle.bound_hash().unwrap(),
+            out.hash,
+            "the yardstick binds values"
+        );
+        // another selection, the same question with another value bound,
+        // saved under the old scheme with the same question's hash
+        let mut other = stored.clone();
+        other.params.get_mut("age_from").unwrap().value = Some(json!(45));
+        selection::save(
+            &mut l.registry,
+            "elsewhere",
+            &other,
+            &out.hash,
+            "tester",
+            None,
+            None,
+        )
+        .unwrap();
+        // the old row of the selection that holds this ask
+        selection::save(
+            &mut l.registry,
+            "converters",
+            &stored,
+            &out.hash,
+            "tester",
+            None,
+            None,
+        )
+        .unwrap();
+        let p = promote::promote(
+            &mut l.registry,
+            out.handle.id,
+            "converters",
+            "tester",
+            Some("the old row"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            p.selection,
+            Some(("converters".to_string(), 1)),
+            "{}",
+            l.name
+        );
+    }
+}
