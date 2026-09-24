@@ -1967,3 +1967,53 @@ fn a_close_that_died_is_run_again_by_a_person() {
         assert_eq!(status, "closed", "{name}");
     }
 }
+
+/// R5 under a second writer: an import reads what stands inside its own
+/// transaction, so a person's decision another process commits while the
+/// import waits for the registry holds the stack, and v0's label never
+/// writes over it.
+#[test]
+fn a_v0_import_reads_what_stands_inside_its_transaction() {
+    for mut l in labs() {
+        let name = l.name;
+        let home = l._dir.path().to_path_buf();
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let mut holder = Home::new(&home).open().unwrap();
+        let mut caller = Home::new(&home).open().unwrap();
+        let store = holder.store();
+        store.begin().unwrap();
+        let now = nils_registry::time::now_iso();
+        row(
+            store,
+            "decision",
+            &[
+                ("scope", Param::from("stack")),
+                ("ref", Param::from(ids[0].to_string())),
+                ("axis", Param::from("body_part")),
+                ("value", Param::from("neck")),
+                ("actor", Param::from("dan@lab")),
+                ("author_kind", Param::from("person")),
+                ("decided_at", Param::from(now.as_str())),
+                ("committed_at", Param::from(now.as_str())),
+            ],
+        );
+        let t = std::thread::spawn(move || {
+            let (v0, _) = labels::parse_v0("1.2.840.9.1\tBrain\t2024-05-06\n");
+            labels::import_v0(
+                &mut caller,
+                &v0,
+                "body_part",
+                &["brain".to_string()],
+                "cleo@lab",
+                false,
+            )
+            .unwrap()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        holder.store().commit().unwrap();
+        let done = t.join().unwrap();
+        assert_eq!(done.held, 1, "{name}: {done:?}");
+        assert!(done.decisions.is_empty(), "{name}");
+    }
+}

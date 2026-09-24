@@ -1105,11 +1105,50 @@ pub fn import_v0(
     if axis.is_empty() {
         return Err(Error::Invalid("an import names its axis".into()));
     }
-    let mut out = Imported {
+    let out = Imported {
         labels: labels.len() as i64,
         ..Imported::default()
     };
+    // What stands is read inside the import's transaction, so a decision a
+    // second writer commits meanwhile is seen: SQLite's immediate
+    // transaction holds the database, and on Postgres the decision table is
+    // held against writers until the import ends.
     let store = registry.store();
+    store.begin()?;
+    let done = import_within(registry, labels, axis, allowed, who, dry_run, out);
+    match done {
+        Ok(out) if !dry_run && !out.decisions.is_empty() => {
+            registry.store().commit()?;
+            Ok(out)
+        }
+        Ok(out) => {
+            registry.store().rollback().ok();
+            Ok(out)
+        }
+        Err(e) => {
+            registry.store().rollback().ok();
+            registry.refresh_meta().ok();
+            Err(e)
+        }
+    }
+}
+
+fn import_within(
+    registry: &mut Registry,
+    labels: &[V0Label],
+    axis: &str,
+    allowed: &[String],
+    who: &str,
+    dry_run: bool,
+    mut out: Imported,
+) -> Result<Imported, Error> {
+    let store = registry.store();
+    if matches!(store, Store::Postgres { .. }) {
+        store.batch(&format!(
+            "LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE",
+            store.qualified("decision")
+        ))?;
+    }
     let tree = stacks_of_series(store, labels)?;
     let mut standing = Standings::read(store, axis)?;
     let now = now_iso();
@@ -1144,29 +1183,14 @@ pub fn import_v0(
             }
         }
     }
-    if dry_run || writes.is_empty() {
+    if dry_run {
         return Ok(out);
     }
-    registry.store().begin()?;
-    let written = (|| -> Result<Vec<i64>, Error> {
-        let mut decisions = Vec::new();
-        for (stack, value, at) in &writes {
-            decisions.push(import_one(registry, axis, *stack, value, at, who, &now)?);
-        }
-        Ok(decisions)
-    })();
-    match written {
-        Ok(decisions) => {
-            registry.store().commit()?;
-            out.decisions = decisions;
-            Ok(out)
-        }
-        Err(e) => {
-            registry.store().rollback().ok();
-            registry.refresh_meta().ok();
-            Err(e)
-        }
+    for (stack, value, at) in &writes {
+        out.decisions
+            .push(import_one(registry, axis, *stack, value, at, who, &now)?);
     }
+    Ok(out)
 }
 
 /// One imported label on one stack, inside the import's transaction: the
