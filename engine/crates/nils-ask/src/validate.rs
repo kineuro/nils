@@ -294,6 +294,24 @@ const LEVELS: &[&str] = &[
 /// The clause options that name a binding, a set or a kind.
 const NAME_OPTIONS: &[&str] = &["of", "over", "set"];
 
+/// The clause options that are booleans. Under the YAML 1.2 booleans a
+/// `yes`, `no`, `on` or `off` is text, so each is checked here rather than
+/// read as its default where it is used (`adjacent: no` meant adjacent).
+/// An axis's `each` is checked with the axis's other options.
+const BOOL_OPTIONS: &[&str] = &["adjacent", "strict", "key"];
+
+/// A boolean option that holds something else.
+fn not_a_boolean(path: impl Into<String>, what: &str, key: &str, v: &Value) -> Issue {
+    issue(
+        Code::UnknownField,
+        path,
+        format!(
+            "{what}'s {key} is {v}, not a boolean: only a plain true or false is a boolean, and yes, no, on and off are text"
+        ),
+        format!("write {key}: true or {key}: false"),
+    )
+}
+
 /// A name the reader took for a boolean (kineuro/nils#98): YAML reads a
 /// plain `true` or `false` as one, so the option named nothing, and the
 /// refusal says why rather than that the name is missing.
@@ -1373,6 +1391,13 @@ fn check_clause(
         for key in NAME_OPTIONS {
             if let Some(Value::Bool(b)) = cl.opts.get(*key) {
                 issues.push(read_as_boolean(path, op, key, *b));
+            }
+        }
+        for key in BOOL_OPTIONS {
+            if let Some(v) = cl.opts.get(*key)
+                && !v.is_boolean()
+            {
+                issues.push(not_a_boolean(path, op, key, v));
             }
         }
         match op {

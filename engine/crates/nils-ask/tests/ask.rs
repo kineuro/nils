@@ -823,6 +823,78 @@ out: {{set: by_sex, level: aggregate, columns: [["field", {{}}, "sex"], ["field"
     );
 }
 
+/// Under the 1.2 booleans a `no`, `yes`, `on` or `off` is text, so a
+/// boolean option written that way must be refused at its path rather than
+/// read as its default (`adjacent: no` would otherwise mean adjacent).
+#[test]
+fn a_boolean_option_written_as_yes_or_no_is_refused_at_its_path() {
+    let yardstick = fixture("yardstick");
+    let refused_text = |text: &str| -> Vec<nils_ask::Issue> {
+        refused(nils_ask::read(text).unwrap_or_else(|e| panic!("{e}")))
+    };
+    let says_true_or_false = |issues: &[nils_ask::Issue], path: &str, key: &str| {
+        let hit = issues
+            .iter()
+            .find(|i| i.path == path && i.message.contains(key))
+            .unwrap_or_else(|| panic!("{path} {key}: {issues:?}"));
+        assert!(
+            hit.next.contains("true") && hit.next.contains("false"),
+            "{}",
+            hit.next
+        );
+    };
+    // change's adjacent
+    for word in ["no", "yes", "off", "\"false\"", "0"] {
+        let text = yardstick.replace("adjacent: true", &format!("adjacent: {word}"));
+        assert_ne!(text, yardstick);
+        says_true_or_false(
+            &refused_text(&text),
+            "sets.converted.bind.transition",
+            "adjacent",
+        );
+    }
+    // a comparison's strict
+    let text = yardstick.replace(
+        r#"[">",  {}, ["field", {}, "first"], ["field", {}, "converted.transition.to_date"]]"#,
+        r#"[">",  {strict: yes}, ["field", {}, "first"], ["field", {}, "converted.transition.to_date"]]"#,
+    );
+    assert_ne!(text, yardstick);
+    let issues = refused_text(&text);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.path.starts_with("sets.followups.where") && i.message.contains("strict")),
+        "{issues:?}"
+    );
+    let hit = issues
+        .iter()
+        .find(|i| i.message.contains("strict"))
+        .unwrap();
+    assert!(
+        hit.next.contains("true") && hit.next.contains("false"),
+        "{}",
+        hit.next
+    );
+    // round's key
+    let issues = refused(json!({
+        "ast_version": 1,
+        "sets": {"t": {"grain": "stack",
+                        "bind": {"te": ["round", {"key": "yes"}, ["field", {}, "echo_time"], 1]}}},
+        "out": {"set": "t", "level": "record", "columns": [["field", {}, "te"]]}
+    }));
+    says_true_or_false(&issues, "sets.t.bind.te", "key");
+    // true and false are still accepted
+    accepted(nils_ask::read(&yardstick.replace("adjacent: true", "adjacent: false")).unwrap());
+    // a pinned handle's pin
+    let e = nils_ask::parse(&yardstick.replacen(
+        "grain: subject",
+        "grain: subject\n    from: {handle: h1, pin: no}",
+        1,
+    ))
+    .expect_err("pin: no is not a boolean");
+    assert!(e.to_string().contains("pin"), "{e}");
+}
+
 /// kineuro/nils#101: a list of literals in an argument is a list, not a
 /// clause without its options map. Repair leaves an inline list whose first
 /// element is not an op of the language as it was written, and still
