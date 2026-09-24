@@ -495,11 +495,22 @@ fn one_campaign_mechanism_annotates_and_curates_through_the_door_alone() {
         CURATOR,
     );
     assert_eq!(answers["rows"], 3, "{answers}");
-    let set = server.ok(
+    // a set of forms is read at detail quasi, like the answers: at plain a
+    // rater sees what the set is and how many rows, never its files
+    let plain = server.ok(
         "GET",
         &format!("/api/label-sets/{}", outcome["id"]),
         None,
         ANNA,
+    );
+    assert!(plain.get("files").is_none(), "{plain}");
+    assert_eq!(plain["rows"], 1, "{plain}");
+    assert_eq!(plain["digest"], outcome["digest"], "{plain}");
+    let set = server.ok(
+        "GET",
+        &format!("/api/label-sets/{}", outcome["id"]),
+        None,
+        CURATOR,
     );
     let tsv = set["files"]["labels.tsv"].as_str().unwrap();
     assert_eq!(sha256(tsv), set["digest"].as_str().unwrap(), "{set}");

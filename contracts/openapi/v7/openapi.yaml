@@ -1306,7 +1306,7 @@ paths:
   /api/label-sets/{id}:
     get:
       summary: One label set, with its files (record 42 S7; campaigns:see or review:see)
-      description: "The set and `files`: the text of labels.tsv and provenance.json as written, read back from the export place. A set of sessions carries the day each opened, which needs detail quasi."
+      description: "The set and `files`: the text of labels.tsv and provenance.json as written, read back from the export place. A set of sessions carries the day each opened, which needs detail quasi. A set of forms, free text or derivatives (whose labels carry a form beside the file) holds a person's words, read at detail quasi as the answers are: at plain it is answered without `files`, its metadata and counts only."
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
       responses:
         "200": {description: The label set}

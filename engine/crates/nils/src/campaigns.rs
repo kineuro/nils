@@ -526,6 +526,12 @@ pub(crate) fn route(
                 if set.what.starts_with("pick:") {
                     caller.allowed("a label set of sessions", Need::Any, Detail::Quasi)?;
                 }
+                // a set of forms or free text carries a person's words, which
+                // are read at quasi as the answers are: at plain, the set's
+                // metadata and counts only
+                if plain(caller) && holds_words(&set.what) {
+                    return Ok(Reply::ok(set_json(&set, None)));
+                }
                 let files = set.path.as_deref().map(|p| {
                     let dir = Path::new(p);
                     json!({
@@ -588,6 +594,12 @@ fn no_sealed_flag(doc: &Value) -> Result<(), Reply> {
         ));
     }
     Ok(())
+}
+
+/// Whether a set's labels may hold a person's words: a form's, a free
+/// answer's, or the form beside a derivative.
+fn holds_words(what: &str) -> bool {
+    what == "form" || what == "free" || what.starts_with("derivative:")
 }
 
 /// Whether the caller reads at detail plain, where a campaign's doors
