@@ -26,6 +26,7 @@ pub mod pack;
 pub mod pass;
 pub mod pick;
 pub mod private;
+pub mod reads;
 pub mod rules;
 pub mod shape;
 pub mod stack;

@@ -338,7 +338,7 @@ fn about(kind: &str, e: &Value) -> String {
 /// A decision in force: its axis, value, why and who committed it.
 /// A decision in force: its axis, value, why, who committed it, its id and
 /// the campaign that closed into it.
-type Decided = (
+pub(crate) type Decided = (
     String,
     Option<String>,
     Option<String>,
@@ -349,7 +349,7 @@ type Decided = (
 
 /// The decisions in force on the stack, its series, its subject or its
 /// origin, newest first.
-fn decisions_of(store: &mut Store, stack: i64) -> Result<Vec<Decided>, StoreError> {
+pub(crate) fn decisions_of(store: &mut Store, stack: i64) -> Result<Vec<Decided>, StoreError> {
     let d = store.dialect();
     let sql = format!(
         "SELECT k.series_id, r.subject_id, \

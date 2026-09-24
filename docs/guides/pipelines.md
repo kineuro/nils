@@ -147,6 +147,48 @@ The job's result counts what it built, skipped and failed, with why for each fai
 
 3. Close it. Each item becomes one decision per axis, and agreement is reported whole and per axis.
 
+## Read a campaign fast
+
+1. Claim the items worth a look first: those where the two systems or the rules disagree, then the least confident.
+
+   ```sh
+   nils campaign claim classify-review --order value
+   ```
+
+   At the door it is `POST /api/campaigns/{id}/claim` with `{"order": "value"}`.
+
+2. Read the evidence of the item's stack, one line per axis: the value in force and who set it, the rule and clause that decided, the header values that clause read, the other rules and what they said, and System 1's candidates where it asked. `GET /api/campaigns/{id}/items/{item}/why` answers it with the suggested answer; the words a rule matched show only at detail quasi or above.
+
+3. Accept like stacks in one move. `GET /api/campaigns/{id}/batches` groups the open items by the physics that decided them and the suggested answer. `POST /api/campaigns/{id}/batches/{key}/accept` answers every item of a batch with the suggestion, one answer per item, and holds back a share (a tenth unless `hold_back` says otherwise) to be read alone. An item of a sealed sample is never in a batch.
+
+4. See how fast it goes. Every answer keeps the seconds from its claim, the suggestion and whether it was changed:
+
+   ```sh
+   nils campaign stats classify-review
+   ```
+
+## Let a certified sample train
+
+A sealed sample trains nothing until the certificate it was drawn for is recorded.
+
+1. Record what the certification measured:
+
+   ```sh
+   nils labels certificate --sample selection:cert-draw@1 --model <model> --result result.json
+   ```
+
+2. Unseal the sample by that certificate. The seal's rows stay, naming the certificate:
+
+   ```sh
+   nils labels unseal selection:cert-draw@1 --certificate <id>
+   ```
+
+3. Write the development labels a training tool reads: every person's decision in force, and nothing of a sample still sealed:
+
+   ```sh
+   nils labels export --for-training --to /export/labels/dev
+   ```
+
 ## Fetch an output
 
 By the door, the bytes with their digest in `X-Nils-Sha256`:

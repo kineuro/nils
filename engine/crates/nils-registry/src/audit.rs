@@ -111,6 +111,10 @@ pub enum Action {
     LabelsImport,
     /// Record 40 R3: a sample sealed for certification, never training data.
     LabelsSeal,
+    /// Record 48 R2: a certificate recorded for a sealed sample, and the
+    /// sample unsealed by it, so its labels may train the next model.
+    LabelsCertificate,
+    LabelsUnseal,
     /// Record 43: a descriptor added to the pipeline catalog, a pipeline
     /// run over a frozen selection (its derivatives and review items with
     /// it), and the runtime an operator chose. None changes a judgement: a
@@ -176,6 +180,8 @@ impl Action {
             Action::LabelsExport => "labels.export",
             Action::LabelsImport => "labels.import",
             Action::LabelsSeal => "labels.seal",
+            Action::LabelsCertificate => "labels.certificate",
+            Action::LabelsUnseal => "labels.unseal",
             Action::PipelineAdd => "pipeline.add",
             Action::PipelineRun => "pipeline.run",
             Action::PipelineRuntime => "pipeline.runtime",
@@ -211,6 +217,8 @@ impl Action {
                 | Action::CampaignClose
                 | Action::LabelsExport
                 | Action::LabelsSeal
+                | Action::LabelsCertificate
+                | Action::LabelsUnseal
                 | Action::PipelineAdd
                 | Action::PipelineRun
                 | Action::PipelineRuntime

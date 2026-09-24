@@ -925,18 +925,28 @@ pub fn by_digest(store: &mut Store, digest: &str) -> Result<Vec<LabelSet>, Error
 /// fitted on the sample that certifies it certifies nothing. A set is held
 /// to the seal it was written under and to the samples sealed since, read
 /// from its `labels.tsv` where the file is still there.
+///
+/// Record 48 R2: a sample stays sealed only until the certificate it was
+/// drawn for is recorded and the sample unsealed by it ([`unseal`]). A set
+/// written while its items were sealed is read again against the seals in
+/// force now, from its `labels.tsv`; one whose file is gone cannot be read
+/// again, and stays refused.
 pub fn usable_for_training(store: &mut Store, id: i64) -> Result<LabelSet, Error> {
     let set = get(store, id)?.ok_or_else(|| Error::NotFound(format!("no label set {id}")))?;
-    let sealed_since = match set.path.as_deref() {
+    let now_sealed = match set.path.as_deref() {
         Some(p) => match std::fs::read_to_string(std::path::Path::new(p).join("labels.tsv")) {
-            Ok(text) => sealed_among(store, &keys_of_tsv(&text))?,
-            Err(_) => false,
+            Ok(text) => Some(sealed_among(store, &keys_of_tsv(&text))?),
+            Err(_) => None,
         },
-        None => false,
+        None => None,
     };
-    if set.sealed || sealed_since {
+    let refused = match now_sealed {
+        Some(sealed) => sealed,
+        None => set.sealed,
+    };
+    if refused {
         return Err(Error::Refused(format!(
-            "label set {id} holds items of a sealed certification sample, which is never training data (record 40 R3)"
+            "label set {id} holds items of a sealed certification sample, which is never training data until its certificate is recorded and the sample unsealed (records 40 R3 and 48 R2)"
         )));
     }
     Ok(set)
@@ -1097,7 +1107,8 @@ fn join_ids(ids: &[i64]) -> String {
 
 /// Whether any of these labels is an item of a sealed sample: its stack is
 /// sealed, or, for a session's label that names no stack, a stack of its
-/// subject is.
+/// subject is. A stack a certificate unsealed (record 48 R2) is no longer
+/// sealed by that sample, though its row stays.
 pub fn sealed_among(store: &mut Store, labels: &[Label]) -> Result<bool, Error> {
     let stacks: BTreeSet<i64> = labels.iter().filter_map(|l| l.stack_id).collect();
     let subjects: BTreeSet<i64> = labels
@@ -1109,7 +1120,7 @@ pub fn sealed_among(store: &mut Store, labels: &[Label]) -> Result<bool, Error> 
         let ids: Vec<i64> = ids.into_iter().collect();
         for chunk in ids.chunks(500) {
             let sql = format!(
-                "SELECT 1 FROM {} WHERE {column} IN ({}) LIMIT 1",
+                "SELECT 1 FROM {} WHERE {column} IN ({}) AND unsealed_at IS NULL LIMIT 1",
                 store.qualified("sealed_stack"),
                 join_ids(chunk)
             );
@@ -1119,6 +1130,419 @@ pub fn sealed_among(store: &mut Store, labels: &[Label]) -> Result<bool, Error> 
         }
     }
     Ok(false)
+}
+
+/// The stacks and the subjects sealed now, of the ones given: what a batch
+/// may not accept in one move and a training view leaves out.
+pub fn sealed_now(
+    store: &mut Store,
+    stacks: &[i64],
+    subjects: &[i64],
+) -> Result<(BTreeSet<i64>, BTreeSet<i64>), Error> {
+    let mut out = (BTreeSet::new(), BTreeSet::new());
+    for (column, ids, into) in [
+        ("stack_id", stacks, &mut out.0),
+        ("subject_id", subjects, &mut out.1),
+    ] {
+        let ids: Vec<i64> = ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for chunk in ids.chunks(500) {
+            let sql = format!(
+                "SELECT DISTINCT {column} FROM {} WHERE {column} IN ({}) AND unsealed_at IS NULL",
+                store.qualified("sealed_stack"),
+                join_ids(chunk)
+            );
+            for r in store.query(&sql, &[])? {
+                into.insert(r.int(0)?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Record 48 R2: the labels a training tool may learn from, of these: every
+/// one whose item is not of a sample sealed now. Answers what is kept and
+/// how many were left out.
+pub fn drop_sealed(store: &mut Store, labels: Vec<Label>) -> Result<(Vec<Label>, usize), Error> {
+    let stacks: Vec<i64> = labels.iter().filter_map(|l| l.stack_id).collect();
+    let subjects: Vec<i64> = labels
+        .iter()
+        .filter(|l| l.stack_id.is_none())
+        .filter_map(|l| l.subject_id)
+        .collect();
+    let (sealed_stacks, sealed_subjects) = sealed_now(store, &stacks, &subjects)?;
+    let before = labels.len();
+    let kept: Vec<Label> = labels
+        .into_iter()
+        .filter(|l| match l.stack_id {
+            Some(k) => !sealed_stacks.contains(&k),
+            None => !l.subject_id.is_some_and(|s| sealed_subjects.contains(&s)),
+        })
+        .collect();
+    let dropped = before - kept.len();
+    Ok((kept, dropped))
+}
+
+/// Record 48 R2: the development labels a training tool reads: the
+/// decisions in force on an axis, or on every axis a decision names, by the
+/// author kinds given (a person's when none is), leaving out every item of
+/// a sample sealed now. Answers the labels and how many were left out.
+/// Staged decisions are not in force and never train.
+pub fn training_labels(
+    store: &mut Store,
+    axis: Option<&str>,
+    stacks: Option<&[i64]>,
+    authors: &[String],
+    campaign: Option<i64>,
+) -> Result<(Vec<Label>, usize), Error> {
+    let axes: Vec<String> = match axis {
+        Some(a) => vec![a.to_string()],
+        None => store
+            .query(
+                &format!(
+                    "SELECT DISTINCT axis FROM {} WHERE withdrawn_at IS NULL ORDER BY axis",
+                    store.qualified("decision")
+                ),
+                &[],
+            )?
+            .iter()
+            .map(|r| r.text(0).map(str::to_string))
+            .collect::<Result<_, _>>()?,
+    };
+    let person = ["person".to_string()];
+    let authors = if authors.is_empty() {
+        &person[..]
+    } else {
+        authors
+    };
+    let mut rows = Vec::new();
+    for a in &axes {
+        rows.extend(decision_labels(
+            store,
+            &DecisionQuery {
+                axis: a,
+                stacks,
+                authors,
+                campaign,
+                staged_too: false,
+            },
+        )?);
+    }
+    drop_sealed(store, rows)
+}
+
+// ------------------------------------------------------ the certificates
+
+/// Record 48 R2: what a certification measured on a sealed sample.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Certificate {
+    pub id: i64,
+    pub sample: String,
+    pub model_ids: Vec<i64>,
+    pub result: Value,
+    pub created_by: String,
+    pub created_at: String,
+}
+
+impl Certificate {
+    pub fn as_json(&self) -> Value {
+        json!({
+            "id": self.id, "sample": self.sample, "model_ids": self.model_ids,
+            "result": self.result, "created_by": self.created_by, "created_at": self.created_at,
+        })
+    }
+}
+
+fn certificate_of(r: &Row) -> Result<Certificate, StoreError> {
+    Ok(Certificate {
+        id: r.int(0)?,
+        sample: r.text(1)?.to_string(),
+        model_ids: r
+            .opt_text(2)?
+            .and_then(|t| serde_json::from_str::<Vec<i64>>(t).ok())
+            .unwrap_or_default(),
+        result: r
+            .opt_text(3)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(Value::Null),
+        created_by: r.text(4)?.to_string(),
+        created_at: r.text(5)?.to_string(),
+    })
+}
+
+fn select_certificates(store: &Store) -> String {
+    let d = store.dialect();
+    let t = table("certificate");
+    [
+        "id",
+        "sample",
+        "model_ids",
+        "result",
+        "created_by",
+        "created_at",
+    ]
+    .iter()
+    .map(|c| d.text_of(t.column(c).expect("a certificate column")))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+pub fn certificate(store: &mut Store, id: i64) -> Result<Option<Certificate>, Error> {
+    let sql = format!(
+        "SELECT {} FROM {} WHERE id = {}",
+        select_certificates(store),
+        store.qualified("certificate"),
+        store.dialect().param(1, Type::Int)
+    );
+    Ok(store
+        .query_opt(&sql, &[Param::Int(id)])?
+        .map(|r| certificate_of(&r))
+        .transpose()?)
+}
+
+/// Every certificate, newest first.
+pub fn certificates(store: &mut Store) -> Result<Vec<Certificate>, Error> {
+    let sql = format!(
+        "SELECT {} FROM {} ORDER BY id DESC",
+        select_certificates(store),
+        store.qualified("certificate")
+    );
+    Ok(store
+        .query(&sql, &[])?
+        .iter()
+        .map(certificate_of)
+        .collect::<Result<_, _>>()?)
+}
+
+/// The samples sealed under a name, with how many of their stacks are
+/// sealed now and how many a certificate unsealed.
+pub fn sample_counts(store: &mut Store, sample: &str) -> Result<(i64, i64), Error> {
+    let mut out = [0i64; 2];
+    for (i, filter) in ["unsealed_at IS NULL", "unsealed_at IS NOT NULL"]
+        .iter()
+        .enumerate()
+    {
+        let sql = format!(
+            "SELECT COUNT(*) FROM {} WHERE sample = {} AND {filter}",
+            store.qualified("sealed_stack"),
+            store.dialect().param(1, Type::Text)
+        );
+        out[i] = store
+            .query_opt(&sql, &[Param::from(sample)])?
+            .map(|r| r.int(0))
+            .transpose()?
+            .unwrap_or(0);
+    }
+    Ok((out[0], out[1]))
+}
+
+/// Record 48 R2: record what a certification measured on a sealed sample:
+/// the models it certified and the result as the certifying tool gave it.
+/// Refused for a sample nobody sealed, and for a model not registered.
+pub fn record_certificate(
+    registry: &mut Registry,
+    sample: &str,
+    model_ids: &[i64],
+    result: &Value,
+    who: &str,
+) -> Result<Certificate, Error> {
+    let sample = sample.trim();
+    if sample.is_empty() {
+        return Err(Error::Invalid(
+            "a certificate names the sealed sample it measured".into(),
+        ));
+    }
+    if model_ids.is_empty() {
+        return Err(Error::Invalid(
+            "a certificate names the registered models it certified".into(),
+        ));
+    }
+    if !result.is_object() {
+        return Err(Error::Invalid(
+            "result: what the certification measured, a JSON object".into(),
+        ));
+    }
+    let store = registry.store();
+    let (sealed, unsealed) = sample_counts(store, sample)?;
+    if sealed + unsealed == 0 {
+        return Err(Error::NotFound(format!(
+            "no sample {sample} was sealed (nils labels seal); a certificate measures a sealed sample"
+        )));
+    }
+    for id in model_ids {
+        if crate::model::get(store, *id)?.is_none() {
+            return Err(Error::NotFound(format!("no registered model {id}")));
+        }
+    }
+    let now = now_iso();
+    let id = store
+        .insert(
+            &Insert::new(
+                table("certificate"),
+                &["sample", "model_ids", "result", "created_by", "created_at"],
+            )
+            .returning(&["id"]),
+            &[vec![
+                Param::from(sample),
+                Param::from(json!(model_ids).to_string()),
+                Param::from(result.to_string()),
+                Param::from(who),
+                Param::from(now.as_str()),
+            ]],
+        )?
+        .first()
+        .ok_or_else(|| StoreError::Message("the certificate was not written back".into()))?
+        .int(0)?;
+    audit::record(
+        registry,
+        &Entry {
+            principal: who,
+            action: Action::LabelsCertificate,
+            scope: json!({"certificate": id, "sample": sample, "models": model_ids}),
+            policy: None,
+            job_id: None,
+            details: None,
+        },
+    )?;
+    certificate(registry.store(), id)?
+        .ok_or_else(|| Error::NotFound(format!("no certificate {id}")))
+}
+
+/// What an unseal did.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Unsealed {
+    pub sample: String,
+    pub certificate: i64,
+    /// Stacks unsealed now, and those the certificate had unsealed before.
+    pub stacks: i64,
+    pub already: i64,
+}
+
+impl Unsealed {
+    pub fn as_json(&self) -> Value {
+        json!({
+            "sample": self.sample, "certificate": self.certificate,
+            "stacks": self.stacks, "already": self.already,
+        })
+    }
+}
+
+/// The samples whose stacks a label set holds, sealed now or unsealed
+/// since, read from its `labels.tsv`.
+pub fn samples_of_set(store: &mut Store, set: &LabelSet) -> Result<Vec<String>, Error> {
+    let text = set
+        .path
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(std::path::Path::new(p).join("labels.tsv")).ok())
+        .ok_or_else(|| {
+            Error::Refused(format!(
+                "label set {}'s labels.tsv is not where it was written, so the samples it holds cannot be read",
+                set.id
+            ))
+        })?;
+    let rows = keys_of_tsv(&text);
+    let stacks: Vec<i64> = rows
+        .iter()
+        .filter_map(|l| l.stack_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let subjects: Vec<i64> = rows
+        .iter()
+        .filter(|l| l.stack_id.is_none())
+        .filter_map(|l| l.subject_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for (column, ids) in [("stack_id", stacks), ("subject_id", subjects)] {
+        for chunk in ids.chunks(500) {
+            let sql = format!(
+                "SELECT DISTINCT sample FROM {} WHERE {column} IN ({})",
+                store.qualified("sealed_stack"),
+                join_ids(chunk)
+            );
+            for r in store.query(&sql, &[])? {
+                out.insert(r.text(0)?.to_string());
+            }
+        }
+    }
+    Ok(out.into_iter().collect())
+}
+
+/// Record 48 R2: unseal a sealed sample once the certificate it was drawn
+/// for is recorded. Every stack of the sample is marked unsealed by the
+/// certificate, the row kept as history, so a label set holding them may
+/// train the next model; the next certificate draws a fresh sample.
+/// Refused without a certificate, or with one recorded for another sample.
+pub fn unseal(
+    registry: &mut Registry,
+    sample: &str,
+    certificate_id: i64,
+    who: &str,
+) -> Result<Unsealed, Error> {
+    let store = registry.store();
+    let cert = certificate(store, certificate_id)?.ok_or_else(|| {
+        Error::Refused(format!(
+            "no certificate {certificate_id}: a sealed sample is unsealed only once the certificate it was drawn for is recorded"
+        ))
+    })?;
+    if cert.sample != sample.trim() {
+        return Err(Error::Refused(format!(
+            "certificate {certificate_id} measured {}, not {}; a certificate unseals only its own sample",
+            cert.sample,
+            sample.trim()
+        )));
+    }
+    let (sealed, unsealed) = sample_counts(store, &cert.sample)?;
+    if sealed + unsealed == 0 {
+        return Err(Error::NotFound(format!(
+            "no sample {} was sealed",
+            cert.sample
+        )));
+    }
+    let now = now_iso();
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET unsealed_at = {}, unsealed_by = {}, certificate_id = {} \
+         WHERE sample = {} AND unsealed_at IS NULL",
+        store.qualified("sealed_stack"),
+        d.param(1, Type::Timestamp),
+        d.param(2, Type::Text),
+        d.param(3, Type::Int),
+        d.param(4, Type::Text),
+    );
+    store.execute(
+        &sql,
+        &[
+            Param::from(now.as_str()),
+            Param::from(who),
+            Param::Int(certificate_id),
+            Param::from(cert.sample.as_str()),
+        ],
+    )?;
+    let done = Unsealed {
+        sample: cert.sample.clone(),
+        certificate: certificate_id,
+        stacks: sealed,
+        already: unsealed,
+    };
+    audit::record(
+        registry,
+        &Entry {
+            principal: who,
+            action: Action::LabelsUnseal,
+            scope: json!({"sample": done.sample, "certificate": certificate_id, "stacks": done.stacks}),
+            policy: None,
+            job_id: None,
+            details: Some(json!({"already": done.already})),
+        },
+    )?;
+    Ok(done)
 }
 
 // ---------------------------------------------------------- v0's labels

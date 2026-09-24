@@ -1474,9 +1474,16 @@ fn routed(
         return r;
     }
     // record 42: the campaigns and the label sets
-    if let Some(r) =
-        crate::campaigns::route(doors, registry, ask, caller, method.as_str(), &segs, body)
-    {
+    if let Some(r) = crate::campaigns::route(
+        doors,
+        registry,
+        ask,
+        caller,
+        method.as_str(),
+        &segs,
+        query,
+        body,
+    ) {
         return r;
     }
     // record 26: the linkage doors, under the table's grants like the rest

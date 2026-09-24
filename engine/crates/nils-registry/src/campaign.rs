@@ -1624,6 +1624,8 @@ pub struct Item {
     pub decision_id: Option<i64>,
     pub pick_id: Option<i64>,
     pub resolved_at: Option<String>,
+    /// Record 48 R1: a batch held the item back to be read alone.
+    pub held_back: bool,
 }
 
 impl Item {
@@ -1635,12 +1637,12 @@ impl Item {
             "input_derivative_ids": self.input_derivative_ids, "state": self.state,
             "round": self.round, "agreement": self.agreement, "metric": self.metric,
             "outcome": self.outcome, "decision_id": self.decision_id, "pick_id": self.pick_id,
-            "resolved_at": self.resolved_at,
+            "resolved_at": self.resolved_at, "held_back": self.held_back,
         })
     }
 }
 
-const ITEM_COLUMNS: [&str; 17] = [
+const ITEM_COLUMNS: [&str; 18] = [
     "id",
     "campaign_id",
     "position",
@@ -1658,6 +1660,7 @@ const ITEM_COLUMNS: [&str; 17] = [
     "decision_id",
     "pick_id",
     "resolved_at",
+    "held_back",
 ];
 
 fn item_of(r: &Row) -> Result<Item, StoreError> {
@@ -1679,7 +1682,60 @@ fn item_of(r: &Row) -> Result<Item, StoreError> {
         decision_id: r.opt_int(14)?,
         pick_id: r.opt_int(15)?,
         resolved_at: r.opt_text(16)?.map(str::to_string),
+        held_back: r.opt_int(17)?.unwrap_or(0) != 0,
     })
+}
+
+/// Record 48 R1: the items a rater could still be given, in position
+/// order: open in round one, wanting raters, never given to this rater,
+/// and not held back by a batch to be read alone.
+pub fn open_for(
+    store: &mut Store,
+    campaign: &Campaign,
+    principal: &str,
+) -> Result<Vec<Item>, Error> {
+    let d = store.dialect();
+    let a = store.qualified("campaign_assignment");
+    let sql = format!(
+        "SELECT {} FROM {} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
+         AND (i.held_back IS NULL OR i.held_back = 0) \
+         AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
+              AND a.state IN ('leased', 'submitted')) < {} \
+         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}) \
+         ORDER BY i.position",
+        select_list(store, "campaign_item", &ITEM_COLUMNS, Some("i")),
+        store.qualified("campaign_item"),
+        d.param(1, Type::Int),
+        d.param(2, Type::Int),
+        d.param(3, Type::Text),
+    );
+    Ok(store
+        .query(
+            &sql,
+            &[
+                Param::Int(campaign.id),
+                Param::Int(campaign.raters_per_item),
+                Param::from(principal),
+            ],
+        )?
+        .iter()
+        .map(item_of)
+        .collect::<Result<_, _>>()?)
+}
+
+/// Record 48 R1: hold items of a campaign back from every batch, to be
+/// read alone.
+pub fn hold_back(store: &mut Store, campaign: i64, items: &[i64]) -> Result<(), Error> {
+    for chunk in items.chunks(500) {
+        let sql = format!(
+            "UPDATE {} SET held_back = 1 WHERE campaign_id = {} AND id IN ({})",
+            store.qualified("campaign_item"),
+            store.dialect().param(1, Type::Int),
+            join_ids(chunk)
+        );
+        store.execute(&sql, &[Param::Int(campaign)])?;
+    }
+    Ok(())
 }
 
 /// A campaign's items, in position order.
@@ -1977,6 +2033,218 @@ pub fn claim(
     role: Role,
     now: &str,
 ) -> Result<Option<Claimed>, Error> {
+    claim_in(registry, campaign, principal, role, Order::Position, now)
+}
+
+/// The order a rater's claims take the items in (record 48 R1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Order {
+    /// By position, as the items were listed.
+    #[default]
+    Position,
+    /// By value: first the items where the two systems or the rules
+    /// disagree, then the least confident, then by position ([`worth`]).
+    Value,
+}
+
+impl Order {
+    pub fn parse(s: &str) -> Result<Order, Error> {
+        match s {
+            "position" => Ok(Order::Position),
+            "value" => Ok(Order::Value),
+            other => Err(invalid(format!("order: position or value, not {other}"))),
+        }
+    }
+}
+
+/// What makes an item worth a person's look first (record 48 R1).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Worth {
+    /// The two systems disagree (System 1's `agree` leaves an axis out), or
+    /// the rules that voted on an axis said different values.
+    pub disagree: bool,
+    /// System 1's first candidate's probability where it asked about the
+    /// stack; else the lowest confidence the rules resolved an axis with;
+    /// one where nothing is known.
+    pub confidence: f64,
+    /// Whether System 1 asked about the stack.
+    pub asked: bool,
+}
+
+impl Worth {
+    pub fn as_json(&self) -> Value {
+        json!({"disagree": self.disagree, "confidence": self.confidence, "asked": self.asked})
+    }
+}
+
+/// The axes a question is about, for [`worth`]: its axis or axes, or none
+/// (every axis) for the other kinds.
+pub fn axes_of(question: &Question) -> Vec<String> {
+    match question {
+        Question::Axis { axis, .. } => vec![axis.clone()],
+        Question::Axes { axes, .. } => axes.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// How much each stack is worth a look (record 48 R1): from the open
+/// `classify.asked` item where System 1 asked (its confidence, and whether
+/// both systems agree on every axis asked), else from the rules (the lowest
+/// confidence an axis resolved with, and whether the rules that voted on an
+/// axis said different values; a clause that only restates another axis is
+/// no witness). `axes` narrows it to the axes asked; empty is every axis.
+pub fn worth(
+    store: &mut Store,
+    stacks: &[i64],
+    axes: &[String],
+) -> Result<BTreeMap<i64, Worth>, Error> {
+    let wanted = |a: &str| axes.is_empty() || axes.iter().any(|x| x == a);
+    let mut out: BTreeMap<i64, Worth> = stacks
+        .iter()
+        .map(|s| {
+            (
+                *s,
+                Worth {
+                    disagree: false,
+                    confidence: 1.0,
+                    asked: false,
+                },
+            )
+        })
+        .collect();
+    let list: Vec<i64> = out.keys().copied().collect();
+    let d = store.dialect();
+    let t = table("review_item");
+    // System 1's questions, one open per stack
+    for chunk in list.chunks(500) {
+        let keys = chunk
+            .iter()
+            .map(|s| format!("'{}'", crate::asked::key(*s)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT group_key, {} FROM {} WHERE kind = '{}' AND status = 'open' AND group_key IN ({keys})",
+            d.text_of(t.column("evidence").expect("evidence")),
+            store.qualified("review_item"),
+            crate::asked::KIND,
+        );
+        for r in store.query(&sql, &[])? {
+            let Some(stack) = r
+                .opt_text(0)?
+                .and_then(|k| k.rsplit(':').next())
+                .and_then(|n| n.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            let ev: Value = r
+                .opt_text(1)?
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or(Value::Null);
+            let asked: Vec<String> = ev["axes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|a| wanted(a))
+                .map(str::to_string)
+                .collect();
+            let agree: BTreeSet<&str> = ev["agree"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            if let Some(w) = out.get_mut(&stack) {
+                w.asked = true;
+                w.confidence = ev["confidence"].as_f64().unwrap_or(1.0);
+                w.disagree = asked.iter().any(|a| !agree.contains(a.as_str()));
+            }
+        }
+    }
+    // the rules: the confidence each axis resolved with
+    for chunk in list.chunks(500) {
+        let sql = format!(
+            "SELECT stack_id, axis, confidence FROM {} WHERE stack_id IN ({})",
+            store.qualified("classification_axis"),
+            join_ids(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            let (stack, axis) = (r.int(0)?, r.text(1)?.to_string());
+            if !wanted(&axis) {
+                continue;
+            }
+            let c = r.double(2)?;
+            if let Some(w) = out.get_mut(&stack)
+                && !w.asked
+                && c < w.confidence
+            {
+                w.confidence = c;
+            }
+        }
+    }
+    // and whether the rules that voted on an axis disagreed
+    let mut voters: BTreeMap<i64, (String, bool)> = BTreeMap::new();
+    let sql = format!(
+        "SELECT id, axis, restates FROM {}",
+        store.qualified("classification_voter")
+    );
+    for r in store.query(&sql, &[])? {
+        voters.insert(r.int(0)?, (r.text(1)?.to_string(), r.int(2)? != 0));
+    }
+    for chunk in list.chunks(500) {
+        let sql = format!(
+            "SELECT stack_id, votes FROM {} WHERE stack_id IN ({})",
+            store.qualified("classification_vote"),
+            join_ids(chunk)
+        );
+        let mut said: BTreeMap<(i64, String), BTreeSet<String>> = BTreeMap::new();
+        for r in store.query(&sql, &[])? {
+            let stack = r.int(0)?;
+            let pairs: Vec<(i64, String)> = serde_json::from_str(r.text(1)?).unwrap_or_default();
+            for (voter, value) in pairs {
+                if let Some((axis, restates)) = voters.get(&voter)
+                    && !restates
+                    && wanted(axis)
+                {
+                    said.entry((stack, axis.clone())).or_default().insert(value);
+                }
+            }
+        }
+        for ((stack, _), values) in said {
+            if values.len() > 1
+                && let Some(w) = out.get_mut(&stack)
+                && !w.asked
+            {
+                w.disagree = true;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The key [`Order::Value`] sorts by: disagreement first, then the least
+/// confident, then the position.
+fn by_value(w: Option<&Worth>, position: i64) -> (u8, i64, i64) {
+    match w {
+        Some(w) => (
+            u8::from(!w.disagree),
+            (w.confidence.clamp(0.0, 1.0) * 1_000_000.0).round() as i64,
+            position,
+        ),
+        None => (1, 1_000_000, position),
+    }
+}
+
+/// [`claim`], taking a rater's next item in the order given. An
+/// adjudicator's order is always the position.
+pub fn claim_in(
+    registry: &mut Registry,
+    campaign: i64,
+    principal: &str,
+    role: Role,
+    order: Order,
+    now: &str,
+) -> Result<Option<Claimed>, Error> {
     let c = get(registry.store(), campaign)?
         .ok_or_else(|| Error::NotFound(format!("no campaign {campaign}")))?;
     if c.status != "open" {
@@ -2018,32 +2286,53 @@ pub fn claim(
             return Ok(Some((r.int(0)?, true)));
         }
         let until = plus_seconds(now, c.lease_seconds);
+        let leased_ms = crate::time::millis_at(now);
         let a = store.qualified("campaign_assignment");
         let i = store.qualified("campaign_item");
         match role {
             Role::Rater => {
                 let sql = format!(
-                    "SELECT i.id FROM {i} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
+                    "SELECT i.id, i.position, i.stack_id FROM {i} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
                      AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
                           AND a.state IN ('leased', 'submitted')) < {} \
                      AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}) \
-                     ORDER BY i.position LIMIT 1",
+                     ORDER BY i.position{}",
                     d.param(1, Type::Int),
                     d.param(2, Type::Int),
-                    d.param(3, Type::Text)
+                    d.param(3, Type::Text),
+                    if order == Order::Position {
+                        " LIMIT 1"
+                    } else {
+                        ""
+                    }
                 );
-                let Some(r) = store.query_opt(
-                    &sql,
-                    &[
-                        Param::Int(campaign),
-                        Param::Int(c.raters_per_item),
-                        Param::from(principal),
-                    ],
-                )?
-                else {
+                let open: Vec<(i64, i64, Option<i64>)> = store
+                    .query(
+                        &sql,
+                        &[
+                            Param::Int(campaign),
+                            Param::Int(c.raters_per_item),
+                            Param::from(principal),
+                        ],
+                    )?
+                    .iter()
+                    .map(|r| Ok((r.int(0)?, r.int(1)?, r.opt_int(2)?)))
+                    .collect::<Result<_, StoreError>>()?;
+                let item = match order {
+                    Order::Position => open.first().map(|(id, ..)| *id),
+                    Order::Value => {
+                        let stacks: Vec<i64> = open.iter().filter_map(|(.., s)| *s).collect();
+                        let worth = worth(store, &stacks, &axes_of(&c.question()?))?;
+                        open.iter()
+                            .min_by_key(|(_, position, stack)| {
+                                by_value(stack.and_then(|s| worth.get(&s)), *position)
+                            })
+                            .map(|(id, ..)| *id)
+                    }
+                };
+                let Some(item) = item else {
                     return Ok(None);
                 };
-                let item = r.int(0)?;
                 let id = store
                     .insert(
                         &Insert::new(
@@ -2058,6 +2347,7 @@ pub fn claim(
                                 "created_at",
                                 "leased_at",
                                 "lease_until",
+                                "leased_ms",
                             ],
                         )
                         .returning(&["id"]),
@@ -2071,6 +2361,7 @@ pub fn claim(
                             Param::from(now),
                             Param::from(now),
                             Param::from(until.as_str()),
+                            leased_ms.map_or(Param::Null, |m| Param::Int(m as i64)),
                         ]],
                     )?
                     .first()
@@ -2111,6 +2402,10 @@ pub fn claim(
                         ("state", Param::from("leased")),
                         ("leased_at", Param::from(now)),
                         ("lease_until", Param::from(until.as_str())),
+                        (
+                            "leased_ms",
+                            leased_ms.map_or(Param::Null, |m| Param::Int(m as i64)),
+                        ),
                     ],
                     "id",
                     id,
@@ -2315,6 +2610,13 @@ pub struct Answer {
     pub answered_at: String,
     /// The registered model, when a model answered.
     pub model_id: Option<i64>,
+    /// Record 48 R1: seconds from the claim to the answer (none for an
+    /// answer given to a batch), the answer the engine suggested, whether
+    /// this one differs from it, and how it came (`claim` or `batch`).
+    pub seconds: Option<f64>,
+    pub suggested: Option<String>,
+    pub changed: Option<bool>,
+    pub via: Option<String>,
 }
 
 impl Answer {
@@ -2325,12 +2627,13 @@ impl Answer {
             "round": self.round, "author_kind": self.author_kind, "value": self.value,
             "form": self.form, "derivative_id": self.derivative_id, "why": self.why,
             "actor_detail": self.actor_detail, "answered_at": self.answered_at,
-            "model_id": self.model_id,
+            "model_id": self.model_id, "seconds": self.seconds, "suggested": self.suggested,
+            "changed": self.changed, "via": self.via,
         })
     }
 }
 
-const ANSWER_COLUMNS: [&str; 15] = [
+const ANSWER_COLUMNS: [&str; 19] = [
     "id",
     "campaign_id",
     "item_id",
@@ -2346,6 +2649,10 @@ const ANSWER_COLUMNS: [&str; 15] = [
     "actor_detail",
     "answered_at",
     "model_id",
+    "seconds",
+    "suggested",
+    "changed",
+    "via",
 ];
 
 fn answer_of(r: &Row) -> Result<Answer, StoreError> {
@@ -2366,6 +2673,10 @@ fn answer_of(r: &Row) -> Result<Answer, StoreError> {
         actor_detail: json_at(r, 12)?,
         answered_at: r.text(13)?.to_string(),
         model_id: r.opt_int(14)?,
+        seconds: r.opt_double(15)?,
+        suggested: r.opt_text(16)?.map(str::to_string),
+        changed: r.opt_int(17)?.map(|c| c != 0),
+        via: r.opt_text(18)?.map(str::to_string),
     })
 }
 
@@ -2451,6 +2762,40 @@ pub struct Answered {
 /// second round is offered to an adjudicator; an adjudicator's answer
 /// settles it. Nothing here is a decision.
 pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answered, Error> {
+    answer_with(registry, g, &Timing::default(), now)
+}
+
+/// What the reader knew about an answer beside it (record 48 R1): the
+/// answer the engine suggested, as an answer to the question would say it,
+/// and whether the answer was given to a whole batch rather than after a
+/// claim of its own.
+#[derive(Debug, Clone, Default)]
+pub struct Timing<'a> {
+    pub suggested: Option<&'a str>,
+    pub batch: bool,
+}
+
+/// An answer's text as it is kept: a pick's stacks as ids, an axes answer
+/// in its canonical order, any other value trimmed.
+fn kept_value(question: &Question, v: &str) -> Result<String, Error> {
+    Ok(match question {
+        Question::Pick { .. } => join_ids(&pick_stacks(v)?),
+        Question::Axes { axes, constraints } => {
+            canonical_joint(constraints, &joint_of(axes, constraints, v)?)
+        }
+        _ => v.trim().to_string(),
+    })
+}
+
+/// [`answer`], with what the reader knew beside it: the time from the
+/// claim to the answer, the suggestion and whether the answer changed it
+/// are kept on the answer (record 48 R1).
+pub fn answer_with(
+    registry: &mut Registry,
+    g: &Given<'_>,
+    t: &Timing<'_>,
+    now: &str,
+) -> Result<Answered, Error> {
     let store = registry.store();
     let a = assignment(store, g.assignment)?
         .ok_or_else(|| Error::NotFound(format!("no assignment {}", g.assignment)))?;
@@ -2510,18 +2855,16 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
         _ => {}
     }
     let actor_detail = crate::actor::current();
-    let stored_value = match &question {
-        Question::Pick { .. } => g
-            .value
-            .map(|v| pick_stacks(v).map(|s| join_ids(&s)))
-            .transpose()?,
-        // one text for one joint answer, whatever order it came in
-        Question::Axes { axes, constraints } => g
-            .value
-            .map(|v| joint_of(axes, constraints, v).map(|a| canonical_joint(constraints, &a)))
-            .transpose()?,
-        _ => g.value.map(|v| v.trim().to_string()),
-    };
+    // one text for one joint answer, whatever order it came in
+    let stored_value = g.value.map(|v| kept_value(&question, v)).transpose()?;
+    // a suggestion that does not read as an answer is no suggestion
+    let suggested = t
+        .suggested
+        .filter(|v| !v.trim().is_empty())
+        .and_then(|v| kept_value(&question, v).ok());
+    let changed = suggested
+        .as_ref()
+        .map(|s| stored_value.as_deref() != Some(s.as_str()));
     store.begin()?;
     let mut replayed = false;
     let done = (|| -> Result<Answered, Error> {
@@ -2575,6 +2918,27 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
                 a.id
             )));
         }
+        // to the millisecond where the lease kept its instant, else to the
+        // second of its stamp
+        let seconds = if t.batch {
+            None
+        } else {
+            let from_ms = store
+                .query_opt(
+                    &format!(
+                        "SELECT leased_ms FROM {} WHERE id = {}",
+                        store.qualified("campaign_assignment"),
+                        store.dialect().param(1, Type::Int)
+                    ),
+                    &[Param::Int(a.id)],
+                )?
+                .and_then(|r| r.opt_int(0).ok().flatten())
+                .map(|m| m as u64)
+                .or_else(|| a.leased_at.as_deref().and_then(secs_of).map(|s| s * 1000));
+            from_ms
+                .zip(crate::time::millis_at(now))
+                .map(|(from, to)| to.saturating_sub(from) as f64 / 1000.0)
+        };
         let id = store
             .insert(
                 &Insert::new(
@@ -2594,6 +2958,10 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
                         "actor_detail",
                         "answered_at",
                         "model_id",
+                        "seconds",
+                        "suggested",
+                        "changed",
+                        "via",
                     ],
                 )
                 .returning(&["id"]),
@@ -2612,6 +2980,10 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
                     Param::from(actor_detail.to_string()),
                     Param::from(now),
                     g.model.map_or(Param::Null, Param::Int),
+                    seconds.map_or(Param::Null, Param::Double),
+                    suggested.clone().map_or(Param::Null, Param::from),
+                    changed.map_or(Param::Null, |c| Param::Int(i64::from(c))),
+                    Param::from(if t.batch { "batch" } else { "claim" }),
                 ]],
             )?
             .first()
@@ -2717,10 +3089,230 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
                 "role": a.role, "round": a.round, "value": shown,
                 "derivative": g.derivative_id, "author_kind": g.author_kind,
                 "item_state": answered.state, "adjudication": answered.adjudication,
+                "via": if t.batch { "batch" } else { "claim" }, "changed": changed,
             })),
         },
     )?;
     Ok(answered)
+}
+
+/// Record 48 R1: answer one item of a batch a rater accepted in one move.
+/// The item is leased to the rater as a claim would lease it, if it still
+/// wants a rater and was never given to this one, and answered at once
+/// with `g`'s value, marked as given to a batch; it is still its own item,
+/// closed into its own decision. `g.assignment` is not read.
+pub fn accept(
+    registry: &mut Registry,
+    campaign: i64,
+    item_id: i64,
+    g: &Given<'_>,
+    suggested: Option<&str>,
+    now: &str,
+) -> Result<Answered, Error> {
+    let c = get(registry.store(), campaign)?
+        .ok_or_else(|| Error::NotFound(format!("no campaign {campaign}")))?;
+    if c.status != "open" {
+        return Err(refused(format!("campaign {} is {}", c.name, c.status)));
+    }
+    let listed = c.raters();
+    if !listed.is_empty() && !listed.iter().any(|p| p == g.principal) {
+        return Err(Error::Forbidden(format!(
+            "campaign {} names its raters, and {} is not one",
+            c.name, g.principal
+        )));
+    }
+    c.question()?.check(g)?;
+    let store = registry.store();
+    let d = store.dialect();
+    store.begin()?;
+    let leased = (|| -> Result<i64, Error> {
+        lock(store, campaign)?;
+        expire_in(store, campaign, now)?;
+        let it = item(store, item_id)?
+            .filter(|it| it.campaign_id == campaign)
+            .ok_or_else(|| Error::NotFound(format!("campaign {} has no item {item_id}", c.name)))?;
+        if it.state != "open" || it.round != 1 {
+            return Err(refused(format!(
+                "item {item_id} is {}, and no longer asks raters",
+                it.state
+            )));
+        }
+        let a = store.qualified("campaign_assignment");
+        let sql = format!(
+            "SELECT COUNT(*) FROM {a} \
+             WHERE item_id = {} AND role = 'rater' AND state IN ('leased', 'submitted')",
+            d.param(1, Type::Int),
+        );
+        let taken = store
+            .query_opt(&sql, &[Param::Int(item_id)])?
+            .map(|r| r.int(0))
+            .transpose()?
+            .unwrap_or(0);
+        let sql = format!(
+            "SELECT COUNT(*) FROM {a} WHERE item_id = {} AND principal = {}",
+            d.param(1, Type::Int),
+            d.param(2, Type::Text),
+        );
+        let mine = store
+            .query_opt(&sql, &[Param::Int(item_id), Param::from(g.principal)])?
+            .map(|r| r.int(0))
+            .transpose()?
+            .unwrap_or(0);
+        if mine > 0 {
+            return Err(refused(format!(
+                "{} was given item {item_id} already",
+                g.principal
+            )));
+        }
+        if taken >= c.raters_per_item {
+            return Err(refused(format!("item {item_id} has the raters it wants")));
+        }
+        let until = plus_seconds(now, c.lease_seconds);
+        Ok(store
+            .insert(
+                &Insert::new(
+                    table("campaign_assignment"),
+                    &[
+                        "campaign_id",
+                        "item_id",
+                        "principal",
+                        "role",
+                        "round",
+                        "state",
+                        "created_at",
+                        "leased_at",
+                        "lease_until",
+                        "leased_ms",
+                    ],
+                )
+                .returning(&["id"]),
+                &[vec![
+                    Param::Int(campaign),
+                    Param::Int(item_id),
+                    Param::from(g.principal),
+                    Param::from("rater"),
+                    Param::Int(1),
+                    Param::from("leased"),
+                    Param::from(now),
+                    Param::from(now),
+                    Param::from(until.as_str()),
+                    crate::time::millis_at(now).map_or(Param::Null, |m| Param::Int(m as i64)),
+                ]],
+            )?
+            .first()
+            .ok_or_else(|| StoreError::Message("the assignment was not written back".into()))?
+            .int(0)?)
+    })();
+    let assignment_id = match leased {
+        Ok(id) => id,
+        Err(e) => {
+            store.rollback().ok();
+            return Err(e);
+        }
+    };
+    store.commit()?;
+    let given = Given {
+        assignment: assignment_id,
+        ..g.clone()
+    };
+    match answer_with(
+        registry,
+        &given,
+        &Timing {
+            suggested,
+            batch: true,
+        },
+        now,
+    ) {
+        Ok(done) => Ok(done),
+        Err(e) => {
+            // the lease was the batch's own: give the item back
+            registry
+                .store()
+                .update_by_id(
+                    table("campaign_assignment"),
+                    &[
+                        ("state", Param::from("released")),
+                        ("ended_at", Param::from(now)),
+                    ],
+                    "id",
+                    assignment_id,
+                )
+                .ok();
+            Err(e)
+        }
+    }
+}
+
+/// The median of some numbers, none when there are none.
+fn median(mut v: Vec<f64>) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    Some(if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    })
+}
+
+/// The ninetieth percentile of some numbers, by the nearest rank; none
+/// when there are none.
+fn p90(mut v: Vec<f64>) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rank = ((0.9 * v.len() as f64).ceil() as usize).clamp(1, v.len());
+    Some(v[rank - 1])
+}
+
+/// Record 48 R1: how fast a campaign is read, per rater and over all: the
+/// answers, those read one by one and those given to a batch, the median
+/// and the ninetieth percentile of the seconds from claim to answer over
+/// the ones read one by one, to a tenth of a second, and of the
+/// answers that had a suggestion, how many changed it and the share.
+/// Counts and times only: never a value.
+pub fn stats(store: &mut Store, campaign: i64) -> Result<Value, Error> {
+    let all = answers(store, campaign)?;
+    let mut by: BTreeMap<String, Vec<&Answer>> = BTreeMap::new();
+    for a in &all {
+        by.entry(a.principal.clone()).or_default().push(a);
+    }
+    let summary = |list: &[&Answer]| -> Value {
+        let read: Vec<&&Answer> = list
+            .iter()
+            .filter(|a| a.via.as_deref() != Some("batch"))
+            .collect();
+        let batched = list.len() - read.len();
+        let seconds: Vec<f64> = read.iter().filter_map(|a| a.seconds).collect();
+        let suggested = list.iter().filter(|a| a.changed.is_some()).count();
+        let changed = list.iter().filter(|a| a.changed == Some(true)).count();
+        let tenth = |v: Option<f64>| v.map(|x| (x * 10.0).round() / 10.0);
+        json!({
+            "answers": list.len(),
+            "read": read.len(),
+            "batched": batched,
+            "timed": seconds.len(),
+            "median_seconds": tenth(median(seconds.clone())),
+            "p90_seconds": tenth(p90(seconds)),
+            "suggested": suggested,
+            "changed": changed,
+            "share_changed": (suggested > 0).then(|| changed as f64 / suggested as f64),
+        })
+    };
+    let raters: Vec<Value> = by
+        .iter()
+        .map(|(p, list)| {
+            let mut v = summary(list);
+            v["principal"] = json!(p);
+            v
+        })
+        .collect();
+    let every: Vec<&Answer> = all.iter().collect();
+    Ok(json!({"campaign": campaign, "all": summary(&every), "raters": raters}))
 }
 
 /// For an axes item, the share of round-one raters whose answer on each
