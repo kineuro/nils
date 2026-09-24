@@ -226,6 +226,10 @@
     "confidence": {
       "type": "number",
       "description": "The first candidate's probability, which the Review queue's cost order and a commit by minimum confidence read as they read every item's."
+    },
+    "fixture": {
+      "type": "boolean",
+      "description": "True on an item a fixture wrote (`nils review asked`, only with NILS_FIXTURES=1), never on one System 1 raised."
     }
   },
   "examples": [

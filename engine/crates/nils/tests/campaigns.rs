@@ -1220,23 +1220,52 @@ fn an_axes_campaign_at_the_door_is_held_to_the_pack_and_closes_axis_by_axis() {
     .unwrap();
     let dir = TempDir::new("campaign-asked");
     let file = dir.file("evidence.json", example["evidence"].to_string().as_bytes());
-    let raised: Value = serde_json::from_str(&cli(
-        &home,
-        "cleo@lab",
-        &[
-            "review",
-            "asked",
-            "--stack",
-            "2",
-            "--evidence",
-            file.to_str().unwrap(),
-            "--pack-dir",
-            packs().to_str().unwrap(),
-        ],
-    ))
-    .unwrap();
+    // the fixture writer is refused on a registry nobody marked as a
+    // fixture's, and without the pack it is held to
+    let asked = |fixtures: bool, pack_dir: &str| {
+        let mut cmd = nils();
+        cmd.arg("--registry")
+            .arg(home.path())
+            .args([
+                "review",
+                "asked",
+                "--stack",
+                "2",
+                "--evidence",
+                file.to_str().unwrap(),
+                "--pack-dir",
+                pack_dir,
+            ])
+            .env("NILS_PRINCIPAL", "cleo@lab")
+            .env_remove("NILS_FIXTURES")
+            .stdin(Stdio::null());
+        if fixtures {
+            cmd.env("NILS_FIXTURES", "1");
+        }
+        cmd.output().unwrap()
+    };
+    let refused = asked(false, packs().to_str().unwrap());
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("NILS_FIXTURES"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let nowhere = dir.path().join("no-packs");
+    let refused = asked(true, nowhere.to_str().unwrap());
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("pack"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let out = asked(true, packs().to_str().unwrap());
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let raised: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(raised["checked_against_pack"], true, "{raised}");
     let item = raised["review_item"].as_i64().unwrap();
+    let shown = server.ok("GET", &format!("/api/review/{item}"), None, CURATOR);
+    assert_eq!(shown["evidence"]["fixture"], true, "{shown}");
     // a query value is read decoded, on every door
     let listed = server.ok("GET", "/api/review?kind=classify%2Easked", None, CURATOR);
     assert!(listed.to_string().contains("\"candidates\""), "{listed}");

@@ -1505,8 +1505,9 @@ enum ReviewCommand {
     },
     /// A fixture of System 1's question (record 45 R5): a classify.asked
     /// item on a stack from an evidence file, held to the shape the
-    /// review-item contract fixes and, with a pack, to its legal
-    /// combinations. Wave 44 writes the real ones
+    /// review-item contract fixes and to the pack's legal combinations,
+    /// marked `fixture: true`; only with NILS_FIXTURES=1, on a registry
+    /// kept for fixtures. Wave 44 writes the real ones
     #[command(hide = true)]
     Asked {
         #[arg(long, value_name = "ID")]
@@ -4766,22 +4767,36 @@ fn review_asked(
         .flatten()
         .filter_map(|a| a.as_str().map(str::to_string))
         .collect();
-    let constraints = match crate::pack_dir(home, pack_dir)
+    // A fixture writer: it supersedes the stack's open item and raises one
+    // a person can answer, so it runs only where an operator marked the
+    // registry as a fixture's, and the item says it is one.
+    if std::env::var("NILS_FIXTURES").ok().as_deref() != Some("1") {
+        return Err(usage(
+            "nils review asked writes a fixture's classify.asked item; it runs only with NILS_FIXTURES=1, on a registry kept for fixtures",
+        ));
+    }
+    if axes.is_empty() {
+        return Err(usage("the evidence names no axes"));
+    }
+    let loaded = crate::pack_dir(home, pack_dir)
         .ok()
         .and_then(|d| nils_pack::load(&d.join(pack), None).ok())
-    {
-        Some(p) if !axes.is_empty() => Some(
-            nils_pack::legal::constraints(&p, &axes, &std::collections::BTreeMap::new())
-                .map_err(usage)?,
-        ),
-        _ => None,
-    };
+        .ok_or_else(|| {
+            usage(format!(
+                "no pack {pack} here: the fixture is held to the pack's legal combinations; pass --pack-dir DIR"
+            ))
+        })?;
+    let constraints =
+        nils_pack::legal::constraints(&loaded, &axes, &std::collections::BTreeMap::new())
+            .map_err(usage)?;
+    let mut doc = doc;
+    doc["fixture"] = serde_json::json!(true);
     let mut registry = open(home)?;
-    let id = nils_registry::asked::raise(registry.store(), stack, &doc, constraints.as_ref(), None)
+    let id = nils_registry::asked::raise(registry.store(), stack, &doc, Some(&constraints), None)
         .map_err(|e| usage(e.to_string()))?;
     println!(
         "{}",
-        serde_json::json!({"review_item": id, "kind": nils_registry::asked::KIND, "stack": stack, "checked_against_pack": constraints.is_some()})
+        serde_json::json!({"review_item": id, "kind": nils_registry::asked::KIND, "stack": stack, "checked_against_pack": true, "fixture": true})
     );
     Ok(())
 }
