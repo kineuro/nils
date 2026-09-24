@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Grants and detail (the suite contract, version 3, which is version 2
-//! with record 42 R7's `models:see` and `models:work`): what a caller may
+//! with record 42 R7's `models:see` and `models:work`, and `campaigns:see`
+//! and `campaigns:work`, which no ladder step but admin holds): what a caller may
 //! open, and how much of a record it sees. A grant names a page and how far
 //! a caller goes there, `see`, or `work`, which includes see; the assistant
 //! has `use`. Detail has an order: `plain` sees neither class, `quasi` the
@@ -17,7 +18,7 @@ use std::collections::{BTreeSet, HashMap};
 use serde_json::Value;
 
 /// The vocabulary, sorted by code point, as `grants.schema.json` lists it.
-pub(crate) const GRANTS: [&str; 26] = [
+pub(crate) const GRANTS: [&str; 28] = [
     "assistant-settings:see",
     "assistant-settings:work",
     "assistant:use",
