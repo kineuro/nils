@@ -732,9 +732,9 @@ fn the_keyboard_runs_a_campaign_and_commits_only_the_confident_part() {
         set["digest"], again["digest"],
         "the same state, the same digest"
     );
-    assert_eq!(
+    assert!(
         again["training"].as_str().unwrap().starts_with("refused"),
-        true
+        "{again}"
     );
     let tsv = std::fs::read_to_string(first.join("labels.tsv")).unwrap();
     assert_eq!(sha256(&tsv), set["digest"].as_str().unwrap());

@@ -364,6 +364,19 @@ fn two_raters_share_the_items_and_an_expired_lease_returns_one() {
         assert_eq!(who[0].text(2).unwrap(), "brain", "{name}");
         assert_eq!(who[1].text(2).unwrap(), "spine", "{name}");
         assert_eq!(count(reg, "campaign_answer", ""), 4, "{name}");
+        // record 42 S1's columns: the campaign each came from, and who put
+        // it in force, its own author, since it was written in force
+        let from = c.id;
+        let rows = select(reg, |s| {
+            format!(
+                "SELECT campaign_id, committed_by FROM {} ORDER BY id",
+                s.qualified("decision")
+            )
+        });
+        for r in &rows {
+            assert_eq!(r.opt_int(0).unwrap(), Some(from), "{name}");
+            assert_eq!(r.text(1).unwrap(), "cleo@lab", "{name}");
+        }
         // the review items are closed by the decisions
         for it in campaign::items(reg.store(), c.id).unwrap() {
             let r = nils_registry::review::item(reg.store(), it.review_item_id)
@@ -762,9 +775,11 @@ fn a_label_set_is_the_decisions_in_force_and_its_bytes_follow_them() {
                     who: "dan@lab",
                     kind: "person",
                     version: None,
+                    model: None,
                 },
                 stage: false,
                 why: None,
+                campaign: None,
             },
         )
         .unwrap();
@@ -869,9 +884,11 @@ fn v0_labels_become_dated_person_decisions_marked_as_imported() {
                     who: "dan@lab",
                     kind: "person",
                     version: None,
+                    model: None,
                 },
                 stage: false,
                 why: None,
+                campaign: None,
             },
         )
         .unwrap();
@@ -996,8 +1013,111 @@ fn a_commit_by_minimum_confidence_commits_only_its_part() {
             1,
             "{name}: the adjudicated one, half its raters behind it, stays staged"
         );
+        let by = select(reg, |s| {
+            format!(
+                "SELECT DISTINCT committed_by FROM {} WHERE committed_at IS NOT NULL",
+                s.qualified("decision")
+            )
+        });
+        assert_eq!(by.len(), 1, "{name}");
+        assert_eq!(by[0].text(0).unwrap(), "cleo@lab", "{name}");
         // the confidence is the item's agreement: one rater of two
         let it = &campaign::items(reg.store(), c.id).unwrap()[0];
         assert_eq!(it.agreement, Some(0.5), "{name}");
+    }
+}
+
+/// S6: a pick question is asked of sessions and closes into a person's
+/// pick of the role, the standing pick withdrawn and never deleted.
+#[test]
+fn a_pick_campaign_closes_into_a_persons_pick() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let subject = select(reg, |s| {
+            format!(
+                "SELECT r.subject_id FROM {} k JOIN {} r ON r.id = k.series_id WHERE k.id = {}",
+                s.qualified("stack"),
+                s.qualified("series"),
+                ids[0]
+            )
+        })[0]
+            .int(0)
+            .unwrap();
+        // the automatic pick that stood before
+        let old = row(
+            reg.store(),
+            "pick",
+            &[
+                ("model", Param::from("main_qc")),
+                ("role", Param::from("t1w")),
+                ("subject_id", Param::Int(subject)),
+                ("session_day", Param::from("2026-01-01")),
+                ("scheme", Param::from("default")),
+                ("author_kind", Param::from("agent")),
+            ],
+        );
+        let q = json!({"kind": "pick", "role": "t1w"});
+        let adj = json!({"when": "never"});
+        // a pick is asked of sessions, not stacks
+        assert!(
+            campaign::create(
+                reg,
+                &new("wrong", &q, &adj, Items::Stacks(ids.clone()), 1, "pick")
+            )
+            .is_err(),
+            "{name}"
+        );
+        let c = campaign::create(
+            reg,
+            &new(
+                "main",
+                &q,
+                &adj,
+                Items::Sessions(vec![(subject, "2026-01-01".into())]),
+                1,
+                "pick",
+            ),
+        )
+        .unwrap();
+        assert_eq!(c.grain, "session", "{name}");
+        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.item.subject_id, Some(subject), "{name}");
+        let pick = format!("{},{}", ids[1], ids[0]);
+        campaign::answer(reg, &give(a.assignment.id, "anna@lab", &pick), &at(1)).unwrap();
+        let closed = campaign::close(
+            reg,
+            &Close {
+                campaign: c.id,
+                who: "cleo@lab",
+                author_kind: "person",
+            },
+            &at(2),
+        )
+        .unwrap();
+        assert_eq!(closed.picks.len(), 1, "{name}");
+        let made = closed.picks[0];
+        let rows = select(reg, |s| {
+            format!(
+                "SELECT id, author_kind, actor, campaign_id, withdrawn_at IS NULL FROM {} ORDER BY id",
+                s.qualified("pick")
+            )
+        });
+        assert_eq!(rows.len(), 2, "{name}: the old pick stays");
+        assert_eq!(rows[0].int(0).unwrap(), old, "{name}");
+        assert_eq!(rows[0].int(4).unwrap(), 0, "{name}: withdrawn");
+        assert_eq!(rows[1].int(0).unwrap(), made, "{name}");
+        assert_eq!(rows[1].text(1).unwrap(), "person", "{name}");
+        assert_eq!(rows[1].text(2).unwrap(), "cleo@lab", "{name}");
+        assert_eq!(rows[1].opt_int(3).unwrap(), Some(c.id), "{name}");
+        assert_eq!(count(reg, "pick_stack", ""), 2, "{name}");
+        assert_eq!(
+            count(reg, "decision", ""),
+            0,
+            "{name}: a pick is not a decision"
+        );
     }
 }

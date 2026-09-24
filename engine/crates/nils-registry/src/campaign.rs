@@ -2494,9 +2494,11 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
                             who: &who,
                             kind: &kind,
                             version: None,
+                            model: None,
                         },
                         stage: staged,
                         why: Some(&path),
+                        campaign: Some(c.id),
                     },
                 );
                 match applied {
@@ -2561,6 +2563,7 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
                         author_kind: &kind,
                         reference: &format!("campaign:{}", c.id),
                         pack_version: c.pack_version.as_deref(),
+                        campaign: Some(c.id),
                         now,
                     },
                 )?;
@@ -2719,6 +2722,8 @@ pub struct PersonPick<'a> {
     pub author_kind: &'a str,
     pub reference: &'a str,
     pub pack_version: Option<&'a str>,
+    /// The campaign the pick was closed from (record 42 S1's column).
+    pub campaign: Option<i64>,
     pub now: &'a str,
 }
 
@@ -2774,6 +2779,7 @@ pub fn write_person_pick(store: &mut Store, p: &PersonPick<'_>) -> Result<i64, S
                         "actor",
                         "author_kind",
                         "decided_at",
+                        "campaign_id",
                     ],
                 )
                 .returning(&["id"]),
@@ -2789,6 +2795,7 @@ pub fn write_person_pick(store: &mut Store, p: &PersonPick<'_>) -> Result<i64, S
                     Param::from(p.who),
                     Param::from(p.author_kind),
                     Param::from(p.now),
+                    p.campaign.map_or(Param::Null, Param::Int),
                 ]],
             )?
             .first()

@@ -1042,7 +1042,10 @@ pub fn commit_where(
         for (id, _) in &chosen {
             store.update_by_id(
                 table("decision"),
-                &[("committed_at", Param::from(now.as_str()))],
+                &[
+                    ("committed_at", Param::from(now.as_str())),
+                    ("committed_by", Param::from(who)),
+                ],
                 "id",
                 *id,
             )?;

@@ -4005,6 +4005,17 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
         row("GET /api/status")["grant"].as_array().unwrap().len(),
         26
     );
+    // record 42 R7: a rater is not a reviewer of the whole queue; closing a
+    // campaign writes decisions, which needs both
+    assert_eq!(
+        row("POST /api/campaigns/{id}/claim")["grant"],
+        "campaigns:work"
+    );
+    assert_eq!(row("GET /api/campaigns/{id}")["grant"], "campaigns:see");
+    let close = row("POST /api/campaigns/{id}/close");
+    assert_eq!(close["grant"], "campaigns:work", "{close}");
+    assert_eq!(close["also"], "review:work", "{close}");
+    assert_eq!(row("POST /api/decisions/commit")["grant"], "review:work");
     assert_eq!(row("GET /api/review")["grant"], "review:see");
     assert_eq!(row("GET /api/review/{id}")["grant"], "review:see");
     assert_eq!(row("POST /api/ask/values")["grant"], "query:work");

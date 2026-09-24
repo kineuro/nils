@@ -189,6 +189,8 @@ struct Standing {
     value: Option<String>,
     actor: String,
     author_kind: String,
+    model_id: Option<i64>,
+    campaign_id: Option<i64>,
 }
 
 /// The decision in force on each stack for one axis, the way the classifier
@@ -209,7 +211,8 @@ pub fn decision_labels(store: &mut Store, q: &DecisionQuery<'_>) -> Result<Vec<L
     let d = store.dialect();
     let sql = format!(
         "SELECT id, scope, ref, value, actor, author_kind, \
-         CASE WHEN staged_at IS NOT NULL AND committed_at IS NULL THEN 1 ELSE 0 END \
+         CASE WHEN staged_at IS NOT NULL AND committed_at IS NULL THEN 1 ELSE 0 END, \
+         model_id, campaign_id \
          FROM {} WHERE axis = {} AND withdrawn_at IS NULL ORDER BY id",
         store.qualified("decision"),
         d.param(1, Type::Text)
@@ -231,6 +234,8 @@ pub fn decision_labels(store: &mut Store, q: &DecisionQuery<'_>) -> Result<Vec<L
                 value: r.opt_text(3)?.map(str::to_string),
                 actor: r.text(4)?.to_string(),
                 author_kind: r.text(5)?.to_string(),
+                model_id: r.opt_int(7)?,
+                campaign_id: r.opt_int(8)?,
             },
             r.text(2)?.to_string(),
         ));
@@ -303,7 +308,7 @@ pub fn decision_labels(store: &mut Store, q: &DecisionQuery<'_>) -> Result<Vec<L
         if !q.authors.is_empty() && !q.authors.contains(&s.author_kind) {
             continue;
         }
-        let campaign = from_campaign.get(&s.id).copied();
+        let campaign = s.campaign_id.or_else(|| from_campaign.get(&s.id).copied());
         if q.campaign.is_some() && campaign != q.campaign {
             continue;
         }
@@ -318,7 +323,7 @@ pub fn decision_labels(store: &mut Store, q: &DecisionQuery<'_>) -> Result<Vec<L
             author: s.actor.clone(),
             decision_id: Some(s.id),
             campaign_id: campaign,
-            model_id: None,
+            model_id: s.model_id,
             answer_id: None,
         });
     }
@@ -409,7 +414,7 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                 };
                 if let Some(decision) = it.decision_id {
                     let sql = format!(
-                        "SELECT value, actor, author_kind FROM {} WHERE id = {}",
+                        "SELECT value, actor, author_kind, model_id FROM {} WHERE id = {}",
                         store.qualified("decision"),
                         d.param(1, Type::Int)
                     );
@@ -418,6 +423,7 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
                             value: r.opt_text(0)?.map(str::to_string),
                             author: r.text(1)?.to_string(),
                             author_kind: r.text(2)?.to_string(),
+                            model_id: r.opt_int(3)?,
                             decision_id: Some(decision),
                             ..base
                         });
@@ -925,9 +931,11 @@ pub fn import_v0(
                         who: IMPORTED_V0,
                         kind: "person",
                         version: Some(IMPORTED_V0),
+                        model: None,
                     },
                     stage: false,
                     why: Some(&why),
+                    campaign: None,
                 },
             )
             .map_err(|e| Error::Refused(e.to_string()))?;
