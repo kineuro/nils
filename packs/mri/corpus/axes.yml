@@ -420,6 +420,16 @@ cases:
     axes:
       technique: RESOLVE
 
+  # Canon's FASE is a single-shot fast spin echo, the vendor's HASTE, and
+  # nothing like RESOLVE; the word stood on both values and RESOLVE came first.
+  - name: a Canon FASE series is HASTE, not RESOLVE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: SE
+      text_series_description: 'FASE cor T2'
+    axes:
+      technique: HASTE
+
   - name: a multiband BOLD series is BOLD, not RESOLVE
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\MOSAIC'
