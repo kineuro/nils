@@ -11,9 +11,9 @@
 //! - **(b) curation:** an axis `body_part` campaign over the same stacks,
 //!   whose answers become person decisions and a label set.
 //!
-//! The masks are named by derivative ids the test makes up: the derivative
-//! door is record 42 S4's, built beside this slice, and the campaign stores
-//! the id an upload to it answers without reading the file.
+//! The masks are uploaded through the derivative door (record 42 S4) into
+//! a working place the curator declares, and an answer names the id the
+//! upload answered; the campaign checks the row, never the file.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -121,10 +121,11 @@ impl Server {
         let tokens = [
             // a reviewer who also runs campaigns and may declare a place
             format!("{CURATOR}=cleo@lab:reviewer,campaigns:work,places:work,audit:see"),
-            // raters hold the campaign's grant and nothing of the queue
-            format!("{ANNA}=anna@lab:campaigns:work"),
-            format!("{BO}=bo@lab:campaigns:work"),
-            format!("{JUDGE}=judge@lab:campaigns:work"),
+            // raters hold the campaign's grant and nothing of the queue, and
+            // the Pipelines page's work to upload their masks
+            format!("{ANNA}=anna@lab:campaigns:work,pipelines:work"),
+            format!("{BO}=bo@lab:campaigns:work,pipelines:work"),
+            format!("{JUDGE}=judge@lab:campaigns:work,pipelines:work"),
         ]
         .join(",");
         let mut child = nils()
@@ -187,6 +188,29 @@ impl Server {
         (status, json)
     }
 
+    /// Upload a mask made from one stack through the derivative door, and
+    /// answer the derivative's id.
+    fn mask(&self, stack: i64, content: &str, token: &str) -> i64 {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        let path = format!(
+            "/api/derivatives?kind=mask&stack={stack}&sha256={}&name=mask.nii.gz",
+            sha256(content)
+        );
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nAuthorization: Bearer {token}\r\n\r\n",
+            content.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(content.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (headers, text) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+        assert!(headers.starts_with("HTTP/1.1 201"), "{headers}: {text}");
+        let doc: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(doc["stack_id"], stack, "{doc}");
+        doc["id"].as_i64().unwrap()
+    }
+
     fn ok(&self, method: &str, path: &str, body: Option<Value>, token: &str) -> Value {
         let (status, doc) = self.call(method, path, body, token);
         assert!(
@@ -199,6 +223,35 @@ impl Server {
 
 fn sha256(text: &str) -> String {
     hex::encode(ring::digest::digest(&ring::digest::SHA256, text.as_bytes()).as_ref())
+}
+
+/// A rater claims the next item, uploads a mask of its stack and answers
+/// with it; answers the claim, what the answer did and the mask's id.
+fn rate_mask(
+    server: &Server,
+    campaign: &str,
+    token: &str,
+    content: &str,
+    form: Value,
+) -> (Value, Value, i64) {
+    let claimed = server.ok(
+        "POST",
+        &format!("/api/campaigns/{campaign}/claim"),
+        Some(json!({})),
+        token,
+    );
+    let assignment = claimed["assignment"]["id"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("nothing claimed: {claimed}"));
+    let stack = claimed["item"]["stack_id"].as_i64().unwrap();
+    let mask = server.mask(stack, content, token);
+    let done = server.ok(
+        "POST",
+        &format!("/api/campaigns/{campaign}/assignments/{assignment}/answer"),
+        Some(json!({"derivative_id": mask, "form": form})),
+        token,
+    );
+    (claimed, done, mask)
 }
 
 /// A rater claims the next item and answers it; answers the claim and what
@@ -228,11 +281,19 @@ fn one_campaign_mechanism_annotates_and_curates_through_the_door_alone() {
     let out = TempDir::new("campaign-export");
     let server = Server::start(&home);
 
-    // the curator declares where labels go and saves a selection of every stack
+    // the curator declares where labels go and where derivatives live, and
+    // saves a selection of every stack
     server.ok(
         "POST",
         "/api/places",
         Some(json!({"name": "labels-out", "role": "export", "path": out.path().to_str().unwrap()})),
+        CURATOR,
+    );
+    let work = TempDir::new("campaign-work");
+    server.ok(
+        "POST",
+        "/api/places",
+        Some(json!({"name": "scratch", "role": "working", "path": work.path().to_str().unwrap()})),
         CURATOR,
     );
     server.ok(
@@ -284,22 +345,20 @@ fn one_campaign_mechanism_annotates_and_curates_through_the_door_alone() {
         "the frozen list is a handle: {made}"
     );
     // the two raters take the same first item, and each uploads a mask
-    let (a, _) = rate(
+    let (a, _, anna_mask) = rate_mask(
         &server,
         "lesions",
         ANNA,
-        json!({"derivative_id": 9001, "form": {"lesions": 2}}),
+        "anna's mask",
+        json!({"lesions": 2}),
     );
-    let (b, rated) = rate(
-        &server,
-        "lesions",
-        BO,
-        json!({"derivative_id": 9002, "form": {"lesions": 3}}),
-    );
+    let (b, rated, bo_mask) = rate_mask(&server, "lesions", BO, "bo's mask", json!({"lesions": 3}));
     let item = a["item"]["id"].as_i64().unwrap();
+    let item_stack = a["item"]["stack_id"].as_i64().unwrap();
     assert_eq!(b["item"]["id"].as_i64(), Some(item));
     assert_eq!(rated["state"], "awaiting_metric", "{rated}");
-    // a mask answer without its file is refused
+    // a mask answer without its file is refused, and so is one naming a
+    // file the derivative door never registered, or a mask of another stack
     let (claimed, _) = (
         server.ok(
             "POST",
@@ -317,6 +376,34 @@ fn one_campaign_mechanism_annotates_and_curates_through_the_door_alone() {
         ANNA,
     );
     assert_eq!(status, 400);
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/campaigns/lesions/assignments/{assignment}/answer"),
+        Some(json!({"derivative_id": 9001, "form": {"lesions": 1}})),
+        ANNA,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("no derivative 9001"),
+        "{doc}"
+    );
+    let (status, doc) = server.call(
+        "POST",
+        &format!("/api/campaigns/lesions/assignments/{assignment}/answer"),
+        Some(json!({"derivative_id": anna_mask, "form": {"lesions": 1}})),
+        ANNA,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("stack {item_stack}")),
+        "{doc}"
+    );
     server.ok(
         "POST",
         &format!("/api/campaigns/lesions/assignments/{assignment}/release"),
@@ -348,13 +435,15 @@ fn one_campaign_mechanism_annotates_and_curates_through_the_door_alone() {
     );
     assert_eq!(claimed["item"]["id"].as_i64(), Some(item), "{claimed}");
     assert_eq!(claimed["assignment"]["round"], 2, "{claimed}");
+    let union = server.mask(item_stack, "the union, trimmed", JUDGE);
+    assert!(union != anna_mask && union != bo_mask);
     let adjudicated = server.ok(
         "POST",
         &format!(
             "/api/campaigns/lesions/assignments/{}/answer",
             claimed["assignment"]["id"]
         ),
-        Some(json!({"derivative_id": 9003, "form": {"lesions": 3}, "why": "the union, trimmed"})),
+        Some(json!({"derivative_id": union, "form": {"lesions": 3}, "why": "the union, trimmed"})),
         JUDGE,
     );
     assert_eq!(adjudicated["state"], "adjudicated", "{adjudicated}");
@@ -402,7 +491,7 @@ fn one_campaign_mechanism_annotates_and_curates_through_the_door_alone() {
         "{set}"
     );
     let row: Vec<&str> = tsv.lines().nth(1).unwrap().split('\t').collect();
-    assert_eq!(row[5], "9003", "the adjudicator's mask: {tsv}");
+    assert_eq!(row[5], union.to_string(), "the adjudicator's mask: {tsv}");
     assert_eq!(row[7], "judge@lab", "{tsv}");
 
     // ------------------------------------------------ (b) curation

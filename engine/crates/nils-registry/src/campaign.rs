@@ -1871,6 +1871,43 @@ fn answers_of_item(store: &mut Store, item: i64) -> Result<Vec<Answer>, StoreErr
         .collect()
 }
 
+/// A derivative answer names a file registered through the derivative door
+/// (record 42 S4): a derivative of the kind the question asks for, not
+/// withdrawn, of the item's subject and, where both name one, its stack.
+fn derivative_answers(store: &mut Store, item_id: i64, id: i64, kind: &str) -> Result<(), Error> {
+    let d = crate::derivative::get(store, id)?.ok_or_else(|| {
+        invalid(format!(
+            "no derivative {id}; POST /api/derivatives registers the file first"
+        ))
+    })?;
+    if d.kind != kind {
+        return Err(invalid(format!(
+            "derivative {id} is a {}, and the question asks for a {kind}",
+            d.kind
+        )));
+    }
+    if d.withdrawn_at.is_some() {
+        return Err(invalid(format!("derivative {id} is withdrawn")));
+    }
+    let it = item(store, item_id)?
+        .ok_or_else(|| Error::NotFound(format!("no campaign item {item_id}")))?;
+    if it.subject_id.is_some() && d.subject_id != it.subject_id {
+        return Err(invalid(format!(
+            "derivative {id} belongs to another subject than item {}",
+            it.position
+        )));
+    }
+    if let (Some(stack), Some(of)) = (it.stack_id, d.stack_id)
+        && stack != of
+    {
+        return Err(invalid(format!(
+            "derivative {id} was made from stack {of}, and item {} asks about stack {stack}",
+            it.position
+        )));
+    }
+    Ok(())
+}
+
 /// What an answer did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Answered {
@@ -1918,6 +1955,13 @@ pub fn answer(registry: &mut Registry, g: &Given<'_>, now: &str) -> Result<Answe
     }
     let question = c.question()?;
     question.check(g)?;
+    if let Question::Derivative {
+        derivative_kind, ..
+    } = &question
+        && let Some(id) = g.derivative_id
+    {
+        derivative_answers(store, a.item_id, id, derivative_kind)?;
+    }
     let adjudication = c.adjudication()?;
     if !["person", "agent", "model"].contains(&g.author_kind) {
         return Err(invalid(format!(

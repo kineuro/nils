@@ -196,6 +196,31 @@ fn new<'a>(
     }
 }
 
+/// A derivative row as the derivative door registers one (record 42 S4),
+/// made from one stack; the file itself is the door's and not read here.
+fn derivative(reg: &mut Registry, stack: i64, kind: &str) -> i64 {
+    let store = reg.store();
+    let belongs = nils_registry::derivative::belongs(store, Some(stack), None, None, None).unwrap();
+    nils_registry::derivative::insert(
+        store,
+        &nils_registry::derivative::New {
+            kind,
+            belongs: &belongs,
+            place_id: 1,
+            path: "derivatives/mask/ab/ab",
+            bytes: 1,
+            sha256: "ab",
+            media_type: "application/octet-stream",
+            registered_by: "anna@lab",
+            actor: None,
+            model_id: None,
+            supersedes_id: None,
+            created_at: "2026-09-24T10:00:00Z",
+        },
+    )
+    .unwrap()
+}
+
 fn at(minute: u32) -> String {
     format!("2026-09-24T10:{minute:02}:00Z")
 }
@@ -534,13 +559,43 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
         .unwrap();
         let form = json!({"lesions": 3});
         let mut item = 0;
-        for (who, file) in [("anna@lab", 101), ("bo@lab", 102)] {
+        let mut files = Vec::new();
+        for who in ["anna@lab", "bo@lab"] {
             let a = campaign::claim(reg, c.id, who, Role::Rater, &at(0))
                 .unwrap()
                 .unwrap();
             item = a.item.id;
+            let stack = a.item.stack_id.unwrap();
+            let other = *ids.iter().find(|s| **s != stack).unwrap();
             // a mask answer names its file
             assert!(campaign::answer(reg, &give(a.assignment.id, who, "x"), &at(1)).is_err());
+            // a file the derivative door registered, of the kind asked, made
+            // from the item's stack
+            let refused = |reg: &mut Registry, file: i64, says: &str| {
+                let e = campaign::answer(
+                    reg,
+                    &Given {
+                        assignment: a.assignment.id,
+                        principal: who,
+                        author_kind: "person",
+                        value: None,
+                        form: Some(&form),
+                        derivative_id: Some(file),
+                        why: None,
+                    },
+                    &at(1),
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(e.contains(says), "{name}: {e}");
+            };
+            refused(reg, 9999, "no derivative 9999");
+            let embedding = derivative(reg, other, "embedding");
+            refused(reg, embedding, "asks for a mask");
+            let elsewhere = derivative(reg, other, "mask");
+            refused(reg, elsewhere, "was made from stack");
+            let file = derivative(reg, stack, "mask");
+            files.push(file);
             campaign::answer(
                 reg,
                 &Given {
@@ -565,6 +620,8 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
         let j = campaign::claim(reg, c.id, "judge@lab", Role::Adjudicator, &at(3))
             .unwrap()
             .unwrap();
+        let union = derivative(reg, j.item.stack_id.unwrap(), "mask");
+        files.push(union);
         campaign::answer(
             reg,
             &Given {
@@ -573,7 +630,7 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
                 author_kind: "person",
                 value: None,
                 form: Some(&form),
-                derivative_id: Some(103),
+                derivative_id: Some(union),
                 why: Some("the union, trimmed"),
             },
             &at(4),
@@ -596,12 +653,12 @@ fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
         assert_eq!(count(reg, "decision", ""), 0, "{name}");
         let outcomes = labels::campaign_labels(reg.store(), c.id, Of::Outcomes).unwrap();
         assert_eq!(outcomes.len(), 1, "{name}");
-        assert_eq!(outcomes[0].derivative_id, Some(103), "{name}");
+        assert_eq!(outcomes[0].derivative_id, Some(union), "{name}");
         assert_eq!(outcomes[0].author, "judge@lab", "{name}");
         let answers = labels::campaign_labels(reg.store(), c.id, Of::Answers).unwrap();
         assert_eq!(answers.len(), 3, "{name}");
-        let files: Vec<i64> = answers.iter().filter_map(|a| a.derivative_id).collect();
-        assert_eq!(files, [101, 102, 103], "{name}");
+        let named: Vec<i64> = answers.iter().filter_map(|a| a.derivative_id).collect();
+        assert_eq!(named, files, "{name}");
     }
 }
 
