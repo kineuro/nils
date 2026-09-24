@@ -5163,7 +5163,7 @@ fn the_model_doors_register_admit_promote_and_a_model_answers_through_apply() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let token = |sub: &str, group: &str, act: Option<&str>| -> String {
+    let token = |sub: &str, group: &str, act: Option<serde_json::Value>| -> String {
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some("test-2026".to_string());
         let mut claims = serde_json::json!({
@@ -5175,17 +5175,36 @@ fn the_model_doors_register_admit_promote_and_a_model_answers_through_apply() {
             "groups": [group],
         });
         if let Some(a) = act {
-            claims["act"] = serde_json::json!({ "sub": a });
+            claims["act"] = a;
         }
         encode(&header, &claims, &key).unwrap()
     };
+    let encoder = format!("sha256:{}", "e".repeat(64));
+    let digest = format!("sha256:{}", "d".repeat(64));
+    let stranger_digest = format!("sha256:{}", "f".repeat(64));
     let reviewer = token("bo", "neuro-reviewers", None);
     let operator = token("cy", "neuro-ops", None);
-    let pipeline = token("cy", "neuro-ops", Some("bodypart-pipeline"));
+    // The issuer binds the model the pipeline runs into the token's act
+    // claim; the header can name it, never another.
+    let pipeline = token(
+        "cy",
+        "neuro-ops",
+        Some(serde_json::json!({"sub": "bodypart-pipeline", "model": digest})),
+    );
+    let stranger = token(
+        "cy",
+        "neuro-ops",
+        Some(serde_json::json!({"sub": "bodypart-pipeline", "model": stranger_digest})),
+    );
+    let bare_agent = token(
+        "cy",
+        "neuro-ops",
+        Some(serde_json::json!({"sub": "bodypart-pipeline"})),
+    );
     let home = registry();
     let server = Server::start(
         &home,
-        15,
+        18,
         &[
             "--auth",
             "oidc",
@@ -5221,8 +5240,6 @@ fn the_model_doors_register_admit_promote_and_a_model_answers_through_apply() {
     let item = asked["id"].as_i64().unwrap();
     let axis = asked["evidence"]["axis"].as_str().unwrap();
     let value = asked["evidence"]["value"].as_str().unwrap();
-    let encoder = format!("sha256:{}", "e".repeat(64));
-    let digest = format!("sha256:{}", "d".repeat(64));
     let head = serde_json::json!({
         "name": "a-head", "version": "1", "kind": "head", "digest": digest,
         "task": format!("axis:{axis}"), "encoder": {"digest": encoder},
@@ -5292,20 +5309,44 @@ fn the_model_doors_register_admit_promote_and_a_model_answers_through_apply() {
         "POST",
         &apply,
         Some(&body),
-        Some(&pipeline),
-        &[(
-            "X-Nils-Actor",
-            &as_model(&format!("sha256:{}", "f".repeat(64))),
-        )],
+        Some(&stranger),
+        &[("X-Nils-Actor", &as_model(&stranger_digest))],
     );
     assert_eq!(status, 404, "{doc}");
-    // Admitted, it answers: staged, with the model named.
+    // The header cannot name a model the token does not carry, even the
+    // same one by another name, nor a name the token does not prove, and
+    // an agent's token that carries no model cannot act as one.
+    for (token, actor, says) in [
+        (&pipeline, as_model("a-head@1"), "the token carries"),
+        (
+            &pipeline,
+            serde_json::json!({"kind": "model", "model": digest, "name": "someone-else"})
+                .to_string(),
+            "acts as bodypart-pipeline",
+        ),
+        (&bare_agent, as_model(&digest), "carries no model"),
+    ] {
+        let (status, doc) = server.request_with(
+            "POST",
+            &apply,
+            Some(&body),
+            Some(token),
+            &[("X-Nils-Actor", &actor)],
+        );
+        assert_eq!(status, 403, "{actor}: {doc}");
+        assert!(
+            doc["error"].as_str().unwrap().contains(says),
+            "{actor}: {doc}"
+        );
+    }
+    // Admitted, it answers: staged, with the model named; the header may
+    // leave the model to the token.
     let (status, applied) = server.request_with(
         "POST",
         &apply,
         Some(&body),
         Some(&pipeline),
-        &[("X-Nils-Actor", &as_model("a-head@1"))],
+        &[("X-Nils-Actor", r#"{"kind": "model"}"#)],
     );
     assert_eq!(status, 200, "{applied}");
     assert_eq!(applied["staged"], true, "{applied}");

@@ -227,6 +227,9 @@ struct Known {
     email: Option<String>,
     /// The `act` claim's subject, when the token was exchanged.
     act: Option<String>,
+    /// The registered model the actor runs, when the issuer bound one into
+    /// the `act` claim (`act.model`: an id, a digest or `name@version`).
+    act_model: Option<String>,
 }
 type ClaimsCache = HashMap<String, Known>;
 
@@ -539,7 +542,13 @@ impl Auth {
                     None => oidc.verify(&token, now)?,
                 };
                 let actor = match &known.act {
-                    Some(sub) => serde_json::json!({ "kind": "agent", "name": sub }),
+                    Some(sub) => {
+                        let mut a = serde_json::json!({ "kind": "agent", "name": sub });
+                        if let Some(m) = &known.act_model {
+                            a["model"] = serde_json::Value::String(m.clone());
+                        }
+                        a
+                    }
                     None => nils_registry::actor::absent(),
                 };
                 Caller {
@@ -583,10 +592,14 @@ fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
         // Record 42 S1: what the token proves the header cannot raise. A
         // token that acts for an agent (its `act` claim) may name the agent
         // or a model it runs, and never a person, nor leave the actor absent,
-        // which is read as a person at a keyboard.
+        // which is read as a person at a keyboard. The header cannot rename
+        // the actor the claim proves, and a model is the one the issuer bound
+        // into the claim (`act.model`) or none: an agent's token names no
+        // model of its own choosing.
         let mut value = value;
         if let Some(proven @ ("agent" | "model")) = caller.actor["kind"].as_str() {
-            let asked = value["kind"].as_str().unwrap_or("");
+            let asked = value["kind"].as_str().unwrap_or("").to_string();
+            let asked = asked.as_str();
             let rank = nils_registry::review::rank;
             if !matches!(asked, "agent" | "model") || rank(asked) > rank(proven) {
                 return Err(Reply::error(
@@ -598,10 +611,44 @@ fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
                     ),
                 ));
             }
-            if value.get("name").is_none()
-                && let Some(name) = caller.actor.get("name").cloned()
-            {
-                value["name"] = name;
+            let proven_name = caller.actor.get("name").and_then(|n| n.as_str());
+            match (value.get("name").filter(|n| !n.is_null()), proven_name) {
+                (Some(said), Some(name)) if said.as_str() != Some(name) => {
+                    return Err(Reply::error(
+                        403,
+                        format!("the token acts as {name}; X-Nils-Actor cannot name it {said}"),
+                    ));
+                }
+                (None, Some(name)) => value["name"] = serde_json::Value::from(name),
+                _ => {}
+            }
+            let carried = caller.actor.get("model").filter(|m| !m.is_null()).cloned();
+            let said = value.get("model").filter(|m| !m.is_null()).cloned();
+            match (said, carried) {
+                (Some(said), Some(carried)) if said != carried => {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "the token carries the model {carried}; X-Nils-Actor cannot name {said}"
+                        ),
+                    ));
+                }
+                (Some(said), None) => {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "the token carries no model, so X-Nils-Actor cannot name {said}; the issuer binds the model an agent runs into the act claim (act.model)"
+                        ),
+                    ));
+                }
+                (None, Some(carried)) => value["model"] = carried,
+                _ => {}
+            }
+            if asked == "model" && value.get("model").is_none_or(|m| m.is_null()) {
+                return Err(Reply::error(
+                    403,
+                    "the token carries no model, so it cannot act as one; the issuer binds the model an agent runs into the act claim (act.model)",
+                ));
             }
         }
         caller.actor = value;
@@ -752,19 +799,29 @@ impl Oidc {
             } else {
                 format!("{}@{}", claims.sub, trust.node)
             };
-            let known = Known {
-                principal,
-                access,
-                exp: claims.exp,
-                display: claims.preferred_username.clone().or(claims.name.clone()),
-                email: claims.email.clone(),
-                act: claims
-                    .act
-                    .as_ref()
-                    .and_then(|a| a.get("sub"))
-                    .and_then(|s| s.as_str())
-                    .map(String::from),
-            };
+            let known =
+                Known {
+                    principal,
+                    access,
+                    exp: claims.exp,
+                    display: claims.preferred_username.clone().or(claims.name.clone()),
+                    email: claims.email.clone(),
+                    act: claims
+                        .act
+                        .as_ref()
+                        .and_then(|a| a.get("sub"))
+                        .and_then(|s| s.as_str())
+                        .map(String::from),
+                    act_model: claims.act.as_ref().and_then(|a| a.get("model")).and_then(
+                        |m| match m {
+                            serde_json::Value::String(s) if !s.trim().is_empty() => {
+                                Some(s.trim().to_string())
+                            }
+                            serde_json::Value::Number(n) => Some(n.to_string()),
+                            _ => None,
+                        },
+                    ),
+                };
             if let Ok(mut cache) = oidc.cache.lock() {
                 cache.retain(|_, k| k.exp > now);
                 cache.insert(token.to_string(), known.clone());

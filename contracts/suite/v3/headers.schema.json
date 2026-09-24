@@ -16,7 +16,7 @@
     },
     "actor": {
       "type": "object",
-      "description": "X-Nils-Actor as JSON, and what the engine stores on audit rows, handles and decisions. An absent header is recorded as {\"kind\": \"absent\"}.",
+      "description": "X-Nils-Actor as JSON, and what the engine stores on audit rows, handles and decisions. An absent header is recorded as {\"kind\": \"absent\"}. A token whose act claim (RFC 8693) names an actor binds it: the header may say agent or model and never person, and cannot name another actor than act.sub, nor another model than act.model, the registered model the issuer bound to the actor; an agent's token without act.model cannot act as a model. Record 42 S1 and R6.",
       "required": [
         "kind"
       ],
@@ -32,10 +32,11 @@
         },
         "name": {
           "type": "string",
-          "description": "The station or agent, such as ask-help"
+          "description": "The station or agent, such as ask-help; under a token with an act claim, act.sub and nothing else"
         },
         "model": {
-          "type": "string"
+          "type": "string",
+          "description": "The registered model acting, by id, digest or name@version; under a token with an act claim, the act.model the issuer bound, written as the token writes it"
         },
         "version": {
           "type": "string"

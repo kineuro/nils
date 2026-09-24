@@ -1335,7 +1335,7 @@ components:
       name: X-Nils-Actor
       in: header
       schema: {type: string}
-      description: "A JSON object naming who acts for the principal: {kind: person|agent|model, name, model, version, conversation}; recorded on the audit row, the handle and the decision, with {kind: absent} as its own value when the header is missing. It is the author of a decision (record 42 S1), and it cannot raise what the token proves: a token whose act claim names an agent may name that agent or a model, never a person nor nobody. Since version 7, for kind model, model names the registered model by id, digest or name@version."
+      description: "A JSON object naming who acts for the principal: {kind: person|agent|model, name, model, version, conversation}; recorded on the audit row, the handle and the decision, with {kind: absent} as its own value when the header is missing. It is the author of a decision (record 42 S1), and it cannot raise what the token proves: a token whose act claim names an agent may name that agent or a model, never a person nor nobody. Since version 7, for kind model, model names the registered model by id, digest or name@version. The act claim binds the actor: under it the header cannot name another actor than act.sub, and a model only as the issuer bound it into the claim as act.model (an id, a digest or name@version, compared as written, and filled in when the header leaves it out); a token whose act claim carries no model cannot act as one. Each is refused with 403."
     idempotency:
       name: Idempotency-Key
       in: header

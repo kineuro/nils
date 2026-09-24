@@ -74,10 +74,19 @@ is why the grants are their own: no ladder set holds them but admin.
 A derivative is not a grant of its own: its doors are the Pipelines page's
 (`pipelines:see`, `pipelines:work`), as in version 2.
 
+The actor a token proves binds `X-Nils-Actor` (record 42 S1 and R6). A
+token whose `act` claim (RFC 8693) names an actor may say agent or model in
+the header, never person; its `name` is `act.sub` or is refused; and a model
+acting is the registered model the issuer bound into the claim as
+`act.model` (an id, a digest or `name@version`), which the header may leave
+out and cannot replace. A token whose claim carries no model cannot act as
+a model, so an agent never names a model of its own choosing.
+
 The other documents are version 2's.
 
 | document | what changes |
 |---|---|
 | `grants.schema.json` | the four grants in the vocabulary, which is 28 |
+| `headers.schema.json` | the actor names what an `act` claim binds: `name` and `model` |
 | `capabilities.schema.json` | the engine's contracts name the model contract's version |
 | `vectors/grants.json` | the sets and every expectation that holds one |
