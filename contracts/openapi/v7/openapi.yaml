@@ -1271,7 +1271,7 @@ paths:
   /api/campaigns/{id}/export:
     post:
       summary: Write a campaign's labels as a label set (record 42 S7; campaigns:work)
-      description: "Into `labels/<name>` of the export place `place` names, or of the one export place there is. `of` is outcomes (the default: a row per resolved item, the decision it became with its author, or the adjudicator's or agreeing raters' answer, a row per file for a derivative) or answers (a row per answer, for an agreement study or a two-rater reference). The set is written and recorded as POST /api/label-sets says."
+      description: "Into `labels/<name>/v<version>` of the export place `place` names, or of the one export place there is: a set under a name taken is the name's next version, in files of its own, and never writes over an earlier version's. `of` is outcomes (the default: a row per resolved item, the decision it became with its author, or the adjudicator's or agreeing raters' answer, a row per file for a derivative) or answers (a row per answer, for an agreement study or a two-rater reference). The set is written and recorded as POST /api/label-sets says."
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       requestBody: {content: {application/json: {schema: {type: object, properties: {of: {type: string, enum: [outcomes, answers], default: outcomes}, place: {type: string}, name: {type: string}}}}}}
       responses:
@@ -1284,7 +1284,7 @@ paths:
         "200": {description: "{count, label_sets}"}
     post:
       summary: Write the decisions in force on one axis as a label set (record 42 S7; campaigns:work or review:work)
-      description: "One row per stack of the decision in force there, resolved as the classifier resolves them (the highest rank, then the narrowest scope, stack, group, series, subject, then the latest); a decision about a machine is a rule and is not exported. `selection` (frozen now, under the caller's query:see) or `handle` keeps the stacks it names and pins the handle; `authors` keeps the decisions in force by those kinds; `campaign` keeps those a campaign's close wrote; `staged` adds the staged ones. `labels.tsv` holds stack_id, subject_id, session_day, what, value, derivative_id, author_kind, author, decision_id, campaign_id, model_id and answer_id, in a canonical order, so the same state gives the same sha256 and one new decision changes it; `provenance.json` holds the source, the handle and its content hash, the epoch, the pack version, the scheme digest, `sealed` and `training`, the columns and the digest. `sealed` marks a set any of whose items is of a sample an operator sealed for certification (`nils labels seal`; for a set of sessions, a sealed stack of the item's subject), which a training tool and a model's registration refuse (record 40 R3); it is the registry's finding and never the caller's, and a body that says `sealed` is refused with 400. Audited as labels.export."
+      description: "One row per stack of the decision in force there, resolved as the classifier resolves them (the highest rank, then the narrowest scope, stack, group, series, subject, then the latest); a decision about a machine is a rule and is not exported. `selection` (frozen now, under the caller's query:see) or `handle` keeps the stacks it names and pins the handle; `authors` keeps the decisions in force by those kinds; `campaign` keeps those a campaign's close wrote; `staged` adds the staged ones. `labels.tsv` holds stack_id, subject_id, session_day, what, value, derivative_id, author_kind, author, decision_id, campaign_id, model_id and answer_id, in a canonical order, so the same state gives the same sha256 and one new decision changes it; `provenance.json` holds the source, the handle and its content hash, the epoch, the pack version, the scheme digest, `sealed` and `training`, the columns and the digest. `sealed` marks a set any of whose items is of a sample an operator sealed for certification (`nils labels seal`; for a set of sessions, a sealed stack of the item's subject), which a training tool and a model's registration refuse (record 40 R3); it is the registry's finding and never the caller's, and a body that says `sealed` is refused with 400. The set is written into `labels/<name>/v<version>` of the export place `place` names, or of the one there is, `name` being the axis unless given: a set under a name taken is the name's next version, in files of its own, and never writes over an earlier version's, and `labels.tsv` is put in place only once the set is recorded, so the digest a set's row holds is always its file's. Audited as labels.export."
       requestBody:
         content:
           application/json:
@@ -1301,7 +1301,7 @@ paths:
                 place: {type: string}
                 name: {type: string}
       responses:
-        "201": {description: "{id, name, kind, what, source, campaign_id, handle_id, epoch, pack_version, scheme_digest, sealed, training, rows, digest, place_id, path, created_by, created_at}"}
+        "201": {description: "{id, name, version, kind, what, source, campaign_id, handle_id, epoch, pack_version, scheme_digest, sealed, training, rows, digest, place_id, path, created_by, created_at}"}
         "409": {description: No export place is declared}
   /api/label-sets/{id}:
     get:

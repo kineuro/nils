@@ -2060,6 +2060,9 @@ fn build_registry() -> Vec<Table> {
             vec![
                 col("id", Type::Id),
                 req("name", Type::Text),
+                // A set written again under a name taken is the name's next
+                // version, in files of its own.
+                req("version", Type::Int),
                 // decisions | answers | outcomes | imported
                 req("kind", Type::Text),
                 // the axis, or the question a campaign asked
@@ -2082,6 +2085,7 @@ fn build_registry() -> Vec<Table> {
                 req("created_at", Type::Timestamp),
             ],
         )
+        .unique(&["name", "version"])
         .index(&["digest"])
         .index(&["handle_id"]),
         // Record 40 R3: the stacks of a sample drawn for certification and

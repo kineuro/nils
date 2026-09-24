@@ -497,6 +497,9 @@ pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<L
 #[derive(Debug, Clone)]
 pub struct NewSet<'a> {
     pub name: &'a str,
+    /// The name's next version ([`next_version`]); a version taken is
+    /// refused, so two sets never share a name and a version.
+    pub version: i64,
     /// decisions | outcomes | answers | imported
     pub kind: &'a str,
     pub what: &'a str,
@@ -518,6 +521,7 @@ pub struct NewSet<'a> {
 pub struct LabelSet {
     pub id: i64,
     pub name: String,
+    pub version: i64,
     pub kind: String,
     pub what: String,
     pub source: Value,
@@ -538,7 +542,7 @@ pub struct LabelSet {
 impl LabelSet {
     pub fn as_json(&self) -> Value {
         json!({
-            "id": self.id, "name": self.name, "kind": self.kind, "what": self.what,
+            "id": self.id, "name": self.name, "version": self.version, "kind": self.kind, "what": self.what,
             "source": self.source, "campaign_id": self.campaign_id, "handle_id": self.handle_id,
             "epoch": self.epoch, "pack_version": self.pack_version,
             "scheme_digest": self.scheme_digest, "sealed": self.sealed, "rows": self.rows,
@@ -553,7 +557,7 @@ impl LabelSet {
     }
 }
 
-const SET_COLUMNS: [&str; 17] = [
+const SET_COLUMNS: [&str; 18] = [
     "id",
     "name",
     "kind",
@@ -571,6 +575,7 @@ const SET_COLUMNS: [&str; 17] = [
     "path",
     "created_by",
     "created_at",
+    "version",
 ];
 
 fn select_sets(store: &Store) -> String {
@@ -605,7 +610,23 @@ fn set_of(r: &Row) -> Result<LabelSet, StoreError> {
         path: r.opt_text(14)?.map(str::to_string),
         created_by: r.text(15)?.to_string(),
         created_at: r.text(16)?.to_string(),
+        version: r.int(17)?,
     })
+}
+
+/// The version a set written now under a name would be: one past the
+/// name's last.
+pub fn next_version(store: &mut Store, name: &str) -> Result<i64, Error> {
+    let sql = format!(
+        "SELECT MAX(version) FROM {} WHERE name = {}",
+        store.qualified("label_set"),
+        store.dialect().param(1, Type::Text)
+    );
+    Ok(store
+        .query_opt(&sql, &[Param::from(name)])?
+        .and_then(|r| r.opt_int(0).ok().flatten())
+        .unwrap_or(0)
+        + 1)
 }
 
 /// Record a set whose files were written, and audit it.
@@ -619,6 +640,7 @@ pub fn record(registry: &mut Registry, n: &NewSet<'_>) -> Result<LabelSet, Error
                 table("label_set"),
                 &[
                     "name",
+                    "version",
                     "kind",
                     "what",
                     "source",
@@ -639,6 +661,7 @@ pub fn record(registry: &mut Registry, n: &NewSet<'_>) -> Result<LabelSet, Error
             .returning(&["id"]),
             &[vec![
                 Param::from(n.name),
+                Param::Int(n.version),
                 Param::from(n.kind),
                 Param::from(n.what),
                 Param::from(n.source.to_string()),
@@ -669,7 +692,7 @@ pub fn record(registry: &mut Registry, n: &NewSet<'_>) -> Result<LabelSet, Error
                 Action::LabelsExport
             },
             scope: json!({
-                "label_set": id, "name": n.name, "kind": n.kind, "what": n.what,
+                "label_set": id, "name": n.name, "version": n.version, "kind": n.kind, "what": n.what,
                 "rows": n.rows, "campaign": n.campaign_id, "handle": n.handle_id,
             }),
             policy: None,

@@ -437,8 +437,8 @@ pub(crate) fn route(
                     created_by: principal,
                 };
                 let dir = export_dir(registry.store(), doc["place"].as_str(), &name)?;
-                let set =
-                    write_set(registry, &dir, &rows, &meta).map_err(|e| Reply::error(500, e))?;
+                let set = write_set(registry, &dir, true, &rows, &meta)
+                    .map_err(|(status, e)| Reply::error(status, e))?;
                 Ok(Reply::created(set_json(&set, None)))
             }
             ["api", "label-sets"] if get => {
@@ -513,8 +513,8 @@ pub(crate) fn route(
                     created_by: principal,
                 };
                 let dir = export_dir(registry.store(), doc["place"].as_str(), &name)?;
-                let set =
-                    write_set(registry, &dir, &rows, &meta).map_err(|e| Reply::error(500, e))?;
+                let set = write_set(registry, &dir, true, &rows, &meta)
+                    .map_err(|(status, e)| Reply::error(status, e))?;
                 Ok(Reply::created(set_json(&set, None)))
             }
             ["api", "label-sets", id] if get => {
@@ -1029,31 +1029,70 @@ fn export_dir(store: &mut Store, place: Option<&str>, name: &str) -> Result<Path
 /// the set. The digest is the sha256 of `labels.tsv`, which the canonical
 /// order makes the same for the same labels. The set is sealed when any of
 /// its items is of a sealed sample (record 40 R3).
+///
+/// A set under a name taken is the name's next version, and never writes
+/// over an earlier set's files: a door writes each version into `v<N>`
+/// under the name's directory (`versioned`), and a directory that holds a
+/// set already is refused. `labels.tsv` is written under a name of its own
+/// and put in place only once the set is recorded, so the files a set's
+/// row names are the ones its digest was taken of.
 pub(crate) fn write_set(
     registry: &mut Registry,
     dir: &Path,
+    versioned: bool,
     rows: &[Label],
     meta: &SetMeta<'_>,
-) -> Result<LabelSet, String> {
+) -> Result<LabelSet, (u16, String)> {
+    let e500 = |e: String| (500, e);
     let text = labels::tsv(rows);
     let digest = sha256(text.as_bytes());
-    let sealed = labels::sealed_among(registry.store(), rows).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let sealed = labels::sealed_among(registry.store(), rows).map_err(|e| e500(e.to_string()))?;
+    let version =
+        labels::next_version(registry.store(), meta.name).map_err(|e| e500(e.to_string()))?;
+    let dir = if versioned {
+        dir.join(format!("v{version}"))
+    } else {
+        dir.to_path_buf()
+    };
+    let dir = dir.as_path();
+    for held in ["labels.tsv", "provenance.json"] {
+        if dir.join(held).exists() {
+            return Err((
+                409,
+                format!(
+                    "{} holds a label set already, and a set never writes over another's files; write it into a directory of its own",
+                    dir.display()
+                ),
+            ));
+        }
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e500(format!("{}: {e}", dir.display())))?;
     let (handle_hash, scheme_digest, pack_version) = match meta.handle_id {
-        Some(h) => match nils_ask::handle::get(registry.store(), h).map_err(|e| e.to_string())? {
-            Some(h) => (h.content_hash, h.scheme_digest, h.pack_version),
-            None => (None, None, None),
-        },
+        Some(h) => {
+            match nils_ask::handle::get(registry.store(), h).map_err(|e| e500(e.to_string()))? {
+                Some(h) => (h.content_hash, h.scheme_digest, h.pack_version),
+                None => (None, None, None),
+            }
+        }
         None => (None, None, None),
     };
     let place =
         nils_registry::place::holding(registry.store(), nils_registry::place::Role::Export, dir)
-            .map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("labels.tsv"), &text).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let set = labels::record(
+            .map_err(|e| e500(e.to_string()))?;
+    let partial = dir.join(format!(
+        ".labels.tsv.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&partial, &text).map_err(|e| e500(format!("{}: {e}", dir.display())))?;
+    let recorded = labels::record(
         registry,
         &NewSet {
             name: meta.name,
+            version,
             kind: meta.kind,
             what: meta.what,
             source: meta.source.clone(),
@@ -1068,11 +1107,20 @@ pub(crate) fn write_set(
             path: Some(&dir.display().to_string()),
             created_by: meta.created_by,
         },
-    )
-    .map_err(|e| e.to_string())?;
+    );
+    let set = match recorded {
+        Ok(set) => set,
+        Err(e) => {
+            std::fs::remove_file(&partial).ok();
+            return Err(e500(e.to_string()));
+        }
+    };
+    std::fs::rename(&partial, dir.join("labels.tsv"))
+        .map_err(|e| e500(format!("{}: {e}", dir.display())))?;
     let provenance = json!({
         "label_set": set.id,
         "name": set.name,
+        "version": set.version,
         "kind": set.kind,
         "what": set.what,
         "source": set.source,
@@ -1094,7 +1142,7 @@ pub(crate) fn write_set(
         dir.join("provenance.json"),
         serde_json::to_string_pretty(&provenance).unwrap_or_default() + "\n",
     )
-    .map_err(|e| format!("{}: {e}", dir.display()))?;
+    .map_err(|e| e500(format!("{}: {e}", dir.display())))?;
     Ok(set)
 }
 
@@ -1642,6 +1690,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             let set = write_set(
                 &mut registry,
                 &to,
+                false,
                 &rows,
                 &SetMeta {
                     name: &name,
@@ -1653,7 +1702,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     created_by: &principal,
                 },
             )
-            .map_err(fail)?;
+            .map_err(|(_, e)| fail(e))?;
             report_set(&set, json);
             Ok(())
         }
@@ -1840,6 +1889,7 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
             let set = write_set(
                 &mut registry,
                 &a.to,
+                false,
                 &rows,
                 &SetMeta {
                     name: &name,
@@ -1854,7 +1904,7 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
                     created_by: &principal,
                 },
             )
-            .map_err(fail)?;
+            .map_err(|(_, e)| fail(e))?;
             report_set(&set, a.json);
             Ok(())
         }
@@ -1987,6 +2037,7 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
                 let set = write_set(
                     &mut registry,
                     dir,
+                    false,
                     &rows,
                     &SetMeta {
                         name: &format!("v0-{axis}"),
@@ -1998,7 +2049,7 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
                         created_by: &principal,
                     },
                 )
-                .map_err(fail)?;
+                .map_err(|(_, e)| fail(e))?;
                 doc["label_set"] = set.as_json();
             }
             if json {

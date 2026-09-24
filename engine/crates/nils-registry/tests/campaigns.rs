@@ -894,6 +894,7 @@ fn a_label_set_is_the_decisions_in_force_and_its_bytes_follow_them() {
             reg,
             &labels::NewSet {
                 name: "sealed-draw",
+                version: 1,
                 kind: "decisions",
                 what: "body_part",
                 source: json!({"axis": "body_part"}),
@@ -1712,10 +1713,12 @@ fn a_sealed_sample_seals_the_sets_that_hold_it_and_trains_nothing() {
             "{name}"
         );
         let set = |reg: &mut Registry, digest: &str, sealed: bool| {
+            let version = labels::next_version(reg.store(), "bp").unwrap();
             labels::record(
                 reg,
                 &labels::NewSet {
                     name: "bp",
+                    version,
                     kind: "decisions",
                     what: "body_part",
                     source: json!({}),
@@ -1738,7 +1741,30 @@ fn a_sealed_sample_seals_the_sets_that_hold_it_and_trains_nothing() {
         let sealed_set = labels::sealed_among(reg.store(), &drawn).unwrap();
         set(reg, &a, sealed_set);
         let open_set = labels::sealed_among(reg.store(), &other).unwrap();
-        set(reg, &b, open_set);
+        let second = set(reg, &b, open_set);
+        assert_eq!(second.version, 2, "{name}: a name's next version");
+        // a name and a version are one set
+        let taken = labels::record(
+            reg,
+            &labels::NewSet {
+                name: "bp",
+                version: 1,
+                kind: "decisions",
+                what: "body_part",
+                source: json!({}),
+                campaign_id: None,
+                handle_id: None,
+                pack_version: None,
+                scheme_digest: None,
+                sealed: false,
+                rows: 1,
+                digest: &b,
+                place_id: None,
+                path: None,
+                created_by: "cleo@lab",
+            },
+        );
+        assert!(taken.is_err(), "{name}");
         let card = |digest: &str, trained: &str| {
             json!({"name": format!("h-{}", &digest[7..9]), "version": "1", "kind": "pass",
                    "digest": digest, "task": "axis:body_part",

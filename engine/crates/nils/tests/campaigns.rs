@@ -641,6 +641,29 @@ fn one_campaign_mechanism_annotates_and_curates_through_the_door_alone() {
         again["digest"], labels["digest"],
         "the same state, the same digest"
     );
+    // a set under a name taken is the name's next version, in a directory
+    // of its own, and never writes over an earlier version's files
+    assert_eq!(labels["version"], 1, "{labels}");
+    assert_eq!(again["version"], 2, "{again}");
+    assert_ne!(again["path"], labels["path"], "{again}");
+    let other = server.ok(
+        "POST",
+        "/api/label-sets",
+        Some(json!({"axis": "body_part", "authors": ["model"], "place": "labels-out", "name": "body-part-curated"})),
+        CURATOR,
+    );
+    assert_eq!(other["version"], 3, "{other}");
+    assert_ne!(other["digest"], labels["digest"], "{other}");
+    for set in [&labels, &again, &other] {
+        let read = server.ok(
+            "GET",
+            &format!("/api/label-sets/{}", set["id"]),
+            None,
+            CURATOR,
+        );
+        let tsv = read["files"]["labels.tsv"].as_str().unwrap();
+        assert_eq!(sha256(tsv), read["digest"].as_str().unwrap(), "{read}");
+    }
     let set = server.ok(
         "GET",
         &format!("/api/label-sets/{}", labels["id"]),
@@ -885,6 +908,32 @@ fn the_keyboard_runs_a_campaign_and_commits_only_the_confident_part() {
     );
     let tsv = std::fs::read_to_string(first.join("labels.tsv")).unwrap();
     assert_eq!(sha256(&tsv), set["digest"].as_str().unwrap());
+    // a directory that holds a set already is never written over
+    let out = nils()
+        .arg("--registry")
+        .arg(home.path())
+        .args([
+            "labels",
+            "export",
+            "--axis",
+            "body_part",
+            "--author",
+            "model",
+            "--to",
+            first.to_str().unwrap(),
+        ])
+        .env("NILS_PRINCIPAL", "cleo@lab")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(
+        sha256(&std::fs::read_to_string(first.join("labels.tsv")).unwrap()),
+        set["digest"].as_str().unwrap()
+    );
     let provenance: Value =
         serde_json::from_str(&std::fs::read_to_string(second.join("provenance.json")).unwrap())
             .unwrap();
