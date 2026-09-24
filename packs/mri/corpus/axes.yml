@@ -377,3 +377,87 @@ cases:
       text_series_description: 'ax vibe'
     axes:
       construct: OutPhase
+
+  # --- what the protocols said (record 41, S1). Five scanner protocols were
+  # read against their printouts, and these are the rules the printouts
+  # proved wrong. The names are the protocols' own public sequence names;
+  # every stack is invented.
+
+  # Siemens writes `SK` in SequenceVariant on every EPI, single shot or not,
+  # so segmented k-space beside an EPI readout is no evidence of a
+  # readout-segmented one. Only the RESOLVE sequence's own name (`*re_b`)
+  # is; 2,916 single-shot diffusion stacks and 462 BOLD stacks said RESOLVE.
+  - name: a single-shot diffusion EPI is not RESOLVE because Siemens writes SK on it
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\DIFFUSION\NONE\ND\NORM'
+      scanning_sequence: EP
+      sequence_variant: 'SK\SP'
+      scan_options: 'PFP\FS'
+      text_sequence_name: '*ep_b1000#1'
+      text_series_description: 'ep2d_diff_2mm_hcp_32_b1000_AP'
+      text_protocol_name: 'ep2d_diff_2mm_hcp_32_b1000_AP'
+      diffusion_b_value: '1000'
+    axes:
+      technique: DWI-EPI
+
+  - name: and neither is the trace image computed from it
+    stack:
+      image_type: 'DERIVED\PRIMARY\DIFFUSION\TRACEW\ND\NORM'
+      scanning_sequence: EP
+      sequence_variant: 'SK\SP'
+      text_sequence_name: '*ep_b1000t'
+      text_series_description: 'ep2d_diff_2mm_hcp_32_b1000_AP_TRACEW'
+    axes:
+      technique: DWI-EPI
+
+  - name: a readout-segmented diffusion EPI is RESOLVE by its sequence name
+    stack:
+      image_type: 'DERIVED\PRIMARY\DIFFUSION\TRACEW\NORM\DIS2D'
+      scanning_sequence: RM
+      sequence_variant: 'SK\SP'
+      text_sequence_name: '*re_b1000t'
+      text_series_description: 'ax dwi b1000'
+    axes:
+      technique: RESOLVE
+
+  - name: a multiband BOLD series is BOLD, not RESOLVE
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: 'SK\OSP'
+      text_sequence_name: '*epfid2d1_104'
+      text_series_description: 'rs-fMRI_ep2d_bold_sms_2mmi_RL_hcp_6min'
+      text_protocol_name: 'rs-fMRI_ep2d_bold_sms_2mmi_RL_hcp_6min'
+    axes:
+      technique: BOLD
+
+  - name: and its motion-corrected copy is BOLD by its protocol
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\MOCO\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: 'SK\OSP'
+      text_sequence_name: '*epfid2d1_104'
+      text_series_description: 'MoCoSeries'
+      text_protocol_name: 'rs-fMRI_ep2d_bold_sms_2mmi_RL_hcp_6min'
+    axes:
+      technique: BOLD
+
+  - name: a gradient-echo EPI the name says nothing about is a gradient-echo EPI
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\NORM\DIS2D'
+      scanning_sequence: EP
+      sequence_variant: 'SK\SP\OSP'
+      text_sequence_name: 'epfid2d1_64'
+      text_series_description: 'ax ep2d'
+    axes:
+      technique: GRE-EPI
+
+  - name: a 3D GRASE arterial spin labelling series is ASL
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\ASL\NONE\ND\NORM\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      text_sequence_name: '*tgse3d1_3000'
+      text_series_description: 'Ax ASL 3D'
+    axes:
+      technique: ASL

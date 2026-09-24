@@ -72,9 +72,14 @@ values:
       - multishot epi
       - multi-shot epi
       - segmented epi
+    # Only the readout-segmented sequence's own name says so (`*re_b`).
+    # v0 also took segmented k-space beside an EPI readout, and Siemens
+    # writes `SK` in SequenceVariant on every EPI it makes, single shot or
+    # not: on five scanner protocols that combination called 2,916
+    # single-shot diffusion stacks, 462 BOLD stacks and every ASL series
+    # RESOLVE, and not one of them was (record 41).
     detection:
       exclusive: is_epi_diff_resolve
-      combination: [has_segmented_kspace, has_epi]
   DWI-EPI:
     family: MIXED
     keywords:

@@ -24,6 +24,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - The ask gate can see a stack the pack ruled out. The one predicate the ask describes in words for stacks, "not excluded", was missing until record 35, and the gate passed identically with and without it because `nils synth` wrote no excluded stack. The generator now writes one beside the first study of one background subject in six, the scanner's screen capture of the MPRAGE, written after every other row so that every earlier answer is unchanged, and the gate's new `ruled-out-stacks` fixture, with four of the existing ones, fails when the predicate is dropped.
 
+- The MRI pack calls an EPI RESOLVE only when its sequence name says so. The technique `MS-EPI` (label `RESOLVE`) was also reached by segmented k-space beside an EPI readout, a combination v0 carried, and Siemens writes `SK` in SequenceVariant on every EPI it makes, single shot or not. Read against the printouts of five scanner protocols, that combination called 2,916 single-shot diffusion stacks and 462 BOLD stacks RESOLVE, and every 3D GRASE ASL series too; none was. The value now comes from the readout-segmented sequence's own name (`*re_b`) or its words, so the diffusion series are `DWI-EPI`, the BOLD series and their motion-corrected copies `BOLD`, the ASL series `ASL`, and a gradient-echo EPI that nothing else names `GRE-EPI`.
+
 ## [1.0.0-alpha.37] - 2026-09-23
 
 ### Fixed
