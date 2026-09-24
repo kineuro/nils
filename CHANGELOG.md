@@ -36,6 +36,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - The MRI pack's intent rules no longer test for a construct nothing writes. `FatFraction` is declared on the construct axis and was never written, in v0 or here, and the Dixon and dual-echo field map rules of the intent cascade each tested for it where it could never be. The two tests are gone and the value stays, because a vocabulary is a contract; `nils pack shape` still reports it unreachable, with the reason.
 
+- A longhand rule's `requires` gates it. The loader read `requires` on a value of an axis file and skipped it on a rule written longhand, which is the same rule in its long form, so a longhand rule fired where its author said it must not and nothing said so. It is honoured now, is checked like any other condition (a rule decided before the passes may not require an axis decided after them), and any key a longhand rule does not have is refused with its file, line and path instead of being ignored.
+
 ## [1.0.0-alpha.37] - 2026-09-23
 
 ### Fixed

@@ -2139,6 +2139,10 @@ fn load_normalizer(f: &File) -> R<Normalizer> {
     })
 }
 
+/// The keys a longhand rule may have. `requires` gates the whole rule as it
+/// does a value of an axis file, which is the same rule written compactly.
+const RULE_KEYS: &[&str] = &["requires", "clauses", "set", "confidence", "why"];
+
 /// A rule set written longhand (§6.5): the routes with their own logic, and
 /// the axes whose tiers are not value-major. Nothing distinguishes a route
 /// from any other rule set but its `enter_when`.
@@ -2300,6 +2304,25 @@ fn load_rule_set(
                 .ok_or_else(|| Error::at("order", format!("no rule named {id}")))?,
             &rat,
         ))?;
+        // A key the loader does not read is refused, not skipped: a rule
+        // whose `requires` was dropped fired where its author said it must
+        // not, and nothing said so (record 41).
+        for k in r.keys() {
+            if !RULE_KEYS.contains(&k.as_str()) {
+                return Err(Error::at(
+                    format!("{rat}.{k}"),
+                    format!(
+                        "is not a key of a rule; a rule has {}",
+                        RULE_KEYS.join(", ")
+                    ),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
+        }
+        let requires = match r.get("requires") {
+            Some(w) => Some(f.blame(compile_here(w, &format!("{rat}.requires"), regexes))?),
+            None => None,
+        };
 
         let mut clauses = Vec::new();
         for (i, c) in f
@@ -2506,7 +2529,7 @@ fn load_rule_set(
         };
         rules.push(Rule {
             id: id.clone(),
-            requires: None,
+            requires,
             clauses,
             sets,
             confidence,
