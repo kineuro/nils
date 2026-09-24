@@ -781,7 +781,7 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
         );
 
         // A staged decision on another question is written but not in
-        // force; the registry moves on (a run), so the commit is refused
+        // force; the registry moves on, so the commit is refused
         // until --anyway; committed, it is in force.
         let technique = rows(
             &mut reg,
@@ -831,6 +831,9 @@ fn the_review_spine_groups_questions_and_a_decision_reaches_the_group() {
             .all(|r| r.text(0).unwrap() != "decision"),
             "{name}: staged is not in force"
         );
+        // The registry moves on: an act that changes a judgement advances
+        // the epoch. Staging does not (record 42), and neither does a run.
+        reg.next_epoch().unwrap();
         let drift = review::commit(&mut reg, Some(staged.decision), false, "anna@ward-3");
         assert!(
             matches!(&drift, Err(review::Error::Refused(m)) if m.contains("moved on")),

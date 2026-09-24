@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 53;
+pub const SCHEMA_VERSION: i64 = 54;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,7 +266,23 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 53,
         apply: an_answer_names_its_model_and_its_committer,
     },
+    Migration {
+        version: 54,
+        apply: a_model_has_a_home,
+    },
 ];
+
+/// Record 42 S2: the model registry. A registry from before gains the two
+/// tables empty, since no model was registered before there was a place to
+/// register one, and a release gains the models its tree's answers came
+/// from, empty on every release before, which named none.
+fn a_model_has_a_home(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["model", "model_event"])?;
+    add_columns(store, "release", &["models"])
+}
 
 /// Record 42 S1: a decision, a piece of evidence and a pick name the
 /// registered model a model's answer came from and the campaign it was given

@@ -196,6 +196,11 @@ pub struct Report {
     /// gone from the tree, written again rather than carried on the
     /// state's word.
     pub restored: i64,
+    /// Record 42 S2: the registered models whose answers are in force on
+    /// the stacks of the tree, by name, version and digest. A release's
+    /// evidence names the model, so a value a model decided is never read
+    /// as a rule's or a person's.
+    pub models: Vec<crate::bids::dataset::Model>,
     pub seconds: f64,
 }
 
@@ -1115,6 +1120,7 @@ fn run_release(registry: &mut Registry, settings: &Settings) -> Result<Report, E
         ]);
     }
     forget_stacks(registry.store(), dataset, &gone)?;
+    report.models = models_in_force(registry.store(), dataset)?;
 
     // §9.5. The files that make the tree a dataset rather than a pile of
     // correctly named images. v0 writes none of them.
@@ -1623,6 +1629,7 @@ fn write_dataset(
             true => vec![settings.actor.to_string()],
             false => settings.authors.to_vec(),
         },
+        models: report.models.clone(),
     };
     std::fs::create_dir_all(root)?;
     std::fs::write(
@@ -3003,11 +3010,43 @@ fn open_row(
     Ok(written.first().map(|r| r.int(0)).transpose()?.unwrap_or(0))
 }
 
+/// Record 42 S2: the registered models whose answers are in force on the
+/// stacks the dataset holds now, read from the evidence the classifier wrote
+/// for each decided value, which carries the decision's model.
+fn models_in_force(
+    store: &mut Store,
+    dataset: i64,
+) -> Result<Vec<crate::bids::dataset::Model>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT DISTINCT m.name, m.version, m.digest FROM {} m \
+         JOIN {} e ON e.model_id = m.id \
+         JOIN {} s ON s.stack_id = e.stack_id \
+         WHERE s.dataset_id = {} AND e.rule_set = 'decision' \
+         ORDER BY m.name, m.version, m.digest",
+        store.qualified("model"),
+        store.qualified("classification_evidence"),
+        store.qualified("release_stack"),
+        d.param(1, Type::Int)
+    );
+    Ok(store
+        .query(&sql, &[Param::Int(dataset)])?
+        .iter()
+        .map(|r| {
+            Ok(crate::bids::dataset::Model {
+                name: r.text(0)?.to_string(),
+                version: r.text(1)?.to_string(),
+                digest: r.text(2)?.to_string(),
+            })
+        })
+        .collect::<Result<_, StoreError>>()?)
+}
+
 fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
     let d = store.dialect();
     let sql = format!(
         "UPDATE {} SET finished_at = {}, files = {}, subjects = {}, unchanged = {}, moved = {}, \
-         rewritten = {}, added = {}, removed = {}, burned_in = {}, unjudged = {} WHERE id = {}",
+         rewritten = {}, added = {}, removed = {}, burned_in = {}, unjudged = {}, models = {} WHERE id = {}",
         store.qualified("release"),
         d.param(1, Type::Timestamp),
         d.param(2, Type::Int),
@@ -3019,7 +3058,8 @@ fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
         d.param(8, Type::Int),
         d.param(9, Type::Int),
         d.param(10, Type::Int),
-        d.param(11, Type::Int),
+        d.param(11, Type::Json),
+        d.param(12, Type::Int),
     );
     store.execute(
         &sql,
@@ -3038,6 +3078,7 @@ fn close_row(store: &mut Store, report: &Report) -> Result<(), Error> {
             // did with them.
             Param::Int(report.burned_in),
             Param::Int(report.unjudged),
+            Param::from(serde_json::to_string(&report.models).unwrap_or_else(|_| "[]".into())),
             Param::Int(report.release_id),
         ],
     )?;

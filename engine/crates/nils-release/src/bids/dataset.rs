@@ -44,6 +44,15 @@ pub struct Scan {
     pub acq_time: Option<String>,
 }
 
+/// A registered model whose answers are in force on the tree's stacks
+/// (record 42 S2), by what names it everywhere: name, version and digest.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+pub struct Model {
+    pub name: String,
+    pub version: String,
+    pub digest: String,
+}
+
 /// What made this dataset, for `GeneratedBy`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MadeBy {
@@ -67,6 +76,10 @@ pub struct MadeBy {
     /// without it, because a dataset with no authors cannot be registered for
     /// a DOI. The release's actor is the honest default: whoever ran it.
     pub authors: Vec<String>,
+    /// The registered models whose answers are in force on the stacks, so
+    /// that a value a model decided is traceable from the tree itself to
+    /// the model and its digest (record 42 S2). Empty is said by absence.
+    pub models: Vec<Model>,
 }
 
 /// A TSV cell. Empty is `n/a`, which is what the standard says absent is, and
@@ -94,6 +107,15 @@ pub fn description(name: &str, made_by: &MadeBy, source: Option<&str>) -> String
         generated["Placements"] = serde_json::json!(made_by.placements);
     }
     generated["Pack"] = serde_json::json!(made_by.pack);
+    if !made_by.models.is_empty() {
+        generated["Models"] = serde_json::json!(
+            made_by
+                .models
+                .iter()
+                .map(|m| serde_json::json!({ "Name": m.name, "Version": m.version, "Digest": m.digest }))
+                .collect::<Vec<_>>()
+        );
+    }
     let mut doc = serde_json::json!({
         "Name": name,
         "BIDSVersion": super::schema::BIDS_VERSION,
@@ -311,6 +333,7 @@ mod tests {
             pack: "mri@0.1.0".into(),
             placements: [("localizers".to_string(), "sourcedata".to_string())].into(),
             authors: vec!["a person".to_string()],
+            models: Vec::new(),
         }
     }
 

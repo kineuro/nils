@@ -100,6 +100,20 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | export | `nils overlay export <id> --to <dir>` |
 | delete | with the registry |
 
+## models
+
+| | |
+|---|---|
+| what | the models whose answers become registry facts (record 42, D15): each by the digest of its artifact, with its card, the check that admitted it, its state and every transition; never the artifact itself |
+| where | rows of model and model_event in the registry |
+| holds | technical: names, versions, digests, tasks and slots, the metrics a card states, the checks<br>who registered, admitted, promoted and retired each |
+| owner | the operator who registered, admitted and promoted each |
+| kept | for good; a retired model is what the decisions it answered name |
+| read | `nils model list`<br>`nils model show <model>` |
+| change | `nils model register --card <file>`<br>`nils model admit <model> --check <file>`<br>`nils model promote <model>`<br>`nils model retire <model>` |
+| export | `nils model show <model> --json` |
+| delete | with the registry |
+
 ## clinical layer
 
 | | |

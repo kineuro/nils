@@ -317,6 +317,8 @@ pub struct Apply<'a> {
 /// What an apply did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Applied {
+    /// The registered model that answered, when a model did.
+    pub model: Option<crate::model::Model>,
     pub decision: i64,
     pub axis: String,
     /// The scope the decision was written at, and what it names.
@@ -387,11 +389,43 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
             a.author.kind
         )));
     }
-    if a.author.kind == "model" && a.author.version.is_none() {
-        return Err(refused(
-            "a model's decision names the model's version (D15)",
-        ));
+    // Record 42 S2 (D15): a model's answer names a registered model that is
+    // admitted or promoted, and carries that model's version, not one the
+    // caller typed. Record 42 R6: it is evidence until a person commits it,
+    // so it is always staged.
+    let model = match (a.author.kind, a.author.model) {
+        ("model", Some(id)) => Some(crate::model::author(registry.store(), id).map_err(
+            |e| match e {
+                crate::model::Error::Store(s) => Error::Store(s),
+                other => refused(other.to_string()),
+            },
+        )?),
+        ("model", None) => {
+            return Err(refused(
+                "a model's decision names the registered model that answered (D15): nils model list",
+            ));
+        }
+        (_, Some(_)) => {
+            return Err(refused(format!(
+                "a {} is not a model; only a model's decision names a model",
+                a.author.kind
+            )));
+        }
+        _ => None,
+    };
+    if let (Some(m), Some(v)) = (&model, a.author.version)
+        && v != m.version
+    {
+        return Err(refused(format!(
+            "model {} is {} at version {}, not {v}",
+            m.id, m.name, m.version
+        )));
     }
+    let version = model
+        .as_ref()
+        .map(|m| m.version.as_str())
+        .or(a.author.version);
+    let stage = a.stage || model.is_some();
     let epoch = registry.meta().epoch;
     let store = registry.store();
     let Some(it) = item(store, a.item)? else {
@@ -406,6 +440,18 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
                 it.id, it.kind
             ))
         })?;
+    // A model answers the task it was registered for, and no other.
+    if let Some(m) = &model
+        && m.task != format!("axis:{axis}")
+    {
+        return Err(refused(format!(
+            "model {} ({}) answers {}, and review item {} asks about the axis {axis}",
+            m.id,
+            m.label(),
+            m.task,
+            it.id
+        )));
+    }
     if it.status != "open" && it.status != "staged" {
         return Err(refused(format!(
             "review item {} is already {}; decide the axis again with a new run",
@@ -486,7 +532,7 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
             d.param(2, Type::Text),
             d.param(3, Type::Text),
             d.param(4, Type::Text),
-            if a.stage {
+            if stage {
                 "staged_at IS NOT NULL AND committed_at IS NULL"
             } else {
                 "1 = 1"
@@ -534,21 +580,21 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
                     a.value.map_or(Param::Null, Param::from),
                     Param::from(a.author.who),
                     Param::from(a.author.kind),
-                    a.author.version.map_or(Param::Null, Param::from),
+                    version.map_or(Param::Null, Param::from),
                     Param::from(actor_detail.to_string()),
                     a.why.map_or(Param::Null, Param::from),
                     Param::from(now.as_str()),
-                    if a.stage {
+                    if stage {
                         Param::from(now.as_str())
                     } else {
                         Param::Null
                     },
-                    if a.stage {
+                    if stage {
                         Param::Null
                     } else {
                         Param::from(now.as_str())
                     },
-                    if a.stage {
+                    if stage {
                         Param::Int(epoch)
                     } else {
                         Param::Null
@@ -556,7 +602,7 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
                     a.author.model.map_or(Param::Null, Param::Int),
                     a.campaign.map_or(Param::Null, Param::Int),
                     // Written in force, it is in force by its own author.
-                    if a.stage {
+                    if stage {
                         Param::Null
                     } else {
                         Param::from(a.author.who)
@@ -571,15 +617,15 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
             "value": a.value,
             "actor": a.author.who,
             "author_kind": a.author.kind,
-            "model_version": a.author.version,
+            "model_version": version,
             "model_id": a.author.model,
             "campaign_id": a.campaign,
             "actor_detail": actor_detail,
             "why": a.why,
             "decision": decision,
-            "staged": a.stage,
+            "staged": stage,
         });
-        let status = if a.stage { "staged" } else { "accepted" };
+        let status = if stage { "staged" } else { "accepted" };
         let mut closed = Vec::new();
         let mut decided_members = 0i64;
         match member_stack {
@@ -667,7 +713,7 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
         }
     };
     store.commit()?;
-    audit::record(
+    audit::record_judging(
         registry,
         &Entry {
             principal: a.author.who,
@@ -680,19 +726,21 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
             job_id: None,
             details: Some(serde_json::json!({
                 "value": a.value, "author_kind": a.author.kind,
-                "model_version": a.author.version, "model_id": a.author.model,
-                "campaign_id": a.campaign, "why": a.why, "staged": a.stage,
+                "model_version": version, "model_id": a.author.model,
+                "campaign_id": a.campaign, "why": a.why, "staged": stage,
             })),
         },
+        !stage,
     )?;
     Ok(Applied {
+        model,
         decision,
         axis,
         scope,
         reference,
         closed,
         members: decided_members,
-        staged: a.stage,
+        staged: stage,
     })
 }
 
@@ -748,11 +796,24 @@ pub fn commit(
     anyway: bool,
     who: &str,
 ) -> Result<Committed, Error> {
+    commit_as(registry, decision, anyway, who, "person")
+}
+
+/// [`commit`], by a committer of a kind: a person, an agent or a model.
+/// Record 42 R6: a model's answer is put in force only by a person, so an
+/// agent or a model that would commit one is refused.
+pub fn commit_as(
+    registry: &mut Registry,
+    decision: Option<i64>,
+    anyway: bool,
+    who: &str,
+    kind: &str,
+) -> Result<Committed, Error> {
     let epoch = registry.meta().epoch;
     let store = registry.store();
     let d = store.dialect();
     let mut sql = format!(
-        "SELECT id, epoch_staged FROM {} WHERE staged_at IS NOT NULL AND committed_at IS NULL \
+        "SELECT id, epoch_staged, author_kind FROM {} WHERE staged_at IS NOT NULL AND committed_at IS NULL \
          AND withdrawn_at IS NULL",
         store.qualified("decision")
     );
@@ -761,11 +822,38 @@ pub fn commit(
         params.push(Param::Int(id));
         sql.push_str(&format!(" AND id = {}", d.param(1, Type::Int)));
     }
-    let staged: Vec<(i64, Option<i64>)> = store
+    let rows: Vec<(i64, Option<i64>, String)> = store
         .query(&sql, &params)?
         .iter()
-        .map(|r| Ok((r.int(0)?, r.opt_int(1)?)))
+        .map(|r| {
+            Ok((
+                r.int(0)?,
+                r.opt_int(1)?,
+                r.opt_text(2)?.unwrap_or("").to_string(),
+            ))
+        })
         .collect::<Result<_, StoreError>>()?;
+    let by_model: Vec<i64> = rows
+        .iter()
+        .filter(|(_, _, k)| k == "model")
+        .map(|(id, _, _)| *id)
+        .collect();
+    if kind != "person" && !by_model.is_empty() {
+        return Err(refused(format!(
+            "decision(s) {} are a model's answer, which a person puts in force (record 42 R6); {} does not",
+            by_model
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            if kind == "agent" {
+                "an agent"
+            } else {
+                "a model"
+            }
+        )));
+    }
+    let staged: Vec<(i64, Option<i64>)> = rows.into_iter().map(|(id, e, _)| (id, e)).collect();
     if staged.is_empty() {
         return Err(refused(match decision {
             Some(id) => format!("decision {id} is not staged"),

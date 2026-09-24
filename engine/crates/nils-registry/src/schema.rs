@@ -1192,6 +1192,68 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["role", "subject_id", "session_day"]),
+        // Record 42 S2 (D15): a model whose answers become registry facts,
+        // identified by the digest of its canonical artifact and described
+        // by its card (`contracts/model/v1`). Registered, admitted by a check
+        // that passed, promoted (one per task and slot), retired; nothing is
+        // deleted, because a retired model still names what it decided.
+        Table::new(
+            "model",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("version", Type::Text),
+                // encoder, head, pass or segmenter
+                req("kind", Type::Text),
+                // sha256:<hex> of the canonical artifact: the identity
+                req("digest", Type::Text),
+                // what it answers, such as axis:body_part, and where: site,
+                // or cohort:<name> (record 42 R4)
+                req("task", Type::Text),
+                req("slot", Type::Text),
+                req("state", Type::Text),
+                // the card as it was registered, kept whole
+                req("card", Type::Json),
+                // a head names the encoder whose features it reads
+                col("encoder_model_id", Type::Int),
+                // the digest of the label set it was fitted on (C7)
+                col("trained_on", Type::Text),
+                col("pack_version", Type::Text),
+                // the check that admitted it, or the last one that failed
+                // while it was registered
+                col("gate", Type::Json),
+                req("registered_by", Type::Text),
+                req("registered_at", Type::Timestamp),
+                col("admitted_by", Type::Text),
+                col("admitted_at", Type::Timestamp),
+                col("promoted_by", Type::Text),
+                col("promoted_at", Type::Timestamp),
+                col("retired_by", Type::Text),
+                col("retired_at", Type::Timestamp),
+                // the review item a person accepted to promote it
+                col("review_item", Type::Int),
+                // the job that fitted it, when a job did
+                col("job_id", Type::Int),
+            ],
+        )
+        .unique(&["digest"])
+        .unique(&["name", "version"])
+        .index(&["task", "slot", "state"]),
+        // Every transition of a model, with who and when: the lifecycle's
+        // own record beside the audit row (`contracts/model/v1`).
+        Table::new(
+            "model_event",
+            vec![
+                col("id", Type::Id),
+                req("model_id", Type::Int),
+                // registered, admitted, admission_failed, promoted, retired
+                req("transition", Type::Text),
+                req("principal", Type::Text),
+                req("at", Type::Timestamp),
+                col("detail", Type::Json),
+            ],
+        )
+        .index(&["model_id"]),
         Table::new(
             "pick_stack",
             vec![
@@ -1299,6 +1361,10 @@ fn build_registry() -> Vec<Table> {
                 // that never closed and on a row written before this.
                 col("burned_in", Type::Int),
                 col("unjudged", Type::Int),
+                // Record 42 S2: the registered models whose answers are in
+                // force on the stacks of the tree, each by name, version and
+                // digest. Null on a row written before this.
+                col("models", Type::Json),
             ],
         )
         .index(&["name"]),

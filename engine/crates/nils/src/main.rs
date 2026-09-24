@@ -40,6 +40,7 @@ mod grants;
 mod linkage_doors;
 mod login;
 mod mcp;
+mod model_cli;
 mod originals;
 mod places;
 mod profile;
@@ -196,6 +197,13 @@ enum Command {
     Review {
         #[command(subcommand)]
         command: ReviewCommand,
+    },
+    /// The model registry (record 42, D15): models whose answers become
+    /// registry facts, by the digest of their artifact, registered,
+    /// admitted by a check, promoted in their slot and retired
+    Model {
+        #[command(subcommand)]
+        command: model_cli::ModelCommand,
     },
     /// What a selection would release, without releasing it: each item and
     /// how it resolved, and what it reaches (Wave 4a section 8)
@@ -1397,9 +1405,11 @@ struct DecideArgs {
         value_name = "person|agent|model"
     )]
     author_kind: String,
-    /// The model's version, required when the author is a model (D15)
-    #[arg(long, value_name = "VERSION")]
-    model_version: Option<String>,
+    /// The registered model that answered, required when the author is a
+    /// model (D15): its id, its digest (sha256:...) or name@version. Its
+    /// answer is staged until a person commits it (record 42)
+    #[arg(long, value_name = "MODEL", alias = "model-version")]
+    model: Option<String>,
     /// Why, in the person's own words
     #[arg(long, value_name = "TEXT")]
     why: Option<String>,
@@ -1696,6 +1706,7 @@ fn main() -> ExitCode {
         Command::Linkage { command } => linkage_command(&home, command),
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
+        Command::Model { command } => model_cli::model_command(&home, command),
         Command::Private(args) => private_survey(&home, args),
         Command::Release(args) => release(&home, *args),
         Command::Handover(command) => handover_command(&home, command),
@@ -4676,7 +4687,7 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
         nothing,
         actor,
         author_kind,
-        model_version,
+        model,
         why,
         stage,
         json,
@@ -4692,6 +4703,18 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
         .and_then(nils_registry::principal::Principal::parse)
         .map(|p| p.to_string())
         .unwrap_or_else(self::actor);
+    let model = match model.as_deref() {
+        Some(reference) => Some(
+            nils_registry::model::resolve(registry.store(), reference)?
+                .ok_or_else(|| {
+                    usage(format!(
+                        "no registered model answers to {reference}: an id, a digest (sha256:...) or name@version"
+                    ))
+                })?
+                .id,
+        ),
+        None => None,
+    };
     let applied = nils_registry::review::apply(
         registry,
         &nils_registry::review::Apply {
@@ -4702,8 +4725,8 @@ fn review_decide(registry: &mut Registry, args: DecideArgs) -> Result<(), Exit> 
             author: nils_registry::review::Author {
                 who: &who,
                 kind: &author_kind,
-                version: model_version.as_deref(),
-                model: None,
+                version: None,
+                model,
             },
             stage,
             why: why.as_deref(),
@@ -4899,6 +4922,8 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let overlays = count_of(store, "overlay", "")?;
     let overlays_proposed = count_of(store, "overlay", " WHERE status = 'proposed'")?;
     let overlays_adopted = count_of(store, "overlay", " WHERE status = 'adopted'")?;
+    let models = count_of(store, "model", "")?;
+    let models_promoted = count_of(store, "model", " WHERE state = 'promoted'")?;
     let jobs = count_of(store, "job", "")?;
     let batches = count_of(store, "ingest_batch", "")?;
     let cohorts = count_of(store, "cohort", "")?;
@@ -5087,6 +5112,22 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
                 "read": ["nils overlay list", "nils overlay show <id>"],
                 "change": ["nils overlay refuse <id>", "POST /api/overlays", "POST /api/overlays/<id>/adopt"],
                 "export": ["nils overlay export <id> --to <dir>"],
+                "delete": "with the registry",
+            },
+        }),
+        serde_json::json!({
+            "store": "models",
+            "owner": "the operator who registered, admitted and promoted each",
+            "what": "the models whose answers become registry facts (record 42, D15): each by the digest of its artifact, with its card, the check that admitted it, its state and every transition; never the artifact itself",
+            "where": "rows of model and model_event in the registry",
+            "files": [],
+            "holds": ["technical: names, versions, digests, tasks and slots, the metrics a card states, the checks", "who registered, admitted, promoted and retired each"],
+            "counts": { "models": models, "promoted": models_promoted },
+            "kept": "for good; a retired model is what the decisions it answered name",
+            "commands": {
+                "read": ["nils model list", "nils model show <model>"],
+                "change": ["nils model register --card <file>", "nils model admit <model> --check <file>", "nils model promote <model>", "nils model retire <model>"],
+                "export": ["nils model show <model> --json"],
                 "delete": "with the registry",
             },
         }),
@@ -8244,6 +8285,11 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             p["uids"].as_str().unwrap_or_default(),
             p["from"].as_str().unwrap_or_default()
         );
+    }
+    // Record 42 S2: a value a model decided is traceable from the report to
+    // the model, by name, version and digest.
+    for m in &report.models {
+        println!("  model            {}@{}   {}", m.name, m.version, m.digest);
     }
     // Record 35: under what rule the file was de-identified. The row has
     // recorded the categories since they existed and nothing a person reads

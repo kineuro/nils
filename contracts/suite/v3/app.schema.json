@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/suite/v3/app.schema.json",
+  "title": "NILS app registry entry",
+  "description": "Wave 4c section 4.4: an app the desk proxies under /apps/{id}/ on the one origin, with the person's token attached, whose capabilities document the desk merges into the deployment capabilities document.",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "url",
+    "entitlement"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "title": {
+      "type": "string"
+    },
+    "url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "entitlement": {
+      "type": "string",
+      "enum": [
+        "assistant-settings:see",
+        "assistant-settings:work",
+        "assistant:use",
+        "audit:see",
+        "data:see",
+        "data:work",
+        "database:see",
+        "database:work",
+        "identity:see",
+        "identity:work",
+        "install:see",
+        "install:work",
+        "kvasir:see",
+        "kvasir:work",
+        "pipelines:see",
+        "pipelines:work",
+        "places:see",
+        "places:work",
+        "query:see",
+        "query:work",
+        "release:see",
+        "release:work",
+        "review:see",
+        "review:work",
+        "reader",
+        "reviewer",
+        "operator",
+        "admin",
+        "assist"
+      ],
+      "description": "The grant that shows the app's section, or a ladder name, which stands for its set (grants.schema.json)"
+    },
+    "capabilities": {
+      "type": "string",
+      "default": "/capabilities",
+      "description": "The app's capabilities path, relative to its url"
+    }
+  },
+  "additionalProperties": false
+}

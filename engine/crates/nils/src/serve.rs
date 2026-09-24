@@ -34,6 +34,7 @@ const REVIEW_ITEM_VERSION: &str = include_str!("../../../../contracts/review-ite
 const SUITE_VERSION: &str = include_str!("../../../../contracts/suite/VERSION");
 const MCP_VERSION: &str = include_str!("../../../../contracts/mcp/VERSION");
 const PACK_CONTRACT_VERSION: &str = include_str!("../../../../contracts/pack/VERSION");
+const MODEL_CONTRACT_VERSION: &str = include_str!("../../../../contracts/model/VERSION");
 
 /// The claims an OIDC token carries that the engine reads; `grants` and
 /// `detail` (the suite contract, version 2) are read from the rest.
@@ -2747,7 +2748,7 @@ fn routed(
             if value.is_none() && !nothing {
                 return Err(Reply::error(400, "value, or nothing: true"));
             }
-            let (kind, version) = author_at_apply(caller, &doc)?;
+            let (kind, version, model) = author_at_apply(registry, caller, &doc)?;
             let applied = nils_registry::review::apply(
                 registry,
                 &nils_registry::review::Apply {
@@ -2759,7 +2760,7 @@ fn routed(
                         who: principal,
                         kind,
                         version,
-                        model: None,
+                        model,
                     },
                     stage: doc["stage"].as_bool().unwrap_or(false),
                     why: doc["why"].as_str(),
@@ -2771,6 +2772,7 @@ fn routed(
                 "decision": applied.decision, "axis": applied.axis, "scope": applied.scope,
                 "ref": applied.reference, "closed": applied.closed, "members": applied.members,
                 "staged": applied.staged,
+                "model": applied.model.as_ref().map(nils_registry::model::Model::named),
             })))
         }
         ["api", "review", _, "accept"] if post => {
@@ -2789,11 +2791,12 @@ fn routed(
         ["api", "decisions", _, "commit"] if post => {
             let id = id_at(2)?;
             let doc = json_body(body)?;
-            let done = nils_registry::review::commit(
+            let done = nils_registry::review::commit_as(
                 registry,
                 Some(id),
                 doc["anyway"].as_bool().unwrap_or(false),
                 principal,
+                author_of(caller).0,
             )
             .map_err(review_err)?;
             Ok(Reply::ok(
@@ -2807,6 +2810,64 @@ fn routed(
             Ok(Reply::ok(
                 serde_json::json!({ "withdrawn": id, "reopened": reopened }),
             ))
+        }
+        // Record 42 S2: the model registry.
+        ["api", "models"] if get => {
+            let filter = nils_registry::model::Filter {
+                task: query.get("task").map(String::as_str),
+                slot: query.get("slot").map(String::as_str),
+                state: query.get("state").map(String::as_str),
+            };
+            let models = nils_registry::model::list(registry.store(), &filter)?;
+            Ok(Reply::ok(serde_json::json!({
+                "count": models.len(),
+                "models": models.iter().map(nils_registry::model::Model::to_json).collect::<Vec<_>>(),
+            })))
+        }
+        ["api", "models"] if post => {
+            let doc = json_body(body)?;
+            let m = nils_registry::model::register(registry, &doc, principal).map_err(model_err)?;
+            Ok(Reply::ok(m.to_json()))
+        }
+        ["api", "models", _] if get => {
+            let id = id_at(2)?;
+            let Some(m) = nils_registry::model::get(registry.store(), id)? else {
+                return Err(Reply::error(404, format!("no model {id}")));
+            };
+            let mut doc = m.to_json();
+            doc["events"] =
+                serde_json::Value::from(nils_registry::model::events(registry.store(), id)?);
+            Ok(Reply::ok(doc))
+        }
+        ["api", "models", _, "admit"] if post => {
+            let id = id_at(2)?;
+            let doc = json_body(body)?;
+            let m =
+                nils_registry::model::admit(registry, id, &doc, principal).map_err(model_err)?;
+            Ok(Reply::ok(m.to_json()))
+        }
+        ["api", "models", _, "promote"] if post => {
+            let id = id_at(2)?;
+            let doc = json_body(body)?;
+            let done = nils_registry::model::promote(
+                registry,
+                id,
+                principal,
+                doc["review_item"].as_i64(),
+                doc["why"].as_str(),
+            )
+            .map_err(model_err)?;
+            Ok(Reply::ok(serde_json::json!({
+                "model": done.model.to_json(),
+                "retired": done.retired.as_ref().map(nils_registry::model::Model::to_json),
+            })))
+        }
+        ["api", "models", _, "retire"] if post => {
+            let id = id_at(2)?;
+            let doc = json_body(body)?;
+            let m = nils_registry::model::retire(registry, id, principal, doc["why"].as_str())
+                .map_err(model_err)?;
+            Ok(Reply::ok(m.to_json()))
         }
         // Wave 5 section 12.2: every event on one object, in order.
         ["api", "depends", kind, id] if get => {
@@ -3001,6 +3062,13 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
             (Need::One("database:work"), Plain)
         }
         ("GET", ["api", "audit" | "custody"]) => (Need::One("audit:see"), Plain),
+        // record 42 R7: the model registry has grants of its own
+        ("GET", ["api", "models"]) | ("GET", ["api", "models", _]) => {
+            (Need::One("models:see"), Plain)
+        }
+        ("POST", ["api", "models"]) | ("POST", ["api", "models", _, _]) => {
+            (Need::One("models:work"), Plain)
+        }
         _ => (Need::Any, Plain),
     }
 }
@@ -3107,14 +3175,17 @@ fn author_of(caller: &Caller) -> (&str, Option<&str>) {
 /// Record 42 S1: the author of a decision is the verified actor, never the
 /// body. The kind (and a model's version) come from `X-Nils-Actor` as the
 /// token allows it (`narrow`), a person at a keyboard when there is none. A
-/// body from an older client may still say `author_kind` and
-/// `model_version`; where it agrees with the actor it is taken, where it
+/// body from an older client may still say `author_kind`, `model_version`
+/// and `model_id`; where it agrees with the actor it is taken, where it
 /// says something else the call is refused rather than recorded under a
-/// name the caller did not prove.
+/// name the caller did not prove. Record 42 S2: a model acting names the
+/// registered model in the header's `model`, by id, digest or
+/// `name@version`, and one that no registered model answers to is refused.
 fn author_at_apply<'a>(
+    registry: &mut Registry,
     caller: &'a Caller,
     doc: &'a serde_json::Value,
-) -> Result<(&'a str, Option<&'a str>), Reply> {
+) -> Result<(&'a str, Option<&'a str>, Option<i64>), Reply> {
     let (kind, version) = author_of(caller);
     if let Some(said) = doc.get("author_kind").filter(|v| !v.is_null())
         && said.as_str() != Some(kind)
@@ -3127,18 +3198,50 @@ fn author_at_apply<'a>(
             ),
         ));
     }
-    if let Some(said) = doc.get("model_version").filter(|v| !v.is_null())
-        && (kind != "model" || said.as_str() != version)
+    let model = if kind == "model" {
+        let reference = match &caller.actor["model"] {
+            serde_json::Value::String(s) if !s.trim().is_empty() => s.trim().to_string(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => {
+                return Err(Reply::error(
+                    400,
+                    "a model acting names the registered model in X-Nils-Actor: {\"kind\": \"model\", \"model\": <id, sha256 digest or name@version>}",
+                ));
+            }
+        };
+        let Some(m) = nils_registry::model::resolve(registry.store(), &reference)? else {
+            return Err(Reply::error(
+                404,
+                format!("no registered model answers to {reference}; nils model list"),
+            ));
+        };
+        Some(m)
+    } else {
+        None
+    };
+    if let Some(said) = doc.get("model_id").filter(|v| !v.is_null())
+        && (said.as_i64() != model.as_ref().map(|m| m.id))
     {
         return Err(Reply::error(
             403,
             format!(
-                "model_version {said} is not what X-Nils-Actor says ({}); a model's version is the actor's, never the body's",
-                version.unwrap_or("none")
+                "model_id {said} is not the model X-Nils-Actor names; the model is the actor's, never the body's"
             ),
         ));
     }
-    Ok((kind, version))
+    if let Some(said) = doc.get("model_version").filter(|v| !v.is_null()) {
+        let held = model.as_ref().map(|m| m.version.as_str()).or(version);
+        if kind != "model" || said.as_str() != held {
+            return Err(Reply::error(
+                403,
+                format!(
+                    "model_version {said} is not the acting model's ({}); a model's version is the actor's, never the body's",
+                    held.unwrap_or("none")
+                ),
+            ));
+        }
+    }
+    Ok((kind, version, model.map(|m| m.id)))
 }
 
 /// An author kind as a sentence names it.
@@ -3257,6 +3360,16 @@ fn cohort_err(e: nils_registry::cohort::Error) -> Reply {
 
 /// A review refusal quotes what it refuses: a reference, a header value, a
 /// name, the person who decided; every one is gated.
+fn model_err(e: nils_registry::model::Error) -> Reply {
+    use nils_registry::model::Error;
+    match e {
+        Error::Invalid(m) => Reply::error(400, m),
+        Error::Unknown(m) => Reply::error(404, m),
+        Error::Refused(m) => Reply::error(409, m),
+        Error::Store(e) => Reply::error(500, e.to_string()),
+    }
+}
+
 fn review_err(e: nils_registry::review::Error) -> Reply {
     match e {
         nils_registry::review::Error::Refused(m) => Reply::gated(409, m),
@@ -3300,6 +3413,12 @@ fn capabilities(
         "POST /api/review/{id}/accept",
         "POST /api/decisions/{id}/commit",
         "POST /api/decisions/{id}/withdraw",
+        "GET /api/models",
+        "POST /api/models",
+        "GET /api/models/{id}",
+        "POST /api/models/{id}/admit",
+        "POST /api/models/{id}/promote",
+        "POST /api/models/{id}/retire",
         "GET /api/timeline/{kind}/{id}",
         "GET /api/depends/{kind}/{id}",
         "GET /api/events",
@@ -3353,6 +3472,7 @@ fn capabilities(
             "suite": SUITE_VERSION.trim(),
             "mcp": MCP_VERSION.trim(),
             "pack": PACK_CONTRACT_VERSION.trim(),
+            "model": MODEL_CONTRACT_VERSION.trim(),
         },
         "packs": packs,
         "registry": { "id": meta.registry_id, "epoch": meta.epoch, "schema_version": meta.schema_version, "synthetic": meta.synthetic },
@@ -3848,6 +3968,60 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one decision",
             "Withdrawing a decision",
             "Withdrew a decision",
+        ),
+        row(
+            "GET /api/models",
+            false,
+            false,
+            "bounded",
+            "every model",
+            "Listing the models",
+            "Listed the models",
+        ),
+        row(
+            "POST /api/models",
+            true,
+            false,
+            "free",
+            "one model",
+            "Registering a model",
+            "Registered a model",
+        ),
+        row(
+            "GET /api/models/{id}",
+            false,
+            false,
+            "free",
+            "one model",
+            "Reading a model's card",
+            "Read a model's card",
+        ),
+        row(
+            "POST /api/models/{id}/admit",
+            true,
+            false,
+            "free",
+            "one model",
+            "Recording a check on a model",
+            "Recorded a check on a model",
+        ),
+        row(
+            "POST /api/models/{id}/promote",
+            true,
+            false,
+            "free",
+            "one model",
+            "Promoting a model",
+            "Promoted a model",
+        ),
+        row(
+            "POST /api/models/{id}/retire",
+            true,
+            false,
+            "free",
+            "one model",
+            "Retiring a model",
+            "Retired a model",
         ),
         row(
             "GET /api/events",

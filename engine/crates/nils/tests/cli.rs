@@ -1222,6 +1222,7 @@ fn custody_quarantine_review_and_purge_go_round() {
             "quarantine list",
             "classifications",
             "overlays",
+            "models",
             "clinical layer",
             "claims cache",
             "backups",
@@ -4051,8 +4052,13 @@ fn nils_review_apply_is_one_verb_over_groups_stages_commits_and_withdraws() {
             .int(0)
             .unwrap();
         assert_eq!(in_force, 1, "only the member's own decision is in force");
+        // The registry moves on: an act that changes a judgement advances
+        // the epoch. Staging does not (record 42), and neither does a run.
+        store
+            .batch("UPDATE registry_meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'epoch'")
+            .unwrap();
     }
-    // The registry moved on (that run), so the commit needs --anyway.
+    // The registry moved on, so the commit needs --anyway.
     let out = nils()
         .args(registry)
         .args(["review", "commit", &decision.to_string()])
@@ -5073,4 +5079,310 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
 
 fn packs_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs")
+}
+
+/// Record 42 S2, at the command line: a model is registered by the digest
+/// of its artifact, refused a second time and refused promotion before a
+/// check admits it; a failed check moves nothing; a second promotion in the
+/// slot retires the first; a model's answer names a registered, admitted
+/// model or is refused, is staged until a person commits it, and `nils
+/// explain` and the release name the model by its name, version and digest.
+#[test]
+fn a_model_is_registered_by_digest_and_named_where_it_answered() {
+    let home = home();
+    let dir = tree();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry: [&std::ffi::OsStr; 2] =
+        [std::ffi::OsStr::new("--registry"), home.path().as_os_str()];
+    let run = |args: &[&str]| -> std::process::Output {
+        nils()
+            .args(registry)
+            .args(args)
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .output()
+            .unwrap()
+    };
+    let ok = |args: &[&str]| -> String {
+        let out = run(args);
+        assert!(out.status.success(), "{}: {}", args.join(" "), stderr(&out));
+        stdout(&out)
+    };
+    let refused = |args: &[&str], says: &str| {
+        let out = run(args);
+        assert!(
+            !out.status.success(),
+            "{}: {}",
+            args.join(" "),
+            stdout(&out)
+        );
+        assert!(
+            stderr(&out).contains(says),
+            "{}: {}",
+            args.join(" "),
+            stderr(&out)
+        );
+    };
+    let doc = |text: String| -> serde_json::Value { serde_json::from_str(&text).unwrap() };
+    ok(&["digest", "--name", "t", dir.path().to_str().unwrap()]);
+    ok(&["fingerprint"]);
+    let pack_dir = packs.to_str().unwrap();
+    ok(&["classify", "--review-below", "1.0", "--pack-dir", pack_dir]);
+
+    // The question a model will answer: an axis the pack was unsure of.
+    let items = doc(ok(&["review", "list", "--json", "--status", "open"]));
+    let asked = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| {
+            i["kind"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with(":low_confidence")
+                && i["evidence"]["value"].is_string()
+        })
+        .unwrap_or_else(|| panic!("{items:#}"))
+        .clone();
+    let base = asked["id"].as_i64().unwrap().to_string();
+    let asked_axis = asked["evidence"]["axis"].as_str().unwrap().to_string();
+    let asked_value = asked["evidence"]["value"].as_str().unwrap().to_string();
+    // The encoder, registered with its artifact: the digest is the file's.
+    let files = TempDir::new("cli-models");
+    let write = |name: &str, text: &str| -> String {
+        let p = files.path().join(name);
+        std::fs::write(&p, text).unwrap();
+        p.to_str().unwrap().to_string()
+    };
+    let weights = write("encoder.onnx", "not really weights");
+    let card = write(
+        "encoder.json",
+        r#"{"name": "dino", "version": "1", "kind": "encoder", "task": "embed:image"}"#,
+    );
+    let encoder = doc(ok(&[
+        "model",
+        "register",
+        "--card",
+        &card,
+        "--artifact",
+        &weights,
+        "--json",
+    ]));
+    let encoder_digest = encoder["digest"].as_str().unwrap().to_string();
+    assert!(encoder_digest.starts_with("sha256:"), "{encoder}");
+    assert_eq!(encoder["state"], "registered", "{encoder}");
+    // the same artifact again is refused, whatever it is called
+    let again = write(
+        "again.json",
+        &format!(
+            r#"{{"name": "dino", "version": "2", "kind": "encoder", "task": "embed:image", "digest": "{encoder_digest}"}}"#
+        ),
+    );
+    refused(
+        &["model", "register", "--card", &again],
+        "registered already",
+    );
+    // a head without its encoder is refused
+    let a = format!("sha256:{}", "a".repeat(64));
+    let b = format!("sha256:{}", "b".repeat(64));
+    let head = |version: &str, digest: &str, encoder: Option<&str>| -> String {
+        let mut card = serde_json::json!({
+            "name": "base-head", "version": version, "kind": "head", "digest": digest,
+            "task": format!("axis:{asked_axis}"), "trained_on": {"label_set": format!("sha256:{}", "c".repeat(64))},
+            "metrics": {"accuracy": 0.97, "ece": 0.02},
+        });
+        if let Some(e) = encoder {
+            card["encoder"] = serde_json::json!({ "digest": e });
+        }
+        write(&format!("head-{version}.json"), &card.to_string())
+    };
+    refused(
+        &["model", "register", "--card", &head("1", &a, None)],
+        "encoder",
+    );
+    let first = doc(ok(&[
+        "model",
+        "register",
+        "--card",
+        &head("1", &a, Some(&encoder_digest)),
+        "--json",
+    ]));
+    assert_eq!(first["encoder_model_id"], encoder["id"], "{first}");
+    assert_eq!(first["slot"], "site", "{first}");
+
+    // promotion before admission is refused; a failed check moves nothing
+    refused(&["model", "promote", "base-head@1"], "not admitted");
+    let failed = write(
+        "failed.json",
+        r#"{"suite": "heldout", "passed": false, "checks": [{"name": "ece", "passed": false, "value": 0.2, "threshold": 0.05}]}"#,
+    );
+    let passed = write(
+        "passed.json",
+        r#"{"suite": "heldout", "passed": true, "checks": [{"name": "ece", "passed": true, "value": 0.02, "threshold": 0.05}]}"#,
+    );
+    let still = doc(ok(&["model", "admit", &a, "--check", &failed, "--json"]));
+    assert_eq!(still["state"], "registered", "{still}");
+    refused(&["model", "promote", &a], "not admitted");
+    let admitted = doc(ok(&[
+        "model",
+        "admit",
+        "base-head@1",
+        "--check",
+        &passed,
+        "--json",
+    ]));
+    assert_eq!(admitted["state"], "admitted", "{admitted}");
+    assert_eq!(admitted["check"]["passed"], true, "{admitted}");
+    ok(&["model", "promote", "base-head@1"]);
+
+    // a second head in the slot: its promotion retires the first
+    ok(&[
+        "model",
+        "register",
+        "--card",
+        &head("2", &b, Some(&encoder_digest)),
+    ]);
+    ok(&["model", "admit", "base-head@2", "--check", &passed]);
+    let promoted = doc(ok(&[
+        "model",
+        "promote",
+        "base-head@2",
+        "--why",
+        "better",
+        "--json",
+    ]));
+    assert_eq!(promoted["model"]["state"], "promoted", "{promoted}");
+    assert_eq!(promoted["retired"]["version"], "1", "{promoted}");
+    let task = format!("axis:{asked_axis}");
+    let listed = doc(ok(&[
+        "model", "list", "--task", &task, "--state", "promoted", "--json",
+    ]));
+    assert_eq!(listed["count"], 1, "one promoted model per slot: {listed}");
+    let shown = doc(ok(&["model", "show", "base-head@1", "--json"]));
+    let transitions: Vec<&str> = shown["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["transition"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        transitions,
+        [
+            "registered",
+            "admission_failed",
+            "admitted",
+            "promoted",
+            "retired"
+        ],
+        "{shown}"
+    );
+
+    // A model's answer names a registered, admitted model, or is refused.
+    refused(
+        &[
+            "review", "apply", &base, "--as", "model", "--model", "999", "--value", "T2w",
+        ],
+        "no registered model",
+    );
+    refused(
+        &[
+            "review",
+            "apply",
+            &base,
+            "--as",
+            "model",
+            "--model",
+            "base-head@1",
+            "--value",
+            &asked_value,
+        ],
+        "retired",
+    );
+    refused(
+        &["review", "apply", &base, "--as", "model", "--value", "T2w"],
+        "names the registered model",
+    );
+    // An admitted model's answer is staged, whatever was asked, and a
+    // person commits it.
+    let said = doc(ok(&[
+        "review",
+        "apply",
+        &base,
+        "--as",
+        "model",
+        "--model",
+        "base-head@2",
+        "--value",
+        &asked_value,
+        "--json",
+    ]));
+    assert_eq!(said["staged"], true, "{said}");
+    ok(&["review", "commit", "--all"]);
+    ok(&["classify", "--review-below", "1.0", "--pack-dir", pack_dir]);
+    // the evidence of the decided value carries the model, and explain
+    // reads it from there
+    let stack = {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .query(
+                "SELECT stack_id FROM classification_evidence WHERE model_id IS NOT NULL ORDER BY stack_id",
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap()
+            .to_string()
+    };
+    let explained = doc(ok(&["explain", &stack, "--json"]));
+    let axis = explained["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["axis"] == asked_axis.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(axis["value"], asked_value.as_str(), "{explained}");
+    assert_eq!(axis["decision"]["kind"], "model", "{axis}");
+    assert_eq!(axis["decision"]["model"]["name"], "base-head", "{axis}");
+    assert_eq!(axis["decision"]["model"]["version"], "2", "{axis}");
+    assert_eq!(axis["decision"]["model"]["digest"], b.as_str(), "{axis}");
+    assert_eq!(axis["decision"]["committed_by"], "anna@ward-3", "{axis}");
+    let text = ok(&["explain", &stack]);
+    assert!(
+        text.contains(&format!(
+            "the model base-head@2 ({b}), committed by anna@ward-3"
+        )),
+        "{text}"
+    );
+
+    // The release names it too: its report, its row and its tree.
+    let out = TempDir::new("cli-model-release");
+    let text = ok(&[
+        "release",
+        "--name",
+        "with-a-model",
+        "--on-unknown",
+        "write",
+        "--pack-dir",
+        pack_dir,
+        "--out",
+        out.path().to_str().unwrap(),
+    ]);
+    assert!(
+        text.contains(&format!("model            base-head@2   {b}")),
+        "{text}"
+    );
+    let mut store = nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+    let models = store
+        .query("SELECT models FROM release ORDER BY id DESC LIMIT 1", &[])
+        .unwrap()[0]
+        .text(0)
+        .unwrap()
+        .to_string();
+    let models: serde_json::Value = serde_json::from_str(&models).unwrap();
+    assert_eq!(
+        models,
+        serde_json::json!([{ "name": "base-head", "version": "2", "digest": b }])
+    );
 }

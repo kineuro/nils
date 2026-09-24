@@ -15,6 +15,7 @@ directory beside the old one, which stays.
 |---|---|---|
 | 1 | [`v1/`](v1/) | Wave 4c slice A7, 2026-09-09 |
 | 2 | [`v2/`](v2/) | 2026-09-15: grants and detail in place of the role ladder |
+| 3 | [`v3/`](v3/) | 2026-09-24: version 2 with the model registry's grants, `models:see` and `models:work` (record 42 R7) |
 
 ## What version 1 fixes
 
@@ -53,3 +54,18 @@ A ladder name stands for its set wherever one is still met: a `--role`
 binding, a named token's list, a legacy entitlement, a ceiling. The engine
 runs the grants vectors in `engine/crates/nils/tests/serve.rs` beside the
 trust list vectors; Kvasir, the assistant and the desk run the same file.
+
+## What version 3 changes
+
+Version 3 is version 2 with two grants for the model registry (record 42
+R7): `models:see` reads the registered models and their cards, and
+`models:work` registers, admits, promotes and retires them. The reviewer's
+set holds `models:see`, since a reviewer reads which model answered what;
+the operator's and the admin's hold both. The other documents are version
+2's.
+
+| document | what changes |
+|---|---|
+| `grants.schema.json` | the two grants in the vocabulary, which is 26 |
+| `capabilities.schema.json` | the engine's contracts name the model contract's version |
+| `vectors/grants.json` | the sets and every expectation that holds one |

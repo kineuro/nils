@@ -38,7 +38,7 @@ fn strings(v: &serde_json::Value) -> Vec<String> {
 #[test]
 fn the_suite_contract_names_the_engine_s_own_vocabulary() {
     let v = version("suite");
-    assert_eq!(v, 2);
+    assert_eq!(v, 3);
     let dir = format!("suite/v{v}");
     for file in [
         "grants.schema.json",
@@ -73,7 +73,7 @@ fn the_suite_contract_names_the_engine_s_own_vocabulary() {
     // has its see beside it, and the assistant's use; sorted by code point
     let g = json(&format!("{dir}/grants.schema.json"));
     let grants = strings(&g["$defs"]["grant"]["enum"]);
-    assert_eq!(grants.len(), 24, "{grants:?}");
+    assert_eq!(grants.len(), 26, "{grants:?}");
     let mut sorted = grants.clone();
     sorted.sort();
     assert_eq!(sorted, grants, "sorted by code point");
@@ -236,4 +236,57 @@ fn the_mcp_contract_is_the_pack_loader_s_vocabulary_and_every_operation_names_it
     let policy = strings(&m["$defs"]["policy"]["required"]);
     assert!(policy.contains(&"grant".to_string()), "{policy:?}");
     assert!(!policy.contains(&"role".to_string()), "{policy:?}");
+}
+
+/// Record 42 S2: the model contract (`contracts/model`), the card and the
+/// lifecycle the engine's registry and Kvasir's both keep, held to what the
+/// engine implements: the kinds, the states and transitions, the digest's
+/// shape, the slots, and what a card and a check require.
+#[test]
+fn the_model_contract_is_the_engine_s_registry() {
+    let v = version("model");
+    assert_eq!(v, 1);
+    let card = json(&format!("model/v{v}/card.schema.json"));
+    let life = json(&format!("model/v{v}/lifecycle.schema.json"));
+    for doc in [&card, &life] {
+        assert_eq!(
+            doc["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+    }
+    assert_eq!(
+        strings(&card["$defs"]["kind"]["enum"]),
+        nils_registry::model::KINDS
+    );
+    assert_eq!(
+        strings(&card["required"]),
+        ["name", "version", "kind", "digest", "task"]
+    );
+    assert_eq!(card["$defs"]["digest"]["pattern"], "^sha256:[0-9a-f]{64}$");
+    let slot = card["$defs"]["slot"]["pattern"].as_str().unwrap();
+    assert!(slot.contains("site") && slot.contains("cohort"), "{slot}");
+    assert_eq!(
+        strings(&life["$defs"]["state"]["enum"]),
+        nils_registry::model::STATES
+    );
+    assert_eq!(
+        strings(&life["$defs"]["transition"]["enum"]),
+        [
+            "registered",
+            "admitted",
+            "admission_failed",
+            "promoted",
+            "retired"
+        ]
+    );
+    assert_eq!(
+        strings(&life["$defs"]["check"]["required"]),
+        ["suite", "passed", "checks"]
+    );
+    for key in ["id", "digest", "state", "card", "registered_by"] {
+        assert!(
+            strings(&life["required"]).contains(&key.to_string()),
+            "{key}"
+        );
+    }
 }
