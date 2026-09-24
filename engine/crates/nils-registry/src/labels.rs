@@ -1048,9 +1048,11 @@ pub const IMPORTED_V0: &str = "imported:v0";
 /// Import v0's human labels of one axis (R5): each label maps by its
 /// SeriesInstanceUID to the stacks of that series and becomes a person's
 /// decision on each, marked `imported:v0`, dated as v0 dated it. A stack
-/// where a person's decision already stands keeps it. Values are taken in
-/// lower case and held to `allowed` when it names any. With `dry_run`
-/// nothing is written.
+/// where a person's decision already stands keeps it, whatever scope the
+/// decision was written at: the stack's own, its group's, its series' or
+/// its subject's. Values are taken in lower case and held to `allowed`
+/// when it names any. The import is one transaction: every label is
+/// written or none is. With `dry_run` nothing is written.
 pub fn import_v0(
     registry: &mut Registry,
     labels: &[V0Label],
@@ -1066,7 +1068,12 @@ pub fn import_v0(
         labels: labels.len() as i64,
         ..Imported::default()
     };
+    let store = registry.store();
+    let tree = stacks_of_series(store, labels)?;
+    let mut standing = Standings::read(store, axis)?;
     let now = now_iso();
+    // what to write: the stacks, in order, with the value and the date
+    let mut writes: Vec<(i64, String, String)> = Vec::new();
     for l in labels {
         let value = l.value.trim().to_lowercase();
         if !allowed.is_empty() && !allowed.contains(&value) {
@@ -1077,132 +1084,267 @@ pub fn import_v0(
             out.bad_dates += 1;
             continue;
         };
-        let store = registry.store();
-        let d = store.dialect();
-        let sql = format!(
-            "SELECT k.id FROM {} k JOIN {} r ON r.id = k.series_id WHERE r.series_instance_uid = {} ORDER BY k.id",
-            store.qualified("stack"),
-            store.qualified("series"),
-            d.param(1, Type::Text)
-        );
-        let stacks: Vec<i64> = store
-            .query(&sql, &[Param::from(l.series_instance_uid.as_str())])?
-            .iter()
-            .map(|r| r.int(0))
-            .collect::<Result<_, _>>()?;
-        if stacks.is_empty() {
+        let Some(stacks) = tree.get(l.series_instance_uid.as_str()) else {
             out.series_unmatched += 1;
             continue;
-        }
+        };
         out.series_matched += 1;
-        for stack in stacks {
+        for &(stack, series, subject) in stacks {
             out.stacks += 1;
-            let store = registry.store();
-            let standing = format!(
-                "SELECT author_kind, author_version, value FROM {} WHERE scope = 'stack' AND ref = {} AND axis = {} \
-                 AND withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL) ORDER BY id DESC LIMIT 1",
-                store.qualified("decision"),
-                d.param(1, Type::Text),
-                d.param(2, Type::Text)
-            );
-            if let Some(r) = store.query_opt(
-                &standing,
-                &[Param::from(stack.to_string()), Param::from(axis)],
-            )? {
-                let imported = r.opt_text(1)? == Some(IMPORTED_V0);
-                if imported && r.opt_text(2)? == Some(value.as_str()) {
-                    out.already += 1;
-                    continue;
-                }
-                if r.text(0)? == "person" && !imported {
-                    out.held += 1;
-                    continue;
+            match standing.of(stack, series, subject, &value) {
+                Held::Already => out.already += 1,
+                Held::ByAPerson => out.held += 1,
+                Held::Open => {
+                    // a later label of the same series in this import meets
+                    // this one, as it would have run after it
+                    standing.imported(stack, &value);
+                    writes.push((stack, value.clone(), at.clone()));
                 }
             }
-            if dry_run {
-                continue;
-            }
-            let item = store
-                .insert(
-                    &Insert::new(
-                        table("review_item"),
-                        &[
-                            "kind",
-                            "scope",
-                            "ref",
-                            "evidence",
-                            "status",
-                            "created_at",
-                            "members",
-                        ],
-                    )
-                    .returning(&["id"]),
-                    &[vec![
-                        Param::from(IMPORT_KIND),
-                        Param::from("stack"),
-                        Param::from(json!({"stack_id": stack}).to_string()),
-                        Param::from(
-                            json!({"axis": axis, "source": "v0", "labelled": at}).to_string(),
-                        ),
-                        Param::from("open"),
-                        Param::from(now.as_str()),
-                        Param::Int(1),
-                    ]],
-                )?
-                .first()
-                .ok_or_else(|| StoreError::Message("the review item was not written back".into()))?
-                .int(0)?;
-            let why = format!("imported from v0 by {who}; labelled {}", &at[..10]);
-            let applied = review::apply(
-                registry,
-                &review::Apply {
-                    item,
-                    member: None,
-                    scope: "stack",
-                    value: Some(&value),
-                    author: review::Author {
-                        who: IMPORTED_V0,
-                        kind: "person",
-                        version: Some(IMPORTED_V0),
-                        model: None,
-                    },
-                    stage: false,
-                    why: Some(&why),
-                    campaign: None,
-                },
-            )
-            .map_err(|e| Error::Refused(e.to_string()))?;
-            let store = registry.store();
-            // the date the label was made, not the day it was copied here
-            store.update_by_id(
-                table("decision"),
-                &[("decided_at", Param::from(at.as_str()))],
-                "id",
-                applied.decision,
-            )?;
-            // the item is its own kind, which `apply` does not close for a
-            // stack; it is answered by the decision it carried
-            let close = format!(
-                "UPDATE {} SET status = 'accepted', decided_at = {}, actor = {}, decision_id = {} WHERE id = {} AND status = 'open'",
-                store.qualified("review_item"),
-                d.param(1, Type::Timestamp),
-                d.param(2, Type::Text),
-                d.param(3, Type::Int),
-                d.param(4, Type::Int)
-            );
-            store.execute(
-                &close,
+        }
+    }
+    if dry_run || writes.is_empty() {
+        return Ok(out);
+    }
+    registry.store().begin()?;
+    let written = (|| -> Result<Vec<i64>, Error> {
+        let mut decisions = Vec::new();
+        for (stack, value, at) in &writes {
+            decisions.push(import_one(registry, axis, *stack, value, at, who, &now)?);
+        }
+        Ok(decisions)
+    })();
+    match written {
+        Ok(decisions) => {
+            registry.store().commit()?;
+            out.decisions = decisions;
+            Ok(out)
+        }
+        Err(e) => {
+            registry.store().rollback().ok();
+            registry.refresh_meta().ok();
+            Err(e)
+        }
+    }
+}
+
+/// One imported label on one stack, inside the import's transaction: the
+/// review item it answers, the decision through the one write path, dated
+/// as v0 dated it, and the item closed by it.
+fn import_one(
+    registry: &mut Registry,
+    axis: &str,
+    stack: i64,
+    value: &str,
+    at: &str,
+    who: &str,
+    now: &str,
+) -> Result<i64, Error> {
+    let store = registry.store();
+    let d = store.dialect();
+    let item = store
+        .insert(
+            &Insert::new(
+                table("review_item"),
                 &[
-                    Param::from(now.as_str()),
-                    Param::from(IMPORTED_V0),
-                    Param::Int(applied.decision),
-                    Param::Int(item),
+                    "kind",
+                    "scope",
+                    "ref",
+                    "evidence",
+                    "status",
+                    "created_at",
+                    "members",
                 ],
-            )?;
-            out.decisions.push(applied.decision);
+            )
+            .returning(&["id"]),
+            &[vec![
+                Param::from(IMPORT_KIND),
+                Param::from("stack"),
+                Param::from(json!({"stack_id": stack}).to_string()),
+                Param::from(json!({"axis": axis, "source": "v0", "labelled": at}).to_string()),
+                Param::from("open"),
+                Param::from(now),
+                Param::Int(1),
+            ]],
+        )?
+        .first()
+        .ok_or_else(|| StoreError::Message("the review item was not written back".into()))?
+        .int(0)?;
+    let why = format!("imported from v0 by {who}; labelled {}", &at[..10]);
+    let applied = review::apply_within(
+        registry,
+        &review::Apply {
+            item,
+            member: None,
+            scope: "stack",
+            value: Some(value),
+            author: review::Author {
+                who: IMPORTED_V0,
+                kind: "person",
+                version: Some(IMPORTED_V0),
+                model: None,
+            },
+            stage: false,
+            why: Some(&why),
+            campaign: None,
+        },
+    )
+    .map_err(|e| Error::Refused(e.to_string()))?;
+    let store = registry.store();
+    // the date the label was made, not the day it was copied here
+    store.update_by_id(
+        table("decision"),
+        &[("decided_at", Param::from(at))],
+        "id",
+        applied.decision,
+    )?;
+    // the item is its own kind, which `apply` does not close for a stack;
+    // it is answered by the decision it carried
+    let close = format!(
+        "UPDATE {} SET status = 'accepted', decided_at = {}, actor = {}, decision_id = {} WHERE id = {} AND status = 'open'",
+        store.qualified("review_item"),
+        d.param(1, Type::Timestamp),
+        d.param(2, Type::Text),
+        d.param(3, Type::Int),
+        d.param(4, Type::Int)
+    );
+    store.execute(
+        &close,
+        &[
+            Param::from(now),
+            Param::from(IMPORTED_V0),
+            Param::Int(applied.decision),
+            Param::Int(item),
+        ],
+    )?;
+    Ok(applied.decision)
+}
+
+/// The stacks of each series the labels name, with the series and the
+/// subject, in one read per five hundred series.
+fn stacks_of_series(
+    store: &mut Store,
+    labels: &[V0Label],
+) -> Result<BTreeMap<String, Vec<(i64, i64, i64)>>, Error> {
+    let uids: Vec<&str> = labels
+        .iter()
+        .map(|l| l.series_instance_uid.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let d = store.dialect();
+    let mut out: BTreeMap<String, Vec<(i64, i64, i64)>> = BTreeMap::new();
+    for chunk in uids.chunks(500) {
+        let marks: Vec<String> = (1..=chunk.len()).map(|i| d.param(i, Type::Text)).collect();
+        let sql = format!(
+            "SELECT r.series_instance_uid, k.id, k.series_id, r.subject_id FROM {} k JOIN {} r ON r.id = k.series_id \
+             WHERE r.series_instance_uid IN ({}) ORDER BY k.id",
+            store.qualified("stack"),
+            store.qualified("series"),
+            marks.join(", ")
+        );
+        let params: Vec<Param> = chunk.iter().map(|u| Param::from(*u)).collect();
+        for r in store.query(&sql, &params)? {
+            out.entry(r.text(0)?.to_string())
+                .or_default()
+                .push((r.int(1)?, r.int(2)?, r.int(3)?));
         }
     }
     Ok(out)
+}
+
+/// What stands on an axis before an import: the latest decision in force
+/// on each stack at stack scope, and every key a person's decision in
+/// force holds at a wider scope (series, subject, or a group's members).
+struct Standings {
+    /// stack -> (author kind, imported, value) of its latest in force
+    stack: BTreeMap<i64, (String, bool, Option<String>)>,
+    series: BTreeSet<i64>,
+    subjects: BTreeSet<i64>,
+    grouped: BTreeSet<i64>,
+}
+
+enum Held {
+    Already,
+    ByAPerson,
+    Open,
+}
+
+impl Standings {
+    fn read(store: &mut Store, axis: &str) -> Result<Standings, Error> {
+        let sql = format!(
+            "SELECT scope, ref, author_kind, author_version, value FROM {} WHERE axis = {} \
+             AND withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL) ORDER BY id",
+            store.qualified("decision"),
+            store.dialect().param(1, Type::Text)
+        );
+        let mut s = Standings {
+            stack: BTreeMap::new(),
+            series: BTreeSet::new(),
+            subjects: BTreeSet::new(),
+            grouped: BTreeSet::new(),
+        };
+        let mut groups: Vec<i64> = Vec::new();
+        for r in store.query(&sql, &[Param::from(axis)])? {
+            let scope = r.text(0)?;
+            let Ok(reference) = r.text(1)?.parse::<i64>() else {
+                continue;
+            };
+            let kind = r.opt_text(2)?.unwrap_or("person").to_string();
+            let imported = r.opt_text(3)? == Some(IMPORTED_V0);
+            let person = kind == "person" && !imported;
+            match scope {
+                "stack" => {
+                    s.stack.insert(
+                        reference,
+                        (kind, imported, r.opt_text(4)?.map(str::to_string)),
+                    );
+                }
+                "series" if person => {
+                    s.series.insert(reference);
+                }
+                "subject" if person => {
+                    s.subjects.insert(reference);
+                }
+                "group" if person => groups.push(reference),
+                _ => {}
+            }
+        }
+        for chunk in groups.chunks(500) {
+            let sql = format!(
+                "SELECT stack_id FROM {} WHERE item_id IN ({})",
+                store.qualified("review_member"),
+                join_ids(chunk)
+            );
+            for r in store.query(&sql, &[])? {
+                s.grouped.insert(r.int(0)?);
+            }
+        }
+        Ok(s)
+    }
+
+    fn of(&self, stack: i64, series: i64, subject: i64, value: &str) -> Held {
+        if let Some((kind, imported, held)) = self.stack.get(&stack) {
+            if *imported && held.as_deref() == Some(value) {
+                return Held::Already;
+            }
+            if kind == "person" && !imported {
+                return Held::ByAPerson;
+            }
+        }
+        if self.series.contains(&series)
+            || self.subjects.contains(&subject)
+            || self.grouped.contains(&stack)
+        {
+            return Held::ByAPerson;
+        }
+        Held::Open
+    }
+
+    fn imported(&mut self, stack: i64, value: &str) {
+        self.stack
+            .insert(stack, ("person".to_string(), true, Some(value.to_string())));
+    }
 }
 
 /// The labels an import wrote, as a set's rows.

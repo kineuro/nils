@@ -1793,3 +1793,66 @@ fn a_sealed_sample_seals_the_sets_that_hold_it_and_trains_nothing() {
         assert_eq!(count(reg, "audit", " WHERE action = 'labels.seal'"), 2);
     }
 }
+
+/// R5 with C15: a person's decision holds a stack at every scope that
+/// covers it, not only its own: a series' or a subject's decision keeps
+/// v0's label out as a stack's does, and an import that holds everything
+/// writes nothing, not even the review items it would have answered.
+#[test]
+fn v0_labels_keep_out_of_a_person_s_decision_at_any_scope() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let now = nils_registry::time::now_iso();
+        for (stack, scope) in [(ids[0], "series"), (ids[2], "subject")] {
+            let item = row(
+                reg.store(),
+                "review_item",
+                &[
+                    ("kind", Param::from("body_part:missing")),
+                    ("scope", Param::from("stack")),
+                    ("ref", Param::from(json!({"stack_id": stack}).to_string())),
+                    (
+                        "evidence",
+                        Param::from(json!({"axis": "body_part"}).to_string()),
+                    ),
+                    ("status", Param::from("open")),
+                    ("created_at", Param::from(now.as_str())),
+                ],
+            );
+            nils_registry::review::apply(
+                reg,
+                &nils_registry::review::Apply {
+                    item,
+                    member: None,
+                    scope,
+                    value: Some("neck"),
+                    author: nils_registry::review::Author {
+                        who: "dan@lab",
+                        kind: "person",
+                        version: None,
+                        model: None,
+                    },
+                    stage: false,
+                    why: None,
+                    campaign: None,
+                },
+            )
+            .unwrap();
+        }
+        let items = count(reg, "review_item", "");
+        let (v0, _) = labels::parse_v0(
+            "SeriesInstanceUID\tbody_part\tdate\n\
+             1.2.840.9.1\tBrain\t2024-05-06\n\
+             1.2.840.9.2\tSpine\t2024-05-07\n",
+        );
+        let allowed: Vec<String> = vec!["brain".into(), "spine".into(), "neck".into()];
+        let done = labels::import_v0(reg, &v0, "body_part", &allowed, "cleo@lab", false).unwrap();
+        assert_eq!(done.stacks, 4, "{name}: {done:?}");
+        assert_eq!(done.held, 4, "{name}: {done:?}");
+        assert!(done.decisions.is_empty(), "{name}");
+        assert_eq!(count(reg, "decision", ""), 2, "{name}");
+        assert_eq!(count(reg, "review_item", ""), items, "{name}");
+    }
+}

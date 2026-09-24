@@ -381,8 +381,27 @@ fn resolve_scope(store: &mut Store, scope: &str, stack: i64) -> Result<(String, 
 
 /// Apply a decision (§10.2). One row at its scope, the earlier decision on
 /// the same key withdrawn rather than overwritten, the item closed with
-/// the same words (or staged), and the audit row with the epoch.
+/// the same words (or staged), and the audit row with the epoch, all in one
+/// transaction.
 pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
+    registry.store().begin()?;
+    match apply_within(registry, a) {
+        Ok(applied) => {
+            registry.store().commit()?;
+            Ok(applied)
+        }
+        Err(e) => {
+            registry.store().rollback().ok();
+            registry.refresh_meta().ok();
+            Err(e)
+        }
+    }
+}
+
+/// [`apply`] inside a transaction the caller holds, so that many decisions
+/// are written as one act or none (an import); the caller commits, or
+/// rolls back and re-reads the registry's epoch.
+pub fn apply_within(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
     if !["person", "agent", "model"].contains(&a.author.kind) {
         return Err(refused(format!(
             "an author is a person, an agent or a model, not {}",
@@ -520,7 +539,6 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
             )));
         }
     }
-    store.begin()?;
     let written = (|| -> Result<(i64, Vec<i64>, i64), Error> {
         // The earlier decision on the same key gives way to this one; it is
         // withdrawn, never deleted. A staged one replaces only staged ones.
@@ -705,14 +723,7 @@ pub fn apply(registry: &mut Registry, a: &Apply<'_>) -> Result<Applied, Error> {
         }
         Ok((decision, closed, decided_members))
     })();
-    let (decision, closed, decided_members) = match written {
-        Ok(w) => w,
-        Err(e) => {
-            store.rollback().ok();
-            return Err(e);
-        }
-    };
-    store.commit()?;
+    let (decision, closed, decided_members) = written?;
     audit::record_judging(
         registry,
         &Entry {
