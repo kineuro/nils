@@ -688,7 +688,17 @@ fn check_template(template: &str, level: Level) -> Result<(), String> {
             "{template}: * is the one wildcard, inside one segment"
         ));
     }
+    if wildcard_touches_a_word(template) {
+        return Err(format!(
+            "{template}: a * beside a unit's word would let one unit take another's file (stack 4 and 45.nii); put a character between them"
+        ));
+    }
     Ok(())
+}
+
+/// Whether a `*` stands right beside a `{word}` of a template.
+pub(crate) fn wildcard_touches_a_word(template: &str) -> bool {
+    template.contains("}*") || template.contains("*{")
 }
 
 /// A run-level template: relative, no `..`, and no unit placeholder, since
@@ -1095,6 +1105,10 @@ x-nils:
             (model.replace("head/head.*", "head/{subject}.json"), "no placeholder"),
             (model.replace("level: run", "level: study"), "level is one of"),
             (model.replace("head/head.*", "results.json"), "runner's own"),
+            (
+                "    - id: extra\n      kind: output\n      path-template: \"sub-{subject}/ses-{session}*.nii\"\n".to_string(),
+                "beside a unit's word",
+            ),
             (
                 "    - id: extra\n      kind: output\n      path-template: \"sub-{subject}/ses-{session}/x\"\n      card: c.json\n".to_string(),
                 "belongs to a model",

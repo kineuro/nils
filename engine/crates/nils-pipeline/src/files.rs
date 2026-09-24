@@ -82,6 +82,10 @@ pub fn unit_output<'a>(
     vars: &[(&str, &str)],
 ) -> Option<&'a crate::descriptor::Output> {
     outputs.iter().find(|o| {
+        // a * beside a unit's word lets one unit take another's file
+        if crate::descriptor::wildcard_touches_a_word(&o.template) {
+            return false;
+        }
         let mut t = o.template.clone();
         for (k, v) in vars {
             t = t.replace(&format!("{{{k}}}"), &glob::Pattern::escape(v));
@@ -284,5 +288,11 @@ mod tests {
         assert!(unit_output(&outputs, "stack-4/out.txt", &[("stack", "4")]).is_some());
         assert!(unit_output(&outputs, "stack-5/out.txt", &[("stack", "4")]).is_none());
         assert!(unit_output(&outputs, "other/out.txt", &[("stack", "4")]).is_none());
+        // stack 4 never takes stack 45's file through a * beside its word
+        let loose = vec![crate::descriptor::Output {
+            template: "{stack}*.nii".into(),
+            ..outputs[0].clone()
+        }];
+        assert!(unit_output(&loose, "45.nii", &[("stack", "4")]).is_none());
     }
 }

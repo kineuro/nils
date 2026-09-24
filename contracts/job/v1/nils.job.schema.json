@@ -52,7 +52,7 @@
         "path-template": {
           "type": "string",
           "pattern": "^[^/].*$",
-          "description": "Where a file lies under /output: for a unit-level output a relative path with {subject} and {session} (the labels without sub- and ses-) or {stack} (the stack's id) standing for the unit, for a run-level one a path with no placeholder, and * for any run of characters inside one path segment. It is how the runner finds the outputs when the pipeline writes no results.json, and which kind a file named in results.json is"
+          "description": "Where a file lies under /output: for a unit-level output a relative path with {subject} and {session} (the labels without sub- and ses-) or {stack} (the stack's id) standing for the unit, for a run-level one a path with no placeholder, and * for any run of characters inside one path segment, never right beside a placeholder, which would let one unit take another's file (stack 4 and 45.nii). It is how the runner finds the outputs when the pipeline writes no results.json, and which kind a file named in results.json is"
         },
         "card": {"type": "string", "pattern": "^[^/].*$", "description": "For a model output: the path under /output of the model's card (contracts/model/v1), whose digest is the artifact's. The runner fills trained_on with the label set the run was given, and refuses a card that names another"},
         "media-type": {"type": "string"}
