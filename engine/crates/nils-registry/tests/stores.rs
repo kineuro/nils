@@ -1507,7 +1507,7 @@ fn migration_54_gives_a_model_a_home() {
             "{name}"
         );
         let applied = migrate::migrate(&mut store, Kind::Registry).unwrap();
-        assert_eq!(applied, vec![54], "{name}");
+        assert_eq!(applied.first(), Some(&54), "{name}: {applied:?}");
         assert!(
             migrate::table_exists(&mut store, "model").unwrap(),
             "{name}"
@@ -1782,5 +1782,53 @@ fn the_model_registry_keeps_its_rules_on_both_backends() {
                 .batch("DROP SCHEMA nils_models_test CASCADE; DROP SCHEMA IF EXISTS nils_models_test_linkage CASCADE")
                 .unwrap();
         }
+    }
+}
+
+/// Record 42 S3 and S4: migrations 55 and 56 bring a registry from before
+/// them to a pick a person may write and a derivative table, on both
+/// backends, and a second run changes nothing.
+#[test]
+fn migrations_55_and_56_add_the_person_s_pick_and_the_derivative() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let pick = store.qualified("pick");
+        let derivative = store.qualified("derivative");
+        let meta = store.qualified("registry_meta");
+        store
+            .batch(&format!(
+                "ALTER TABLE {pick} DROP COLUMN why; \
+                 ALTER TABLE {pick} DROP COLUMN withdrawn_by; \
+                 ALTER TABLE {pick} DROP COLUMN overruled_by; \
+                 DROP TABLE {derivative}; \
+                 UPDATE {meta} SET value = '54' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        assert_eq!(
+            migrate::standing(&mut store, Kind::Registry).unwrap(),
+            Standing::Behind(54),
+            "{name}"
+        );
+        let applied = migrate::migrate(&mut store, Kind::Registry).unwrap();
+        assert!(
+            applied.contains(&55) && applied.contains(&56),
+            "{name}: {applied:?}"
+        );
+        for column in ["why", "withdrawn_by", "overruled_by"] {
+            assert!(
+                migrate::column_exists(&mut store, "pick", column).unwrap(),
+                "{name}: pick.{column}"
+            );
+        }
+        let rows = store
+            .query(&format!("SELECT COUNT(*) FROM {derivative}"), &[])
+            .unwrap();
+        assert_eq!(rows[0].int(0).unwrap(), 0, "{name}");
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
     }
 }

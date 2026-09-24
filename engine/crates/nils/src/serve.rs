@@ -787,6 +787,9 @@ pub(crate) struct Reply {
     /// Wave 5 §12.7: bytes with their own content type, the instance door's
     /// tiles and renders; `body` is ignored when set.
     pub(crate) raw: Option<Box<(String, Vec<u8>)>>,
+    /// Record 42 S4: a file sent as it stands, streamed from its place
+    /// rather than read whole; its content type is among `headers`.
+    pub(crate) file: Option<Box<std::path::PathBuf>>,
 }
 
 impl Reply {
@@ -798,6 +801,23 @@ impl Reply {
             headers,
             empty: false,
             raw: Some(Box::new((content_type.to_string(), bytes))),
+            file: None,
+        }
+    }
+    /// A file with a content type, streamed from where it lies.
+    pub(crate) fn file(
+        content_type: &str,
+        path: std::path::PathBuf,
+        mut headers: Vec<(String, String)>,
+    ) -> Reply {
+        headers.insert(0, ("Content-Type".to_string(), content_type.to_string()));
+        Reply {
+            status: 200,
+            body: serde_json::Value::Null,
+            headers,
+            empty: false,
+            raw: None,
+            file: Some(Box::new(path)),
         }
     }
     pub(crate) fn ok(body: serde_json::Value) -> Reply {
@@ -807,6 +827,7 @@ impl Reply {
             headers: Vec::new(),
             empty: false,
             raw: None,
+            file: None,
         }
     }
     pub(crate) fn accepted(body: serde_json::Value) -> Reply {
@@ -816,6 +837,7 @@ impl Reply {
             headers: Vec::new(),
             empty: false,
             raw: None,
+            file: None,
         }
     }
     pub(crate) fn created(body: serde_json::Value) -> Reply {
@@ -825,6 +847,7 @@ impl Reply {
             headers: Vec::new(),
             empty: false,
             raw: None,
+            file: None,
         }
     }
     /// An error, with its disclosure (Wave 5 section 12.6): `internal` for
@@ -840,6 +863,7 @@ impl Reply {
             headers: Vec::new(),
             empty: false,
             raw: None,
+            file: None,
         }
     }
     /// An error whose text may carry a value of a person: a subject code,
@@ -852,6 +876,7 @@ impl Reply {
             headers: Vec::new(),
             empty: false,
             raw: None,
+            file: None,
         }
     }
     /// The same reply with one more header.
@@ -867,6 +892,7 @@ impl Reply {
             headers: Vec::new(),
             empty: true,
             raw: None,
+            file: None,
         }
     }
 }
@@ -1132,6 +1158,26 @@ fn queue_worker(
 }
 
 fn respond(request: Request, reply: Reply) -> std::io::Result<()> {
+    if let Some(path) = &reply.file {
+        let file = match std::fs::File::open(path.as_path()) {
+            Ok(f) => f,
+            Err(e) => {
+                return respond(
+                    request,
+                    Reply::error(500, format!("the file will not open: {e}")),
+                );
+            }
+        };
+        let mut response = Response::from_file(file)
+            .with_status_code(StatusCode(reply.status))
+            .with_chunked_threshold(usize::MAX);
+        for (name, value) in &reply.headers {
+            if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+                response = response.with_header(h);
+            }
+        }
+        return request.respond(response);
+    }
     if let Some(raw) = reply.raw {
         let (content_type, bytes) = *raw;
         let mut response = Response::from_data(bytes)
@@ -1185,9 +1231,12 @@ fn handle(
         })
         .collect();
     let mut body = String::new();
+    // Record 42 S4: a derivative's body is a file, read by its door once
+    // the caller passes and streamed into its place, never into memory.
+    let upload = method == Method::Post && path == "/api/derivatives";
     // A body rides on a POST and on a PUT (the selection door); reading
     // it only on a POST was why a PUT selection could carry no document.
-    if matches!(method, Method::Post | Method::Put) {
+    if matches!(method, Method::Post | Method::Put) && !upload {
         let _ = request.as_reader().read_to_string(&mut body);
     }
     if path == "/api/events" && method == Method::Get {
@@ -1202,6 +1251,17 @@ fn handle(
     // provenance on this thread.
     if let Ok(c) = &caller {
         nils_registry::actor::set(c.actor.clone());
+    }
+    if upload {
+        let reply = match &caller {
+            Ok(c) => match crate::derivatives::upload(registry, c, &query, &mut request) {
+                Ok(r) | Err(r) => r,
+            },
+            Err(_) => caller.err().expect("an error"),
+        };
+        nils_registry::actor::clear();
+        let _ = respond(request, reply);
+        return;
     }
     // Wave 4b §12.3: the MCP door and its public metadata, before the
     // older doors and before a refusal, so a client learns where to
@@ -1315,6 +1375,10 @@ fn routed(
         detail
     };
     caller.allowed(path, need, detail)?;
+    // record 42 S4: the derivative doors that read
+    if let Some(r) = crate::derivatives::route(registry, caller, get, &segs, query) {
+        return r;
+    }
     // record 26: the linkage doors, under the table's grants like the rest
     if let Some(r) = crate::linkage_doors::route(
         &doors.home,
@@ -2869,6 +2933,82 @@ fn routed(
                 .map_err(model_err)?;
             Ok(Reply::ok(m.to_json()))
         }
+        // Record 42 S3: a person's pick, which a pick run leaves standing,
+        // and its withdrawal. A pick a person writes is a person's: an
+        // agent or a model acting for the principal is refused here, since
+        // its answer is evidence for a person and not a pick.
+        ["api", "picks"] if post => {
+            let (kind, _) = author_of(caller);
+            if kind != "person" {
+                return Err(Reply::error(
+                    403,
+                    format!(
+                        "a pick is written by a person; X-Nils-Actor names a {kind} acting for {principal}"
+                    ),
+                ));
+            }
+            let doc = json_body(body)?;
+            let role = doc["role"]
+                .as_str()
+                .ok_or_else(|| Reply::error(400, "role names the role the pick stands for"))?;
+            let stacks: Vec<i64> = doc["stacks"]
+                .as_array()
+                .map(|a| a.iter().filter_map(serde_json::Value::as_i64).collect())
+                .unwrap_or_default();
+            let why = doc["why"].as_str().unwrap_or_default();
+            let name = doc["pack"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| doors.ask_pack.clone());
+            let found = doors.pack_dir.as_ref().and_then(|dir| {
+                crate::packs_in(dir)
+                    .ok()?
+                    .into_iter()
+                    .find(|p| p.file_name().is_some_and(|f| *f == *name))
+            });
+            let Some(found) = found else {
+                return Err(Reply::error(
+                    409,
+                    format!("no pack named {name} is served, and a pick is the pack's"),
+                ));
+            };
+            let pack = nils_pack::load(&found, None)
+                .map_err(|e| Reply::error(500, format!("the pack {name}: {e}")))?;
+            let scheme = match doc["scheme"].as_str() {
+                None | Some("default" | "day") => nils_registry::session::Scheme::default(),
+                Some(n) => crate::stored_scheme(registry, n).map_err(Reply::from)?,
+            };
+            let picked = nils_classify::picking::set_person(
+                registry,
+                &pack,
+                &scheme,
+                &nils_classify::picking::PersonPick {
+                    role,
+                    stacks: &stacks,
+                    model: doc["pick"].as_str(),
+                    why,
+                    actor: principal,
+                },
+            )
+            .map_err(pick_err)?;
+            Ok(Reply::created(
+                serde_json::to_value(picked).unwrap_or(serde_json::Value::Null),
+            ))
+        }
+        ["api", "picks", _, "withdraw"] if post => {
+            let id = id_at(2)?;
+            let doc = json_body(body)?;
+            let done = nils_classify::picking::withdraw_person(
+                registry,
+                id,
+                principal,
+                doc["why"].as_str(),
+            )
+            .map_err(pick_err)?;
+            Ok(Reply::ok(
+                serde_json::to_value(done).unwrap_or(serde_json::Value::Null),
+            ))
+        }
         // Wave 5 section 12.2: every event on one object, in order.
         ["api", "depends", kind, id] if get => {
             match crate::depends::of(doors, registry, kind, id)? {
@@ -3033,6 +3173,8 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         | ("GET", ["api", "classify", "signals"]) => (Need::One("review:see"), Plain),
         ("POST", ["api", "review", _, "apply" | "accept"])
         | ("POST", ["api", "decisions", _, "commit" | "withdraw"])
+        | ("POST", ["api", "picks"])
+        | ("POST", ["api", "picks", _, "withdraw"])
         | ("POST", ["api", "classify", "try"])
         | ("POST", ["api", "overlays"]) => (Need::One("review:work"), Plain),
         // adopting a rule changes how data is sorted: work on both pages
@@ -3050,6 +3192,13 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
             (Need::One("pipelines:see"), Plain)
         }
         ("POST", ["api", "sessions", "rebuild"]) => (Need::One("pipelines:work"), Plain),
+        // record 42 S4: what pipelines make; the bytes are drawn from the
+        // pixels, so they open at detail quasi like the viewer's
+        ("GET", ["api", "derivatives"]) | ("GET", ["api", "derivatives", _]) => {
+            (Need::One("pipelines:see"), Plain)
+        }
+        ("GET", ["api", "derivatives", _, "content"]) => (Need::One("pipelines:see"), Quasi),
+        ("POST", ["api", "derivatives"]) => (Need::One("pipelines:work"), Plain),
         ("POST", ["api", "jobs"]) | ("POST", ["api", "jobs", _, "cancel"]) => {
             (Need::AnyOf(JOB_GRANTS), Plain)
         }
@@ -3358,8 +3507,6 @@ fn cohort_err(e: nils_registry::cohort::Error) -> Reply {
     }
 }
 
-/// A review refusal quotes what it refuses: a reference, a header value, a
-/// name, the person who decided; every one is gated.
 fn model_err(e: nils_registry::model::Error) -> Reply {
     use nils_registry::model::Error;
     match e {
@@ -3370,6 +3517,15 @@ fn model_err(e: nils_registry::model::Error) -> Reply {
     }
 }
 
+fn pick_err(e: nils_classify::picking::PersonError) -> Reply {
+    match e {
+        nils_classify::picking::PersonError::Refused(m) => Reply::error(409, m),
+        nils_classify::picking::PersonError::Store(e) => Reply::error(500, e.to_string()),
+    }
+}
+
+/// A review refusal quotes what it refuses: a reference, a header value, a
+/// name, the person who decided; every one is gated.
 fn review_err(e: nils_registry::review::Error) -> Reply {
     match e {
         nils_registry::review::Error::Refused(m) => Reply::gated(409, m),
@@ -3419,6 +3575,8 @@ fn capabilities(
         "POST /api/models/{id}/admit",
         "POST /api/models/{id}/promote",
         "POST /api/models/{id}/retire",
+        "POST /api/picks",
+        "POST /api/picks/{id}/withdraw",
         "GET /api/timeline/{kind}/{id}",
         "GET /api/depends/{kind}/{id}",
         "GET /api/events",
@@ -3460,6 +3618,7 @@ fn capabilities(
         "GET /api/instances/{stack}/render/{level}/{z}",
     ]
     .iter()
+    .chain(crate::derivatives::DOORS.iter())
     .chain(crate::linkage_doors::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
     .map(|d| (*d).to_string())
@@ -3503,6 +3662,7 @@ fn capabilities(
         "ingest_roots": doors.ingest_roots.keys().collect::<Vec<_>>(),
         "backup_dir": doors.backup_dir.is_some(),
         "places": crate::places::capabilities(registry.store()),
+        "derivatives": crate::derivatives::capability(registry.store()),
         "policy": policy(),
         "idempotency": {
             "header": "Idempotency-Key",
@@ -4022,6 +4182,60 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one model",
             "Retiring a model",
             "Retired a model",
+        ),
+        row(
+            "POST /api/picks",
+            true,
+            false,
+            "free",
+            "one pick",
+            "Picking a stack",
+            "Picked a stack",
+        ),
+        row(
+            "POST /api/picks/{id}/withdraw",
+            true,
+            false,
+            "free",
+            "one pick",
+            "Withdrawing a pick",
+            "Withdrew a pick",
+        ),
+        row(
+            "GET /api/derivatives",
+            false,
+            false,
+            "bounded",
+            "limit rows",
+            "Listing derivatives",
+            "Listed derivatives",
+        ),
+        row(
+            "POST /api/derivatives",
+            true,
+            false,
+            "bounded",
+            "one derivative",
+            "Registering a derivative",
+            "Registered a derivative",
+        ),
+        row(
+            "GET /api/derivatives/{id}",
+            false,
+            false,
+            "free",
+            "one derivative",
+            "Reading a derivative",
+            "Read a derivative",
+        ),
+        row(
+            "GET /api/derivatives/{id}/content",
+            false,
+            false,
+            "bounded",
+            "one file",
+            "Downloading a derivative",
+            "Downloaded a derivative",
         ),
         row(
             "GET /api/events",

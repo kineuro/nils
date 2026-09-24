@@ -1422,6 +1422,110 @@ pub fn close_resolved(
     store.execute(&sql, &params)
 }
 
+// ---------------------------------------------------------------- pick items
+
+/// Record 42 S3: a session whose pick is not to be trusted without a look,
+/// because its two best candidates are too close, the winner is rare in its
+/// population, or nothing was eligible (v0's `needs_check`, study 1.4). One
+/// open item per pick model, role and occasion; a later run brings it up to
+/// date or closes it, and a person's pick answers it.
+pub const PICK_BORDER_KIND: &str = "pick.border";
+
+/// What groups the open `pick.border` item of one role on one occasion.
+pub fn pick_border_key(model: &str, role: &str, subject_id: i64, day: &str) -> String {
+    format!("pick:{model}|role:{role}|subject:{subject_id}|day:{day}")
+}
+
+/// One occasion a pick run thought worth a person's eye.
+#[derive(Debug, Clone)]
+pub struct PickBorder<'a> {
+    pub model: &'a str,
+    pub role: &'a str,
+    pub subject_id: i64,
+    pub day: &'a str,
+    /// The run's reasons, by name (`too_close`, `rare`, `nothing_eligible`).
+    pub borders: &'a [&'a str],
+    /// What the run wrote, when it wrote anything.
+    pub pick_id: Option<i64>,
+    pub score: Option<f64>,
+    pub margin: Option<f64>,
+    pub runner_up_score: Option<f64>,
+    /// Every candidate's stacks and score, best first.
+    pub considered: &'a serde_json::Value,
+    pub job_id: Option<i64>,
+}
+
+/// Raise or refresh the open `pick.border` item of one occasion. Scope
+/// `subject`, since an occasion is derived and has no row; `ref` names the
+/// subject, the day, the role and the model, and the evidence is the run's
+/// numbers, never a value of a person.
+pub fn raise_pick_border(
+    store: &mut Store,
+    b: &PickBorder<'_>,
+    now: &str,
+) -> Result<i64, StoreError> {
+    let key = pick_border_key(b.model, b.role, b.subject_id, b.day);
+    let reference = serde_json::json!({
+        "subject_id": b.subject_id, "session_day": b.day, "role": b.role, "model": b.model,
+    });
+    let candidates = b.considered.as_array().map_or(0, Vec::len) as i64;
+    let evidence = serde_json::json!({
+        "borders": b.borders, "pick_id": b.pick_id, "score": b.score, "margin": b.margin,
+        "runner_up_score": b.runner_up_score, "candidates": candidates,
+        "considered": b.considered,
+    });
+    if let Some((id, _)) = open_item(store, PICK_BORDER_KIND, &key)? {
+        refresh_item(store, id, &evidence, candidates.max(1), b.job_id)?;
+        return Ok(id);
+    }
+    open_new(
+        store,
+        PICK_BORDER_KIND,
+        "subject",
+        &key,
+        &reference,
+        &evidence,
+        candidates.max(1),
+        b.job_id,
+        now,
+    )
+}
+
+/// Close the open `pick.border` item of one occasion, if there is one:
+/// `superseded` when a later run found nothing to doubt, `accepted` when a
+/// person's pick answered it. Answers how many were closed.
+pub fn close_pick_border(
+    store: &mut Store,
+    key: &str,
+    status: &str,
+    actor: &str,
+    decision: &serde_json::Value,
+) -> Result<u64, StoreError> {
+    let d = store.dialect();
+    let sql = format!(
+        "UPDATE {} SET status = {}, decided_at = {}, actor = {}, decision = {} \
+         WHERE kind = {} AND status = 'open' AND group_key = {}",
+        store.qualified("review_item"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Timestamp),
+        d.param(3, Type::Text),
+        d.param(4, Type::Json),
+        d.param(5, Type::Text),
+        d.param(6, Type::Text),
+    );
+    store.execute(
+        &sql,
+        &[
+            Param::from(status),
+            Param::from(now_iso()),
+            Param::from(actor),
+            Param::from(decision.to_string()),
+            Param::from(PICK_BORDER_KIND),
+            Param::from(key),
+        ],
+    )
+}
+
 #[cfg(test)]
 mod identity_items {
     use super::*;

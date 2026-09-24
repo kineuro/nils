@@ -20,6 +20,7 @@ pub mod audit;
 pub mod clinical;
 pub mod cohort;
 pub mod day;
+pub mod derivative;
 pub mod dialect;
 pub mod home;
 pub mod idempotency;

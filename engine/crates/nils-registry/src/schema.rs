@@ -1189,6 +1189,15 @@ fn build_registry() -> Vec<Table> {
                 // a decision.
                 col("model_id", Type::Int),
                 col("campaign_id", Type::Int),
+                // Record 42 S3: why a person picked, in their words, and who
+                // withdrew a pick. A run's own pick has no why: its parts
+                // are the reason.
+                col("why", Type::Text),
+                col("withdrawn_by", Type::Text),
+                // The person's pick that stopped this run's pick from
+                // applying. Withdrawing that person's pick lets it apply
+                // again, so a person's mistake is undone without a new run.
+                col("overruled_by", Type::Int),
             ],
         )
         .index(&["role", "subject_id", "session_day"]),
@@ -1264,6 +1273,53 @@ fn build_registry() -> Vec<Table> {
         )
         .index(&["pick_id"])
         .index(&["stack_id"]),
+        // Record 42 S4: a file made from the archive that is not the archive,
+        // a mask, an embedding, a pipeline's output, kept in a working place
+        // (Wave 5 section 10.2) and named here by its digest. The registry
+        // holds the row and the digest; the bytes are the place's.
+        Table::new(
+            "derivative",
+            vec![
+                col("id", Type::Id),
+                // `mask`, `embedding`, `pyramid`, `output`.
+                req("kind", Type::Text),
+                // What it belongs to: `stack`, `series`, `session` or
+                // `subject`, and the ids that say which. The subject is
+                // filled whatever the scope, so a merge moves it and a
+                // subject's derivatives are one read.
+                req("scope", Type::Text),
+                col("stack_id", Type::Int),
+                col("series_id", Type::Int),
+                col("subject_id", Type::Int),
+                col("session_day", Type::Date),
+                // Where it lives: a place of role working, and the path
+                // under it.
+                req("place_id", Type::Int),
+                req("path", Type::Text),
+                req("bytes", Type::Int),
+                req("sha256", Type::Text),
+                req("media_type", Type::Text),
+                // Who made it. A person's upload names the principal and who
+                // acted for it; a model and a pipeline run are named by id
+                // once their tables exist (record 42 S2, wave 43), and null
+                // until then.
+                col("registered_by", Type::Text),
+                col("actor", Type::Json),
+                col("model_id", Type::Int),
+                col("run_id", Type::Int),
+                // For an embedding: the preprocessing it was made under.
+                col("preprocess_version", Type::Text),
+                // The row this one replaces. Nothing is deleted: the old row
+                // and its file stay, and a reader follows the link.
+                col("supersedes_id", Type::Int),
+                req("created_at", Type::Timestamp),
+                col("withdrawn_at", Type::Timestamp),
+            ],
+        )
+        .index(&["stack_id"])
+        .index(&["subject_id"])
+        .index(&["kind"])
+        .index(&["sha256"]),
         // Wave 3 §8.5: what a release did, as rows.
         //
         // Not a workbook beside the originals under a password kept in a

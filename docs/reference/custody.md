@@ -240,6 +240,20 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | export | no command |
 | delete | with the registry |
 
+## derivatives
+
+| | |
+|---|---|
+| what | files made from the archive that are not the archive, a mask, an embedding, a pipeline's output, each named by its sha256 and kept in a working place, with a row saying what it is, what it belongs to, where it lives, its bytes and digest, and who registered it (record 42) |
+| where | files under derivatives in a working place, and none is bound now, so none can be added; rows of derivative in the registry |
+| holds | quasi-identifying: drawn from the pixels of a subject's stacks, and the stack, series or subject each belongs to<br>technical: the kind, the digest, the size, the media type, the place and the path, who registered it |
+| owner | the research group that owns the archive |
+| kept | for ever; a newer file supersedes an older one by a link and both stay |
+| read | `nils derivative list`<br>`nils derivative show <id>`<br>GET /api/derivatives/{id}/content |
+| change | `nils derivative add <file>` |
+| export | GET /api/derivatives/{id}/content |
+| delete | with the registry and the working place; nils has no command for one |
+
 ## logs
 
 | | |

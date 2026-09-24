@@ -32,6 +32,7 @@ mod browse;
 mod chain;
 mod dataset;
 mod depends;
+mod derivatives;
 mod door_client;
 mod explain;
 mod folders;
@@ -231,6 +232,11 @@ enum Command {
     Pyramid {
         #[command(subcommand)]
         command: PyramidCommand,
+    },
+    /// Files made from the archive, kept in a working place and named by their digest: masks, embeddings, a pipeline's outputs (record 42)
+    Derivative {
+        #[command(subcommand)]
+        command: derivatives::DerivativeCommand,
     },
     /// The registry's settings: the timezone and the week start its dates are read under (Wave 5 section 12.6)
     Settings {
@@ -1177,6 +1183,19 @@ enum PickCommand {
         #[arg(long)]
         json: bool,
     },
+    /// A person's pick: the stacks that stand for a role on their occasion, which a pick run leaves standing (record 42)
+    Set(PickSetArgs),
+    /// Withdraw a person's pick; the run's pick it overruled applies again
+    Withdraw {
+        /// The person's pick, from `nils pick list`
+        id: i64,
+        /// Why, kept on the audit row
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
     /// Why one pick came out the way it did: every component, and what it read
     Explain {
         /// The pick's id, from `nils pick list`
@@ -1207,6 +1226,36 @@ struct PickArgs {
     /// Only this subject, which also narrows the population scored against
     #[arg(long, value_name = "CODE")]
     subject: Option<String>,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PickSetArgs {
+    /// The role the pick stands for, one the pack's picks declare
+    #[arg(long, value_name = "ROLE")]
+    role: String,
+    /// A stack the pick names; more than one for the stacks of one acquisition
+    #[arg(long = "stack", value_name = "ID", required = true)]
+    stacks: Vec<i64>,
+    /// Why this stack and not the run's, in a person's words
+    #[arg(long, value_name = "TEXT")]
+    why: String,
+    /// The pack's pick that declares the role, when more than one does
+    #[arg(long = "pick", value_name = "NAME")]
+    pick: Option<String>,
+    /// The pack's name, looked up in the pack directory
+    #[arg(long, default_value = "mri")]
+    pack: String,
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<PathBuf>,
+    /// The session scheme, as a file; without one, the default
+    #[arg(long, value_name = "FILE", conflicts_with = "scheme_name")]
+    scheme: Option<PathBuf>,
+    /// A scheme stored in this registry, by name
+    #[arg(long = "scheme-name", value_name = "NAME")]
+    scheme_name: Option<String>,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -1715,6 +1764,7 @@ fn main() -> ExitCode {
         Command::Jobs(command) => jobs_command(&home, command),
         Command::Settings { command } => settings_command(&home, command),
         Command::Pyramid { command } => pyramid_command(&home, command),
+        Command::Derivative { command } => derivatives::command(&home, command),
         Command::Login(args) => login_command(args),
         Command::Logout => {
             if login::logout() {
@@ -4943,6 +4993,21 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let identifier_reads = count_of(store, "handle_read_audit", "")?;
     let documents = count_of(store, "ask_document", "")?;
     let schema = store.schema().map(str::to_string);
+    let (derivative_rows, derivative_bytes) = nils_registry::derivative::totals(store)?;
+    let derivatives_where = match derivatives::working(store) {
+        Ok(p) => format!(
+            "files under {} in the working place {} ({}), and rows of derivative in the registry",
+            nils_registry::derivative::TREE,
+            p.name,
+            Path::new(&p.path)
+                .join(nils_registry::derivative::TREE)
+                .display()
+        ),
+        Err(_) => format!(
+            "files under {} in a working place, and none is bound now, so none can be added; rows of derivative in the registry",
+            nils_registry::derivative::TREE
+        ),
+    };
     let linkage_holdings = linkage::holdings(&mut registry.open_linkage()?)?;
 
     let dir = home.dir();
@@ -5286,6 +5351,22 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
                 "change": [],
                 "export": [],
                 "delete": "with the registry",
+            },
+        }),
+        serde_json::json!({
+            "store": "derivatives",
+            "owner": "the research group that owns the archive",
+            "what": "files made from the archive that are not the archive, a mask, an embedding, a pipeline's output, each named by its sha256 and kept in a working place, with a row saying what it is, what it belongs to, where it lives, its bytes and digest, and who registered it (record 42)",
+            "where": derivatives_where,
+            "files": [],
+            "holds": ["quasi-identifying: drawn from the pixels of a subject's stacks, and the stack, series or subject each belongs to", "technical: the kind, the digest, the size, the media type, the place and the path, who registered it"],
+            "counts": { "derivatives": derivative_rows, "bytes": derivative_bytes },
+            "kept": "for ever; a newer file supersedes an older one by a link and both stay",
+            "commands": {
+                "read": ["nils derivative list", "nils derivative show <id>", "GET /api/derivatives/{id}/content"],
+                "change": ["nils derivative add <file>"],
+                "export": ["GET /api/derivatives/{id}/content"],
+                "delete": "with the registry and the working place; nils has no command for one",
             },
         }),
         serde_json::json!({
@@ -6197,7 +6278,98 @@ fn pick_command(home: &Home, command: PickCommand) -> Result<(), Exit> {
             json,
         } => pick_list(home, role, borders, subject, json),
         PickCommand::Explain { id, json } => pick_explain(home, id, json),
+        PickCommand::Set(args) => pick_set(home, args),
+        PickCommand::Withdraw { id, why, json } => pick_withdraw(home, id, why, json),
     }
+}
+
+/// Record 42 S3: `nils pick set`, a person's pick.
+fn pick_set(home: &Home, args: PickSetArgs) -> Result<(), Exit> {
+    let dir = pack_dir(home, args.pack_dir)?;
+    let found = packs_in(&dir)?
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|f| f == args.pack.as_str()))
+        .ok_or_else(|| fail(format!("no pack named {} in {}", args.pack, dir.display())))?;
+    let pack = nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
+    let mut registry = open(home)?;
+    let scheme = match (&args.scheme, &args.scheme_name) {
+        (Some(path), _) => read_scheme(path)?,
+        (None, Some(name)) => stored_scheme(&mut registry, name)?,
+        (None, None) => session::Scheme::default(),
+    };
+    let who = actor();
+    let picked = nils_classify::picking::set_person(
+        &mut registry,
+        &pack,
+        &scheme,
+        &nils_classify::picking::PersonPick {
+            role: &args.role,
+            stacks: &args.stacks,
+            model: args.pick.as_deref(),
+            why: &args.why,
+            actor: &who,
+        },
+    )
+    .map_err(|e| match e {
+        nils_classify::picking::PersonError::Refused(m) => usage(m),
+        other => fail(other.to_string()),
+    })?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&picked)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
+    println!(
+        "pick {}: the {} of the occasion on {}, by a person",
+        picked.id, picked.role, picked.session_day
+    );
+    println!(
+        "  stacks           {}",
+        picked
+            .stacks
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "  overrules        {} run's pick(s)",
+        picked.overruled.len()
+    );
+    if !picked.replaced.is_empty() {
+        println!(
+            "  replaces         {} earlier person's pick(s)",
+            picked.replaced.len()
+        );
+    }
+    println!("  answers          {} review item(s)", picked.answered);
+    Ok(())
+}
+
+/// Record 42 S3: `nils pick withdraw`, a person's pick withdrawn.
+fn pick_withdraw(home: &Home, id: i64, why: Option<String>, json: bool) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let done = nils_classify::picking::withdraw_person(&mut registry, id, &actor(), why.as_deref())
+        .map_err(|e| match e {
+            nils_classify::picking::PersonError::Refused(m) => usage(m),
+            other => fail(other.to_string()),
+        })?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&done)
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
+    println!(
+        "pick {id} withdrawn; {} run's pick(s) apply again",
+        done.restored.len()
+    );
+    Ok(())
 }
 
 fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
@@ -6247,6 +6419,8 @@ fn pick_run(home: &Home, args: PickArgs) -> Result<(), Exit> {
     println!("  occasions        {:>12}", report.sessions);
     println!("  picked           {:>12}", report.written);
     println!("  nothing eligible {:>12}", report.empty);
+    println!("  {:<16} {:>12}", "person's stands", report.standing);
+    println!("  {:<16} {:>12}", "for review", report.raised);
     for (why, n) in &report.borders {
         println!("  {why:<16} {n:>12}   worth a person's eye");
     }

@@ -57,6 +57,8 @@ pub const SUBJECT_TABLES: &[(&str, Handling)] = &[
     ("subject_disease", Handling::Repoint),
     ("event", Handling::Repoint),
     ("pick", Handling::Repoint),
+    // record 42 S4: a derivative names its subject whatever its scope
+    ("derivative", Handling::Repoint),
     ("handover_subject", Handling::Repoint),
     ("session_cache", Handling::Rebuild),
     ("handle_member", Handling::Repoint),

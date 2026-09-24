@@ -1,20 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# The engine's HTTP API, version 7: version 6 with the model registry
-# (record 42 S2, D15). A model whose answers become registry facts is
-# registered by the digest of its canonical artifact with its card
+# The engine's HTTP API, version 7: version 6 with the doors of record 42
+# (labels and models have a home).
+#
+# The model registry (S2, D15). A model whose answers become registry facts
+# is registered by the digest of its canonical artifact with its card
 # (contracts/model/v1), admitted by a check that passed, promoted, which is
 # refused unless it was admitted and retires the model promoted before it in
 # the same task and slot, and retired; every transition is an event and an
 # audit row. GET /api/models and GET /api/models/{id} under models:see, and
 # POST /api/models, POST /api/models/{id}/admit, /promote and /retire under
-# models:work, the two grants of suite contract version 3. A model's answer
+# models:work, two grants of suite contract version 3. A model's answer
 # applied to a review item names the registered model in X-Nils-Actor and is
 # refused unless the model is admitted or promoted; it is staged until a
 # person commits it, and a decision names who committed it. The author of a
-# decision is the verified actor, never the body (record 42 S1). Nothing
-# else changes, and a caller pinned to version 6 meets the engine it already
-# knew, but for the model's answer, which version 6 took as free text.
+# decision is the verified actor, never the body (S1).
+#
+# A person's pick (S3). POST /api/picks writes a person's pick, the stacks
+# that stand for a role on the occasion they belong to, which a pick run
+# leaves standing and keeps its own pick beside as evidence that does not
+# apply; POST /api/picks/{id}/withdraw withdraws a person's pick and lets the
+# run's pick it overruled apply again; both under review:work, for a person
+# only. A session whose pick is ambiguous raises a review item of kind
+# pick.border, which a person's pick answers.
+#
+# The derivatives (S4). GET and POST /api/derivatives, GET
+# /api/derivatives/{id} and GET /api/derivatives/{id}/content register,
+# list, describe and serve derivatives, files made from the archive and kept
+# in a working place under their sha256: pipelines:see to read the rows,
+# pipelines:see at detail quasi for the bytes, pipelines:work to register,
+# the digest checked before anything is registered, and every registration
+# and download audited. With no working place bound the capability is off
+# and the registering door answers 409 saying so.
+#
+# Nothing else changes, and a caller pinned to version 6 meets the engine it
+# already knew, but for the model's answer, which version 6 took as free
+# text.
 openapi: 3.1.0
 info:
   title: NILS engine API
@@ -47,7 +68,7 @@ paths:
   /api/capabilities:
     get:
       summary: What this engine is and speaks (C26)
-      description: "The engine version, the contract versions (openapi, review-item, pack, suite, mcp and, since version 7, model), the loaded packs with their versions, the registry id, epoch, schema version and `synthetic` (the builder's name when `nils synth` made the registry, absent on real data; a desk shows a banner on it), the auth mode, the caller's principal, grants (sorted), detail, roles (for one release, the ladder steps up to the detail, never admin), display name, mail, ceiling and actor, the node, the list of doors, and since version 3 `assist` (the assistant's URL when one is installed), `event_streams` (the cap), `idempotency` (the header, the doors, the hours), `policy` (one row per door, Wave 4c section 6.5, each naming the grant it needs as a grant or an array meaning any of, with `also` for a second grant, `detail` for the lowest detail and, since version 5, `dataset` on POST /api/places and PUT /api/places/{id} for the grant their dataset fields need beside the door's own), since Wave 5 section 10.4 `supervisor` (the URL of the supervisor on this host when `nils serve --supervisor` names one, null otherwise), and since version 5 `places.dataset` (record 26: `grant`, the `fields` a declaration takes, the three `arrives` and the two `trees` by name)."
+      description: "The engine version, the contract versions (openapi, review-item, pack, suite, mcp and, since version 7, model), the loaded packs with their versions, the registry id, epoch, schema version and `synthetic` (the builder's name when `nils synth` made the registry, absent on real data; a desk shows a banner on it), the auth mode, the caller's principal, grants (sorted), detail, roles (for one release, the ladder steps up to the detail, never admin), display name, mail, ceiling and actor, the node, the list of doors, and since version 3 `assist` (the assistant's URL when one is installed), `event_streams` (the cap), `idempotency` (the header, the doors, the hours), `policy` (one row per door, Wave 4c section 6.5, each naming the grant it needs as a grant or an array meaning any of, with `also` for a second grant, `detail` for the lowest detail and, since version 5, `dataset` on POST /api/places and PUT /api/places/{id} for the grant their dataset fields need beside the door's own), since Wave 5 section 10.4 `supervisor` (the URL of the supervisor on this host when `nils serve --supervisor` names one, null otherwise), and since version 5 `places.dataset` (record 26: `grant`, the `fields` a declaration takes, the three `arrives` and the two `trees` by name), and since version 7 `derivatives` (record 42: `enabled`, the working `place` new derivatives go into or the `reason` they are off, the `kinds`, the `grants` and `upload_max_bytes`)."
       responses:
         "200": {description: The capabilities}
   /api/summary:
@@ -345,6 +366,24 @@ paths:
         "200": {description: The model}
         "404": {description: No such model}
         "409": {description: Retired already}
+  /api/picks:
+    post:
+      summary: A person's pick, which a pick run leaves standing (record 42 S3; nils pick set)
+      description: "The stacks that stand for a role on the occasion they belong to: one acquisition, on one occasion of one subject under the scheme. `role` must be one the served pack's picks declare, `pick` names the pick when more than one declares it, `scheme` names a stored scheme (the default otherwise), and `why` is required: it is what a reader of the pick has in place of the run's scores. The pick is written with author_kind person; an earlier person's pick on the occasion is withdrawn by it, and the run's pick stops applying and points at it (`overruled_by`). A later `nils pick run` keeps the person's pick and writes its own beside it as evidence that does not apply, and raises no pick.border item on that occasion. An open pick.border item on the occasion is answered (accepted, with the pick as its decision). Only a person writes one: a call whose X-Nils-Actor names an agent or a model is refused 403. Audited as pick.set, which moves the epoch."
+      requestBody: {content: {application/json: {schema: {type: object, required: [role, stacks, why], properties: {role: {type: string}, stacks: {type: array, items: {type: integer}}, why: {type: string}, pick: {type: string}, pack: {type: string}, scheme: {type: string}}}}}}
+      responses:
+        "201": {description: "{id, model, role, subject_id, session_day, stacks, overruled, replaced, answered}"}
+        "403": {description: No review:work, or an agent or a model acting for the principal}
+        "409": {description: "Refused in words: a role no pick declares, a stack the fingerprint has not read, stacks of more than one subject or occasion, no why, or no pack served"}
+  /api/picks/{id}/withdraw:
+    post:
+      summary: Withdraw a person's pick; the run's pick it overruled applies again (record 42 S3; nils pick withdraw)
+      description: "The row stays and stops applying. A run's pick is not withdrawn: a person overrules it with a pick of their own. `why`, optional, is kept on the audit row. Audited as pick.withdraw, which moves the epoch."
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {why: {type: string}}}}}}
+      responses:
+        "200": {description: "{id, restored}: the run's picks that apply again"}
+        "409": {description: "No such pick, a run's pick, or already withdrawn"}
   /api/timeline/{kind}/{id}:
     get:
       summary: Every event on one object in order, typed, each with the object it produced (Wave 5 section 12.2)
@@ -905,6 +944,55 @@ paths:
       responses:
         "200": {description: The folders inside the folder, or where a browser starts}
         "400": {description: A path that is not absolute}
+  /api/derivatives:
+    get:
+      summary: The derivatives, newest first (record 42 S4; nils derivative list)
+      description: "Each row as GET /api/derivatives/{id} answers it, with the capability beside them. pipelines:see."
+      parameters:
+        - {name: kind, in: query, schema: {type: string, enum: [mask, embedding, pyramid, output]}}
+        - {name: stack, in: query, schema: {type: integer}}
+        - {name: subject, in: query, schema: {type: integer}}
+        - {name: limit, in: query, schema: {type: integer, default: 50}}
+      responses:
+        "200": {description: "{derivatives: [...], capability}"}
+    post:
+      summary: Register a file as a derivative, into the working place (record 42 S4; nils derivative add)
+      description: "The body is the file, as it stands, and its media type is the request's Content-Type (application/octet-stream when none). The query says what it is: `kind` (mask, embedding, pyramid or output), exactly one of `stack`, `series` or `subject` (with `day`, YYYY-MM-DD, for one occasion of the subject), `sha256`, the digest of the body, which is required and checked before anything is registered, and optionally `supersedes`, a derivative of the same kind this one replaces (both stay), and `name`, of which only a plain extension is kept. The body is streamed into the working place and hashed on the way; the file is kept under `derivatives/<kind>/<two hex>/<sha256><extension>`, so the same content is one file, and its name never carries what a caller called it. The row records the bytes, the digest, the place, the principal and X-Nils-Actor; a model and a pipeline run are named once their tables exist. pipelines:work. Audited as derivative.register, which does not move the epoch."
+      parameters:
+        - {name: kind, in: query, required: true, schema: {type: string, enum: [mask, embedding, pyramid, output]}}
+        - {name: sha256, in: query, required: true, schema: {type: string, pattern: "^[0-9a-fA-F]{64}$"}}
+        - {name: stack, in: query, schema: {type: integer}}
+        - {name: series, in: query, schema: {type: integer}}
+        - {name: subject, in: query, schema: {type: integer}}
+        - {name: day, in: query, schema: {type: string, format: date}}
+        - {name: supersedes, in: query, schema: {type: integer}}
+        - {name: name, in: query, schema: {type: string}}
+      requestBody: {content: {application/octet-stream: {schema: {type: string, format: binary}}}}
+      responses:
+        "201": {description: "The derivative, as GET /api/derivatives/{id} answers it"}
+        "400": {description: "No kind or sha256, an unknown kind, not exactly one owner, an owner that does not exist, or a supersede of another kind"}
+        "403": {description: No pipelines:work}
+        "409": {description: "No working place is bound: the capability is off"}
+        "413": {description: Larger than upload_max_bytes}
+        "422": {description: "The body hashes to another digest than the one named; nothing was kept or registered"}
+  /api/derivatives/{id}:
+    get:
+      summary: One derivative (record 42 S4; nils derivative show)
+      description: "{id, kind, scope (stack, series, session or subject), stack_id, series_id, subject_id, session_day, place_id, place, path (under the place), bytes, sha256, media_type, registered_by, actor, model_id, run_id, preprocess_version, supersedes_id, created_at, withdrawn_at, content (the door its bytes are read from)}. pipelines:see."
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: The derivative}
+        "404": {description: No such derivative}
+  /api/derivatives/{id}/content:
+    get:
+      summary: The bytes of one derivative (record 42 S4)
+      description: "The file as it was registered, streamed with its media type, `X-Nils-Sha256` and `X-Nils-Derivative`. A mask or an embedding is drawn from the pixels, so the door needs pipelines:see at detail quasi. A file whose size is not the registered one is not served. Every read is audited as derivative.read, which does not move the epoch."
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: The file}
+        "403": {description: No pipelines:see, or below detail quasi}
+        "404": {description: No such derivative, or its file is not in its place}
+        "409": {description: "Its place is retired or gone, or its file is not the size registered"}
   /api/instances/{stack}/manifest:
     get:
       summary: The viewing pyramid of a stack, as its manifest (Wave 5 section 12.7)

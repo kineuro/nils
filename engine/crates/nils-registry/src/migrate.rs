@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 54;
+pub const SCHEMA_VERSION: i64 = 56;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +270,14 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 54,
         apply: a_model_has_a_home,
     },
+    Migration {
+        version: 55,
+        apply: a_person_may_pick,
+    },
+    Migration {
+        version: 56,
+        apply: a_derivative_has_a_home,
+    },
 ];
 
 /// Record 42 S2: the model registry. A registry from before gains the two
@@ -318,6 +326,25 @@ fn an_answer_names_its_model_and_its_committer(store: &mut Store, kind: Kind) ->
         )?;
     }
     Ok(())
+}
+
+/// Record 42 S3: a person's pick. The pick table gains why a person picked,
+/// who withdrew a pick, and which person's pick overruled a run's; every
+/// pick written before is a run's, so the three are null on it.
+fn a_person_may_pick(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "pick", &["why", "withdrawn_by", "overruled_by"])
+}
+
+/// Record 42 S4: the derivative table, empty. A registry from before has
+/// no derivative, and the working place it would be kept in is unchanged.
+fn a_derivative_has_a_home(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["derivative"])
 }
 
 /// Record 41 S2: every rule's vote. A registry from before gains the two

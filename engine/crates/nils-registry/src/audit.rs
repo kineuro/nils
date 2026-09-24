@@ -86,6 +86,15 @@ pub enum Action {
     ModelAdmit,
     ModelPromote,
     ModelRetire,
+    /// Record 42 S3: a person picked the stack that stands for a session's
+    /// role, or withdrew a person's pick. The ask reads picks, so both
+    /// move the epoch.
+    PickSet,
+    PickWithdraw,
+    /// Record 42 S4: a derivative registered in a working place, and one
+    /// read whole through its door. Neither changes a judgement.
+    DerivativeRegister,
+    DerivativeRead,
 }
 
 impl Action {
@@ -131,6 +140,10 @@ impl Action {
             Action::ModelAdmit => "model.admit",
             Action::ModelPromote => "model.promote",
             Action::ModelRetire => "model.retire",
+            Action::PickSet => "pick.set",
+            Action::PickWithdraw => "pick.withdraw",
+            Action::DerivativeRegister => "derivative.register",
+            Action::DerivativeRead => "derivative.read",
         }
     }
 
@@ -153,6 +166,8 @@ impl Action {
                 | Action::ModelAdmit
                 | Action::ModelPromote
                 | Action::ModelRetire
+                | Action::DerivativeRegister
+                | Action::DerivativeRead
         )
     }
 }
