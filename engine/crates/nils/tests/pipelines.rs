@@ -2645,7 +2645,13 @@ fn units_apart_fill_the_lane_s_budget_and_never_pass_it() {
         assert!(words.iter().any(|w| w == "NILS_CORES=2"), "{words:?}");
     }
 
-    // memory binds as cores do: three units of 1 GB in a lane of 3 GB
+    // memory binds as cores do: three units of 1 GB in a lane of 3 GB,
+    // each of one core, so the cores never bind first on a machine of 4
+    // (the lane's cores are never more than the machine offers)
+    lab.add_descriptor(
+        "slow-one",
+        &stack_slow("slow-one", "{cores: 1, memory-gb: 1}", ""),
+    );
     let t = lab.work.path().join("trace-memory");
     lab.ok(
         &["pipeline", "lane", "--cores", "64", "--memory-gb", "3"],
@@ -2655,7 +2661,7 @@ fn units_apart_fill_the_lane_s_budget_and_never_pass_it() {
         &t,
         &[
             "run",
-            "slow",
+            "slow-one",
             "--select",
             "selection:every@1",
             "--param",
