@@ -34,6 +34,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - A plane resliced from a susceptibility acquisition is a reformat. The MRI pack's SWI route tried every output it knows and then fell back to the processed SWI image, so the MPR planes the console writes from a susceptibility EPI, whose image type says `MPR` and names no SWI output, were the construct `SWI` and a scanner-derived image, 375 of them on five scanner protocols. The route now takes `MPR` before its last resort, so those planes are the construct `MPR` and the disposition `reformat`, as every other MPR is; their provenance stays `SWIRecon`, which the name gives first.
 
+- The MRI pack's intent rules no longer test for a construct nothing writes. `FatFraction` is declared on the construct axis and was never written, in v0 or here, and the Dixon and dual-echo field map rules of the intent cascade each tested for it where it could never be. The two tests are gone and the value stays, because a vocabulary is a contract; `nils pack shape` still reports it unreachable, with the reason.
+
 ## [1.0.0-alpha.37] - 2026-09-23
 
 ### Fixed
