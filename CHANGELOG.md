@@ -38,9 +38,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - A longhand rule's `requires` gates it. The loader read `requires` on a value of an axis file and skipped it on a rule written longhand, which is the same rule in its long form, so a longhand rule fired where its author said it must not and nothing said so. It is honoured now, is checked like any other condition (a rule decided before the passes may not require an axis decided after them), and any key a longhand rule does not have is refused with its file, line and path instead of being ignored.
 
+- What the scanner computed and wrote as an image of its own is scanner derived. The motion-corrected copy of a BOLD run (`MOCO`, which Siemens writes on an ORIGINAL image) and the perfusion-weighted image of an ASL series (`SUB`, the label minus the control) reached no disposition rule, because neither has a construct or a provenance that says so, and both were the acquisition. The printouts switch both on as products of the scanner; a new disposition rule reads the two tokens, so the run and the label and control images stay the acquisition and the copies are `scanner_derived`.
+
 ### Changed
 
-- The MRI pack is version 0.3.0, because the rules the five scanner protocols proved wrong now give other answers: RESOLVE, FlowComp, the t test map of an ASL series, the body part, and the reformats of a susceptibility acquisition. Its vocabulary is unchanged, so a question asked of 0.2.0 means the same words here.
+- The MRI pack is version 0.3.0, because the rules the five scanner protocols proved wrong now give other answers: RESOLVE, FlowComp, the t test map of an ASL series, the body part, the reformats of a susceptibility acquisition, and the disposition of what the scanner computed. Its vocabulary is unchanged, so a question asked of 0.2.0 means the same words here.
 
 ## [1.0.0-alpha.37] - 2026-09-23
 

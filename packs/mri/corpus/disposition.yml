@@ -180,3 +180,58 @@ cases:
       quality: Encrypted
       convertible: 'no'
       disposition: acquisition
+
+  # --- record 41: what the scanner computed and wrote as an original image.
+  # The printouts switch both on, and both are made from images the scanner
+  # had just taken: the motion-corrected copy of a BOLD run, and the
+  # perfusion-weighted image an ASL series computes from its label and
+  # control images.
+
+  - name: the motion-corrected copy of a BOLD run is scanner derived
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\MOCO\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: 'SK\OSP'
+      text_sequence_name: '*epfid2d1_104'
+      text_series_description: 'MoCoSeries'
+      text_protocol_name: 'rs-fMRI_ep2d_bold_sms_2mmi_RL_hcp_6min'
+      image_role: original_primary
+    axes:
+      technique: BOLD
+      disposition: scanner_derived
+      convertible: 'yes'
+
+  - name: and the run itself is the acquisition
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: 'SK\OSP'
+      text_sequence_name: '*epfid2d1_104'
+      text_series_description: 'rs-fMRI_ep2d_bold_sms_2mmi_RL_hcp_6min'
+      image_role: original_primary
+    axes:
+      disposition: acquisition
+
+  - name: the perfusion-weighted image of an ASL series is scanner derived
+    stack:
+      image_type: 'DERIVED\PRIMARY\ASL\ND\NORM\SUB\TTEST\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      text_sequence_name: '*tgse3d1_3000'
+      text_series_description: 'Ax ASL 3D_PERFUSION_WEIGHTED'
+      image_role: derived
+    axes:
+      provenance: ASLRecon
+      disposition: scanner_derived
+
+  - name: and the label and control images it was computed from are the acquisition
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\ASL\NONE\ND\NORM\MOSAIC'
+      scanning_sequence: EP
+      sequence_variant: SK
+      text_sequence_name: '*tgse3d1_3000'
+      text_series_description: 'Ax ASL 3D'
+      image_role: original_primary
+    axes:
+      provenance: ASLRecon
+      disposition: acquisition
