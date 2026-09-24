@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nils.kineuro.se/contracts/suite/v3/grants.schema.json",
   "title": "NILS grants and detail",
-  "description": "Record 25, with record 42 R7 in version 3: models:see and models:work, the model registry. What a person may open, as grants, and how much of a record they see, as detail. The desk's tokens carry both as the grants and detail claims. A grant names a page and how far a person goes there: see, or work, which includes see; the assistant has use. Detail is ordered, lowest first. The ladder's four names and assist stand for the sets in vectors/grants.json wherever they are still met.",
+  "description": "Record 25, with record 42 R7 in version 3: models:see and models:work, the model registry, and campaigns:see and campaigns:work, reading a campaign, and claiming, answering and closing its items, since a rater is not a reviewer of the whole queue; no ladder set but admin holds the campaign grants. What a person may open, as grants, and how much of a record they see, as detail. The desk's tokens carry both as the grants and detail claims. A grant names a page and how far a person goes there: see, or work, which includes see; the assistant has use. Detail is ordered, lowest first. The ladder's four names and assist stand for the sets in vectors/grants.json wherever they are still met.",
   "$defs": {
     "grant": {
       "type": "string",
@@ -11,6 +11,8 @@
         "assistant-settings:work",
         "assistant:use",
         "audit:see",
+        "campaigns:see",
+        "campaigns:work",
         "data:see",
         "data:work",
         "database:see",

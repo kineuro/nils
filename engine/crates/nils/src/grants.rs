@@ -22,6 +22,9 @@ pub(crate) const GRANTS: [&str; 26] = [
     "assistant-settings:work",
     "assistant:use",
     "audit:see",
+    // record 42 R7: a rater is not a reviewer of the whole queue
+    "campaigns:see",
+    "campaigns:work",
     "data:see",
     "data:work",
     "database:see",

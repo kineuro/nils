@@ -1,0 +1,1055 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! Label sets (record 42 S7, C7): decisions leave the registry as labelled
+//! data with their provenance. A set is one `labels.tsv`, a row per label
+//! naming its stack, what was labelled, the value, who said so and the
+//! decision, campaign and model behind it, beside a `provenance.json`; its
+//! digest covers the canonical `labels.tsv`, so the same state gives the
+//! same digest and one new decision changes it. The set's row pins the
+//! handle it covers.
+//!
+//! Record 40 R3: a sample drawn and sealed for certification is never
+//! training data. A set drawn from one carries `sealed`, and
+//! [`usable_for_training`] refuses it.
+//!
+//! R5: v0's human body-part labels come in as person decisions marked as
+//! imported from v0, with the date v0 gave them ([`import_v0`]). A label
+//! set is not a database migration: v0's databases migrate nowhere.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde_json::{Value, json};
+
+use crate::Registry;
+use crate::audit::{self, Action, Entry};
+use crate::review;
+use crate::schema::{Type, table};
+use crate::store::{Error as StoreError, Insert, Param, Row, Store};
+use crate::time::now_iso;
+
+#[derive(Debug)]
+pub enum Error {
+    Store(StoreError),
+    Invalid(String),
+    NotFound(String),
+    Refused(String),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Store(e) => write!(f, "{e}"),
+            Error::Invalid(m) | Error::NotFound(m) | Error::Refused(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<StoreError> for Error {
+    fn from(e: StoreError) -> Error {
+        Error::Store(e)
+    }
+}
+
+impl From<crate::campaign::Error> for Error {
+    fn from(e: crate::campaign::Error) -> Error {
+        match e {
+            crate::campaign::Error::Store(s) => Error::Store(s),
+            crate::campaign::Error::NotFound(m) => Error::NotFound(m),
+            crate::campaign::Error::Invalid(m) => Error::Invalid(m),
+            crate::campaign::Error::Refused(m) | crate::campaign::Error::Forbidden(m) => {
+                Error::Refused(m)
+            }
+        }
+    }
+}
+
+/// One label.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Label {
+    pub stack_id: Option<i64>,
+    pub subject_id: Option<i64>,
+    pub session_day: Option<String>,
+    /// The axis, or the question a campaign asked.
+    pub what: String,
+    pub value: Option<String>,
+    pub derivative_id: Option<i64>,
+    pub author_kind: String,
+    pub author: String,
+    pub decision_id: Option<i64>,
+    pub campaign_id: Option<i64>,
+    pub model_id: Option<i64>,
+    /// For a set of a campaign's answers, the answer.
+    pub answer_id: Option<i64>,
+}
+
+/// The columns of `labels.tsv`, in order.
+pub const COLUMNS: [&str; 12] = [
+    "stack_id",
+    "subject_id",
+    "session_day",
+    "what",
+    "value",
+    "derivative_id",
+    "author_kind",
+    "author",
+    "decision_id",
+    "campaign_id",
+    "model_id",
+    "answer_id",
+];
+
+fn cell(v: Option<String>) -> String {
+    v.map(|s| s.replace(['\t', '\n', '\r'], " "))
+        .unwrap_or_default()
+}
+
+/// The canonical `labels.tsv`: the header, then one line per label in the
+/// order of its stack, subject, day, what, decision and answer, so the same
+/// labels always give the same bytes.
+pub fn tsv(labels: &[Label]) -> String {
+    let mut sorted: Vec<&Label> = labels.iter().collect();
+    sorted.sort_by(|a, b| {
+        (
+            a.stack_id,
+            a.subject_id,
+            &a.session_day,
+            &a.what,
+            a.decision_id,
+            a.answer_id,
+            a.derivative_id,
+        )
+            .cmp(&(
+                b.stack_id,
+                b.subject_id,
+                &b.session_day,
+                &b.what,
+                b.decision_id,
+                b.answer_id,
+                b.derivative_id,
+            ))
+    });
+    let mut out = COLUMNS.join("\t");
+    out.push('\n');
+    for l in sorted {
+        let line = [
+            cell(l.stack_id.map(|v| v.to_string())),
+            cell(l.subject_id.map(|v| v.to_string())),
+            cell(l.session_day.clone()),
+            cell(Some(l.what.clone())),
+            cell(l.value.clone()),
+            cell(l.derivative_id.map(|v| v.to_string())),
+            cell(Some(l.author_kind.clone())),
+            cell(Some(l.author.clone())),
+            cell(l.decision_id.map(|v| v.to_string())),
+            cell(l.campaign_id.map(|v| v.to_string())),
+            cell(l.model_id.map(|v| v.to_string())),
+            cell(l.answer_id.map(|v| v.to_string())),
+        ];
+        out.push_str(&line.join("\t"));
+        out.push('\n');
+    }
+    out
+}
+
+// ------------------------------------------------------ labels of decisions
+
+/// Which decisions a set is made of.
+#[derive(Debug, Clone, Default)]
+pub struct DecisionQuery<'a> {
+    pub axis: &'a str,
+    /// The stacks a frozen selection named; every stack with a decision
+    /// when none.
+    pub stacks: Option<&'a [i64]>,
+    /// The author kinds kept (`person`, `agent`, `model`); every kind when
+    /// empty. Held against the decision in force, never a losing one.
+    pub authors: &'a [String],
+    /// Only decisions a campaign's close wrote.
+    pub campaign: Option<i64>,
+    /// Staged decisions are not in force and are left out unless asked for.
+    pub staged_too: bool,
+}
+
+/// How narrow a scope is, for the resolution: a stack's own decision over a
+/// group's, a group's over a series', a series' over a subject's.
+fn narrowness(scope: &str) -> u8 {
+    match scope {
+        "stack" => 4,
+        "group" => 3,
+        "series" => 2,
+        "subject" => 1,
+        _ => 0,
+    }
+}
+
+struct Standing {
+    id: i64,
+    scope: String,
+    value: Option<String>,
+    actor: String,
+    author_kind: String,
+}
+
+/// The decision in force on each stack for one axis, the way the classifier
+/// resolves them (C15): the highest rank, then the narrowest scope, then the
+/// latest. A decision about a machine (origin scope) is a rule about the
+/// machine rather than a label of a stack, and is not exported.
+pub fn decision_labels(store: &mut Store, q: &DecisionQuery<'_>) -> Result<Vec<Label>, Error> {
+    if q.axis.is_empty() {
+        return Err(Error::Invalid("a label set names its axis".into()));
+    }
+    for a in q.authors {
+        if !["person", "agent", "model"].contains(&a.as_str()) {
+            return Err(Error::Invalid(format!(
+                "{a} is not an author kind: person, agent or model"
+            )));
+        }
+    }
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id, scope, ref, value, actor, author_kind, \
+         CASE WHEN staged_at IS NOT NULL AND committed_at IS NULL THEN 1 ELSE 0 END \
+         FROM {} WHERE axis = {} AND withdrawn_at IS NULL ORDER BY id",
+        store.qualified("decision"),
+        d.param(1, Type::Text)
+    );
+    let rows = store.query(&sql, &[Param::from(q.axis)])?;
+    let mut decisions: Vec<(Standing, String)> = Vec::new();
+    for r in &rows {
+        if r.int(6)? == 1 && !q.staged_too {
+            continue;
+        }
+        let scope = r.text(1)?.to_string();
+        if narrowness(&scope) == 0 {
+            continue;
+        }
+        decisions.push((
+            Standing {
+                id: r.int(0)?,
+                scope,
+                value: r.opt_text(3)?.map(str::to_string),
+                actor: r.text(4)?.to_string(),
+                author_kind: r.text(5)?.to_string(),
+            },
+            r.text(2)?.to_string(),
+        ));
+    }
+    // what each scope reaches
+    let needs_tree = decisions
+        .iter()
+        .any(|(s, _)| s.scope == "series" || s.scope == "subject");
+    let mut tree: BTreeMap<i64, (i64, i64)> = BTreeMap::new();
+    let mut by_series: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    let mut by_subject: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    let tree_sql = format!(
+        "SELECT k.id, k.series_id, r.subject_id FROM {} k JOIN {} r ON r.id = k.series_id",
+        store.qualified("stack"),
+        store.qualified("series")
+    );
+    for r in store.query(&tree_sql, &[])? {
+        let (stack, series, subject) = (r.int(0)?, r.int(1)?, r.int(2)?);
+        tree.insert(stack, (series, subject));
+        if needs_tree {
+            by_series.entry(series).or_default().push(stack);
+            by_subject.entry(subject).or_default().push(stack);
+        }
+    }
+    let mut best: BTreeMap<i64, usize> = BTreeMap::new();
+    for (i, (s, reference)) in decisions.iter().enumerate() {
+        let reached: Vec<i64> = match s.scope.as_str() {
+            "stack" => reference.parse::<i64>().ok().into_iter().collect(),
+            "group" => match reference.parse::<i64>() {
+                Ok(item) => review::members(store, item)
+                    .map_err(|e| Error::Invalid(e.to_string()))?
+                    .iter()
+                    .map(|m| m.stack_id)
+                    .collect(),
+                Err(_) => Vec::new(),
+            },
+            "series" => reference
+                .parse::<i64>()
+                .ok()
+                .and_then(|id| by_series.get(&id).cloned())
+                .unwrap_or_default(),
+            "subject" => reference
+                .parse::<i64>()
+                .ok()
+                .and_then(|id| by_subject.get(&id).cloned())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let key = |j: usize| {
+            let (x, _) = &decisions[j];
+            (review::rank(&x.author_kind), narrowness(&x.scope), x.id)
+        };
+        for stack in reached {
+            match best.get(&stack) {
+                Some(&j) if key(j) >= key(i) => {}
+                _ => {
+                    best.insert(stack, i);
+                }
+            }
+        }
+    }
+    let wanted: Option<BTreeSet<i64>> = q.stacks.map(|s| s.iter().copied().collect());
+    let from_campaign = campaign_of_decisions(store)?;
+    let mut out = Vec::new();
+    for (stack, i) in best {
+        if wanted.as_ref().is_some_and(|w| !w.contains(&stack)) {
+            continue;
+        }
+        let (s, _) = &decisions[i];
+        if !q.authors.is_empty() && !q.authors.contains(&s.author_kind) {
+            continue;
+        }
+        let campaign = from_campaign.get(&s.id).copied();
+        if q.campaign.is_some() && campaign != q.campaign {
+            continue;
+        }
+        out.push(Label {
+            stack_id: Some(stack),
+            subject_id: tree.get(&stack).map(|(_, subject)| *subject),
+            session_day: None,
+            what: q.axis.to_string(),
+            value: s.value.clone(),
+            derivative_id: None,
+            author_kind: s.author_kind.clone(),
+            author: s.actor.clone(),
+            decision_id: Some(s.id),
+            campaign_id: campaign,
+            model_id: None,
+            answer_id: None,
+        });
+    }
+    Ok(out)
+}
+
+/// The campaign each decision a close wrote belongs to.
+fn campaign_of_decisions(store: &mut Store) -> Result<BTreeMap<i64, i64>, StoreError> {
+    let sql = format!(
+        "SELECT decision_id, campaign_id FROM {} WHERE decision_id IS NOT NULL",
+        store.qualified("campaign_item")
+    );
+    store
+        .query(&sql, &[])?
+        .iter()
+        .map(|r| Ok((r.int(0)?, r.int(1)?)))
+        .collect()
+}
+
+// ------------------------------------------------------ labels of a campaign
+
+/// What a campaign's set holds: the outcome of every resolved item, or
+/// every answer (for an agreement study, or a two-rater reference).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Of {
+    Outcomes,
+    Answers,
+}
+
+impl Of {
+    pub fn name(self) -> &'static str {
+        match self {
+            Of::Outcomes => "outcomes",
+            Of::Answers => "answers",
+        }
+    }
+}
+
+/// A campaign's labels. An outcome that became a decision is that
+/// decision, with its author; one that closed into nothing is the
+/// adjudicator's, or the raters' who agreed, and a derivative outcome is a
+/// row per file.
+pub fn campaign_labels(store: &mut Store, campaign: i64, of: Of) -> Result<Vec<Label>, Error> {
+    use crate::campaign;
+    let c = campaign::get(store, campaign)?
+        .ok_or_else(|| Error::NotFound(format!("no campaign {campaign}")))?;
+    let question = c.question()?;
+    let what = question.what();
+    let items: BTreeMap<i64, campaign::Item> = campaign::items(store, campaign)?
+        .into_iter()
+        .map(|i| (i.id, i))
+        .collect();
+    let answers = campaign::answers(store, campaign)?;
+    let mut out = Vec::new();
+    match of {
+        Of::Answers => {
+            for a in &answers {
+                let it = &items[&a.item_id];
+                out.push(Label {
+                    stack_id: it.stack_id,
+                    subject_id: it.subject_id,
+                    session_day: it.session_day.clone(),
+                    what: what.clone(),
+                    value: a
+                        .value
+                        .clone()
+                        .or_else(|| a.form.as_ref().map(|f| f.to_string())),
+                    derivative_id: a.derivative_id,
+                    author_kind: a.author_kind.clone(),
+                    author: a.principal.clone(),
+                    decision_id: None,
+                    campaign_id: Some(campaign),
+                    model_id: None,
+                    answer_id: Some(a.id),
+                });
+            }
+        }
+        Of::Outcomes => {
+            let d = store.dialect();
+            for it in items.values().filter(|i| i.state == "resolved") {
+                let base = Label {
+                    stack_id: it.stack_id,
+                    subject_id: it.subject_id,
+                    session_day: it.session_day.clone(),
+                    what: what.clone(),
+                    campaign_id: Some(campaign),
+                    ..Label::default()
+                };
+                if let Some(decision) = it.decision_id {
+                    let sql = format!(
+                        "SELECT value, actor, author_kind FROM {} WHERE id = {}",
+                        store.qualified("decision"),
+                        d.param(1, Type::Int)
+                    );
+                    if let Some(r) = store.query_opt(&sql, &[Param::Int(decision)])? {
+                        out.push(Label {
+                            value: r.opt_text(0)?.map(str::to_string),
+                            author: r.text(1)?.to_string(),
+                            author_kind: r.text(2)?.to_string(),
+                            decision_id: Some(decision),
+                            ..base
+                        });
+                    }
+                    continue;
+                }
+                let of_item: Vec<&campaign::Answer> =
+                    answers.iter().filter(|a| a.item_id == it.id).collect();
+                let settled: Vec<&campaign::Answer> =
+                    match of_item.iter().rev().find(|a| a.role == "adjudicator") {
+                        Some(a) => vec![*a],
+                        None => of_item
+                            .iter()
+                            .copied()
+                            .filter(|a| a.role == "rater")
+                            .collect(),
+                    };
+                let authors: Vec<&str> = settled.iter().map(|a| a.principal.as_str()).collect();
+                let kinds: BTreeSet<&str> =
+                    settled.iter().map(|a| a.author_kind.as_str()).collect();
+                let kind = if kinds.len() == 1 {
+                    kinds.iter().next().copied().unwrap_or("person").to_string()
+                } else {
+                    kinds.into_iter().collect::<Vec<_>>().join("+")
+                };
+                let value = it.outcome["value"]
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| {
+                        let f = &it.outcome["form"];
+                        (!f.is_null()).then(|| f.to_string())
+                    });
+                let files: Vec<i64> = match it.outcome["derivatives"].as_array() {
+                    Some(_) if settled.iter().any(|a| a.role == "adjudicator") => {
+                        settled.iter().filter_map(|a| a.derivative_id).collect()
+                    }
+                    Some(list) => list.iter().filter_map(Value::as_i64).collect(),
+                    None => Vec::new(),
+                };
+                let base = Label {
+                    value,
+                    author_kind: kind,
+                    author: authors.join("+"),
+                    ..base
+                };
+                if files.is_empty() {
+                    out.push(base);
+                } else {
+                    for f in files {
+                        out.push(Label {
+                            derivative_id: Some(f),
+                            ..base.clone()
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ------------------------------------------------------------- the sets
+
+/// A set to record, once its files are written.
+#[derive(Debug, Clone)]
+pub struct NewSet<'a> {
+    pub name: &'a str,
+    /// decisions | outcomes | answers | imported
+    pub kind: &'a str,
+    pub what: &'a str,
+    pub source: Value,
+    pub campaign_id: Option<i64>,
+    pub handle_id: Option<i64>,
+    pub pack_version: Option<&'a str>,
+    pub scheme_digest: Option<&'a str>,
+    pub sealed: bool,
+    pub rows: i64,
+    pub digest: &'a str,
+    pub place_id: Option<i64>,
+    pub path: Option<&'a str>,
+    pub created_by: &'a str,
+}
+
+/// A set as read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelSet {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub what: String,
+    pub source: Value,
+    pub campaign_id: Option<i64>,
+    pub handle_id: Option<i64>,
+    pub epoch: i64,
+    pub pack_version: Option<String>,
+    pub scheme_digest: Option<String>,
+    pub sealed: bool,
+    pub rows: i64,
+    pub digest: String,
+    pub place_id: Option<i64>,
+    pub path: Option<String>,
+    pub created_by: String,
+    pub created_at: String,
+}
+
+impl LabelSet {
+    pub fn as_json(&self) -> Value {
+        json!({
+            "id": self.id, "name": self.name, "kind": self.kind, "what": self.what,
+            "source": self.source, "campaign_id": self.campaign_id, "handle_id": self.handle_id,
+            "epoch": self.epoch, "pack_version": self.pack_version,
+            "scheme_digest": self.scheme_digest, "sealed": self.sealed, "rows": self.rows,
+            "digest": self.digest, "place_id": self.place_id, "path": self.path,
+            "created_by": self.created_by, "created_at": self.created_at,
+            "training": if self.sealed {
+                "refused: drawn from a sealed certification sample (record 40 R3)"
+            } else {
+                "allowed"
+            },
+        })
+    }
+}
+
+const SET_COLUMNS: [&str; 17] = [
+    "id",
+    "name",
+    "kind",
+    "what",
+    "source",
+    "campaign_id",
+    "handle_id",
+    "epoch",
+    "pack_version",
+    "scheme_digest",
+    "sealed",
+    "rows",
+    "digest",
+    "place_id",
+    "path",
+    "created_by",
+    "created_at",
+];
+
+fn select_sets(store: &Store) -> String {
+    let d = store.dialect();
+    let t = table("label_set");
+    SET_COLUMNS
+        .iter()
+        .map(|c| d.text_of(t.column(c).expect("a label_set column")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn set_of(r: &Row) -> Result<LabelSet, StoreError> {
+    Ok(LabelSet {
+        id: r.int(0)?,
+        name: r.text(1)?.to_string(),
+        kind: r.text(2)?.to_string(),
+        what: r.text(3)?.to_string(),
+        source: r
+            .opt_text(4)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(Value::Null),
+        campaign_id: r.opt_int(5)?,
+        handle_id: r.opt_int(6)?,
+        epoch: r.int(7)?,
+        pack_version: r.opt_text(8)?.map(str::to_string),
+        scheme_digest: r.opt_text(9)?.map(str::to_string),
+        sealed: r.int(10)? != 0,
+        rows: r.int(11)?,
+        digest: r.text(12)?.to_string(),
+        place_id: r.opt_int(13)?,
+        path: r.opt_text(14)?.map(str::to_string),
+        created_by: r.text(15)?.to_string(),
+        created_at: r.text(16)?.to_string(),
+    })
+}
+
+/// Record a set whose files were written, and audit it.
+pub fn record(registry: &mut Registry, n: &NewSet<'_>) -> Result<LabelSet, Error> {
+    let epoch = registry.meta().epoch;
+    let now = now_iso();
+    let store = registry.store();
+    let id = store
+        .insert(
+            &Insert::new(
+                table("label_set"),
+                &[
+                    "name",
+                    "kind",
+                    "what",
+                    "source",
+                    "campaign_id",
+                    "handle_id",
+                    "epoch",
+                    "pack_version",
+                    "scheme_digest",
+                    "sealed",
+                    "rows",
+                    "digest",
+                    "place_id",
+                    "path",
+                    "created_by",
+                    "created_at",
+                ],
+            )
+            .returning(&["id"]),
+            &[vec![
+                Param::from(n.name),
+                Param::from(n.kind),
+                Param::from(n.what),
+                Param::from(n.source.to_string()),
+                n.campaign_id.map_or(Param::Null, Param::Int),
+                n.handle_id.map_or(Param::Null, Param::Int),
+                Param::Int(epoch),
+                n.pack_version.map_or(Param::Null, Param::from),
+                n.scheme_digest.map_or(Param::Null, Param::from),
+                Param::Int(i64::from(n.sealed)),
+                Param::Int(n.rows),
+                Param::from(n.digest),
+                n.place_id.map_or(Param::Null, Param::Int),
+                n.path.map_or(Param::Null, Param::from),
+                Param::from(n.created_by),
+                Param::from(now.as_str()),
+            ]],
+        )?
+        .first()
+        .ok_or_else(|| StoreError::Message("the label set was not written back".into()))?
+        .int(0)?;
+    audit::record(
+        registry,
+        &Entry {
+            principal: n.created_by,
+            action: if n.kind == "imported" {
+                Action::LabelsImport
+            } else {
+                Action::LabelsExport
+            },
+            scope: json!({
+                "label_set": id, "name": n.name, "kind": n.kind, "what": n.what,
+                "rows": n.rows, "campaign": n.campaign_id, "handle": n.handle_id,
+            }),
+            policy: None,
+            job_id: None,
+            details: Some(json!({"digest": n.digest, "sealed": n.sealed, "place": n.place_id})),
+        },
+    )?;
+    get(registry.store(), id)?.ok_or_else(|| Error::NotFound(format!("no label set {id}")))
+}
+
+pub fn get(store: &mut Store, id: i64) -> Result<Option<LabelSet>, Error> {
+    let sql = format!(
+        "SELECT {} FROM {} WHERE id = {}",
+        select_sets(store),
+        store.qualified("label_set"),
+        store.dialect().param(1, Type::Int)
+    );
+    Ok(store
+        .query_opt(&sql, &[Param::Int(id)])?
+        .map(|r| set_of(&r))
+        .transpose()?)
+}
+
+/// Every set, newest first.
+pub fn list(store: &mut Store) -> Result<Vec<LabelSet>, Error> {
+    let sql = format!(
+        "SELECT {} FROM {} ORDER BY id DESC",
+        select_sets(store),
+        store.qualified("label_set")
+    );
+    Ok(store
+        .query(&sql, &[])?
+        .iter()
+        .map(set_of)
+        .collect::<Result<_, _>>()?)
+}
+
+/// The set, when a training tool may learn from it: a set drawn from a
+/// sealed certification sample is refused (record 40 R3), since a model
+/// fitted on the sample that certifies it certifies nothing.
+pub fn usable_for_training(store: &mut Store, id: i64) -> Result<LabelSet, Error> {
+    let set = get(store, id)?.ok_or_else(|| Error::NotFound(format!("no label set {id}")))?;
+    if set.sealed {
+        return Err(Error::Refused(format!(
+            "label set {id} was drawn from a sealed certification sample, which is never training data (record 40 R3)"
+        )));
+    }
+    Ok(set)
+}
+
+// ---------------------------------------------------------- v0's labels
+
+/// One label of v0's, as its export gives it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct V0Label {
+    pub series_instance_uid: String,
+    pub value: String,
+    /// When v0's person labelled it: a day or an instant.
+    pub date: String,
+}
+
+/// Read v0's export: tab-separated `SeriesInstanceUID`, value and date, a
+/// header line allowed. Answers the labels and how many lines were not one.
+pub fn parse_v0(text: &str) -> (Vec<V0Label>, i64) {
+    let mut out = Vec::new();
+    let mut bad = 0;
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('\t').map(str::trim).collect();
+        if n == 0
+            && parts
+                .first()
+                .is_some_and(|p| p.eq_ignore_ascii_case("SeriesInstanceUID"))
+        {
+            continue;
+        }
+        match parts.as_slice() {
+            [uid, value, date, ..] if !uid.is_empty() && !value.is_empty() => out.push(V0Label {
+                series_instance_uid: uid.to_string(),
+                value: value.to_string(),
+                date: date.to_string(),
+            }),
+            _ => bad += 1,
+        }
+    }
+    (out, bad)
+}
+
+/// A day or an instant as the instant a decision carries.
+fn instant_of(date: &str) -> Option<String> {
+    let d = date.trim();
+    let day = d.get(..10)?;
+    let bytes = day.as_bytes();
+    let shaped = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && day
+            .chars()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit());
+    if !shaped {
+        return None;
+    }
+    if d.len() == 10 {
+        return Some(format!("{day}T00:00:00Z"));
+    }
+    crate::time::secs_of(d).map(crate::time::iso_of)
+}
+
+/// What an import did, as counts: never a UID.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Imported {
+    pub labels: i64,
+    pub series_matched: i64,
+    pub series_unmatched: i64,
+    pub stacks: i64,
+    pub decisions: Vec<i64>,
+    /// Stacks where a person's decision in this registry already stands,
+    /// which an old label from v0 does not override.
+    pub held: i64,
+    /// Stacks that already carry the same imported label.
+    pub already: i64,
+    pub refused_values: i64,
+    pub bad_dates: i64,
+}
+
+impl Imported {
+    pub fn as_json(&self) -> Value {
+        json!({
+            "labels": self.labels, "series_matched": self.series_matched,
+            "series_unmatched": self.series_unmatched, "stacks": self.stacks,
+            "decisions": self.decisions.len(), "held": self.held, "already": self.already,
+            "refused_values": self.refused_values, "bad_dates": self.bad_dates,
+        })
+    }
+}
+
+/// The review item kind an imported label is answered through, so that it
+/// takes the one write path every decision takes.
+pub const IMPORT_KIND: &str = "labels.import";
+
+/// The mark an imported decision carries as its author's version, and its
+/// author: v0's people are not known by name here.
+pub const IMPORTED_V0: &str = "imported:v0";
+
+/// Import v0's human labels of one axis (R5): each label maps by its
+/// SeriesInstanceUID to the stacks of that series and becomes a person's
+/// decision on each, marked `imported:v0`, dated as v0 dated it. A stack
+/// where a person's decision already stands keeps it. Values are taken in
+/// lower case and held to `allowed` when it names any. With `dry_run`
+/// nothing is written.
+pub fn import_v0(
+    registry: &mut Registry,
+    labels: &[V0Label],
+    axis: &str,
+    allowed: &[String],
+    who: &str,
+    dry_run: bool,
+) -> Result<Imported, Error> {
+    if axis.is_empty() {
+        return Err(Error::Invalid("an import names its axis".into()));
+    }
+    let mut out = Imported {
+        labels: labels.len() as i64,
+        ..Imported::default()
+    };
+    let now = now_iso();
+    for l in labels {
+        let value = l.value.trim().to_lowercase();
+        if !allowed.is_empty() && !allowed.contains(&value) {
+            out.refused_values += 1;
+            continue;
+        }
+        let Some(at) = instant_of(&l.date) else {
+            out.bad_dates += 1;
+            continue;
+        };
+        let store = registry.store();
+        let d = store.dialect();
+        let sql = format!(
+            "SELECT k.id FROM {} k JOIN {} r ON r.id = k.series_id WHERE r.series_instance_uid = {} ORDER BY k.id",
+            store.qualified("stack"),
+            store.qualified("series"),
+            d.param(1, Type::Text)
+        );
+        let stacks: Vec<i64> = store
+            .query(&sql, &[Param::from(l.series_instance_uid.as_str())])?
+            .iter()
+            .map(|r| r.int(0))
+            .collect::<Result<_, _>>()?;
+        if stacks.is_empty() {
+            out.series_unmatched += 1;
+            continue;
+        }
+        out.series_matched += 1;
+        for stack in stacks {
+            out.stacks += 1;
+            let store = registry.store();
+            let standing = format!(
+                "SELECT author_kind, author_version, value FROM {} WHERE scope = 'stack' AND ref = {} AND axis = {} \
+                 AND withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL) ORDER BY id DESC LIMIT 1",
+                store.qualified("decision"),
+                d.param(1, Type::Text),
+                d.param(2, Type::Text)
+            );
+            if let Some(r) = store.query_opt(
+                &standing,
+                &[Param::from(stack.to_string()), Param::from(axis)],
+            )? {
+                let imported = r.opt_text(1)? == Some(IMPORTED_V0);
+                if imported && r.opt_text(2)? == Some(value.as_str()) {
+                    out.already += 1;
+                    continue;
+                }
+                if r.text(0)? == "person" && !imported {
+                    out.held += 1;
+                    continue;
+                }
+            }
+            if dry_run {
+                continue;
+            }
+            let item = store
+                .insert(
+                    &Insert::new(
+                        table("review_item"),
+                        &[
+                            "kind",
+                            "scope",
+                            "ref",
+                            "evidence",
+                            "status",
+                            "created_at",
+                            "members",
+                        ],
+                    )
+                    .returning(&["id"]),
+                    &[vec![
+                        Param::from(IMPORT_KIND),
+                        Param::from("stack"),
+                        Param::from(json!({"stack_id": stack}).to_string()),
+                        Param::from(
+                            json!({"axis": axis, "source": "v0", "labelled": at}).to_string(),
+                        ),
+                        Param::from("open"),
+                        Param::from(now.as_str()),
+                        Param::Int(1),
+                    ]],
+                )?
+                .first()
+                .ok_or_else(|| StoreError::Message("the review item was not written back".into()))?
+                .int(0)?;
+            let why = format!("imported from v0 by {who}; labelled {}", &at[..10]);
+            let applied = review::apply(
+                registry,
+                &review::Apply {
+                    item,
+                    member: None,
+                    scope: "stack",
+                    value: Some(&value),
+                    author: review::Author {
+                        who: IMPORTED_V0,
+                        kind: "person",
+                        version: Some(IMPORTED_V0),
+                    },
+                    stage: false,
+                    why: Some(&why),
+                },
+            )
+            .map_err(|e| Error::Refused(e.to_string()))?;
+            let store = registry.store();
+            // the date the label was made, not the day it was copied here
+            store.update_by_id(
+                table("decision"),
+                &[("decided_at", Param::from(at.as_str()))],
+                "id",
+                applied.decision,
+            )?;
+            // the item is its own kind, which `apply` does not close for a
+            // stack; it is answered by the decision it carried
+            let close = format!(
+                "UPDATE {} SET status = 'accepted', decided_at = {}, actor = {}, decision_id = {} WHERE id = {} AND status = 'open'",
+                store.qualified("review_item"),
+                d.param(1, Type::Timestamp),
+                d.param(2, Type::Text),
+                d.param(3, Type::Int),
+                d.param(4, Type::Int)
+            );
+            store.execute(
+                &close,
+                &[
+                    Param::from(now.as_str()),
+                    Param::from(IMPORTED_V0),
+                    Param::Int(applied.decision),
+                    Param::Int(item),
+                ],
+            )?;
+            out.decisions.push(applied.decision);
+        }
+    }
+    Ok(out)
+}
+
+/// The labels an import wrote, as a set's rows.
+pub fn imported_labels(store: &mut Store, axis: &str) -> Result<Vec<Label>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT d.id, d.ref, d.value, r.subject_id FROM {} d \
+         LEFT JOIN {} k ON {} = k.id LEFT JOIN {} r ON r.id = k.series_id \
+         WHERE d.axis = {} AND d.author_version = {} AND d.withdrawn_at IS NULL AND d.scope = 'stack' ORDER BY d.id",
+        store.qualified("decision"),
+        store.qualified("stack"),
+        match d {
+            crate::dialect::Dialect::Sqlite => "CAST(d.ref AS INTEGER)",
+            crate::dialect::Dialect::Postgres => "CAST(d.ref AS BIGINT)",
+        },
+        store.qualified("series"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Text)
+    );
+    store
+        .query(&sql, &[Param::from(axis), Param::from(IMPORTED_V0)])?
+        .iter()
+        .map(|r| {
+            Ok(Label {
+                stack_id: r.text(1)?.parse::<i64>().ok(),
+                subject_id: r.opt_int(3)?,
+                session_day: None,
+                what: axis.to_string(),
+                value: r.opt_text(2)?.map(str::to_string),
+                derivative_id: None,
+                author_kind: "person".into(),
+                author: IMPORTED_V0.into(),
+                decision_id: Some(r.int(0)?),
+                campaign_id: None,
+                model_id: None,
+                answer_id: None,
+            })
+        })
+        .collect::<Result<_, StoreError>>()
+        .map_err(Error::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_v0_export_reads_with_or_without_its_header() {
+        let (labels, bad) = parse_v0(
+            "SeriesInstanceUID\tvalue\tdate\n1.2.3\tBrain\t2025-03-01\n\n1.2.4\tSpine\t2025-03-02T10:00:00Z\nbroken\n",
+        );
+        assert_eq!(labels.len(), 2);
+        assert_eq!(bad, 1);
+        assert_eq!(labels[0].value, "Brain");
+        assert_eq!(instant_of("2025-03-01").unwrap(), "2025-03-01T00:00:00Z");
+        assert_eq!(
+            instant_of("2025-03-02T10:00:00Z").unwrap(),
+            "2025-03-02T10:00:00Z"
+        );
+        assert_eq!(instant_of("yesterday"), None);
+    }
+
+    #[test]
+    fn the_same_labels_give_the_same_bytes_in_any_order() {
+        let a = Label {
+            stack_id: Some(2),
+            what: "body_part".into(),
+            value: Some("brain".into()),
+            author_kind: "person".into(),
+            author: "anna@lab".into(),
+            decision_id: Some(9),
+            ..Label::default()
+        };
+        let b = Label {
+            stack_id: Some(1),
+            value: Some("spine\tneck".into()),
+            decision_id: Some(4),
+            ..a.clone()
+        };
+        let one = tsv(&[a.clone(), b.clone()]);
+        assert_eq!(one, tsv(&[b, a]));
+        assert!(one.starts_with("stack_id\tsubject_id\t"));
+        let lines: Vec<&str> = one.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].starts_with("1\t"), "{one}");
+        assert!(
+            lines[1].contains("spine neck"),
+            "a tab in a value is a space"
+        );
+    }
+}

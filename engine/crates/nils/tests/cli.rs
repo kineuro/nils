@@ -1224,6 +1224,7 @@ fn custody_quarantine_review_and_purge_go_round() {
             "overlays",
             "models",
             "clinical layer",
+            "campaigns and label sets",
             "claims cache",
             "backups",
             "job records",

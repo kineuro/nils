@@ -313,7 +313,7 @@ fn the_door_serves_what_the_command_line_has() {
     assert_eq!(caps["auth"], "off", "{caps}");
     assert_eq!(caps["principal"], "anna@ward-3", "{caps}");
     // the suite contract, version 3: off holds every grant and detail sensitive
-    assert_eq!(caps["grants"].as_array().unwrap().len(), 26, "{caps}");
+    assert_eq!(caps["grants"].as_array().unwrap().len(), 28, "{caps}");
     assert_eq!(caps["detail"], "sensitive", "{caps}");
     assert_eq!(
         caps["roles"],
@@ -567,7 +567,7 @@ fn nils_tokens_keeps_an_entry_s_own_list() {
     );
     assert_eq!(status, 200, "{doc}");
     assert_eq!(doc["principal"], "cy@lab-2", "{doc}");
-    assert_eq!(doc["grants"].as_array().unwrap().len(), 26, "{doc}");
+    assert_eq!(doc["grants"].as_array().unwrap().len(), 28, "{doc}");
     assert_eq!(doc["detail"], "sensitive", "{doc}");
     server.finish();
 }
@@ -1821,7 +1821,7 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     assert_eq!(exported.id, "site@1.0.0");
 }
 
-/// Wave 4c §5.3: the trust list vectors of `contracts/suite/v2` run against
+/// Wave 4c §5.3: the trust list vectors of `contracts/suite/v3` run against
 /// the engine. Each case is minted with the key it names and presented; what
 /// happened is compared with what the vector expects.
 #[test]

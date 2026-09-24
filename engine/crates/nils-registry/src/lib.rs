@@ -17,6 +17,7 @@ use std::str::FromStr;
 
 pub mod actor;
 pub mod audit;
+pub mod campaign;
 pub mod clinical;
 pub mod cohort;
 pub mod day;
@@ -28,6 +29,7 @@ pub mod identity_map;
 pub mod import;
 pub mod job;
 pub mod keys;
+pub mod labels;
 pub mod linkage;
 pub mod merge;
 pub mod migrate;

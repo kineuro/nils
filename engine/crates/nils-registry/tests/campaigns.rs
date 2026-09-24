@@ -1,0 +1,1003 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! Record 42 S5, S6 and S7 on both backends: campaigns with raters, leases
+//! and an adjudicator, the close through the one write path, and label sets
+//! and v0's labels.
+
+use std::env;
+use std::sync::{Mutex, MutexGuard};
+
+use nils_dicom::synth::TempDir;
+use nils_registry::campaign::{self, Close, Given, Items, New, Role};
+use nils_registry::home::{Home, InitOptions};
+use nils_registry::labels::{self, DecisionQuery, Of};
+use nils_registry::schema::{Type, table};
+use nils_registry::{Backend, Insert, Param, Registry, Scheme, Store};
+use serde_json::json;
+
+static POSTGRES: Mutex<()> = Mutex::new(());
+
+const SCHEMA: &str = "nils_campaign_test";
+
+fn postgres_dsn() -> Option<String> {
+    match env::var("NILS_TEST_POSTGRES_DSN") {
+        Ok(dsn) if !dsn.is_empty() => Some(dsn),
+        _ => {
+            eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+            None
+        }
+    }
+}
+
+struct Lab {
+    name: &'static str,
+    registry: Registry,
+    _dir: TempDir,
+    _guard: Option<MutexGuard<'static, ()>>,
+}
+
+impl Drop for Lab {
+    fn drop(&mut self) {
+        if let Some(dsn) = postgres_dsn().filter(|_| self._guard.is_some()) {
+            let mut store = Store::connect_postgres(&dsn, SCHEMA).expect("connect");
+            store
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCHEMA}_linkage CASCADE"
+                ))
+                .expect("drop");
+        }
+    }
+}
+
+fn lab(name: &'static str, backend: Backend, dsn: Option<String>) -> Lab {
+    let dir = TempDir::new("campaign-home");
+    let home = Home::new(dir.path());
+    home.keys(None).add("k", b"nils-campaign-test-key").unwrap();
+    let registry = home
+        .init(&InitOptions {
+            backend,
+            dsn,
+            schema: (backend == Backend::Postgres).then(|| SCHEMA.to_string()),
+            scheme: Scheme::DEFAULT,
+            key: "k".to_string(),
+            display_length: 12,
+            session_scheme: None,
+        })
+        .unwrap();
+    Lab {
+        name,
+        registry,
+        _dir: dir,
+        _guard: None,
+    }
+}
+
+fn labs() -> Vec<Lab> {
+    let mut out = vec![lab("sqlite", Backend::Sqlite, None)];
+    if let Some(dsn) = postgres_dsn() {
+        let guard = POSTGRES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut store = Store::connect_postgres(&dsn, SCHEMA).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCHEMA}_linkage CASCADE"
+            ))
+            .expect("drop");
+        let mut l = lab("postgres", Backend::Postgres, Some(dsn));
+        l._guard = Some(guard);
+        out.push(l);
+    }
+    out
+}
+
+/// A value of the column's type for a row made up by the test.
+fn filler(ty: Type) -> Param {
+    match ty {
+        Type::Int | Type::Id => Param::Int(1),
+        Type::Double => Param::Double(1.0),
+        Type::Bool => Param::Bool(false),
+        Type::Date => Param::from("2026-01-01"),
+        Type::Time => Param::from("00:00:00"),
+        Type::Timestamp => Param::from("2026-01-01T00:00:00Z"),
+        Type::Json => Param::from("{}"),
+        Type::Text => Param::from("x"),
+        Type::Bytes => Param::Bytes(vec![0]),
+    }
+}
+
+/// One row of a table with the columns given and every other required
+/// column filled.
+fn row(store: &mut Store, name: &str, given: &[(&str, Param)]) -> i64 {
+    let t = table(name);
+    let mut cols: Vec<&str> = Vec::new();
+    let mut vals: Vec<Param> = Vec::new();
+    for c in t.columns.iter().filter(|c| c.ty != Type::Id) {
+        if let Some((_, v)) = given.iter().find(|(n, _)| *n == c.name) {
+            cols.push(c.name);
+            vals.push(v.clone());
+        } else if c.not_null {
+            cols.push(c.name);
+            vals.push(filler(c.ty));
+        }
+    }
+    store
+        .insert(&Insert::new(t, &cols).returning(&["id"]), &[vals])
+        .unwrap()[0]
+        .int(0)
+        .unwrap()
+}
+
+/// Two subjects, a series each with the UID given, and `per` stacks in
+/// each series. Answers the stack ids.
+fn stacks(reg: &mut Registry, per: usize) -> Vec<i64> {
+    let store = reg.store();
+    let mut out = Vec::new();
+    for (n, uid) in ["1.2.840.9.1", "1.2.840.9.2"].iter().enumerate() {
+        let subject = row(store, "subject", &[("code", Param::from(format!("s{n}")))]);
+        let study = row(
+            store,
+            "study",
+            &[
+                ("subject_id", Param::Int(subject)),
+                ("study_instance_uid", Param::from(format!("{uid}.0"))),
+            ],
+        );
+        let series = row(
+            store,
+            "series",
+            &[
+                ("subject_id", Param::Int(subject)),
+                ("study_id", Param::Int(study)),
+                ("series_instance_uid", Param::from(*uid)),
+            ],
+        );
+        for i in 0..per {
+            out.push(row(
+                store,
+                "stack",
+                &[
+                    ("series_id", Param::Int(series)),
+                    ("stack_index", Param::Int(i as i64)),
+                    ("stack_key", Param::from(format!("{uid}#{i}"))),
+                ],
+            ));
+        }
+    }
+    out
+}
+
+fn body_part() -> serde_json::Value {
+    json!({"kind": "axis", "axis": "body_part", "values": ["brain", "spine", "neck", "brain-neck"]})
+}
+
+fn new<'a>(
+    name: &'a str,
+    q: &'a serde_json::Value,
+    adj: &'a serde_json::Value,
+    items: Items,
+    raters: i64,
+    closes_into: &'a str,
+) -> New<'a> {
+    New {
+        name,
+        owner: "cleo@lab",
+        question: q,
+        source: json!({"test": true}),
+        items,
+        handle_id: None,
+        content_hash: None,
+        pack_version: Some("mri@0.3.0"),
+        raters_per_item: raters,
+        raters: Vec::new(),
+        adjudicators: Vec::new(),
+        adjudication: adj,
+        closes_into,
+        lease_seconds: 600,
+        inputs: Default::default(),
+    }
+}
+
+fn at(minute: u32) -> String {
+    format!("2026-09-24T10:{minute:02}:00Z")
+}
+
+fn give<'a>(assignment: i64, who: &'a str, value: &'a str) -> Given<'a> {
+    Given {
+        assignment,
+        principal: who,
+        author_kind: "person",
+        value: Some(value),
+        form: None,
+        derivative_id: None,
+        why: None,
+    }
+}
+
+/// Rows of a statement made with the store at hand, for its qualified names.
+fn select(reg: &mut Registry, sql: impl Fn(&Store) -> String) -> Vec<nils_registry::Row> {
+    let store = reg.store();
+    let text = sql(store);
+    store.query(&text, &[]).unwrap()
+}
+
+fn count(reg: &mut Registry, t: &str, filter: &str) -> i64 {
+    let sql = format!("SELECT COUNT(*) FROM {}{filter}", reg.store().qualified(t));
+    reg.store().query(&sql, &[]).unwrap()[0].int(0).unwrap()
+}
+
+/// S5: two raters on each of two items, one lease that runs out and returns
+/// its item to the pool, and no rater given the same item twice.
+#[test]
+fn two_raters_share_the_items_and_an_expired_lease_returns_one() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let q = body_part();
+        let adj = json!({"when": "disagree", "metric": "exact"});
+        let c = campaign::create(
+            reg,
+            &new(
+                "curate",
+                &q,
+                &adj,
+                Items::Stacks(ids.clone()),
+                2,
+                "decision",
+            ),
+        )
+        .unwrap();
+        assert_eq!(c.grain, "stack", "{name}");
+        let items = campaign::items(reg.store(), c.id).unwrap();
+        assert_eq!(items.len(), 2, "{name}");
+        // every item is backed by a review item of its own, open in the queue
+        for it in &items {
+            let r = nils_registry::review::item(reg.store(), it.review_item_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(r.kind, "campaign.axis", "{name}");
+            assert_eq!(r.status, "open", "{name}");
+            assert_eq!(r.evidence["axis"], "body_part", "{name}");
+        }
+
+        // anna takes the first item; asking again hands the same lease back
+        let a1 = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(a1.item.position, 0, "{name}");
+        let again = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(1))
+            .unwrap()
+            .unwrap();
+        assert!(again.held, "{name}");
+        assert_eq!(again.assignment.id, a1.assignment.id, "{name}");
+        // bo takes the first item too, since it wants two raters
+        let b1 = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(b1.item.id, a1.item.id, "{name}");
+        // a third rater finds the first full and takes the second
+        let c1 = campaign::claim(reg, c.id, "cy@lab", Role::Rater, &at(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(c1.item.position, 1, "{name}");
+        // anna and bo answer the first
+        campaign::answer(reg, &give(a1.assignment.id, "anna@lab", "brain"), &at(3)).unwrap();
+        let done =
+            campaign::answer(reg, &give(b1.assignment.id, "bo@lab", "brain"), &at(4)).unwrap();
+        assert_eq!(done.state, "agreed", "{name}");
+        // an answer is not a decision
+        assert_eq!(count(reg, "decision", ""), 0, "{name}");
+        // anna's next claim is the second item; she never gets the first again
+        let a2 = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(a2.item.position, 1, "{name}");
+        campaign::answer(reg, &give(a2.assignment.id, "anna@lab", "spine"), &at(6)).unwrap();
+        // cy's lease ran out (ten minutes): bo may now take the second item
+        let b2 = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(13))
+            .unwrap()
+            .unwrap();
+        assert_eq!(b2.item.position, 1, "{name}");
+        let states: Vec<String> = campaign::assignments(reg.store(), c.id)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.id == c1.assignment.id)
+            .map(|a| a.state)
+            .collect();
+        assert_eq!(states, ["expired"], "{name}");
+        // cy's expired lease cannot be answered, and cy is never given the
+        // item again
+        let late = campaign::answer(reg, &give(c1.assignment.id, "cy@lab", "spine"), &at(14));
+        assert!(late.is_err(), "{name}");
+        assert!(
+            campaign::claim(reg, c.id, "cy@lab", Role::Rater, &at(14))
+                .unwrap()
+                .is_none(),
+            "{name}"
+        );
+        // a rater may give an item back unanswered, and does not get it again
+        campaign::release(reg, b2.assignment.id, "bo@lab", &at(15)).unwrap();
+        assert!(
+            campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(15))
+                .unwrap()
+                .is_none(),
+            "{name}"
+        );
+        let d2 = campaign::claim(reg, c.id, "dan@lab", Role::Rater, &at(16))
+            .unwrap()
+            .unwrap();
+        assert_eq!(d2.item.position, 1, "{name}");
+        // an assignment is its rater's own
+        assert!(
+            campaign::answer(reg, &give(d2.assignment.id, "anna@lab", "brain"), &at(16)).is_err(),
+            "{name}"
+        );
+        campaign::answer(reg, &give(d2.assignment.id, "dan@lab", "spine"), &at(17)).unwrap();
+        // an answer outside the vocabulary is refused before anything is written
+        let e2 = campaign::claim(reg, c.id, "eve@lab", Role::Rater, &at(18)).unwrap();
+        assert!(e2.is_none(), "{name}: both items are full");
+        let counts = campaign::counts(reg.store(), c.id).unwrap();
+        assert_eq!(counts["items"]["agreed"], 2, "{name}: {counts}");
+        assert_eq!(counts["answers"], 4, "{name}: {counts}");
+
+        let closed = campaign::close(
+            reg,
+            &Close {
+                campaign: c.id,
+                who: "cleo@lab",
+                author_kind: "person",
+            },
+            &at(20),
+        )
+        .unwrap();
+        assert_eq!(closed.decisions.len(), 2, "{name}: {closed:?}");
+        assert_eq!(closed.resolved, 2, "{name}");
+        assert_eq!(closed.agreement["exact"], 1.0, "{name}: {closed:?}");
+        // the decisions are the person's who closed it, and every answer stays
+        let who = select(reg, |s| {
+            format!(
+                "SELECT actor, author_kind, value FROM {} WHERE withdrawn_at IS NULL ORDER BY id",
+                s.qualified("decision")
+            )
+        });
+        assert_eq!(who[0].text(0).unwrap(), "cleo@lab", "{name}");
+        assert_eq!(who[0].text(1).unwrap(), "person", "{name}");
+        assert_eq!(who[0].text(2).unwrap(), "brain", "{name}");
+        assert_eq!(who[1].text(2).unwrap(), "spine", "{name}");
+        assert_eq!(count(reg, "campaign_answer", ""), 4, "{name}");
+        // the review items are closed by the decisions
+        for it in campaign::items(reg.store(), c.id).unwrap() {
+            let r = nils_registry::review::item(reg.store(), it.review_item_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(r.status, "accepted", "{name}");
+            assert_eq!(it.state, "resolved", "{name}");
+        }
+        // a closed campaign takes no more claims
+        assert!(campaign::claim(reg, c.id, "fay@lab", Role::Rater, &at(21)).is_err());
+    }
+}
+
+/// S6: three raters who disagree give one adjudicator assignment and
+/// exactly one decision per item, and every answer is kept.
+#[test]
+fn three_raters_who_disagree_give_one_adjudicator_and_one_decision() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let q = body_part();
+        let adj = json!({"when": "disagree", "metric": "kappa"});
+        let mut n = new(
+            "disagree",
+            &q,
+            &adj,
+            Items::Stacks(ids[..1].to_vec()),
+            3,
+            "decision",
+        );
+        n.adjudicators = vec!["judge@lab".into()];
+        let c = campaign::create(reg, &n).unwrap();
+        let mut opened = Vec::new();
+        for (who, value) in [
+            ("anna@lab", "brain"),
+            ("bo@lab", "brain"),
+            ("cy@lab", "neck"),
+        ] {
+            let a = campaign::claim(reg, c.id, who, Role::Rater, &at(0))
+                .unwrap()
+                .unwrap();
+            let done = campaign::answer(reg, &give(a.assignment.id, who, value), &at(1)).unwrap();
+            opened.extend(done.adjudication);
+        }
+        assert_eq!(opened.len(), 1, "{name}: one adjudicator assignment");
+        let adjudicators: Vec<_> = campaign::assignments(reg.store(), c.id)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.role == "adjudicator")
+            .collect();
+        assert_eq!(adjudicators.len(), 1, "{name}");
+        assert_eq!(
+            adjudicators[0].principal.as_deref(),
+            Some("judge@lab"),
+            "{name}"
+        );
+        // the queue shows the item waiting for its adjudicator
+        let it = &campaign::items(reg.store(), c.id).unwrap()[0];
+        assert_eq!(it.state, "needs_adjudication", "{name}");
+        let r = nils_registry::review::item(reg.store(), it.review_item_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.evidence["campaign_state"], "needs_adjudication", "{name}");
+        // a rater is not the adjudicator, and the policy names who is
+        assert!(matches!(
+            campaign::claim(reg, c.id, "anna@lab", Role::Adjudicator, &at(2)),
+            Err(campaign::Error::Forbidden(_))
+        ));
+        let j = campaign::claim(reg, c.id, "judge@lab", Role::Adjudicator, &at(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(j.assignment.round, 2, "{name}");
+        let done = campaign::answer(
+            reg,
+            &give(j.assignment.id, "judge@lab", "brain-neck"),
+            &at(3),
+        )
+        .unwrap();
+        assert_eq!(done.state, "adjudicated", "{name}");
+        let closed = campaign::close(
+            reg,
+            &Close {
+                campaign: c.id,
+                who: "cleo@lab",
+                author_kind: "person",
+            },
+            &at(4),
+        )
+        .unwrap();
+        assert_eq!(closed.decisions.len(), 1, "{name}");
+        let rows = select(reg, |s| {
+            format!(
+                "SELECT actor, value, why FROM {} WHERE withdrawn_at IS NULL",
+                s.qualified("decision")
+            )
+        });
+        assert_eq!(rows.len(), 1, "{name}: exactly one decision");
+        assert_eq!(rows[0].text(0).unwrap(), "judge@lab", "{name}");
+        assert_eq!(rows[0].text(1).unwrap(), "brain-neck", "{name}");
+        assert!(
+            rows[0]
+                .text(2)
+                .unwrap()
+                .contains("adjudicated by judge@lab over 3"),
+            "{name}"
+        );
+        assert_eq!(
+            count(reg, "campaign_answer", ""),
+            4,
+            "{name}: every answer kept"
+        );
+        // no rater agreed with the adjudicator
+        let it = &campaign::items(reg.store(), c.id).unwrap()[0];
+        assert_eq!(it.agreement, Some(0.0), "{name}");
+        assert_eq!(closed.agreement["exact"], 0.0, "{name}");
+    }
+}
+
+/// S6: masks are compared by a number something with pixels computed; below
+/// the threshold the item goes to an adjudicator, and the campaign closes
+/// into nothing, its outcome the adjudicator's file.
+#[test]
+fn an_external_metric_sends_masks_to_adjudication_and_closes_into_nothing() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let q = json!({"kind": "derivative", "derivative_kind": "mask", "form": {
+            "properties": {"lesions": {"type": "integer"}}, "required": ["lesions"]}});
+        let adj = json!({"when": "disagree", "metric": "external", "threshold": 0.8});
+        // a mask question is never compared by the engine
+        let exact = json!({"when": "disagree", "metric": "exact"});
+        assert!(
+            campaign::create(
+                reg,
+                &new("x", &q, &exact, Items::Stacks(ids.clone()), 2, "none")
+            )
+            .is_err()
+        );
+        // nor closed into a decision
+        assert!(
+            campaign::create(
+                reg,
+                &new("y", &q, &adj, Items::Stacks(ids.clone()), 2, "decision")
+            )
+            .is_err()
+        );
+        let c = campaign::create(
+            reg,
+            &new("segment", &q, &adj, Items::Stacks(ids.clone()), 2, "none"),
+        )
+        .unwrap();
+        let form = json!({"lesions": 3});
+        let mut item = 0;
+        for (who, file) in [("anna@lab", 101), ("bo@lab", 102)] {
+            let a = campaign::claim(reg, c.id, who, Role::Rater, &at(0))
+                .unwrap()
+                .unwrap();
+            item = a.item.id;
+            // a mask answer names its file
+            assert!(campaign::answer(reg, &give(a.assignment.id, who, "x"), &at(1)).is_err());
+            campaign::answer(
+                reg,
+                &Given {
+                    assignment: a.assignment.id,
+                    principal: who,
+                    author_kind: "person",
+                    value: None,
+                    form: Some(&form),
+                    derivative_id: Some(file),
+                    why: None,
+                },
+                &at(1),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            campaign::item(reg.store(), item).unwrap().unwrap().state,
+            "awaiting_metric"
+        );
+        let posted = campaign::post_metric(reg, item, "app@lab", "dice", 0.61, &at(2)).unwrap();
+        assert_eq!(posted.state, "needs_adjudication", "{name}");
+        let j = campaign::claim(reg, c.id, "judge@lab", Role::Adjudicator, &at(3))
+            .unwrap()
+            .unwrap();
+        campaign::answer(
+            reg,
+            &Given {
+                assignment: j.assignment.id,
+                principal: "judge@lab",
+                author_kind: "person",
+                value: None,
+                form: Some(&form),
+                derivative_id: Some(103),
+                why: Some("the union, trimmed"),
+            },
+            &at(4),
+        )
+        .unwrap();
+        let closed = campaign::close(
+            reg,
+            &Close {
+                campaign: c.id,
+                who: "cleo@lab",
+                author_kind: "person",
+            },
+            &at(5),
+        )
+        .unwrap();
+        assert!(closed.decisions.is_empty(), "{name}");
+        // the second stack was never rated and is left open in the queue
+        assert_eq!((closed.resolved, closed.unresolved), (1, 1), "{name}");
+        assert_eq!(count(reg, "decision", ""), 0, "{name}");
+        let outcomes = labels::campaign_labels(reg.store(), c.id, Of::Outcomes).unwrap();
+        assert_eq!(outcomes.len(), 1, "{name}");
+        assert_eq!(outcomes[0].derivative_id, Some(103), "{name}");
+        assert_eq!(outcomes[0].author, "judge@lab", "{name}");
+        let answers = labels::campaign_labels(reg.store(), c.id, Of::Answers).unwrap();
+        assert_eq!(answers.len(), 3, "{name}");
+        let files: Vec<i64> = answers.iter().filter_map(|a| a.derivative_id).collect();
+        assert_eq!(files, [101, 102, 103], "{name}");
+    }
+}
+
+/// S5: a campaign over review items adopts them as they are, and one open
+/// campaign at a time asks each.
+#[test]
+fn a_campaign_adopts_review_items_and_one_campaign_asks_each() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let now = nils_registry::time::now_iso();
+        let store = reg.store();
+        for (i, s) in ids.iter().enumerate() {
+            row(
+                store,
+                "review_item",
+                &[
+                    (
+                        "kind",
+                        Param::from(if i == 0 {
+                            "body_part:low_confidence"
+                        } else {
+                            "body_part:conflict"
+                        }),
+                    ),
+                    ("scope", Param::from("stack")),
+                    ("ref", Param::from(json!({"stack_id": s}).to_string())),
+                    (
+                        "evidence",
+                        Param::from(json!({"axis": "body_part", "confidence": 0.4}).to_string()),
+                    ),
+                    ("status", Param::from("open")),
+                    ("created_at", Param::from(now.as_str())),
+                ],
+            );
+        }
+        let q = body_part();
+        let adj = json!({"when": "never"});
+        let found = campaign::review_items(
+            reg.store(),
+            &campaign::ReviewQuery {
+                kind_prefix: Some("body_part:".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(found.len(), 2, "{name}");
+        let c = campaign::create(
+            reg,
+            &new("adopt", &q, &adj, Items::Review(found.clone()), 1, "stage"),
+        )
+        .unwrap();
+        assert!(
+            campaign::create(
+                reg,
+                &new("twice", &q, &adj, Items::Review(found.clone()), 1, "stage")
+            )
+            .is_err(),
+            "{name}"
+        );
+        let it = &campaign::items(reg.store(), c.id).unwrap()[0];
+        assert_eq!(it.review_item_id, found[0], "{name}");
+        assert_eq!(it.stack_id, Some(ids[0]), "{name}");
+        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        campaign::answer(reg, &give(a.assignment.id, "anna@lab", "spine"), &at(1)).unwrap();
+        let closed = campaign::close(
+            reg,
+            &Close {
+                campaign: c.id,
+                who: "cleo@lab",
+                author_kind: "person",
+            },
+            &at(2),
+        )
+        .unwrap();
+        assert!(closed.staged, "{name}");
+        assert_eq!(closed.decisions.len(), 1, "{name}");
+        // staged: written, not in force, the adopted item staged by it
+        let r = nils_registry::review::item(reg.store(), found[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.status, "staged", "{name}");
+        assert_eq!(
+            count(reg, "decision", " WHERE committed_at IS NULL"),
+            1,
+            "{name}"
+        );
+    }
+}
+
+/// S7: the same state gives the same digest, one new decision changes it,
+/// and every row resolves to a decision and its author.
+#[test]
+fn a_label_set_is_the_decisions_in_force_and_its_bytes_follow_them() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let q = body_part();
+        let adj = json!({"when": "never"});
+        let c = campaign::create(
+            reg,
+            &new(
+                "labels",
+                &q,
+                &adj,
+                Items::Stacks(ids[..3].to_vec()),
+                1,
+                "decision",
+            ),
+        )
+        .unwrap();
+        for (i, v) in ["brain", "brain", "spine"].iter().enumerate() {
+            let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(i as u32)).unwrap();
+            let a = match a {
+                Some(a) => a,
+                None => panic!("{name}: nothing to claim"),
+            };
+            campaign::answer(reg, &give(a.assignment.id, "anna@lab", v), &at(i as u32)).unwrap();
+        }
+        campaign::close(
+            reg,
+            &Close {
+                campaign: c.id,
+                who: "cleo@lab",
+                author_kind: "person",
+            },
+            &at(9),
+        )
+        .unwrap();
+        let q = DecisionQuery {
+            axis: "body_part",
+            ..Default::default()
+        };
+        let first = labels::decision_labels(reg.store(), &q).unwrap();
+        assert_eq!(first.len(), 3, "{name}");
+        for l in &first {
+            assert!(l.decision_id.is_some(), "{name}");
+            assert_eq!(l.author, "cleo@lab", "{name}");
+            assert_eq!(l.campaign_id, Some(c.id), "{name}");
+            assert!(l.subject_id.is_some(), "{name}");
+        }
+        let one = labels::tsv(&first);
+        let again = labels::tsv(&labels::decision_labels(reg.store(), &q).unwrap());
+        assert_eq!(one, again, "{name}: the same state, the same bytes");
+        // a person's decision on the fourth stack changes the set
+        let now = nils_registry::time::now_iso();
+        let item = row(
+            reg.store(),
+            "review_item",
+            &[
+                ("kind", Param::from("body_part:missing")),
+                ("scope", Param::from("stack")),
+                ("ref", Param::from(json!({"stack_id": ids[3]}).to_string())),
+                (
+                    "evidence",
+                    Param::from(json!({"axis": "body_part"}).to_string()),
+                ),
+                ("status", Param::from("open")),
+                ("created_at", Param::from(now.as_str())),
+            ],
+        );
+        nils_registry::review::apply(
+            reg,
+            &nils_registry::review::Apply {
+                item,
+                member: None,
+                scope: "stack",
+                value: Some("neck"),
+                author: nils_registry::review::Author {
+                    who: "dan@lab",
+                    kind: "person",
+                    version: None,
+                },
+                stage: false,
+                why: None,
+            },
+        )
+        .unwrap();
+        let later = labels::tsv(&labels::decision_labels(reg.store(), &q).unwrap());
+        assert_ne!(one, later, "{name}");
+        // held to a campaign, to a frozen list, to an author kind
+        let only = labels::decision_labels(
+            reg.store(),
+            &DecisionQuery {
+                axis: "body_part",
+                campaign: Some(c.id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(only.len(), 3, "{name}");
+        let few = [ids[0], ids[3]];
+        let listed = labels::decision_labels(
+            reg.store(),
+            &DecisionQuery {
+                axis: "body_part",
+                stacks: Some(&few),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 2, "{name}");
+        let models = ["model".to_string()];
+        let none = labels::decision_labels(
+            reg.store(),
+            &DecisionQuery {
+                axis: "body_part",
+                authors: &models,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(none.is_empty(), "{name}");
+        // a sealed set is recorded, and refused for training
+        let set = labels::record(
+            reg,
+            &labels::NewSet {
+                name: "sealed-draw",
+                kind: "decisions",
+                what: "body_part",
+                source: json!({"axis": "body_part"}),
+                campaign_id: None,
+                handle_id: None,
+                pack_version: None,
+                scheme_digest: None,
+                sealed: true,
+                rows: 4,
+                digest: "abc",
+                place_id: None,
+                path: None,
+                created_by: "cleo@lab",
+            },
+        )
+        .unwrap();
+        assert!(
+            labels::usable_for_training(reg.store(), set.id).is_err(),
+            "{name}"
+        );
+        assert_eq!(set.as_json()["sealed"], true, "{name}");
+    }
+}
+
+/// R5: v0's labels, by SeriesInstanceUID, become person decisions marked
+/// imported from v0 and dated as v0 dated them; a person's decision that
+/// already stands keeps its place; an import run twice writes nothing new.
+#[test]
+fn v0_labels_become_dated_person_decisions_marked_as_imported() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        // a person already decided the first stack of the second series
+        let now = nils_registry::time::now_iso();
+        let item = row(
+            reg.store(),
+            "review_item",
+            &[
+                ("kind", Param::from("body_part:missing")),
+                ("scope", Param::from("stack")),
+                ("ref", Param::from(json!({"stack_id": ids[2]}).to_string())),
+                (
+                    "evidence",
+                    Param::from(json!({"axis": "body_part"}).to_string()),
+                ),
+                ("status", Param::from("open")),
+                ("created_at", Param::from(now.as_str())),
+            ],
+        );
+        nils_registry::review::apply(
+            reg,
+            &nils_registry::review::Apply {
+                item,
+                member: None,
+                scope: "stack",
+                value: Some("neck"),
+                author: nils_registry::review::Author {
+                    who: "dan@lab",
+                    kind: "person",
+                    version: None,
+                },
+                stage: false,
+                why: None,
+            },
+        )
+        .unwrap();
+        let (v0, bad) = labels::parse_v0(
+            "SeriesInstanceUID\tbody_part\tdate\n\
+             1.2.840.9.1\tBrain\t2024-05-06\n\
+             1.2.840.9.2\tSpine\t2024-05-07T08:30:00Z\n\
+             1.2.840.9.3\tBrain\t2024-05-07\n\
+             1.2.840.9.1\tChest\t2024-05-07\n\
+             1.2.840.9.2\tSpine\tnot a date\n",
+        );
+        assert_eq!((v0.len(), bad), (5, 0), "{name}");
+        let allowed: Vec<String> = ["brain", "spine", "neck", "brain-neck"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let dry = labels::import_v0(reg, &v0, "body_part", &allowed, "cleo@lab", true).unwrap();
+        assert!(dry.decisions.is_empty(), "{name}");
+        assert_eq!(
+            count(reg, "decision", ""),
+            1,
+            "{name}: a dry run writes nothing"
+        );
+        let done = labels::import_v0(reg, &v0, "body_part", &allowed, "cleo@lab", false).unwrap();
+        assert_eq!(done.series_matched, 2, "{name}: {done:?}");
+        assert_eq!(done.series_unmatched, 1, "{name}");
+        assert_eq!(done.refused_values, 1, "{name}");
+        assert_eq!(done.bad_dates, 1, "{name}");
+        assert_eq!(done.held, 1, "{name}: the person's decision stands");
+        assert_eq!(done.decisions.len(), 3, "{name}");
+        let rows = select(reg, |s| {
+            format!(
+                "SELECT ref, value, actor, author_kind, author_version, {} FROM {} \
+                 WHERE author_version = 'imported:v0' ORDER BY id",
+                s.dialect()
+                    .text_of(table("decision").column("decided_at").unwrap()),
+                s.qualified("decision")
+            )
+        });
+        assert_eq!(rows.len(), 3, "{name}");
+        assert_eq!(rows[0].text(1).unwrap(), "brain", "{name}");
+        assert_eq!(rows[0].text(3).unwrap(), "person", "{name}");
+        assert_eq!(rows[0].text(5).unwrap(), "2024-05-06T00:00:00Z", "{name}");
+        assert_eq!(rows[2].text(0).unwrap(), ids[3].to_string(), "{name}");
+        assert_eq!(rows[2].text(5).unwrap(), "2024-05-07T08:30:00Z", "{name}");
+        let again = labels::import_v0(reg, &v0, "body_part", &allowed, "cleo@lab", false).unwrap();
+        assert!(again.decisions.is_empty(), "{name}");
+        assert_eq!(again.already, 3, "{name}");
+        let set = labels::imported_labels(reg.store(), "body_part").unwrap();
+        assert_eq!(set.len(), 3, "{name}");
+        assert!(
+            set.iter()
+                .all(|l| l.author == "imported:v0" && l.decision_id.is_some())
+        );
+    }
+}
+
+/// S6: a close into staged decisions, then a commit by a minimum confidence
+/// that takes only its part and leaves the rest staged; a commit by filter
+/// that names no filter is refused.
+#[test]
+fn a_commit_by_minimum_confidence_commits_only_its_part() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let q = body_part();
+        let adj = json!({"when": "disagree", "metric": "exact"});
+        let c = campaign::create(
+            reg,
+            &new("staged", &q, &adj, Items::Stacks(ids.clone()), 2, "stage"),
+        )
+        .unwrap();
+        for i in 0..ids.len() {
+            let other = if i == 0 { "spine" } else { "brain" };
+            for (who, value) in [("anna@lab", "brain"), ("bo@lab", other)] {
+                let a = campaign::claim(reg, c.id, who, Role::Rater, &at(i as u32))
+                    .unwrap()
+                    .unwrap();
+                campaign::answer(reg, &give(a.assignment.id, who, value), &at(i as u32)).unwrap();
+            }
+        }
+        let j = campaign::claim(reg, c.id, "judge@lab", Role::Adjudicator, &at(8))
+            .unwrap()
+            .unwrap();
+        campaign::answer(reg, &give(j.assignment.id, "judge@lab", "brain"), &at(8)).unwrap();
+        let closed = campaign::close(
+            reg,
+            &Close {
+                campaign: c.id,
+                who: "cleo@lab",
+                author_kind: "person",
+            },
+            &at(9),
+        )
+        .unwrap();
+        assert_eq!(closed.decisions.len(), ids.len(), "{name}");
+        assert!(
+            nils_registry::review::commit_where(
+                reg,
+                &nils_registry::review::CommitFilter::default(),
+                false,
+                "cleo@lab"
+            )
+            .is_err(),
+            "{name}"
+        );
+        let done = nils_registry::review::commit_where(
+            reg,
+            &nils_registry::review::CommitFilter {
+                min_confidence: Some(0.9),
+                campaign: Some(c.id),
+            },
+            false,
+            "cleo@lab",
+        )
+        .unwrap();
+        assert_eq!(done.decisions.len(), ids.len() - 1, "{name}: {done:?}");
+        assert_eq!(done.left, 1, "{name}");
+        assert_eq!(
+            count(reg, "decision", " WHERE committed_at IS NULL"),
+            1,
+            "{name}: the adjudicated one, half its raters behind it, stays staged"
+        );
+        // the confidence is the item's agreement: one rater of two
+        let it = &campaign::items(reg.store(), c.id).unwrap()[0];
+        assert_eq!(it.agreement, Some(0.5), "{name}");
+    }
+}

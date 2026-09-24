@@ -1379,6 +1379,12 @@ fn routed(
     if let Some(r) = crate::derivatives::route(registry, caller, get, &segs, query) {
         return r;
     }
+    // record 42: the campaigns and the label sets
+    if let Some(r) =
+        crate::campaigns::route(doors, registry, ask, caller, method.as_str(), &segs, body)
+    {
+        return r;
+    }
     // record 26: the linkage doors, under the table's grants like the rest
     if let Some(r) = crate::linkage_doors::route(
         &doors.home,
@@ -3218,6 +3224,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("POST", ["api", "models"]) | ("POST", ["api", "models", _, _]) => {
             (Need::One("models:work"), Plain)
         }
+        // record 42: the campaigns, the label sets and the commit by filter
+        (m, s) if crate::campaigns::door(m, s).is_some() => {
+            crate::campaigns::door(m, s).unwrap_or((Need::Any, Plain))
+        }
         _ => (Need::Any, Plain),
     }
 }
@@ -3311,7 +3321,7 @@ fn scope_of(doc: &serde_json::Value) -> Result<nils_classify::scope::Scope, Repl
 
 /// The author kind the caller acts as: the actor's kind when one was
 /// declared, else a person at a keyboard. With the model version beside it.
-fn author_of(caller: &Caller) -> (&str, Option<&str>) {
+pub(crate) fn author_of(caller: &Caller) -> (&str, Option<&str>) {
     // Anything else, `absent` included, is a person at a keyboard.
     let kind = match caller.actor["kind"].as_str() {
         Some("agent") => "agent",
@@ -3620,6 +3630,7 @@ fn capabilities(
     .iter()
     .chain(crate::derivatives::DOORS.iter())
     .chain(crate::linkage_doors::DOORS.iter())
+    .chain(crate::campaigns::DOORS.iter())
     .chain(crate::ask_doors::DOORS.iter())
     .map(|d| (*d).to_string())
     .collect();
@@ -4924,6 +4935,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Read what the pseudonymiser removes",
         ),
     ]
+    .into_iter()
+    .chain(
+        crate::campaigns::POLICY
+            .iter()
+            .map(|(door, writes, idem, cost, cap, now, then)| {
+                row(door, *writes, *idem, cost, cap, now, then)
+            }),
+    )
+    .collect()
 }
 
 #[cfg(test)]

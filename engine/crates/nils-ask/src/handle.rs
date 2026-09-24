@@ -667,7 +667,9 @@ pub fn find_cached(
 }
 
 /// Who pins a handle: a cohort promoted from it, a selection whose ask
-/// reads it. (A release or a job naming a handle is a later wave's column.)
+/// reads it, a campaign whose items it froze and a label set that covers
+/// it (record 42). (A release or a job naming a handle is a later wave's
+/// column.)
 pub fn pinned_by(store: &mut Store, id: i64) -> Result<Vec<String>, HandleError> {
     let d = store.dialect();
     let mut out = Vec::new();
@@ -679,6 +681,17 @@ pub fn pinned_by(store: &mut Store, id: i64) -> Result<Vec<String>, HandleError>
     );
     for r in store.query(&sql, &[Param::Int(id)])? {
         out.push(format!("cohort {}", r.text(0)?));
+    }
+    // record 42: a campaign's frozen item list, and a label set's
+    for (t, what) in [("campaign", "campaign"), ("label_set", "label set")] {
+        let sql = format!(
+            "SELECT name FROM {} WHERE handle_id = {} ORDER BY id",
+            store.qualified(t),
+            d.param(1, Type::Int)
+        );
+        for r in store.query(&sql, &[Param::Int(id)])? {
+            out.push(format!("{what} {}", r.text(0)?));
+        }
     }
     let sql = format!(
         "SELECT s.name, sv.version, sv.ask FROM {} sv JOIN {} s ON s.id = sv.selection_id ORDER BY s.name, sv.version",

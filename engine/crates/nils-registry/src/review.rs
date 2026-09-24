@@ -921,6 +921,162 @@ pub fn commit_as(
     Ok(out)
 }
 
+/// Which staged decisions a commit by filter takes (record 42 S6, v0's
+/// commit by minimum confidence).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CommitFilter {
+    /// Only decisions whose confidence is at least this: the agreement of
+    /// the campaign item that closed into it, else the `confidence` its
+    /// review item's evidence names. A decision with no confidence is left.
+    pub min_confidence: Option<f64>,
+    /// Only decisions a campaign's close staged.
+    pub campaign: Option<i64>,
+}
+
+/// What a commit by filter did, and what it left staged.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommittedPart {
+    pub decisions: Vec<i64>,
+    pub items: i64,
+    /// Staged decisions the filter left as they were.
+    pub left: i64,
+}
+
+/// Commit the part of the staged decisions a filter names, in one
+/// transaction, with the drift check [`commit`] makes: the rest stay
+/// staged. A filter that names nothing is refused, so that a commit of
+/// everything is always said as such.
+pub fn commit_where(
+    registry: &mut Registry,
+    filter: &CommitFilter,
+    anyway: bool,
+    who: &str,
+) -> Result<CommittedPart, Error> {
+    if filter.min_confidence.is_none() && filter.campaign.is_none() {
+        return Err(refused(
+            "a commit by filter names a minimum confidence or a campaign; commit --all commits everything",
+        ));
+    }
+    let epoch = registry.meta().epoch;
+    let store = registry.store();
+    let d = store.dialect();
+    let staged: Vec<(i64, Option<i64>)> = store
+        .query(
+            &format!(
+                "SELECT id, epoch_staged FROM {} WHERE staged_at IS NOT NULL AND committed_at IS NULL \
+                 AND withdrawn_at IS NULL ORDER BY id",
+                store.qualified("decision")
+            ),
+            &[],
+        )?
+        .iter()
+        .map(|r| Ok((r.int(0)?, r.opt_int(1)?)))
+        .collect::<Result<_, StoreError>>()?;
+    // what each staged decision's confidence and campaign are
+    let t = table("review_item");
+    let item_sql = format!(
+        "SELECT id, {} FROM {} WHERE decision_id = {} ORDER BY id LIMIT 1",
+        d.text_of(t.column("evidence").expect("evidence")),
+        store.qualified("review_item"),
+        d.param(1, Type::Int)
+    );
+    let campaign_sql = format!(
+        "SELECT campaign_id, agreement FROM {} WHERE decision_id = {} ORDER BY id DESC LIMIT 1",
+        store.qualified("campaign_item"),
+        d.param(1, Type::Int)
+    );
+    let mut chosen = Vec::new();
+    let mut left = 0i64;
+    for (id, epoch_staged) in &staged {
+        let mut confidence: Option<f64> = None;
+        let mut campaign: Option<i64> = None;
+        if let Some(r) = store.query_opt(&item_sql, &[Param::Int(*id)])? {
+            let evidence: serde_json::Value = r
+                .opt_text(1)?
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or(serde_json::Value::Null);
+            confidence = evidence["confidence"].as_f64();
+        }
+        if let Some(c) = store.query_opt(&campaign_sql, &[Param::Int(*id)])? {
+            campaign = Some(c.int(0)?);
+            if let Some(a) = c.opt_double(1)? {
+                confidence = Some(a);
+            }
+        }
+        let keep = filter
+            .min_confidence
+            .is_none_or(|min| confidence.is_some_and(|c| c >= min))
+            && filter.campaign.is_none_or(|want| campaign == Some(want));
+        if keep {
+            chosen.push((*id, *epoch_staged));
+        } else {
+            left += 1;
+        }
+    }
+    let drifted: Vec<i64> = chosen
+        .iter()
+        .filter(|(_, e)| e.is_some_and(|e| e != epoch))
+        .map(|(id, _)| *id)
+        .collect();
+    if !drifted.is_empty() && !anyway {
+        return Err(refused(format!(
+            "the registry moved on since decision(s) {} were staged (epoch {} now); look again, or commit --anyway",
+            drifted
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            epoch
+        )));
+    }
+    let mut out = CommittedPart {
+        left,
+        ..CommittedPart::default()
+    };
+    if chosen.is_empty() {
+        return Ok(out);
+    }
+    let now = now_iso();
+    store.begin()?;
+    let written = (|| -> Result<(), StoreError> {
+        for (id, _) in &chosen {
+            store.update_by_id(
+                table("decision"),
+                &[("committed_at", Param::from(now.as_str()))],
+                "id",
+                *id,
+            )?;
+            let sql = format!(
+                "UPDATE {} SET status = 'accepted' WHERE status = 'staged' AND decision_id = {}",
+                store.qualified("review_item"),
+                d.param(1, Type::Int)
+            );
+            out.items += store.execute(&sql, &[Param::Int(*id)])? as i64;
+            out.decisions.push(*id);
+        }
+        Ok(())
+    })();
+    if let Err(e) = written {
+        store.rollback().ok();
+        return Err(e.into());
+    }
+    store.commit()?;
+    audit::record(
+        registry,
+        &Entry {
+            principal: who,
+            action: Action::Decision,
+            scope: serde_json::json!({ "committed": out.decisions, "items": out.items, "left": out.left }),
+            policy: None,
+            job_id: None,
+            details: Some(serde_json::json!({
+                "anyway": anyway, "min_confidence": filter.min_confidence, "campaign": filter.campaign,
+            })),
+        },
+    )?;
+    Ok(out)
+}
+
 /// Withdraw a decision, staged or committed: it stops being in force, the
 /// items it closed open again, and nothing is deleted.
 pub fn withdraw(registry: &mut Registry, decision: i64, who: &str) -> Result<i64, Error> {

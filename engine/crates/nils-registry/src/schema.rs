@@ -1924,8 +1924,167 @@ fn build_registry() -> Vec<Table> {
         )
         .unique(&["digest"])
         .index(&["principal"]),
+        // Record 42 S5: one campaign mechanism for annotation and curation.
+        // A campaign asks one question of a frozen list of items, each item
+        // backed by a review item so that closing it writes through the one
+        // path decisions already have. No table here belongs to one QC
+        // product of v0, and a test holds every table name to that.
+        Table::new(
+            "campaign",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                req("owner", Type::Text),
+                // open | closed | archived
+                req("status", Type::Text),
+                // {kind: axis|pick|form|derivative|free, ...}
+                req("question", Type::Json),
+                // stack | session: what one item is
+                req("grain", Type::Text),
+                // {selection: name@v} | {handle: id} | {review: {...}}
+                req("source", Type::Json),
+                // The frozen list a selection gave, pinned by the campaign.
+                col("handle_id", Type::Int),
+                col("content_hash", Type::Text),
+                req("epoch", Type::Int),
+                col("pack_version", Type::Text),
+                req("raters_per_item", Type::Int),
+                // {raters: [..], adjudicators: [..]}; absent means anyone
+                // holding campaigns:work
+                col("rater_policy", Type::Json),
+                // {when: disagree|always|never, metric: exact|kappa|external,
+                // threshold}
+                req("adjudication", Type::Json),
+                // decision | stage | pick | none
+                req("closes_into", Type::Text),
+                req("lease_seconds", Type::Int),
+                req("created_at", Type::Timestamp),
+                col("closed_at", Type::Timestamp),
+                col("closed_by", Type::Text),
+                // What the close measured over the whole campaign: the share
+                // of items the raters agreed on, Cohen's and Fleiss' kappa.
+                col("agreement", Type::Json),
+            ],
+        )
+        .unique(&["name"]),
+        Table::new(
+            "campaign_item",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("position", Type::Int),
+                req("review_item_id", Type::Int),
+                col("stack_id", Type::Int),
+                // A session-grain item names its subject and the day the
+                // session opened, as a pick does.
+                col("subject_id", Type::Int),
+                col("session_day", Type::Date),
+                req("key", Type::Text),
+                // Seeds and pre-segmentations an annotator starts from.
+                col("input_derivative_ids", Type::Json),
+                // open | awaiting_metric | needs_adjudication | agreed |
+                // adjudicated | disagreed | resolved | unresolved
+                req("state", Type::Text),
+                req("round", Type::Int),
+                // The share of the raters whose answer is the item's outcome.
+                col("agreement", Type::Double),
+                // An external metric posted for the item (a Dice over masks).
+                col("metric", Type::Json),
+                // What the item came to: the value, or the derivative.
+                col("outcome", Type::Json),
+                col("decision_id", Type::Int),
+                col("pick_id", Type::Int),
+                col("resolved_at", Type::Timestamp),
+            ],
+        )
+        .unique(&["campaign_id", "position"])
+        .index(&["review_item_id"])
+        .index(&["subject_id"]),
+        Table::new(
+            "campaign_assignment",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                // Null while a round-two assignment waits for any adjudicator.
+                col("principal", Type::Text),
+                // rater | adjudicator
+                req("role", Type::Text),
+                req("round", Type::Int),
+                // offered | leased | submitted | expired | released
+                req("state", Type::Text),
+                req("created_at", Type::Timestamp),
+                col("leased_at", Type::Timestamp),
+                col("lease_until", Type::Timestamp),
+                col("ended_at", Type::Timestamp),
+            ],
+        )
+        .index(&["item_id"])
+        .index(&["campaign_id", "state"]),
+        // A rater's answer is never a decision: `apply` withdraws the
+        // earlier decision on the same key, so two raters written as
+        // decisions would cancel each other. Every answer is kept.
+        Table::new(
+            "campaign_answer",
+            vec![
+                col("id", Type::Id),
+                req("campaign_id", Type::Int),
+                req("item_id", Type::Int),
+                req("assignment_id", Type::Int),
+                req("principal", Type::Text),
+                req("role", Type::Text),
+                req("round", Type::Int),
+                // person | agent | model, from the verified actor
+                req("author_kind", Type::Text),
+                col("value", Type::Text),
+                col("form", Type::Json),
+                col("derivative_id", Type::Int),
+                col("why", Type::Text),
+                col("actor_detail", Type::Json),
+                req("answered_at", Type::Timestamp),
+                col("supersedes_id", Type::Int),
+            ],
+        )
+        .index(&["item_id"])
+        .index(&["campaign_id"]),
+        // Record 42 S7 (C7): labels exported with their provenance. The
+        // digest covers the canonical labels.tsv, so the same state gives
+        // the same digest and one new decision changes it.
+        Table::new(
+            "label_set",
+            vec![
+                col("id", Type::Id),
+                req("name", Type::Text),
+                // decisions | answers | outcomes | imported
+                req("kind", Type::Text),
+                // the axis, or the question a campaign asked
+                req("what", Type::Text),
+                req("source", Type::Json),
+                col("campaign_id", Type::Int),
+                // The frozen stack list it covers, pinned while the set is.
+                col("handle_id", Type::Int),
+                req("epoch", Type::Int),
+                col("pack_version", Type::Text),
+                col("scheme_digest", Type::Text),
+                // Record 40 R3: 1 when the set was drawn from a sealed
+                // certification sample, which is never training data.
+                req("sealed", Type::Int),
+                req("rows", Type::Int),
+                req("digest", Type::Text),
+                col("place_id", Type::Int),
+                col("path", Type::Text),
+                req("created_by", Type::Text),
+                req("created_at", Type::Timestamp),
+            ],
+        )
+        .index(&["digest"])
+        .index(&["handle_id"]),
     ]
 }
+
+/// Record 42: the words a table of the campaign mechanism may never
+/// carry, because the mechanism belongs to no QC product of v0.
+pub const PRODUCT_WORDS: [&str; 4] = ["qc", "body_part", "axes", "acquisition"];
 
 fn detail(name: &'static str, level: Level) -> Table {
     Table::new(
@@ -2034,6 +2193,30 @@ mod tests {
         assert_eq!(table("source_file").uniques[0], vec!["source_id", "path"]);
         assert_eq!(linkage_tables().len(), 5);
         assert_eq!(linkage_tables()[0].name, "linkage_meta");
+    }
+
+    /// Record 42 S5: one campaign mechanism carries v0's five QC products,
+    /// so no table is named for one of them.
+    #[test]
+    fn no_table_belongs_to_one_qc_product() {
+        for t in registry_tables().iter().chain(linkage_tables()) {
+            for word in PRODUCT_WORDS {
+                assert!(
+                    !t.name.contains(word),
+                    "{} is named for a QC product ({word})",
+                    t.name
+                );
+            }
+        }
+        for name in [
+            "campaign",
+            "campaign_item",
+            "campaign_assignment",
+            "campaign_answer",
+            "label_set",
+        ] {
+            assert!(registry_tables().iter().any(|t| t.name == name), "{name}");
+        }
     }
 
     #[test]

@@ -33,6 +33,23 @@
 # and download audited. With no working place bound the capability is off
 # and the registering door answers 409 saying so.
 #
+# Campaigns and label sets (S5 to S7). Campaigns, one mechanism for
+# annotation and curation, under /api/campaigns: made from a frozen
+# selection, a handle or open review items, each item backed by a review
+# item; raters claim an item under a lease, answer and give it back, no
+# rater given the same item twice; an answer is never a decision;
+# disagreement, or an external metric below its threshold, offers a second
+# round to an adjudicator; closing writes through the apply of the review
+# spine into one decision per item, in force or staged, into a person's
+# pick, or into nothing, and every answer stays. POST /api/decisions/commit
+# commits the part of the staged decisions a filter names. Label sets under
+# /api/label-sets and a campaign's export, labels.tsv and provenance.json
+# with the sha256 of the labels, the handle pinned, and a flag for a set
+# drawn from a sealed certification sample, which is never training data.
+# The grants are campaigns:see and campaigns:work of suite contract version
+# 3; closing a campaign writes decisions, so it needs review:work beside
+# campaigns:work.
+#
 # Nothing else changes, and a caller pinned to version 6 meets the engine it
 # already knew, but for the model's answer, which version 6 took as free
 # text.
@@ -1138,6 +1155,168 @@ paths:
       responses:
         "200": {description: "The calendar, as GET /api/settings says it"}
         "400": {description: A timezone this engine does not know, or a day a week does not start on}
+  /api/campaigns:
+    get:
+      summary: Every campaign, newest first, each with its counts (record 42 S5; campaigns:see)
+      description: "Each campaign as GET /api/campaigns/{id} names it, without its items and assignments, and `counts`: its items by state, its assignments by state and its answers."
+      responses:
+        "200": {description: "{count, campaigns}"}
+    post:
+      summary: Make a campaign (record 42 S5; campaigns:work)
+      description: "One question asked of a frozen list of items. `question` is one of {kind: axis, axis, values?}, {kind: pick, role, scheme?}, {kind: form, schema}, {kind: derivative, derivative_kind?, form?} and {kind: free}; a form is a small JSON Schema, `properties` each with a `type` (string, number, integer, boolean, array) or an `enum`, and `required`. `source` is {selection: name@v}, which is frozen now through the ask door under the caller's own grants (query:see), its stacks, or for a pick question its sessions, becoming the items and the handle pinned by the campaign; {handle: id}, the keys of a handle of that grain; or {review: {kind | kind_prefix, job_id?, limit?}}, the open review items at stack or group scope, adopted as they are, one open campaign at a time asking each. A campaign over a selection raises one review item per item, of kind `campaign.<question>`, so every item is in the ordinary queue. `adjudication` is {when: disagree | always | never, metric: exact | kappa | external, threshold?} (default disagree, exact, 0.8); a derivative question is compared by an external metric or adjudicated always or never, since the engine never compares files. `closes_into` is decision or stage (an axis question), pick (a pick question) or none. `raters` and `adjudicators` name who may rate and adjudicate; anyone holding campaigns:work when absent. `lease_seconds` (default 3600) is how long a claim holds. `inputs` maps an item's key to the derivative ids it starts from. Audited as campaign.create; the epoch does not move."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, question, source]
+              properties:
+                name: {type: string}
+                question: {type: object}
+                source: {type: object}
+                raters_per_item: {type: integer, minimum: 1, default: 1}
+                raters: {type: array, items: {type: string}}
+                adjudicators: {type: array, items: {type: string}}
+                adjudication: {type: object}
+                closes_into: {type: string, enum: [decision, stage, pick, none], default: none}
+                lease_seconds: {type: integer, minimum: 1, default: 3600}
+                inputs: {type: object}
+      responses:
+        "201": {description: "The campaign as GET /api/campaigns/{id} names it"}
+        "400": {description: A question, a source, an adjudication or a close that does not fit}
+        "403": {description: Without campaigns:work, or without query:see for a selection}
+        "404": {description: No such selection, handle or review item}
+        "409": {description: A campaign of that name exists, or a review item is asked by an open campaign already}
+  /api/campaigns/{id}:
+    get:
+      summary: One campaign, by id or name (record 42 S5; campaigns:see)
+      description: "{id, name, owner, status, question, grain, source, handle_id, content_hash, epoch, pack_version, raters_per_item, rater_policy, adjudication, closes_into, lease_seconds, created_at, closed_at, closed_by, agreement, counts, items, assignments}. An item is {id, position, review_item_id, stack_id, subject_id, session_day, key, input_derivative_ids, state, round, agreement, metric, outcome, decision_id, pick_id, resolved_at}, its state one of open, awaiting_metric, needs_adjudication, agreed, adjudicated, disagreed and resolved. While the campaign is open `agreement` is measured on read: {items, raters_per_item, exact, fleiss_kappa, cohen_kappa}, where exact is the share of fully rated items all raters agreed on and Cohen's kappa is given when the same two raters answered every item."
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: The campaign}
+        "404": {description: No such campaign}
+  /api/campaigns/{id}/answers:
+    get:
+      summary: Every answer of a campaign, in the order given (record 42 S5; campaigns:see)
+      description: "Each {id, item_id, assignment_id, principal, role, round, author_kind, value, form, derivative_id, why, actor_detail, answered_at}. An answer is never overwritten or deleted, and never a decision."
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: "{campaign, count, answers}"}
+  /api/campaigns/{id}/claim:
+    post:
+      summary: Claim the next item under a lease (record 42 S5; campaigns:work)
+      description: "As a rater (the default), the first open item by position that still wants raters and that the caller was never given, in any role, in any state; as an adjudicator, the first item waiting for one that the caller did not rate, offered to the caller or to any. A caller holding a live lease in the campaign is handed that one again with held true, never a second. Leases past their time end first: a rater's returns its item to the pool for others, an adjudicator's is offered again. On Postgres the campaign's row is locked for the claim, on SQLite the transaction is immediate, so two raters never take one place. Audited as campaign.claim."
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {role: {type: string, enum: [rater, adjudicator], default: rater}}}}}}
+      responses:
+        "200": {description: "{assignment, item, held}, or {assignment: null, item: null, why} when nothing is left for the caller"}
+        "403": {description: The campaign names its raters or adjudicators and the caller is not one}
+        "409": {description: The campaign is closed}
+  /api/campaigns/{id}/assignments/{assignment}/answer:
+    post:
+      summary: Answer a claimed item (record 42 S5; campaigns:work)
+      description: "The answer fits the question or is refused before anything is written: `value` for an axis (a value of the axis, of `values` when the question lists them), a pick (stack ids, as `12,14` or a list) and a free question; `form` for a form; `derivative_id` for a derivative, the file registered by the derivative door first, with `form` beside it when the question declares one. The author is the caller, of the kind its verified actor is. Once every rater of an item answered, it is agreed, waits for its external metric, or is offered to an adjudicator (the review item's evidence then says `campaign_state: needs_adjudication`); an adjudicator's answer settles it. Nothing here is a decision. An expired lease is refused. Audited as campaign.answer with the value of an axis or a pick and never a form's text."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: assignment, in: path, required: true, schema: {type: integer}}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                value: {oneOf: [{type: string}, {type: array, items: {type: integer}}]}
+                form: {type: object}
+                derivative_id: {type: integer}
+                why: {type: string}
+      responses:
+        "200": {description: "{answer, item, state, adjudication}: the item's state after it, and the adjudicator assignment it opened, if any"}
+        "400": {description: An answer that does not fit the question}
+        "403": {description: Another principal's assignment}
+        "404": {description: No such assignment in this campaign}
+        "409": {description: The lease ran out, the assignment is not leased, or the campaign is closed}
+  /api/campaigns/{id}/assignments/{assignment}/release:
+    post:
+      summary: Give a claimed item back unanswered (record 42 S5; campaigns:work)
+      description: "A rater's item returns to the pool for others and never to the same rater; an adjudicator's is offered again. Audited as campaign.release."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: assignment, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: The assignment, released}
+        "403": {description: Another principal's assignment}
+        "409": {description: The assignment is not leased}
+  /api/campaigns/{id}/items/{item}/metric:
+    post:
+      summary: Post an external metric for an item (record 42 S6; campaigns:work)
+      description: "For a campaign whose adjudication metric is external, once every rater of the item answered: something with pixels computed the agreement of their files (a Dice over masks) and posts it here. At or above the campaign's threshold the item is agreed; below it an adjudicator is offered the item, or with `when: never` it closes into nothing. The engine only compares the number with the threshold and never computes one. Audited as campaign.metric."
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: item, in: path, required: true, schema: {type: integer}}
+      requestBody: {content: {application/json: {schema: {type: object, required: [value], properties: {name: {type: string, default: external}, value: {type: number}}}}}}
+      responses:
+        "200": {description: "{item, state, adjudication}"}
+        "409": {description: The campaign measures agreement itself, or the item's raters have not all answered}
+  /api/campaigns/{id}/close:
+    post:
+      summary: Close a campaign (record 42 S6; campaigns:work and review:work)
+      description: "Every agreed or adjudicated item is written as the campaign says: through the apply of the review spine into one decision on its review item, in force (decision) or staged (stage), authored by the adjudicator where there was one and otherwise by the caller, each of the kind its verified actor was, with a why that names the campaign, the item and the answers; into a person's pick of the role for the session, the standing pick withdrawn; or into nothing, the review item closed with the outcome. A decision the spine refuses (a decision of a higher rank holds) leaves its item unresolved, named in `refused`. Items without an outcome stay unresolved and their review items stay open in the queue; every lease still out ends. Every answer stays. The agreement over the campaign is measured and kept. Audited as campaign.close; the decisions are audited by apply."
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: "{decisions, picks, resolved, unresolved, refused, staged, agreement}"}
+        "409": {description: The campaign is closed already}
+  /api/campaigns/{id}/export:
+    post:
+      summary: Write a campaign's labels as a label set (record 42 S7; campaigns:work)
+      description: "Into `labels/<name>` of the export place `place` names, or of the one export place there is. `of` is outcomes (the default: a row per resolved item, the decision it became with its author, or the adjudicator's or agreeing raters' answer, a row per file for a derivative) or answers (a row per answer, for an agreement study or a two-rater reference). The set is written and recorded as POST /api/label-sets says."
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {of: {type: string, enum: [outcomes, answers], default: outcomes}, place: {type: string}, name: {type: string}, sealed: {type: boolean, default: false}}}}}}
+      responses:
+        "201": {description: "The label set, as GET /api/label-sets/{id} names it without its files"}
+        "409": {description: No export place is declared}
+  /api/label-sets:
+    get:
+      summary: Every label set, newest first (record 42 S7; campaigns:see or review:see)
+      responses:
+        "200": {description: "{count, label_sets}"}
+    post:
+      summary: Write the decisions in force on one axis as a label set (record 42 S7; campaigns:work or review:work)
+      description: "One row per stack of the decision in force there, resolved as the classifier resolves them (the highest rank, then the narrowest scope, stack, group, series, subject, then the latest); a decision about a machine is a rule and is not exported. `selection` (frozen now, under the caller's query:see) or `handle` keeps the stacks it names and pins the handle; `authors` keeps the decisions in force by those kinds; `campaign` keeps those a campaign's close wrote; `staged` adds the staged ones. `labels.tsv` holds stack_id, subject_id, session_day, what, value, derivative_id, author_kind, author, decision_id, campaign_id, model_id and answer_id, in a canonical order, so the same state gives the same sha256 and one new decision changes it; `provenance.json` holds the source, the handle and its content hash, the epoch, the pack version, the scheme digest, `sealed` and `training`, the columns and the digest. `sealed` marks a set drawn from a sealed certification sample (record 40 R3), which a training tool refuses. Audited as labels.export."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [axis]
+              properties:
+                axis: {type: string}
+                selection: {type: string}
+                handle: {type: integer}
+                authors: {type: array, items: {type: string, enum: [person, agent, model]}}
+                campaign: {type: string}
+                staged: {type: boolean, default: false}
+                place: {type: string}
+                name: {type: string}
+                sealed: {type: boolean, default: false}
+      responses:
+        "201": {description: "{id, name, kind, what, source, campaign_id, handle_id, epoch, pack_version, scheme_digest, sealed, training, rows, digest, place_id, path, created_by, created_at}"}
+        "409": {description: No export place is declared}
+  /api/label-sets/{id}:
+    get:
+      summary: One label set, with its files (record 42 S7; campaigns:see or review:see)
+      description: "The set and `files`: the text of labels.tsv and provenance.json as written, read back from the export place. A set of sessions carries the day each opened, which needs detail quasi."
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: The label set}
+        "404": {description: No such label set}
+  /api/decisions/commit:
+    post:
+      summary: Commit the part of the staged decisions a filter names (record 42 S6; review:work)
+      description: "`min_confidence` keeps the decisions whose confidence is at least it: the agreement of the campaign item that closed into it, else the `confidence` its review item's evidence names; a decision with none is left. `campaign` keeps those a campaign's close staged. At least one is named; the rest stay staged. The drift check of POST /api/decisions/{id}/commit applies, and `anyway` overrides it. Audited as a decision."
+      requestBody: {content: {application/json: {schema: {type: object, properties: {min_confidence: {type: number}, campaign: {type: string}, anyway: {type: boolean}}}}}}
+      responses:
+        "200": {description: "{committed, items, left}"}
+        "409": {description: No filter named, or the registry moved on since they were staged}
 components:
   securitySchemes:
     bearer:

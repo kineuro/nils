@@ -73,7 +73,7 @@ fn the_suite_contract_names_the_engine_s_own_vocabulary() {
     // has its see beside it, and the assistant's use; sorted by code point
     let g = json(&format!("{dir}/grants.schema.json"));
     let grants = strings(&g["$defs"]["grant"]["enum"]);
-    assert_eq!(grants.len(), 26, "{grants:?}");
+    assert_eq!(grants.len(), 28, "{grants:?}");
     let mut sorted = grants.clone();
     sorted.sort();
     assert_eq!(sorted, grants, "sorted by code point");

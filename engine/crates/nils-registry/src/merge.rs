@@ -63,6 +63,8 @@ pub const SUBJECT_TABLES: &[(&str, Handling)] = &[
     ("session_cache", Handling::Rebuild),
     ("handle_member", Handling::Repoint),
     ("values_member", Handling::Repoint),
+    // record 42: a session-grain campaign item names its subject
+    ("campaign_item", Handling::Repoint),
     // the linkage store
     ("identity", Handling::Repoint),
 ];

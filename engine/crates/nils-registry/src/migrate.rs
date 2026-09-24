@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 56;
+pub const SCHEMA_VERSION: i64 = 58;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +278,14 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 56,
         apply: a_derivative_has_a_home,
     },
+    Migration {
+        version: 57,
+        apply: a_campaign_asks_one_question_of_many,
+    },
+    Migration {
+        version: 58,
+        apply: labels_leave_with_their_provenance,
+    },
 ];
 
 /// Record 42 S2: the model registry. A registry from before gains the two
@@ -345,6 +353,34 @@ fn a_derivative_has_a_home(store: &mut Store, kind: Kind) -> Result<(), Error> {
         return Ok(());
     }
     add_tables(store, kind, &["derivative"])
+}
+
+/// Record 42 S5: campaigns, their items, the raters' assignments and their
+/// answers. A registry from before gains the four tables empty; with no
+/// campaign nothing changes and review items work as they did.
+fn a_campaign_asks_one_question_of_many(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(
+        store,
+        kind,
+        &[
+            "campaign",
+            "campaign_item",
+            "campaign_assignment",
+            "campaign_answer",
+        ],
+    )
+}
+
+/// Record 42 S7: the label sets, each an export with its digest and the
+/// handle it pins. A registry from before gains the table empty.
+fn labels_leave_with_their_provenance(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["label_set"])
 }
 
 /// Record 41 S2: every rule's vote. A registry from before gains the two

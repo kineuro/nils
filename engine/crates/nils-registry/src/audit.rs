@@ -95,6 +95,20 @@ pub enum Action {
     /// read whole through its door. Neither changes a judgement.
     DerivativeRegister,
     DerivativeRead,
+    /// Record 42 S5 and S6: a campaign made, an item claimed under a lease,
+    /// answered, given back, measured by an external metric, and the
+    /// campaign closed. None of them is a decision; the decisions a close
+    /// writes are audited by `apply` as every decision is.
+    CampaignCreate,
+    CampaignClaim,
+    CampaignAnswer,
+    CampaignRelease,
+    CampaignMetric,
+    CampaignClose,
+    /// Record 42 S7: a label set written out with its digest, and labels
+    /// from v0 imported as person decisions.
+    LabelsExport,
+    LabelsImport,
 }
 
 impl Action {
@@ -144,6 +158,14 @@ impl Action {
             Action::PickWithdraw => "pick.withdraw",
             Action::DerivativeRegister => "derivative.register",
             Action::DerivativeRead => "derivative.read",
+            Action::CampaignCreate => "campaign.create",
+            Action::CampaignClaim => "campaign.claim",
+            Action::CampaignAnswer => "campaign.answer",
+            Action::CampaignRelease => "campaign.release",
+            Action::CampaignMetric => "campaign.metric",
+            Action::CampaignClose => "campaign.close",
+            Action::LabelsExport => "labels.export",
+            Action::LabelsImport => "labels.import",
         }
     }
 
@@ -168,6 +190,13 @@ impl Action {
                 | Action::ModelRetire
                 | Action::DerivativeRegister
                 | Action::DerivativeRead
+                | Action::CampaignCreate
+                | Action::CampaignClaim
+                | Action::CampaignAnswer
+                | Action::CampaignRelease
+                | Action::CampaignMetric
+                | Action::CampaignClose
+                | Action::LabelsExport
         )
     }
 }

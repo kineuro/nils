@@ -29,6 +29,7 @@ mod assist_cli;
 mod backup;
 mod batches;
 mod browse;
+mod campaigns;
 mod chain;
 mod dataset;
 mod depends;
@@ -205,6 +206,19 @@ enum Command {
     Model {
         #[command(subcommand)]
         command: model_cli::ModelCommand,
+    },
+    /// Campaigns: one question asked of a frozen list of items, answered by
+    /// raters under leases, adjudicated where they disagree, and closed
+    /// through the one write path (record 42)
+    Campaign {
+        #[command(subcommand)]
+        command: campaigns::CampaignCommand,
+    },
+    /// Label sets: decisions as labelled data with their provenance and a
+    /// digest, and v0's labels imported (record 42)
+    Labels {
+        #[command(subcommand)]
+        command: campaigns::LabelsCommand,
     },
     /// What a selection would release, without releasing it: each item and
     /// how it resolved, and what it reaches (Wave 4a section 8)
@@ -1390,14 +1404,23 @@ enum ReviewCommand {
     Apply(DecideArgs),
     /// The same as `apply`, under the name Wave 2 gave it
     Decide(DecideArgs),
-    /// Put staged decisions in force: one by id, or every one with --all.
-    /// Refused when the registry moved on since they were staged, unless
-    /// --anyway
+    /// Put staged decisions in force: one by id, every one with --all, or
+    /// the part a filter names (--min-confidence, --campaign), leaving the
+    /// rest staged. Refused when the registry moved on since they were
+    /// staged, unless --anyway
     Commit {
         /// The decision to commit
         id: Option<i64>,
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["min_confidence", "campaign"])]
         all: bool,
+        /// Only decisions whose confidence is at least this: the agreement
+        /// of the campaign item that closed into it, else the confidence
+        /// its review item names
+        #[arg(long, value_name = "P", conflicts_with = "id")]
+        min_confidence: Option<f64>,
+        /// Only decisions this campaign's close staged
+        #[arg(long, value_name = "CAMPAIGN", conflicts_with = "id")]
+        campaign: Option<String>,
         #[arg(long)]
         anyway: bool,
     },
@@ -1756,6 +1779,8 @@ fn main() -> ExitCode {
         Command::Quarantine { command } => quarantine_command(&home, command),
         Command::Review { command } => review_command(&home, command),
         Command::Model { command } => model_cli::model_command(&home, command),
+        Command::Campaign { command } => campaigns::campaign_command(&home, command),
+        Command::Labels { command } => campaigns::labels_command(&home, command),
         Command::Private(args) => private_survey(&home, args),
         Command::Release(args) => release(&home, *args),
         Command::Handover(command) => handover_command(&home, command),
@@ -4580,10 +4605,45 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             drop(columns);
             review_decide(&mut registry, args)
         }
-        ReviewCommand::Commit { id, all, anyway } => {
+        ReviewCommand::Commit {
+            id,
+            all,
+            min_confidence,
+            campaign,
+            anyway,
+        } => {
             drop(columns);
+            if min_confidence.is_some() || campaign.is_some() {
+                let campaign = match campaign {
+                    Some(w) => Some(
+                        nils_registry::campaign::find(registry.store(), &w)
+                            .map_err(|e| usage(e.to_string()))?
+                            .id,
+                    ),
+                    None => None,
+                };
+                let done = nils_registry::review::commit_where(
+                    &mut registry,
+                    &nils_registry::review::CommitFilter {
+                        min_confidence,
+                        campaign,
+                    },
+                    anyway,
+                    &actor(),
+                )
+                .map_err(|e| fail(e.to_string()))?;
+                println!(
+                    "committed {} decision(s), {} item(s) accepted; {} left staged",
+                    done.decisions.len(),
+                    done.items,
+                    done.left
+                );
+                return Ok(());
+            }
             if id.is_none() && !all {
-                return Err(usage("name a decision to commit, or --all"));
+                return Err(usage(
+                    "name a decision to commit, --all, or a filter (--min-confidence, --campaign)",
+                ));
             }
             let done = nils_registry::review::commit(&mut registry, id, anyway, &actor())
                 .map_err(|e| fail(e.to_string()))?;
@@ -4992,6 +5052,10 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
     let curated = count_of(store, "catalog_curation", "")?;
     let identifier_reads = count_of(store, "handle_read_audit", "")?;
     let documents = count_of(store, "ask_document", "")?;
+    let campaigns = count_of(store, "campaign", "")?;
+    let campaign_items = count_of(store, "campaign_item", "")?;
+    let campaign_answers = count_of(store, "campaign_answer", "")?;
+    let label_sets = count_of(store, "label_set", "")?;
     let schema = store.schema().map(str::to_string);
     let (derivative_rows, derivative_bytes) = nils_registry::derivative::totals(store)?;
     let derivatives_where = match derivatives::working(store) {
@@ -5213,6 +5277,22 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
                 "change": ["nils clinical vocabulary load", "nils clinical cohort make | rename | set | retire | add | remove", "nils ask promote", "a digest of a dataset that feeds a cohort"],
                 "export": ["nils release"],
                 "delete": delete_db(REGISTRY_DB, &registry_schema),
+            },
+        }),
+        serde_json::json!({
+            "store": "campaigns and label sets",
+            "owner": "the research group that runs the campaign; each answer is its rater's",
+            "what": "campaigns (record 42): the question, the frozen item list, each item's review item, the raters' leases, every answer with who gave it, and what each item came to; and the label sets written out of the decisions or a campaign, with the digest of each and where it went",
+            "where": "rows of campaign, campaign_item, campaign_assignment, campaign_answer and label_set in the registry; a label set's labels.tsv and provenance.json in the export place it was written to",
+            "files": [],
+            "holds": ["quasi-identifying: the day a session opened, on a pick campaign's items and its labels", "a person's words: the why and the form of an answer", "technical: stack, subject and derivative ids, values, the principals, the times, the digests"],
+            "counts": { "campaigns": campaigns, "items": campaign_items, "answers": campaign_answers, "label_sets": label_sets },
+            "kept": "for good: an answer is never deleted or overwritten, and a closed campaign keeps every answer; a label set's row stays after its files are removed",
+            "commands": {
+                "read": ["nils campaign list", "nils campaign show <campaign> [--answers]", "nils labels list", "nils labels show <id>"],
+                "change": ["nils campaign create | claim | answer | release | metric | close", "nils labels import-v0 --tsv <file>"],
+                "export": ["nils campaign export <campaign> --to <dir> [--answers]", "nils labels export --axis <axis> --to <dir>"],
+                "delete": "with the registry",
             },
         }),
         serde_json::json!({
