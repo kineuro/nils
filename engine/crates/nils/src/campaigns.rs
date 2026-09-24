@@ -281,12 +281,29 @@ pub(crate) fn route(
             }
             ["api", "campaigns", which] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
-                Ok(Reply::ok(shown(registry.store(), &c)?))
+                let mut v = shown(registry.store(), &c)?;
+                if plain(caller) {
+                    let free = c.question["kind"] == "free";
+                    for it in v["items"].as_array_mut().into_iter().flatten() {
+                        plain_item(it, &c.grain, free);
+                    }
+                }
+                Ok(Reply::ok(v))
             }
             ["api", "campaigns", which, "answers"] if get => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
                 let all = campaign::answers(registry.store(), c.id).map_err(campaign_err)?;
-                let list: Vec<Value> = all.iter().map(campaign::Answer::as_json).collect();
+                let free = c.question["kind"] == "free";
+                let list: Vec<Value> = all
+                    .iter()
+                    .map(|a| {
+                        let mut v = a.as_json();
+                        if plain(caller) {
+                            plain_answer(&mut v, free);
+                        }
+                        v
+                    })
+                    .collect();
                 Ok(Reply::ok(
                     json!({"campaign": c.id, "count": list.len(), "answers": list}),
                 ))
@@ -294,6 +311,11 @@ pub(crate) fn route(
             ["api", "campaigns", which, "claim"] if post => {
                 let doc = json_body(body)?;
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                // a session is named by its subject and its day, which is
+                // quasi-identifying, and a rater of one must see it
+                if c.grain == "session" {
+                    caller.allowed("a campaign of sessions", Need::Any, Detail::Quasi)?;
+                }
                 let role =
                     Role::parse(doc["role"].as_str().unwrap_or("rater")).map_err(campaign_err)?;
                 let claimed =
@@ -554,6 +576,47 @@ pub(crate) fn route(
             )),
         }
     })())
+}
+
+/// Whether the caller reads at detail plain, where a campaign's doors
+/// leave out what is quasi-identifying or free text.
+fn plain(caller: &Caller) -> bool {
+    caller.access.detail < Detail::Quasi
+}
+
+/// An item at detail plain: a session is named by its subject and the day
+/// it opened, which are quasi-identifying, so a session's item keeps its id
+/// and position and loses both, with the key that spells them; a form or a
+/// free text the item came to is left out, as the answers' are.
+fn plain_item(v: &mut Value, grain: &str, free: bool) {
+    let Some(m) = v.as_object_mut() else {
+        return;
+    };
+    if grain == "session" {
+        m.remove("subject_id");
+        m.remove("session_day");
+        m.remove("key");
+    }
+    if let Some(Value::Object(o)) = m.get_mut("outcome") {
+        o.remove("form");
+        if free {
+            o.remove("value");
+        }
+    }
+}
+
+/// An answer at detail plain: no why, no form, no actor detail, and no
+/// value where the value is free text.
+fn plain_answer(v: &mut Value, free: bool) {
+    let Some(m) = v.as_object_mut() else {
+        return;
+    };
+    for field in ["why", "form", "actor_detail"] {
+        m.remove(field);
+    }
+    if free {
+        m.remove("value");
+    }
 }
 
 /// Whether a row of a campaign's table belongs to the campaign the path
@@ -1899,5 +1962,39 @@ pub(crate) fn labels_command(home: &Home, cmd: LabelsCommand) -> Result<(), Exit
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Record 42 at detail plain: a session's item loses its subject, its
+    /// day and the key that spells them; an answer its why, form and actor
+    /// detail, and a free answer its text.
+    #[test]
+    fn plain_detail_leaves_out_the_session_and_the_free_text() {
+        let mut item = json!({
+            "id": 3, "position": 0, "subject_id": 7, "session_day": "2024-05-06",
+            "key": "session:7:2024-05-06", "outcome": {"value": "12,14", "form": {"a": 1}},
+        });
+        plain_item(&mut item, "session", false);
+        assert_eq!(
+            item,
+            json!({"id": 3, "position": 0, "outcome": {"value": "12,14"}})
+        );
+        let mut stack =
+            json!({"id": 4, "stack_id": 9, "key": "stack:9", "outcome": {"value": "a note"}});
+        plain_item(&mut stack, "stack", true);
+        assert_eq!(
+            stack,
+            json!({"id": 4, "stack_id": 9, "key": "stack:9", "outcome": {}})
+        );
+        let mut answer = json!({
+            "id": 1, "value": "a note", "why": "because", "form": {"a": 1},
+            "actor_detail": {"kind": "agent"}, "principal": "anna@lab",
+        });
+        plain_answer(&mut answer, true);
+        assert_eq!(answer, json!({"id": 1, "principal": "anna@lab"}));
     }
 }

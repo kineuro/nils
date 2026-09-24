@@ -1191,7 +1191,7 @@ paths:
   /api/campaigns/{id}:
     get:
       summary: One campaign, by id or name (record 42 S5; campaigns:see)
-      description: "{id, name, owner, status, question, grain, source, handle_id, content_hash, epoch, pack_version, raters_per_item, rater_policy, adjudication, closes_into, lease_seconds, created_at, closed_at, closed_by, agreement, counts, items, assignments}. An item is {id, position, review_item_id, stack_id, subject_id, session_day, key, input_derivative_ids, state, round, agreement, metric, outcome, decision_id, pick_id, resolved_at}, its state one of open, awaiting_metric, needs_adjudication, agreed, adjudicated, disagreed and resolved. While the campaign is open `agreement` is measured on read: {items, raters_per_item, exact, fleiss_kappa, cohen_kappa}, where exact is the share of fully rated items all raters agreed on and Cohen's kappa is given when the same two raters answered every item."
+      description: "{id, name, owner, status, question, grain, source, handle_id, content_hash, epoch, pack_version, raters_per_item, rater_policy, adjudication, closes_into, lease_seconds, created_at, closed_at, closed_by, agreement, counts, items, assignments}. An item is {id, position, review_item_id, stack_id, subject_id, session_day, key, input_derivative_ids, state, round, agreement, metric, outcome, decision_id, pick_id, resolved_at}, its state one of open, awaiting_metric, needs_adjudication, agreed, adjudicated, disagreed and resolved. While the campaign is open `agreement` is measured on read: {items, raters_per_item, exact, fleiss_kappa, cohen_kappa}, where exact is the share of fully rated items all raters agreed on and Cohen's kappa is given when the same two raters answered every item. At detail plain a session's item leaves out its subject_id, session_day and key, which spell the day the session opened, and an item's outcome leaves out a form and a free text; quasi and above read the item whole."
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: The campaign}
@@ -1199,14 +1199,14 @@ paths:
   /api/campaigns/{id}/answers:
     get:
       summary: Every answer of a campaign, in the order given (record 42 S5; campaigns:see)
-      description: "Each {id, item_id, assignment_id, principal, role, round, author_kind, value, form, derivative_id, why, actor_detail, answered_at}. An answer is never overwritten or deleted, and never a decision."
+      description: "Each {id, item_id, assignment_id, principal, role, round, author_kind, value, form, derivative_id, why, actor_detail, answered_at, model_id}. An answer is never overwritten or deleted, and never a decision. At detail plain why, form and actor_detail are left out, and so is the value of a free question, which is free text; quasi and above read the answer whole."
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: "{campaign, count, answers}"}
   /api/campaigns/{id}/claim:
     post:
       summary: Claim the next item under a lease (record 42 S5; campaigns:work)
-      description: "As a rater (the default), the first open item by position that still wants raters and that the caller was never given, in any role, in any state; as an adjudicator, the first item waiting for one that the caller did not rate, offered to the caller or to any. A caller holding a live lease in the campaign is handed that one again with held true, never a second. Leases past their time end first: a rater's returns its item to the pool for others, an adjudicator's is offered again. On Postgres the campaign's row is locked for the claim, on SQLite the transaction is immediate, so two raters never take one place. Audited as campaign.claim."
+      description: "As a rater (the default), the first open item by position that still wants raters and that the caller was never given, in any role, in any state; as an adjudicator, the first item waiting for one that the caller did not rate, offered to the caller or to any. A caller holding a live lease in the campaign is handed that one again with held true, never a second. Leases past their time end first: a rater's returns its item to the pool for others, an adjudicator's is offered again. On Postgres the campaign's row is locked for the claim, on SQLite the transaction is immediate, so two raters never take one place. A campaign of sessions names each item by its subject and the day the session opened, so its claim needs detail quasi. Audited as campaign.claim."
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       requestBody: {content: {application/json: {schema: {type: object, properties: {role: {type: string, enum: [rater, adjudicator], default: rater}}}}}}
       responses:

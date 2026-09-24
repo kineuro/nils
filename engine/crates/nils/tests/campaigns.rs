@@ -462,6 +462,23 @@ fn one_campaign_mechanism_annotates_and_curates_through_the_door_alone() {
         json!([]),
         "a mask closes into no decision"
     );
+    // at plain detail a rater reads the answers without their free text,
+    // their forms or who acted; a reviewer at quasi reads them whole
+    let (status, plain) = server.call("GET", "/api/campaigns/lesions/answers", None, ANNA);
+    assert_eq!(status, 200, "{plain}");
+    for a in plain["answers"].as_array().unwrap() {
+        for field in ["why", "form", "actor_detail"] {
+            assert!(a.get(field).is_none(), "{field} at plain: {a}");
+        }
+    }
+    assert!(!plain.to_string().contains("the union, trimmed"), "{plain}");
+    let full = server.ok("GET", "/api/campaigns/lesions/answers", None, CURATOR);
+    assert!(full.to_string().contains("the union, trimmed"), "{full}");
+    let (status, shown) = server.call("GET", "/api/campaigns/lesions", None, ANNA);
+    assert_eq!(status, 200, "{shown}");
+    for it in shown["items"].as_array().unwrap() {
+        assert!(it["outcome"].get("form").is_none(), "{it}");
+    }
     // the closed campaign exports: its outcome, the adjudicator's mask, and
     // every answer
     let outcome = server.ok(
