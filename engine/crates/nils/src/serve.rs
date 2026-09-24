@@ -1270,8 +1270,10 @@ fn respond(request: Request, reply: Reply) -> std::io::Result<()> {
     request.respond(response)
 }
 
-/// Undo the percent-encoding of one query key or value, `+` as a space
-/// (record 45: every door reads its query decoded, once, here).
+/// Undo the percent-encoding of one query key or value (record 45: every
+/// door reads its query decoded, once, here). Percent-decoding only: a `+`
+/// stays a `+`, since it means one in a time's offset (`+02:00`) and may in
+/// a principal; a space comes as `%20`.
 pub(crate) fn decoded(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -1292,10 +1294,6 @@ pub(crate) fn decoded(text: &str) -> String {
                         i += 1;
                     }
                 }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
             }
             b => {
                 out.push(b);
@@ -5289,7 +5287,16 @@ mod query_tests {
     fn a_query_key_and_value_are_decoded_once() {
         assert_eq!(decoded("body_part%3Amodel"), "body_part:model");
         assert_eq!(decoded("application%2Fx-nifti"), "application/x-nifti");
-        assert_eq!(decoded("a+b"), "a b");
+        // percent-decoding only: a `+` keeps its meaning, as in a time's
+        // offset or a principal, and a space comes as %20
+        assert_eq!(decoded("a+b"), "a+b");
+        assert_eq!(
+            decoded("2026-09-24T10:00:00+02:00"),
+            "2026-09-24T10:00:00+02:00"
+        );
+        assert_eq!(decoded("anna+lab%40node"), "anna+lab@node");
+        assert_eq!(decoded("a%20b"), "a b");
+        assert_eq!(decoded("a%2Bb"), "a+b");
         assert_eq!(decoded("100%"), "100%");
         assert_eq!(decoded("%zz"), "%zz");
         assert_eq!(decoded("%25zz"), "%zz");

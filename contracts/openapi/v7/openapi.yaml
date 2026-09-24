@@ -105,8 +105,8 @@ info:
   version: "7"
   description: >-
     The one door of the engine (decision record 05 section 1). A query's
-    keys and values are read percent-decoded, `+` as a space, on every door
-    (record 45). Every answer
+    keys and values are read percent-decoded, and only that, on every door
+    (record 45): a `+` stays a `+`, as in a time's offset, and a space is %20. Every answer
     is JSON; an error is {"error": "...", "disclosure": "safe" | "gated" | "internal"}
     (Wave 5 section 12.6: safe when the text is built from document, set,
     field and door names and counts; gated when it may carry a value of a
