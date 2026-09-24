@@ -930,7 +930,9 @@ fn only_a_person_commits(store: &mut Store, ids: &[i64], kind: &str) -> Result<(
 }
 
 /// The decisions among `ids` that carry a model's answer: a model is their
-/// author, or they name a registered model.
+/// author, they name a registered model, or a campaign closed an item into
+/// them that a model answered (a person and a model who agreed, record 42
+/// R6).
 pub fn models_answers(store: &mut Store, ids: &[i64]) -> Result<Vec<i64>, StoreError> {
     let mut out = Vec::new();
     for chunk in ids.chunks(500) {
@@ -940,8 +942,12 @@ pub fn models_answers(store: &mut Store, ids: &[i64]) -> Result<Vec<i64>, StoreE
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT id FROM {} WHERE id IN ({list}) AND (author_kind = 'model' OR model_id IS NOT NULL) ORDER BY id",
-            store.qualified("decision")
+            "SELECT id FROM {} WHERE id IN ({list}) AND (author_kind = 'model' OR model_id IS NOT NULL) \
+             UNION SELECT i.decision_id FROM {} i JOIN {} a ON a.item_id = i.id \
+             WHERE i.decision_id IN ({list}) AND a.author_kind = 'model'",
+            store.qualified("decision"),
+            store.qualified("campaign_item"),
+            store.qualified("campaign_answer"),
         );
         for r in store.query(&sql, &[])? {
             out.push(r.int(0)?);

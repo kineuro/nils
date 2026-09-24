@@ -1357,3 +1357,185 @@ fn a_model_s_answer_keeps_its_model_on_the_decision() {
         assert_eq!(done.decisions.len(), 1, "{name}");
     }
 }
+
+/// Record 42 R6 at the close: an item a model's answer settled is written
+/// staged, whoever closes, and only a person commits it. Two answers of
+/// one model that agree keep the model as the author; a person and a model
+/// who agree keep the person closing as the author, and the model's answer
+/// on the item still holds the commit to a person. A close by an agent is
+/// staged whoever rated, and two persons closed by a person stay in force.
+#[test]
+fn a_close_stages_what_a_model_answered_and_what_an_agent_closed() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let digest = format!("sha256:{}", "c".repeat(64));
+        let model = nils_registry::model::register(
+            reg,
+            &json!({"name": "bp", "version": "1", "kind": "pass", "digest": digest, "task": "axis:body_part"}),
+            "anna@lab",
+        )
+        .unwrap();
+        nils_registry::model::admit(
+            reg,
+            model.id,
+            &json!({"suite": "heldout", "passed": true, "checks": [{"name": "ece", "passed": true}]}),
+            "anna@lab",
+        )
+        .unwrap();
+        let q = body_part();
+        let adj = json!({"when": "disagree", "metric": "exact"});
+        let as_model = |assignment: i64, who: &'static str| Given {
+            assignment,
+            principal: who,
+            author_kind: "model",
+            model: Some(model.id),
+            value: Some("brain"),
+            form: None,
+            derivative_id: None,
+            why: None,
+        };
+        let close = |reg: &mut Registry, id: i64, who: &str, kind: &str, minute: u32| {
+            campaign::close(
+                reg,
+                &Close {
+                    campaign: id,
+                    who,
+                    author_kind: kind,
+                    model: None,
+                    picks: None,
+                },
+                &at(minute),
+            )
+            .unwrap()
+        };
+        let decision = |reg: &mut Registry, id: i64| {
+            let sql = format!(
+                "SELECT author_kind, actor, model_id, staged_at IS NOT NULL, committed_at IS NULL FROM {} WHERE id = {id}",
+                reg.store().qualified("decision")
+            );
+            let r = reg.store().query(&sql, &[]).unwrap().remove(0);
+            (
+                r.text(0).unwrap().to_string(),
+                r.text(1).unwrap().to_string(),
+                r.opt_int(2).unwrap(),
+                r.int(3).unwrap() == 1,
+                r.int(4).unwrap() == 1,
+            )
+        };
+
+        // one model twice, agreeing, closed by a person: the model's, staged
+        let c = campaign::create(
+            reg,
+            &new(
+                "models",
+                &q,
+                &adj,
+                Items::Stacks(vec![ids[0]]),
+                2,
+                "decision",
+            ),
+        )
+        .unwrap();
+        for who in ["bp-1@lab", "bp-2@lab"] {
+            let a = campaign::claim(reg, c.id, who, Role::Rater, &at(0))
+                .unwrap()
+                .unwrap();
+            campaign::answer(reg, &as_model(a.assignment.id, who), &at(1)).unwrap();
+        }
+        let closed = close(reg, c.id, "cleo@lab", "person", 2);
+        assert_eq!(closed.decisions.len(), 1, "{name}: {closed:?}");
+        assert!(closed.staged, "{name}");
+        let (kind, _, m, staged, open) = decision(reg, closed.decisions[0]);
+        assert_eq!(kind, "model", "{name}");
+        assert_eq!(m, Some(model.id), "{name}");
+        assert!(staged && open, "{name}: staged, not in force (R6)");
+
+        // a person and the model, agreeing, closed by a person: the
+        // person's, staged, and an agent may not commit it
+        let c = campaign::create(
+            reg,
+            &new(
+                "mixed",
+                &q,
+                &adj,
+                Items::Stacks(vec![ids[1]]),
+                2,
+                "decision",
+            ),
+        )
+        .unwrap();
+        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(3))
+            .unwrap()
+            .unwrap();
+        campaign::answer(reg, &give(a.assignment.id, "anna@lab", "brain"), &at(3)).unwrap();
+        let a = campaign::claim(reg, c.id, "bp-1@lab", Role::Rater, &at(3))
+            .unwrap()
+            .unwrap();
+        campaign::answer(reg, &as_model(a.assignment.id, "bp-1@lab"), &at(3)).unwrap();
+        let closed = close(reg, c.id, "cleo@lab", "person", 4);
+        let mixed = closed.decisions[0];
+        let (kind, actor, m, staged, open) = decision(reg, mixed);
+        assert_eq!(
+            (kind.as_str(), actor.as_str()),
+            ("person", "cleo@lab"),
+            "{name}"
+        );
+        assert_eq!(m, None, "{name}");
+        assert!(staged && open, "{name}: a model answered, so it is staged");
+        let e = nils_registry::review::commit_as(reg, Some(mixed), true, "bot@lab", "agent")
+            .unwrap_err();
+        assert!(e.to_string().contains("R6"), "{name}: {e}");
+        nils_registry::review::commit_as(reg, Some(mixed), true, "cleo@lab", "person").unwrap();
+
+        // two persons, closed by an agent: staged
+        let c = campaign::create(
+            reg,
+            &new(
+                "by-agent",
+                &q,
+                &adj,
+                Items::Stacks(vec![ids[2]]),
+                2,
+                "decision",
+            ),
+        )
+        .unwrap();
+        for who in ["anna@lab", "bo@lab"] {
+            let a = campaign::claim(reg, c.id, who, Role::Rater, &at(5))
+                .unwrap()
+                .unwrap();
+            campaign::answer(reg, &give(a.assignment.id, who, "brain"), &at(5)).unwrap();
+        }
+        let closed = close(reg, c.id, "helper@lab", "agent", 6);
+        let (kind, _, _, staged, open) = decision(reg, closed.decisions[0]);
+        assert_eq!(kind, "agent", "{name}");
+        assert!(staged && open, "{name}: an agent's close is staged");
+
+        // two persons, closed by a person: in force, as before
+        let c = campaign::create(
+            reg,
+            &new(
+                "people",
+                &q,
+                &adj,
+                Items::Stacks(vec![ids[3]]),
+                2,
+                "decision",
+            ),
+        )
+        .unwrap();
+        for who in ["anna@lab", "bo@lab"] {
+            let a = campaign::claim(reg, c.id, who, Role::Rater, &at(7))
+                .unwrap()
+                .unwrap();
+            campaign::answer(reg, &give(a.assignment.id, who, "brain"), &at(7)).unwrap();
+        }
+        let closed = close(reg, c.id, "cleo@lab", "person", 8);
+        assert!(!closed.staged, "{name}");
+        let (kind, _, _, staged, _) = decision(reg, closed.decisions[0]);
+        assert_eq!(kind, "person", "{name}");
+        assert!(!staged, "{name}: in force");
+    }
+}

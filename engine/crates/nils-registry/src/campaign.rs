@@ -2528,6 +2528,9 @@ pub struct Closed {
     pub unresolved: i64,
     /// Items a decision could not be written for, with why.
     pub refused: Vec<(i64, String)>,
+    /// Whether it staged anything: every decision of a campaign that closes
+    /// into `stage`, and any a model's answer settled or an agent or a
+    /// model closed (record 42 R6).
     pub staged: bool,
     pub agreement: Value,
 }
@@ -2551,6 +2554,12 @@ impl Closed {
 /// staged; into a person's pick; or into nothing, the review item closed
 /// with the outcome. Every answer stays. The rest are left unresolved,
 /// their leases ended, and the campaign is closed.
+///
+/// Record 42 R6: a decision goes in force as it closes only when the
+/// answers behind it and the closer are all persons. An item a model's
+/// answer settled is staged, and keeps the model as its author when that
+/// model's answers were all there was; an agent's or a model's close is
+/// staged whoever rated. A person commits them.
 pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Closed, Error> {
     let c = get(registry.store(), cl.campaign)?
         .ok_or_else(|| Error::NotFound(format!("no campaign {}", cl.campaign)))?;
@@ -2559,10 +2568,8 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
     }
     let question = c.question()?;
     let staged = c.closes_into == "stage";
-    let mut out = Closed {
-        staged,
-        ..Closed::default()
-    };
+    let mut out = Closed::default();
+    let mut staged_ones: Vec<i64> = Vec::new();
     let all = items(registry.store(), c.id)?;
     for it in &all {
         if !matches!(it.state.as_str(), "agreed" | "adjudicated") {
@@ -2582,11 +2589,53 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
                 c.name, it.position
             ),
         };
-        // the author of what the item came to: the adjudicator where there
-        // was one, else the principal closing it, each as verified
+        // The answers the outcome is: the adjudicator's, or the raters' who
+        // agreed.
+        let settled: BTreeSet<i64> = it.outcome["answers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_i64)
+            .collect();
+        let behind: Vec<&Answer> = answers.iter().filter(|a| settled.contains(&a.id)).collect();
+        let models: BTreeSet<i64> = behind.iter().filter_map(|a| a.model_id).collect();
+        // The author of what the item came to: the adjudicator where there
+        // was one; one model where every answer behind it was that model's
+        // (record 42 R6: it keeps the model as author); else the principal
+        // closing it. Each is as verified.
+        let one_model = !behind.is_empty()
+            && models.len() == 1
+            && behind
+                .iter()
+                .all(|a| a.author_kind == "model" && a.model_id.is_some());
         let (who, kind, model) = match adjudicator {
             Some(a) => (a.principal.clone(), a.author_kind.clone(), a.model_id),
+            None if one_model => (
+                behind[0].principal.clone(),
+                "model".to_string(),
+                models.first().copied(),
+            ),
             None => (cl.who.to_string(), cl.author_kind.to_string(), cl.model),
+        };
+        // R6: a model's answer is evidence until a person commits it, so an
+        // item a model's answer settled is staged; so is anything an agent
+        // or a model closes, or authors, whoever rated. Only raters and a
+        // closer who are all persons put an item in force as it closes.
+        let persons_only = cl.author_kind == "person"
+            && kind == "person"
+            && behind.iter().all(|a| a.author_kind == "person");
+        let stage = staged || !persons_only;
+        let path = if models.is_empty() {
+            path
+        } else {
+            format!(
+                "{path}; model(s) {} answered",
+                models
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         };
         match c.closes_into.as_str() {
             "decision" | "stage" => {
@@ -2610,7 +2659,7 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
                             version: None,
                             model,
                         },
-                        stage: staged,
+                        stage,
                         why: Some(&path),
                         campaign: Some(c.id),
                     },
@@ -2622,7 +2671,7 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
                             finish_review_item(
                                 store,
                                 it.review_item_id,
-                                if staged { "staged" } else { "accepted" },
+                                if applied.staged { "staged" } else { "accepted" },
                                 &who,
                                 &json!({"campaign": c.id, "decision": applied.decision, "value": value}),
                                 Some(applied.decision),
@@ -2640,6 +2689,9 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
                             "id",
                             it.id,
                         )?;
+                        if applied.staged {
+                            staged_ones.push(applied.decision);
+                        }
                         out.decisions.push(applied.decision);
                         out.resolved += 1;
                     }
@@ -2665,11 +2717,23 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
                     continue;
                 };
                 // a pick is a person's (record 42 S3): an agent's or a
-                // model's answer is evidence, never a pick
+                // model's answer is evidence, never a pick, and a pick is
+                // written in force, so it is never staged (R6)
                 if kind != "person" {
                     out.refused.push((
                         it.id,
                         format!("a pick is a person's; {who} answered as a {kind}"),
+                    ));
+                    out.unresolved += 1;
+                    continue;
+                }
+                if !persons_only {
+                    out.refused.push((
+                        it.id,
+                        format!(
+                            "a pick is a person's and is written in force; a model answered item {}, or {} closes as a {}: a person adjudicates it or closes the campaign",
+                            it.position, cl.who, cl.author_kind
+                        ),
                     ));
                     out.unresolved += 1;
                     continue;
@@ -2757,14 +2821,15 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
     // registry moved on, by the close's own later writes; what the person
     // closing looked at is the campaign, so every one carries the epoch
     // the close left.
-    if staged && !out.decisions.is_empty() {
+    out.staged = staged || !staged_ones.is_empty();
+    if !staged_ones.is_empty() {
         let epoch = registry.meta().epoch;
         let store = registry.store();
         store.update_by_ids(
             table("decision"),
             &[("epoch_staged", Param::Int(epoch))],
             "id",
-            &out.decisions,
+            &staged_ones,
         )?;
     }
     out.agreement = agreement(registry.store(), c.id)?;
