@@ -1394,6 +1394,7 @@ paths:
   /api/label-sets:
     get:
       summary: Every label set, newest first (record 42 S7; campaigns:see or review:see)
+      description: "Each set as GET /api/label-sets/{id} names it, without its files. Record 48 R2: `training` is read under the seals in force, at this door and the set's own alike: a set written while its sample was sealed keeps `sealed` true as history and says `allowed` once a certificate unseals the sample."
       responses:
         "200": {description: "{count, label_sets}"}
     post:

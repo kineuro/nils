@@ -855,7 +855,14 @@ pub(crate) fn route(
             }
             ["api", "label-sets"] if get => {
                 let list = labels::list(registry.store()).map_err(labels_err)?;
-                let out: Vec<Value> = list.iter().map(LabelSet::as_json).collect();
+                let out: Vec<Value> = list
+                    .iter()
+                    .map(|set| {
+                        let mut v = set.as_json();
+                        training_now(registry.store(), set, &mut v);
+                        v
+                    })
+                    .collect();
                 Ok(Reply::ok(json!({"count": out.len(), "label_sets": out})))
             }
             ["api", "label-sets"] if post => {
@@ -1002,13 +1009,7 @@ pub(crate) fn route(
                     })
                 });
                 let mut v = set_json(&set, files);
-                // record 48 R2: whether it trains now, under the seals in
-                // force; a set written sealed trains once its sample is
-                // unsealed by a certificate
-                if set.sealed && labels::usable_for_training(registry.store(), set.id).is_ok() {
-                    v["training"] =
-                        json!("allowed: its sample was unsealed by a certificate (record 48 R2)");
-                }
+                training_now(registry.store(), &set, &mut v);
                 Ok(Reply::ok(v))
             }
             ["api", "decisions", "commit"] if post => {
@@ -1105,6 +1106,15 @@ pub(crate) fn route(
             )),
         }
     })())
+}
+
+/// Record 48 R2: whether a set trains now, under the seals in force: a set
+/// written while its sample was sealed trains once a certificate unseals
+/// the sample. One reading for the list door and the set's own door.
+fn training_now(store: &mut Store, set: &LabelSet, v: &mut Value) {
+    if set.sealed && labels::usable_for_training(store, set.id).is_ok() {
+        v["training"] = json!("allowed: its sample was unsealed by a certificate (record 48 R2)");
+    }
 }
 
 /// Record 40 R3: whether a set is sealed is the registry's finding, from

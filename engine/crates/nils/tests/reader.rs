@@ -477,6 +477,34 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
         CURATOR,
     );
     assert_eq!(training["sealed"], false, "{training}");
+    // a set written while its sample is sealed trains nothing, and says so
+    // at the list door and the set's own door alike
+    let drawn = server.ok(
+        "POST",
+        "/api/campaigns/bases/export",
+        Some(json!({"of": "answers", "name": "drawn"})),
+        CURATOR,
+    );
+    assert_eq!(drawn["sealed"], true, "{drawn}");
+    let training_of = |server: &Server| {
+        let one = server.ok(
+            "GET",
+            &format!("/api/label-sets/{}", drawn["id"]),
+            None,
+            CURATOR,
+        );
+        let list = server.ok("GET", "/api/label-sets", None, CURATOR);
+        let listed = list["label_sets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == drawn["id"])
+            .unwrap()
+            .clone();
+        assert_eq!(one["training"], listed["training"], "{one} {listed}");
+        listed["training"].as_str().unwrap().to_string()
+    };
+    assert!(training_of(&server).starts_with("refused"));
     let sample = format!("handle:{handle}");
     let (ok, _, _) = cli(
         &home,
@@ -522,6 +550,7 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     assert!(done["stacks"].as_i64().unwrap() >= 4, "{done}");
     let open = server.ok("GET", "/api/campaigns/bases/batches", None, BO);
     assert_eq!(open["sealed"], 0, "{open}");
+    assert!(training_of(&server).starts_with("allowed"));
     // the development labels at the keyboard: every person's decision in
     // force, nothing sealed now
     let (ok, stdout, err) = cli(
