@@ -98,7 +98,7 @@ rules:
           all:
             - {axis: construct, is: InPhase}
             - {axis: construct, is: OutPhase}
-            - not: {any: [{axis: construct, is: Water}, {axis: construct, is: Fat}, {axis: construct, is: FatFraction}]}
+            - not: {any: [{axis: construct, is: Water}, {axis: construct, is: Fat}]}
         cite: 'in-phase and out-of-phase without a Dixon output'
         source: construct
     set: {directory_type: fmap}
@@ -197,7 +197,6 @@ rules:
           any:
             - {axis: construct, is: Water}
             - {axis: construct, is: Fat}
-            - {axis: construct, is: FatFraction}
         cite: 'a Dixon output'
         source: construct
     set: {directory_type: anat}

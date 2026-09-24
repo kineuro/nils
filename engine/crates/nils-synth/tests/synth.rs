@@ -158,6 +158,33 @@ fn the_same_seed_builds_the_same_registry_on_every_backend() {
         assert!(m.counts.memberships_closed > 0);
         assert!(m.counts.dispositions["scanner_derived"] > 0);
         assert!(m.counts.dispositions["scout"] > 0);
+        // record 35: stacks the pack ruled out, written last, so that the
+        // ask gate has one to leave out
+        let excluded = m.counts.dispositions["excluded"] as i64;
+        assert!(excluded > 0, "{}", l.name);
+        assert_eq!(
+            count(
+                &mut l.registry,
+                "classification_axis",
+                " WHERE axis = 'disposition' AND value = 'excluded'"
+            ),
+            excluded,
+            "{}",
+            l.name
+        );
+        assert_eq!(
+            count(
+                &mut l.registry,
+                "classification_axis",
+                &format!(
+                    " WHERE axis = 'disposition' AND value = 'excluded' AND stack_id > {}",
+                    m.counts.stacks as i64 - excluded
+                )
+            ),
+            excluded,
+            "the ruled-out stacks are the last written: {}",
+            l.name
+        );
         // a second build into the same registry is refused
         assert!(build(&mut l.registry, &plan).is_err(), "{}", l.name);
         // the epoch moved

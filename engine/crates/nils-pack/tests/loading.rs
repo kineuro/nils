@@ -420,6 +420,89 @@ rules:
     assert!(e.contains("a rule set decides one phase"), "{e}");
 }
 
+/// Record 41: a longhand rule's `requires` was read by nothing, so the rule
+/// fired where its author said it must not. It gates the rule now, as it
+/// gates a value of an axis file.
+#[test]
+fn a_longhand_rule_is_gated_by_its_requires() {
+    let d = phased();
+    d.file(
+        "rules/kind.yml",
+        "\
+rule_set: kind
+decides: [kind]
+tiers: {stated: 0.9}
+order: [gated, otherwise]
+rules:
+  gated:
+    requires: {not: is_original}
+    clauses: [{flag: is_original, tier: stated}]
+    set: {kind: a}
+  otherwise:
+    clauses: [{when: true, cite: anything, source: none}]
+    set: {kind: b}
+",
+    );
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    let mut stack = nils_pack::stack::Stack::new();
+    stack
+        .set(
+            "image_type",
+            nils_pack::stack::Value::Text(Some("ORIGINAL\\PRIMARY")),
+        )
+        .unwrap();
+    let verdict = nils_pack::eval::Evaluated::new(&pack, &stack).classify();
+    assert_eq!(
+        verdict.stored("kind"),
+        "b",
+        "the clause held and the gate did not"
+    );
+}
+
+#[test]
+fn a_key_a_longhand_rule_does_not_have_is_refused_rather_than_ignored() {
+    let d = phased();
+    d.file(
+        "rules/kind.yml",
+        "\
+rule_set: kind
+decides: [kind]
+tiers: {stated: 0.9}
+order: [original]
+rules:
+  original:
+    require: {not: is_original}
+    clauses: [{flag: is_original, tier: stated}]
+    set: {kind: a}
+",
+    );
+    let e = refusal(&d);
+    assert!(e.contains("rules.original.require"), "{e}");
+    assert!(e.contains("is not a key of a rule"), "{e}");
+    assert!(e.contains("kind.yml"), "{e}");
+}
+
+#[test]
+fn a_longhand_rule_may_not_require_what_is_decided_after_the_passes() {
+    let d = phased();
+    d.file(
+        "rules/kind.yml",
+        "\
+rule_set: kind
+decides: [kind]
+tiers: {stated: 0.9}
+order: [original]
+rules:
+  original:
+    requires: {axis: disposition, is: keep}
+    clauses: [{flag: is_original, tier: stated}]
+    set: {kind: a}
+",
+    );
+    let e = refusal(&d);
+    assert!(e.contains("decided after the passes"), "{e}");
+}
+
 const PRIVATE: &str = "\
 private:
   coverage: [a test vendor]

@@ -29,6 +29,7 @@ order:
   - workstation_reformat
   - derived_construct
   - derived_provenance
+  - scanner_computed
 
 rules:
 
@@ -146,4 +147,17 @@ rules:
       - {when: {axis: provenance, is: SWIRecon}, cite: SWIRecon, source: provenance}
       - {when: {axis: provenance, is: STAGE}, cite: STAGE, source: provenance}
       - {when: {axis: provenance, is: SubtractionDerived}, cite: SubtractionDerived, source: provenance}
+    set: {disposition: scanner_derived, convertible: 'yes'}
+
+  # What the scanner computed from images it had just taken and wrote with
+  # no construct or provenance of its own to say so, read from the image
+  # type (record 41): the motion-corrected copy of a run (`MOCO`, which
+  # Siemens writes on an ORIGINAL image), and a subtraction (`SUB`), which is
+  # what the perfusion-weighted image of an ASL series is, the label minus
+  # the control. Both are switched on in the console's printouts and neither
+  # is the acquisition.
+  scanner_computed:
+    clauses:
+      - {flag: has_moco, tier: stated}
+      - {flag: is_subtraction, tier: stated}
     set: {disposition: scanner_derived, convertible: 'yes'}

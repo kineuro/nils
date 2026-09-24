@@ -1728,3 +1728,111 @@ fn a_zero_echo_time_does_not_vote_itself_a_base_from_its_neighbours() {
         );
     }
 }
+
+/// kineuro/nils#94: the text an unresolved axis was matched against. Stacks
+/// whose description carries only a word the pack does not know leave axes
+/// unresolved; per axis the signals fold their search texts into distinct
+/// texts with the stacks each covers, the most common first, at most ten,
+/// and show a text only when it covers five stacks of three subjects. A
+/// text on one subject's stacks is withheld and counted, whatever its
+/// number of stacks.
+#[test]
+fn the_text_an_unresolved_axis_was_matched_against_is_sampled_bounded_and_withheld() {
+    use nils_classify::signals::{TEXT_MIN_STACKS, TEXT_MIN_SUBJECTS, TEXTS_MAX};
+    assert_eq!((TEXT_MIN_STACKS, TEXT_MIN_SUBJECTS, TEXTS_MAX), (5, 3, 10));
+    let dir = TempDir::new("classify-unresolved");
+    // (description, subject): the site's word on three subjects, six stacks,
+    // in two spellings; eleven more words on three subjects, five stacks
+    // each; one word on one subject's six stacks; one on two subjects' six
+    let mut planted: Vec<(String, &str)> = Vec::new();
+    for (k, who) in ["P1", "P2", "P3", "P1", "P2", "P3"].iter().enumerate() {
+        let word = if k % 2 == 0 { "zzzagent" } else { "ZZZAGENT" };
+        planted.push((word.to_string(), who));
+    }
+    for w in 0..11 {
+        for who in ["P1", "P2", "P3", "P1", "P2"] {
+            planted.push((format!("zzzword{w:02}"), who));
+        }
+    }
+    for _ in 0..6 {
+        planted.push(("zzzlone".to_string(), "P4"));
+    }
+    for who in ["P4", "P5", "P4", "P5", "P4", "P5"] {
+        planted.push(("zzzpair".to_string(), who));
+    }
+    for (i, (word, who)) in planted.iter().enumerate() {
+        let study = format!("S{who}");
+        let sop = format!("{study}.{i}.1");
+        let mut e = synth::minimal_mr(&study, &format!("{study}.{i}"), &sop);
+        e.push(elem(tags::PATIENT_ID, VR::LO, who));
+        e.extend([
+            elem(tags::SERIES_DESCRIPTION, VR::LO, word),
+            elem(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+        ]);
+        dir.file(
+            &format!("{who}/{i}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    let total = planted.len() as i64;
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    for lab in labs() {
+        let name = lab.name;
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        assert_eq!(
+            one(
+                &mut reg,
+                "SELECT COUNT(DISTINCT subject_id) FROM {stack_fingerprint}"
+            ),
+            5,
+            "{name}"
+        );
+        let scope = nils_classify::scope::Scope::parse("batch:1").unwrap();
+        let signals = nils_classify::signals::signals(reg.store(), &scope).unwrap();
+        let counted = signals["diagnostics"]["axis_unresolved"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{name}: no axis is unresolved: {signals}"));
+        let sampled =
+            nils_classify::signals::unresolved_texts(reg.store(), &pack, &scope, 2_000).unwrap();
+        assert_eq!(sampled["read"], total, "{name}: {sampled}");
+        assert_eq!(sampled["complete"], true, "{name}: {sampled}");
+        let axes = sampled["axes"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{name}: {sampled}"));
+        assert!(!axes.is_empty(), "{name}: {sampled}");
+        let mut stacks = 0;
+        for (axis, doc) in axes {
+            stacks += doc["stacks"].as_i64().unwrap();
+            let texts = doc["texts"].as_array().unwrap();
+            assert_eq!(doc["stacks"], total, "{name} {axis}: {doc}");
+            assert_eq!(doc["distinct"], 14, "{name} {axis}: {doc}");
+            assert_eq!(texts.len(), 10, "bounded: {name} {axis}: {doc}");
+            // folded: the two spellings of the site word are one text, first
+            assert!(
+                texts[0]["text"].as_str().unwrap().contains("zzzagent"),
+                "{name} {axis}: {doc}"
+            );
+            assert_eq!(texts[0]["stacks"], 6, "{name} {axis}: {doc}");
+            assert!(
+                texts[1..].iter().all(|t| t["stacks"] == 5),
+                "{name} {axis}: {doc}"
+            );
+            // one subject's word and two subjects' word are withheld, counted
+            let shown = doc.to_string();
+            assert!(!shown.contains("zzzlone"), "{name} {axis}: {doc}");
+            assert!(!shown.contains("zzzpair"), "{name} {axis}: {doc}");
+            assert_eq!(doc["withheld"]["texts"], 2, "{name} {axis}: {doc}");
+            assert_eq!(doc["withheld"]["stacks"], 12, "{name} {axis}: {doc}");
+        }
+        assert_eq!(
+            stacks, counted,
+            "the stacks the diagnostics count: {name}: {sampled} {signals}"
+        );
+        // a smaller sample says it did not read everything
+        let two = nils_classify::signals::unresolved_texts(reg.store(), &pack, &scope, 2).unwrap();
+        assert_eq!(two["read"], 2, "{name}: {two}");
+        assert_eq!(two["complete"], false, "{name}: {two}");
+    }
+}

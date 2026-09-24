@@ -1501,10 +1501,37 @@ fn routed(
             })?;
             let scope =
                 nils_classify::scope::Scope::parse(scope).map_err(|e| Reply::error(400, e))?;
-            Ok(Reply::ok(nils_classify::signals::signals(
-                registry.store(),
-                &scope,
-            )?))
+            let mut doc = nils_classify::signals::signals(registry.store(), &scope)?;
+            // kineuro/nils#94: the text each unresolved axis was matched
+            // against, under the pack the engine serves, over a bounded sample
+            let name = query
+                .get("pack")
+                .cloned()
+                .unwrap_or_else(|| doors.ask_pack.clone());
+            let found = doors.pack_dir.as_ref().and_then(|dir| {
+                crate::packs_in(dir)
+                    .ok()?
+                    .into_iter()
+                    .find(|p| p.file_name().is_some_and(|f| *f == *name))
+            });
+            doc["unresolved_texts"] = match found {
+                Some(dir) => {
+                    let pack = nils_pack::load(&dir, None)
+                        .map_err(|e| Reply::error(500, format!("the pack {name}: {e}")))?;
+                    let pack = with_adopted_overlay(registry, &dir, pack)?;
+                    let sample = nils_classify::rehearse::sample_of(
+                        query.get("sample").and_then(|s| s.parse().ok()),
+                    );
+                    nils_classify::signals::unresolved_texts(
+                        registry.store(),
+                        &pack,
+                        &scope,
+                        sample,
+                    )?
+                }
+                None => serde_json::Value::Null,
+            };
+            Ok(Reply::ok(doc))
         }
         ["api", "classify", "try"] if post => {
             let doc = json_body(body)?;
@@ -2972,6 +2999,9 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
         // record 26 §9: a promotion is a cohort act, which is Data work
         ("ask", Some("promote")) => ("data:work", Detail::Plain),
         ("ask", Some("run")) => ("query:work", Detail::Plain),
+        // record 41: the vote matrix is a read that writes a file where it
+        // is told, which no door queues
+        ("classify", Some("votes")) => return None,
         ("fingerprint" | "classify" | "pick" | "session" | "pyramid", _) => {
             ("pipelines:work", Detail::Plain)
         }
@@ -3051,6 +3081,34 @@ fn author_of(caller: &Caller) -> (&str, Option<&str>) {
 /// Wave 4c §6.6: an overlay from a body, rehearsed over a scope. The pack
 /// it amends is loaded bare and amended; the overlay's own cases are judged
 /// and their failure is part of the answer, not a refusal.
+/// The pack as the registry was classified under it: with the overlay the
+/// site adopted for it last, because adopting an overlay reclassifies under
+/// that overlay (`classify --overlay-id`). Without one, or where the adopted
+/// overlay no longer loads on the pack served, the pack as it is; the
+/// answer names the overlay it read, so the two are told apart.
+fn with_adopted_overlay(
+    registry: &mut Registry,
+    dir: &std::path::Path,
+    pack: nils_pack::Pack,
+) -> Result<nils_pack::Pack, Reply> {
+    let last = nils_registry::overlay::list(registry.store())?
+        .into_iter()
+        .filter(|o| o.status == nils_registry::overlay::ADOPTED && o.pack == pack.name)
+        .max_by(|a, b| {
+            a.decided_at
+                .cmp(&b.decided_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+    let Some(row) = last else {
+        return Ok(pack);
+    };
+    let adopted =
+        nils_pack::Overlay::parse(&format!("overlay {}", row.id), &row.document.to_string())
+            .ok()
+            .and_then(|o| nils_pack::load(dir, Some(&o)).ok());
+    Ok(adopted.unwrap_or(pack))
+}
+
 fn rehearsed(
     doors: &Doors,
     registry: &mut Registry,
@@ -4454,5 +4512,23 @@ mod token_tests {
         );
         // a piece before any entry stays on its own, and is refused as before
         assert_eq!(token_entries("reader,t1=bo@lab"), ["reader", "t1=bo@lab"]);
+    }
+}
+
+#[cfg(test)]
+mod verb_tests {
+    use super::verb_needs;
+
+    fn words(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn a_classify_is_queued_and_its_vote_matrix_is_not() {
+        // record 41: `classify votes --out FILE` writes where it is told,
+        // and a door never names a path of the host
+        assert!(verb_needs(&words("classify --pack mri")).is_some());
+        assert!(verb_needs(&words("classify")).is_some());
+        assert!(verb_needs(&words("classify votes --out x.tsv")).is_none());
     }
 }

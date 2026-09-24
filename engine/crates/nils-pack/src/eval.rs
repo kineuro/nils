@@ -201,7 +201,7 @@ impl Ctx for Evaluated<'_> {
 // decided (§6.3).
 
 use crate::rules::{AxisPhase, Clause, Rule, Tier, Which};
-use crate::verdict::{AxisVerdict, DIAGNOSTICS_MAX, Diagnostic, Evidence, Verdict};
+use crate::verdict::{AxisVerdict, DIAGNOSTICS_MAX, Diagnostic, Evidence, Verdict, Vote};
 
 /// The value index a set names: the one it wrote, or the one the rule set
 /// worked out for this stack.
@@ -225,12 +225,22 @@ struct Fired {
     /// the boilerplate, `anatomy_text` keeps it), so a citation without the
     /// text it came from cannot be compared with another rule's.
     text: Option<usize>,
+    /// The clause's place in its rule.
+    clause: usize,
 }
 
 impl Evaluated<'_> {
     /// The pack's verdict on this stack, with the evidence that made it.
     pub fn classify(&self) -> Verdict {
-        self.run(AxisPhase::Class, &[])
+        self.run(AxisPhase::Class, &[], false)
+    }
+
+    /// The same verdict, with every rule's vote beside it (record 41, S2):
+    /// each clause that held, of each rule whose set was entered, whether or
+    /// not the rule decided anything. The rest of the verdict is exactly
+    /// what [`Evaluated::classify`] says.
+    pub fn classify_with_votes(&self) -> Verdict {
+        self.run(AxisPhase::Class, &[], true)
     }
 
     /// What to do with this stack, from what the rules and the passes decided
@@ -241,10 +251,15 @@ impl Evaluated<'_> {
     /// recomputed because the passes have run since, and a disposition worked
     /// out from the rules alone would be worked out from a gap.
     pub fn dispose(&self, decided: &[Vec<String>]) -> Verdict {
-        self.run(AxisPhase::Disposition, decided)
+        self.run(AxisPhase::Disposition, decided, false)
     }
 
-    fn run(&self, phase: AxisPhase, seed: &[Vec<String>]) -> Verdict {
+    /// [`Evaluated::dispose`], with every rule's vote beside it.
+    pub fn dispose_with_votes(&self, decided: &[Vec<String>]) -> Verdict {
+        self.run(AxisPhase::Disposition, decided, true)
+    }
+
+    fn run(&self, phase: AxisPhase, seed: &[Vec<String>], voting: bool) -> Verdict {
         let pack = self.pack;
         let mut verdict = Verdict::default();
         {
@@ -304,14 +319,24 @@ impl Evaluated<'_> {
                 let Some(fired) = self.fire(rule) else {
                     continue;
                 };
+                // Record 41, S2: what the rule says, heard before it acts,
+                // so that a value's condition reads what the rule's own
+                // answer reads.
+                let held = if voting {
+                    self.held(rule, fired.clause)
+                } else {
+                    Vec::new()
+                };
                 if all_closed {
                     for sets in &rule.sets {
+                        self.vote(&mut verdict.votes, set, rule, &held, sets, &derived);
                         self.conflict(&mut verdict, set, rule, &fired, sets, &derived, &decided_by);
                     }
                     continue;
                 }
                 for sets in &rule.sets {
                     let axis = &pack.axes[sets.axis];
+                    self.vote(&mut verdict.votes, set, rule, &held, sets, &derived);
                     if closed[sets.axis] {
                         self.conflict(&mut verdict, set, rule, &fired, sets, &derived, &decided_by);
                         continue;
@@ -336,6 +361,7 @@ impl Evaluated<'_> {
                                 source: fired.source.clone(),
                                 matched: fired.matched.clone(),
                                 text: fired.text,
+                                clause: fired.clause,
                             },
                             set.name.clone(),
                             rule.id.clone(),
@@ -424,6 +450,20 @@ impl Evaluated<'_> {
                     // shadowed on every stack of a batch is a keyword that
                     // can never match.
                     self.shadowed(&mut verdict, set, ri, rule, &fired);
+                    // Record 41, S2: the rules the set never reached, heard
+                    // anyway. They read what the winner decided, as they
+                    // would have had they run.
+                    if voting {
+                        for later in &set.rules[ri + 1..] {
+                            let Some(also) = self.fire(later) else {
+                                continue;
+                            };
+                            let held = self.held(later, also.clause);
+                            for sets in &later.sets {
+                                self.vote(&mut verdict.votes, set, later, &held, sets, &derived);
+                            }
+                        }
+                    }
                     break;
                 }
             }
@@ -549,6 +589,61 @@ impl Evaluated<'_> {
             .map(|i| axis.stored(i).to_string())
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    /// The clauses of a rule that hold on this stack, from the first, which
+    /// [`Evaluated::fire`] found, to the last. The rule's `requires` has
+    /// already been read by then.
+    fn held(&self, rule: &Rule, first: usize) -> Vec<usize> {
+        let mut out = vec![first];
+        out.extend(
+            rule.clauses
+                .iter()
+                .enumerate()
+                .skip(first + 1)
+                .filter(|(_, c)| self.holds(c))
+                .map(|(i, _)| i),
+        );
+        out
+    }
+
+    /// Record 41, S2: one vote per clause that held and per value the
+    /// rule's `sets` entry gives this stack. A value whose own condition
+    /// fails is not said; a rule that decides the axis to nothing says the
+    /// empty value.
+    fn vote(
+        &self,
+        votes: &mut Vec<Vote>,
+        set: &crate::rules::RuleSet,
+        rule: &Rule,
+        held: &[usize],
+        sets: &crate::rules::Sets,
+        derived: &[Option<usize>],
+    ) {
+        if held.is_empty() {
+            return;
+        }
+        let axis = &self.pack.axes[sets.axis];
+        for v in &sets.values {
+            if let Some(w) = &v.when
+                && !w.eval(None, self)
+            {
+                continue;
+            }
+            let value = which(v.value, derived)
+                .map(|i| axis.stored(i).to_string())
+                .unwrap_or_default();
+            for &c in held {
+                votes.push(Vote {
+                    axis: axis.name.clone(),
+                    value: value.clone(),
+                    rule_set: set.name.clone(),
+                    rule: rule.id.clone(),
+                    clause: c,
+                    tier: rule.clauses[c].tier().name().to_string(),
+                });
+            }
+        }
     }
 
     /// Wave 4c §6.6, `axis_conflict`: a rule fired for an axis an earlier
@@ -683,7 +778,7 @@ impl Evaluated<'_> {
         {
             return None;
         }
-        for c in &rule.clauses {
+        for (clause, c) in rule.clauses.iter().enumerate() {
             match c {
                 Clause::Flag {
                     tier,
@@ -698,6 +793,7 @@ impl Evaluated<'_> {
                             source: "flags".into(),
                             matched: name.clone(),
                             text: None,
+                            clause,
                         });
                     }
                 }
@@ -720,6 +816,7 @@ impl Evaluated<'_> {
                             source: "text".into(),
                             matched: kw.clone(),
                             text: Some(*field),
+                            clause,
                         });
                     }
                 }
@@ -736,6 +833,7 @@ impl Evaluated<'_> {
                             source: "flags".into(),
                             matched: names[i].clone(),
                             text: None,
+                            clause,
                         });
                     }
                 }
@@ -752,6 +850,7 @@ impl Evaluated<'_> {
                             source: "flags".into(),
                             matched: names.join("+"),
                             text: None,
+                            clause,
                         });
                     }
                 }
@@ -769,6 +868,7 @@ impl Evaluated<'_> {
                             source: source.clone(),
                             matched: cite.clone(),
                             text: expr.one_text(),
+                            clause,
                         });
                     }
                 }
@@ -779,6 +879,23 @@ impl Evaluated<'_> {
 }
 
 impl Evaluated<'_> {
+    /// Whether one clause holds on this stack, by the test
+    /// [`Evaluated::fire`] applies to it.
+    fn holds(&self, c: &Clause) -> bool {
+        match c {
+            Clause::Flag { flag, .. } => self.flags[*flag],
+            Clause::Keywords { field, list, .. } => {
+                let text = <Self as Ctx>::text(self, *field).to_lowercase();
+                !text.is_empty() && list.iter().any(|k| text.contains(&k.to_lowercase()))
+            }
+            Clause::AnyFlag { flags, .. } => flags.iter().any(|f| self.flags[*f]),
+            Clause::Combination { flags, .. } => {
+                !flags.is_empty() && flags.iter().all(|f| self.flags[*f])
+            }
+            Clause::When { expr, .. } => expr.eval(None, self),
+        }
+    }
+
     /// The text the pack derived, by the name it published it under.
     pub fn derived_text(&self, name: &str) -> Option<&str> {
         let i = self.pack.derived.iter().position(|d| d.into == name)?;

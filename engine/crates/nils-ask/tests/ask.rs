@@ -761,3 +761,181 @@ fn collect_refs(v: &Value, out: &mut BTreeSet<String>) {
         _ => {}
     }
 }
+
+/// kineuro/nils#98: YAML is read under the 1.2 core booleans, so a binding
+/// named `n` (or `y`, `yes`, `no`, `on`, `off`) is a name in an option, and
+/// a name written `true` or `false` is refused in words that say it was
+/// read as a boolean, at the clause's path.
+#[test]
+fn yaml_reads_a_bare_n_as_a_name_and_says_when_a_name_was_read_as_a_boolean() {
+    let text = |name: &str| {
+        format!(
+            r#"
+ast_version: 1
+sets:
+  people: {{grain: subject}}
+  by_sex:
+    grain: group
+    group: {{of: people, by: [["field", {{}}, "sex"]]}}
+    bind:
+      {name}:     ["count", {{set: people}}]
+      share: ["share", {{of: {name}, over: people}}]
+out: {{set: by_sex, level: aggregate, columns: [["field", {{}}, "sex"], ["field", {{}}, "share"]]}}
+"#
+        )
+    };
+    for name in ["n", "y", "yes", "no", "on", "off", "N", "Yes"] {
+        let v = nils_ask::read(&text(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            v["sets"]["by_sex"]["bind"]["share"][1]["of"],
+            json!(name),
+            "{name}"
+        );
+        assert!(v["sets"]["by_sex"]["bind"][name].is_array(), "{name}: {v}");
+        accepted(v);
+    }
+    // true and false stay booleans, and the refusal says so
+    let v = nils_ask::read(&text("true").replace("true:", "t:")).unwrap();
+    assert_eq!(v["sets"]["by_sex"]["bind"]["share"][1]["of"], json!(true));
+    let issues = refused(v);
+    let hit = issues
+        .iter()
+        .find(|i| i.path == "sets.by_sex.bind.share")
+        .unwrap_or_else(|| panic!("{issues:?}"));
+    assert!(
+        hit.message.contains("read as the boolean true"),
+        "{}",
+        hit.message
+    );
+    assert!(hit.next.contains("quotes"), "{}", hit.next);
+    // the same on a measure of out
+    let issues = refused(json!({
+        "ast_version": 1,
+        "sets": {"people": {"grain": "subject"}},
+        "out": {"set": "people", "level": "record", "columns": [["field", {}, "sex"]],
+                "measures": [{"share": {"of": false, "over": "people"}}]}
+    }));
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.path == "out.measures[0]" && i.message.contains("read as the boolean false")),
+        "{issues:?}"
+    );
+}
+
+/// Under the 1.2 booleans a `no`, `yes`, `on` or `off` is text, so a
+/// boolean option written that way must be refused at its path rather than
+/// read as its default (`adjacent: no` would otherwise mean adjacent).
+#[test]
+fn a_boolean_option_written_as_yes_or_no_is_refused_at_its_path() {
+    let yardstick = fixture("yardstick");
+    let refused_text = |text: &str| -> Vec<nils_ask::Issue> {
+        refused(nils_ask::read(text).unwrap_or_else(|e| panic!("{e}")))
+    };
+    let says_true_or_false = |issues: &[nils_ask::Issue], path: &str, key: &str| {
+        let hit = issues
+            .iter()
+            .find(|i| i.path == path && i.message.contains(key))
+            .unwrap_or_else(|| panic!("{path} {key}: {issues:?}"));
+        assert!(
+            hit.next.contains("true") && hit.next.contains("false"),
+            "{}",
+            hit.next
+        );
+    };
+    // change's adjacent
+    for word in ["no", "yes", "off", "\"false\"", "0"] {
+        let text = yardstick.replace("adjacent: true", &format!("adjacent: {word}"));
+        assert_ne!(text, yardstick);
+        says_true_or_false(
+            &refused_text(&text),
+            "sets.converted.bind.transition",
+            "adjacent",
+        );
+    }
+    // a comparison's strict
+    let text = yardstick.replace(
+        r#"[">",  {}, ["field", {}, "first"], ["field", {}, "converted.transition.to_date"]]"#,
+        r#"[">",  {strict: yes}, ["field", {}, "first"], ["field", {}, "converted.transition.to_date"]]"#,
+    );
+    assert_ne!(text, yardstick);
+    let issues = refused_text(&text);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.path.starts_with("sets.followups.where") && i.message.contains("strict")),
+        "{issues:?}"
+    );
+    let hit = issues
+        .iter()
+        .find(|i| i.message.contains("strict"))
+        .unwrap();
+    assert!(
+        hit.next.contains("true") && hit.next.contains("false"),
+        "{}",
+        hit.next
+    );
+    // round's key
+    let issues = refused(json!({
+        "ast_version": 1,
+        "sets": {"t": {"grain": "stack",
+                        "bind": {"te": ["round", {"key": "yes"}, ["field", {}, "echo_time"], 1]}}},
+        "out": {"set": "t", "level": "record", "columns": [["field", {}, "te"]]}
+    }));
+    says_true_or_false(&issues, "sets.t.bind.te", "key");
+    // true and false are still accepted
+    accepted(nils_ask::read(&yardstick.replace("adjacent: true", "adjacent: false")).unwrap());
+    // a pinned handle's pin
+    let e = nils_ask::parse(&yardstick.replacen(
+        "grain: subject",
+        "grain: subject\n    from: {handle: h1, pin: no}",
+        1,
+    ))
+    .expect_err("pin: no is not a boolean");
+    assert!(e.to_string().contains("pin"), "{e}");
+}
+
+/// kineuro/nils#101: a list of literals in an argument is a list, not a
+/// clause without its options map. Repair leaves an inline list whose first
+/// element is not an op of the language as it was written, and still
+/// repairs a ref written without its options inside the same clause.
+#[test]
+fn repair_leaves_an_inline_list_of_literals_a_list() {
+    let text = r#"
+ast_version: 1
+sets:
+  scope: {grain: cohort, where: [["in", {}, ["field", {}, "name"], ["ms-cohort-a", "ms-cohort-b"]]]}
+  people: {grain: subject, of: scope, where: [["in", ["field", "sex"], ["F", "M"]]]}
+out: {set: people, level: count}
+"#;
+    let (ask, repairs) = parse_repaired(text).unwrap();
+    assert!(
+        !repairs.iter().any(|r| r.path.starts_with("sets.scope")),
+        "an inline list is not a clause: {repairs:?}"
+    );
+    let clause = &ask.sets["scope"].where_[0];
+    assert_eq!(clause.op, "in");
+    match &clause.args[1] {
+        nils_ask::ast::Arg::List(items) => {
+            let texts: Vec<&str> = items.iter().filter_map(|a| a.as_text()).collect();
+            assert_eq!(texts, vec!["ms-cohort-a", "ms-cohort-b"]);
+        }
+        other => panic!("not a list: {other:?}"),
+    }
+    // the ref inside the second set is still repaired, its list left alone
+    let people = &ask.sets["people"].where_[0];
+    match (&people.args[0], &people.args[1]) {
+        (nils_ask::ast::Arg::Clause(f), nils_ask::ast::Arg::List(items)) => {
+            assert_eq!(f.ref_name(), Some("sex"));
+            assert_eq!(items.len(), 2);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        repairs
+            .iter()
+            .any(|r| r.path == "sets.people.where[0][2]" && r.what.contains("options map of field")),
+        "{repairs:?}"
+    );
+    accepted(serde_json::to_value(&ask).unwrap());
+}

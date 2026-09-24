@@ -62,12 +62,20 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Read a document as JSON, else as YAML, into a JSON value.
+///
+/// YAML is read under the 1.2 core schema's booleans: only `true` and
+/// `false` are booleans, and a plain `n`, `y`, `yes`, `no`, `on` or `off`
+/// is the text it says (kineuro/nils#98). A person, and a small model,
+/// names a count `n` more often than anything else, and under the 1.1
+/// rules `{of: n}` named no binding at all.
 pub fn read(text: &str) -> Result<Value, Error> {
     let trimmed = text.trim_start();
     if trimmed.starts_with('{') {
         return serde_json::from_str(text).map_err(|e| Error::Parse(e.to_string()));
     }
-    serde_saphyr::from_str::<Value>(text).map_err(|e| Error::Parse(e.to_string()))
+    let options = serde_saphyr::options! { strict_booleans: true };
+    serde_saphyr::from_str_with_options::<Value>(text, options)
+        .map_err(|e| Error::Parse(e.to_string()))
 }
 
 /// A document parsed strictly: no repair, unknown keys refused.

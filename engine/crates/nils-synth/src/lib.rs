@@ -13,7 +13,9 @@
 //! exact comparability level and protocols that differ at every level,
 //! cohorts with closed intervals, and the yardstick's positive cases and its
 //! named negatives, one defect each, so that a funnel can name the set where
-//! each falls out. The manifest returned says what was planted.
+//! each falls out, and one background subject in six a stack the pack
+//! ruled out (record 35), so that a question over stacks has something to
+//! leave out. The manifest returned says what was planted.
 
 use std::collections::BTreeMap;
 
@@ -294,6 +296,23 @@ const LOCALIZER: Protocol = Protocol {
     instances: 9,
     field: 3.0,
 };
+
+/// A stack the pack ruled out (record 35): the scanner's screen capture of
+/// the MPRAGE, which reads as the MPRAGE it shows on every axis but the
+/// disposition. A question about MPRAGE stacks leaves it out; a stack set
+/// that forgot the standing predicate `disposition != excluded` counts it.
+const RULED_OUT: Protocol = Protocol {
+    description: "t1_mprage_sag_iso_1.0_screen_capture",
+    disposition: "excluded",
+    instances: 1,
+    ..MPRAGE_10
+};
+
+/// Whether a subject's first study carries a ruled-out stack: one
+/// background subject in six, never a planted case of the yardstick.
+fn rules_out(i: usize) -> bool {
+    i >= 24 && (i - 24).is_multiple_of(6)
+}
 
 /// What a site scans at every session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1112,6 +1131,20 @@ fn write(
     )
     .returning(&["id"]);
 
+    let ins = Inserts {
+        series: series_insert,
+        series_mr: series_mr_insert,
+        stack: stack_insert,
+        fingerprint: fingerprint_insert,
+        classification: classification_insert,
+        axis: axis_insert,
+        batch,
+        job,
+        epoch,
+    };
+    // the studies that get a ruled-out stack, written after everyone else
+    let mut ruled_out: Vec<(i64, i64, Day, usize)> = Vec::new();
+
     let mut uid = 0u64;
     let mut next_uid = |what: &str| {
         uid += 1;
@@ -1271,140 +1304,19 @@ fn write(
                     vec![LOCALIZER, T2_TSE_2D]
                 };
                 for (n, proto) in protocols.iter().enumerate() {
-                    let series = one_id(
-                        store,
-                        &series_insert,
-                        vec![
-                            text(&next_uid("series")),
-                            Param::Int(study),
-                            Param::Int(subject),
-                            text("MR"),
-                            text(proto.description),
-                            text(proto.description),
-                            text(proto.technique),
-                            text(&iso(session.day)),
-                            Param::Int(proto.instances),
-                            Param::Int(1),
-                            Param::Int(batch),
-                        ],
-                    )?;
-                    manifest.counts.series += 1;
-                    store.insert(
-                        &series_mr_insert,
-                        &[vec![
-                            Param::Int(series),
-                            text(proto.acquisition_type),
-                            Param::Double(proto.repetition_time),
-                            Param::Double(proto.echo_time),
-                            opt_f(proto.inversion_time),
-                            Param::Double(proto.flip_angle),
-                            Param::Double(proto.field),
-                        ]],
-                    )?;
-                    let stack = one_id(
-                        store,
-                        &stack_insert,
-                        vec![
-                            Param::Int(series),
-                            Param::Int(0),
-                            text(&format!("synth-{n}")),
-                            text("MR"),
-                            text(proto.orientation),
-                            Param::Double(1.0),
-                            Param::Int(proto.instances),
-                            Param::Int(batch),
-                            Param::Double(proto.echo_time),
-                            Param::Double(proto.repetition_time),
-                            opt_f(proto.inversion_time),
-                            Param::Double(proto.flip_angle),
-                        ],
-                    )?;
-                    manifest.counts.stacks += 1;
-                    let text_all = format!(
-                        "{} {} {}",
-                        proto.description, proto.description, proto.technique
-                    );
-                    let spacing = format!("{}\\{}", proto.spacing, proto.spacing);
-                    let matrix = (240.0 / proto.spacing).round() as i64;
-                    store.insert(
-                        &fingerprint_insert,
-                        &[vec![
-                            Param::Int(stack),
-                            Param::Int(series),
-                            Param::Int(study),
-                            Param::Int(subject),
-                            text("MR"),
-                            text(proto.description),
-                            text(proto.description),
-                            text(&text_all),
-                            text(&proto.description.to_lowercase()),
-                            text(&proto.description.to_lowercase()),
-                            text(&text_all.to_lowercase()),
-                            Param::Double(proto.echo_time),
-                            Param::Double(proto.repetition_time),
-                            opt_f(proto.inversion_time),
-                            Param::Double(proto.flip_angle),
-                            Param::Double(proto.field),
-                            Param::Double(proto.thickness),
-                            Param::Double(proto.thickness),
-                            text(proto.acquisition_type),
-                            text(proto.orientation),
-                            Param::Double(1.0),
-                            Param::Int(proto.instances),
-                            Param::Int(0),
-                            Param::Int(1),
-                            Param::Int(matrix),
-                            Param::Int(matrix),
-                            text(&spacing),
-                            Param::Double(proto.spacing),
-                            Param::Double(proto.spacing),
-                            text("SYNTHETIC"),
-                            text("Model S"),
-                            text("SYN1"),
-                            Param::Double(proto.field),
-                            Param::Double(proto.field),
-                            text("T"),
-                            text(proto.acquisition_type),
-                            text("measured"),
-                            text(if proto.construct.is_some() {
-                                "derived"
-                            } else {
-                                "original"
-                            }),
-                            Param::Int(job),
-                            Param::Int(epoch),
-                        ]],
-                    )?;
-                    store.insert(
-                        &classification_insert,
-                        &[vec![
-                            Param::Int(stack),
-                            text("mri"),
-                            text("synthetic"),
-                            Param::Int(2),
-                            Param::Int(job),
-                            Param::Int(epoch),
-                            Param::Int(0),
-                        ]],
-                    )?;
-                    let mut axes: Vec<Vec<Param>> = vec![
-                        axis_row(stack, "base", proto.base),
-                        axis_row(stack, "technique", proto.technique),
-                        axis_row(stack, "disposition", proto.disposition),
-                        axis_row(stack, "body_part", "Brain"),
-                    ];
-                    if let Some(m) = proto.modifier {
-                        axes.push(axis_row(stack, "modifier", m));
-                    }
-                    if let Some(c) = proto.construct {
-                        axes.push(axis_row(stack, "construct", c));
-                    }
-                    store.insert(&axis_insert, &axes)?;
-                    *manifest
-                        .counts
-                        .dispositions
-                        .entry(proto.disposition.to_string())
-                        .or_insert(0) += 1;
+                    let at = At {
+                        subject,
+                        study,
+                        day: session.day,
+                        n,
+                        uid: next_uid("series"),
+                    };
+                    write_stack(store, &ins, &at, proto, manifest)?;
+                }
+                // Record 35: a ruled-out stack beside the first session's
+                // protocols, written after everyone else (see below)
+                if s == 0 && k == 0 && rules_out(i) {
+                    ruled_out.push((subject, study, session.day, protocols.len()));
                 }
             }
             // the scores near the session
@@ -1441,7 +1353,192 @@ fn write(
             manifest.cases.push(case.clone());
         }
     }
+
+    // Record 35: stacks the pack ruled out, so that a question over stacks
+    // has something to leave out and a gate fixture fails when the standing
+    // predicate is missing. Written last, so every row before them keeps
+    // the id and the UID it had.
+    for (subject, study, day, n) in ruled_out {
+        let at = At {
+            subject,
+            study,
+            day,
+            n,
+            uid: next_uid("series"),
+        };
+        write_stack(store, &ins, &at, &RULED_OUT, manifest)?;
+    }
     Ok(())
+}
+
+/// The inserts a stack is written with, and the batch, job and epoch every
+/// row of the synthetic registry carries.
+struct Inserts<'a> {
+    series: Insert<'a>,
+    series_mr: Insert<'a>,
+    stack: Insert<'a>,
+    fingerprint: Insert<'a>,
+    classification: Insert<'a>,
+    axis: Insert<'a>,
+    batch: i64,
+    job: i64,
+    epoch: i64,
+}
+
+/// Where one protocol's stack goes: its subject, its study, the session's
+/// day, its place among the study's series and its series UID.
+struct At {
+    subject: i64,
+    study: i64,
+    day: Day,
+    n: usize,
+    uid: String,
+}
+
+/// One protocol as a series with one stack, its fingerprint and the axes a
+/// classification gave it.
+fn write_stack(
+    store: &mut Store,
+    ins: &Inserts<'_>,
+    at: &At,
+    proto: &Protocol,
+    manifest: &mut Manifest,
+) -> Result<i64, Error> {
+    let series = one_id(
+        store,
+        &ins.series,
+        vec![
+            text(&at.uid),
+            Param::Int(at.study),
+            Param::Int(at.subject),
+            text("MR"),
+            text(proto.description),
+            text(proto.description),
+            text(proto.technique),
+            text(&iso(at.day)),
+            Param::Int(proto.instances),
+            Param::Int(1),
+            Param::Int(ins.batch),
+        ],
+    )?;
+    manifest.counts.series += 1;
+    store.insert(
+        &ins.series_mr,
+        &[vec![
+            Param::Int(series),
+            text(proto.acquisition_type),
+            Param::Double(proto.repetition_time),
+            Param::Double(proto.echo_time),
+            opt_f(proto.inversion_time),
+            Param::Double(proto.flip_angle),
+            Param::Double(proto.field),
+        ]],
+    )?;
+    let stack = one_id(
+        store,
+        &ins.stack,
+        vec![
+            Param::Int(series),
+            Param::Int(0),
+            text(&format!("synth-{}", at.n)),
+            text("MR"),
+            text(proto.orientation),
+            Param::Double(1.0),
+            Param::Int(proto.instances),
+            Param::Int(ins.batch),
+            Param::Double(proto.echo_time),
+            Param::Double(proto.repetition_time),
+            opt_f(proto.inversion_time),
+            Param::Double(proto.flip_angle),
+        ],
+    )?;
+    manifest.counts.stacks += 1;
+    let text_all = format!(
+        "{} {} {}",
+        proto.description, proto.description, proto.technique
+    );
+    let spacing = format!("{}\\{}", proto.spacing, proto.spacing);
+    let matrix = (240.0 / proto.spacing).round() as i64;
+    store.insert(
+        &ins.fingerprint,
+        &[vec![
+            Param::Int(stack),
+            Param::Int(series),
+            Param::Int(at.study),
+            Param::Int(at.subject),
+            text("MR"),
+            text(proto.description),
+            text(proto.description),
+            text(&text_all),
+            text(&proto.description.to_lowercase()),
+            text(&proto.description.to_lowercase()),
+            text(&text_all.to_lowercase()),
+            Param::Double(proto.echo_time),
+            Param::Double(proto.repetition_time),
+            opt_f(proto.inversion_time),
+            Param::Double(proto.flip_angle),
+            Param::Double(proto.field),
+            Param::Double(proto.thickness),
+            Param::Double(proto.thickness),
+            text(proto.acquisition_type),
+            text(proto.orientation),
+            Param::Double(1.0),
+            Param::Int(proto.instances),
+            Param::Int(0),
+            Param::Int(1),
+            Param::Int(matrix),
+            Param::Int(matrix),
+            text(&spacing),
+            Param::Double(proto.spacing),
+            Param::Double(proto.spacing),
+            text("SYNTHETIC"),
+            text("Model S"),
+            text("SYN1"),
+            Param::Double(proto.field),
+            Param::Double(proto.field),
+            text("T"),
+            text(proto.acquisition_type),
+            text("measured"),
+            text(if proto.construct.is_some() {
+                "derived"
+            } else {
+                "original"
+            }),
+            Param::Int(ins.job),
+            Param::Int(ins.epoch),
+        ]],
+    )?;
+    store.insert(
+        &ins.classification,
+        &[vec![
+            Param::Int(stack),
+            text("mri"),
+            text("synthetic"),
+            Param::Int(2),
+            Param::Int(ins.job),
+            Param::Int(ins.epoch),
+            Param::Int(0),
+        ]],
+    )?;
+    let mut axes: Vec<Vec<Param>> = vec![
+        axis_row(stack, "base", proto.base),
+        axis_row(stack, "technique", proto.technique),
+        axis_row(stack, "disposition", proto.disposition),
+        axis_row(stack, "body_part", "Brain"),
+    ];
+    if let Some(m) = proto.modifier {
+        axes.push(axis_row(stack, "modifier", m));
+    }
+    if let Some(c) = proto.construct {
+        axes.push(axis_row(stack, "construct", c));
+    }
+    store.insert(&ins.axis, &axes)?;
+    *manifest
+        .counts
+        .dispositions
+        .entry(proto.disposition.to_string())
+        .or_insert(0) += 1;
+    Ok(stack)
 }
 
 fn axis_row(stack: i64, axis: &str, value: &str) -> Vec<Param> {

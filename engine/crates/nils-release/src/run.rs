@@ -4170,4 +4170,31 @@ mod tests {
             policies.describe()
         );
     }
+
+    /// A sidecar keeps every number dcm2niix wrote, to the last digit: the
+    /// JSON is read and written back to add a field, and without
+    /// serde_json's `float_roundtrip` a 17-digit decimal came back an ulp
+    /// away from what the converter wrote.
+    #[test]
+    fn a_sidecar_keeps_a_seventeen_digit_decimal_exactly() {
+        let dir = TempDir::new("sidecar-float");
+        let path = dir.path().join("sub-01_T1w.json");
+        std::fs::write(
+            &path,
+            "{\"SliceTiming\": [0, 212.91890726713459, 479.60756426982596], \"EchoTime\": 0.0029}\n",
+        )
+        .unwrap();
+        add_to_sidecar(&path, "BodyPart", "BRAIN");
+        let text = std::fs::read_to_string(&path).unwrap();
+        for exact in ["212.91890726713459", "479.60756426982596", "0.0029"] {
+            assert!(text.contains(exact), "{exact} not kept: {text}");
+        }
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["BodyPart"], "BRAIN", "{text}");
+        assert_eq!(
+            doc["SliceTiming"][1].as_f64().unwrap().to_bits(),
+            212.918_907_267_134_59_f64.to_bits(),
+            "{text}"
+        );
+    }
 }

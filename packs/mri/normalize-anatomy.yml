@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# The anatomy text: the same six fields, folded and tokenized the same way,
-# with nothing dropped as boilerplate (spec section 6.4).
+# The anatomy text: the series' own five text fields, folded and tokenized
+# the same way as `search_text`, with nothing dropped as boilerplate (spec
+# section 6.4).
 #
 # `search_text` removes `brain` and `head` as noise, which is right for the
 # axes that tell techniques and constructs apart: a series description that
@@ -14,13 +15,19 @@
 # So the removals stay where they earn their keep and the body-part rules
 # read this instead: what a normalizer strips for one purpose does not
 # decide another.
+#
+# It holds the series' own words and not `BodyPartExamined`, which is
+# `stated_anatomy_text` (`normalize-stated-anatomy.yml`). The stated body
+# part is written from the exam's registration and not from the series: a
+# brain protocol run in an exam registered as a spine said spine on every
+# series, and a spinal series in an exam registered as a brain said brain.
+# So the two are read apart, the series' own words first (record 41).
 
 normalize: anatomy_text
 from:
   - text_series_description
   - text_protocol_name
   - text_sequence_name
-  - text_body_part
   - text_series_comments
   - text_image_comments
 

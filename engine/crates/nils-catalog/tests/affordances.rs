@@ -814,3 +814,44 @@ fn an_outdated_selection_gets_its_move() {
         );
     }
 }
+
+/// kineuro/nils#98: the draft door stores and runs a share whose
+/// numerator is a binding called `n`, written plain in YAML, as it does
+/// the same document written as JSON.
+#[test]
+fn the_draft_door_names_a_binding_called_n() {
+    for mut l in labs() {
+        let scope = Scope::default();
+        let scheme = Scheme::default();
+        let s = Setting {
+            names: &l.catalog,
+            scope: &scope,
+            scheme: &scheme,
+            principal: "author",
+            bounds: bounds(),
+            values_cap: 50,
+        };
+        let text = r#"
+ast_version: 1
+sets:
+  people: {grain: subject}
+  by_sex:
+    grain: group
+    group: {of: people, by: [["field", {}, "sex"]]}
+    bind:
+      n:     ["count", {set: people}]
+      share: ["share", {of: n, over: people}]
+out: {set: by_sex, level: aggregate, columns: [["field", {}, "sex"], ["field", {}, "n"], ["field", {}, "share"]]}
+"#;
+        let drafted = affordance::draft(&mut l.registry, text, &s, None).unwrap();
+        assert!(
+            drafted.diagnosis.valid,
+            "{}: {:?}",
+            l.name, drafted.diagnosis.issues
+        );
+        assert!(drafted.document.is_some(), "{}", l.name);
+        let (ask, _) = nils_ask::parse_repaired(text).unwrap();
+        let (_, answer) = common::run_ask(&mut l, ask);
+        assert!(answer.rows.len() >= 2, "{}: {:?}", l.name, answer.rows);
+    }
+}

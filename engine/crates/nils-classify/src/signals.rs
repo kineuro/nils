@@ -21,11 +21,13 @@
 //! reviewer; no row leaves, and the fingerprint fields shown are acquisition
 //! parameters, never identifiers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use nils_pack::{Evaluated, Pack};
 use nils_registry::store::{Error, Param, Store};
 use serde_json::{Value, json};
 
+use crate::classify::{scoped_select, subject_of, to_stack};
 use crate::scope::Scope;
 
 /// The fingerprint fields summarised for the overridden stacks.
@@ -228,6 +230,117 @@ pub fn signals(store: &mut Store, scope: &Scope) -> Result<Value, Error> {
         "shadowed_keywords": shadowed,
         "unused_overlay_terms": unused,
         "fields": fields,
+    }))
+}
+
+/// The most distinct search texts listed per axis (kineuro/nils#94).
+pub const TEXTS_MAX: usize = 10;
+
+/// The fewest stacks a search text must cover, inside the sampled scope,
+/// before the door shows it (kineuro/nils#94, Nima's ruling for record 41).
+pub const TEXT_MIN_STACKS: i64 = 5;
+
+/// The fewest distinct subjects those stacks must belong to, inside the
+/// sampled scope, before the door shows a search text.
+pub const TEXT_MIN_SUBJECTS: usize = 3;
+
+/// The text each unresolved axis was matched against (Wave 4c section
+/// 9.13, kineuro/nils#94): over a bounded sample of the stacks in scope,
+/// the pack's verdict on each, and per axis, for the stacks it leaves
+/// `axis_unresolved`, the pack's own normalised `search_text` folded into
+/// distinct texts with the number of stacks each covers, the most common
+/// first and at most [`TEXTS_MAX`]. That is the text a keyword is matched
+/// against, so a reviewer tuning the words reads the site's own word where
+/// the rules found none.
+///
+/// A text is shown only when it covers at least [`TEXT_MIN_STACKS`] stacks
+/// of at least [`TEXT_MIN_SUBJECTS`] distinct subjects in the sample. A
+/// series description can carry free text about one person, and a text
+/// only one or two people's stacks carry is theirs rather than the site's
+/// word; those are withheld, and the axis says how many texts and stacks
+/// it withheld. The same spirit as record 39's word allowlist for training
+/// (at least ten people and two scanners), lighter here because the door
+/// is a reviewer's and no model is trained on what it shows. Counts and
+/// texts only, never a stack; `sample` bounds the stacks read, and
+/// `complete` says whether it read them all.
+pub fn unresolved_texts(
+    store: &mut Store,
+    pack: &Pack,
+    scope: &Scope,
+    sample: usize,
+) -> Result<Value, Error> {
+    let sample = sample.clamp(1, crate::rehearse::SAMPLE_MAX);
+    // one past the bound, to say whether the sample read every stack
+    let (sql, params) = scoped_select(store, &pack.modality, scope, sample + 1);
+    let rows = store.query(&sql, &params)?;
+    let complete = rows.len() <= sample;
+    let read = rows.len().min(sample);
+    // axis -> text -> (stacks, subjects)
+    type Covered = (i64, BTreeSet<i64>);
+    let mut texts: BTreeMap<String, BTreeMap<String, Covered>> = BTreeMap::new();
+    for r in rows.iter().take(sample) {
+        let (_, stack, private) =
+            to_stack(r, false, pack).map_err(|e| Error::Message(e.to_string()))?;
+        // whose the stack is, for the subject threshold, from the sampled
+        // row itself rather than from every stack in scope
+        let subject = subject_of(r);
+        let evaluated = Evaluated::with_private(pack, &stack, private);
+        let verdict = evaluated.classify();
+        let text = evaluated.derived_text("search_text").unwrap_or_default();
+        let axes: BTreeSet<&str> = verdict
+            .diagnostics
+            .iter()
+            .filter(|d| d.kind == "axis_unresolved")
+            .map(|d| d.axis.as_str())
+            .collect();
+        for axis in axes {
+            let c = texts
+                .entry(axis.to_string())
+                .or_default()
+                .entry(text.to_string())
+                .or_default();
+            c.0 += 1;
+            c.1.insert(subject);
+        }
+    }
+    let axes: BTreeMap<String, Value> = texts
+        .into_iter()
+        .map(|(axis, by_text)| {
+            let stacks: i64 = by_text.values().map(|c| c.0).sum();
+            let distinct = by_text.len();
+            let (shown, withheld): (Vec<_>, Vec<_>) =
+                by_text.into_iter().partition(|(_, (n, subjects))| {
+                    *n >= TEXT_MIN_STACKS && subjects.len() >= TEXT_MIN_SUBJECTS
+                });
+            let withheld_stacks: i64 = withheld.iter().map(|(_, c)| c.0).sum();
+            let mut listed: Vec<(String, i64)> =
+                shown.into_iter().map(|(t, (n, _))| (t, n)).collect();
+            listed.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            listed.truncate(TEXTS_MAX);
+            let listed: Vec<Value> = listed
+                .into_iter()
+                .map(|(text, n)| json!({"text": text, "stacks": n}))
+                .collect();
+            (
+                axis,
+                json!({
+                    "stacks": stacks,
+                    "distinct": distinct,
+                    "texts": listed,
+                    "withheld": {"texts": withheld.len(), "stacks": withheld_stacks},
+                }),
+            )
+        })
+        .collect();
+    Ok(json!({
+        "pack": format!("{}@{}", pack.name, pack.version),
+        "overlay": pack.overlay,
+        "text": "search_text",
+        "sample": sample,
+        "read": read,
+        "complete": complete,
+        "shown_when": {"stacks": TEXT_MIN_STACKS, "subjects": TEXT_MIN_SUBJECTS},
+        "axes": axes,
     }))
 }
 

@@ -9,7 +9,7 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 0.2.0
+version: 0.3.0
 contract: 4
 modality: MR
 
@@ -19,12 +19,15 @@ flags:
   - flags.yml
 # The pack's own text: the twelve steps that turn the fingerprint's folded
 # fields into what a keyword is matched against (spec section 6.4). There are
-# two, because a word that is noise to one axis is the answer to another:
-# `search_text` drops the boilerplate, `anatomy_text` keeps every word, and
-# the body-part rules read the second.
+# three, because a word that is noise to one axis is the answer to another:
+# `search_text` drops the boilerplate, `anatomy_text` keeps every word of the
+# series' own names, and `stated_anatomy_text` is `BodyPartExamined` alone,
+# which the body-part rules read only where the series' own words and its
+# coil said nothing.
 normalize:
   - normalize.yml
   - normalize-anatomy.yml
+  - normalize-stated-anatomy.yml
 
 axes:
   # The order is the order the axes are decided in, and an axis may read one

@@ -70,6 +70,111 @@ pub struct Diagnostic {
     pub by_matched: String,
 }
 
+/// One witness on one stack (record 41, S2): a clause of a rule that held,
+/// and the value its rule says for one axis.
+///
+/// The evidence records what decided an axis, which is the first clause of
+/// the first rule that fired; a rule set that decides stops there, so the
+/// rules behind it and the clauses behind the one cited are never heard. A
+/// label model needs all of them, since a rule's accuracy cannot be
+/// estimated from the stacks where an earlier rule spoke over it. A vote is
+/// recorded wherever a rule set was entered, the rule's own condition held
+/// and one of its clauses held, whether or not the rule decided anything;
+/// it changes no verdict.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Vote {
+    pub axis: String,
+    /// The value as a row stores it, or the empty string where the rule
+    /// decides the axis to nothing.
+    pub value: String,
+    pub rule_set: String,
+    pub rule: String,
+    /// The clause's place in its rule, from 0: an axis file's value rule
+    /// has its exclusive flag, its words and its combination in that order.
+    pub clause: usize,
+    /// The clause's kind, as evidence names a tier.
+    pub tier: String,
+}
+
+/// Who may vote: one clause of one rule, for one axis its rule writes. A
+/// [`Vote`] is one of these holding on a stack, with a value. A voter is
+/// identified by where it sits (set, rule, clause, axis, tier); `restates`
+/// follows from that place, so equality and hashing leave it out and a
+/// vote can find its voter without knowing it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Voter {
+    pub rule_set: String,
+    pub rule: String,
+    pub clause: usize,
+    pub axis: String,
+    pub tier: String,
+    /// The clause only restates another axis ([`crate::Rule::restates`]):
+    /// an implication of the schema, which a label model must not count as
+    /// a second witness.
+    pub restates: bool,
+}
+
+impl PartialEq for Voter {
+    fn eq(&self, other: &Self) -> bool {
+        (
+            &self.rule_set,
+            &self.rule,
+            self.clause,
+            &self.axis,
+            &self.tier,
+        ) == (
+            &other.rule_set,
+            &other.rule,
+            other.clause,
+            &other.axis,
+            &other.tier,
+        )
+    }
+}
+
+impl Eq for Voter {}
+
+impl std::hash::Hash for Voter {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        (
+            &self.rule_set,
+            &self.rule,
+            self.clause,
+            &self.axis,
+            &self.tier,
+        )
+            .hash(h);
+    }
+}
+
+/// Every voter a pack has, in the order its rule sets, rules, clauses and
+/// the axes each rule writes are declared: what a vote can name, known before
+/// any stack is read, so that a store can number them once per pack.
+pub fn voters(pack: &crate::Pack) -> Vec<Voter> {
+    let mut out: Vec<Voter> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for set in &pack.rule_sets {
+        for rule in &set.rules {
+            for (clause, c) in rule.clauses.iter().enumerate() {
+                for sets in &rule.sets {
+                    let v = Voter {
+                        rule_set: set.name.clone(),
+                        rule: rule.id.clone(),
+                        clause,
+                        axis: pack.axes[sets.axis].name.clone(),
+                        tier: c.tier().name().to_string(),
+                        restates: rule.restates(clause),
+                    };
+                    if seen.insert(v.clone()) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The most diagnostics one verdict keeps. A stack that trips more than this
 /// is a question about the pack, and the count says so without the list.
 pub const DIAGNOSTICS_MAX: usize = 64;
@@ -88,6 +193,10 @@ pub struct Verdict {
     /// Wave 4c §6.6: what the evaluator noticed and did not act on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<Diagnostic>,
+    /// Record 41, S2: every clause that held, when the verdict was asked for
+    /// with its votes. Empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub votes: Vec<Vote>,
 }
 
 impl Verdict {

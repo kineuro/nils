@@ -1519,6 +1519,35 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
         "{signals}"
     );
     assert!(signals["diagnostics"].is_object(), "{signals}");
+    // kineuro/nils#94: the text each unresolved axis was matched against,
+    // folded and bounded, and the stacks it counts are the diagnostics'.
+    // Two stacks of one subject are under the showing threshold, so every
+    // text is withheld and counted.
+    let unresolved = &signals["unresolved_texts"];
+    assert_eq!(unresolved["read"], 2, "{signals}");
+    assert_eq!(unresolved["complete"], true, "{signals}");
+    assert_eq!(unresolved["text"], "search_text", "{signals}");
+    assert_eq!(
+        unresolved["shown_when"],
+        serde_json::json!({"stacks": 5, "subjects": 3}),
+        "{signals}"
+    );
+    let axes = unresolved["axes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{signals}"));
+    let mut stacks = 0;
+    for doc in axes.values() {
+        assert_eq!(doc["texts"], serde_json::json!([]), "{signals}");
+        assert_eq!(doc["withheld"]["stacks"], doc["stacks"], "{signals}");
+        stacks += doc["stacks"].as_i64().unwrap();
+    }
+    assert_eq!(
+        stacks,
+        signals["diagnostics"]["axis_unresolved"]
+            .as_i64()
+            .unwrap_or(0),
+        "{signals}"
+    );
     // record 26: the same by value, and the origins for the scope chips
     let by_value = signals["by_value"]["technique"]
         .as_object()
@@ -1702,6 +1731,44 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
             "{axis}: {still}"
         );
     }
+    // kineuro/nils#94 review: the texts the signals call unresolved are
+    // read under the pack as the registry was classified, with the adopted
+    // overlay, so the stack the site's word resolved is no longer counted
+    // unresolved, and the stacks it counts are still the diagnostics'.
+    let server = Server::start(
+        &home,
+        1,
+        &[
+            "--auth",
+            "token",
+            "--token",
+            "a-reviewer-token-of-len=rev@lab:reviewer",
+        ],
+        &[],
+    );
+    let (status, signals) =
+        server.request("GET", "/api/classify/signals?scope=batch:1", None, reviewer);
+    server.finish();
+    assert_eq!(status, 200, "{signals}");
+    let unresolved = &signals["unresolved_texts"];
+    assert_eq!(unresolved["overlay"], "site@1.0.0", "{signals}");
+    assert_eq!(
+        unresolved["axes"]["post_contrast"]["stacks"], 1,
+        "{signals}"
+    );
+    let counted: i64 = unresolved["axes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|d| d["stacks"].as_i64().unwrap())
+        .sum();
+    assert_eq!(
+        counted,
+        signals["diagnostics"]["axis_unresolved"]
+            .as_i64()
+            .unwrap_or(0),
+        "{signals}"
+    );
     let audited = run(
         &home,
         &["audit", "list", "--action", "overlay.adopt", "--json"],
@@ -4832,5 +4899,5 @@ fn a_list_on_an_axis_value_rehearses_adopts_and_is_named_on_the_pack() {
         None,
     );
     let classified: serde_json::Value = serde_json::from_str(&classified).unwrap();
-    assert_eq!(classified["pack"], "mri@0.2.0", "{classified}");
+    assert_eq!(classified["pack"], "mri@0.3.0", "{classified}");
 }

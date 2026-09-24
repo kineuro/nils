@@ -251,6 +251,8 @@ fn run_err(e: RunError) -> Reply {
         RunError::Selection(SelectionError::NotFound(n, v)) => {
             Reply::error(404, SelectionError::NotFound(n, v).to_string())
         }
+        // kineuro/nils#99: a measure that fails is the document's to change
+        RunError::Measure(m) => issues_reply(400, "the document is refused", &[m.issue()]),
         other => Reply::error(500, other.to_string()),
     }
 }

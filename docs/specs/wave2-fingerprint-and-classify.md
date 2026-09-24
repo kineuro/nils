@@ -405,7 +405,11 @@ So v1 has one concept.
 
 - A **rule** is an ordered list of **clauses**. The first clause that holds
   fires the rule and is what the evidence cites; the clause's tier fixes the
-  confidence unless the rule states one.
+  confidence unless the rule states one. A rule may also carry `requires`, a
+  condition that gates the whole rule whatever its clauses say, written the
+  same way on a value of an axis file and on a longhand rule; a longhand
+  rule has `requires`, `clauses`, `set`, `confidence` and `why`, and any
+  other key is refused (record 41).
 - A **rule set** declares the axes it `decides`, an optional `enter_when`, and
   its rules in order. The first rule that fires decides.
 - A pack's rule sets run in declared order. An axis a rule set decided is not

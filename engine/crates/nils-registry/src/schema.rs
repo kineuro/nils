@@ -1041,6 +1041,53 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .index(&["stack_id"]),
+        // Record 41, S2: every rule's vote, and not only the one the
+        // evidence cites. A voter is one clause of one rule of a pack, for
+        // one axis its rule writes, numbered once per pack version, so that
+        // a stack's votes are one short list of numbers and values rather
+        // than a row per vote: the MRI pack's corpus hears seven clauses a
+        // stack, which is a few million rows over an archive.
+        Table::new(
+            "classification_voter",
+            vec![
+                col("id", Type::Id),
+                req("pack", Type::Text),
+                req("pack_version", Type::Text),
+                req("rule_set", Type::Text),
+                req("rule", Type::Text),
+                // The clause's place in its rule, from 0.
+                req("clause", Type::Int),
+                req("axis", Type::Text),
+                req("tier", Type::Text),
+                // 1 where the clause only restates another axis (record 41,
+                // S3): a schema implication, not a witness.
+                req("restates", Type::Int),
+            ],
+        )
+        .unique(&[
+            "pack",
+            "pack_version",
+            "rule_set",
+            "rule",
+            "clause",
+            "axis",
+            "tier",
+        ]),
+        Table::new(
+            "classification_vote",
+            vec![
+                col("id", Type::Id),
+                req("stack_id", Type::Int),
+                // `class` or `disposition`: the second phase is decided after
+                // the passes and replaces its own votes alone.
+                req("phase", Type::Text),
+                // A JSON array of `[voter, value]` pairs, in the order the
+                // rules were heard; the value is what a row would store, the
+                // empty string where the rule decides the axis to nothing.
+                req("votes", Type::Text),
+            ],
+        )
+        .unique(&["stack_id", "phase"]),
         // A person's or an agent's verdict, which outranks a rule and
         // survives a re-classification (C15, D7).
         Table::new(

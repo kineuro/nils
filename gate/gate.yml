@@ -171,6 +171,21 @@ gate:
         is numbered last on both backends. The generator writes one
         modifier per stack at most; the engine's own tests hold the stack
         with two values and the stack the pack ruled out.
+    - name: ruled-out-stacks
+      family: record 35
+      question: How many MPRAGE stacks per disposition
+      file: fixtures/ruled-out-stacks.ask.yml
+      outcome: passes
+      note: >-
+        The generator writes a stack the pack ruled out beside the first
+        study of one background subject in six: the scanner's screen
+        capture of the MPRAGE, an MPRAGE on every axis but the disposition,
+        which is excluded. A stack set carries the standing predicate
+        `disposition != excluded`, so the capture is in no group and the
+        answer has rows for the acquisitions and the reformats only. A
+        compiler that forgot the predicate answers a third row, excluded,
+        with the captures in it, which is the defect of record 35 this
+        gate could not see before the generator wrote one.
 
     # --- what this wave does not answer, named rather than hidden
     - name: pair-grain-matching

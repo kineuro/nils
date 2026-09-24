@@ -76,14 +76,14 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 
 | | |
 |---|---|
-| what | what a pack decided about each stack, one row per axis, with the evidence that made it and any decision a person recorded |
-| where | rows of stack_fingerprint, classification, classification_axis, classification_evidence and decision in the registry |
-| holds | technical: the fields a pack reads, the axes, the tiers and confidences, the rule that fired<br>a person's words: the why on a decision |
+| what | what a pack decided about each stack, one row per axis, with the evidence that made it, every rule's vote on it and any decision a person recorded |
+| where | rows of stack_fingerprint, classification, classification_axis, classification_evidence, classification_voter, classification_vote and decision in the registry |
+| holds | technical: the fields a pack reads, the axes, the tiers and confidences, the rule that fired, every clause that held and the value its rule said<br>a person's words: the why on a decision |
 | owner | the pack's author for the rules, the reviewers for the decisions |
 | kept | until the next run of that job replaces it; a decision until withdrawn, and a withdrawn one for good |
 | read | `nils explain <stack>`<br>`nils review list`<br>`nils pack show <name>` |
-| change | `nils fingerprint`<br>`nils classify`<br>`nils review decide <id> --value <v>` |
-| export | `nils explain <stack> --json` |
+| change | `nils fingerprint`<br>`nils classify`<br>`nils classify --no-votes`<br>`nils review decide <id> --value <v>` |
+| export | `nils explain <stack> --json`<br>`nils classify votes [--out <file>] [--axis <axis>]` |
 | delete | with the registry |
 
 ## overlays

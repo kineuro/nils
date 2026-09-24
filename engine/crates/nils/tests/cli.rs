@@ -1605,6 +1605,38 @@ fn pack_validate_says_what_is_wrong_and_where() {
     assert!(said.contains("mri@"), "{said}");
     assert!(said.contains("222 predicates"), "{said}");
     assert!(said.contains("cases"), "{said}");
+    // and what its rules can reach (record 41)
+    assert!(said.contains("values reached by a rule"), "{said}");
+
+    // which `pack shape` says value by value
+    let out = nils()
+        .args(["pack", "shape", "--json"])
+        .arg(packs.join("mri"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let shape: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(shape["pack"].as_str().unwrap().starts_with("mri@"));
+    assert!(shape["axes"].as_array().unwrap().len() >= 12, "{shape}");
+    assert!(
+        shape["implications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["rule"] == "technique:MPRAGE"),
+        "{shape}"
+    );
+    let out = nils()
+        .args(["pack", "shape"])
+        .arg(packs.join("mri"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("unreachable  base.Unknown"),
+        "{}",
+        stdout(&out)
+    );
 
     // a pack that is wrong is refused, by file, line and path
     let dir = TempDir::new("cli-pack");
@@ -1663,7 +1695,7 @@ fn pack_list_and_show_read_the_pack_directory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p["pack"] == "mri@0.2.0"),
+            .any(|p| p["pack"] == "mri@0.3.0"),
         "{listed}"
     );
 
@@ -1820,6 +1852,44 @@ fn classify_explains_itself_and_a_decision_closes_the_question() {
             .iter()
             .any(|e| e["rule"].is_string()),
         "{shown}"
+    );
+
+    // record 41: the vote matrix, on standard output and to a file
+    let out = nils()
+        .args(registry)
+        .args(["classify", "votes"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let matrix = stdout(&out);
+    let mut lines = matrix.lines();
+    assert_eq!(
+        lines.next(),
+        Some("stack_id\taxis\trule_set\trule\tclause\tvalue\ttier\trestates")
+    );
+    let votes: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
+    assert!(
+        votes
+            .iter()
+            .any(|v| v[0] == "1" && v[1] == "technique" && v[5] == "MPRAGE"),
+        "{matrix}"
+    );
+    let file = home.path().join("votes.tsv");
+    let out = nils()
+        .args(registry)
+        .args(["classify", "votes", "--axis", "base", "--json", "--out"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(summary["stacks"], 1, "{summary}");
+    assert_eq!(summary["axes"], serde_json::json!(["base"]), "{summary}");
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        written.lines().count() as i64 - 1,
+        summary["votes"].as_i64().unwrap(),
+        "{written}"
     );
 
     let items = |status: &str| -> Vec<serde_json::Value> {

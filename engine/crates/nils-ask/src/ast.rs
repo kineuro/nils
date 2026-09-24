@@ -443,9 +443,18 @@ impl<'de> Deserialize<'de> for Src {
                     .get("handle")
                     .and_then(Value::as_str)
                     .ok_or_else(|| de::Error::custom("a source object is {handle, pin}"))?;
+                let pin = match m.get("pin") {
+                    None => false,
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return Err(de::Error::custom(format!(
+                            "a source's pin is true or false, not {other}: write pin: true or pin: false"
+                        )));
+                    }
+                };
                 Ok(Src::Handle {
                     id: id.to_string(),
-                    pin: m.get("pin").and_then(Value::as_bool).unwrap_or(false),
+                    pin,
                 })
             }
             other => Err(de::Error::custom(format!(

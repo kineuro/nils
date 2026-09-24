@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+ast_version: 1
+name: How many MPRAGE stacks per disposition
+sets:
+  mprage:
+    grain: stack
+    where: [["=", {}, ["axis", {}, "technique"], "MPRAGE"]]
+  per_disposition:
+    grain: group
+    group:
+      of: mprage
+      by: [["axis", {}, "disposition"]]
+keep: [per_disposition]
+out:
+  set: per_disposition
+  level: record
+  columns:
+    - ["field", {}, "disposition"]
+    - ["field", {}, "_rows"]
+    - ["field", {}, "_subjects"]
+  order:
+    - [["field", {}, "disposition"], asc]

@@ -221,6 +221,7 @@ pub(crate) fn scoped_select(
             ),
         ))
         .chain(std::iter::once("k.first_batch_id".to_string()))
+        .chain(std::iter::once("f.subject_id".to_string()))
         .collect();
     let (stacks, scope_params) = scope.stacks_sql(store, 2);
     let mut params = vec![Param::from(modality)];
@@ -315,6 +316,12 @@ pub(crate) fn to_stack(
     Ok((ids, s, private))
 }
 
+/// The subject a row of [`scoped_select`] belongs to, which it carries
+/// after the batch; 0 where the fingerprint names none.
+pub(crate) fn subject_of(r: &Row) -> i64 {
+    r.opt_int(1 + FIELDS.len() + 2).ok().flatten().unwrap_or(0)
+}
+
 /// The batch column the select carries last (Wave 4c §6.6).
 pub(crate) fn batch_of(r: &Row, with_ids: bool) -> i64 {
     let first = if with_ids { 3 } else { 1 };
@@ -389,7 +396,7 @@ pub struct Author {
 /// decision wider than a stack exists, so the usual run is one table.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Ids {
-    stack: i64,
+    pub(crate) stack: i64,
     series: i64,
     subject: i64,
 }
@@ -543,6 +550,121 @@ impl Decisions {
     }
 }
 
+/// Record 41, S2: the pack's voters, numbered in the registry once per pack
+/// version, by what each one is.
+pub(crate) struct Voters {
+    ids: HashMap<nils_pack::Voter, i64>,
+}
+
+impl Voters {
+    /// Number every voter the pack has, keeping the numbers an earlier run
+    /// of the same version gave. One transaction, since a pack has hundreds.
+    fn register(store: &mut Store, pack: &Pack) -> Result<Voters, Error> {
+        let version = pack.version.to_string();
+        let catalogue = nils_pack::voters(pack);
+        let rows: Vec<Vec<Param>> = catalogue
+            .iter()
+            .map(|v| {
+                vec![
+                    Param::from(pack.name.as_str()),
+                    Param::from(version.as_str()),
+                    Param::from(v.rule_set.as_str()),
+                    Param::from(v.rule.as_str()),
+                    Param::Int(v.clause as i64),
+                    Param::from(v.axis.as_str()),
+                    Param::from(v.tier.as_str()),
+                    Param::Int(i64::from(v.restates)),
+                ]
+            })
+            .collect();
+        const KEY: &[&str] = &[
+            "pack",
+            "pack_version",
+            "rule_set",
+            "rule",
+            "clause",
+            "axis",
+            "tier",
+        ];
+        const COLUMNS: &[&str] = &[
+            "pack",
+            "pack_version",
+            "rule_set",
+            "rule",
+            "clause",
+            "axis",
+            "tier",
+            "restates",
+        ];
+        store.begin()?;
+        let written = store.insert(
+            &Insert::new(table("classification_voter"), COLUMNS)
+                .on_conflict(Conflict::Nothing(KEY)),
+            &rows,
+        );
+        match written {
+            Ok(_) => store.commit()?,
+            Err(e) => {
+                store.rollback().ok();
+                return Err(Error::Store(e));
+            }
+        }
+        let sql = format!(
+            "SELECT id, rule_set, rule, clause, axis, tier, restates FROM {} WHERE pack = {} AND pack_version = {}",
+            store.qualified("classification_voter"),
+            store.dialect().param(1, Type::Text),
+            store.dialect().param(2, Type::Text),
+        );
+        let mut ids = HashMap::new();
+        for r in store.query(
+            &sql,
+            &[
+                Param::from(pack.name.as_str()),
+                Param::from(version.as_str()),
+            ],
+        )? {
+            ids.insert(
+                nils_pack::Voter {
+                    rule_set: r.text(1)?.to_string(),
+                    rule: r.text(2)?.to_string(),
+                    clause: r.int(3)? as usize,
+                    axis: r.text(4)?.to_string(),
+                    tier: r.text(5)?.to_string(),
+                    restates: r.int(6)? != 0,
+                },
+                r.int(0)?,
+            );
+        }
+        Ok(Voters { ids })
+    }
+
+    /// One stack's votes as the registry keeps them: a JSON array of
+    /// `[voter, value]`. A vote whose voter the pack did not declare cannot
+    /// happen, since both come from one pack; it is dropped rather than
+    /// written under a number that means something else.
+    fn row(&self, stack: i64, phase: &str, votes: &[nils_pack::Vote]) -> Vec<Param> {
+        let pairs: Vec<(i64, &str)> = votes
+            .iter()
+            .filter_map(|v| {
+                let key = nils_pack::Voter {
+                    rule_set: v.rule_set.clone(),
+                    rule: v.rule.clone(),
+                    clause: v.clause,
+                    axis: v.axis.clone(),
+                    tier: v.tier.clone(),
+                    restates: false,
+                };
+                self.ids.get(&key).map(|id| (*id, v.value.as_str()))
+            })
+            .collect();
+        vec![
+            Param::Int(stack),
+            Param::from(phase),
+            Param::from(serde_json::to_string(&pairs).expect("pairs serialize")),
+        ]
+    }
+}
+
 /// Classify every stack in scope.
 pub fn classify(
     registry: &mut Registry,
@@ -606,10 +728,16 @@ fn run(
     let any_decision = decisions.any();
     let sql = select(store, settings.modality.as_deref(), with_ids);
     let now = now_iso();
+    let voters = if settings.votes {
+        Some(Voters::register(store, pack)?)
+    } else {
+        None
+    };
 
     let class_t = table("classification");
     let axis_t = table("classification_axis");
     let ev_t = table("classification_evidence");
+    let vote_t = table("classification_vote");
     let review_t = table("review_item");
 
     // Whether any classifier question is still open from an earlier run. A
@@ -647,6 +775,7 @@ fn run(
         let mut axes: Vec<Vec<Param>> = Vec::new();
         let mut evidence: Vec<Vec<Param>> = Vec::new();
         let mut reviews: Vec<Vec<Param>> = Vec::new();
+        let mut votes: Vec<Vec<Param>> = Vec::new();
 
         for r in &rows {
             let (ids, stack, private) = to_stack(r, with_ids, pack)?;
@@ -664,7 +793,15 @@ fn run(
                 report.no_pack += 1;
                 continue;
             }
-            let verdict = Evaluated::with_private(pack, &stack, private).classify();
+            let evaluated = Evaluated::with_private(pack, &stack, private);
+            let verdict = match &voters {
+                Some(v) => {
+                    let verdict = evaluated.classify_with_votes();
+                    votes.push(v.row(stack_id, "class", &verdict.votes));
+                    verdict
+                }
+                None => evaluated.classify(),
+            };
             tallies.note(batch_of(r, with_ids), &verdict);
             let mut raised = 0i64;
 
@@ -989,7 +1126,7 @@ fn run(
                         store.execute(&grouped, &[])?;
                     }
                 }
-                for t in [axis_t, ev_t] {
+                for t in [axis_t, ev_t, vote_t] {
                     let sql = format!(
                         "DELETE FROM {} WHERE stack_id > {} AND stack_id <= {}",
                         store.qualified(t.name),
@@ -1056,6 +1193,10 @@ fn run(
                     ),
                     &evidence,
                 )?;
+                store.insert(
+                    &Insert::new(vote_t, &["stack_id", "phase", "votes"]),
+                    &votes,
+                )?;
                 if !reviews.is_empty() {
                     store.insert(
                         &Insert::new(
@@ -1116,7 +1257,7 @@ fn run(
     // And last, what to do with each stack (Wave 3 §7), from what the rules
     // and the passes between them decided.
     if !report.cancelled {
-        report.disposed = dispose(store, pack, settings, cancel, job_id, &sql)?;
+        report.disposed = dispose(store, pack, settings, cancel, job_id, &sql, voters.as_ref())?;
     }
 
     report.seconds = started.elapsed().as_secs_f64();
@@ -1143,6 +1284,7 @@ fn dispose(
     cancel: &nils_digest::Cancel,
     job_id: i64,
     sql: &str,
+    voters: Option<&Voters>,
 ) -> Result<i64, Error> {
     let names: Vec<&str> = pack
         .axes
@@ -1156,6 +1298,7 @@ fn dispose(
     let window = settings.window.max(1);
     let axis_t = table("classification_axis");
     let ev_t = table("classification_evidence");
+    let vote_t = table("classification_vote");
     let quoted: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
     let scope = format!("axis IN ({})", quoted.join(", "));
 
@@ -1200,6 +1343,7 @@ fn dispose(
         let empty: Vec<Vec<String>> = vec![Vec::new(); pack.axes.len()];
         let mut axes: Vec<Vec<Param>> = Vec::new();
         let mut evidence: Vec<Vec<Param>> = Vec::new();
+        let mut votes: Vec<Vec<Param>> = Vec::new();
         for r in &rows {
             let (ids, stack, private) = to_stack(r, false, pack)?;
             let modality =
@@ -1208,7 +1352,15 @@ fn dispose(
                 continue;
             }
             let seed = decided.get(&ids.stack).unwrap_or(&empty);
-            let verdict = Evaluated::with_private(pack, &stack, private).dispose(seed);
+            let evaluated = Evaluated::with_private(pack, &stack, private);
+            let verdict = match voters {
+                Some(v) => {
+                    let verdict = evaluated.dispose_with_votes(seed);
+                    votes.push(v.row(ids.stack, "disposition", &verdict.votes));
+                    verdict
+                }
+                None => evaluated.dispose(seed),
+            };
             for a in &verdict.axes {
                 let value = a.stored();
                 axes.extend(axis_rows(ids.stack, &a.axis, &value, a.confidence, &a.tier));
@@ -1249,6 +1401,19 @@ fn dispose(
                         &[Param::Int(after), Param::Int(last)],
                     )?;
                 }
+                store.execute(
+                    &format!(
+                        "DELETE FROM {} WHERE stack_id > {} AND stack_id <= {} AND phase = 'disposition'",
+                        store.qualified(vote_t.name),
+                        store.dialect().param(1, Type::Int),
+                        store.dialect().param(2, Type::Int),
+                    ),
+                    &[Param::Int(after), Param::Int(last)],
+                )?;
+                store.insert(
+                    &Insert::new(vote_t, &["stack_id", "phase", "votes"]),
+                    &votes,
+                )?;
                 store.insert(
                     &Insert::new(axis_t, &["stack_id", "axis", "value", "confidence", "tier"]),
                     &axes,
@@ -1306,6 +1471,19 @@ mod tests {
         for (i, (name, _)) in FIELDS.iter().enumerate() {
             assert_eq!(*name, nils_pack::stack::FIELDS[i], "field {i}");
         }
+    }
+
+    /// kineuro/nils#94 review: the signals door's text sample needs each
+    /// sampled stack's subject, and read it from every stack in scope
+    /// (with `pack:<version>`, the whole archive) on every GET. The sampled
+    /// select carries it instead.
+    #[test]
+    fn the_scoped_select_carries_each_stacks_subject_last() {
+        let store = Store::sqlite_in_memory().unwrap();
+        let scope = crate::scope::Scope::parse("batch:1").unwrap();
+        let (sql, _) = scoped_select(&store, "MR", &scope, 10);
+        let cols = sql.split(" FROM ").next().unwrap();
+        assert!(cols.trim_end().ends_with("f.subject_id"), "{sql}");
     }
 
     #[test]

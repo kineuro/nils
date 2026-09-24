@@ -307,6 +307,7 @@ paths:
   /api/ask/catalog:
     get:
       summary: The catalog the caller may see, every level's first page (Wave 4b section 9)
+      description: "Section 4.4 rule 15 applied to the caller's detail after any ceiling: `kinds` lists the event kinds that detail opens, a sensitive kind only at detail sensitive and marked `sensitive: true` there, so a document written from the catalog read under one ceiling validates under the same ceiling, and a kind absent from it is refused at validate as forbidden_field (kineuro/nils#100)."
       responses:
         "200": {description: The catalog document}
   /api/ask/catalog/{level}:
@@ -323,7 +324,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, mode: {type: string, enum: [strict, repair]}}}}}}
       responses:
         "200": {description: "{hash, warnings, pinned, repairs}"}
-        "400": {description: "{error, issues}: the taxonomy errors with their paths and next calls"}
+        "400": {description: "{error, issues}: the taxonomy errors with their paths and next calls; since record 41 S4 a measure of out that names no column (of), a share with no denominator (over) and a percentile with no rank (p) are refused at out.measures[i] (kineuro/nils#99)"}
   /api/ask/run:
     post:
       summary: "The bounded path, inside the caps (Wave 4b section 11.5): a handle with its first page of rows"
@@ -331,7 +332,7 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object, properties: {document: {type: object}, document_id: {type: integer}, name: {type: string}, keep: {type: boolean}, after: {type: integer}, limit: {type: integer}, purpose: {type: string}, fresh: {type: boolean}}}}}}
       responses:
         "200": {description: "{handle, hash, columns, rows, truncated, pages, measures, drift, kept, identifiers, declaration, epoch} and, on a cached answer, {cached: true, produced_at, produced_by}; the declaration (Wave 4c section 6.4) names the grain, the session scheme and its digest, the membership reading, the key namespace, the pick rule, the denominator, the disclosure and whether a cap truncated"}
-        "400": {description: The document is refused}
+        "400": {description: "The document is refused: {error, issues}. Since record 41 S4 a measure that fails at run (a column the answer does not carry, a denominator with no count) is refused here with its path, out.measures[i], and no longer answers 500 (kineuro/nils#99)"}
         "403": {description: Identifiers are projected at detail sensitive only}
   /api/ask/jobs:
     post:
@@ -488,7 +489,7 @@ paths:
   /api/ask/draft:
     post:
       summary: Authored text with add only repair (Wave 4c section 6.4)
-      description: A document as YAML or JSON text; the structural repairs are applied and reported, the diagnosis says what is wrong in domain words, and a valid document is stored and answered by handle. The engine never parses a sentence.
+      description: "A document as YAML or JSON text; the structural repairs are applied and reported, the diagnosis says what is wrong in domain words, and a valid document is stored and answered by handle. The engine never parses a sentence. Since record 41 S4 YAML is read under the 1.2 core booleans: only true and false are booleans, and a plain n, y, yes, no, on or off is the text it says, so a binding named n is named in an option as written; a name written true or false is refused at its path in words saying it was read as a boolean (kineuro/nils#98). Repair treats an array in an argument as a clause only when its first element is an op of the language or an alias of one; any other array is a list of literals and is left as written, so an inline `in` list reaches the parser as the list it is (kineuro/nils#101)."
       requestBody: {content: {application/json: {schema: {type: object, required: [text], properties: {text: {type: string}}}}}}
       responses:
         "200": {description: "{repairs, diagnosis, document, hash}"}
@@ -687,11 +688,13 @@ paths:
   /api/classify/signals:
     get:
       summary: The classifier's own signals over a scope (Wave 4c section 6.6; review:see)
-      description: Per axis over a batch, an origin or a pack version, how many stacks resolved at each tier, the confidence spread, the open review items by kind, the shadowed keywords, the unused overlay terms, and the terms that carried the most decisions that disagreed with the rules. And the same by value, so a person tuning one value's words sees what reaches it, with the origins of the scope for the scope chips. Bounded as before, at most twelve words per value and twelve origins per kind, two hundred values per axis.
+      description: "Per axis over a batch, an origin or a pack version, how many stacks resolved at each tier, the confidence spread, the open review items by kind, the shadowed keywords, the unused overlay terms, and the terms that carried the most decisions that disagreed with the rules. And the same by value, so a person tuning one value's words sees what reaches it, with the origins of the scope for the scope chips. Bounded as before, at most twelve words per value and twelve origins per kind, two hundred values per axis. Since record 41 S4 (kineuro/nils#94) `unresolved_texts` samples the text each unresolved axis was matched against: over a bounded sample of the stacks in scope, the served pack's verdict on each, read with the overlay the site adopted for that pack last, since adopting it reclassified under it (`overlay` names it, null when none is adopted), and per axis, for the stacks it leaves axis_unresolved, the pack's own normalised search_text folded into distinct texts with the stacks each covers, the most common first and at most ten. A text is shown only when it covers at least five stacks of at least three distinct subjects in the sample (`shown_when`); the others are withheld, and the axis counts the texts and stacks it withheld. Counts and texts, never a stack; null when the engine serves no such pack."
       parameters:
         - {name: scope, in: query, required: true, schema: {type: string}, description: "batch:<id> | origin:<name> | pack:<version>"}
+        - {name: pack, in: query, schema: {type: string}, description: "The pack whose verdict unresolved_texts reads, among those the engine serves; the ask's pack when not given"}
+        - {name: sample, in: query, schema: {type: integer, default: 2000, maximum: 20000}, description: "The most stacks unresolved_texts reads"}
       responses:
-        "200": {description: "The signals, per axis, plus by_value{axis: {value: {decided, by_flag, by_word, by_physics, unsure, shadowed[words], overrode_with[{word, count}]}}} (decided counts the rows that store the value whoever decided it; by_flag, by_word and by_physics the rows the rules decided by that kind of clause; unsure the stacks a person is still asked about on that axis; shadowed the words that matched on the way to it and were never cited, from the batch samples; overrode_with the words the rule cited on stacks a person then decided otherwise) and origins[{name, kind: manufacturer|model|station, stacks}]"}
+        "200": {description: "The signals, per axis, plus by_value{axis: {value: {decided, by_flag, by_word, by_physics, unsure, shadowed[words], overrode_with[{word, count}]}}} (decided counts the rows that store the value whoever decided it; by_flag, by_word and by_physics the rows the rules decided by that kind of clause; unsure the stacks a person is still asked about on that axis; shadowed the words that matched on the way to it and were never cited, from the batch samples; overrode_with the words the rule cited on stacks a person then decided otherwise) and origins[{name, kind: manufacturer|model|station, stacks}], and unresolved_texts{pack, overlay, text, sample, read, complete, shown_when{stacks, subjects}, axes{axis: {stacks, distinct, texts[{text, stacks}], withheld{texts, stacks}}}} | null"}
   /api/classify/try:
     post:
       summary: A candidate overlay rehearsed over a sample, writing nothing (Wave 4c section 6.6; review:work)

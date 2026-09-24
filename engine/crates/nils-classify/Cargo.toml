@@ -24,6 +24,7 @@ nils-pack.workspace = true
 dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
 nils-dicom.workspace = true
+nils-synth.workspace = true
 
 [lints]
 workspace = true

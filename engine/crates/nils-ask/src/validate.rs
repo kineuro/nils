@@ -291,6 +291,41 @@ const LEVELS: &[&str] = &[
     "cohort", "subject", "study", "series", "session", "stack", "instance", "event",
 ];
 
+/// The clause options that name a binding, a set or a kind.
+const NAME_OPTIONS: &[&str] = &["of", "over", "set"];
+
+/// The clause options that are booleans. Under the YAML 1.2 booleans a
+/// `yes`, `no`, `on` or `off` is text, so each is checked here rather than
+/// read as its default where it is used (`adjacent: no` meant adjacent).
+/// An axis's `each` is checked with the axis's other options.
+const BOOL_OPTIONS: &[&str] = &["adjacent", "strict", "key"];
+
+/// A boolean option that holds something else.
+fn not_a_boolean(path: impl Into<String>, what: &str, key: &str, v: &Value) -> Issue {
+    issue(
+        Code::UnknownField,
+        path,
+        format!(
+            "{what}'s {key} is {v}, not a boolean: only a plain true or false is a boolean, and yes, no, on and off are text"
+        ),
+        format!("write {key}: true or {key}: false"),
+    )
+}
+
+/// A name the reader took for a boolean (kineuro/nils#98): YAML reads a
+/// plain `true` or `false` as one, so the option named nothing, and the
+/// refusal says why rather than that the name is missing.
+fn read_as_boolean(path: impl Into<String>, what: &str, key: &str, b: bool) -> Issue {
+    issue(
+        Code::UnknownField,
+        path,
+        format!(
+            "{what}'s {key} was read as the boolean {b}, not a name: a plain true or false is a boolean in YAML"
+        ),
+        format!("write the name in quotes: {key}: \"{b}\""),
+    )
+}
+
 fn issue(
     code: Code,
     path: impl Into<String>,
@@ -442,6 +477,11 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
             }
             for (i, m) in ask.out.measures.iter().enumerate() {
                 for (k, v) in &m.0 {
+                    for key in ["of", "over"] {
+                        if let Some(Value::Bool(b)) = v.get(key) {
+                            issues.push(read_as_boolean(format!("out.measures[{i}]"), k, key, *b));
+                        }
+                    }
                     if !matches!(k.as_str(), "share" | "stddev" | "median" | "percentile") {
                         issues.push(issue(
                             Code::UnknownField,
@@ -450,6 +490,32 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
                                 "{k} is not a measure; those are share, stddev, median, percentile"
                             ),
                             "rename the measure",
+                        ));
+                    }
+                    // kineuro/nils#99: what run would refuse, refused here
+                    // at the measure's path
+                    if v.get("of").is_none() {
+                        issues.push(issue(
+                            Code::UnknownField,
+                            format!("out.measures[{i}]"),
+                            format!("{k} names the column it measures: {{of: <column>}}"),
+                            "add of",
+                        ));
+                    }
+                    if k == "share" && v.get("over").is_none() {
+                        issues.push(issue(
+                            Code::UnknownSet,
+                            format!("out.measures[{i}]"),
+                            "share names its denominator: {over: <set>}",
+                            "add over",
+                        ));
+                    }
+                    if k == "percentile" && !v.get("p").is_some_and(Value::is_number) {
+                        issues.push(issue(
+                            Code::UnknownField,
+                            format!("out.measures[{i}]"),
+                            "percentile names its rank: {p: <0 to 100>}",
+                            "add p",
                         ));
                     }
                     if k == "share"
@@ -1322,6 +1388,18 @@ fn check_clause(
     }
     for cl in all {
         let op = cl.op.as_str();
+        for key in NAME_OPTIONS {
+            if let Some(Value::Bool(b)) = cl.opts.get(*key) {
+                issues.push(read_as_boolean(path, op, key, *b));
+            }
+        }
+        for key in BOOL_OPTIONS {
+            if let Some(v) = cl.opts.get(*key)
+                && !v.is_boolean()
+            {
+                issues.push(not_a_boolean(path, op, key, v));
+            }
+        }
         match op {
             "field" => {
                 let Some(p) = cl.ref_name() else {
@@ -1498,6 +1576,8 @@ fn check_clause(
                 }
             }
             "share" => match cl.opts.get("over").and_then(Value::as_str) {
+                // said above: a name read as a boolean
+                None if matches!(cl.opts.get("over"), Some(Value::Bool(_))) => {}
                 None => issues.push(issue(
                     Code::UnknownSet,
                     path,

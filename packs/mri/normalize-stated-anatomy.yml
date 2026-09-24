@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The stated anatomy text: `BodyPartExamined` alone, folded and tokenized as
+# `anatomy_text` is, with nothing dropped (spec section 6.4).
+#
+# The file states a body part, but it is written from the exam's
+# registration and not from the series, so it says the same thing on every
+# series of an exam: five scanner protocols had a brain protocol in exams
+# registered as a spine, where every series said spine, and spinal series in
+# exams registered as a brain (record 41). The body-part rules read it after
+# the series' own words and its coil, never ahead of them.
+
+normalize: stated_anatomy_text
+from:
+  - text_body_part
+
+token_removals: []
+
+# As in `normalize-anatomy.yml`: the French for neck, spelled as a word so
+# that no keyword has to be three letters long.
+token_replacements:
+  'cou': 'neck'
