@@ -268,7 +268,16 @@ fn a_selection_s_pyramids_build_once_and_an_oblique_stack_reports_its_orientatio
     assert_eq!(first["built"], 2, "{first}");
     assert_eq!(first["skipped"], 0, "{first}");
     assert_eq!(first["failed"], 1, "{first}");
-    assert!(first["failures"][0]["why"].is_string(), "{first}");
+    // a failure names its stack and a reason class, never the reader's
+    // words: a file's path can start with a subject code or hold a series
+    // name, and the job's result is served at detail plain
+    assert_eq!(first["failures"][0]["reason"], "unreadable", "{first}");
+    assert!(first["failures"][0].get("why").is_none(), "{first}");
+    let src = lab._src.path().to_str().unwrap().to_string();
+    for text in [first.to_string()] {
+        assert!(!text.contains(&src), "{text}");
+        assert!(!text.contains("1.2.3.C"), "{text}");
+    }
     let second: Value = serde_json::from_str(ok(&lab.home, &args).trim()).unwrap();
     assert_eq!(second["built"], 0, "{second}");
     assert_eq!(second["skipped"], 2, "{second}");
@@ -286,6 +295,20 @@ fn a_selection_s_pyramids_build_once_and_an_oblique_stack_reports_its_orientatio
             .any(|j| j["result"]["skipped"] == 2 && j["result"]["built"] == 0),
         "{jobs}"
     );
+    // one stack at the door's worker, whose error is what the verb printed:
+    // the class again, never the path
+    let (good, _, err) = run(
+        &lab.home,
+        &["pyramid", "build", "--stack", &first["failures"][0]["stack"].to_string()],
+    );
+    assert!(!good);
+    assert!(err.contains("unreadable"), "{err}");
+    assert!(!err.contains(&src) && !err.contains("1.2.3.C"), "{err}");
+    // no job's result names a path or a series
+    for j in &pyramids {
+        let text = j["result"].to_string();
+        assert!(!text.contains(&src) && !text.contains("1.2.3.C"), "{text}");
+    }
 
     // E2: which stack is which is read from the manifests
     let built: Vec<(i64, Value)> = (1..=3)

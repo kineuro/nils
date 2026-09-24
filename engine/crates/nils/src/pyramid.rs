@@ -947,8 +947,11 @@ pub fn built(working: &Path) -> BTreeMap<i64, Manifest> {
 pub struct Many {
     pub built: Vec<i64>,
     pub skipped: Vec<i64>,
-    /// A stack whose pyramid could not be built, and the reader's words.
-    pub failed: Vec<(i64, String)>,
+    /// A stack whose pyramid could not be built, and a reason class
+    /// ([`reason_of`]): never the reader's words, which can hold a file's
+    /// path (a subject code, a series name) or header text, since a job's
+    /// result is served at detail plain.
+    pub failed: Vec<(i64, &'static str)>,
     pub bytes: u64,
     /// Cancelled part way: what was built stays built.
     pub stopped: bool,
@@ -964,9 +967,36 @@ impl Many {
             "failed": self.failed.len(),
             "bytes": self.bytes,
             "stopped": self.stopped,
-            // the first few, each with the reader's words; stack ids only
-            "failures": self.failed.iter().take(20).map(|(s, why)| serde_json::json!({"stack": s, "why": why})).collect::<Vec<_>>(),
+            // the first few: a stack id and a reason class, never a path
+            "failures": self.failed.iter().take(20).map(|(s, reason)| serde_json::json!({"stack": s, "reason": reason})).collect::<Vec<_>>(),
         })
+    }
+}
+
+/// The class of a reason a stack's pyramid was not built, from the
+/// reader's or the builder's words, which stay on the machine: `no_files`,
+/// `compressed`, `unsupported_pixels`, `mixed_matrix`, `unreadable` for a
+/// file that did not open or parse, or `build_failed`.
+pub fn reason_of(why: &str, reading: bool) -> &'static str {
+    if !reading {
+        return "build_failed";
+    }
+    if why.contains("has no files") {
+        "no_files"
+    } else if why.starts_with("transfer syntax") {
+        "compressed"
+    } else if why.contains("bits allocated")
+        || why.contains("samples per pixel")
+        || why.starts_with("no Rows")
+        || why.starts_with("no Columns")
+        || why.starts_with("no Pixel Data")
+        || why.starts_with("pixel data holds")
+    {
+        "unsupported_pixels"
+    } else if why.contains("do not share one matrix") {
+        "mixed_matrix"
+    } else {
+        "unreadable"
     }
 }
 
@@ -994,7 +1024,11 @@ pub fn build_many(
             out.skipped.push(stack);
         } else {
             match read_volume(store, stack)
-                .and_then(|v| build(&v, stack, &root, workers, pack_version.clone()))
+                .map_err(|why| reason_of(&why, true))
+                .and_then(|v| {
+                    build(&v, stack, &root, workers, pack_version.clone())
+                        .map_err(|why| reason_of(&why, false))
+                })
             {
                 Ok(m) => {
                     out.bytes += m.bytes_per_level.iter().sum::<u64>();

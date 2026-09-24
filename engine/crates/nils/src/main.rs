@@ -3822,8 +3822,22 @@ fn pyramid_command(home: &Home, command: PyramidCommand) -> Result<(), Exit> {
                 return pyramid_many(home, select, handle, &pack, pack_dir, &working, workers);
             };
             let root = crate::pyramid::dir(std::path::Path::new(&working.path), stack);
-            let volume = crate::pyramid::read_volume(registry.store(), stack).map_err(fail)?;
-            let m = crate::pyramid::build(&volume, stack, &root, workers, None).map_err(fail)?;
+            // The reader's words name a file's path, which can hold a
+            // subject code or a series name: they are said at a terminal,
+            // and a queued job's error (what the verb printed) keeps the
+            // reason's class alone, since jobs are served at detail plain.
+            let not_built = |why: String, reading: bool| {
+                let class = crate::pyramid::reason_of(&why, reading);
+                if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                    fail(format!("stack {stack}: its pyramid was not built ({class}): {why}"))
+                } else {
+                    fail(format!("stack {stack}: its pyramid was not built ({class})"))
+                }
+            };
+            let volume = crate::pyramid::read_volume(registry.store(), stack)
+                .map_err(|why| not_built(why, true))?;
+            let m = crate::pyramid::build(&volume, stack, &root, workers, None)
+                .map_err(|why| not_built(why, false))?;
             println!(
                 "{}",
                 serde_json::json!({
