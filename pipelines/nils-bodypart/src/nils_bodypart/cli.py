@@ -458,10 +458,19 @@ def _load_head(directory: Path, allow_pickle: bool):
     elif pickle_file is not None:
         if not allow_pickle:
             raise RunError("the head is a pickle; run with --allow-pickle true to trust it")
+        import io
+
         import joblib
 
+        # A pickle runs code when it is loaded: its bytes are checked
+        # against the digest its card names first, and loaded from those
+        # same bytes, never from the file again.
         data = pickle_file.read_bytes()
-        obj = joblib.load(pickle_file)
+        if not card.get("digest"):
+            raise RunError("the head is a pickle with no card beside it to check it against")
+        if card["digest"] != sha256_bytes(data):
+            raise RunError("the head is not the artifact its card names")
+        obj = joblib.load(io.BytesIO(data))
         est, classes, chain = obj["estimator"], list(obj["classes"]), obj["encoder_chain"]
 
         class _Wrapped:

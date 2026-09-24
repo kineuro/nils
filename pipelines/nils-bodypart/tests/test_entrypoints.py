@@ -89,3 +89,45 @@ def test_an_unreadable_stack_fails_alone(synthetic, tmp_path):
     by = {u["unit_id"]: u for u in r["units"]}
     assert by["stack-104"]["status"] == "failed" and "nowhere" not in by["stack-104"]["error"]
     assert r["counts"]["succeeded"] == 3
+
+
+def test_a_pickled_head_is_checked_against_its_card_before_it_is_loaded(tmp_path, monkeypatch):
+    """The review of record 43: a pickle runs code when it is loaded, so its
+    bytes are checked against the digest its card names first, and loaded
+    from those checked bytes; a pickle with no card, or another digest, is
+    never loaded."""
+    import hashlib
+    import io
+
+    import joblib
+    import numpy as np
+    import pytest
+    from sklearn.linear_model import LogisticRegression
+
+    est = LogisticRegression().fit(np.array([[0.0], [1.0], [0.1], [0.9]]), ["brain", "spine", "brain", "spine"])
+    buf = io.BytesIO()
+    joblib.dump({"estimator": est, "classes": ["brain", "spine"], "encoder_chain": []}, buf)
+    data = buf.getvalue()
+    head = tmp_path / "head"
+    head.mkdir()
+    (head / "head.joblib").write_bytes(data)
+    card = {"name": "h", "version": "1", "kind": "head", "digest": "sha256:" + hashlib.sha256(data).hexdigest()}
+    (head / "card.json").write_text(json.dumps(card))
+    loaded = []
+    real = joblib.load
+    monkeypatch.setattr(joblib, "load", lambda f, *a, **k: loaded.append(f) or real(f, *a, **k))
+    # the card's digest is the artifact's: loaded, from the checked bytes
+    cli._load_head(head, allow_pickle=True)
+    assert len(loaded) == 1 and not isinstance(loaded[0], (str, Path))
+    # tampered after the card was written: refused before any load
+    loaded.clear()
+    with open(head / "head.joblib", "ab") as f:
+        f.write(b"tampered")
+    with pytest.raises(cli.RunError, match="card"):
+        cli._load_head(head, allow_pickle=True)
+    assert not loaded
+    # no card beside it: a pickle is not loaded at all
+    (head / "card.json").unlink()
+    with pytest.raises(cli.RunError, match="card"):
+        cli._load_head(head, allow_pickle=True)
+    assert not loaded
